@@ -11,8 +11,8 @@ import os
 from . import _graph_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmTiming, ReducedOrdering,
-                           SchurPlan, SchurPolicy)
+                           LmPreset, LmStatus, LmTiming, LogLevel,
+                           ReducedOrdering, SchurPlan, SchurPolicy)
 
 LmIter = _f.LmIter
 
@@ -48,6 +48,14 @@ def load(path=None):
     raise AraelError(-1, "no capi cdylib found; build it with "
         "`cargo build --release -p <crate>-capi` or set ARAEL_CAPI. "
         "Tried: " + ", ".join(tried))
+
+
+def set_log_level(level):
+    """Drop arael log messages above `level` (a LogLevel; INFO --
+    everything -- is the default). Process-wide: all models and roots
+    share it."""
+    load()
+    _f.graph_set_log_level(int(level))
 
 
 def _raw(r):

@@ -69,6 +69,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     let mut fit = Fit::default();
     fill(&mut fit);
     assert!(fit.validate().is_clean());
+    assert_eq!(g("log_smoke"), 1.0);
     assert_eq!(g("clean"), 1.0);
     assert_eq!(g("n_obs"), 6.0);
     assert_eq!(g("n_items"), 3.0);

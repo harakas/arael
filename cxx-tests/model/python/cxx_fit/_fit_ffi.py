@@ -111,6 +111,7 @@ SIGS = [
     ("fit_free", [ctypes.c_void_p], None),
     ("fit_last_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("fit_validate", [ctypes.c_void_p], ctypes.c_char_p),
+    ("fit_set_log_level", [ctypes.c_uint32], None),
     ("fit_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("fit_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
     ("fit_result_free", [ctypes.c_void_p], None),

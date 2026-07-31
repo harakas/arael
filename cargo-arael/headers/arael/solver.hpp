@@ -41,6 +41,15 @@ enum class LmPreset : uint32_t {
     IllConditioned = 3,
 };
 
+/// Severity threshold for arael's diagnostics (mirrors arael's
+/// log::Level): a level admits everything at or below itself.
+enum class LogLevel : uint32_t {
+    Off = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+};
+
 /// One damped attempt, as the observer callback sees it. `params`
 /// points at the CURRENT parameter vector for this attempt; valid
 /// only during the callback.

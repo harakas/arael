@@ -54,8 +54,10 @@ surface reference); the differences are Python idiom:
 - **Math values** (`vect2/3`, `matrix2/3`, `quatern`, f/d variants)
   live in the vendored `arael.math`: the classes ARE the FFI structs,
   with the same operators as the C++ headers (`*` dot, `%` cross,
-  `symmetric_eigen`, euler/quaternion conversions...). `arael.geometry.Camera`
-  and `arael.g2o.Dataset2` complete the support library.
+  `symmetric_eigen`, euler/quaternion conversions...).
+  `arael.geometry.Camera` and the `arael.g2o` pose-graph readers
+  (`Dataset2` for SE2, `Dataset3` for SE3:QUAT with sqrt-information
+  Cholesky blocks) complete the support library.
 - **Collections** speak Python: `len(f.obs)`, `f.obs[3]` (negative
   indices too), `for n in f.items:`, the `push`/`pop` families,
   `reserve`/`clear`/`truncate`. Ref lookups -- `ref_at`/end refs,
@@ -92,7 +94,11 @@ surface reference); the differences are Python idiom:
   `AraelError(status, message)` whose `.partial` holds the best
   accepted state when the solve got that far. `cost()`, `validate()`,
   `last_error()` as in C++; a model frees on garbage collection
-  (`free()` to force it).
+  (`free()` to force it). Warm restart: `cfg.initial_lambda =
+  r.final_lambda` re-enters at the previous damping; the optimized
+  parameters already live in the model. `set_log_level(LogLevel.WARN)`
+  quiets arael's diagnostics process-wide (INFO, everything, is the
+  default).
 - **Covariance**: `assemble_covariance(mode)` returns a view or
   raises; `marginal`/`conditional` shaped by param count (float,
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`

@@ -31,6 +31,10 @@ static void fill(Fit& fit) {
 }
 
 int main() {
+    // Log control crosses the FFI; Warn quiets the backend's INFO
+    // chatter for this run.
+    set_log_level(LogLevel::Warn);
+    pi("log_smoke", 1);
     Fit fit;
     fill(fit);
     pi("clean", std::strlen(fit.validate()) == 0 ? 1 : 0);

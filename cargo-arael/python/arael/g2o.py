@@ -1,9 +1,9 @@
-# arael Python g2o pose-graph file I/O: the SE2 subset of arael's
-# src/g2o.rs (VERTEX_SE2 / EDGE_SE2; unknown record types are skipped,
-# vertex ids must be dense and ordered). Malformed records raise
-# ValueError with the 1-based line number.
+# arael Python g2o pose-graph file I/O, mirroring arael's src/g2o.rs:
+# VERTEX_SE2 / EDGE_SE2 and VERTEX_SE3:QUAT / EDGE_SE3:QUAT. Unknown
+# record types are skipped, vertex ids must be dense and ordered.
+# Malformed records raise ValueError with the 1-based line number.
 
-from .math import vect2d
+from .math import matrix3d, quaternd, vect2d, vect3d
 
 
 class Pose2:
@@ -75,5 +75,132 @@ class Dataset2:
     @classmethod
     def load(cls, path):
         """Read a 2D pose graph from a .g2o file."""
+        with open(path, "r") as f:
+            return cls.parse(f.read())
+
+
+def _unit_quat(qx, qy, qz, qw):
+    """The file's qx qy qz qw, normalized."""
+    n = (qw * qw + qx * qx + qy * qy + qz * qz) ** 0.5
+    if n < 1e-12:
+        raise ValueError("zero-length quaternion")
+    return quaternd(qw / n, (qx / n, qy / n, qz / n))
+
+
+class Pose3:
+    """One 3D pose from a VERTEX_SE3:QUAT record; `q` is the
+    orientation (unit quaternion, normalized on load)."""
+
+    def __init__(self, t, q):
+        self.t = t if isinstance(t, vect3d) else vect3d(t)
+        self.q = q
+
+    def rot(self):
+        """The pose's rotation matrix."""
+        return self.q.rotation_matrix()
+
+
+class DeltaPose3:
+    """One relative SE3 measurement from an EDGE_SE3:QUAT record: pose
+    b seen from pose a's body frame. `info` is the full symmetric 6x6
+    information matrix, rows ordered (x y z qx qy qz)."""
+
+    def __init__(self, a, b, dt, dq, info):
+        self.a = int(a)
+        self.b = int(b)
+        self.dt = dt if isinstance(dt, vect3d) else vect3d(dt)
+        self.dq = dq
+        self.info = tuple(tuple(float(v) for v in row) for row in info)
+
+    def sqrt_info_upper(self):
+        """Upper Cholesky factor u of the information matrix
+        (info = u^T u), as a 6x6 tuple of tuples. Raises when the
+        matrix is not positive definite -- that is a data error, not
+        something to paper over."""
+        a = self.info
+        low = [[0.0] * 6 for _ in range(6)]
+        for i in range(6):
+            for j in range(i + 1):
+                s = a[i][j] - sum(low[i][k] * low[j][k] for k in range(j))
+                if i == j:
+                    if s <= 0.0:
+                        raise ValueError(
+                            "information matrix not positive definite "
+                            "(pivot %d = %g)" % (i, s))
+                    low[i][j] = s ** 0.5
+                else:
+                    low[i][j] = s / low[j][j]
+        return tuple(tuple(low[j][i] for j in range(6)) for i in range(6))
+
+    def u_blocks(self):
+        """The three 3x3 blocks of the upper-triangular sqrt-info
+        factor [ u_tt u_tr ; 0 u_rr ]: (u_tt, u_tr, u_rr)."""
+        u = self.sqrt_info_upper()
+
+        def block(r0, c0):
+            return matrix3d.from_elements(
+                u[r0][c0], u[r0][c0 + 1], u[r0][c0 + 2],
+                u[r0 + 1][c0], u[r0 + 1][c0 + 1], u[r0 + 1][c0 + 2],
+                u[r0 + 2][c0], u[r0 + 2][c0 + 1], u[r0 + 2][c0 + 2])
+
+        return block(0, 0), block(0, 3), block(3, 3)
+
+
+class Dataset3:
+    """A 3D pose graph: poses and the relative measurements between
+    them."""
+
+    def __init__(self):
+        self.poses = []
+        self.deltas = []
+
+    @classmethod
+    def parse(cls, text):
+        """Parse a 3D pose graph from .g2o text."""
+        ds = cls()
+        for lineno, line in enumerate(text.splitlines(), 1):
+            f = line.split()
+            if not f:
+                continue
+            try:
+                if f[0] == "VERTEX_SE3:QUAT":
+                    # VERTEX_SE3:QUAT id x y z qx qy qz qw
+                    if int(f[1]) != len(ds.poses):
+                        raise ValueError("vertex ids must be dense and ordered")
+                    ds.poses.append(Pose3(
+                        (float(f[2]), float(f[3]), float(f[4])),
+                        _unit_quat(float(f[5]), float(f[6]), float(f[7]),
+                                   float(f[8]))))
+                elif f[0] == "EDGE_SE3:QUAT":
+                    # EDGE_SE3:QUAT a b dx dy dz qx qy qz qw then the
+                    # 21 upper-triangular information entries,
+                    # row-major, rows ordered (x y z qx qy qz).
+                    vals = [float(v) for v in f[10:31]]
+                    if len(vals) != 21:
+                        raise ValueError(
+                            "EDGE_SE3:QUAT needs 21 information entries")
+                    info = [[0.0] * 6 for _ in range(6)]
+                    k = 0
+                    for i in range(6):
+                        for j in range(i, 6):
+                            info[i][j] = info[j][i] = vals[k]
+                            k += 1
+                    ds.deltas.append(DeltaPose3(
+                        int(f[1]), int(f[2]),
+                        (float(f[3]), float(f[4]), float(f[5])),
+                        _unit_quat(float(f[6]), float(f[7]), float(f[8]),
+                                   float(f[9])),
+                        info))
+            except (IndexError, ValueError) as e:
+                raise ValueError("g2o line %d: %s" % (lineno, e)) from None
+        for d in ds.deltas:
+            if d.a >= len(ds.poses) or d.b >= len(ds.poses):
+                raise ValueError("measurement references pose %d / %d of %d"
+                                 % (d.a, d.b, len(ds.poses)))
+        return ds
+
+    @classmethod
+    def load(cls, path):
+        """Read a 3D pose graph from a .g2o file."""
         with open(path, "r") as f:
             return cls.parse(f.read())

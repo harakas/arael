@@ -176,6 +176,30 @@ int main() {
         p("g2o_d0_wr", wr);
     }
 
+    // g2o SE3 parsing: quaternion normalization, the symmetric
+    // information matrix, and its Cholesky blocks.
+    {
+        arael::g2o::Dataset3 ds = arael::g2o::Dataset3::parse(
+            "VERTEX_SE3:QUAT 0 0 0 0 0 0 0 1\n"
+            "VERTEX_SE3:QUAT 1 1.0 2.0 -0.5 0.2 0.4 -0.4 1.0\n"
+            "EDGE_SE3:QUAT 0 1 1.5 -0.25 0.75 0.1 -0.2 0.3 0.9 "
+            "100 1 2 0 0 0 100 3 0 0 0 100 0 0 0 400 4 0 400 5 400\n");
+        p("g2o3_n_poses", double(ds.poses.size()));
+        p("g2o3_n_deltas", double(ds.deltas.size()));
+        pv3("g2o3_p1_t", ds.poses[1].t);
+        pq("g2o3_p1_q", ds.poses[1].q);
+        pm3("g2o3_p1_rot", ds.poses[1].rot());
+        const arael::g2o::DeltaPose3& d3 = ds.deltas[0];
+        pv3("g2o3_d0_dt", d3.dt);
+        pq("g2o3_d0_dq", d3.dq);
+        p("g2o3_d0_i03", d3.info[0][3]);
+        p("g2o3_d0_i34", d3.info[3][4]);
+        arael::g2o::DeltaPose3::U u = d3.u_blocks();
+        pm3("g2o3_u_tt", u.u_tt);
+        pm3("g2o3_u_tr", u.u_tr);
+        pm3("g2o3_u_rr", u.u_rr);
+    }
+
     // f32 smoke: euler round trip, printed at double precision.
     vect3<float> eaf{0.3f, -0.7f, 1.9f};
     vect3<float> eaf_back = quatern<float>::from_euler_angles(eaf).get_euler_angles();

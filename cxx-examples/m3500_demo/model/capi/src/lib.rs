@@ -669,6 +669,19 @@ pub unsafe extern "C" fn graph_result_free(d: *mut ResultDetail) {
     }
 }
 
+/// Drop arael log messages above `level` (0 Off, 1 Error, 2 Warn,
+/// 3 Info; Info -- everything -- is the default). Process-wide: all
+/// models and roots share it.
+#[no_mangle]
+pub extern "C" fn graph_set_log_level(level: u32) {
+    arael::log::set_level(match level {
+        0 => arael::log::Level::Off,
+        1 => arael::log::Level::Error,
+        2 => arael::log::Level::Warn,
+        _ => arael::log::Level::Info,
+    });
+}
+
 /// Empty string when the model is clean, the Diagnostic text otherwise.
 #[no_mangle]
 pub unsafe extern "C" fn graph_validate(h: *mut GraphHandle) -> *const c_char {

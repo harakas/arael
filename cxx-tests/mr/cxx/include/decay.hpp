@@ -45,6 +45,7 @@ using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
 using arael::SparseOptionsT;
+using arael::LogLevel;
 using arael::CovMode;
 using arael::CovError;
 
@@ -114,6 +115,7 @@ Decay* decay_new(void);
 void decay_free(Decay*);
 const char* decay_last_error(const Decay*);
 const char* decay_validate(Decay*);
+void decay_set_log_level(uint32_t);
 void decay_sparse_options(SparseOptions*);
 int32_t decay_solve_dense(Decay*, const LmConfig*, LmResultT<float>*);
 int32_t decay_solve_sparse(Decay*, const LmConfig*, const SparseOptions*, LmResultT<float>*);
@@ -134,6 +136,12 @@ inline LmConfig::LmConfig(LmPreset p) {
 
 inline SparseOptions::SparseOptions() {
     ffi::decay_sparse_options(this);
+}
+
+/// Drop arael log messages above `level` (Info -- everything -- is
+/// the default). Process-wide: all models and roots share it.
+inline void set_log_level(LogLevel level) {
+    ffi::decay_set_log_level(uint32_t(level));
 }
 
 /// A completed solve: the plain result fields plus ownership of the

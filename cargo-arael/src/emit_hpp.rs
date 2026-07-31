@@ -639,6 +639,7 @@ public:
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
          const char* {root_sn}_validate({root}*);\n\
+         void {root_sn}_set_log_level(uint32_t);\n\
          void {root_sn}_sparse_options(SparseOptions*);\n\
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResultT<{fp}>*);\n\
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
@@ -701,6 +702,7 @@ using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
 using arael::SparseOptionsT;
+using arael::LogLevel;
 using arael::CovMode;
 using arael::CovError;
 
@@ -737,6 +739,12 @@ inline LmConfig::LmConfig(LmPreset p) {{
 
 inline SparseOptions::SparseOptions() {{
     ffi::{root_sn}_sparse_options(this);
+}}
+
+/// Drop arael log messages above `level` (Info -- everything -- is
+/// the default). Process-wide: all models and roots share it.
+inline void set_log_level(LogLevel level) {{
+    ffi::{root_sn}_set_log_level(uint32_t(level));
 }}
 
 /// A completed solve: the plain result fields plus ownership of the

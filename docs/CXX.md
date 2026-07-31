@@ -95,7 +95,9 @@ views are named by their container's nature: `PathPosesDeque`,
   scalar part first. `matrix2/3::symmetric_eigen()` matches the Rust
   one (ascending eigenvalues, eigenvector columns) to precision, not
   bits. `arael/geometry.hpp` carries the pinhole `Camera`;
-  `arael/g2o.hpp` the SE2 pose-graph file reader.
+  `arael/g2o.hpp` the pose-graph file reader (`Dataset2` for
+  VERTEX_SE2/EDGE_SE2, `Dataset3` for VERTEX_SE3:QUAT/EDGE_SE3:QUAT
+  with sqrt-information Cholesky blocks).
 - **Params** read/write their value; `set_<p>_optimize(false)` fixes
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
@@ -139,6 +141,11 @@ views are named by their container's nature: `PathPosesDeque`,
   `Option` fields are `arael::option<F>`
   (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` in
   seconds. The shared solver surface lives in `arael/solver.hpp`.
+  Warm restart: `cfg.initial_lambda = r.final_lambda` re-enters at
+  the previous damping (Rust's `continue_from`); the optimized
+  parameters already live in the model.
+  `set_log_level(LogLevel::Warn)` quiets arael's diagnostics
+  process-wide (Info, everything, is the default).
 - **Observer**: `cfg.observer` (+ `cfg.observer_user`, passed back as
   its first argument) is called once per damped attempt with an
   `LmIter` -- iteration counts, accepted flag, costs, lambda, and the

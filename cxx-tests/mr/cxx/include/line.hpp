@@ -45,6 +45,7 @@ using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
 using arael::SparseOptionsT;
+using arael::LogLevel;
 using arael::CovMode;
 using arael::CovError;
 
@@ -104,6 +105,7 @@ Line* line_new(void);
 void line_free(Line*);
 const char* line_last_error(const Line*);
 const char* line_validate(Line*);
+void line_set_log_level(uint32_t);
 void line_sparse_options(SparseOptions*);
 int32_t line_solve_dense(Line*, const LmConfig*, LmResultT<double>*);
 int32_t line_solve_sparse(Line*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -124,6 +126,12 @@ inline LmConfig::LmConfig(LmPreset p) {
 
 inline SparseOptions::SparseOptions() {
     ffi::line_sparse_options(this);
+}
+
+/// Drop arael log messages above `level` (Info -- everything -- is
+/// the default). Process-wide: all models and roots share it.
+inline void set_log_level(LogLevel level) {
+    ffi::line_set_log_level(uint32_t(level));
 }
 
 /// A completed solve: the plain result fields plus ownership of the

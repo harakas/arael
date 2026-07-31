@@ -45,6 +45,7 @@ using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
 using arael::SparseOptionsT;
+using arael::LogLevel;
 using arael::CovMode;
 using arael::CovError;
 
@@ -274,6 +275,7 @@ Path* path_new(void);
 void path_free(Path*);
 const char* path_last_error(const Path*);
 const char* path_validate(Path*);
+void path_set_log_level(uint32_t);
 void path_sparse_options(SparseOptions*);
 int32_t path_solve_dense(Path*, const LmConfig*, LmResultT<double>*);
 int32_t path_solve_sparse(Path*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -294,6 +296,12 @@ inline LmConfig::LmConfig(LmPreset p) {
 
 inline SparseOptions::SparseOptions() {
     ffi::path_sparse_options(this);
+}
+
+/// Drop arael log messages above `level` (Info -- everything -- is
+/// the default). Process-wide: all models and roots share it.
+inline void set_log_level(LogLevel level) {
+    ffi::path_set_log_level(uint32_t(level));
 }
 
 /// A completed solve: the plain result fields plus ownership of the

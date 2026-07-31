@@ -706,6 +706,8 @@ class Covariance:
         "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_validate"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
+    sig(&mut py, &format!("{root_sn}_set_log_level"), &["ctypes.c_uint32"],
+        "None");
     sig(&mut py, &format!("{root_sn}_result_report"),
         &["ctypes.c_void_p", "ctypes.c_bool"], "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_result_plan"),
@@ -861,8 +863,8 @@ import os
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmTiming, ReducedOrdering,
-                           SchurPlan, SchurPolicy)
+                           LmPreset, LmStatus, LmTiming, LogLevel,
+                           ReducedOrdering, SchurPlan, SchurPolicy)
 
 LmIter = _f.LmIter
 
@@ -898,6 +900,14 @@ def load(path=None):
     raise AraelError(-1, \"no capi cdylib found; build it with \"
         \"`cargo build --release -p <crate>-capi` or set ARAEL_CAPI. \"
         \"Tried: \" + \", \".join(tried))
+
+
+def set_log_level(level):
+    \"\"\"Drop arael log messages above `level` (a LogLevel; INFO --
+    everything -- is the default). Process-wide: all models and roots
+    share it.\"\"\"
+    load()
+    _f.{root_sn}_set_log_level(int(level))
 
 
 def _raw(r):

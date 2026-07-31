@@ -57,6 +57,15 @@ class CovMode(enum.IntEnum):
     TRI_DIAGONAL = 2
 
 
+class LogLevel(enum.IntEnum):
+    """Severity threshold for arael's diagnostics (matches the Rust
+    log::Level): a level admits everything at or below itself."""
+    OFF = 0
+    ERROR = 1
+    WARN = 2
+    INFO = 3
+
+
 class ReducedOrdering(enum.IntEnum):
     """How the reduced system was ordered (matches the Rust enum)."""
     NATURAL_BANDED = 0

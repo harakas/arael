@@ -45,6 +45,7 @@ using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
 using arael::SparseOptionsT;
+using arael::LogLevel;
 using arael::CovMode;
 using arael::CovError;
 
@@ -160,6 +161,7 @@ Graph* graph_new(void);
 void graph_free(Graph*);
 const char* graph_last_error(const Graph*);
 const char* graph_validate(Graph*);
+void graph_set_log_level(uint32_t);
 void graph_sparse_options(SparseOptions*);
 int32_t graph_solve_dense(Graph*, const LmConfig*, LmResultT<double>*);
 int32_t graph_solve_sparse(Graph*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -180,6 +182,12 @@ inline LmConfig::LmConfig(LmPreset p) {
 
 inline SparseOptions::SparseOptions() {
     ffi::graph_sparse_options(this);
+}
+
+/// Drop arael log messages above `level` (Info -- everything -- is
+/// the default). Process-wide: all models and roots share it.
+inline void set_log_level(LogLevel level) {
+    ffi::graph_set_log_level(uint32_t(level));
 }
 
 /// A completed solve: the plain result fields plus ownership of the

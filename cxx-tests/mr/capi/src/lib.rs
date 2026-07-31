@@ -671,6 +671,19 @@ pub unsafe extern "C" fn decay_result_free(d: *mut ResultDetail) {
     }
 }
 
+/// Drop arael log messages above `level` (0 Off, 1 Error, 2 Warn,
+/// 3 Info; Info -- everything -- is the default). Process-wide: all
+/// models and roots share it.
+#[no_mangle]
+pub extern "C" fn decay_set_log_level(level: u32) {
+    arael::log::set_level(match level {
+        0 => arael::log::Level::Off,
+        1 => arael::log::Level::Error,
+        2 => arael::log::Level::Warn,
+        _ => arael::log::Level::Info,
+    });
+}
+
 /// Empty string when the model is clean, the Diagnostic text otherwise.
 #[no_mangle]
 pub unsafe extern "C" fn decay_validate(h: *mut DecayHandle) -> *const c_char {
@@ -1876,6 +1889,19 @@ pub unsafe extern "C" fn line_result_free(d: *mut ResultDetail) {
     if !d.is_null() {
         drop(Box::from_raw(d));
     }
+}
+
+/// Drop arael log messages above `level` (0 Off, 1 Error, 2 Warn,
+/// 3 Info; Info -- everything -- is the default). Process-wide: all
+/// models and roots share it.
+#[no_mangle]
+pub extern "C" fn line_set_log_level(level: u32) {
+    arael::log::set_level(match level {
+        0 => arael::log::Level::Off,
+        1 => arael::log::Level::Error,
+        2 => arael::log::Level::Warn,
+        _ => arael::log::Level::Info,
+    });
 }
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.

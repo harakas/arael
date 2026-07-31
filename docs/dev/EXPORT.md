@@ -175,25 +175,35 @@ root has `jacobian`, or add a lighter per-label cost pass to the
 macro that does not need the jacobian machinery. Decide when picked
 up.
 
-## 7. Covariance for param-bearing components [S-M]
+## 7. Covariance for param-bearing components [DROPPED 2026-07-31]
 
 The covariance query emitters filter on `role == "entity" &&
 param_count > 0`, so a user component with parameters (a
 `UnitVecParam`-style plane lives happily inside an entity) cannot be
 queried, although Rust's `marginal_cov<M: Model>` accepts any Model.
-Extend the filter to components with params; same generated shape.
+
+Dropped as fringe: the owning entity's marginal covers the practical
+cases, and the rare sub-block need has the Rust API. Revisit only if
+a real consumer asks.
 
 ## 8. Smaller items, in no particular order
 
 - `continue_from`: document the recipe (`cfg.initial_lambda =
   r.final_lambda`) in both skin docs; not worth FFI surface. [S]
+  [DONE 2026-07-31]
 - Param vector snapshot/restore (`serialize`/`deserialize`) for
   retry-with-perturbation loops; add when a consumer asks. [S]
+  [deferred 2026-07-31, user decision]
 - Log control (`arael::log::set_level` / `silence`) over the FFI, to
   quiet backend warnings from a C++/Python host. [S]
+  [DONE 2026-07-31: `{root}_set_log_level` + `set_log_level(LogLevel)`
+  in both skins; level only, the sink callback stays Rust-side]
 - g2o 3D (`Pose3` / `DeltaPose3` / `Dataset3`) in the vendored C++
   and Python support libraries; SE2 only today. Needed the day a 3D
   pose-graph demo shows up. [M]
+  [DONE 2026-07-31: both libraries mirror src/g2o.rs's SE3:QUAT
+  subset incl. quaternion normalization and the sqrt-information
+  Cholesky blocks; pinned by the cxx_math / py_math golden parity]
 
 ## Not planned (unchanged decisions)
 

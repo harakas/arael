@@ -38,6 +38,11 @@ def fill(f):
         n.w = w[i]
 
 
+# Log control crosses the FFI; WARN quiets the backend's INFO chatter
+# for this run.
+fit.set_log_level(fit.LogLevel.WARN)
+pi("log_smoke", 1)
+
 f = fit.Fit()
 fill(f)
 pi("clean", 1 if len(f.validate()) == 0 else 0)

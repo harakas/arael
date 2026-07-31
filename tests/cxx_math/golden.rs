@@ -191,6 +191,30 @@ pub fn golden() -> Vec<(String, f64)> {
         p(&mut out, "g2o_d0_wr", wr);
     }
 
+    // g2o SE3 parsing: quaternion normalization, the symmetric
+    // information matrix, and its Cholesky blocks.
+    {
+        let ds = arael::g2o::Dataset3::parse(
+            "VERTEX_SE3:QUAT 0 0 0 0 0 0 0 1\n\
+             VERTEX_SE3:QUAT 1 1.0 2.0 -0.5 0.2 0.4 -0.4 1.0\n\
+             EDGE_SE3:QUAT 0 1 1.5 -0.25 0.75 0.1 -0.2 0.3 0.9 \
+             100 1 2 0 0 0 100 3 0 0 0 100 0 0 0 400 4 0 400 5 400\n").unwrap();
+        p(&mut out, "g2o3_n_poses", ds.poses.len() as f64);
+        p(&mut out, "g2o3_n_deltas", ds.deltas.len() as f64);
+        pv3(&mut out, "g2o3_p1_t", ds.poses[1].t);
+        pq(&mut out, "g2o3_p1_q", ds.poses[1].q);
+        pm3(&mut out, "g2o3_p1_rot", ds.poses[1].rot());
+        let d = &ds.deltas[0];
+        pv3(&mut out, "g2o3_d0_dt", d.dt);
+        pq(&mut out, "g2o3_d0_dq", d.dq);
+        p(&mut out, "g2o3_d0_i03", d.info[0][3]);
+        p(&mut out, "g2o3_d0_i34", d.info[3][4]);
+        let (u_tt, u_tr, u_rr) = d.u_blocks();
+        pm3(&mut out, "g2o3_u_tt", u_tt);
+        pm3(&mut out, "g2o3_u_tr", u_tr);
+        pm3(&mut out, "g2o3_u_rr", u_rr);
+    }
+
     let eaf = vect3::<f32>::new(0.3, -0.7, 1.9);
     let eaf_back = quatern::<f32>::from_euler_angles(eaf).get_euler_angles();
     pv3(&mut out, "f32_ea_back",

@@ -111,6 +111,7 @@ SIGS = [
     ("path_free", [ctypes.c_void_p], None),
     ("path_last_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("path_validate", [ctypes.c_void_p], ctypes.c_char_p),
+    ("path_set_log_level", [ctypes.c_uint32], None),
     ("path_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("path_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
     ("path_result_free", [ctypes.c_void_p], None),
