@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iterator>
 #include <memory>
+#include <vector>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -37,6 +38,7 @@ using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
 using arael::LmIterT;
+using arael::LmStep;
 using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
@@ -116,6 +118,7 @@ int32_t line_solve_dense(Line*, const LmConfig*, LmResultT<double>*);
 int32_t line_solve_sparse(Line*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
 const char* line_result_report(void*, bool);
 bool line_result_plan(const void*, SchurPlan*);
+uint64_t line_result_steps(const void*, LmStep*, uint64_t);
 void line_result_free(void*);
 struct LineSession;
 LineSession* line_session_new(const SparseOptions*);
@@ -143,7 +146,8 @@ inline void set_log_level(LogLevel level) {
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data. Copies share ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline. Copies share
+/// ownership of the Rust result.
 class LmResult : public LmResultT<double> {
 public:
     LmResult() : LmResultT<double>() {}
@@ -166,6 +170,17 @@ public:
         if (detail && ffi::line_result_plan(detail, &p))
             return p;
         return {};
+    }
+    /// The per-attempt timeline (Rust's LmTiming::steps); empty
+    /// unless the solve ran with gather_timing.
+    std::vector<LmStep> steps() const {
+        std::vector<LmStep> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::line_result_steps(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::line_result_steps(detail, out.data(), out.size());
+        return out;
     }
 
 private:

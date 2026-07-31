@@ -378,6 +378,24 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("tm_assembly_count"), t.assembly_count as f64);
         assert_eq!(g("tm_solve_count"), t.linear_solve_count as f64);
         assert_eq!(g("tm_cost_count"), t.cost_eval_count as f64);
+        // Per-attempt timeline mirrored exactly.
+        assert!(!t.steps.is_empty());
+        assert_eq!(g("steps_len"), t.steps.len() as f64);
+        let s0 = &t.steps[0];
+        let sn = t.steps.last().unwrap();
+        assert_eq!(g("step0_iter"), s0.iter as f64);
+        assert_eq!(g("step0_inner"), s0.inner as f64);
+        assert_eq!(g("step0_accepted"), s0.accepted as i32 as f64);
+        assert_eq!(g("step0_lambda"), s0.lambda);
+        assert_eq!(g("step0_cost"), s0.cost);
+        assert_eq!(g("step0_new_cost"), s0.new_cost);
+        assert_eq!(g("step0_step_norm"), s0.step_norm);
+        assert_eq!(g("step0_grad_max"), s0.grad_max);
+        assert_eq!(g("stepN_iter"), sn.iter as f64);
+        assert_eq!(g("stepN_accepted"), sn.accepted as i32 as f64);
+        assert_eq!(g("stepN_cost"), sn.cost);
+        assert_eq!(g("stepN_new_cost"), sn.new_cost);
+        assert_eq!(g("steps_ok"), 1.0);
         assert!(!r7.report().is_empty());
         assert_eq!(g("report_nonempty"), 1.0);
         assert_eq!(g("report_pretty_nonempty"), 1.0);

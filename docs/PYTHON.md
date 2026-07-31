@@ -87,8 +87,9 @@ surface reference); the differences are Python idiom:
   the actual Rust values filled in. `cfg.observer = fn` gets an
   `LmIter` per damped attempt (`it.lambda_`, `it.param(i)`,
   `it.param_list()`; return `False` to stop); `cfg.gather_timing =
-  True` fills `r.timing`; `cfg.gradient_tolerance = 1e-8` / `= None`
-  for the optional fields. The result owns the full Rust-side solve:
+  True` fills `r.timing` and `r.steps` (the per-attempt timeline, a
+  list of `LmStep` records); `cfg.gradient_tolerance = 1e-8` / `=
+  None` for the optional fields. The result owns the full Rust-side solve:
   `r.report()` / `r.pretty_report()` render it (status, costs, the
   timing breakdown, the backend's plan) and stay valid however many
   solves follow; `r.plan` is the sparse backend's `SchurPlan` as data

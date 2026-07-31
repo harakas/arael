@@ -278,6 +278,32 @@ pi("tm_total_pos", 1 if r7.timing.total > 0.0 else 0)
 pi("tm_assembly_count", r7.timing.assembly_count)
 pi("tm_solve_count", r7.timing.linear_solve_count)
 pi("tm_cost_count", r7.timing.cost_eval_count)
+# Per-attempt timeline: exact solver figures, sane wall times.
+steps = r7.steps
+pi("steps_len", len(steps))
+if steps:
+    s0, sn = steps[0], steps[-1]
+    pi("step0_iter", s0.iter)
+    pi("step0_inner", s0.inner)
+    pi("step0_accepted", 1 if s0.accepted else 0)
+    p("step0_lambda", s0.lambda_)
+    p("step0_cost", s0.cost)
+    p("step0_new_cost", s0.new_cost)
+    p("step0_step_norm", s0.step_norm)
+    p("step0_grad_max", s0.grad_max)
+    pi("stepN_iter", sn.iter)
+    pi("stepN_accepted", 1 if sn.accepted else 0)
+    p("stepN_cost", sn.cost)
+    p("stepN_new_cost", sn.new_cost)
+    steps_ok = 1
+    for s in steps:
+        for tv in (s.time, s.assembly, s.analysis, s.linear_solve,
+                   s.cost_eval, s.advance):
+            if not math.isfinite(tv) or tv < 0.0:
+                steps_ok = 0
+        if s.factorization_failed:
+            steps_ok = 0
+    pi("steps_ok", steps_ok)
 pi("report_nonempty", 1 if len(r7.report()) > 0 else 0)
 pi("report_pretty_nonempty", 1 if len(r7.pretty_report()) > 0 else 0)
 cov7 = f7.assemble_covariance()

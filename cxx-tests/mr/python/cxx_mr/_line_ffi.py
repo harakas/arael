@@ -29,6 +29,7 @@ SIGS = [
     ("line_set_log_level", [ctypes.c_uint32], None),
     ("line_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("line_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
+    ("line_result_steps", [ctypes.c_void_p, ctypes.POINTER(_solver.LmStep), ctypes.c_uint64], ctypes.c_uint64),
     ("line_result_free", [ctypes.c_void_p], None),
     ("line_cost", [ctypes.c_void_p], ctypes.c_double),
     ("line_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),

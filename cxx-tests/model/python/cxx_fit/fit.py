@@ -11,7 +11,7 @@ import os
 from . import _fit_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmTiming, LogLevel,
+                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
                            ReducedOrdering, SchurPlan, SchurPolicy,
                            SchurSolve)
 
@@ -165,6 +165,19 @@ class LmResult(_f.LmResultRaw):
                                                      ctypes.byref(p)):
             return p
         return None
+
+    @property
+    def steps(self):
+        """The per-attempt timeline (list of arael.solver.LmStep);
+        empty unless the solve ran with gather_timing."""
+        if not self._detail:
+            return []
+        n = _f.fit_result_steps(self._detail, None, 0)
+        if not n:
+            return []
+        buf = (LmStep * n)()
+        _f.fit_result_steps(self._detail, buf, n)
+        return list(buf)
 
     def __del__(self):
         d, self._detail = self._detail, None

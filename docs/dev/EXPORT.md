@@ -295,8 +295,11 @@ independent -- a second `assemble_covariance` leaves older views
 answering from their own assembly -- and nothing stays resident past
 the last view. Query errors carry text via `{root}_cov_error`
 (Python raises `AraelError`, C++ `ck_` throws `PanicError` on a
-caught panic). Parity pins: `cov2_ok` / `cov_independent`. Joint
-blocks stay [M, on demand].
+caught panic). Parity pins: `cov2_ok` / `cov_independent`.
+
+[DROPPED -- joint half] The `Model`-generic queries are accidental
+generality in the Rust signatures, not a designed feature; per-entity
+plus `cross` is the intended surface. Item closed.
 
 ### 14. Session for band solves [M]
 
@@ -315,6 +318,13 @@ optimized one back out.
 - `LmTiming::steps` / `LmStep` per-iteration timeline (observer
   covers half the fields, no per-phase durations, and render never
   prints the steps table).
+  [DONE 2026-07-31] `{root_sn}_result_steps(d, out, cap)` copies the
+  records (returns the total; cap 0 sizes the buffer); C++
+  `r.steps()` -> `std::vector<LmStep>`, Python `r.steps` -> list of
+  `LmStep` (`lambda_` for the keyword). Empty without gather_timing.
+  Parity pins the exact solver figures of the first and last record
+  plus sane wall times (`steps_*`/`step0_*`/`stepN_*`). The render
+  gap (report never prints the steps table) is Rust-side and stays.
 - `Style` granularity: unicode-without-colour is unreachable (one
   extra bool on `result_report`).
 - `SolveFailureKind`'s param index reaches the skins only as prose;

@@ -37,6 +37,7 @@ SIGS = [
     ("decay_set_log_level", [ctypes.c_uint32], None),
     ("decay_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("decay_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
+    ("decay_result_steps", [ctypes.c_void_p, ctypes.POINTER(_solver.LmStep), ctypes.c_uint64], ctypes.c_uint64),
     ("decay_result_free", [ctypes.c_void_p], None),
     ("decay_cost", [ctypes.c_void_p], ctypes.c_double),
     ("decay_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),

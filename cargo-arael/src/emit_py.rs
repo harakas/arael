@@ -732,6 +732,10 @@ class Covariance:
     sig(&mut py, &format!("{root_sn}_result_plan"),
         &["ctypes.c_void_p", "ctypes.POINTER(_solver.SchurPlan)"],
         "ctypes.c_bool");
+    sig(&mut py, &format!("{root_sn}_result_steps"),
+        &["ctypes.c_void_p", "ctypes.POINTER(_solver.LmStep)",
+          "ctypes.c_uint64"],
+        "ctypes.c_uint64");
     sig(&mut py, &format!("{root_sn}_result_free"), &["ctypes.c_void_p"],
         "None");
     sig(&mut py, &format!("{root_sn}_cost"), &["ctypes.c_void_p"],
@@ -915,7 +919,7 @@ import os
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmTiming, LogLevel,
+                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
                            ReducedOrdering, SchurPlan, SchurPolicy,
                            SchurSolve)
 
@@ -1069,6 +1073,19 @@ class LmResult(_f.LmResultRaw):
                                                      ctypes.byref(p)):
             return p
         return None
+
+    @property
+    def steps(self):
+        \"\"\"The per-attempt timeline (list of arael.solver.LmStep);
+        empty unless the solve ran with gather_timing.\"\"\"
+        if not self._detail:
+            return []
+        n = _f.{root_sn}_result_steps(self._detail, None, 0)
+        if not n:
+            return []
+        buf = (LmStep * n)()
+        _f.{root_sn}_result_steps(self._detail, buf, n)
+        return list(buf)
 
     def __del__(self):
         d, self._detail = self._detail, None

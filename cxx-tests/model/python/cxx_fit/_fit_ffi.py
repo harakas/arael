@@ -116,6 +116,7 @@ SIGS = [
     ("fit_set_log_level", [ctypes.c_uint32], None),
     ("fit_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("fit_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
+    ("fit_result_steps", [ctypes.c_void_p, ctypes.POINTER(_solver.LmStep), ctypes.c_uint64], ctypes.c_uint64),
     ("fit_result_free", [ctypes.c_void_p], None),
     ("fit_cost", [ctypes.c_void_p], ctypes.c_double),
     ("fit_cost_table", [ctypes.c_void_p], ctypes.c_int32),

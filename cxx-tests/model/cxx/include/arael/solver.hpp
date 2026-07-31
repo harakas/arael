@@ -220,7 +220,7 @@ struct SparseOptionsT {
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
 /// LmConfigT::gather_timing is set (see Rust's LmTiming for the
-/// phase definitions; the per-step records stay Rust-side).
+/// phase definitions; the per-step records are LmResult::steps()).
 struct LmTiming {
     double total;
     double assembly;
@@ -237,6 +237,40 @@ struct LmTiming {
     uint32_t linear_solve_count;
     uint32_t cost_eval_count;
     uint32_t advance_count;
+};
+
+/// One attempted LM step: the per-attempt timeline behind
+/// LmResult::steps() (Rust's LmStep). A damping retry is its own
+/// record, so rejected steps and failed factorizations appear too.
+/// Durations are wall-clock seconds; assembly is charged to the
+/// first attempt at each linearization (inner == 0), zero on a
+/// retry.
+struct LmStep {
+    /// Attempt number, 1-based, counting damping retries.
+    uint32_t iter;
+    /// Retry index within this linearization (0 = first attempt).
+    uint32_t inner;
+    /// Did the step reduce the cost and get kept?
+    bool accepted;
+    /// Damped Cholesky not positive definite: no step was produced,
+    /// new_cost is NaN and step_norm is zero.
+    bool factorization_failed;
+    double lambda;
+    /// Cost before the attempt / at the trial point.
+    double cost;
+    double new_cost;
+    /// |delta|_2 of the proposed move.
+    double step_norm;
+    /// max|g_i| at this linearization point.
+    double grad_max;
+    /// The whole attempt (excludes assembly and analysis).
+    double time;
+    double assembly;
+    double analysis;
+    double linear_solve;
+    double cost_eval;
+    /// Post-step re-centering; zero unless the step was accepted.
+    double advance;
 };
 
 template<class F>

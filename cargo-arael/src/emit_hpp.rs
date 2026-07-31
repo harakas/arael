@@ -652,7 +652,7 @@ public:
              double {root_sn}_cost_table_value(const {root}*, uint32_t);\n"));
     }
     let extra_includes = if model.jacobian {
-        "#include <utility>\n#include <vector>\n"
+        "#include <utility>\n"
     } else {
         ""
     };
@@ -690,6 +690,7 @@ public:
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
          const char* {root_sn}_result_report(void*, bool);\n\
          bool {root_sn}_result_plan(const void*, SchurPlan*);\n\
+         uint64_t {root_sn}_result_steps(const void*, LmStep*, uint64_t);\n\
          void {root_sn}_result_free(void*);\n\
          struct {root}Session;\n\
          {root}Session* {root_sn}_session_new(const SparseOptions*);\n\
@@ -709,6 +710,7 @@ public:
 #include <cmath>
 #include <iterator>
 #include <memory>
+#include <vector>
 {extra_includes}#include \"arael/math.hpp\"
 #include \"arael/result.hpp\"
 #include \"arael/solver.hpp\"
@@ -739,6 +741,7 @@ using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
 using arael::LmIterT;
+using arael::LmStep;
 using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
@@ -798,7 +801,8 @@ inline void set_log_level(LogLevel level) {{
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data. Copies share ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline. Copies share
+/// ownership of the Rust result.
 class LmResult : public LmResultT<{fp}> {{
 public:
     LmResult() : LmResultT<{fp}>() {{}}
@@ -821,6 +825,17 @@ public:
         if (detail && ffi::{root_sn}_result_plan(detail, &p))
             return p;
         return {{}};
+    }}
+    /// The per-attempt timeline (Rust's LmTiming::steps); empty
+    /// unless the solve ran with gather_timing.
+    std::vector<LmStep> steps() const {{
+        std::vector<LmStep> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::{root_sn}_result_steps(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::{root_sn}_result_steps(detail, out.data(), out.size());
+        return out;
     }}
 
 private:

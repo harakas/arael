@@ -978,7 +978,7 @@ impl CLmConfig {{
 }}
 
 /// LmTiming mirror: per-phase wall-clock seconds plus call counts.
-/// The Rust per-step records (LmTiming::steps) stay Rust-side.
+/// The per-step records are read with {root_sn}_result_steps.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct CLmTiming {{
@@ -997,6 +997,28 @@ pub struct CLmTiming {{
     pub linear_solve_count: u32,
     pub cost_eval_count: u32,
     pub advance_count: u32,
+}}
+
+/// LmStep mirror: one attempted step of the per-attempt timeline
+/// (durations as seconds). Layout must match the C++ LmStep.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CLmStep {{
+    pub iter: u32,
+    pub inner: u32,
+    pub accepted: bool,
+    pub factorization_failed: bool,
+    pub lambda: f64,
+    pub cost: f64,
+    pub new_cost: f64,
+    pub step_norm: f64,
+    pub grad_max: f64,
+    pub time: f64,
+    pub assembly: f64,
+    pub analysis: f64,
+    pub linear_solve: f64,
+    pub cost_eval: f64,
+    pub advance: f64,
 }}
 
 #[repr(C)]
@@ -1210,6 +1232,38 @@ pub unsafe extern \"C\" fn {root_sn}_result_plan(d: *const ResultDetail, out: *m
         }}
         _ => false,
     }}
+}}
+
+/// Per-attempt timeline of the result behind `d` (LmTiming::steps;
+/// populated when the solve ran with gather_timing, empty
+/// otherwise). Copies up to `cap` records into `out` and returns the
+/// total count -- call with cap 0 to size the buffer.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_result_steps(d: *const ResultDetail, out: *mut CLmStep, cap: u64) -> u64 {{
+    let steps: &[arael::simple_lm::LmStep] = match &(*d).result.timing {{
+        Some(t) => &t.steps,
+        None => &[],
+    }};
+    for (i, s) in steps.iter().take(cap as usize).enumerate() {{
+        *out.add(i) = CLmStep {{
+            iter: s.iter as u32,
+            inner: s.inner as u32,
+            accepted: s.accepted,
+            factorization_failed: s.factorization_failed,
+            lambda: s.lambda,
+            cost: s.cost,
+            new_cost: s.new_cost,
+            step_norm: s.step_norm,
+            grad_max: s.grad_max,
+            time: s.time.as_secs_f64(),
+            assembly: s.assembly.as_secs_f64(),
+            analysis: s.analysis.as_secs_f64(),
+            linear_solve: s.linear_solve.as_secs_f64(),
+            cost_eval: s.cost_eval.as_secs_f64(),
+            advance: s.advance.as_secs_f64(),
+        }};
+    }}
+    steps.len() as u64
 }}
 
 /// Release the Rust result behind a CLmResult. Null is fine.

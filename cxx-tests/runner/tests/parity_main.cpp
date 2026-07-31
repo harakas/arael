@@ -260,6 +260,36 @@ int main() {
     pi("tm_assembly_count", r7.timing.assembly_count);
     pi("tm_solve_count", r7.timing.linear_solve_count);
     pi("tm_cost_count", r7.timing.cost_eval_count);
+    // Per-attempt timeline: exact solver figures, sane wall times.
+    auto steps = r7.steps();
+    pi("steps_len", (int)steps.size());
+    if (!steps.empty()) {
+        const auto& s0 = steps.front();
+        const auto& sn = steps.back();
+        pi("step0_iter", (int)s0.iter);
+        pi("step0_inner", (int)s0.inner);
+        pi("step0_accepted", s0.accepted ? 1 : 0);
+        p("step0_lambda", s0.lambda);
+        p("step0_cost", s0.cost);
+        p("step0_new_cost", s0.new_cost);
+        p("step0_step_norm", s0.step_norm);
+        p("step0_grad_max", s0.grad_max);
+        pi("stepN_iter", (int)sn.iter);
+        pi("stepN_accepted", sn.accepted ? 1 : 0);
+        p("stepN_cost", sn.cost);
+        p("stepN_new_cost", sn.new_cost);
+        int steps_ok = 1;
+        for (const auto& s : steps) {
+            const double ts[] = {s.time, s.assembly, s.analysis,
+                                 s.linear_solve, s.cost_eval, s.advance};
+            for (double tv : ts)
+                if (!std::isfinite(tv) || tv < 0.0)
+                    steps_ok = 0;
+            if (s.factorization_failed)
+                steps_ok = 0;
+        }
+        pi("steps_ok", steps_ok);
+    }
     pi("report_nonempty", std::strlen(r7.report()) > 0 ? 1 : 0);
     pi("report_pretty_nonempty", std::strlen(r7.pretty_report()) > 0 ? 1 : 0);
     auto cov7 = f7.assemble_covariance(CovMode::AllMarginals).value();

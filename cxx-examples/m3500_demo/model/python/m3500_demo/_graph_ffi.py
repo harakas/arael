@@ -56,6 +56,7 @@ SIGS = [
     ("graph_set_log_level", [ctypes.c_uint32], None),
     ("graph_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("graph_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
+    ("graph_result_steps", [ctypes.c_void_p, ctypes.POINTER(_solver.LmStep), ctypes.c_uint64], ctypes.c_uint64),
     ("graph_result_free", [ctypes.c_void_p], None),
     ("graph_cost", [ctypes.c_void_p], ctypes.c_double),
     ("graph_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),

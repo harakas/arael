@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iterator>
 #include <memory>
+#include <vector>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -37,6 +38,7 @@ using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
 using arael::LmIterT;
+using arael::LmStep;
 using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
@@ -126,6 +128,7 @@ int32_t decay_solve_dense(Decay*, const LmConfig*, LmResultT<float>*);
 int32_t decay_solve_sparse(Decay*, const LmConfig*, const SparseOptions*, LmResultT<float>*);
 const char* decay_result_report(void*, bool);
 bool decay_result_plan(const void*, SchurPlan*);
+uint64_t decay_result_steps(const void*, LmStep*, uint64_t);
 void decay_result_free(void*);
 struct DecaySession;
 DecaySession* decay_session_new(const SparseOptions*);
@@ -153,7 +156,8 @@ inline void set_log_level(LogLevel level) {
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data. Copies share ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline. Copies share
+/// ownership of the Rust result.
 class LmResult : public LmResultT<float> {
 public:
     LmResult() : LmResultT<float>() {}
@@ -176,6 +180,17 @@ public:
         if (detail && ffi::decay_result_plan(detail, &p))
             return p;
         return {};
+    }
+    /// The per-attempt timeline (Rust's LmTiming::steps); empty
+    /// unless the solve ran with gather_timing.
+    std::vector<LmStep> steps() const {
+        std::vector<LmStep> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::decay_result_steps(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::decay_result_steps(detail, out.data(), out.size());
+        return out;
     }
 
 private:

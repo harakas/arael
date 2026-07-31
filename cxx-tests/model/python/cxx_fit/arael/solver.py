@@ -279,6 +279,31 @@ class LmTiming(ctypes.Structure):
     ]
 
 
+class LmStep(ctypes.Structure):
+    """One attempted LM step: the per-attempt timeline behind
+    LmResult.steps. A damping retry is its own record, so rejected
+    steps and failed factorizations appear too. Durations are
+    wall-clock seconds; assembly is charged to the first attempt at
+    each linearization (inner == 0), zero on a retry."""
+    _fields_ = [
+        ("iter", ctypes.c_uint32),
+        ("inner", ctypes.c_uint32),
+        ("accepted", ctypes.c_bool),
+        ("factorization_failed", ctypes.c_bool),
+        ("lambda_", ctypes.c_double),
+        ("cost", ctypes.c_double),
+        ("new_cost", ctypes.c_double),
+        ("step_norm", ctypes.c_double),
+        ("grad_max", ctypes.c_double),
+        ("time", ctypes.c_double),
+        ("assembly", ctypes.c_double),
+        ("analysis", ctypes.c_double),
+        ("linear_solve", ctypes.c_double),
+        ("cost_eval", ctypes.c_double),
+        ("advance", ctypes.c_double),
+    ]
+
+
 def _opt_property(field):
     """Property mapping a COpt struct field to a float-or-None."""
 

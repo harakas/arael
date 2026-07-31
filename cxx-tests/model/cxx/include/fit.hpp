@@ -7,8 +7,8 @@
 #include <cmath>
 #include <iterator>
 #include <memory>
-#include <utility>
 #include <vector>
+#include <utility>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -39,6 +39,7 @@ using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
 using arael::LmIterT;
+using arael::LmStep;
 using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
@@ -330,6 +331,7 @@ int32_t fit_solve_dense(Fit*, const LmConfig*, LmResultT<double>*);
 int32_t fit_solve_sparse(Fit*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
 const char* fit_result_report(void*, bool);
 bool fit_result_plan(const void*, SchurPlan*);
+uint64_t fit_result_steps(const void*, LmStep*, uint64_t);
 void fit_result_free(void*);
 struct FitSession;
 FitSession* fit_session_new(const SparseOptions*);
@@ -357,7 +359,8 @@ inline void set_log_level(LogLevel level) {
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data. Copies share ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline. Copies share
+/// ownership of the Rust result.
 class LmResult : public LmResultT<double> {
 public:
     LmResult() : LmResultT<double>() {}
@@ -380,6 +383,17 @@ public:
         if (detail && ffi::fit_result_plan(detail, &p))
             return p;
         return {};
+    }
+    /// The per-attempt timeline (Rust's LmTiming::steps); empty
+    /// unless the solve ran with gather_timing.
+    std::vector<LmStep> steps() const {
+        std::vector<LmStep> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::fit_result_steps(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::fit_result_steps(detail, out.data(), out.size());
+        return out;
     }
 
 private:
