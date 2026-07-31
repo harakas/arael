@@ -6,7 +6,9 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
-use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SparseFaer, SparseFaerOptions};
+use arael::simple_lm::{
+    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+};
 use slam_demo_gm::{GpsData, Path, PointFeature, PointFrine, PointLandmark, Pose, PoseInfo, PosePair};
 
 /// The opaque handle the C ABI hands out: the model, the error /
@@ -749,6 +751,87 @@ pub unsafe extern "C" fn path_solve_sparse(
         Some(mut s) => hh.model.solve_with(&mut s, &c),
         None => hh.model.solve_sparse(&c),
     })) {
+        Ok(Ok(r)) => {
+            let code = fill_result(out, &r);
+            (*out).detail = boxed(r);
+            set_text(hh, "");
+            code
+        }
+        Ok(Err(f)) => {
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }
+            -1
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            (*out).status = -2;
+            -2
+        }
+    }
+}
+
+/// A warm-reuse session over the sparse backend (Rust's LmSession):
+/// keeps the analysis -- pattern, ordering, symbolic factorization,
+/// Schur plan -- across solves, so only the first pays for it. Warm
+/// solves are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; path_session_invalidate covers a
+/// structural change at the same count (solving warm through one is
+/// undefined).
+pub struct PathSession {
+    session: LmSession<f64, SparseFaer<f64>>,
+}
+
+/// New session; `opts` as in path_solve_sparse (null =
+/// defaults). Returns null when the options are invalid.
+#[no_mangle]
+pub unsafe extern "C" fn path_session_new(
+    opts: *const CSparseOptions,
+) -> *mut PathSession {
+    let solver = if opts.is_null() {
+        SparseFaer::<f64>::new()
+    } else {
+        match (*opts).to_options() {
+            Ok(o) => SparseFaer::<f64>::from_options(&o),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    Box::into_raw(Box::new(PathSession {
+        session: LmSession::new(solver),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn path_session_free(s: *mut PathSession) {
+    if !s.is_null() {
+        drop(Box::from_raw(s));
+    }
+}
+
+/// Drop the learned structure; the next solve runs cold.
+#[no_mangle]
+pub unsafe extern "C" fn path_session_invalidate(s: *mut PathSession) {
+    (*s).session.invalidate();
+}
+
+/// As path_solve_sparse, through the session's cached analysis.
+/// Error text lands on the model handle (path_last_error).
+#[no_mangle]
+pub unsafe extern "C" fn path_session_solve(
+    s: *mut PathSession,
+    h: *mut PathHandle,
+    cfg: *const CLmConfig,
+    out: *mut CLmResult,
+) -> i32 {
+    let ss = &mut *s;
+    let hh = &mut *h;
+    let c = (*cfg).to_config();
+    zero_result(out);
+    match catch_unwind(AssertUnwindSafe(|| ss.session.solve(&mut hh.model, &c))) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);

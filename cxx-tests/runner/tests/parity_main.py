@@ -157,6 +157,45 @@ pi("opt2_reduced", 1 if p12.reduced else 0)
 pi("opt2_envelope", 1 if p12.envelope else 0)
 pi("opt2_ordering", int(p12.ordering) if p12.ordering is not None else -1)
 
+# LmSession: warm solves reuse the analysis and stay bit-identical to
+# cold ones; a parameter-count change re-analyzes by itself.
+f13 = fit.Fit()
+fill(f13)
+sess = fit.LmSession()
+rs1 = sess.solve(f13, cfg)
+p("sess_end1", rs1.end_cost)
+f13.m = 0.0
+f13.c = 0.0
+for i in range(len(f13.items)):
+    f13.items[i].v = 0.0
+rs2 = sess.solve(f13, cfg)
+p("sess_end2", rs2.end_cost)
+pi("sess_warm_equals_cold", 1 if rs2.end_cost == rs1.end_cost else 0)
+sess.invalidate()
+f13.m = 0.0
+f13.c = 0.0
+for i in range(len(f13.items)):
+    f13.items[i].v = 0.0
+rs3 = sess.solve(f13, cfg)
+pi("sess_invalidate_agrees", 1 if rs3.end_cost == rs1.end_cost else 0)
+n13 = f13.items.push()
+n13.t = 0.5
+n13.w = 1.0
+rs4 = sess.solve(f13, cfg)
+p("sess_end4", rs4.end_cost)
+
+# A session built over explicit options follows them.
+f14 = fit.Fit()
+fill(f14)
+so14 = fit.SparseOptions()
+so14.schur = fit.SchurPolicy.FORCE
+so14.ordering = fit.FaerOrdering.NATURAL
+so14.envelope = fit.EnvelopeMode.ALWAYS
+sessf = fit.LmSession(so14)
+rs5 = sessf.solve(f14, cfg)
+p("sessf_end", rs5.end_cost)
+pi("sessf_envelope", 1 if rs5.plan.envelope else 0)
+
 # Observer callback + timing + report + conditional covariance.
 f7 = fit.Fit()
 pi("report_default_empty", 1 if len(fit.LmResult().report()) == 0 else 0)

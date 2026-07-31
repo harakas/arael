@@ -8,7 +8,9 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
-use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SparseFaer, SparseFaerOptions};
+use arael::simple_lm::{
+    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+};
 use cxx_mr::{Cell, Decay};
 
 /// The opaque handle the C ABI hands out: the model, the error /
@@ -775,6 +777,87 @@ pub unsafe extern "C" fn decay_solve_sparse(
     }
 }
 
+/// A warm-reuse session over the sparse backend (Rust's LmSession):
+/// keeps the analysis -- pattern, ordering, symbolic factorization,
+/// Schur plan -- across solves, so only the first pays for it. Warm
+/// solves are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; decay_session_invalidate covers a
+/// structural change at the same count (solving warm through one is
+/// undefined).
+pub struct DecaySession {
+    session: LmSession<f32, SparseFaer<f32>>,
+}
+
+/// New session; `opts` as in decay_solve_sparse (null =
+/// defaults). Returns null when the options are invalid.
+#[no_mangle]
+pub unsafe extern "C" fn decay_session_new(
+    opts: *const CSparseOptions,
+) -> *mut DecaySession {
+    let solver = if opts.is_null() {
+        SparseFaer::<f32>::new()
+    } else {
+        match (*opts).to_options() {
+            Ok(o) => SparseFaer::<f32>::from_options(&o),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    Box::into_raw(Box::new(DecaySession {
+        session: LmSession::new(solver),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn decay_session_free(s: *mut DecaySession) {
+    if !s.is_null() {
+        drop(Box::from_raw(s));
+    }
+}
+
+/// Drop the learned structure; the next solve runs cold.
+#[no_mangle]
+pub unsafe extern "C" fn decay_session_invalidate(s: *mut DecaySession) {
+    (*s).session.invalidate();
+}
+
+/// As decay_solve_sparse, through the session's cached analysis.
+/// Error text lands on the model handle (decay_last_error).
+#[no_mangle]
+pub unsafe extern "C" fn decay_session_solve(
+    s: *mut DecaySession,
+    h: *mut DecayHandle,
+    cfg: *const CLmConfig,
+    out: *mut CLmResult,
+) -> i32 {
+    let ss = &mut *s;
+    let hh = &mut *h;
+    let c = (*cfg).to_config();
+    zero_result(out);
+    match catch_unwind(AssertUnwindSafe(|| ss.session.solve(&mut hh.model, &c))) {
+        Ok(Ok(r)) => {
+            let code = fill_result(out, &r);
+            (*out).detail = boxed(r);
+            set_text(hh, "");
+            code
+        }
+        Ok(Err(f)) => {
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }
+            -1
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            (*out).status = -2;
+            -2
+        }
+    }
+}
+
 /// Band Cholesky solve; `kd` is the Hessian half-bandwidth in scalar
 /// parameters. Returns the status code (>= 0: LmStatus; -1: solve
 /// failure; -2: panic). Failure text via decay_last_error;
@@ -1132,7 +1215,9 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
-use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SparseFaer, SparseFaerOptions};
+use arael::simple_lm::{
+    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+};
 use cxx_mr::{Line, Ob};
 
 /// The opaque handle the C ABI hands out: the model, the error /
@@ -1875,6 +1960,87 @@ pub unsafe extern "C" fn line_solve_sparse(
         Some(mut s) => hh.model.solve_with(&mut s, &c),
         None => hh.model.solve_sparse(&c),
     })) {
+        Ok(Ok(r)) => {
+            let code = fill_result(out, &r);
+            (*out).detail = boxed(r);
+            set_text(hh, "");
+            code
+        }
+        Ok(Err(f)) => {
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }
+            -1
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            (*out).status = -2;
+            -2
+        }
+    }
+}
+
+/// A warm-reuse session over the sparse backend (Rust's LmSession):
+/// keeps the analysis -- pattern, ordering, symbolic factorization,
+/// Schur plan -- across solves, so only the first pays for it. Warm
+/// solves are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; line_session_invalidate covers a
+/// structural change at the same count (solving warm through one is
+/// undefined).
+pub struct LineSession {
+    session: LmSession<f64, SparseFaer<f64>>,
+}
+
+/// New session; `opts` as in line_solve_sparse (null =
+/// defaults). Returns null when the options are invalid.
+#[no_mangle]
+pub unsafe extern "C" fn line_session_new(
+    opts: *const CSparseOptions,
+) -> *mut LineSession {
+    let solver = if opts.is_null() {
+        SparseFaer::<f64>::new()
+    } else {
+        match (*opts).to_options() {
+            Ok(o) => SparseFaer::<f64>::from_options(&o),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    Box::into_raw(Box::new(LineSession {
+        session: LmSession::new(solver),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn line_session_free(s: *mut LineSession) {
+    if !s.is_null() {
+        drop(Box::from_raw(s));
+    }
+}
+
+/// Drop the learned structure; the next solve runs cold.
+#[no_mangle]
+pub unsafe extern "C" fn line_session_invalidate(s: *mut LineSession) {
+    (*s).session.invalidate();
+}
+
+/// As line_solve_sparse, through the session's cached analysis.
+/// Error text lands on the model handle (line_last_error).
+#[no_mangle]
+pub unsafe extern "C" fn line_session_solve(
+    s: *mut LineSession,
+    h: *mut LineHandle,
+    cfg: *const CLmConfig,
+    out: *mut CLmResult,
+) -> i32 {
+    let ss = &mut *s;
+    let hh = &mut *h;
+    let c = (*cfg).to_config();
+    zero_result(out);
+    match catch_unwind(AssertUnwindSafe(|| ss.session.solve(&mut hh.model, &c))) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);

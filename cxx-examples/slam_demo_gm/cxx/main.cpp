@@ -420,14 +420,14 @@ int main(int argc, char** argv) {
     std::printf("\n");
 
     // Graduated optimization: start with loose feature constraints,
-    // tighten. Landmark anchors re-snapshot between passes. (The Rust
-    // example carries the passes through one LmSession so the sparsity
-    // analysis is reused warm; each generated solve call here analyzes
-    // afresh.)
+    // tighten. Landmark anchors re-snapshot between passes -- values
+    // only, so one LmSession carries every pass and the sparsity
+    // analysis is reused warm, like the Rust example.
     std::printf("--- Optimization ---\n");
     std::vector<float> isigma_scales =
         std::getenv("SINGLE_PASS") ? std::vector<float>{1.0f}
                                    : std::vector<float>{0.01f, 0.1f, 1.0f};
+    LmSession session;
     for (size_t pass = 0; pass < isigma_scales.size(); pass++) {
         path.set_frine_isigma_scale(isigma_scales[pass]);
         std::printf("\nPass %zu (isigma scale=%g):\n", pass + 1, isigma_scales[pass]);
@@ -435,7 +435,7 @@ int main(int argc, char** argv) {
         lm_cfg.rel_precision = 1e-6;
         lm_cfg.verbose = true;
         SolveResult r = solver_name == "dense" ? path.solve_dense(lm_cfg)
-                                               : path.solve_sparse(lm_cfg);
+                                               : session.solve(path, lm_cfg);
         if (r.is_err()) {
             std::fprintf(stderr, "solve failed: %s\n", r.error().message);
             return 1;

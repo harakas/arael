@@ -74,7 +74,11 @@ surface reference); the differences are Python idiom:
   with the actual Rust defaults at construction): Schur policy,
   elimination ordering, the envelope route for the reduced system,
   supernodal, narrow band -- the `SchurPolicy` / `FaerOrdering` /
-  `EnvelopeMode` enums live beside it. `LmConfig` starts from a preset -- `defaults()`,
+  `EnvelopeMode` enums live beside it. `LmSession()` (optionally over
+  a `SparseOptions`) keeps the sparsity analysis warm across repeated
+  `sess.solve(model, cfg)` calls -- bit-identical to cold solves;
+  `invalidate()` after a structural change at the same parameter
+  count. `LmConfig` starts from a preset -- `defaults()`,
   `conservative()`, `well_conditioned()`, `ill_conditioned()` -- with
   the actual Rust values filled in. `cfg.observer = fn` gets an
   `LmIter` per damped attempt (`it.lambda_`, `it.param(i)`,

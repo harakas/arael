@@ -155,6 +155,13 @@ views are named by their container's nature: `PathPosesDeque`,
   for the reduced system (Auto / Always / Never, plus panel width),
   supernodal on/off, narrow band. Constructed with the actual Rust
   defaults; the one-argument `solve_sparse(cfg)` uses them.
+- **LmSession**: warm reuse over repeated sparse solves --
+  `LmSession sess;` (optionally over a `SparseOptions`), then
+  `sess.solve(model, cfg)` keeps the sparsity analysis (pattern,
+  ordering, symbolic factorization, Schur plan) across solves, so
+  only the first pays for it. Warm solves are bit-identical to cold
+  ones. A parameter-count change re-analyzes by itself; call
+  `invalidate()` after a structural change at the same count.
 - **Reports and the plan**: the returned `LmResult` owns the full
   Rust-side result. `r.report()` / `r.pretty_report()` render it --
   status, costs, iterations, the timing breakdown, the backend's

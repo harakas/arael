@@ -384,12 +384,15 @@
   what holds the large collections -- so if scale ever bites it is a `BVec`
   that is wanted, built the same way.
 
-- **cargo-arael: LmSession over the FFI.** The generated solve calls are
-  stateless, so a graduated ramp (cxx-examples/slam_demo_gm) re-analyzes
-  the sparsity every pass where the Rust demo carries one `LmSession`
-  warm across the solves. Needs a session object on the handle with an
-  explicit invalidate; deferred with the other v2 solver-surface items
-  (observer callbacks, band solve) in docs/dev/CXX.md.
+- **cargo-arael: LmSession over the FFI.** DONE (2026-07-31,
+  docs/dev/EXPORT.md item 5): a per-root `LmSession` object in both
+  skins -- constructed over optional `SparseOptions`, `solve(model,
+  cfg)`, `invalidate()` -- mirroring the Rust session (warm solves
+  bit-identical to cold, parameter-count change re-analyzes by
+  itself). Both slam_demo_gm drivers now carry the ramp through one
+  session, like the Rust example. Original note: the generated solve
+  calls were stateless, so the ramp re-analyzed the sparsity every
+  pass.
 
 - **cargo-arael: no gradient/Hessian assembly surface.** The Rust
   slam_demo_gm's env-gated Hessian-sparsity bitmap uses

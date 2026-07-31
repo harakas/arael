@@ -232,6 +232,64 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("opt2_ordering"), ord_code(p12.ordering));
     }
 
+    // LmSession: warm solves reuse the analysis and stay bit-identical
+    // to cold ones; a parameter-count change re-analyzes by itself.
+    {
+        use arael::simple_lm::{
+            EnvelopeMode, FaerOrdering, LmSession, SchurPolicy, SolverReport,
+            SparseFaer, SparseFaerOptions,
+        };
+        let mut f13 = Fit::default();
+        fill(&mut f13);
+        let mut sess = LmSession::new(SparseFaer::new());
+        let rs1 = sess.solve(&mut f13, &cfg).unwrap();
+        assert_eq!(g("sess_end1"), rs1.end_cost);
+        f13.m.value = 0.0;
+        f13.c.value = 0.0;
+        for i in 0..3 {
+            f13.items[i].v.value = 0.0;
+        }
+        let rs2 = sess.solve(&mut f13, &cfg).unwrap();
+        assert_eq!(g("sess_end2"), rs2.end_cost);
+        assert_eq!(rs2.end_cost, rs1.end_cost, "warm must equal cold");
+        assert_eq!(g("sess_warm_equals_cold"), 1.0);
+        sess.invalidate();
+        f13.m.value = 0.0;
+        f13.c.value = 0.0;
+        for i in 0..3 {
+            f13.items[i].v.value = 0.0;
+        }
+        let rs3 = sess.solve(&mut f13, &cfg).unwrap();
+        assert_eq!(rs3.end_cost, rs1.end_cost, "cold-again must agree");
+        assert_eq!(g("sess_invalidate_agrees"), 1.0);
+        f13.items.push(N {
+            v: Param::default(),
+            t: 0.5,
+            w: 1.0,
+            hb: SelfBlock::new(),
+        });
+        let rs4 = sess.solve(&mut f13, &cfg).unwrap();
+        assert_eq!(g("sess_end4"), rs4.end_cost);
+
+        // A session built over explicit options follows them.
+        let mut f14 = Fit::default();
+        fill(&mut f14);
+        let mut sessf = LmSession::new(SparseFaer::from_options(
+            &SparseFaerOptions::auto()
+                .with_policy(SchurPolicy::Force)
+                .with_ordering(FaerOrdering::Natural)
+                .with_envelope_schur(EnvelopeMode::Always),
+        ));
+        let rs5 = sessf.solve(&mut f14, &cfg).unwrap();
+        assert_eq!(g("sessf_end"), rs5.end_cost);
+        let p5 = match rs5.solver {
+            Some(SolverReport::Schur(p)) => p,
+            _ => panic!("session solve carried no plan"),
+        };
+        assert!(p5.envelope, "the options must reach the session's backend");
+        assert_eq!(g("sessf_envelope"), p5.envelope as u8 as f64);
+    }
+
     // Observer + timing + report + conditional covariance mirrored.
     {
         use std::cell::Cell;

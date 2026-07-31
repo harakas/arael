@@ -110,6 +110,11 @@ int32_t line_solve_sparse(Line*, const LmConfig*, const SparseOptions*, LmResult
 const char* line_result_report(void*, bool);
 bool line_result_plan(const void*, SchurPlan*);
 void line_result_free(void*);
+struct LineSession;
+LineSession* line_session_new(const SparseOptions*);
+void line_session_free(LineSession*);
+void line_session_invalidate(LineSession*);
+int32_t line_session_solve(LineSession*, Line*, const LmConfig*, LmResultT<double>*);
 }
 } // namespace ffi
 
@@ -344,6 +349,8 @@ public:
     const char* last_error() const { return ffi::line_last_error(h_); }
 
 private:
+    friend class LmSession;
+
     SolveResult finish_(int32_t code, const LmResultT<double>& raw) {
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{static_cast<LmStatus>(code), last_error(), {}};
@@ -352,6 +359,43 @@ private:
     }
 
     ffi::Line* h_;
+};
+
+/// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
+/// the analysis -- pattern, ordering, symbolic factorization, Schur
+/// plan -- across solves, so only the first pays for it. Warm solves
+/// are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; call invalidate() after a structural change
+/// at the same count (solving warm through one is undefined).
+/// Move-only.
+class LmSession {
+public:
+    LmSession() : s_(ffi::line_session_new(nullptr)) {}
+    /// Session over explicit backend options (see SparseOptions).
+    explicit LmSession(const SparseOptions& opts)
+        : s_(ffi::line_session_new(&opts)) {}
+    ~LmSession() { if (s_) ffi::line_session_free(s_); }
+    LmSession(const LmSession&) = delete;
+    LmSession& operator=(const LmSession&) = delete;
+    LmSession(LmSession&& o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+    LmSession& operator=(LmSession&& o) noexcept {
+        if (this != &o) {
+            if (s_) ffi::line_session_free(s_);
+            s_ = o.s_;
+            o.s_ = nullptr;
+        }
+        return *this;
+    }
+    /// Solve through the session; contract as Line::solve_sparse.
+    SolveResult solve(Line& m, const LmConfig& cfg = LmConfig{}) {
+        LmResultT<double> raw;
+        return m.finish_(ffi::line_session_solve(s_, m.h_, &cfg, &raw), raw);
+    }
+    /// Drop the learned structure; the next solve runs cold.
+    void invalidate() { ffi::line_session_invalidate(s_); }
+
+private:
+    ffi::LineSession* s_;
 };
 
 } // namespace cxx_mr::line

@@ -644,7 +644,12 @@ public:
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
          const char* {root_sn}_result_report(void*, bool);\n\
          bool {root_sn}_result_plan(const void*, SchurPlan*);\n\
-         void {root_sn}_result_free(void*);\n"));
+         void {root_sn}_result_free(void*);\n\
+         struct {root}Session;\n\
+         {root}Session* {root_sn}_session_new(const SparseOptions*);\n\
+         void {root_sn}_session_free({root}Session*);\n\
+         void {root_sn}_session_invalidate({root}Session*);\n\
+         int32_t {root_sn}_session_solve({root}Session*, {root}*, const LmConfig*, LmResultT<{fp}>*);\n"));
 
     let ffi_decls = &cpp.ffi;
     let body = &cpp.body;
@@ -836,6 +841,8 @@ public:
     const char* last_error() const {{ return ffi::{root_sn}_last_error(h_); }}
 
 private:
+    friend class LmSession;
+
     SolveResult finish_(int32_t code, const LmResultT<{fp}>& raw) {{
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{{static_cast<LmStatus>(code), last_error(), {{}}}};
@@ -844,6 +851,43 @@ private:
     }}
 
     ffi::{root}* h_;
+}};
+
+/// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
+/// the analysis -- pattern, ordering, symbolic factorization, Schur
+/// plan -- across solves, so only the first pays for it. Warm solves
+/// are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; call invalidate() after a structural change
+/// at the same count (solving warm through one is undefined).
+/// Move-only.
+class LmSession {{
+public:
+    LmSession() : s_(ffi::{root_sn}_session_new(nullptr)) {{}}
+    /// Session over explicit backend options (see SparseOptions).
+    explicit LmSession(const SparseOptions& opts)
+        : s_(ffi::{root_sn}_session_new(&opts)) {{}}
+    ~LmSession() {{ if (s_) ffi::{root_sn}_session_free(s_); }}
+    LmSession(const LmSession&) = delete;
+    LmSession& operator=(const LmSession&) = delete;
+    LmSession(LmSession&& o) noexcept : s_(o.s_) {{ o.s_ = nullptr; }}
+    LmSession& operator=(LmSession&& o) noexcept {{
+        if (this != &o) {{
+            if (s_) ffi::{root_sn}_session_free(s_);
+            s_ = o.s_;
+            o.s_ = nullptr;
+        }}
+        return *this;
+    }}
+    /// Solve through the session; contract as {root}::solve_sparse.
+    SolveResult solve({root}& m, const LmConfig& cfg = LmConfig{{}}) {{
+        LmResultT<{fp}> raw;
+        return m.finish_(ffi::{root_sn}_session_solve(s_, m.h_, &cfg, &raw), raw);
+    }}
+    /// Drop the learned structure; the next solve runs cold.
+    void invalidate() {{ ffi::{root_sn}_session_invalidate(s_); }}
+
+private:
+    ffi::{root}Session* s_;
 }};
 
 }} // namespace {ns}

@@ -93,6 +93,45 @@ class SparseOptions(_f.SparseOptionsRaw):
         _f.line_sparse_options(ctypes.byref(self))
 
 
+class LmSession:
+    """Warm reuse over repeated sparse solves: keeps the analysis
+    (pattern, ordering, symbolic factorization, Schur plan) across
+    solves, so only the first pays for it. Warm solves are
+    bit-identical to cold ones. A parameter-count change re-analyzes
+    by itself; call invalidate() after a structural change at the
+    same count (solving warm through one is undefined)."""
+
+    def __init__(self, opts=None):
+        load()
+        self._s = _f.line_session_new(
+            ctypes.byref(opts) if opts is not None else None)
+        if not self._s:
+            raise AraelError(-1, "invalid sparse options")
+
+    def free(self):
+        if self._s:
+            _f.line_session_free(self._s)
+            self._s = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+    def solve(self, model, cfg=None):
+        """Solve through the session; contract as solve_sparse."""
+        cfg = cfg if cfg is not None else LmConfig()
+        r = LmResult()
+        return model._solved(
+            _f.line_session_solve(self._s, model._p, ctypes.byref(cfg),
+                                       ctypes.byref(r)), r)
+
+    def invalidate(self):
+        """Drop the learned structure; the next solve runs cold."""
+        _f.line_session_invalidate(self._s)
+
+
 class LmResult(_f.LmResultRaw):
     """A completed solve (see arael.solver for the fields); owns the
     full Rust-side result until garbage collected."""

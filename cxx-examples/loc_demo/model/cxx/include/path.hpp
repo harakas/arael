@@ -246,6 +246,11 @@ int32_t path_solve_sparse(Path*, const LmConfig*, const SparseOptions*, LmResult
 const char* path_result_report(void*, bool);
 bool path_result_plan(const void*, SchurPlan*);
 void path_result_free(void*);
+struct PathSession;
+PathSession* path_session_new(const SparseOptions*);
+void path_session_free(PathSession*);
+void path_session_invalidate(PathSession*);
+int32_t path_session_solve(PathSession*, Path*, const LmConfig*, LmResultT<float>*);
 }
 } // namespace ffi
 
@@ -981,6 +986,8 @@ public:
     const char* last_error() const { return ffi::path_last_error(h_); }
 
 private:
+    friend class LmSession;
+
     SolveResult finish_(int32_t code, const LmResultT<float>& raw) {
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{static_cast<LmStatus>(code), last_error(), {}};
@@ -989,6 +996,43 @@ private:
     }
 
     ffi::Path* h_;
+};
+
+/// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
+/// the analysis -- pattern, ordering, symbolic factorization, Schur
+/// plan -- across solves, so only the first pays for it. Warm solves
+/// are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; call invalidate() after a structural change
+/// at the same count (solving warm through one is undefined).
+/// Move-only.
+class LmSession {
+public:
+    LmSession() : s_(ffi::path_session_new(nullptr)) {}
+    /// Session over explicit backend options (see SparseOptions).
+    explicit LmSession(const SparseOptions& opts)
+        : s_(ffi::path_session_new(&opts)) {}
+    ~LmSession() { if (s_) ffi::path_session_free(s_); }
+    LmSession(const LmSession&) = delete;
+    LmSession& operator=(const LmSession&) = delete;
+    LmSession(LmSession&& o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+    LmSession& operator=(LmSession&& o) noexcept {
+        if (this != &o) {
+            if (s_) ffi::path_session_free(s_);
+            s_ = o.s_;
+            o.s_ = nullptr;
+        }
+        return *this;
+    }
+    /// Solve through the session; contract as Path::solve_sparse.
+    SolveResult solve(Path& m, const LmConfig& cfg = LmConfig{}) {
+        LmResultT<float> raw;
+        return m.finish_(ffi::path_session_solve(s_, m.h_, &cfg, &raw), raw);
+    }
+    /// Drop the learned structure; the next solve runs cold.
+    void invalidate() { ffi::path_session_invalidate(s_); }
+
+private:
+    ffi::PathSession* s_;
 };
 
 } // namespace loc_demo

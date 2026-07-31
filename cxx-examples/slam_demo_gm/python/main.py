@@ -330,17 +330,22 @@ def main():
     print()
 
     # Graduated optimization: loose feature constraints first, tighten;
-    # landmark anchors re-snapshot between passes.
+    # landmark anchors re-snapshot between passes -- values only, so
+    # one LmSession carries every pass and the sparsity analysis is
+    # reused warm, like the Rust example.
     print("--- Optimization ---", flush=True)
     scales = [1.0] if os.environ.get("SINGLE_PASS") else [0.01, 0.1, 1.0]
+    session = pathmod.LmSession()
     for passno, scale in enumerate(scales, 1):
         path.frine_isigma_scale = scale
         print("\nPass %d (isigma scale=%g):" % (passno, scale), flush=True)
         lm_cfg = pathmod.LmConfig.well_conditioned()
         lm_cfg.rel_precision = 1e-6
+        lm_cfg.gather_timing = True
         lm_cfg.verbose = True
         r = (path.solve_dense(lm_cfg) if solver_name == "dense"
-             else path.solve_sparse(lm_cfg))
+             else session.solve(path, lm_cfg))
+        print(r.pretty_report(), end='')
         print("  %d iterations, cost %.4f -> %.4f"
               % (r.iterations, r.start_cost, r.end_cost), flush=True)
 

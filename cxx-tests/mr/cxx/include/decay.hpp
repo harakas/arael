@@ -120,6 +120,11 @@ int32_t decay_solve_sparse(Decay*, const LmConfig*, const SparseOptions*, LmResu
 const char* decay_result_report(void*, bool);
 bool decay_result_plan(const void*, SchurPlan*);
 void decay_result_free(void*);
+struct DecaySession;
+DecaySession* decay_session_new(const SparseOptions*);
+void decay_session_free(DecaySession*);
+void decay_session_invalidate(DecaySession*);
+int32_t decay_session_solve(DecaySession*, Decay*, const LmConfig*, LmResultT<float>*);
 }
 } // namespace ffi
 
@@ -386,6 +391,8 @@ public:
     const char* last_error() const { return ffi::decay_last_error(h_); }
 
 private:
+    friend class LmSession;
+
     SolveResult finish_(int32_t code, const LmResultT<float>& raw) {
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{static_cast<LmStatus>(code), last_error(), {}};
@@ -394,6 +401,43 @@ private:
     }
 
     ffi::Decay* h_;
+};
+
+/// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
+/// the analysis -- pattern, ordering, symbolic factorization, Schur
+/// plan -- across solves, so only the first pays for it. Warm solves
+/// are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; call invalidate() after a structural change
+/// at the same count (solving warm through one is undefined).
+/// Move-only.
+class LmSession {
+public:
+    LmSession() : s_(ffi::decay_session_new(nullptr)) {}
+    /// Session over explicit backend options (see SparseOptions).
+    explicit LmSession(const SparseOptions& opts)
+        : s_(ffi::decay_session_new(&opts)) {}
+    ~LmSession() { if (s_) ffi::decay_session_free(s_); }
+    LmSession(const LmSession&) = delete;
+    LmSession& operator=(const LmSession&) = delete;
+    LmSession(LmSession&& o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+    LmSession& operator=(LmSession&& o) noexcept {
+        if (this != &o) {
+            if (s_) ffi::decay_session_free(s_);
+            s_ = o.s_;
+            o.s_ = nullptr;
+        }
+        return *this;
+    }
+    /// Solve through the session; contract as Decay::solve_sparse.
+    SolveResult solve(Decay& m, const LmConfig& cfg = LmConfig{}) {
+        LmResultT<float> raw;
+        return m.finish_(ffi::decay_session_solve(s_, m.h_, &cfg, &raw), raw);
+    }
+    /// Drop the learned structure; the next solve runs cold.
+    void invalidate() { ffi::decay_session_invalidate(s_); }
+
+private:
+    ffi::DecaySession* s_;
 };
 
 } // namespace cxx_mr::decay

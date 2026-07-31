@@ -140,7 +140,7 @@ end-to-end: a failure that carries a partial result (the degenerate
 fixture fails on its first assembly, so `partial` is None on every
 skin; the shim branch that boxes a partial has no test driving it).
 
-## 5. LmSession warm reuse [M]
+## 5. LmSession warm reuse [M] [DONE 2026-07-31]
 
 Already in TODO.md: the generated solves are stateless, so a
 graduated ramp (cxx-examples/slam_demo_gm) re-analyzes sparsity every
@@ -150,6 +150,19 @@ subsequent `solve_sparse` calls through it,
 `{root}_session_invalidate(h)`, `{root}_session_end(h)`. Parity: warm
 solves bit-identical to cold, as tests/lm_session.rs already pins in
 Rust. The one real performance gap in the export.
+
+As built: as an explicit session OBJECT, not handle-owned state --
+mirroring Rust's `LmSession` beats rerouting `solve_sparse` behind
+the model's back. Per-root `{root}Session` behind
+`{root}_session_new(opts)` (null = defaults, null return on invalid
+options) / `_solve(s, h, cfg, out)` / `_invalidate` / `_free`; C++
+`LmSession` (move-only, befriended by the root class) and Python
+`LmSession` with GC-driven free. Sparse backend only. Parity pins:
+warm == cold end cost exactly, invalidate agrees, a pushed entity
+(parameter-count change) re-analyzes by itself, and an options-built
+session takes the envelope. Both slam_demo_gm drivers run their ramp
+through one session; the pretty report shows analysis paid on pass 1
+only.
 
 ## 6. Per-constraint cost breakdown [M, needs a decision]
 

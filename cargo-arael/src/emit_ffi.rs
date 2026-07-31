@@ -608,7 +608,9 @@ pub fn emit_body(model: &Model, model_crate: &str) -> Result<String, String> {
 use std::os::raw::c_char;
 use std::panic::{{AssertUnwindSafe, catch_unwind}};
 use arael::covariance::{{CovAssembly, CovMode, Covariance}};
-use arael::simple_lm::{{LmConfig, LmProblem, LmStatus, SparseFaer, SparseFaerOptions}};
+use arael::simple_lm::{{
+    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+}};
 use {model_crate}::{{{}}};
 
 /// The opaque handle the C ABI hands out: the model, the error /
@@ -1265,6 +1267,87 @@ pub unsafe extern \"C\" fn {root_sn}_solve_sparse(
         Some(mut s) => hh.model.solve_with(&mut s, &c),
         None => hh.model.solve_sparse(&c),
     }})) {{
+        Ok(Ok(r)) => {{
+            let code = fill_result(out, &r);
+            (*out).detail = boxed(r);
+            set_text(hh, \"\");
+            code
+        }}
+        Ok(Err(f)) => {{
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {{
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }}
+            -1
+        }}
+        Err(p) => {{
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            (*out).status = -2;
+            -2
+        }}
+    }}
+}}
+
+/// A warm-reuse session over the sparse backend (Rust's LmSession):
+/// keeps the analysis -- pattern, ordering, symbolic factorization,
+/// Schur plan -- across solves, so only the first pays for it. Warm
+/// solves are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; {root_sn}_session_invalidate covers a
+/// structural change at the same count (solving warm through one is
+/// undefined).
+pub struct {root}Session {{
+    session: LmSession<{fp}, SparseFaer<{fp}>>,
+}}
+
+/// New session; `opts` as in {root_sn}_solve_sparse (null =
+/// defaults). Returns null when the options are invalid.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_session_new(
+    opts: *const CSparseOptions,
+) -> *mut {root}Session {{
+    let solver = if opts.is_null() {{
+        SparseFaer::<{fp}>::new()
+    }} else {{
+        match (*opts).to_options() {{
+            Ok(o) => SparseFaer::<{fp}>::from_options(&o),
+            Err(_) => return std::ptr::null_mut(),
+        }}
+    }};
+    Box::into_raw(Box::new({root}Session {{
+        session: LmSession::new(solver),
+    }}))
+}}
+
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_session_free(s: *mut {root}Session) {{
+    if !s.is_null() {{
+        drop(Box::from_raw(s));
+    }}
+}}
+
+/// Drop the learned structure; the next solve runs cold.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_session_invalidate(s: *mut {root}Session) {{
+    (*s).session.invalidate();
+}}
+
+/// As {root_sn}_solve_sparse, through the session's cached analysis.
+/// Error text lands on the model handle ({root_sn}_last_error).
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_session_solve(
+    s: *mut {root}Session,
+    h: *mut {handle},
+    cfg: *const CLmConfig,
+    out: *mut CLmResult,
+) -> i32 {{
+    let ss = &mut *s;
+    let hh = &mut *h;
+    let c = (*cfg).to_config();
+    zero_result(out);
+    match catch_unwind(AssertUnwindSafe(|| ss.session.solve(&mut hh.model, &c))) {{
         Ok(Ok(r)) => {{
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);

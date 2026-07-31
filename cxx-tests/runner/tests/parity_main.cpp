@@ -156,6 +156,45 @@ int main() {
     pi("opt2_envelope", p12.envelope ? 1 : 0);
     pi("opt2_ordering", p12.ordering.has_value() ? long(p12.ordering.value()) : -1);
 
+    // LmSession: warm solves reuse the analysis and stay bit-identical
+    // to cold ones; a parameter-count change re-analyzes by itself.
+    Fit f13;
+    fill(f13);
+    LmSession sess;
+    LmResult rs1 = sess.solve(f13, cfg).value();
+    p("sess_end1", rs1.end_cost);
+    f13.set_m(0.0);
+    f13.set_c(0.0);
+    for (uint32_t i = 0; i < f13.items().size(); i++)
+        f13.items()[i].set_v(0.0);
+    LmResult rs2 = sess.solve(f13, cfg).value();
+    p("sess_end2", rs2.end_cost);
+    pi("sess_warm_equals_cold", rs2.end_cost == rs1.end_cost ? 1 : 0);
+    sess.invalidate();
+    f13.set_m(0.0);
+    f13.set_c(0.0);
+    for (uint32_t i = 0; i < f13.items().size(); i++)
+        f13.items()[i].set_v(0.0);
+    LmResult rs3 = sess.solve(f13, cfg).value();
+    pi("sess_invalidate_agrees", rs3.end_cost == rs1.end_cost ? 1 : 0);
+    auto n13 = f13.items().push();
+    n13.set_t(0.5);
+    n13.set_w(1.0);
+    LmResult rs4 = sess.solve(f13, cfg).value();
+    p("sess_end4", rs4.end_cost);
+
+    // A session built over explicit options follows them.
+    Fit f14;
+    fill(f14);
+    SparseOptions so14;
+    so14.schur = SchurPolicy::Force;
+    so14.ordering = FaerOrdering::Natural;
+    so14.envelope = EnvelopeMode::Always;
+    LmSession sessf(so14);
+    LmResult rs5 = sessf.solve(f14, cfg).value();
+    p("sessf_end", rs5.end_cost);
+    pi("sessf_envelope", rs5.plan().value().envelope ? 1 : 0);
+
     // Observer callback + timing + report + conditional covariance.
     Fit f7;
     pi("report_default_empty", std::strlen(LmResult().report()) == 0 ? 1 : 0);

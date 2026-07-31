@@ -319,6 +319,11 @@ int32_t fit_solve_sparse(Fit*, const LmConfig*, const SparseOptions*, LmResultT<
 const char* fit_result_report(void*, bool);
 bool fit_result_plan(const void*, SchurPlan*);
 void fit_result_free(void*);
+struct FitSession;
+FitSession* fit_session_new(const SparseOptions*);
+void fit_session_free(FitSession*);
+void fit_session_invalidate(FitSession*);
+int32_t fit_session_solve(FitSession*, Fit*, const LmConfig*, LmResultT<double>*);
 }
 } // namespace ffi
 
@@ -1286,6 +1291,8 @@ public:
     const char* last_error() const { return ffi::fit_last_error(h_); }
 
 private:
+    friend class LmSession;
+
     SolveResult finish_(int32_t code, const LmResultT<double>& raw) {
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{static_cast<LmStatus>(code), last_error(), {}};
@@ -1294,6 +1301,43 @@ private:
     }
 
     ffi::Fit* h_;
+};
+
+/// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
+/// the analysis -- pattern, ordering, symbolic factorization, Schur
+/// plan -- across solves, so only the first pays for it. Warm solves
+/// are bit-identical to cold ones. A parameter-count change
+/// re-analyzes by itself; call invalidate() after a structural change
+/// at the same count (solving warm through one is undefined).
+/// Move-only.
+class LmSession {
+public:
+    LmSession() : s_(ffi::fit_session_new(nullptr)) {}
+    /// Session over explicit backend options (see SparseOptions).
+    explicit LmSession(const SparseOptions& opts)
+        : s_(ffi::fit_session_new(&opts)) {}
+    ~LmSession() { if (s_) ffi::fit_session_free(s_); }
+    LmSession(const LmSession&) = delete;
+    LmSession& operator=(const LmSession&) = delete;
+    LmSession(LmSession&& o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+    LmSession& operator=(LmSession&& o) noexcept {
+        if (this != &o) {
+            if (s_) ffi::fit_session_free(s_);
+            s_ = o.s_;
+            o.s_ = nullptr;
+        }
+        return *this;
+    }
+    /// Solve through the session; contract as Fit::solve_sparse.
+    SolveResult solve(Fit& m, const LmConfig& cfg = LmConfig{}) {
+        LmResultT<double> raw;
+        return m.finish_(ffi::fit_session_solve(s_, m.h_, &cfg, &raw), raw);
+    }
+    /// Drop the learned structure; the next solve runs cold.
+    void invalidate() { ffi::fit_session_invalidate(s_); }
+
+private:
+    ffi::FitSession* s_;
 };
 
 } // namespace cxx_fit

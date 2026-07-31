@@ -726,6 +726,15 @@ class Covariance:
         &["ctypes.c_void_p", "ctypes.POINTER(LmConfigRaw)",
           "ctypes.POINTER(_solver.SparseOptions)",
           "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_session_new"),
+        &["ctypes.POINTER(_solver.SparseOptions)"], "ctypes.c_void_p");
+    sig(&mut py, &format!("{root_sn}_session_free"),
+        &["ctypes.c_void_p"], "None");
+    sig(&mut py, &format!("{root_sn}_session_invalidate"),
+        &["ctypes.c_void_p"], "None");
+    sig(&mut py, &format!("{root_sn}_session_solve"),
+        &["ctypes.c_void_p", "ctypes.c_void_p", "ctypes.POINTER(LmConfigRaw)",
+          "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
     sig(&mut py, &format!("{root_sn}_solve_band"),
         &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.POINTER(LmConfigRaw)",
           "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
@@ -932,6 +941,45 @@ class SparseOptions(_f.SparseOptionsRaw):
     def __init__(self):
         load()
         _f.{root_sn}_sparse_options(ctypes.byref(self))
+
+
+class LmSession:
+    \"\"\"Warm reuse over repeated sparse solves: keeps the analysis
+    (pattern, ordering, symbolic factorization, Schur plan) across
+    solves, so only the first pays for it. Warm solves are
+    bit-identical to cold ones. A parameter-count change re-analyzes
+    by itself; call invalidate() after a structural change at the
+    same count (solving warm through one is undefined).\"\"\"
+
+    def __init__(self, opts=None):
+        load()
+        self._s = _f.{root_sn}_session_new(
+            ctypes.byref(opts) if opts is not None else None)
+        if not self._s:
+            raise AraelError(-1, \"invalid sparse options\")
+
+    def free(self):
+        if self._s:
+            _f.{root_sn}_session_free(self._s)
+            self._s = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+    def solve(self, model, cfg=None):
+        \"\"\"Solve through the session; contract as solve_sparse.\"\"\"
+        cfg = cfg if cfg is not None else LmConfig()
+        r = LmResult()
+        return model._solved(
+            _f.{root_sn}_session_solve(self._s, model._p, ctypes.byref(cfg),
+                                       ctypes.byref(r)), r)
+
+    def invalidate(self):
+        \"\"\"Drop the learned structure; the next solve runs cold.\"\"\"
+        _f.{root_sn}_session_invalidate(self._s)
 
 
 class LmResult(_f.LmResultRaw):
