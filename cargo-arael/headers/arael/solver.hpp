@@ -7,9 +7,18 @@
 #pragma once
 
 #include <cstdint>
+#include <stdexcept>
 #include "result.hpp"
 
 namespace arael {
+
+/// A Rust panic caught at the FFI boundary -- a programmer error (a
+/// stale ref, an unguarded Option read; validate() reports these as
+/// text). The model's parameters are unchanged, and a session in use
+/// was invalidated; the message is the Rust panic text.
+struct PanicError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 /// Why a solve stopped. Non-negative codes come from the solver;
 /// SolverFailed carries text via last_error(), Panicked likewise.

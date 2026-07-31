@@ -93,9 +93,10 @@ Rust prerequisite landed first: `SparseFaerOptions` gained
 applies them (tests/narrow_band_cholesky.rs pins it). FFI:
 `CSparseOptions` with u32 enum tags, `{root}_sparse_options` fills
 the Rust defaults, `{root}_solve_sparse` takes a nullable options
-pointer; an out-of-range tag aborts loudly (since 2026-07-31; it is
-a programmer error, unreachable through the typed wrappers and the
-validating Python setters). Parity pins the defaults field-for-field and two forced
+pointer; an out-of-range tag panics and surfaces as PanicError /
+AraelError with the tag in the message (final policy 2026-07-31: the
+shim never aborts; the typed wrappers and validating Python setters
+make the case unreachable anyway). Parity pins the defaults field-for-field and two forced
 routes (Force+Natural+Always takes the envelope, Force+Amd+Never
 declines it) against Rust driving `SparseFaer::from_options` with
 the same options.
@@ -239,6 +240,20 @@ priority.
 - `cost_table()` on a panic: C++ returns an empty vector (ambiguous
   -- empty is a legitimate table), Python raises. Align on the
   C++ side distinguishing the failure.
+  [DONE 2026-07-31, after discussion: a Rust panic is a throw, so
+  both skins raise -- Python AraelError (status -2, as before), C++
+  a new `arael::PanicError` thrown from the solve wrappers,
+  cost_table and assemble_covariance. The catch_unwind contract was
+  audited and documented: stored parameters are unchanged (solves
+  are a serialize/optimize/deserialize round trip), evaluation
+  scratch is rewritten per pass, and the one risky spot -- a
+  session's half-built cache -- is now invalidated on a caught
+  panic. Since extended: the covariance query wrappers throw too
+  (a ck_ helper), option-tag panics are caught like every other
+  panic (session_new defers a construction panic to the first solve,
+  message intact), and cost() -- the last uncaught entry point --
+  catches, returning NaN with the text in last_error. The shim never
+  aborts.]
 
 ### 10. Status helpers [S]
 

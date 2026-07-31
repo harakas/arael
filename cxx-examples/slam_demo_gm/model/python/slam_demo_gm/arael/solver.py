@@ -11,10 +11,13 @@ import enum
 
 
 class AraelError(Exception):
-    """A failed solve (status < 0), a caught Rust panic, or a failed
-    covariance query; carries the status code, the last_error text,
-    and -- for a solve that got past its first assembly -- the
-    partial LmResult."""
+    """A failed solve (status < 0), a caught Rust panic (status -2),
+    or a failed covariance query; carries the status code, the
+    last_error text, and -- for a solve that got past its first
+    assembly -- the partial LmResult. After a caught panic the
+    model's parameters are unchanged and a session in use was
+    invalidated; validate() reports the underlying mistake as
+    text."""
 
     def __init__(self, status, message, partial=None):
         super().__init__("%s (status %d)" % (message, status))

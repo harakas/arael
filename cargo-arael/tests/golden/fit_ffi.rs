@@ -296,8 +296,9 @@ pub struct CSparseOptions {
 }
 
 impl CSparseOptions {
-    /// An out-of-range enum tag aborts loudly: it is a programmer
-    /// error, unreachable through the typed wrappers.
+    /// An out-of-range enum tag panics; the callers catch it, so it
+    /// surfaces as PanicError / AraelError with the tag in the
+    /// message. Unreachable through the typed wrappers.
     fn to_options(&self) -> SparseFaerOptions {
         use arael::simple_lm::{EnvelopeMode, FaerOrdering, SchurPolicy};
         let policy = match self.schur {
@@ -779,14 +780,13 @@ pub unsafe extern "C" fn fit_solve_sparse(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    let solver = if opts.is_null() {
-        None
-    } else {
-        Some(SparseFaer::<f64>::from_options(&(*opts).to_options()))
-    };
-    match catch_unwind(AssertUnwindSafe(|| match solver {
-        Some(mut s) => hh.model.solve_with(&mut s, &c),
-        None => hh.model.solve_sparse(&c),
+    match catch_unwind(AssertUnwindSafe(|| {
+        if opts.is_null() {
+            hh.model.solve_sparse(&c)
+        } else {
+            let mut s = SparseFaer::<f64>::from_options(&(*opts).to_options());
+            hh.model.solve_with(&mut s, &c)
+        }
     })) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
@@ -820,23 +820,26 @@ pub unsafe extern "C" fn fit_solve_sparse(
 /// structural change at the same count (solving warm through one is
 /// undefined).
 pub struct FitSession {
-    session: LmSession<f64, SparseFaer<f64>>,
+    // Err carries a construction panic (a bad options tag), reported
+    // by the first solve.
+    session: Result<LmSession<f64, SparseFaer<f64>>, String>,
 }
 
 /// New session; `opts` as in fit_solve_sparse (null =
-/// defaults). Never fails (an out-of-range options tag aborts).
+/// defaults). Never fails: a bad options tag is reported by the
+/// first solve (status -2 with the tag in the text).
 #[no_mangle]
 pub unsafe extern "C" fn fit_session_new(
     opts: *const CSparseOptions,
 ) -> *mut FitSession {
-    let solver = if opts.is_null() {
-        SparseFaer::<f64>::new()
-    } else {
-        SparseFaer::<f64>::from_options(&(*opts).to_options())
-    };
-    Box::into_raw(Box::new(FitSession {
-        session: LmSession::new(solver),
-    }))
+    let session = catch_unwind(AssertUnwindSafe(|| {
+        if opts.is_null() {
+            LmSession::new(SparseFaer::<f64>::new())
+        } else {
+            LmSession::new(SparseFaer::<f64>::from_options(&(*opts).to_options()))
+        }
+    })).map_err(panic_text);
+    Box::into_raw(Box::new(FitSession { session }))
 }
 
 #[no_mangle]
@@ -849,7 +852,9 @@ pub unsafe extern "C" fn fit_session_free(s: *mut FitSession) {
 /// Drop the learned structure; the next solve runs cold.
 #[no_mangle]
 pub unsafe extern "C" fn fit_session_invalidate(s: *mut FitSession) {
-    (*s).session.invalidate();
+    if let Ok(sess) = &mut (*s).session {
+        sess.invalidate();
+    }
 }
 
 /// As fit_solve_sparse, through the session's cached analysis.
@@ -865,7 +870,16 @@ pub unsafe extern "C" fn fit_session_solve(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    match catch_unwind(AssertUnwindSafe(|| ss.session.solve(&mut hh.model, &c))) {
+    let session = match &mut ss.session {
+        Ok(sess) => sess,
+        Err(msg) => {
+            let msg = msg.clone();
+            set_text(hh, &msg);
+            (*out).status = -2;
+            return -2;
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(|| session.solve(&mut hh.model, &c))) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
@@ -882,6 +896,9 @@ pub unsafe extern "C" fn fit_session_solve(
             -1
         }
         Err(p) => {
+            // A panic mid-solve may leave the session's cached
+            // analysis half-built; drop it so the next solve is cold.
+            session.invalidate();
             let msg = panic_text(p);
             set_text(hh, &msg);
             (*out).status = -2;
@@ -937,13 +954,27 @@ pub unsafe extern "C" fn fit_solve_band(
 }
 
 /// Total cost at the current parameter values (evaluated at the
-/// model's precision, returned as f64).
+/// model's precision, returned as f64). NaN on a caught panic, with
+/// the text via fit_last_error (a healthy cost can also be NaN
+/// -- non-finite parameters -- so check last_error to distinguish).
 #[no_mangle]
 pub unsafe extern "C" fn fit_cost(h: *mut FitHandle) -> f64 {
-    let m = &mut (*h).model;
-    let mut params = Vec::new();
-    m.serialize64(&mut params);
-    m.calc_cost(&params)
+    let hh = &mut *h;
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut params = Vec::new();
+        hh.model.serialize64(&mut params);
+        hh.model.calc_cost(&params)
+    })) {
+        Ok(c) => {
+            set_text(hh, "");
+            c
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            f64::NAN
+        }
+    }
 }
 
 /// Per-constraint cost breakdown at the current parameters: each

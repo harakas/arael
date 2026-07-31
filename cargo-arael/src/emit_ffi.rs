@@ -819,8 +819,9 @@ pub struct CSparseOptions {{
 }}
 
 impl CSparseOptions {{
-    /// An out-of-range enum tag aborts loudly: it is a programmer
-    /// error, unreachable through the typed wrappers.
+    /// An out-of-range enum tag panics; the callers catch it, so it
+    /// surfaces as PanicError / AraelError with the tag in the
+    /// message. Unreachable through the typed wrappers.
     fn to_options(&self) -> SparseFaerOptions {{
         use arael::simple_lm::{{EnvelopeMode, FaerOrdering, SchurPolicy}};
         let policy = match self.schur {{
@@ -1305,14 +1306,13 @@ pub unsafe extern \"C\" fn {root_sn}_solve_sparse(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    let solver = if opts.is_null() {{
-        None
-    }} else {{
-        Some(SparseFaer::<{fp}>::from_options(&(*opts).to_options()))
-    }};
-    match catch_unwind(AssertUnwindSafe(|| match solver {{
-        Some(mut s) => hh.model.solve_with(&mut s, &c),
-        None => hh.model.solve_sparse(&c),
+    match catch_unwind(AssertUnwindSafe(|| {{
+        if opts.is_null() {{
+            hh.model.solve_sparse(&c)
+        }} else {{
+            let mut s = SparseFaer::<{fp}>::from_options(&(*opts).to_options());
+            hh.model.solve_with(&mut s, &c)
+        }}
     }})) {{
         Ok(Ok(r)) => {{
             let code = fill_result(out, &r);
@@ -1346,23 +1346,26 @@ pub unsafe extern \"C\" fn {root_sn}_solve_sparse(
 /// structural change at the same count (solving warm through one is
 /// undefined).
 pub struct {root}Session {{
-    session: LmSession<{fp}, SparseFaer<{fp}>>,
+    // Err carries a construction panic (a bad options tag), reported
+    // by the first solve.
+    session: Result<LmSession<{fp}, SparseFaer<{fp}>>, String>,
 }}
 
 /// New session; `opts` as in {root_sn}_solve_sparse (null =
-/// defaults). Never fails (an out-of-range options tag aborts).
+/// defaults). Never fails: a bad options tag is reported by the
+/// first solve (status -2 with the tag in the text).
 #[no_mangle]
 pub unsafe extern \"C\" fn {root_sn}_session_new(
     opts: *const CSparseOptions,
 ) -> *mut {root}Session {{
-    let solver = if opts.is_null() {{
-        SparseFaer::<{fp}>::new()
-    }} else {{
-        SparseFaer::<{fp}>::from_options(&(*opts).to_options())
-    }};
-    Box::into_raw(Box::new({root}Session {{
-        session: LmSession::new(solver),
-    }}))
+    let session = catch_unwind(AssertUnwindSafe(|| {{
+        if opts.is_null() {{
+            LmSession::new(SparseFaer::<{fp}>::new())
+        }} else {{
+            LmSession::new(SparseFaer::<{fp}>::from_options(&(*opts).to_options()))
+        }}
+    }})).map_err(panic_text);
+    Box::into_raw(Box::new({root}Session {{ session }}))
 }}
 
 #[no_mangle]
@@ -1375,7 +1378,9 @@ pub unsafe extern \"C\" fn {root_sn}_session_free(s: *mut {root}Session) {{
 /// Drop the learned structure; the next solve runs cold.
 #[no_mangle]
 pub unsafe extern \"C\" fn {root_sn}_session_invalidate(s: *mut {root}Session) {{
-    (*s).session.invalidate();
+    if let Ok(sess) = &mut (*s).session {{
+        sess.invalidate();
+    }}
 }}
 
 /// As {root_sn}_solve_sparse, through the session's cached analysis.
@@ -1391,7 +1396,16 @@ pub unsafe extern \"C\" fn {root_sn}_session_solve(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    match catch_unwind(AssertUnwindSafe(|| ss.session.solve(&mut hh.model, &c))) {{
+    let session = match &mut ss.session {{
+        Ok(sess) => sess,
+        Err(msg) => {{
+            let msg = msg.clone();
+            set_text(hh, &msg);
+            (*out).status = -2;
+            return -2;
+        }}
+    }};
+    match catch_unwind(AssertUnwindSafe(|| session.solve(&mut hh.model, &c))) {{
         Ok(Ok(r)) => {{
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
@@ -1408,6 +1422,9 @@ pub unsafe extern \"C\" fn {root_sn}_session_solve(
             -1
         }}
         Err(p) => {{
+            // A panic mid-solve may leave the session's cached
+            // analysis half-built; drop it so the next solve is cold.
+            session.invalidate();
             let msg = panic_text(p);
             set_text(hh, &msg);
             (*out).status = -2;
@@ -1482,13 +1499,27 @@ pub unsafe extern \"C\" fn {root_sn}_solve_band(
     out.push_str(&format!(
 "
 /// Total cost at the current parameter values (evaluated at the
-/// model's precision, returned as f64).
+/// model's precision, returned as f64). NaN on a caught panic, with
+/// the text via {root_sn}_last_error (a healthy cost can also be NaN
+/// -- non-finite parameters -- so check last_error to distinguish).
 #[no_mangle]
 pub unsafe extern \"C\" fn {root_sn}_cost(h: *mut {handle}) -> f64 {{
-    let m = &mut (*h).model;
-    let mut params = Vec::new();
-    m.{ser}(&mut params);
-    m.calc_cost(&params){cast}
+    let hh = &mut *h;
+    match catch_unwind(AssertUnwindSafe(|| {{
+        let mut params = Vec::new();
+        hh.model.{ser}(&mut params);
+        hh.model.calc_cost(&params){cast}
+    }})) {{
+        Ok(c) => {{
+            set_text(hh, \"\");
+            c
+        }}
+        Err(p) => {{
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            f64::NAN
+        }}
+    }}
 }}
 "));
 

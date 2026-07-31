@@ -47,6 +47,7 @@ using arael::EnvelopeMode;
 using arael::SchurSolve;
 using arael::SparseOptionsT;
 using arael::LogLevel;
+using arael::PanicError;
 using arael::CovMode;
 using arael::CovError;
 
@@ -178,7 +179,7 @@ private:
     std::shared_ptr<void> guard_;
 };
 
-/// The Err side of a solve: SolverFailed or Panicked, the text from
+/// The Err side of a solve: SolverFailed, the text from
 /// last_error() (valid until the next call on the model), and the
 /// best accepted state before the break when the solve got that far.
 struct SolveError {
@@ -223,24 +224,29 @@ public:
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Cell& e, double* out, uint32_t cap) {
-        return ffi::decay_cell_std_dev(h_, e.raw(), out, cap);
+        return ck_(ffi::decay_cell_std_dev(h_, e.raw(), out, cap));
     }
     /// Row-major dim x dim conditional covariance (all other
     /// parameters held fixed) into out; returns dim or a negative code.
     int32_t conditional(const Cell& e, double* out, uint32_t cap) {
-        return ffi::decay_cell_conditional_cov(h_, e.raw(), out, cap);
+        return ck_(ffi::decay_cell_conditional_cov(h_, e.raw(), out, cap));
     }
     result<double, CovError> marginal(const Cell& e) {
         double b[1];
-        if (ffi::decay_cell_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
+        if (ck_(ffi::decay_cell_marginal_cov(h_, e.raw(), b, 1)) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
     }
     /// Row-major Cell::param_count x Cell::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Cell& a, const Cell& b, double* out, uint32_t cap) {
-        return ffi::decay_cell_cell_cross_cov(h_, a.raw(), b.raw(), out, cap);
+        return ck_(ffi::decay_cell_cell_cross_cov(h_, a.raw(), b.raw(), out, cap));
     }
 private:
+    /// A caught Rust panic (-2) throws; other codes pass through.
+    int32_t ck_(int32_t n) const {
+        if (n == -2) throw PanicError(ffi::decay_last_error(h_));
+        return n;
+    }
     template<class T> result<T, CovError> fail() {
         return result<T, CovError>::err({ffi::decay_last_error(h_)});
     }
@@ -361,7 +367,8 @@ public:
     DecayCellsVec cells() { return DecayCellsVec(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
-    /// a solve failure (-1) or a caught panic (-2) -- the same split
+    /// a solve failure (-1); a caught Rust panic throws PanicError.
+    /// The Ok/Err division is the same split
     /// Rust's SolveResult makes. The error carries the partial result
     /// when the solver got past its first assembly.
     SolveResult solve_dense(const LmConfig& cfg = LmConfig{}) {
@@ -390,7 +397,9 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
-        if (ffi::decay_assemble_covariance(h_, uint32_t(mode)) != 0)
+        int32_t code = ffi::decay_assemble_covariance(h_, uint32_t(mode));
+        if (code == -2) throw PanicError(last_error());
+        if (code != 0)
             return result<Covariance, CovError>::err({last_error()});
         return result<Covariance, CovError>::ok(Covariance(h_));
     }
@@ -404,6 +413,7 @@ private:
     friend class LmSession;
 
     SolveResult finish_(int32_t code, const LmResultT<float>& raw) {
+        if (code == -2) throw PanicError(last_error());
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{static_cast<LmStatus>(code), last_error(), {}};
         if (raw.detail) e.partial = LmResult(raw);

@@ -47,6 +47,7 @@ using arael::EnvelopeMode;
 using arael::SchurSolve;
 using arael::SparseOptionsT;
 using arael::LogLevel;
+using arael::PanicError;
 using arael::CovMode;
 using arael::CovError;
 
@@ -168,7 +169,7 @@ private:
     std::shared_ptr<void> guard_;
 };
 
-/// The Err side of a solve: SolverFailed or Panicked, the text from
+/// The Err side of a solve: SolverFailed, the text from
 /// last_error() (valid until the next call on the model), and the
 /// best accepted state before the break when the solve got that far.
 struct SolveError {
@@ -207,6 +208,11 @@ public:
     Covariance() : h_(nullptr) {}
     explicit Covariance(ffi::Line* h) : h_(h) {}
 private:
+    /// A caught Rust panic (-2) throws; other codes pass through.
+    int32_t ck_(int32_t n) const {
+        if (n == -2) throw PanicError(ffi::line_last_error(h_));
+        return n;
+    }
     template<class T> result<T, CovError> fail() {
         return result<T, CovError>::err({ffi::line_last_error(h_)});
     }
@@ -319,7 +325,8 @@ public:
     LineObsVec obs() { return LineObsVec(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
-    /// a solve failure (-1) or a caught panic (-2) -- the same split
+    /// a solve failure (-1); a caught Rust panic throws PanicError.
+    /// The Ok/Err division is the same split
     /// Rust's SolveResult makes. The error carries the partial result
     /// when the solver got past its first assembly.
     SolveResult solve_dense(const LmConfig& cfg = LmConfig{}) {
@@ -348,7 +355,9 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
-        if (ffi::line_assemble_covariance(h_, uint32_t(mode)) != 0)
+        int32_t code = ffi::line_assemble_covariance(h_, uint32_t(mode));
+        if (code == -2) throw PanicError(last_error());
+        if (code != 0)
             return result<Covariance, CovError>::err({last_error()});
         return result<Covariance, CovError>::ok(Covariance(h_));
     }
@@ -362,6 +371,7 @@ private:
     friend class LmSession;
 
     SolveResult finish_(int32_t code, const LmResultT<double>& raw) {
+        if (code == -2) throw PanicError(last_error());
         if (code >= 0) return SolveResult::ok(LmResult(raw));
         SolveError e{static_cast<LmStatus>(code), last_error(), {}};
         if (raw.detail) e.partial = LmResult(raw);

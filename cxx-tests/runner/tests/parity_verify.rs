@@ -330,6 +330,9 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     if let Some(v) = got.get("enum_setter_validates") {
         assert_eq!(*v, 1.0, "python enum setter must reject bad values");
     }
+    if let Some(v) = got.get("bad_tag_raises") {
+        assert_eq!(*v, 1.0, "a raw bad tag must raise, not abort");
+    }
 
     // Observer + timing + report + conditional covariance mirrored.
     {

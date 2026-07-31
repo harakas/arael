@@ -228,6 +228,18 @@ try:
 except ValueError:
     pi("enum_setter_validates", 1)
 
+# A bad tag poked past the typed API surfaces as a caught panic at
+# the solve (AraelError, status -2), never an abort.
+so_raw = fit.SparseOptions()
+so_raw._schur = 7
+f16 = fit.Fit()
+fill(f16)
+try:
+    f16.solve_sparse(cfg, so_raw)
+    pi("bad_tag_raises", 0)
+except AraelError as e:
+    pi("bad_tag_raises", 1 if e.status == -2 and "tag" in e.message else 0)
+
 # Observer callback + timing + report + conditional covariance.
 f7 = fit.Fit()
 pi("report_default_empty", 1 if len(fit.LmResult().report()) == 0 else 0)
