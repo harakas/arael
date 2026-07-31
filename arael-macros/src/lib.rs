@@ -763,7 +763,7 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// #[arael::model]
 /// #[arael(skip_self_block)]
 /// struct Coefficient {
-///     value: Param<f64>,   // written by RegressionModel::extended_compute64
+///     value: Param<f64>,   // written by RegressionModel::extended_compute
 /// }
 /// ```
 ///

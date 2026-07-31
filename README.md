@@ -606,7 +606,7 @@ let residual = expr - arael_sym::symbol("y");
 let dr_da = residual.diff("a");  // symbolic derivative w.r.t. a
 let dr_db = residual.diff("b");  // symbolic derivative w.r.t. b
 
-// In ExtendedModel::extended_compute64(params, grad) -- each solver iteration:
+// In ExtendedModel::extended_compute(params, grad) -- each solver iteration:
 for &(x, y) in &data {
     vars.insert("x", x);
     vars.insert("y", y);

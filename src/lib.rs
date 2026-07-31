@@ -386,8 +386,8 @@
 //!     // ...
 //! }
 //!
-//! impl ExtendedModel for RegressionModel {
-//!     fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
+//! impl ExtendedModel<f64> for RegressionModel {
+//!     fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
 //!         for &(x, y) in &self.data {
 //!             vars.insert("x", x);
 //!             vars.insert("y", y);
@@ -537,7 +537,7 @@
 //! |---|---|---|
 //! | [`SelfBlock<T>`](model::SelfBlock) | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block |
 //! | [`CrossBlock<A, B>`](model::CrossBlock) | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One per unordered (A, B) entity pair; (A, A) / (B, B) diagonals stay on each entity's `SelfBlock` |
-//! | [`TripletBlock<T>`](model::TripletBlock) | COO across-entity pairs | **always placed on the root** (one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel) that can't enumerate per-pair CrossBlocks statically -- `extended_compute*` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** -- every entry is a `Vec` push |
+//! | [`TripletBlock<T>`](model::TripletBlock) | COO across-entity pairs | **always placed on the root** (one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel) that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** -- every entry is a `Vec` push |
 //!
 //! `SelfBlock<Self>` is **required** on every Model that has
 //! parameters -- omitting it is a compile-time error. Grad and
@@ -618,7 +618,7 @@
 //! 2. **Runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel).**
 //!    When the residual body is a user-supplied expression parsed
 //!    at runtime, the macro cannot enumerate per-pair CrossBlocks
-//!    statically. `ExtendedModel::extended_compute*` writes
+//!    statically. `ExtendedModel::extended_compute` writes
 //!    directly into the root's TripletBlock instead -- see
 //!    [examples/runtime_fit_demo.rs](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs).
 //!
@@ -988,8 +988,8 @@
 //! **not** generate the residual evaluation; you write:
 //!
 //! ```ignore
-//! fn extended_update64(&mut self, params: &[f64]);
-//! fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]);
+//! fn extended_update(&mut self, params: &[f64]);
+//! fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]);
 //! ```
 //!
 //! `extended_compute` evaluates residuals, writes directly into the

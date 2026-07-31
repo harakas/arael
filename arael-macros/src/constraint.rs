@@ -5834,23 +5834,17 @@ pub fn generate_root_methods(
     let advance_call = quote! { arael::model::Model::advance_params(self, params); };
 
     // `extended_compute_call` now passes `grad` so the extended hook can
-    // write gradient entries directly into the LM-provided slice.
-    let (extended_update_call, extended_cost_call, extended_compute_call) = if precision == "f64" {
-        (quote! { arael::model::ExtendedModel::extended_update64(self, params); },
-         quote! { __cost += arael::model::ExtendedModel::extended_cost64(self, params); },
-         quote! { arael::model::ExtendedModel::extended_compute64(self, params, grad); })
-    } else {
-        (quote! { arael::model::ExtendedModel::extended_update32(self, params); },
-         quote! { __cost += arael::model::ExtendedModel::extended_cost32(self, params); },
-         quote! { arael::model::ExtendedModel::extended_compute32(self, params, grad); })
-    };
+    // write gradient entries directly into the LM-provided slice. The
+    // trait's width parameter is inferred from `params`.
+    let extended_update_call =
+        quote! { arael::model::ExtendedModel::extended_update(self, params); };
+    let extended_cost_call =
+        quote! { __cost += arael::model::ExtendedModel::extended_cost(self, params); };
+    let extended_compute_call =
+        quote! { arael::model::ExtendedModel::extended_compute(self, params, grad); };
 
     let extended_jacobian_call = if custom {
-        if precision == "f64" {
-            quote! { arael::model::ExtendedModel::extended_jacobian64(self, params, &mut __jac_rows, &mut __jac_cid); }
-        } else {
-            quote! { arael::model::ExtendedModel::extended_jacobian32(self, params, &mut __jac_rows, &mut __jac_cid); }
-        }
+        quote! { arael::model::ExtendedModel::extended_jacobian(self, params, &mut __jac_rows, &mut __jac_cid); }
     } else {
         quote! {}
     };
@@ -5864,6 +5858,17 @@ pub fn generate_root_methods(
         (quote! { serialize64 }, quote! { deserialize64 })
     };
     let requires_compute = custom || has_triplet_block;
+
+    // `extended_deserialize` carries no width in its signature, and the
+    // root implements `ExtendedModel` only at its solve precision -- so
+    // only the matching inherent deserialize wrapper calls the hook.
+    let (extended_deser64_call, extended_deser32_call) = if precision == "f32" {
+        (quote! {},
+         quote! { <#root_name as arael::model::ExtendedModel<f32>>::extended_deserialize(self); })
+    } else {
+        (quote! { <#root_name as arael::model::ExtendedModel<f64>>::extended_deserialize(self); },
+         quote! {})
+    };
 
     let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
 
@@ -5893,7 +5898,7 @@ pub fn generate_root_methods(
             }
             pub fn deserialize64(&mut self, data: &[f64]) {
                 arael::model::Model::deserialize_params(self, data);
-                arael::model::ExtendedModel::extended_deserialize64(self);
+                #extended_deser64_call
             }
             pub fn serialize32(&mut self, data: &mut std::vec::Vec<f32>) {
                 arael::model::Model::serialize_params(self, data);
@@ -5901,7 +5906,7 @@ pub fn generate_root_methods(
             }
             pub fn deserialize32(&mut self, data: &[f32]) {
                 arael::model::Model::deserialize_params(self, data);
-                arael::model::ExtendedModel::extended_deserialize32(self);
+                #extended_deser32_call
             }
 
             fn __set_block_indices(&mut self) {
@@ -6104,7 +6109,7 @@ pub fn generate_root_methods(
     // Generate default ExtendedModel impl unless `extended` flag is set
     if !custom {
         tokens.extend(quote! {
-            impl arael::model::ExtendedModel for #root_name {}
+            impl arael::model::ExtendedModel<#prec_type> for #root_name {}
         });
     }
 

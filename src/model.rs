@@ -308,8 +308,8 @@ pub trait Component {
 /// let dr_da = residual.diff("a");
 /// let dr_db = residual.diff("b");
 ///
-/// impl ExtendedModel for RegressionModel {
-///     fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
+/// impl ExtendedModel<f64> for RegressionModel {
+///     fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
 ///         // Evaluate symbolically-differentiated expressions numerically
 ///         for &(x, y) in &self.data {
 ///             vars.insert("x", x);
@@ -325,7 +325,7 @@ pub trait Component {
 ///         }
 ///     }
 ///
-///     fn extended_cost64(&self, params: &[f64]) -> f64 {
+///     fn extended_cost(&self, params: &[f64]) -> f64 {
 ///         // Sum of squared residuals
 ///         self.data.iter().filter_map(|&(x, y)| {
 ///             vars.insert("x", x);
@@ -340,23 +340,21 @@ pub trait Component {
 /// See `examples/runtime_fit_demo.rs` for the complete working example,
 /// and `arael-sketch-solver` for a production use of this pattern with
 /// parametric expression dimensions.
-pub trait ExtendedModel {
-    /// Called after `deserialize64` writes optimized values back to `Param::value`.
+/// The trait is parameterized by the solve width: implement it at your
+/// root's precision (`impl ExtendedModel<f64> for MyRoot`) with plainly
+/// typed bodies. A root generated at one precision requires the matching
+/// instantiation, so a width mismatch is a missing-impl compile error.
+pub trait ExtendedModel<F: crate::utils::Float> {
+    /// Called after `deserialize` writes optimized values back to `Param::value`.
     /// Use to sync derived persistent state (e.g. copy one param's value to another).
-    fn extended_deserialize64(&mut self) {}
-    /// Called after `deserialize32` writes optimized values back to `Param::value`.
-    fn extended_deserialize32(&mut self) {}
-    /// Called after `update_params` (f64), before cost/constraint calculations.
+    fn extended_deserialize(&mut self) {}
+    /// Called after `update_params`, before cost/constraint calculations.
     /// Use to compute derived state that constraints depend on.
-    fn extended_update64(&mut self, _params: &[f64]) {}
-    /// Called after `update_params` (f32), before cost/constraint calculations.
-    fn extended_update32(&mut self, _params: &[f32]) {}
-    /// Additional cost contribution (f64). Called after the
+    fn extended_update(&mut self, _params: &[F]) {}
+    /// Additional cost contribution. Called after the
     /// macro-generated cost loop.
-    fn extended_cost64(&self, _params: &[f64]) -> f64 { 0.0 }
-    /// Additional cost contribution (f32).
-    fn extended_cost32(&self, _params: &[f32]) -> f32 { 0.0 }
-    /// Compute custom constraint residuals (f64). Called after
+    fn extended_cost(&self, _params: &[F]) -> F { F::zero() }
+    /// Compute custom constraint residuals. Called after
     /// macro-generated constraints. Writes gradient contributions directly
     /// into `grad` and cross-entity Hessian pairs into a
     /// [`TripletBlock`] field.
@@ -370,15 +368,10 @@ pub trait ExtendedModel {
     /// Violations are detected and reported ("sparsity pattern changed
     /// between iterations"). Restructure between solves instead;
     /// `LmSolver::reset()` rebuilds the cached pattern.
-    fn extended_compute64(&mut self, _params: &[f64], _grad: &mut [f64]) {}
-    /// Compute custom constraint residuals (f32). See the
-    /// iteration-invariance contract on [`ExtendedModel::extended_compute64`].
-    fn extended_compute32(&mut self, _params: &[f32], _grad: &mut [f32]) {}
-    /// Append Jacobian rows for runtime constraints (f64).
+    fn extended_compute(&mut self, _params: &[F], _grad: &mut [F]) {}
+    /// Append Jacobian rows for runtime constraints.
     /// `cid` is the constraint counter -- increment per constraint object.
-    fn extended_jacobian64(&mut self, _params: &[f64], _rows: &mut std::vec::Vec<JacobianRow<f64>>, _cid: &mut u32) {}
-    /// Append Jacobian rows for runtime constraints (f32).
-    fn extended_jacobian32(&mut self, _params: &[f32], _rows: &mut std::vec::Vec<JacobianRow<f32>>, _cid: &mut u32) {}
+    fn extended_jacobian(&mut self, _params: &[F], _rows: &mut std::vec::Vec<JacobianRow<F>>, _cid: &mut u32) {}
 }
 
 

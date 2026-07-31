@@ -17,7 +17,7 @@ pub struct ExpressionConstraint {
     pub param_derivs: Vec<(String, E)>,
     pub indices: Vec<u32>,
     pub description: String,
-    /// Set by extended_jacobian64 to match the Jacobian row's constraint field.
+    /// Set by extended_jacobian to match the Jacobian row's constraint field.
     pub cid: u32,
     /// Static label for JacobianRow (always "dimension" for dimension-derived exprs).
     pub label: &'static str,

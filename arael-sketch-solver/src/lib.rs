@@ -1319,8 +1319,8 @@ impl Sketch {
 
 }
 
-impl arael::model::ExtendedModel for Sketch {
-    fn extended_deserialize64(&mut self) {
+impl arael::model::ExtendedModel<f64> for Sketch {
+    fn extended_deserialize(&mut self) {
         // After solver writes back optimized values, sync radius_b.value for non-ellipses
         let refs: Vec<_> = self.arcs.refs().collect();
         for r in refs {
@@ -1330,7 +1330,7 @@ impl arael::model::ExtendedModel for Sketch {
         }
     }
 
-    fn extended_update64(&mut self, _params: &[f64]) {
+    fn extended_update(&mut self, _params: &[f64]) {
         // For non-ellipse arcs, keep radius_b work value in sync with radius
         let refs: Vec<_> = self.arcs.refs().collect();
         for r in refs {
@@ -1341,7 +1341,7 @@ impl arael::model::ExtendedModel for Sketch {
         }
     }
 
-    fn extended_cost64(&self, params: &[f64]) -> f64 {
+    fn extended_cost(&self, params: &[f64]) -> f64 {
         if self.expr_constraints.is_empty() { return 0.0; }
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
@@ -1356,7 +1356,7 @@ impl arael::model::ExtendedModel for Sketch {
         total
     }
 
-    fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
         if self.expr_constraints.is_empty() { return; }
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
@@ -1369,7 +1369,7 @@ impl arael::model::ExtendedModel for Sketch {
         }
     }
 
-    fn extended_jacobian64(&mut self, params: &[f64], rows: &mut std::vec::Vec<arael::model::JacobianRow<f64>>, cid: &mut u32) {
+    fn extended_jacobian(&mut self, params: &[f64], rows: &mut std::vec::Vec<arael::model::JacobianRow<f64>>, cid: &mut u32) {
         if self.expr_constraints.is_empty() { return; }
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);

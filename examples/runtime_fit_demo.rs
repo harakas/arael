@@ -28,7 +28,7 @@ use arael_sym::E;
 // ---------------------------------------------------------------------------
 
 /// One optimizable coefficient. Params are written by RegressionModel's
-/// ExtendedModel::extended_compute64 directly into the global grad/hessian
+/// ExtendedModel::extended_compute directly into the global grad/hessian
 /// via a TripletBlock, so Coefficient itself has no grad+diag to store.
 #[arael::model]
 #[arael(skip_self_block)]
@@ -55,8 +55,8 @@ struct RegressionModel {
     param_names: Vec<String>,
 }
 
-impl ExtendedModel for RegressionModel {
-    fn extended_cost64(&self, params: &[f64]) -> f64 {
+impl ExtendedModel<f64> for RegressionModel {
+    fn extended_cost(&self, params: &[f64]) -> f64 {
         let residual = match self.residual_expr { Some(ref e) => e, None => return 0.0 };
         let mut vars = self.build_vars(params);
         let mut cost = 0.0;
@@ -70,7 +70,7 @@ impl ExtendedModel for RegressionModel {
         cost
     }
 
-    fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
         let residual = match self.residual_expr { Some(ref e) => e.clone(), None => return };
         let derivs: Vec<(u32, E)> = self.derivs.iter().map(|(_, idx, d)| (*idx, d.clone())).collect();
         let mut vars: HashMap<&str, f64> = HashMap::new();

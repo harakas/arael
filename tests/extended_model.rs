@@ -24,8 +24,8 @@ struct Fit {
     data: Vec<(f64, f64)>,
 }
 
-impl ExtendedModel for Fit {
-    fn extended_cost64(&self, params: &[f64]) -> f64 {
+impl ExtendedModel<f64> for Fit {
+    fn extended_cost(&self, params: &[f64]) -> f64 {
         let a = params[self.coeffs[0].value.index() as usize];
         let b = params[self.coeffs[1].value.index() as usize];
         self.data.iter().map(|&(x, y)| {
@@ -34,7 +34,7 @@ impl ExtendedModel for Fit {
         }).sum()
     }
 
-    fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
         let ia = self.coeffs[0].value.index();
         let ib = self.coeffs[1].value.index();
         let a = params[ia as usize];
