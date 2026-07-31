@@ -100,7 +100,7 @@ fn main() {
         scene.collect_param_block_spans(&mut spans);
         let partition = block_partition_from_spans(&spans, n);
         let mut cells: Vec<(u32, u32)> = Vec::new();
-        arael::model::Model::collect_hessian_cells64(&scene, &mut cells);
+        arael::model::Model::collect_hessian_cells(&scene, &mut cells);
         let (hsym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
             partition.clone(),
             partition.clone(),
@@ -109,7 +109,7 @@ fn main() {
         );
         let mut resolver = PositionResolver::new(&hsym);
         let mut positions: Vec<arael::ValueIndex> = Vec::new();
-        arael::model::Model::bind_hessian_positions64(
+        arael::model::Model::bind_hessian_positions(
             &mut scene,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)

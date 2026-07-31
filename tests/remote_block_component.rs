@@ -176,8 +176,8 @@ fn the_component_span_is_counted() {
             obs: vec![Obs { pose, measured: m[j] }],
         });
     }
-    let mut params = std::vec::Vec::new();
-    w.serialize_params64(&mut params);
+    let mut params = std::vec::Vec::<f64>::new();
+    w.serialize_params(&mut params);
     assert_eq!(params.len(), 6, "transform contributes 6 params");
 }
 
@@ -201,8 +201,8 @@ fn a_frozen_half_still_indexes_correctly() {
         });
     }
 
-    let mut params = std::vec::Vec::new();
-    w.serialize_params64(&mut params);
+    let mut params = std::vec::Vec::<f64>::new();
+    w.serialize_params(&mut params);
     assert_eq!(params.len(), 3, "only the translation is free");
 
     let result = w.solve_sparse(&LmConfig::default()).unwrap();

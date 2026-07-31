@@ -5826,34 +5826,12 @@ pub fn generate_root_methods(
     let prec_type: syn::Type = syn::parse_str(precision)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
             format!("invalid precision type '{}': {}", precision, e)))?;
-    let update_method = syn::Ident::new(
-        &format!("update{}", if precision == "f32" { "32" } else { "64" }),
-        proc_macro2::Span::call_site());
-    let accumulate_method = syn::Ident::new(
-        &format!("accumulate_hessian{}", if precision == "f32" { "32" } else { "64" }),
-        proc_macro2::Span::call_site());
-    let accumulate_band_method = syn::Ident::new(
-        &format!("accumulate_hessian_band{}", if precision == "f32" { "32" } else { "64" }),
-        proc_macro2::Span::call_site());
-    let accumulate_sparse_method = syn::Ident::new(
-        &format!("accumulate_hessian_sparse{}", if precision == "f32" { "32" } else { "64" }),
-        proc_macro2::Span::call_site());
-    let accumulate_sparse_direct_method = syn::Ident::new(
-        &format!("accumulate_hessian_sparse_direct{}", if precision == "f32" { "32" } else { "64" }),
-        proc_macro2::Span::call_site());
-    let accumulate_sparse_indexed_method = syn::Ident::new(
-        &format!("accumulate_hessian_sparse_indexed{}", if precision == "f32" { "32" } else { "64" }),
-        proc_macro2::Span::call_site());
 
     // advance(): fold accepted-step euler angle deltas. Recurses through
     // the whole model tree via Model::advance_params, so EA params at any
     // location (collections, root-level fields, direct-composed structs,
     // nested sub-models) are re-centered.
-    let advance_call = if precision == "f32" {
-        quote! { arael::model::Model::advance_params32(self, params); }
-    } else {
-        quote! { arael::model::Model::advance_params64(self, params); }
-    };
+    let advance_call = quote! { arael::model::Model::advance_params(self, params); };
 
     // `extended_compute_call` now passes `grad` so the extended hook can
     // write gradient entries directly into the LM-provided slice.
@@ -5886,11 +5864,6 @@ pub fn generate_root_methods(
         (quote! { serialize64 }, quote! { deserialize64 })
     };
     let requires_compute = custom || has_triplet_block;
-    let (cells_method, positions_method) = if precision == "f32" {
-        (quote! { collect_hessian_cells32 }, quote! { bind_hessian_positions32 })
-    } else {
-        (quote! { collect_hessian_cells64 }, quote! { bind_hessian_positions64 })
-    };
 
     let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
 
@@ -5915,19 +5888,19 @@ pub fn generate_root_methods(
 
         impl #root_name {
             pub fn serialize64(&mut self, data: &mut std::vec::Vec<f64>) {
-                arael::model::Model::serialize_params64(self, data);
+                arael::model::Model::serialize_params(self, data);
                 self.__set_block_indices();
             }
             pub fn deserialize64(&mut self, data: &[f64]) {
-                arael::model::Model::deserialize_params64(self, data);
+                arael::model::Model::deserialize_params(self, data);
                 arael::model::ExtendedModel::extended_deserialize64(self);
             }
             pub fn serialize32(&mut self, data: &mut std::vec::Vec<f32>) {
-                arael::model::Model::serialize_params32(self, data);
+                arael::model::Model::serialize_params(self, data);
                 self.__set_block_indices();
             }
             pub fn deserialize32(&mut self, data: &[f32]) {
-                arael::model::Model::deserialize_params32(self, data);
+                arael::model::Model::deserialize_params(self, data);
                 arael::model::ExtendedModel::extended_deserialize32(self);
             }
 
@@ -5944,7 +5917,7 @@ pub fn generate_root_methods(
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
                 use arael::utils::Float as _;
-                arael::model::Model::#update_method(self, params);
+                arael::model::Model::update_params(self, params);
                 #extended_update_call
                 arael::model::Model::zero_blocks(self);
                 let mut __cost = 0.0 as #prec_type;
@@ -5979,7 +5952,7 @@ pub fn generate_root_methods(
                     // cost pass (rho(s) under a loss) shadowed into its
                     // label's slot, so the table sums to calc_cost.
                     use arael::utils::Float as _;
-                    arael::model::Model::#update_method(self, params);
+                    arael::model::Model::update_params(self, params);
                     #ext_update
                     #[allow(unused_variables)]
                     let __self_ref = &*self;
@@ -5994,7 +5967,7 @@ pub fn generate_root_methods(
                     // Generated expressions may call Float trait methods
                     // (e.g. heaviside from safe-function derivatives).
                     use arael::utils::Float as _;
-                    arael::model::Model::#update_method(self, params);
+                    arael::model::Model::update_params(self, params);
                     #ext_update
                     // Read-only traversal: a plain shared reborrow suffices.
                     let __self_ref = &*self;
@@ -6043,10 +6016,10 @@ pub fn generate_root_methods(
             #marginalize_hint_fn
             #marginalize_candidates_fn
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                arael::model::Model::#cells_method(self, out)
+                arael::model::Model::collect_hessian_cells(self, out)
             }
             fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                arael::model::Model::#positions_method(self, binder, out)
+                arael::model::Model::bind_hessian_positions(self, binder, out)
             }
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::collect_param_blocks(self, out)
@@ -6055,7 +6028,7 @@ pub fn generate_root_methods(
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
                 use arael::utils::Float as _;
-                arael::model::Model::#update_method(self, params);
+                arael::model::Model::update_params(self, params);
                 #extended_update_call
                 // Read-only traversal: a plain shared reborrow suffices.
                 let __self_ref = &*self;
@@ -6070,7 +6043,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 hessian.iter_mut().for_each(|h| *h = 0.0);
-                arael::model::Model::#accumulate_method(self, hessian);
+                arael::model::Model::accumulate_hessian(self, hessian);
                 __cost
             }
 
@@ -6079,7 +6052,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 band.iter_mut().for_each(|b| *b = 0.0);
-                arael::model::Model::#accumulate_band_method(self, band, kd)?;
+                arael::model::Model::accumulate_hessian_band(self, band, kd)?;
                 Ok(__cost)
             }
 
@@ -6088,7 +6061,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 coo.clear();
-                arael::model::Model::#accumulate_sparse_method(self, coo);
+                arael::model::Model::accumulate_hessian_sparse(self, coo);
                 __cost
             }
 
@@ -6097,7 +6070,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                arael::model::Model::#accumulate_sparse_direct_method(self, csc);
+                arael::model::Model::accumulate_hessian_sparse_direct(self, csc);
                 __cost
             }
 
@@ -6107,7 +6080,7 @@ pub fn generate_root_methods(
                 #extended_cost_call
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
-                arael::model::Model::#accumulate_sparse_indexed_method(self, vals, positions, &mut cursor);
+                arael::model::Model::accumulate_hessian_sparse_indexed(self, vals, positions, &mut cursor);
                 // The cached position map is replayed by cursor and assumes
                 // an identical entry sequence every iteration. A shorter
                 // sequence (a TripletBlock or extended constraint emitting

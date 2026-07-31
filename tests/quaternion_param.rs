@@ -95,14 +95,14 @@ fn value_syncs_only_on_deserialize() {
 fn deserialize_folds_delta_via_exp_map() {
     let q0 = quaternd::from_euler_angles(vect3d::new(0.2, 0.5, -0.7));
     let mut att = QuaternionParam::new(q0);
-    let mut data = Vec::new();
-    att.serialize_params64(&mut data);
+    let mut data = Vec::<f64>::new();
+    att.serialize_params(&mut data);
     assert_eq!(data.len(), 3);
 
     // A large delta, where the rotation-vector and euler retractions differ.
     let w = vect3d::new(0.3, -0.4, 0.5);
     data[0] = w.x; data[1] = w.y; data[2] = w.z;
-    att.deserialize_params64(&data);
+    att.deserialize_params(&data);
 
     let expected = (q0 * quaternd::from_rotation_vector_small(w)).unit();
     let v = att.value;
@@ -113,7 +113,7 @@ fn deserialize_folds_delta_via_exp_map() {
         "deserialize must fold via the rotation-vector retraction");
 
     // A second deserialize with the same data must not fold the delta twice.
-    att.deserialize_params64(&data);
+    att.deserialize_params(&data);
     let v2 = att.value;
     assert!(v2.t == v.t && v2.v.x == v.v.x && v2.v.y == v.v.y && v2.v.z == v.v.z,
         "deserialize must be idempotent");

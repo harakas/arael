@@ -238,42 +238,25 @@ where
 {
     const PARAM_COUNT: u32 = 6;
 
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+    fn serialize_params<F: Float>(&mut self, data: &mut std::vec::Vec<F>) {
         Component::start(self);
-        Model::serialize_params32(&mut self.w, data);
-        Model::serialize_params32(&mut self.d, data);
+        Model::serialize_params(&mut self.w, data);
+        Model::serialize_params(&mut self.d, data);
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
-        Model::deserialize_params32(&mut self.w, data);
-        Model::deserialize_params32(&mut self.d, data);
+    fn deserialize_params<F: Float>(&mut self, data: &[F]) {
+        Model::deserialize_params(&mut self.w, data);
+        Model::deserialize_params(&mut self.d, data);
         Component::finish(self);
         Model::update_self(self);
     }
-    fn update32(&mut self, data: &[f32]) {
-        Model::update32(&mut self.w, data);
-        Model::update32(&mut self.d, data);
+    fn update_params<F: Float>(&mut self, data: &[F]) {
+        Model::update_params(&mut self.w, data);
+        Model::update_params(&mut self.d, data);
         self.__precompute_symbolic();
     }
     fn update_self(&mut self) {
         Model::update_self(&mut self.w);
         Model::update_self(&mut self.d);
-        self.__precompute_symbolic();
-    }
-
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        Component::start(self);
-        Model::serialize_params64(&mut self.w, data);
-        Model::serialize_params64(&mut self.d, data);
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        Model::deserialize_params64(&mut self.w, data);
-        Model::deserialize_params64(&mut self.d, data);
-        Component::finish(self);
-        Model::update_self(self);
-    }
-    fn update64(&mut self, data: &[f64]) {
-        Model::update64(&mut self.w, data);
-        Model::update64(&mut self.d, data);
         self.__precompute_symbolic();
     }
 
@@ -285,25 +268,14 @@ where
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.d", base), out);
     }
 
-    fn advance_params32(&mut self, params: &mut [f32]) {
-        Model::deserialize_params32(&mut self.w, params);
-        Model::deserialize_params32(&mut self.d, params);
+    fn advance_params<F: Float>(&mut self, params: &mut [F]) {
+        Model::deserialize_params(&mut self.w, params);
+        Model::deserialize_params(&mut self.d, params);
         Component::update(self);
         for p in [&self.w, &self.d] {
             if p.index() != u32::MAX {
                 let i = p.index() as usize;
-                ParamType::write_to32(&p.value, &mut params[i..i + 3]);
-            }
-        }
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        Model::deserialize_params64(&mut self.w, params);
-        Model::deserialize_params64(&mut self.d, params);
-        Component::update(self);
-        for p in [&self.w, &self.d] {
-            if p.index() != u32::MAX {
-                let i = p.index() as usize;
-                ParamType::write_to64(&p.value, &mut params[i..i + 3]);
+                ParamType::write_to(&p.value, &mut params[i..i + 3]);
             }
         }
     }
@@ -333,7 +305,7 @@ mod tests {
         let mut p = TransformParam::new(vect3::new(1.5, -0.4, 2.0), q);
         // A serialize pass gives the step live indices, so the guarded
         // Jacobian caches fill.
-        Model::serialize_params64(&mut p, &mut std::vec::Vec::new());
+        Model::serialize_params(&mut p, &mut std::vec::Vec::<f64>::new());
         p
     }
 
@@ -425,14 +397,14 @@ mod tests {
         let t0 = vect3::new(3.0, -1.0, 0.5);
 
         let mut both = TransformParam::new(t0, q);
-        let mut data = std::vec::Vec::new();
-        Model::serialize_params64(&mut both, &mut data);
+        let mut data = std::vec::Vec::<f64>::new();
+        Model::serialize_params(&mut both, &mut data);
         assert_eq!(data.len(), 6, "both halves free");
 
         let mut rot_only = TransformParam::new(t0, q);
         rot_only.optimize_translation = false;
-        let mut data = std::vec::Vec::new();
-        Model::serialize_params64(&mut rot_only, &mut data);
+        let mut data = std::vec::Vec::<f64>::new();
+        Model::serialize_params(&mut rot_only, &mut data);
         assert_eq!(data.len(), 3, "translation frozen");
         rot_only.w.value = vect3::new(0.1, 0.2, -0.15);
         Model::update_self(&mut rot_only);
@@ -440,8 +412,8 @@ mod tests {
 
         let mut trans_only = TransformParam::new(t0, q);
         trans_only.optimize_rotation = false;
-        let mut data = std::vec::Vec::new();
-        Model::serialize_params64(&mut trans_only, &mut data);
+        let mut data = std::vec::Vec::<f64>::new();
+        Model::serialize_params(&mut trans_only, &mut data);
         assert_eq!(data.len(), 3, "rotation frozen");
         trans_only.d.value = vect3::new(0.3, -0.1, 0.2);
         Model::update_self(&mut trans_only);
@@ -451,8 +423,8 @@ mod tests {
         }
 
         let mut fixed = TransformParam::fixed(t0, q);
-        let mut data = std::vec::Vec::new();
-        Model::serialize_params64(&mut fixed, &mut data);
+        let mut data = std::vec::Vec::<f64>::new();
+        Model::serialize_params(&mut fixed, &mut data);
         assert!(data.is_empty(), "a fixed transform serializes no params");
     }
 }

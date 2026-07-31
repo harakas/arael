@@ -9,46 +9,36 @@
 pub trait ParamType: Copy + Default + 'static {
     const SIZE: usize;
     const SUFFIXES: &'static [&'static str];
-    fn write_to32(&self, dst: &mut [f32]);
-    fn read_from32(src: &[f32]) -> Self;
-    fn write_to64(&self, dst: &mut [f64]);
-    fn read_from64(src: &[f64]) -> Self;
+    fn write_to<F: crate::utils::Float>(&self, dst: &mut [F]);
+    fn read_from<F: crate::utils::Float>(src: &[F]) -> Self;
 }
 
 impl ParamType for f32 {
     const SIZE: usize = 1;
     const SUFFIXES: &'static [&'static str] = &[""];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = *self; }
-    fn read_from32(src: &[f32]) -> Self { src[0] }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = *self as f64; }
-    fn read_from64(src: &[f64]) -> Self { src[0] as f32 }
+    fn write_to<F: crate::utils::Float>(&self, dst: &mut [F]) { dst[0] = F::from(*self).unwrap(); }
+    fn read_from<F: crate::utils::Float>(src: &[F]) -> Self { src[0].to_f32().unwrap() }
 }
 
 impl ParamType for f64 {
     const SIZE: usize = 1;
     const SUFFIXES: &'static [&'static str] = &[""];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = *self as f32; }
-    fn read_from32(src: &[f32]) -> Self { src[0] as f64 }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = *self; }
-    fn read_from64(src: &[f64]) -> Self { src[0] }
+    fn write_to<F: crate::utils::Float>(&self, dst: &mut [F]) { dst[0] = F::from(*self).unwrap(); }
+    fn read_from<F: crate::utils::Float>(src: &[F]) -> Self { src[0].to_f64().unwrap() }
 }
 
 impl<T: crate::utils::Float> ParamType for crate::vect::vect2<T> {
     const SIZE: usize = 2;
     const SUFFIXES: &'static [&'static str] = &[".x", ".y"];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x.to_f32().unwrap(); dst[1] = self.y.to_f32().unwrap(); }
-    fn read_from32(src: &[f32]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap()) }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x.to_f64().unwrap(); dst[1] = self.y.to_f64().unwrap(); }
-    fn read_from64(src: &[f64]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap()) }
+    fn write_to<F: crate::utils::Float>(&self, dst: &mut [F]) { dst[0] = F::from(self.x).unwrap(); dst[1] = F::from(self.y).unwrap(); }
+    fn read_from<F: crate::utils::Float>(src: &[F]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap()) }
 }
 
 impl<T: crate::utils::Float> ParamType for crate::vect::vect3<T> {
     const SIZE: usize = 3;
     const SUFFIXES: &'static [&'static str] = &[".x", ".y", ".z"];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x.to_f32().unwrap(); dst[1] = self.y.to_f32().unwrap(); dst[2] = self.z.to_f32().unwrap(); }
-    fn read_from32(src: &[f32]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap(), T::from(src[2]).unwrap()) }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x.to_f64().unwrap(); dst[1] = self.y.to_f64().unwrap(); dst[2] = self.z.to_f64().unwrap(); }
-    fn read_from64(src: &[f64]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap(), T::from(src[2]).unwrap()) }
+    fn write_to<F: crate::utils::Float>(&self, dst: &mut [F]) { dst[0] = F::from(self.x).unwrap(); dst[1] = F::from(self.y).unwrap(); dst[2] = F::from(self.z).unwrap(); }
+    fn read_from<F: crate::utils::Float>(src: &[F]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap(), T::from(src[2]).unwrap()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -139,25 +129,25 @@ impl<T: ParamType + std::fmt::Debug> std::fmt::Debug for Param<T> {
 /// `Param<T>`, euler angle params, and collections (`Vec`, `Arena`, `Option`).
 /// The trait drives the optimization loop:
 ///
-/// - `serialize_params{32,64}` -- flatten optimizable parameters into a vector
+/// - `serialize_params` -- flatten optimizable parameters into a vector
 ///   and assign indices.
-/// - `deserialize_params{32,64}` -- write optimized values back into `Param::value`.
-/// - `update{32,64}` -- copy a candidate parameter vector into working copies.
+/// - `deserialize_params` -- write optimized values back into `Param::value`.
+/// - `update_params` -- copy a candidate parameter vector into working copies.
 /// - `update_self` -- reset working copies to current `value` (and precompute
 ///   derived quantities like rotation matrices).
 /// - `zero_blocks` / `accumulate_hessian*` -- zero and accumulate Hessian
 ///   blocks into dense, banded, COO, CSC, or indexed sparse formats.
 ///   Gradient is written directly into a global slice by each constraint,
 ///   not routed through these methods.
+///
+/// The parameter-vector and Hessian methods are generic over the solve
+/// precision `F`; blocks store at their own precision and convert on
+/// accumulation (an identity after monomorphization when the widths match).
 pub trait Model {
-    fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
-    fn deserialize_params32(&mut self, _data: &[f32]) {}
-    fn update32(&mut self, _data: &[f32]) {}
+    fn serialize_params<F: crate::utils::Float>(&mut self, _data: &mut std::vec::Vec<F>) {}
+    fn deserialize_params<F: crate::utils::Float>(&mut self, _data: &[F]) {}
+    fn update_params<F: crate::utils::Float>(&mut self, _data: &[F]) {}
     fn update_self(&mut self) {}
-
-    fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
-    fn deserialize_params64(&mut self, _data: &[f64]) {}
-    fn update64(&mut self, _data: &[f64]) {}
 
     const PARAM_COUNT: u32 = 0;
     fn serialize_size(&self) -> u32 { 0 }
@@ -173,28 +163,20 @@ pub trait Model {
     fn collect_param_blocks(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
 
     /// Append one representative scalar coordinate per Hessian block cell
-    /// this model's f64 blocks touch (TripletBlocks: one per stored
-    /// entry). Same traversal order as `accumulate_hessian_sparse64`;
+    /// this model's blocks touch (TripletBlocks: one per stored
+    /// entry). Same traversal order as `accumulate_hessian_sparse`;
     /// valid after `serialize`. Structure-only: no numeric work.
-    fn collect_hessian_cells64(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
-    /// f32-block variant of [`collect_hessian_cells64`](Self::collect_hessian_cells64).
-    fn collect_hessian_cells32(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
-    /// Bind every f64 block to its tile in the assembled value buffer, ready
-    /// for `accumulate_hessian_sparse_indexed64`. `bind` maps a scalar
+    fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+    /// Bind every block to its tile in the assembled value buffer, ready
+    /// for `accumulate_hessian_sparse_indexed`. `bind` maps a scalar
     /// coordinate to its position and the column stride of its tile; blocks
     /// with a static tile shape keep the pair and derive the rest. Blocks
     /// with no static shape ([`TripletBlock`]) instead push one position per
     /// entry into `out`, in the emission order of
-    /// `accumulate_hessian_sparse64`. Builds the indexed map without a COO
+    /// `accumulate_hessian_sparse`. Builds the indexed map without a COO
     /// pass. Valid after `serialize`, and must be redone whenever parameter
     /// indices or the Hessian pattern change.
-    fn bind_hessian_positions64(
-        &mut self,
-        _binder: &mut HessianBinder,
-        _out: &mut std::vec::Vec<ValueIndex>,
-    ) {}
-    /// f32-block variant of [`bind_hessian_positions64`](Self::bind_hessian_positions64).
-    fn bind_hessian_positions32(
+    fn bind_hessian_positions(
         &mut self,
         _binder: &mut HessianBinder,
         _out: &mut std::vec::Vec<ValueIndex>,
@@ -212,23 +194,17 @@ pub trait Model {
     // accepted LM step (the property that avoids gimbal lock). Recurses
     // through the model tree exactly like update/serialize, so params at
     // any nesting depth are advanced.
-    fn advance_params32(&mut self, _params: &mut [f32]) {}
-    fn advance_params64(&mut self, _params: &mut [f64]) {}
+    fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
     // Hessian-only accumulation: blocks hold only Hessian entries after the
     // refactor; the gradient is written directly by constraint evaluation
     // into the LM-provided `grad` slice, so there is nothing for these
     // methods to do with grad.
-    fn accumulate_hessian32(&self, _hessian: &mut [f32]) {}
-    fn accumulate_hessian64(&self, _hessian: &mut [f64]) {}
-    fn accumulate_hessian_band32(&self, _band: &mut [f32], _kd: usize) -> Result<(), crate::simple_lm::BandOverflow> { Ok(()) }
-    fn accumulate_hessian_band64(&self, _band: &mut [f64], _kd: usize) -> Result<(), crate::simple_lm::BandOverflow> { Ok(()) }
-    fn accumulate_hessian_sparse32(&self, _coo: &mut crate::simple_lm::CooMatrix<f32>) {}
-    fn accumulate_hessian_sparse64(&self, _coo: &mut crate::simple_lm::CooMatrix<f64>) {}
-    fn accumulate_hessian_sparse_direct32(&self, _csc: &mut crate::simple_lm::CscMatrix<f32>) {}
-    fn accumulate_hessian_sparse_direct64(&self, _csc: &mut crate::simple_lm::CscMatrix<f64>) {}
-    fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[ValueIndex], _cursor: &mut usize) {}
-    fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[ValueIndex], _cursor: &mut usize) {}
+    fn accumulate_hessian<F: crate::utils::Float>(&self, _hessian: &mut [F]) {}
+    fn accumulate_hessian_band<F: crate::utils::Float>(&self, _band: &mut [F], _kd: usize) -> Result<(), crate::simple_lm::BandOverflow> { Ok(()) }
+    fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, _coo: &mut crate::simple_lm::CooMatrix<F>) {}
+    fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, _csc: &mut crate::simple_lm::CscMatrix<F>) {}
+    fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, _vals: &mut [F], _positions: &[ValueIndex], _cursor: &mut usize) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +346,10 @@ pub trait ExtendedModel {
     fn extended_deserialize64(&mut self) {}
     /// Called after `deserialize32` writes optimized values back to `Param::value`.
     fn extended_deserialize32(&mut self) {}
-    /// Called after `update64`, before cost/constraint calculations.
+    /// Called after `update_params` (f64), before cost/constraint calculations.
     /// Use to compute derived state that constraints depend on.
     fn extended_update64(&mut self, _params: &[f64]) {}
-    /// Called after `update32`, before cost/constraint calculations.
+    /// Called after `update_params` (f32), before cost/constraint calculations.
     fn extended_update32(&mut self, _params: &[f32]) {}
     /// Additional cost contribution (f64). Called after the
     /// macro-generated cost loop.
@@ -411,28 +387,28 @@ pub trait ExtendedModel {
 // ---------------------------------------------------------------------------
 
 impl<T: ParamType> Model for Param<T> {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         if self.optimize {
             self.index = data.len() as u32;
             let start = data.len();
-            data.resize(start + T::SIZE, 0.0);
-            self.value.write_to32(&mut data[start..start + T::SIZE]);
+            data.resize(start + T::SIZE, F::zero());
+            self.value.write_to(&mut data[start..start + T::SIZE]);
         } else {
             self.index = u32::MAX;
         }
     }
 
-    fn deserialize_params32(&mut self, data: &[f32]) {
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            self.value = T::read_from32(&data[i..i + T::SIZE]);
+            self.value = T::read_from(&data[i..i + T::SIZE]);
         }
     }
 
-    fn update32(&mut self,data: &[f32]) {
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            self.work = T::read_from32(&data[i..i + T::SIZE]);
+            self.work = T::read_from(&data[i..i + T::SIZE]);
         } else {
             self.work = self.value;
         }
@@ -440,33 +416,6 @@ impl<T: ParamType> Model for Param<T> {
 
     fn update_self(&mut self) {
         self.work = self.value;
-    }
-
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        if self.optimize {
-            self.index = data.len() as u32;
-            let start = data.len();
-            data.resize(start + T::SIZE, 0.0);
-            self.value.write_to64(&mut data[start..start + T::SIZE]);
-        } else {
-            self.index = u32::MAX;
-        }
-    }
-
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.value = T::read_from64(&data[i..i + T::SIZE]);
-        }
-    }
-
-    fn update64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.work = T::read_from64(&data[i..i + T::SIZE]);
-        } else {
-            self.work = self.value;
-        }
     }
 
     const PARAM_COUNT: u32 = T::SIZE as u32;
@@ -596,50 +545,29 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 }
 
 impl<T: crate::utils::Float> Model for SimpleEulerAngleParam<T> where vect3<T>: ParamType {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         if self.optimize {
             self.index = data.len() as u32;
             let start = data.len();
-            data.resize(start + 3, 0.0);
-            self.value.write_to32(&mut data[start..start + 3]);
+            data.resize(start + 3, F::zero());
+            self.value.write_to(&mut data[start..start + 3]);
         } else { self.index = u32::MAX; }
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            self.value = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            self.value = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
         }
     }
-    fn update32(&mut self, data: &[f32]) {
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            self.work = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            self.work = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
         } else { self.work = self.value; }
     }
     fn update_self(&mut self) {
         self.work = self.value;
         self.__precompute();
-    }
-
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        if self.optimize {
-            self.index = data.len() as u32;
-            let start = data.len();
-            data.resize(start + 3, 0.0);
-            self.value.write_to64(&mut data[start..start + 3]);
-        } else { self.index = u32::MAX; }
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.value = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-        }
-    }
-    fn update64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.work = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-        } else { self.work = self.value; }
     }
 
     const PARAM_COUNT: u32 = 3;
@@ -785,59 +713,35 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 }
 
 impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamType {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         // Seed the reference from value for fixed params too -- constraints
         // evaluate a fixed rotation through ref_rotation as well.
         self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
         if self.optimize {
             self.index = data.len() as u32;
-            data.push(0.0); data.push(0.0); data.push(0.0);
+            data.push(F::zero()); data.push(F::zero()); data.push(F::zero());
         } else { self.index = u32::MAX; }
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            let dea = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            let dea = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
             self.ref_rotation = self.ref_rotation
                 * matrix3::<T>::rotation_from_euler_angles(dea);
             self.value = self.ref_rotation.get_euler_angles();
             self.delta = vect3::<T>::default();
         }
     }
-    fn update32(&mut self, data: &[f32]) {
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            self.delta = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            self.delta = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
         } else { self.delta = vect3::<T>::default(); }
     }
     fn update_self(&mut self) {
         self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
         self.delta = vect3::<T>::default();
         self.__precompute();
-    }
-
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
-        if self.optimize {
-            self.index = data.len() as u32;
-            data.push(0.0); data.push(0.0); data.push(0.0);
-        } else { self.index = u32::MAX; }
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            let dea = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-            self.ref_rotation = self.ref_rotation
-                * matrix3::<T>::rotation_from_euler_angles(dea);
-            self.value = self.ref_rotation.get_euler_angles();
-            self.delta = vect3::<T>::default();
-        }
-    }
-    fn update64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.delta = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-        } else { self.delta = vect3::<T>::default(); }
     }
 
     const PARAM_COUNT: u32 = 3;
@@ -848,18 +752,11 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
         }
     }
 
-    fn advance_params32(&mut self, params: &mut [f32]) {
+    fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
             self.advance();
-            params[i] = 0.0; params[i + 1] = 0.0; params[i + 2] = 0.0;
-        }
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.advance();
-            params[i] = 0.0; params[i + 1] = 0.0; params[i + 2] = 0.0;
+            params[i] = F::zero(); params[i + 1] = F::zero(); params[i + 2] = F::zero();
         }
     }
 }
@@ -882,7 +779,7 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
 ///
 /// `value` is the initial orientation going in and the optimized orientation
 /// coming out: the solver keeps its working state in an internal reference
-/// quaternion and syncs `value` only when `deserialize_params{32,64}` reads
+/// quaternion and syncs `value` only when `deserialize_params` reads
 /// the result back. As with the other rotation parameters, call
 /// `deserialize(&result.x)` after a solve to get the result.
 ///
@@ -1027,20 +924,20 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 }
 
 impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamType {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         // Seed the internal reference from value for fixed params too --
         // constraints evaluate a fixed rotation through ref_rotation as well.
         self.ref_value = self.value.unit();
         self.ref_rotation = self.ref_value.rotation_matrix();
         if self.optimize {
             self.index = data.len() as u32;
-            data.push(0.0); data.push(0.0); data.push(0.0);
+            data.push(F::zero()); data.push(F::zero()); data.push(F::zero());
         } else { self.index = u32::MAX; }
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            let dvec = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            let dvec = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
             // Fold the handed-back rotation-vector delta with the same
             // retraction advance uses. The reference itself is not mutated,
             // so repeated deserialize calls are idempotent.
@@ -1050,10 +947,10 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
             self.delta = vect3::<T>::default();
         }
     }
-    fn update32(&mut self, data: &[f32]) {
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            self.delta = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            self.delta = <vect3<T> as ParamType>::read_from(&data[i..i + 3]);
         } else { self.delta = vect3::<T>::default(); }
     }
     fn update_self(&mut self) {
@@ -1061,31 +958,6 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
         self.ref_rotation = self.ref_value.rotation_matrix();
         self.delta = vect3::<T>::default();
         self.__precompute();
-    }
-
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        self.ref_value = self.value.unit();
-        self.ref_rotation = self.ref_value.rotation_matrix();
-        if self.optimize {
-            self.index = data.len() as u32;
-            data.push(0.0); data.push(0.0); data.push(0.0);
-        } else { self.index = u32::MAX; }
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            let dvec = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-            self.value = (self.ref_value
-                * crate::quatern::quatern::<T>::from_rotation_vector_small(dvec)).unit();
-            self.ref_rotation = self.value.rotation_matrix();
-            self.delta = vect3::<T>::default();
-        }
-    }
-    fn update64(&mut self, data: &[f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.delta = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-        } else { self.delta = vect3::<T>::default(); }
     }
 
     const PARAM_COUNT: u32 = 3;
@@ -1096,18 +968,11 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
         }
     }
 
-    fn advance_params32(&mut self, params: &mut [f32]) {
+    fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
             self.advance();
-            params[i] = 0.0; params[i + 1] = 0.0; params[i + 2] = 0.0;
-        }
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        if self.index != u32::MAX {
-            let i = self.index as usize;
-            self.advance();
-            params[i] = 0.0; params[i + 1] = 0.0; params[i + 2] = 0.0;
+            params[i] = F::zero(); params[i + 1] = F::zero(); params[i + 2] = F::zero();
         }
     }
 }
@@ -1154,32 +1019,20 @@ impl<T> Model for crate::refs::Ref<T> {}
 macro_rules! impl_model_collection {
     ($ty:ty, $iter_mut:ident) => {
         impl<T: Model> Model for $ty {
-            fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
-                for item in self.$iter_mut() { item.serialize_params32(data); }
+            fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
+                for item in self.$iter_mut() { item.serialize_params(data); }
             }
-            fn deserialize_params32(&mut self, data: &[f32]) {
-                for item in self.$iter_mut() { item.deserialize_params32(data); }
+            fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+                for item in self.$iter_mut() { item.deserialize_params(data); }
             }
-            fn update32(&mut self,data: &[f32]) {
-                for item in self.$iter_mut() { item.update32(data); }
+            fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+                for item in self.$iter_mut() { item.update_params(data); }
             }
             fn update_self(&mut self) {
                 for item in self.$iter_mut() { item.update_self(); }
             }
-            fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-                for item in self.$iter_mut() { item.serialize_params64(data); }
-            }
-            fn deserialize_params64(&mut self, data: &[f64]) {
-                for item in self.$iter_mut() { item.deserialize_params64(data); }
-            }
-            fn update64(&mut self, data: &[f64]) {
-                for item in self.$iter_mut() { item.update64(data); }
-            }
-            fn advance_params32(&mut self, params: &mut [f32]) {
-                for item in self.$iter_mut() { item.advance_params32(params); }
-            }
-            fn advance_params64(&mut self, params: &mut [f64]) {
-                for item in self.$iter_mut() { item.advance_params64(params); }
+            fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
+                for item in self.$iter_mut() { item.advance_params(params); }
             }
             fn zero_blocks(&mut self) {
                 for item in self.$iter_mut() { item.zero_blocks(); }
@@ -1187,17 +1040,11 @@ macro_rules! impl_model_collection {
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 for item in self.iter() { item.collect_param_blocks(out); }
             }
-            fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                for item in self.iter() { item.collect_hessian_cells64(out); }
+            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                for item in self.iter() { item.collect_hessian_cells(out); }
             }
-            fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                for item in self.iter() { item.collect_hessian_cells32(out); }
-            }
-            fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-                for item in self.$iter_mut() { item.bind_hessian_positions64(binder, out); }
-            }
-            fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-                for item in self.$iter_mut() { item.bind_hessian_positions32(binder, out); }
+            fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+                for item in self.$iter_mut() { item.bind_hessian_positions(binder, out); }
             }
             fn release_blocks(&mut self) {
                 for item in self.$iter_mut() { item.release_blocks(); }
@@ -1205,37 +1052,21 @@ macro_rules! impl_model_collection {
             fn serialize_size(&self) -> u32 {
                 self.iter().map(|item| item.serialize_size()).sum()
             }
-            fn accumulate_hessian32(&self, hessian: &mut [f32]) {
-                for item in self.iter() { item.accumulate_hessian32(hessian); }
+            fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+                for item in self.iter() { item.accumulate_hessian(hessian); }
             }
-            fn accumulate_hessian64(&self, hessian: &mut [f64]) {
-                for item in self.iter() { item.accumulate_hessian64(hessian); }
-            }
-            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
-                for item in self.iter() { item.accumulate_hessian_band32(band, kd)?; }
+            fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
+                for item in self.iter() { item.accumulate_hessian_band(band, kd)?; }
                 Ok(())
             }
-            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
-                for item in self.iter() { item.accumulate_hessian_band64(band, kd)?; }
-                Ok(())
+            fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+                for item in self.iter() { item.accumulate_hessian_sparse(coo); }
             }
-            fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
-                for item in self.iter() { item.accumulate_hessian_sparse32(coo); }
+            fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+                for item in self.iter() { item.accumulate_hessian_sparse_direct(csc); }
             }
-            fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
-                for item in self.iter() { item.accumulate_hessian_sparse64(coo); }
-            }
-            fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
-                for item in self.iter() { item.accumulate_hessian_sparse_direct32(csc); }
-            }
-            fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
-                for item in self.iter() { item.accumulate_hessian_sparse_direct64(csc); }
-            }
-            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
-                for item in self.iter() { item.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
-            }
-            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
-                for item in self.iter() { item.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
+            fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+                for item in self.iter() { item.accumulate_hessian_sparse_indexed(vals, positions, cursor); }
             }
         }
     };
@@ -1247,32 +1078,20 @@ impl_model_collection!(crate::refs::Deque<T>, iter_mut);
 
 // Arena needs a manual impl because iter()/iter_mut() return impl Iterator
 impl<T: Model> Model for crate::refs::Arena<T> {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
-        for item in self.iter_mut() { item.serialize_params32(data); }
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
+        for item in self.iter_mut() { item.serialize_params(data); }
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
-        for item in self.iter_mut() { item.deserialize_params32(data); }
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+        for item in self.iter_mut() { item.deserialize_params(data); }
     }
-    fn update32(&mut self,data: &[f32]) {
-        for item in self.iter_mut() { item.update32(data); }
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+        for item in self.iter_mut() { item.update_params(data); }
     }
     fn update_self(&mut self) {
         for item in self.iter_mut() { item.update_self(); }
     }
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        for item in self.iter_mut() { item.serialize_params64(data); }
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        for item in self.iter_mut() { item.deserialize_params64(data); }
-    }
-    fn update64(&mut self, data: &[f64]) {
-        for item in self.iter_mut() { item.update64(data); }
-    }
-    fn advance_params32(&mut self, params: &mut [f32]) {
-        for item in self.iter_mut() { item.advance_params32(params); }
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        for item in self.iter_mut() { item.advance_params64(params); }
+    fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
+        for item in self.iter_mut() { item.advance_params(params); }
     }
     fn zero_blocks(&mut self) {
         for item in self.iter_mut() { item.zero_blocks(); }
@@ -1280,17 +1099,11 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         for item in self.iter() { item.collect_param_blocks(out); }
     }
-    fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        for item in self.iter() { item.collect_hessian_cells64(out); }
+    fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for item in self.iter() { item.collect_hessian_cells(out); }
     }
-    fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        for item in self.iter() { item.collect_hessian_cells32(out); }
-    }
-    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-        for item in self.iter_mut() { item.bind_hessian_positions64(binder, out); }
-    }
-    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-        for item in self.iter_mut() { item.bind_hessian_positions32(binder, out); }
+    fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+        for item in self.iter_mut() { item.bind_hessian_positions(binder, out); }
     }
     fn release_blocks(&mut self) {
         for item in self.iter_mut() { item.release_blocks(); }
@@ -1298,67 +1111,39 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn serialize_size(&self) -> u32 {
         self.iter().map(|item| item.serialize_size()).sum()
     }
-    fn accumulate_hessian32(&self, hessian: &mut [f32]) {
-        for item in self.iter() { item.accumulate_hessian32(hessian); }
+    fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+        for item in self.iter() { item.accumulate_hessian(hessian); }
     }
-    fn accumulate_hessian64(&self, hessian: &mut [f64]) {
-        for item in self.iter() { item.accumulate_hessian64(hessian); }
-    }
-    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
-        for item in self.iter() { item.accumulate_hessian_band32(band, kd)?; }
+    fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
+        for item in self.iter() { item.accumulate_hessian_band(band, kd)?; }
         Ok(())
     }
-    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
-        for item in self.iter() { item.accumulate_hessian_band64(band, kd)?; }
-        Ok(())
+    fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+        for item in self.iter() { item.accumulate_hessian_sparse(coo); }
     }
-    fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
-        for item in self.iter() { item.accumulate_hessian_sparse32(coo); }
+    fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+        for item in self.iter() { item.accumulate_hessian_sparse_direct(csc); }
     }
-    fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
-        for item in self.iter() { item.accumulate_hessian_sparse64(coo); }
-    }
-    fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
-        for item in self.iter() { item.accumulate_hessian_sparse_direct32(csc); }
-    }
-    fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
-        for item in self.iter() { item.accumulate_hessian_sparse_direct64(csc); }
-    }
-    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
-        for item in self.iter() { item.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
-    }
-    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
-        for item in self.iter() { item.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
+    fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+        for item in self.iter() { item.accumulate_hessian_sparse_indexed(vals, positions, cursor); }
     }
 }
 
 impl<T: Model> Model for Option<T> {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
-        if let Some(inner) = self { inner.serialize_params32(data); }
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
+        if let Some(inner) = self { inner.serialize_params(data); }
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
-        if let Some(inner) = self { inner.deserialize_params32(data); }
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+        if let Some(inner) = self { inner.deserialize_params(data); }
     }
-    fn update32(&mut self,data: &[f32]) {
-        if let Some(inner) = self { inner.update32(data); }
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+        if let Some(inner) = self { inner.update_params(data); }
     }
     fn update_self(&mut self) {
         if let Some(inner) = self { inner.update_self(); }
     }
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        if let Some(inner) = self { inner.serialize_params64(data); }
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        if let Some(inner) = self { inner.deserialize_params64(data); }
-    }
-    fn update64(&mut self, data: &[f64]) {
-        if let Some(inner) = self { inner.update64(data); }
-    }
-    fn advance_params32(&mut self, params: &mut [f32]) {
-        if let Some(inner) = self { inner.advance_params32(params); }
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        if let Some(inner) = self { inner.advance_params64(params); }
+    fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
+        if let Some(inner) = self { inner.advance_params(params); }
     }
     fn serialize_size(&self) -> u32 {
         if let Some(inner) = self { inner.serialize_size() } else { 0 }
@@ -1369,52 +1154,30 @@ impl<T: Model> Model for Option<T> {
     fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         if let Some(inner) = self { inner.collect_param_blocks(out); }
     }
-    fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        if let Some(inner) = self { inner.collect_hessian_cells64(out); }
+    fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(inner) = self { inner.collect_hessian_cells(out); }
     }
-    fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        if let Some(inner) = self { inner.collect_hessian_cells32(out); }
-    }
-    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-        if let Some(inner) = self { inner.bind_hessian_positions64(binder, out); }
-    }
-    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-        if let Some(inner) = self { inner.bind_hessian_positions32(binder, out); }
+    fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+        if let Some(inner) = self { inner.bind_hessian_positions(binder, out); }
     }
     fn release_blocks(&mut self) {
         if let Some(inner) = self { inner.release_blocks(); }
     }
-    fn accumulate_hessian32(&self, hessian: &mut [f32]) {
-        if let Some(inner) = self { inner.accumulate_hessian32(hessian); }
+    fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+        if let Some(inner) = self { inner.accumulate_hessian(hessian); }
     }
-    fn accumulate_hessian64(&self, hessian: &mut [f64]) {
-        if let Some(inner) = self { inner.accumulate_hessian64(hessian); }
-    }
-    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
-        if let Some(inner) = self { inner.accumulate_hessian_band32(band, kd)?; }
+    fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
+        if let Some(inner) = self { inner.accumulate_hessian_band(band, kd)?; }
         Ok(())
     }
-    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
-        if let Some(inner) = self { inner.accumulate_hessian_band64(band, kd)?; }
-        Ok(())
+    fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse(coo); }
     }
-    fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
-        if let Some(inner) = self { inner.accumulate_hessian_sparse32(coo); }
+    fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse_direct(csc); }
     }
-    fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
-        if let Some(inner) = self { inner.accumulate_hessian_sparse64(coo); }
-    }
-    fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
-        if let Some(inner) = self { inner.accumulate_hessian_sparse_direct32(csc); }
-    }
-    fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
-        if let Some(inner) = self { inner.accumulate_hessian_sparse_direct64(csc); }
-    }
-    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
-        if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
-    }
-    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
-        if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
+    fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed(vals, positions, cursor); }
     }
 }
 
@@ -1482,7 +1245,7 @@ fn tile_start(indices: &[u32]) -> u32 {
 }
 
 /// How a backend hands out scatter targets during
-/// [`Model::bind_hessian_positions64`].
+/// [`Model::bind_hessian_positions`].
 pub enum HessianBinder<'a> {
     /// Tile-expanded pattern: every stored cell holds a full dense tile, so
     /// one lookup fixes a whole block and only the tile's origin and column
@@ -1694,7 +1457,9 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     }
 
     /// Accumulate this block's Hessian into the full dense symmetric hessian.
-    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+    /// Generic over the target width; the conversion is an identity when it
+    /// matches the block's storage.
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
         let n_total = (hessian.len() as f64).sqrt() as usize;
         for i in 0..N {
             let gi = self.indices[i];
@@ -1704,7 +1469,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
                 hessian[gi * n_total + gj] += val;
                 if gi != gj {
                     hessian[gj * n_total + gi] += val;
@@ -1715,7 +1480,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
     /// Returns Err if any element exceeds bandwidth kd.
-    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
         let ldab = kd + 1;
@@ -1731,7 +1496,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
                 if hi - lo > kd {
                     return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
                 }
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
                 band[(kd + lo - hi) + hi * ldab] += val;
             }
         }
@@ -1739,7 +1504,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     }
 
     /// Accumulate into COO (triplet) sparse format. Upper triangle only.
-    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
@@ -1747,14 +1512,14 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
                 coo.push(lo, hi, val);
             }
         }
     }
 
     /// Accumulate directly into CSC vals array using position lookup.
-    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
@@ -1762,7 +1527,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
                 if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
                     csc.vals[pos] += val;
                 }
@@ -1773,7 +1538,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     /// Accumulate into the assembled value buffer through this block's bound
     /// tile, leaving `positions` and `cursor` untouched. Blocks bound against
     /// a pattern with no tile to walk fall back to the map.
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         if !self.pos.tiled() {
             return self.accumulate_mapped_indexed(vals, positions, cursor);
         }
@@ -1794,7 +1559,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
             let tri = i * (2 * N - i - 1) / 2;
             for j in i..N {
                 if self.indices[j] == u32::MAX { continue; }
-                vals[row + col[j]] += self.hessian[tri + j];
+                vals[row + col[j]] += F::from(self.hessian[tri + j]).unwrap();
             }
         }
     }
@@ -1803,13 +1568,13 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
     /// one cached position per entry, `cursor` advancing in lockstep with the
     /// block traversal. An all-fixed block emits nothing and so consumes none.
-    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    fn accumulate_mapped_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
             for j in i..N {
                 if self.indices[j] == u32::MAX { continue; }
-                vals[positions[*cursor] as usize] += self.hessian[tri_idx(N, i, j)];
+                vals[positions[*cursor] as usize] += F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
                 *cursor += 1;
             }
         }
@@ -1906,12 +1671,12 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
     }
 
     /// Scatter this block into a dense n x n Hessian.
-    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
         if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
     }
 
     /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
-    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
         match &self.inner {
@@ -1935,17 +1700,17 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
     }
 
     /// Scatter this block into COO triplets.
-    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
     }
 
     /// Scatter this block into a prebuilt CSC structure by position lookup.
-    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
     }
 
     /// Scatter this block into CSC values through cached positions.
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         if let Some(b) = &self.inner {
             b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
@@ -2056,7 +1821,9 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Accumulate cross pairs into the full dense symmetric hessian.
-    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+    /// Generic over the target width; the conversion is an identity when it
+    /// matches the block's storage.
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
         let n_total = (hessian.len() as f64).sqrt() as usize;
         for i in 0..NA {
             let gi = self.indices_a[i];
@@ -2067,7 +1834,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
-                let val = self.cross_hessian[row + j];
+                let val = F::from(self.cross_hessian[row + j]).unwrap();
                 hessian[gi * n_total + gj] += val;
                 hessian[gj * n_total + gi] += val;
             }
@@ -2075,7 +1842,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
-    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
         let ldab = kd + 1;
@@ -2092,7 +1859,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 if hi - lo > kd {
                     return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
                 }
-                let val = self.cross_hessian[row + j];
+                let val = F::from(self.cross_hessian[row + j]).unwrap();
                 // Aliased slots (same entity in both refs): the triangle
                 // stores each symmetric pair once, so the diagonal needs
                 // both of the 2*dr_a*dr_b contributions explicitly.
@@ -2152,7 +1919,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Accumulate into COO sparse format. Upper triangle only.
-    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2161,7 +1928,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.cross_hessian[row + j];
+                let val = F::from(self.cross_hessian[row + j]).unwrap();
                 // Aliased diagonal: see accumulate_hessian_band.
                 let val = if gi == gj { val + val } else { val };
                 coo.push(lo, hi, val);
@@ -2170,7 +1937,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Accumulate directly into CSC vals via position lookup.
-    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2179,7 +1946,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.cross_hessian[row + j];
+                let val = F::from(self.cross_hessian[row + j]).unwrap();
                 // Aliased diagonal: see accumulate_hessian_band.
                 let val = if gi == gj { val + val } else { val };
                 if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
@@ -2192,7 +1959,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// Accumulate into the assembled value buffer through this block's bound
     /// tile; see the note on
     /// [`SelfBlock::accumulate_hessian_sparse_indexed`].
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         if !self.pos.tiled() {
             return self.accumulate_mapped_indexed(vals, positions, cursor);
         }
@@ -2221,14 +1988,14 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
             let row = i * NB;
             for j in 0..NB {
                 if self.indices_b[j] == u32::MAX { continue; }
-                vals[pos + off_b[j]] += self.cross_hessian[row + j];
+                vals[pos + off_b[j]] += F::from(self.cross_hessian[row + j]).unwrap();
             }
         }
     }
 
     /// The aliased case of [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
     /// one entity in both slots, every pair on its diagonal tile.
-    fn accumulate_aliased_indexed(&self, vals: &mut [T], base: usize, stride: usize, start: usize) {
+    fn accumulate_aliased_indexed<F: crate::utils::Float>(&self, vals: &mut [F], base: usize, stride: usize, start: usize) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2237,7 +2004,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.cross_hessian[row + j];
+                let val = F::from(self.cross_hessian[row + j]).unwrap();
                 // The triangle stores each symmetric pair once, so a pair that
                 // lands on the diagonal needs both contributions.
                 let val = if gi == gj { val + val } else { val };
@@ -2249,7 +2016,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// The untiled case of
     /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
     /// one cached position per entry.
-    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    fn accumulate_mapped_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2257,7 +2024,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
             for j in 0..NB {
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
-                let val = self.cross_hessian[row + j];
+                let val = F::from(self.cross_hessian[row + j]).unwrap();
                 // Aliased diagonal: see accumulate_hessian_band.
                 let val = if gi == gj { val + val } else { val };
                 vals[positions[*cursor] as usize] += val;
@@ -2350,12 +2117,12 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Scatter this block into a dense n x n Hessian.
-    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
         if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
     }
 
     /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
-    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
         match &self.inner {
@@ -2379,17 +2146,17 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Scatter this block into COO triplets.
-    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
     }
 
     /// Scatter this block into a prebuilt CSC structure by position lookup.
-    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
     }
 
     /// Scatter this block into CSC values through cached positions.
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         if let Some(b) = &self.inner {
             b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
@@ -2575,10 +2342,13 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     }
 
     /// Accumulate Hessian pairs into the full dense symmetric hessian.
-    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+    /// Generic over the target width; the conversion is an identity when it
+    /// matches the block's storage.
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
         let n_total = (hessian.len() as f64).sqrt() as usize;
         for &(i, j, v) in &self.hessian {
             let (i, j) = (i as usize, j as usize);
+            let v = F::from(v).unwrap();
             hessian[i * n_total + j] += v;
             if i != j {
                 hessian[j * n_total + i] += v;
@@ -2589,7 +2359,7 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     /// Accumulate into upper-band format (LAPACK layout: A[r, c] at
     /// band[(kd + r - c) + c * ldab], matching SelfBlock/CrossBlock and
     /// the band solvers).
-    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
         let ldab = kd + 1;
@@ -2598,7 +2368,7 @@ impl<T: crate::utils::Float> TripletBlock<T> {
             if c < r || c - r > kd {
                 return Err(crate::simple_lm::BandOverflow { row: r, col: c, kd });
             }
-            band[(kd + r - c) + c * ldab] += v;
+            band[(kd + r - c) + c * ldab] += F::from(v).unwrap();
         }
         Ok(())
     }
@@ -2639,17 +2409,17 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     }
 
     /// Scatter this block into COO triplets.
-    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
         for &(i, j, v) in &self.hessian {
-            coo.push(i, j, v);
+            coo.push(i, j, F::from(v).unwrap());
         }
     }
 
     /// Accumulate directly into CSC vals via position lookup.
-    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
         for &(row, col, v) in &self.hessian {
             if let Some(pos) = csc.find_pos(row as usize, col as usize) {
-                csc.vals[pos] += v;
+                csc.vals[pos] += F::from(v).unwrap();
             }
         }
     }
@@ -2659,13 +2429,13 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     /// The position list is built once per solve from the first
     /// iteration's entry sequence; this block must push the same number
     /// of tuples every iteration (see `ExtendedModel` contract notes).
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         assert!(*cursor + self.hessian.len() <= positions.len(),
             "sparsity pattern changed between iterations: TripletBlock holds {} \
              entries but only {} slots remain in the cached pattern",
             self.hessian.len(), positions.len() - *cursor);
         for &(_, _, v) in &self.hessian {
-            vals[positions[*cursor] as usize] += v;
+            vals[positions[*cursor] as usize] += F::from(v).unwrap();
             *cursor += 1;
         }
     }
@@ -2676,84 +2446,44 @@ impl<T: crate::utils::Float> TripletBlock<T> {
 // ---------------------------------------------------------------------------
 //
 // A block is a node of the model tree like any other field: generated code
-// walks it through the same uniform `Model::` recursion. Each block
-// implements ONLY its own precision's walk family (the other family stays
-// the trait's no-op default), so a walk visits exactly the blocks of its
-// precision -- resolved at monomorphization, which is what lets a generic
-// struct's `SelfBlock<A, N, M, T>` sort itself per instantiation.
+// walks it through the same uniform `Model::` recursion. The walk methods
+// are generic over the target width and forward to the blocks' inherent
+// methods, which convert stored values on accumulation -- an identity when
+// the widths match, which is the only case generated roots emit.
 
 macro_rules! block_model_methods {
-    (f32) => {
+    () => {
         #[inline]
         fn zero_blocks(&mut self) { self.zero(); }
         #[inline]
         fn release_blocks(&mut self) { self.release(); }
         #[inline]
-        fn accumulate_hessian32(&self, hessian: &mut [f32]) {
+        fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
             self.accumulate_hessian(hessian);
         }
         #[inline]
-        fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize)
+        fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
             -> Result<(), crate::simple_lm::BandOverflow> {
             self.accumulate_hessian_band(band, kd)
         }
         #[inline]
-        fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
+        fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
             self.accumulate_hessian_sparse(coo);
         }
         #[inline]
-        fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
+        fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
             self.accumulate_hessian_sparse_direct(csc);
         }
         #[inline]
-        fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
+        fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
             self.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
         #[inline]
-        fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
             self.collect_hessian_cells(out);
         }
         #[inline]
-        fn bind_hessian_positions32(
-            &mut self,
-            binder: &mut HessianBinder,
-            out: &mut std::vec::Vec<ValueIndex>,
-        ) {
-            self.bind_hessian_positions(binder, out);
-        }
-    };
-    (f64) => {
-        #[inline]
-        fn zero_blocks(&mut self) { self.zero(); }
-        #[inline]
-        fn release_blocks(&mut self) { self.release(); }
-        #[inline]
-        fn accumulate_hessian64(&self, hessian: &mut [f64]) {
-            self.accumulate_hessian(hessian);
-        }
-        #[inline]
-        fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize)
-            -> Result<(), crate::simple_lm::BandOverflow> {
-            self.accumulate_hessian_band(band, kd)
-        }
-        #[inline]
-        fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
-            self.accumulate_hessian_sparse(coo);
-        }
-        #[inline]
-        fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
-            self.accumulate_hessian_sparse_direct(csc);
-        }
-        #[inline]
-        fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
-            self.accumulate_hessian_sparse_indexed(vals, positions, cursor);
-        }
-        #[inline]
-        fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-            self.collect_hessian_cells(out);
-        }
-        #[inline]
-        fn bind_hessian_positions64(
+        fn bind_hessian_positions(
             &mut self,
             binder: &mut HessianBinder,
             out: &mut std::vec::Vec<ValueIndex>,
@@ -2773,43 +2503,24 @@ macro_rules! collect_param_block_method {
     };
 }
 
-impl<A, const N: usize, const M: usize> Model for SelfBlock<A, N, M, f32> {
-    block_model_methods!(f32);
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> Model for SelfBlock<A, N, M, T> {
+    block_model_methods!();
     collect_param_block_method!();
 }
-impl<A, const N: usize, const M: usize> Model for SelfBlock<A, N, M, f64> {
-    block_model_methods!(f64);
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> Model for BoxedSelfBlock<A, N, M, T> {
+    block_model_methods!();
     collect_param_block_method!();
 }
-impl<A, const N: usize, const M: usize> Model for BoxedSelfBlock<A, N, M, f32> {
-    block_model_methods!(f32);
-    collect_param_block_method!();
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Model
+    for CrossBlock<A, B, NA, NB, P, T> {
+    block_model_methods!();
 }
-impl<A, const N: usize, const M: usize> Model for BoxedSelfBlock<A, N, M, f64> {
-    block_model_methods!(f64);
-    collect_param_block_method!();
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Model
+    for BoxedCrossBlock<A, B, NA, NB, P, T> {
+    block_model_methods!();
 }
-impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
-    for CrossBlock<A, B, NA, NB, P, f32> {
-    block_model_methods!(f32);
-}
-impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
-    for CrossBlock<A, B, NA, NB, P, f64> {
-    block_model_methods!(f64);
-}
-impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
-    for BoxedCrossBlock<A, B, NA, NB, P, f32> {
-    block_model_methods!(f32);
-}
-impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
-    for BoxedCrossBlock<A, B, NA, NB, P, f64> {
-    block_model_methods!(f64);
-}
-impl Model for TripletBlock<f32> {
-    block_model_methods!(f32);
-}
-impl Model for TripletBlock<f64> {
-    block_model_methods!(f64);
+impl<T: crate::utils::Float> Model for TripletBlock<T> {
+    block_model_methods!();
 }
 
 // ---------------------------------------------------------------------------
@@ -3270,10 +2981,10 @@ mod tests {
         let mut b = Param::new(7.0f32);
         let mut c = Param::fixed(99.0f32);
 
-        let mut data = Vec::new();
-        a.serialize_params32(&mut data);
-        b.serialize_params32(&mut data);
-        c.serialize_params32(&mut data);
+        let mut data: std::vec::Vec<f32> = Vec::new();
+        a.serialize_params(&mut data);
+        b.serialize_params(&mut data);
+        c.serialize_params(&mut data);
 
         assert_eq!(data, vec![3.0, 7.0]);
         assert_eq!(a.index, 0);
@@ -3283,9 +2994,9 @@ mod tests {
         // modify and deserialize
         data[0] = 10.0;
         data[1] = 20.0;
-        a.deserialize_params32(&data);
-        b.deserialize_params32(&data);
-        c.deserialize_params32(&data);
+        a.deserialize_params(&data);
+        b.deserialize_params(&data);
+        c.deserialize_params(&data);
         assert_eq!(a.value, 10.0);
         assert_eq!(b.value, 20.0);
         assert_eq!(c.value, 99.0); // unchanged — fixed
@@ -3294,8 +3005,8 @@ mod tests {
     #[test]
     fn test_param_vect3f_serialize() {
         let mut p = Param::new(vect3f::new(1.0, 2.0, 3.0));
-        let mut data = Vec::new();
-        p.serialize_params32(&mut data);
+        let mut data: std::vec::Vec<f32> = Vec::new();
+        p.serialize_params(&mut data);
         assert_eq!(data, vec![1.0, 2.0, 3.0]);
         assert_eq!(p.index, 0);
     }
@@ -3303,11 +3014,11 @@ mod tests {
     #[test]
     fn test_param_update() {
         let mut p = Param::new(5.0f32);
-        let mut data = Vec::new();
-        p.serialize_params32(&mut data);
+        let mut data: std::vec::Vec<f32> = Vec::new();
+        p.serialize_params(&mut data);
         data[0] = 42.0;
 
-        p.update32(&data);
+        p.update_params(&data);
         assert_eq!(p.work(), 42.0);
         assert_eq!(p.value, 5.0); // value unchanged
 
@@ -3318,24 +3029,24 @@ mod tests {
     #[test]
     fn test_param_fixed_update() {
         let mut p = Param::fixed(5.0f32);
-        let mut data = Vec::new();
-        p.serialize_params32(&mut data);
+        let mut data: std::vec::Vec<f32> = Vec::new();
+        p.serialize_params(&mut data);
         assert!(data.is_empty()); // fixed param not serialized
 
-        p.update32(&data);
+        p.update_params(&data);
         assert_eq!(p.work(), 5.0); // gets value since not optimized
     }
 
     #[test]
     fn test_param_vect2f() {
         let mut p = Param::new(vect2f::new(1.0, 2.0));
-        let mut data = Vec::new();
-        p.serialize_params32(&mut data);
+        let mut data: std::vec::Vec<f32> = Vec::new();
+        p.serialize_params(&mut data);
         assert_eq!(data, vec![1.0, 2.0]);
 
         data[0] = 10.0;
         data[1] = 20.0;
-        p.update32(&data);
+        p.update_params(&data);
         assert_eq!(p.work().x, 10.0);
         assert_eq!(p.work().y, 20.0);
     }
@@ -3347,21 +3058,21 @@ mod tests {
         let mut c = Param::fixed(99.0f32);
 
         let mut data: std::vec::Vec<f64> = Vec::new();
-        a.serialize_params64(&mut data);
-        b.serialize_params64(&mut data);
-        c.serialize_params64(&mut data);
+        a.serialize_params(&mut data);
+        b.serialize_params(&mut data);
+        c.serialize_params(&mut data);
 
         assert_eq!(data, vec![3.0f64, 7.0]);
         assert_eq!(a.index, 0);
         assert_eq!(b.index, 1);
         assert_eq!(c.index, u32::MAX);
 
-        // modify and deserialize64
+        // modify and deserialize through the f64 vector
         data[0] = 10.0;
         data[1] = 20.0;
-        a.deserialize_params64(&data);
-        b.deserialize_params64(&data);
-        c.deserialize_params64(&data);
+        a.deserialize_params(&data);
+        b.deserialize_params(&data);
+        c.deserialize_params(&data);
         assert_eq!(a.value, 10.0f32);
         assert_eq!(b.value, 20.0f32);
         assert_eq!(c.value, 99.0f32);
@@ -3371,13 +3082,13 @@ mod tests {
     fn test_param_vect3f_serialize64_roundtrip() {
         let mut p = Param::new(vect3f::new(1.0, 2.0, 3.0));
         let mut data: std::vec::Vec<f64> = Vec::new();
-        p.serialize_params64(&mut data);
+        p.serialize_params(&mut data);
         assert_eq!(data, vec![1.0f64, 2.0, 3.0]);
 
         data[0] = 10.5;
         data[1] = 20.5;
         data[2] = 30.5;
-        p.update64(&data);
+        p.update_params(&data);
         assert_eq!(p.work().x, 10.5f32);
         assert_eq!(p.work().y, 20.5f32);
         assert_eq!(p.work().z, 30.5f32);
@@ -3387,10 +3098,10 @@ mod tests {
     fn test_param_fixed_update64() {
         let mut p = Param::fixed(5.0f32);
         let mut data: std::vec::Vec<f64> = Vec::new();
-        p.serialize_params64(&mut data);
+        p.serialize_params(&mut data);
         assert!(data.is_empty());
 
-        p.update64(&data);
+        p.update_params(&data);
         assert_eq!(p.work(), 5.0f32);
     }
 
@@ -3423,8 +3134,8 @@ mod tests {
     #[test]
     fn test_collection_serialize_size() {
         let mut v = vec![Param::new(1.0f32), Param::new(2.0f32), Param::fixed(3.0f32)];
-        let mut data = Vec::new();
-        v.serialize_params32(&mut data);
+        let mut data: std::vec::Vec<f32> = Vec::new();
+        v.serialize_params(&mut data);
         // 2 optimized params
         assert_eq!(v.serialize_size(), 2);
 

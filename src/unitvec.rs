@@ -184,37 +184,23 @@ where
 {
     const PARAM_COUNT: u32 = 2;
 
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+    fn serialize_params<F: Float>(&mut self, data: &mut std::vec::Vec<F>) {
         Component::start(self);
-        Model::serialize_params32(&mut self.d, data);
+        Model::serialize_params(&mut self.d, data);
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
-        Model::deserialize_params32(&mut self.d, data);
+    fn deserialize_params<F: Float>(&mut self, data: &[F]) {
+        Model::deserialize_params(&mut self.d, data);
         Component::finish(self);
         // Sync the working copy before precomputing: it still holds the
         // last trial's delta, and the embed must match what finish wrote.
         Model::update_self(self);
     }
-    fn update32(&mut self, data: &[f32]) {
-        Model::update32(&mut self.d, data);
+    fn update_params<F: Float>(&mut self, data: &[F]) {
+        Model::update_params(&mut self.d, data);
         self.__precompute_symbolic();
     }
     fn update_self(&mut self) {
         Model::update_self(&mut self.d);
-        self.__precompute_symbolic();
-    }
-
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        Component::start(self);
-        Model::serialize_params64(&mut self.d, data);
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        Model::deserialize_params64(&mut self.d, data);
-        Component::finish(self);
-        Model::update_self(self);
-    }
-    fn update64(&mut self, data: &[f64]) {
-        Model::update64(&mut self.d, data);
         self.__precompute_symbolic();
     }
 
@@ -225,20 +211,12 @@ where
         <Param<vect2<T>> as Model>::param_symbols(&format!("{}.d", base), out);
     }
 
-    fn advance_params32(&mut self, params: &mut [f32]) {
-        Model::deserialize_params32(&mut self.d, params);
+    fn advance_params<F: Float>(&mut self, params: &mut [F]) {
+        Model::deserialize_params(&mut self.d, params);
         Component::update(self);
         if self.d.index() != u32::MAX {
             let i = self.d.index() as usize;
-            ParamType::write_to32(&self.d.value, &mut params[i..i + 2]);
-        }
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        Model::deserialize_params64(&mut self.d, params);
-        Component::update(self);
-        if self.d.index() != u32::MAX {
-            let i = self.d.index() as usize;
-            ParamType::write_to64(&self.d.value, &mut params[i..i + 2]);
+            ParamType::write_to(&self.d.value, &mut params[i..i + 2]);
         }
     }
 }
@@ -293,7 +271,7 @@ mod tests {
         let mut p = UnitVecParam::<f64>::new(vect3::new(0.3, -0.8, 0.51));
         // A serialize pass assigns the delta its live index, so the guarded
         // cache fills.
-        Model::serialize_params64(&mut p, &mut std::vec::Vec::new());
+        Model::serialize_params(&mut p, &mut std::vec::Vec::<f64>::new());
         // Drive the proper cycle: value -> update_self syncs the working
         // copy and refreshes unit + unit_d.
         let mut at = |p: &mut UnitVecParam<f64>, dx: f64, dy: f64| -> (vect3<f64>, [vect3<f64>; 2]) {

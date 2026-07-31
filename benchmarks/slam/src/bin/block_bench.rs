@@ -94,7 +94,7 @@ fn main() {
     let (t_scatter, _) = min_ms(rounds, || {
         bsc.vals_mut().iter_mut().for_each(|v| *v = 0.0);
         let mut cursor = 0usize;
-        arael::model::Model::accumulate_hessian_sparse_indexed64(
+        arael::model::Model::accumulate_hessian_sparse_indexed(
             &path, bsc.vals_mut(), &positions_block, &mut cursor);
     });
 
@@ -102,7 +102,7 @@ fn main() {
     // scan 1: block cells from indices alone (structure-only)
     let (t_cells, cells) = min_ms(rounds, || {
         let mut cells: Vec<(u32, u32)> = Vec::new();
-        arael::model::Model::collect_hessian_cells64(&path, &mut cells);
+        arael::model::Model::collect_hessian_cells(&path, &mut cells);
         cells
     });
     // symbolic from the cells (anchors are ordinary scalar coords)
@@ -118,7 +118,7 @@ fn main() {
     let (t_pos2, positions2) = min_ms(rounds, || {
         let mut resolver = PositionResolver::new(&sym2);
         let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_block.len());
-        arael::model::Model::bind_hessian_positions64(
+        arael::model::Model::bind_hessian_positions(
             &mut path,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
             &mut out,
@@ -137,7 +137,7 @@ fn main() {
     let (t_spos, _spos) = min_ms(rounds, || {
         let mut resolver = resolver_proto.clone();
         let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_scalar.len());
-        arael::model::Model::bind_hessian_positions64(
+        arael::model::Model::bind_hessian_positions(
             &mut path,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut out,

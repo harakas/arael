@@ -1252,12 +1252,12 @@ pub trait LmProblem<T> {
         true
     }
     /// Append one representative scalar coordinate per Hessian block
-    /// cell (see `Model::collect_hessian_cells64`). Default: nothing
+    /// cell (see `Model::collect_hessian_cells`). Default: nothing
     /// (structure walk unsupported -- backends fall back to COO).
     fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
     /// Bind every block to its tile in the assembled value buffer, ready for
     /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed).
-    /// `binder` hands out scatter targets (see `Model::bind_hessian_positions64`):
+    /// `binder` hands out scatter targets (see `Model::bind_hessian_positions`):
     /// against a tile-expanded pattern a block keeps its tile origin and
     /// column stride, otherwise it pushes one position per entry into `out`.
     /// Must be redone whenever the pattern or the indices change.

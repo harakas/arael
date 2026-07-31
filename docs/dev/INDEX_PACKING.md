@@ -43,7 +43,7 @@ block column's height, which they do not.
 
 ## Two binders
 
-`Model::bind_hessian_positions64` takes a `HessianBinder`:
+`Model::bind_hessian_positions` takes a `HessianBinder`:
 
 - `Tiled` -- the pattern is tile-expanded, so a block keeps its `TilePosition`
   and pushes nothing.

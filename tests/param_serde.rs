@@ -16,7 +16,7 @@ fn param_index_restores_sentinel_not_zero() {
     let mut p = Param::new(1.5_f64);
     // Assign a real index by serializing the parameter vector.
     let mut data: Vec<f64> = Vec::new();
-    p.serialize_params64(&mut data);
+    p.serialize_params(&mut data);
     assert_eq!(p.index(), 0, "first param gets index 0");
 
     let json = serde_json::to_string(&p).expect("serialize");
@@ -54,15 +54,15 @@ fn vect3_f64_param_type() {
     // exactly through the parameter vector and serde.
     let mut p = Param::new(vect3::new(1.0e6_f64, 2.0e6, 3.0e6));
     let mut data: Vec<f64> = Vec::new();
-    p.serialize_params64(&mut data);
+    p.serialize_params(&mut data);
     assert_eq!(data, vec![1.0e6, 2.0e6, 3.0e6]);
     assert_eq!(p.index(), 0);
 
     // Full-precision round trip through the parameter vector: values
     // like 1e6 + 0.25 must survive exactly (they would not in f32).
     let moved = vec![1.0e6 + 0.25, 2.0e6 + 0.25, 3.0e6 + 0.25];
-    p.update64(&moved);
-    p.deserialize_params64(&moved);
+    p.update_params(&moved);
+    p.deserialize_params(&moved);
     assert_eq!(p.value.x, 1.0e6 + 0.25);
     assert_eq!(p.work().z, 3.0e6 + 0.25);
 
@@ -74,7 +74,7 @@ fn vect3_f64_param_type() {
     // f64 euler angle params (Model requires vect3<T>: ParamType).
     let mut ea = SimpleEulerAngleParam::<f64>::new(vect3::new(0.1, 0.2, 0.3));
     let mut data: Vec<f64> = Vec::new();
-    ea.serialize_params64(&mut data);
+    ea.serialize_params(&mut data);
     assert_eq!(data.len(), 3);
 }
 
@@ -84,7 +84,7 @@ fn simple_euler_angle_param_round_trips_with_sentinel() {
     // sentinel and defaults optimize -- keep it that way.
     let mut p = SimpleEulerAngleParam::<f32>::new(vect3::new(0.1, 0.2, 0.3));
     let mut data: Vec<f32> = Vec::new();
-    p.serialize_params32(&mut data);
+    p.serialize_params(&mut data);
     assert_eq!(p.index(), 0);
 
     let json = serde_json::to_string(&p).expect("serialize");

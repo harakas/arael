@@ -756,7 +756,7 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// params are never touched by their own constraints or by cross/triplet
 /// constraints -- e.g. a coefficient wrapper whose gradient is written
 /// exclusively by a parent's `ExtendedModel`, or a struct that only
-/// exercises `serialize_params32`/`update32` without ever going through
+/// exercises `serialize_params`/`update_params` without ever going through
 /// the LM solver.
 ///
 /// ```ignore
@@ -807,7 +807,7 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///
 /// ```ignore
 /// fn calc_cost(&mut self, params: &[f64]) -> f64 {
-///     arael::model::Model::update64(self, params);
+///     arael::model::Model::update_params(self, params);
 ///     let mut __cost = 0.0 as f64;
 ///     for __item in self.poses.iter() {
 ///         // Tilt constraint -- precomputed rotation matrix used directly:
@@ -1841,8 +1841,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         .map(|l| l.component).unwrap_or(false);
     // The per-Param slice writeback the component's advance needs after
     // Component::update reset the values.
-    let mut comp_writeback32: Vec<TokenStream2> = Vec::new();
-    let mut comp_writeback64: Vec<TokenStream2> = Vec::new();
+    let mut comp_writeback: Vec<TokenStream2> = Vec::new();
 
     // Pass 1: identify Param<T> fields
     let mut param_field_names: HashSet<String> = HashSet::new();
@@ -1870,23 +1869,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut update_phase1: Vec<TokenStream2> = Vec::new();
     let mut update_self_phase1: Vec<TokenStream2> = Vec::new();
     let mut compute_stmts: Vec<TokenStream2> = Vec::new();
-    let mut serialize64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut deserialize64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut update64_phase1: Vec<TokenStream2> = Vec::new();
     let mut zero_blocks_stmts: Vec<TokenStream2> = Vec::new();
     let mut release_blocks_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_band32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_band64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_direct32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_direct64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_indexed32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_indexed64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut advance32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut advance64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_band_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_direct_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_indexed_stmts: Vec<TokenStream2> = Vec::new();
+    let mut advance_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_count_terms: Vec<TokenStream2> = Vec::new();
     let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_symbols_stmts: Vec<TokenStream2> = Vec::new();
@@ -1900,13 +1890,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // read from SelfBlock indices).
     let mut collect_param_blocks_stmts: Vec<TokenStream2> = Vec::new();
     // Per-struct recursion for the structure-only Hessian walks (cells
-    // and scatter positions), split by block precision to mirror the
-    // accumulate stmt lists exactly -- emission order is the invariant.
+    // and scatter positions), mirroring the accumulate stmt list exactly
+    // -- emission order is the invariant.
     let mut has_triplet_block = false;
-    let mut collect_cells32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut collect_cells64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut positions32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut positions64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut collect_cells_stmts: Vec<TokenStream2> = Vec::new();
+    let mut positions_stmts: Vec<TokenStream2> = Vec::new();
 
     // The struct's scalar type parameter, when generic: a bare `T` data
     // field is excluded from the Model walks below -- for concrete scalars
@@ -1946,12 +1934,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             Some(AraelAttr::RefResolve(_)) | Some(AraelAttr::Cross(_))
             | Some(AraelAttr::Symbolic(_)) | None => {
                 // Block fields walk through the same uniform Model
-                // recursion as every other field: each block's Model impl
-                // participates in exactly its own precision's walks (the
-                // other family is the trait's no-op default), so the
-                // precision sort happens at monomorphization -- which is
-                // what lets a generic struct's `SelfBlock<A, T>` sort
-                // itself per instantiation.
+                // recursion as every other field: the walk methods are
+                // generic over the target width, and each block converts
+                // its stored values on accumulation -- an identity at the
+                // one width a generated root actually calls.
                 if let syn::Type::Path(tp) = &field.ty
                     && let Some(seg) = tp.path.segments.last()
                         && seg.ident == "TripletBlock" {
@@ -1971,18 +1957,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         );
                     });
                     if is_component_struct && is_euler_angle_param_type(ty).is_none() {
-                        comp_writeback32.push(quote! {
+                        comp_writeback.push(quote! {
                             if self.#ident.index() != u32::MAX {
                                 let __i = self.#ident.index() as usize;
                                 let __n = <#ty as arael::model::Model>::PARAM_COUNT as usize;
-                                arael::model::ParamType::write_to32(&self.#ident.value, &mut params[__i..__i + __n]);
-                            }
-                        });
-                        comp_writeback64.push(quote! {
-                            if self.#ident.index() != u32::MAX {
-                                let __i = self.#ident.index() as usize;
-                                let __n = <#ty as arael::model::Model>::PARAM_COUNT as usize;
-                                arael::model::ParamType::write_to64(&self.#ident.value, &mut params[__i..__i + __n]);
+                                arael::model::ParamType::write_to(&self.#ident.value, &mut params[__i..__i + __n]);
                             }
                         });
                     }
@@ -2007,31 +1986,19 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 // All param types (Param, SimpleEulerAngleParam, EulerAngleParam)
                 // use their own Model trait impl for serialize/deserialize/update.
                 serialize_stmts.push(quote! {
-                    arael::model::Model::serialize_params32(&mut self.#ident, data);
+                    arael::model::Model::serialize_params(&mut self.#ident, data);
                 });
                 deserialize_stmts.push(quote! {
-                    arael::model::Model::deserialize_params32(&mut self.#ident, data);
+                    arael::model::Model::deserialize_params(&mut self.#ident, data);
                 });
                 update_phase1.push(quote! {
-                    arael::model::Model::update32(&mut self.#ident, data);
+                    arael::model::Model::update_params(&mut self.#ident, data);
                 });
                 update_self_phase1.push(quote! {
                     arael::model::Model::update_self(&mut self.#ident);
                 });
-                serialize64_stmts.push(quote! {
-                    arael::model::Model::serialize_params64(&mut self.#ident, data);
-                });
-                deserialize64_stmts.push(quote! {
-                    arael::model::Model::deserialize_params64(&mut self.#ident, data);
-                });
-                update64_phase1.push(quote! {
-                    arael::model::Model::update64(&mut self.#ident, data);
-                });
-                advance32_stmts.push(quote! {
-                    arael::model::Model::advance_params32(&mut self.#ident, params);
-                });
-                advance64_stmts.push(quote! {
-                    arael::model::Model::advance_params64(&mut self.#ident, params);
+                advance_stmts.push(quote! {
+                    arael::model::Model::advance_params(&mut self.#ident, params);
                 });
                 serialize_size_stmts.push(quote! {
                     arael::model::Model::serialize_size(&self.#ident)
@@ -2055,50 +2022,29 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 collect_param_blocks_stmts.push(quote! {
                     arael::model::Model::collect_param_blocks(&self.#ident, out);
                 });
-                collect_cells32_stmts.push(quote! {
-                    arael::model::Model::collect_hessian_cells32(&self.#ident, out);
+                collect_cells_stmts.push(quote! {
+                    arael::model::Model::collect_hessian_cells(&self.#ident, out);
                 });
-                collect_cells64_stmts.push(quote! {
-                    arael::model::Model::collect_hessian_cells64(&self.#ident, out);
-                });
-                positions32_stmts.push(quote! {
-                    arael::model::Model::bind_hessian_positions32(&mut self.#ident, binder, out);
-                });
-                positions64_stmts.push(quote! {
-                    arael::model::Model::bind_hessian_positions64(&mut self.#ident, binder, out);
+                positions_stmts.push(quote! {
+                    arael::model::Model::bind_hessian_positions(&mut self.#ident, binder, out);
                 });
                 release_blocks_stmts.push(quote! {
                     arael::model::Model::release_blocks(&mut self.#ident);
                 });
-                accumulate_hessian32_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian32(&self.#ident, hessian);
+                accumulate_hessian_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian(&self.#ident, hessian);
                 });
-                accumulate_hessian64_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian64(&self.#ident, hessian);
+                accumulate_hessian_band_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_band(&self.#ident, band, kd)?;
                 });
-                accumulate_hessian_band32_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_band32(&self.#ident, band, kd)?;
+                accumulate_hessian_sparse_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse(&self.#ident, coo);
                 });
-                accumulate_hessian_band64_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_band64(&self.#ident, band, kd)?;
+                accumulate_hessian_sparse_direct_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse_direct(&self.#ident, csc);
                 });
-                accumulate_hessian_sparse32_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse32(&self.#ident, coo);
-                });
-                accumulate_hessian_sparse64_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse64(&self.#ident, coo);
-                });
-                accumulate_hessian_sparse_direct32_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse_direct32(&self.#ident, csc);
-                });
-                accumulate_hessian_sparse_direct64_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse_direct64(&self.#ident, csc);
-                });
-                accumulate_hessian_sparse_indexed32_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse_indexed32(&self.#ident, vals, positions, cursor);
-                });
-                accumulate_hessian_sparse_indexed64_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse_indexed64(&self.#ident, vals, positions, cursor);
+                accumulate_hessian_sparse_indexed_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse_indexed(&self.#ident, vals, positions, cursor);
                 });
             }
         }
@@ -2114,18 +2060,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let comp_finish = if is_component_struct {
         quote! { arael::model::Component::finish(self); }
     } else { quote! {} };
-    let comp_advance32 = if is_component_struct {
+    let comp_advance = if is_component_struct {
         quote! {
-            arael::model::Model::deserialize_params32(self, params);
+            arael::model::Model::deserialize_params(self, params);
             arael::model::Component::update(self);
-            #(#comp_writeback32)*
-        }
-    } else { quote! {} };
-    let comp_advance64 = if is_component_struct {
-        quote! {
-            arael::model::Model::deserialize_params64(self, params);
-            arael::model::Component::update(self);
-            #(#comp_writeback64)*
+            #(#comp_writeback)*
         }
     } else { quote! {} };
 
@@ -2168,16 +2107,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let model_impl = quote! {
         impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
-            fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+            fn serialize_params<F: arael::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
                 #comp_start
                 #(#serialize_stmts)*
             }
-            fn deserialize_params32(&mut self, data: &[f32]) {
+            fn deserialize_params<F: arael::utils::Float>(&mut self, data: &[F]) {
                 #(#deserialize_stmts)*
                 #comp_finish
                 #precompute_deser
             }
-            fn update32(&mut self, data: &[f32]) {
+            fn update_params<F: arael::utils::Float>(&mut self, data: &[F]) {
                 #(#update_phase1)*
                 #(#compute_stmts)*
                 #(#euler_compute_stmts)*
@@ -2189,28 +2128,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 #(#euler_compute_stmts)*
                 #precompute_call
             }
-            fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-                #comp_start
-                #(#serialize64_stmts)*
-            }
-            fn deserialize_params64(&mut self, data: &[f64]) {
-                #(#deserialize64_stmts)*
-                #comp_finish
-                #precompute_deser
-            }
-            fn update64(&mut self, data: &[f64]) {
-                #(#update64_phase1)*
-                #(#compute_stmts)*
-                #(#euler_compute_stmts)*
-                #precompute_call
-            }
-            fn advance_params32(&mut self, params: &mut [f32]) {
-                #(#advance32_stmts)*
-                #comp_advance32
-            }
-            fn advance_params64(&mut self, params: &mut [f64]) {
-                #(#advance64_stmts)*
-                #comp_advance64
+            fn advance_params<F: arael::utils::Float>(&mut self, params: &mut [F]) {
+                #(#advance_stmts)*
+                #comp_advance
             }
             const PARAM_COUNT: u32 = 0 #(+ #param_count_terms)*;
             fn serialize_size(&self) -> u32 {
@@ -2226,56 +2146,32 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 let _ = &out;
                 #(#collect_param_blocks_stmts)*
             }
-            fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 let _ = &out;
-                #(#collect_cells64_stmts)*
+                #(#collect_cells_stmts)*
             }
-            fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                let _ = &out;
-                #(#collect_cells32_stmts)*
-            }
-            fn bind_hessian_positions64(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
+            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
                 let _ = (&binder, &out);
-                #(#positions64_stmts)*
-            }
-            fn bind_hessian_positions32(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                let _ = (&binder, &out);
-                #(#positions32_stmts)*
+                #(#positions_stmts)*
             }
             fn release_blocks(&mut self) {
                 #(#release_blocks_stmts)*
             }
-            fn accumulate_hessian32(&self, hessian: &mut [f32]) {
-                #(#accumulate_hessian32_stmts)*
+            fn accumulate_hessian<F: arael::utils::Float>(&self, hessian: &mut [F]) {
+                #(#accumulate_hessian_stmts)*
             }
-            fn accumulate_hessian64(&self, hessian: &mut [f64]) {
-                #(#accumulate_hessian64_stmts)*
-            }
-            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), arael::simple_lm::BandOverflow> {
-                #(#accumulate_hessian_band32_stmts)*
+            fn accumulate_hessian_band<F: arael::utils::Float>(&self, band: &mut [F], kd: usize) -> Result<(), arael::simple_lm::BandOverflow> {
+                #(#accumulate_hessian_band_stmts)*
                 Ok(())
             }
-            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), arael::simple_lm::BandOverflow> {
-                #(#accumulate_hessian_band64_stmts)*
-                Ok(())
+            fn accumulate_hessian_sparse<F: arael::utils::Float>(&self, coo: &mut arael::simple_lm::CooMatrix<F>) {
+                #(#accumulate_hessian_sparse_stmts)*
             }
-            fn accumulate_hessian_sparse32(&self, coo: &mut arael::simple_lm::CooMatrix<f32>) {
-                #(#accumulate_hessian_sparse32_stmts)*
+            fn accumulate_hessian_sparse_direct<F: arael::utils::Float>(&self, csc: &mut arael::simple_lm::CscMatrix<F>) {
+                #(#accumulate_hessian_sparse_direct_stmts)*
             }
-            fn accumulate_hessian_sparse64(&self, coo: &mut arael::simple_lm::CooMatrix<f64>) {
-                #(#accumulate_hessian_sparse64_stmts)*
-            }
-            fn accumulate_hessian_sparse_direct32(&self, csc: &mut arael::simple_lm::CscMatrix<f32>) {
-                #(#accumulate_hessian_sparse_direct32_stmts)*
-            }
-            fn accumulate_hessian_sparse_direct64(&self, csc: &mut arael::simple_lm::CscMatrix<f64>) {
-                #(#accumulate_hessian_sparse_direct64_stmts)*
-            }
-            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[arael::ValueIndex], cursor: &mut usize) {
-                #(#accumulate_hessian_sparse_indexed32_stmts)*
-            }
-            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[arael::ValueIndex], cursor: &mut usize) {
-                #(#accumulate_hessian_sparse_indexed64_stmts)*
+            fn accumulate_hessian_sparse_indexed<F: arael::utils::Float>(&self, vals: &mut [F], positions: &[arael::ValueIndex], cursor: &mut usize) {
+                #(#accumulate_hessian_sparse_indexed_stmts)*
             }
         }
     };
@@ -3501,11 +3397,6 @@ fn generate_fit_impl(
     let prec_type: syn::Type = syn::parse_str(prec)
         .map_err(|e| syn::Error::new_spanned(name,
             format!("invalid fit precision '{}': {}", prec, e)))?;
-    let (fit_serialize, fit_deserialize) = if prec == "f32" {
-        (quote! { serialize_params32 }, quote! { deserialize_params32 })
-    } else {
-        (quote! { serialize_params64 }, quote! { deserialize_params64 })
-    };
     // 1. Classify fields
     let mut param_names: Vec<String> = Vec::new();
     let mut constant_names: HashSet<String> = HashSet::new();
@@ -3851,10 +3742,10 @@ fn generate_fit_impl(
 
         impl arael::simple_lm::FitProblem<#prec_type> for #name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
-                arael::model::Model::#fit_serialize(self, data)
+                arael::model::Model::serialize_params(self, data)
             }
             fn deserialize(&mut self, data: &[#prec_type]) {
-                arael::model::Model::#fit_deserialize(self, data)
+                arael::model::Model::deserialize_params(self, data)
             }
         }
     })

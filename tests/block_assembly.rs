@@ -228,7 +228,7 @@ fn two_scan_matches_coo_route() {
 
     // two-scan: cells from indices alone, positions by emission replay
     let mut cells: Vec<(u32, u32)> = Vec::new();
-    arael::model::Model::collect_hessian_cells64(&w, &mut cells);
+    arael::model::Model::collect_hessian_cells(&w, &mut cells);
     let (sym2, _) = SymbolicSparseBlockColMat::from_scalar_coords(
         partition.clone(),
         partition,
@@ -237,7 +237,7 @@ fn two_scan_matches_coo_route() {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions64(
+    arael::model::Model::bind_hessian_positions(
         &mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
@@ -267,7 +267,7 @@ fn two_scan_matches_coo_route() {
         |k| (coo.rows[k] as usize, coo.cols[k] as usize),
     );
     let mut cells: Vec<(u32, u32)> = Vec::new();
-    arael::model::Model::collect_hessian_cells64(&w, &mut cells);
+    arael::model::Model::collect_hessian_cells(&w, &mut cells);
     let (sym2, _) = SymbolicSparseBlockColMat::from_scalar_coords(
         partition.clone(),
         partition,
@@ -276,7 +276,7 @@ fn two_scan_matches_coo_route() {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions64(
+    arael::model::Model::bind_hessian_positions(
         &mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
@@ -405,7 +405,7 @@ fn assert_routes_agree(w: &mut World) {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions64(
+    arael::model::Model::bind_hessian_positions(
         w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,

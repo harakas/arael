@@ -105,15 +105,15 @@ where
 {
     const PARAM_COUNT: u32 = 1;
 
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
-        Model::serialize_params32(&mut self.angle, data);
+    fn serialize_params<F: Float>(&mut self, data: &mut std::vec::Vec<F>) {
+        Model::serialize_params(&mut self.angle, data);
     }
-    fn deserialize_params32(&mut self, data: &[f32]) {
-        Model::deserialize_params32(&mut self.angle, data);
+    fn deserialize_params<F: Float>(&mut self, data: &[F]) {
+        Model::deserialize_params(&mut self.angle, data);
         Model::update_self(self);
     }
-    fn update32(&mut self, data: &[f32]) {
-        Model::update32(&mut self.angle, data);
+    fn update_params<F: Float>(&mut self, data: &[F]) {
+        Model::update_params(&mut self.angle, data);
         self.__precompute_symbolic();
     }
     fn update_self(&mut self) {
@@ -121,23 +121,8 @@ where
         self.__precompute_symbolic();
     }
 
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
-        Model::serialize_params64(&mut self.angle, data);
-    }
-    fn deserialize_params64(&mut self, data: &[f64]) {
-        Model::deserialize_params64(&mut self.angle, data);
-        Model::update_self(self);
-    }
-    fn update64(&mut self, data: &[f64]) {
-        Model::update64(&mut self.angle, data);
-        self.__precompute_symbolic();
-    }
-
-    fn advance_params32(&mut self, params: &mut [f32]) {
-        Model::advance_params32(&mut self.angle, params);
-    }
-    fn advance_params64(&mut self, params: &mut [f64]) {
-        Model::advance_params64(&mut self.angle, params);
+    fn advance_params<F: Float>(&mut self, params: &mut [F]) {
+        Model::advance_params(&mut self.angle, params);
     }
 
     fn serialize_size(&self) -> u32 {
@@ -166,8 +151,8 @@ mod tests {
     fn matrix_matches_rotation() {
         // The matrix built from the cached sin/cos equals matrix2::rotation.
         let mut p = AngleParam::<f64>::new(0.7);
-        let mut data = std::vec::Vec::new();
-        Model::serialize_params64(&mut p, &mut data); // assigns the index
+        let mut data: std::vec::Vec<f64> = std::vec::Vec::new();
+        Model::serialize_params(&mut p, &mut data); // assigns the index
         Model::update_self(&mut p);                   // work = value, precompute
         let r = matrix2::<f64>::rotation(0.7);
         let m = p.rotation_matrix();

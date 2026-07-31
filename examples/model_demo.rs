@@ -35,8 +35,8 @@ fn main() {
     };
 
     // Step 1: serialize — collects all optimizable parameter values
-    let mut params = Vec::new();
-    model.serialize_params32(&mut params);
+    let mut params = Vec::<f32>::new();
+    model.serialize_params(&mut params);
     info!("Serialized params: {:?}", params);  // [1.0, 0.0]
     info!("  a index={}, b index={}", model.a.value, model.b.value);
 
@@ -53,7 +53,7 @@ fn main() {
     info!("Optimizer sets params to: {:?}", params);
 
     // Step 4: update — copies new values from data into work
-    model.update32(&params);
+    model.update_params(&params);
     info!("After update:");
     info!("  a.work={}, b.work={}", model.a.work(), model.b.work());
     info!("  a.value={}, b.value={} (unchanged)", model.a.value, model.b.value);
@@ -67,7 +67,7 @@ fn main() {
     info!("  Cost = {:.4}", cost);
 
     // Step 5: deserialize — commit optimized values back
-    model.deserialize_params32(&params);
+    model.deserialize_params(&params);
     info!("");
     info!("After deserialize (commit):");
     info!("  a.value={}, b.value={}", model.a.value, model.b.value);
@@ -83,13 +83,13 @@ fn main() {
         data: vec![DataEntry { x: 1.0, y: 2.0 }],
     };
 
-    let mut params2 = Vec::new();
-    model2.serialize_params32(&mut params2);
+    let mut params2 = Vec::<f32>::new();
+    model2.serialize_params(&mut params2);
     info!("With a=fixed(2.0), b=new(0.0):");
     info!("  Serialized params: {:?} (only b)", params2);
 
     params2[0] = 0.5;
-    model2.update32(&params2);
+    model2.update_params(&params2);
     info!("  After update: a.work={}, b.work={}", model2.a.work(), model2.b.work());
 
     // ===== Computed field demo =====
@@ -112,8 +112,8 @@ fn main() {
         mr2w: matrix3f::identity(),
     };
 
-    let mut params3 = Vec::new();
-    pose.serialize_params32(&mut params3);
+    let mut params3 = Vec::<f32>::new();
+    pose.serialize_params(&mut params3);
     info!("Pose params: {:?}", params3);  // [1, 2, 3, 0, 0, pi/2]
     info!("  {} params total (pos=3 + ea=3)", params3.len());
 
@@ -125,7 +125,7 @@ fn main() {
 
     // Simulate optimizer changing euler angles
     params3[5] = 0.0;  // set ea.z = 0 (no rotation)
-    pose.update32(&params3);
+    pose.update_params(&params3);
     info!("");
     info!("After update with ea.z=0:");
     info!("  ea.work = {:?}", pose.ea.work());
