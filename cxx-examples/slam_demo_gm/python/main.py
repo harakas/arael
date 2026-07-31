@@ -22,9 +22,9 @@ _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_here, "..", "model", "python"))
 
 from slam_demo_gm import path as pathmod  # noqa: E402
-from slam_demo_gm.arael import Camera  # noqa: E402
-from slam_demo_gm.arael.math import (matrix3d, matrix3f, quaternf,  # noqa: E402
-                                     vect2f, vect3f)
+from slam_demo_gm.arael import camerad  # noqa: E402
+from slam_demo_gm.arael.math import (matrix3d, quaternd,  # noqa: E402
+                                     vect2d, vect3d)
 
 
 class Cfg:
@@ -54,21 +54,21 @@ def create_cameras():
     for i in range(5):
         yaw = math.radians(i * (360.0 / 5))
         sy, cy = math.sin(yaw), math.cos(yaw)
-        mc2r = matrix3f.from_cols((-sy, cy, 0.0), (0.0, 0.0, -1.0),
+        mc2r = matrix3d.from_cols((-sy, cy, 0.0), (0.0, 0.0, -1.0),
                                   (cy, sy, 0.0))
-        cameras.append(Camera(fx, fx, w / 2.0, h / 2.0, w, h,
+        cameras.append(camerad(fx, fx, w / 2.0, h / 2.0, w, h,
                               (cy * 0.1, sy * 0.1, 0.3), mc2r))
     return cameras
 
 
 def decompose_cov(cov):
     r, d = cov.symmetric_eigen()
-    return r, vect3f(1.0 / math.sqrt(d.x), 1.0 / math.sqrt(d.y),
+    return r, vect3d(1.0 / math.sqrt(d.x), 1.0 / math.sqrt(d.y),
                      1.0 / math.sqrt(d.z))
 
 
 def diagonal_cov(sigma):
-    return matrix3f.from_elements(
+    return matrix3d.from_elements(
         sigma[0] ** 2, 0.0, 0.0, 0.0, sigma[1] ** 2, 0.0,
         0.0, 0.0, sigma[2] ** 2)
 
@@ -79,7 +79,7 @@ def truth_poses(cfg):
     for _ in range(cfg.num_poses):
         y = cfg.s_amplitude * math.sin(cfg.s_frequency * t)
         dy = cfg.s_amplitude * cfg.s_frequency * math.cos(cfg.s_frequency * t)
-        out.append((vect3f(t, y, 0.0), vect3f(0.0, 0.0, math.atan2(dy, 1.0))))
+        out.append((vect3d(t, y, 0.0), vect3d(0.0, 0.0, math.atan2(dy, 1.0))))
         t += cfg.step_size
     return out
 
@@ -92,7 +92,7 @@ def truth_landmarks(cfg, rng, poses):
         anchor = poses[anchor_idx][0]
         angle = rng.random() * 2.0 * math.pi
         dist = 5.0 + rng.random() * 25.0
-        lm = vect3f(anchor.x + dist * math.cos(angle),
+        lm = vect3d(anchor.x + dist * math.cos(angle),
                     anchor.y + dist * math.sin(angle),
                     rng.random() * 2.0)
         min_dist = min((lm - p).norm() for p, _ in poses)
@@ -119,12 +119,12 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
     # reallocates repeatedly.
     path.poses.reserve(len(gt_poses))
     for pi, (pos, ea) in enumerate(gt_poses):
-        mr2w = matrix3f.rotation_from_euler_angles(ea)
+        mr2w = matrix3d.rotation_from_euler_angles(ea)
 
-        delta_pos = vect3f(0.0, 0.0, 0.0)
-        delta_rot = matrix3f.identity()
+        delta_pos = vect3d(0.0, 0.0, 0.0)
+        delta_rot = matrix3d.identity()
         if pi > 0:
-            prev_mw2r = matrix3f.rotation_from_euler_angles(
+            prev_mw2r = matrix3d.rotation_from_euler_angles(
                 gt_poses[pi - 1][1]).transpose()
             delta_pos = prev_mw2r * (pos - gt_poses[pi - 1][0])
             delta_rot = prev_mw2r * mr2w
@@ -156,7 +156,7 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
 
                 is_outlier = rng.random() < cfg.outlier_fraction
                 noise_scale = cfg.outlier_scale if is_outlier else 1.0
-                noisy_pixel = vect2f(
+                noisy_pixel = vect2d(
                     pixel.x + noise_scale * (rng.random() * 2.0 - 1.0),
                     pixel.y + noise_scale * (rng.random() * 2.0 - 1.0))
 
@@ -173,7 +173,7 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
 
                 feat = info.features.push()
                 feat.pixel = noisy_pixel
-                feat.mf2r = matrix3f.from_cols(d, col1, col2)
+                feat.mf2r = matrix3d.from_cols(d, col1, col2)
                 feat.camera_pos = cam.camera_pos
                 feat.isigma = (1.0 / sigma.x, 1.0 / sigma.y)
                 frine_data.append((li, pi, info.features.last_ref()))
@@ -187,7 +187,7 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
         pose.r2w_translation = (pos.x + 0.1 * rng.gauss(0, 1),
                                 pos.y + 0.1 * rng.gauss(0, 1),
                                 pos.z + 0.1 * rng.gauss(0, 1))
-        pose.r2w_rotation = quaternf.from_euler_angles(
+        pose.r2w_rotation = quaternd.from_euler_angles(
             (ea.x + 0.02 * rng.gauss(0, 1),
              ea.y + 0.02 * rng.gauss(0, 1),
              ea.z + 0.02 * rng.gauss(0, 1)))
@@ -217,7 +217,7 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
     kept_gt = []
     path.landmarks.reserve(len(gt_landmarks))
     for li, (lm_pos, _) in enumerate(gt_landmarks):
-        noisy_lm = vect3f(lm_pos.x + 0.5 * rng.gauss(0, 1),
+        noisy_lm = vect3d(lm_pos.x + 0.5 * rng.gauss(0, 1),
                           lm_pos.y + 0.5 * rng.gauss(0, 1),
                           lm_pos.z + 0.3 * rng.gauss(0, 1))
         obs = [fd for fd in frine_data if fd[0] == li]
@@ -329,6 +329,8 @@ def main():
               % (gp.x, gp.y, gp.z, ge.x, ge.y, ge.z))
     print()
 
+    print('validate', path.validate())
+
     # Graduated optimization: loose feature constraints first, tighten;
     # landmark anchors re-snapshot between passes -- values only, so
     # one LmSession carries every pass and the sparsity analysis is
@@ -385,7 +387,7 @@ def main():
         prev = path.poses[i - 1]
         pose = path.poses[i]
 
-        gt_mr2w = matrix3f.rotation_from_euler_angles(gt_poses[i - 1][1])
+        gt_mr2w = matrix3d.rotation_from_euler_angles(gt_poses[i - 1][1])
         gt_delta_pos = gt_mr2w.transpose() * (gt_poses[i][0] - gt_poses[i - 1][0])
 
         opt_mr2w_prev = prev.r2w_rotation.rotation_matrix()
@@ -396,7 +398,7 @@ def main():
         gt_step = gt_delta_pos.norm()
         dpos_rel = 100.0 * dpos_err / gt_step if gt_step > 1e-6 else 0.0
 
-        gt_mr2w_cur = matrix3f.rotation_from_euler_angles(gt_poses[i][1])
+        gt_mr2w_cur = matrix3d.rotation_from_euler_angles(gt_poses[i][1])
         gt_delta_ea = (gt_mr2w.transpose() * gt_mr2w_cur).get_euler_angles()
 
         opt_mr2w_cur = pose.r2w_rotation.rotation_matrix()
@@ -439,7 +441,7 @@ def main():
 
         closest_idx = min(range(len(gt_poses)),
                           key=lambda j: (gt_lm - gt_poses[j][0]).norm())
-        gt_mr2w = matrix3f.rotation_from_euler_angles(gt_poses[closest_idx][1])
+        gt_mr2w = matrix3d.rotation_from_euler_angles(gt_poses[closest_idx][1])
         gt_vec = gt_mr2w.transpose() * (gt_lm - gt_poses[closest_idx][0])
 
         opt_pose = path.poses[closest_idx]

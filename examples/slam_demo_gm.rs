@@ -63,14 +63,14 @@
 
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
-use arael::quatern::quaternf;
+use arael::quatern::quaternd;
 use arael::simple_lm::LmProblem;
-use arael::transform::TransformParamF;
-use arael::unitvec::UnitVecParamF;
-use arael::vect::{vect3f, vect2f};
-use arael::matrix::matrix3f;
+use arael::transform::TransformParam;
+use arael::unitvec::UnitVecParam;
+use arael::vect::{vect3d, vect2d};
+use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
-use arael::geometry::Camera;
+use arael::geometry::camerad;
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -85,41 +85,41 @@ use rand_distr::Normal;
 #[arael::model]
 #[allow(dead_code)]
 struct PointFeature {
-    pixel: vect2f,
-    mf2r: matrix3f,       // feature-to-robot rotation: col0=view dir, col1/col2=perp axes
+    pixel: vect2d,
+    mf2r: matrix3d,       // feature-to-robot rotation: col0=view dir, col1/col2=perp axes
     #[arael(skip)]
-    camera: Ref<Camera>,
-    camera_pos: vect3f,    // camera position in robot frame
-    isigma: vect2f,        // 1/sigma for angular residuals (rad^-1)
+    camera: Ref<camerad>,
+    camera_pos: vect3d,    // camera position in robot frame
+    isigma: vect2d,        // 1/sigma for angular residuals (rad^-1)
 }
 
 // Decomposed GPS reading: position + covariance split into R and 1/sqrt(d)
 #[arael::model]
 struct GpsData {
-    pos: vect3f,
-    cov_r: matrix3f,
-    cov_isigma: vect3f,
+    pos: vect3d,
+    cov_r: matrix3d,
+    cov_isigma: vect3d,
 }
 
 #[arael::model]
 struct PoseInfo {
-    delta_pos: vect3f,
+    delta_pos: vect3d,
     /// Measured relative rotation prev -> cur, as a matrix.
-    delta_rot: matrix3f,
-    delta_pos_cov_r: matrix3f,
-    delta_pos_cov_isigma: vect3f,
-    delta_rot_cov_r: matrix3f,
-    delta_rot_cov_isigma: vect3f,
+    delta_rot: matrix3d,
+    delta_pos_cov_r: matrix3d,
+    delta_pos_cov_isigma: vect3d,
+    delta_rot_cov_r: matrix3d,
+    delta_rot_cov_isigma: vect3d,
     gps: Option<GpsData>,
     /// Accelerometer tilt reading: the world up direction seen in the
     /// body frame (yaw-free by construction).
-    tilt_g: vect3f,
+    tilt_g: vect3d,
     features: refs::Vec<PointFeature>,
 }
 
-fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
+fn decompose_cov(cov: matrix3d) -> (matrix3d, vect3d) {
     let (r, d) = cov.symmetric_eigen();
-    let isigma = vect3f::new(
+    let isigma = vect3d::new(
         1.0 / d.x.sqrt(),
         1.0 / d.y.sqrt(),
         1.0 / d.z.sqrt(),
@@ -151,7 +151,7 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
     [d.x * path.tilt_isigma, d.y * path.tilt_isigma, d.z * path.tilt_isigma]
 }))]
 struct Pose {
-    r2w: TransformParamF,
+    r2w: TransformParam<f64>,
     info: PoseInfo,
     hb_pose: SelfBlock<Pose>,
 }
@@ -171,13 +171,13 @@ struct Pose {
     [(pointlandmark.rho - pointlandmark.rho_value) * path.drift_rho_isigma]
 }))]
 struct PointLandmark {
-    anchor: vect3f,
+    anchor: vect3d,
     /// The observing pose the anchor is snapshotted from. Data only --
     /// no constraint reads it, so the anchor stays constant in the solve.
     #[arael(skip)]
     anchor_pose: Ref<Pose>,
-    dir: UnitVecParamF,
-    rho: Param<f32>,
+    dir: UnitVecParam<f64>,
+    rho: Param<f64>,
     frines: std::vec::Vec<PointFrine>,
     hb_drift: SelfBlock<PointLandmark>,
 }
@@ -247,23 +247,23 @@ struct Path {
     poses: refs::Deque<Pose>,
     landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
-    drift_rho_isigma: f32,
-    tilt_isigma: f32,
-    frine_isigma_scale: f32,
+    drift_rho_isigma: f64,
+    tilt_isigma: f64,
+    frine_isigma_scale: f64,
     /// Squared threshold for the feature blocks. Half the 2-DOF 0.95
     /// quantile (5.99) for GM: the quantile logic assumes rare outliers,
     /// but half the observations here are outliers, and the tighter gate
     /// measures better (worst landmark 4.6m vs 11.2m). Cauchy prefers
     /// tighter still (1.5).
-    frine_c2: f32,
+    frine_c2: f64,
     /// Feature loss selector: > 0 Cauchy, else Geman-McClure. The two
     /// viable losses at this contamination level (32-seed sweep): GM has
     /// the best mean, Cauchy the best worst-case bound; Huber (no
     /// redescent) and Tukey (hard cutoff, brittle) both fail here.
-    frine_cauchy: f32,
+    frine_cauchy: f64,
     /// Geman-McClure squared threshold for the GPS blocks
     /// (chi-square 0.95 quantile, 3 DOF).
-    gps_c2: f32,
+    gps_c2: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,21 +274,21 @@ struct SceneConfig {
     num_poses: usize,
     num_landmarks: usize,
     seed: u64,
-    outlier_fraction: f32,
-    outlier_scale: f32,
+    outlier_fraction: f64,
+    outlier_scale: f64,
     // S-curve parameters
-    s_amplitude: f32,
-    s_frequency: f32,
-    step_size: f32,
+    s_amplitude: f64,
+    s_frequency: f64,
+    step_size: f64,
     // Noise parameters
-    gps_sigma: f32,
-    gps_sigma_inflate: f32,
-    odo_pos_k: f32,    // position noise as fraction of distance
-    odo_pos_base: f32, // base position noise (meters)
-    odo_ea_k: f32,     // ea noise as fraction of rotation
-    odo_ea_base: f32,  // base ea noise (radians)
+    gps_sigma: f64,
+    gps_sigma_inflate: f64,
+    odo_pos_k: f64,    // position noise as fraction of distance
+    odo_pos_base: f64, // base position noise (meters)
+    odo_ea_k: f64,     // ea noise as fraction of rotation
+    odo_ea_base: f64,  // base ea noise (radians)
     lm_visibility_range: usize, // landmark visible from anchor +- this many poses
-    lm_visibility_prob: f32,    // probability of seeing landmark at any given pose in range
+    lm_visibility_prob: f64,    // probability of seeing landmark at any given pose in range
 }
 
 impl Default for SceneConfig {
@@ -321,53 +321,53 @@ impl Default for SceneConfig {
     }
 }
 
-fn create_cameras() -> refs::Vec<Camera> {
+fn create_cameras() -> refs::Vec<camerad> {
     let mut cameras = refs::Vec::new();
     // 5 cameras at 72-degree intervals around the robot, looking toward horizon
     let w = 1024;
     let h = 768;
-    let fov_deg = 80.0_f32;
-    let fx = (w as f32 / 2.0) / (fov_deg / 2.0).to_radians().tan();
+    let fov_deg = 80.0_f64;
+    let fx = (w as f64 / 2.0) / (fov_deg / 2.0).to_radians().tan();
     let fy = fx;
 
     let n = 5;
     for i in 0..n {
-        let yaw = (i as f32) * (360.0_f32 / n as f32).to_radians();
+        let yaw = (i as f64) * (360.0_f64 / n as f64).to_radians();
         let sy = yaw.sin();
         let cy = yaw.cos();
-        // Camera looks outward from robot center, Z forward in camera = outward direction
+        // The camera looks outward from robot center, Z forward in camera = outward direction
         // mc2r rotates camera frame to robot frame: camera Z -> robot (cy, sy, 0)
-        let mc2r = matrix3f::from_cols(
-            vect3f::new(-sy, cy, 0.0),  // camera X -> robot left (perpendicular to view)
-            vect3f::new(0.0, 0.0, -1.0), // camera Y -> robot down (image Y down)
-            vect3f::new(cy, sy, 0.0),    // camera Z -> robot forward direction
+        let mc2r = matrix3d::from_cols(
+            vect3d::new(-sy, cy, 0.0),  // camera X -> robot left (perpendicular to view)
+            vect3d::new(0.0, 0.0, -1.0), // camera Y -> robot down (image Y down)
+            vect3d::new(cy, sy, 0.0),    // camera Z -> robot forward direction
         );
-        cameras.push(Camera {
+        cameras.push(camerad {
             fx, fy,
-            cx: w as f32 / 2.0,
-            cy: h as f32 / 2.0,
+            cx: w as f64 / 2.0,
+            cy: h as f64 / 2.0,
             width: w,
             height: h,
-            camera_pos: vect3f::new(cy * 0.1, sy * 0.1, 0.3), // slight offset, 30cm high
+            camera_pos: vect3d::new(cy * 0.1, sy * 0.1, 0.3), // slight offset, 30cm high
             mc2r,
         });
     }
     cameras
 }
 
-fn generate_ground_truth_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
+fn generate_ground_truth_poses(cfg: &SceneConfig) -> Vec<(vect3d, vect3d)> {
     let mut poses = Vec::new();
-    let mut t = 0.0_f32;
+    let mut t = 0.0_f64;
     for _ in 0..cfg.num_poses {
         let x = t;
         let y = cfg.s_amplitude * (cfg.s_frequency * t).sin();
-        let pos = vect3f::new(x, y, 0.0);
+        let pos = vect3d::new(x, y, 0.0);
 
         // Yaw follows tangent direction
         let dx = 1.0;
         let dy = cfg.s_amplitude * cfg.s_frequency * (cfg.s_frequency * t).cos();
         let yaw = dy.atan2(dx);
-        let ea = vect3f::new(0.0, 0.0, yaw);
+        let ea = vect3d::new(0.0, 0.0, yaw);
 
         poses.push((pos, ea));
         t += cfg.step_size;
@@ -376,18 +376,18 @@ fn generate_ground_truth_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
 }
 
 /// Returns (landmark_pos, anchor_pose_index) pairs.
-fn generate_ground_truth_landmarks(cfg: &SceneConfig, rng: &mut StdRng, poses: &[(vect3f, vect3f)]) -> Vec<(vect3f, usize)> {
+fn generate_ground_truth_landmarks(cfg: &SceneConfig, rng: &mut StdRng, poses: &[(vect3d, vect3d)]) -> Vec<(vect3d, usize)> {
     let mut landmarks = Vec::new();
     for _ in 0..cfg.num_landmarks {
         loop {
             let anchor_idx = rng.random_range(0..poses.len());
             let anchor = &poses[anchor_idx].0;
-            let angle = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
-            let dist = 5.0 + rng.random::<f32>() * 25.0;
-            let lm = vect3f::new(anchor.x + dist * angle.cos(), anchor.y + dist * angle.sin(), rng.random::<f32>() * 2.0);
+            let angle = rng.random::<f64>() * 2.0 * std::f64::consts::PI;
+            let dist = 5.0 + rng.random::<f64>() * 25.0;
+            let lm = vect3d::new(anchor.x + dist * angle.cos(), anchor.y + dist * angle.sin(), rng.random::<f64>() * 2.0);
             let min_dist = poses.iter()
                 .map(|(p, _)| (lm - *p).norm())
-                .fold(f32::MAX, f32::min);
+                .fold(f64::MAX, f64::min);
             if min_dist >= 5.0 && min_dist <= 30.0 {
                 landmarks.push((lm, anchor_idx));
                 break;
@@ -397,7 +397,7 @@ fn generate_ground_truth_landmarks(cfg: &SceneConfig, rng: &mut StdRng, poses: &
     landmarks
 }
 
-fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, usize)>) {
+fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3d, vect3d)>, Vec<(vect3d, usize)>) {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let normal01 = Normal::new(0.0, 1.0).unwrap();
 
@@ -408,8 +408,8 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     // Weak prior on each landmark's inverse range (1/m units): holds
     // all-outlier landmarks at their initial ray instead of letting them
     // wander; the direction needs none (pinned by its initializer).
-    let drift_rho_sigma: f32 = 1.0;
-    let tilt_sigma_deg: f32 = 0.25;         // accelerometer accuracy in degrees
+    let drift_rho_sigma: f64 = 1.0;
+    let tilt_sigma_deg: f64 = 0.25;         // accelerometer accuracy in degrees
     let tilt_sigma_rad = tilt_sigma_deg.to_radians();
 
     let mut path = Path {
@@ -430,14 +430,14 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     let mut frine_data: std::vec::Vec<(usize, usize, Ref<PointFeature>)> = std::vec::Vec::new();
 
     for (pi, &(pos, ea)) in gt_poses.iter().enumerate() {
-        let mr2w = matrix3f::rotation_from_euler_angles(ea);
+        let mr2w = matrix3d::rotation_from_euler_angles(ea);
 
         // Compute odometry deltas
         let (delta_pos, delta_rot) = if pi == 0 {
-            (vect3f::new(0.0, 0.0, 0.0), matrix3f::identity())
+            (vect3d::new(0.0, 0.0, 0.0), matrix3d::identity())
         } else {
             let (prev_pos, prev_ea) = gt_poses[pi - 1];
-            let prev_mr2w = matrix3f::rotation_from_euler_angles(prev_ea);
+            let prev_mr2w = matrix3d::rotation_from_euler_angles(prev_ea);
             let prev_mw2r = prev_mr2w.transpose();
             let dp = prev_mw2r * (pos - prev_pos);
             (dp, prev_mw2r * mr2w)
@@ -448,23 +448,23 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         let dp_norm = delta_pos.norm().max(0.01);
         let tr = delta_rot[0].x + delta_rot[1].y + delta_rot[2].z;
         let de_norm = ((tr - 1.0) * 0.5).clamp(-1.0, 1.0).acos().max(0.001);
-        let pos_sigma = vect3f::new(
+        let pos_sigma = vect3d::new(
             cfg.odo_pos_k * dp_norm + cfg.odo_pos_base,
             (cfg.odo_pos_k * dp_norm + cfg.odo_pos_base) * 0.5, // lateral less noisy than forward
             (cfg.odo_pos_k * dp_norm + cfg.odo_pos_base) * 0.5,
         );
-        let rot_sigma = vect3f::new(
+        let rot_sigma = vect3d::new(
             cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
             cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
             cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
         );
 
-        let delta_pos_cov = matrix3f::from_elements(
+        let delta_pos_cov = matrix3d::from_elements(
             pos_sigma.x * pos_sigma.x, 0.0, 0.0,
             0.0, pos_sigma.y * pos_sigma.y, 0.0,
             0.0, 0.0, pos_sigma.z * pos_sigma.z,
         );
-        let delta_rot_cov = matrix3f::from_elements(
+        let delta_rot_cov = matrix3d::from_elements(
             rot_sigma.x * rot_sigma.x, 0.0, 0.0,
             0.0, rot_sigma.y * rot_sigma.y, 0.0,
             0.0, 0.0, rot_sigma.z * rot_sigma.z,
@@ -477,7 +477,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
             let dist_to_anchor = if pi >= anchor_idx { pi - anchor_idx } else { anchor_idx - pi };
             if dist_to_anchor > cfg.lm_visibility_range { continue; }
             // Random visibility within range
-            if rng.random::<f32>() > cfg.lm_visibility_prob { continue; }
+            if rng.random::<f64>() > cfg.lm_visibility_prob { continue; }
             for cam_ref in cameras.refs() {
                 let cam = &cameras[cam_ref];
                 let p_cam = cam.world_to_camera(lm_pos, pos, mr2w);
@@ -486,11 +486,11 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
                 if !cam.is_visible(pixel) { continue; }
 
                 // Add pixel noise (uniform +-1 pixel, outliers get scaled up)
-                let is_outlier = rng.random::<f32>() < cfg.outlier_fraction;
+                let is_outlier = rng.random::<f64>() < cfg.outlier_fraction;
                 let noise_scale = if is_outlier { cfg.outlier_scale } else { 1.0 };
-                let noisy_pixel = vect2f::new(
-                    pixel.x + noise_scale * (rng.random::<f32>() * 2.0 - 1.0),
-                    pixel.y + noise_scale * (rng.random::<f32>() * 2.0 - 1.0),
+                let noisy_pixel = vect2d::new(
+                    pixel.x + noise_scale * (rng.random::<f64>() * 2.0 - 1.0),
+                    pixel.y + noise_scale * (rng.random::<f64>() * 2.0 - 1.0),
                 );
                 // Build feature-to-robot frame (mf2r): col0 = view direction from
                 // pose toward feature, col1/col2 = perpendicular axes for measuring
@@ -502,10 +502,10 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
                 if up_norm < 1e-6 { continue; }
                 let col2 = up_proj * (1.0 / up_norm);
                 let col1 = col2 % dir;
-                let mf2r = matrix3f::from_cols(dir, col1, col2);
+                let mf2r = matrix3d::from_cols(dir, col1, col2);
 
                 let sigma = cam.pixel_angular_size(noisy_pixel);
-                let isigma = vect2f::new(1.0 / sigma.x, 1.0 / sigma.y);
+                let isigma = vect2d::new(1.0 / sigma.x, 1.0 / sigma.y);
 
                 let feat_ref = features.push(PointFeature {
                     pixel: noisy_pixel,
@@ -520,30 +520,30 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
 
         // GPS: iid per-fix noise; the constraint covariance is inflated
         // past the actual error (see gps_sigma_inflate).
-        let gps_pos = vect3f::new(
-            pos.x + cfg.gps_sigma * rng.sample(normal01) as f32,
-            pos.y + cfg.gps_sigma * rng.sample(normal01) as f32,
-            pos.z + cfg.gps_sigma * rng.sample(normal01) as f32,
+        let gps_pos = vect3d::new(
+            pos.x + cfg.gps_sigma * rng.sample(normal01) as f64,
+            pos.y + cfg.gps_sigma * rng.sample(normal01) as f64,
+            pos.z + cfg.gps_sigma * rng.sample(normal01) as f64,
         );
         let ms = cfg.gps_sigma * cfg.gps_sigma_inflate;
-        let gps_cov = matrix3f::from_elements(
+        let gps_cov = matrix3d::from_elements(
             ms * ms, 0.0, 0.0,
             0.0, ms * ms, 0.0,
             0.0, 0.0, ms * ms,
         );
 
         // Noisy initial pose estimate
-        let init_noise_pos = 0.1_f32;   // meters
-        let init_noise_ea = 0.02_f32;   // radians (~1.1 degrees)
-        let noisy_pos = vect3f::new(
-            pos.x + init_noise_pos * rng.sample(normal01) as f32,
-            pos.y + init_noise_pos * rng.sample(normal01) as f32,
-            pos.z + init_noise_pos * rng.sample(normal01) as f32,
+        let init_noise_pos = 0.1_f64;   // meters
+        let init_noise_ea = 0.02_f64;   // radians (~1.1 degrees)
+        let noisy_pos = vect3d::new(
+            pos.x + init_noise_pos * rng.sample(normal01) as f64,
+            pos.y + init_noise_pos * rng.sample(normal01) as f64,
+            pos.z + init_noise_pos * rng.sample(normal01) as f64,
         );
-        let noisy_ea = vect3f::new(
-            ea.x + init_noise_ea * rng.sample(normal01) as f32,
-            ea.y + init_noise_ea * rng.sample(normal01) as f32,
-            ea.z + init_noise_ea * rng.sample(normal01) as f32,
+        let noisy_ea = vect3d::new(
+            ea.x + init_noise_ea * rng.sample(normal01) as f64,
+            ea.y + init_noise_ea * rng.sample(normal01) as f64,
+            ea.z + init_noise_ea * rng.sample(normal01) as f64,
         );
 
         let (delta_pos_cov_r, delta_pos_cov_isigma) = decompose_cov(delta_pos_cov);
@@ -551,7 +551,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         let (gps_cov_r, gps_cov_isigma) = decompose_cov(gps_cov);
 
         path.poses.push_back(Pose {
-            r2w: TransformParamF::new(noisy_pos, quaternf::from_euler_angles(noisy_ea)),
+            r2w: TransformParam::<f64>::new(noisy_pos, quaternd::from_euler_angles(noisy_ea)),
             info: PoseInfo {
                 delta_pos, delta_rot,
                 delta_pos_cov_r, delta_pos_cov_isigma,
@@ -561,9 +561,9 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
                     // Sensor noise lives in angle space (roll/pitch); the
                     // reading is stored as the up direction it implies:
                     // (-sin p, cos p sin r, cos p cos r), row 2 of R.
-                    let r = ea.x + tilt_sigma_rad * rng.sample(normal01) as f32;
-                    let p = ea.y + tilt_sigma_rad * rng.sample(normal01) as f32;
-                    vect3f::new(-p.sin(), p.cos() * r.sin(), p.cos() * r.cos())
+                    let r = ea.x + tilt_sigma_rad * rng.sample(normal01) as f64;
+                    let p = ea.y + tilt_sigma_rad * rng.sample(normal01) as f64;
+                    vect3d::new(-p.sin(), p.cos() * r.sin(), p.cos() * r.cos())
                 },
                 features,
             },
@@ -580,10 +580,10 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     // initial position; direction and inverse range initialize from the
     // noisy landmark guess.
     for (li, &(lm_pos, _)) in gt_landmarks.iter().enumerate() {
-        let noisy_lm = vect3f::new(
-            lm_pos.x + 0.5 * rng.sample(normal01) as f32,
-            lm_pos.y + 0.5 * rng.sample(normal01) as f32,
-            lm_pos.z + 0.3 * rng.sample(normal01) as f32,
+        let noisy_lm = vect3d::new(
+            lm_pos.x + 0.5 * rng.sample(normal01) as f64,
+            lm_pos.y + 0.5 * rng.sample(normal01) as f64,
+            lm_pos.z + 0.3 * rng.sample(normal01) as f64,
         );
         let obs: std::vec::Vec<usize> = frine_data.iter()
             .filter(|(lmi, _, _)| *lmi == li)
@@ -600,7 +600,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         path.landmarks.push(PointLandmark {
             anchor,
             anchor_pose,
-            dir: UnitVecParamF::new(d),
+            dir: UnitVecParam::<f64>::new(d),
             rho: Param::new(1.0 / d.norm()),
             frines,
             hb_drift: SelfBlock::new(),
@@ -728,14 +728,14 @@ fn main() {
     // carries the solves: the sparsity analysis from pass 1 is reused
     // warm by the later passes.
     println!("--- Optimization ---");
-    let isigma_scales: std::vec::Vec<f32> = if std::env::var("SINGLE_PASS").is_ok() {
+    let isigma_scales: std::vec::Vec<f64> = if std::env::var("SINGLE_PASS").is_ok() {
         vec![1.0]
     } else {
         vec![0.01, 0.1, 1.0]
     };
 
     fn run_ramp<S: arael::simple_lm::LmSolver<f64>>(
-        solver: S, path: &mut Path, scales: &[f32],
+        solver: S, path: &mut Path, scales: &[f64],
     ) {
         let mut session = arael::simple_lm::LmSession::new(solver);
         for (pass, &scale) in scales.iter().enumerate() {
@@ -788,8 +788,8 @@ fn main() {
 
     // Mean absolute pose error vs GT
     {
-        let mut pos_err_sum = 0.0_f32;
-        let mut ea_err_sum = 0.0_f32;
+        let mut pos_err_sum = 0.0_f64;
+        let mut ea_err_sum = 0.0_f64;
         let n = gt_poses.len().min(path.poses.len());
         for i in 0..n {
             let pose = &path.poses[i];
@@ -802,15 +802,15 @@ fn main() {
         let cost = path.calc_cost(&params64);
         println!("\nFinal cost: {:.4}", cost);
         println!("Mean pose error vs GT: pos={:.4}m  ea={:.3}deg",
-            pos_err_sum / n as f32, (ea_err_sum / n as f32).to_degrees());
+            pos_err_sum / n as f64, (ea_err_sum / n as f64).to_degrees());
     }
 
     // Relative pose errors: compare consecutive delta_pos in local frame
     println!("\n--- Relative pose errors ---");
-    let mut dpos_errs: std::vec::Vec<f32> = std::vec::Vec::new();
-    let mut dpos_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
-    let mut dea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
-    let mut dea_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
+    let mut dpos_errs: std::vec::Vec<f64> = std::vec::Vec::new();
+    let mut dpos_rel_errs: std::vec::Vec<f64> = std::vec::Vec::new();
+    let mut dea_errs_deg: std::vec::Vec<f64> = std::vec::Vec::new();
+    let mut dea_rel_errs: std::vec::Vec<f64> = std::vec::Vec::new();
     for i in 1..gt_poses.len().min(path.poses.len()) {
         let prev = &path.poses[i - 1];
         let pose = &path.poses[i];
@@ -818,7 +818,7 @@ fn main() {
         let (gt_cur_pos, gt_cur_ea) = gt_poses[i];
 
         // GT delta_pos in previous pose's local frame
-        let gt_mr2w = matrix3f::rotation_from_euler_angles(gt_prev_ea);
+        let gt_mr2w = matrix3d::rotation_from_euler_angles(gt_prev_ea);
         let gt_delta_pos = gt_mr2w.transpose() * (gt_cur_pos - gt_prev_pos);
 
         // Optimized delta_pos in previous pose's local frame
@@ -830,7 +830,7 @@ fn main() {
         let dpos_rel = if gt_step > 1e-6 { 100.0 * dpos_err / gt_step } else { 0.0 };
 
         // GT delta_ea: relative rotation from prev to cur
-        let gt_mr2w_cur = matrix3f::rotation_from_euler_angles(gt_cur_ea);
+        let gt_mr2w_cur = matrix3d::rotation_from_euler_angles(gt_cur_ea);
         let gt_delta_ea = (gt_mr2w.transpose() * gt_mr2w_cur).get_euler_angles();
 
         // Optimized delta_ea
@@ -855,16 +855,16 @@ fn main() {
     dea_rel_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     if !dpos_errs.is_empty() {
         let n = dpos_errs.len();
-        let mean: f32 = dpos_errs.iter().sum::<f32>() / n as f32;
+        let mean: f64 = dpos_errs.iter().sum::<f64>() / n as f64;
         println!("Delta pos: mean={:.4}m  median={:.4}m  min={:.4}m  max={:.4}m",
             mean, dpos_errs[n / 2], dpos_errs[0], dpos_errs[n - 1]);
-        let mean: f32 = dpos_rel_errs.iter().sum::<f32>() / n as f32;
+        let mean: f64 = dpos_rel_errs.iter().sum::<f64>() / n as f64;
         println!("Delta pos: mean={:.2}%  median={:.2}%  min={:.2}%  max={:.2}%",
             mean, dpos_rel_errs[n / 2], dpos_rel_errs[0], dpos_rel_errs[n - 1]);
-        let mean: f32 = dea_errs_deg.iter().sum::<f32>() / n as f32;
+        let mean: f64 = dea_errs_deg.iter().sum::<f64>() / n as f64;
         println!("Delta ea:  mean={:.3}deg  median={:.3}deg  min={:.3}deg  max={:.3}deg",
             mean, dea_errs_deg[n / 2], dea_errs_deg[0], dea_errs_deg[n - 1]);
-        let mean: f32 = dea_rel_errs.iter().sum::<f32>() / n as f32;
+        let mean: f64 = dea_rel_errs.iter().sum::<f64>() / n as f64;
         println!("Delta ea:  mean={:.2}%  median={:.2}%  min={:.2}%  max={:.2}%",
             mean, dea_rel_errs[n / 2], dea_rel_errs[0], dea_rel_errs[n - 1]);
     }
@@ -880,8 +880,8 @@ fn main() {
 
     // Landmark errors: compare landmark-to-closest-pose vector (opt vs GT)
     println!("\n--- Landmark errors (relative to closest pose) ---");
-    let mut lm_errs: std::vec::Vec<f32> = std::vec::Vec::new();
-    let mut lm_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
+    let mut lm_errs: std::vec::Vec<f64> = std::vec::Vec::new();
+    let mut lm_rel_errs: std::vec::Vec<f64> = std::vec::Vec::new();
     let mut max_sigmas: std::vec::Vec<f64> = std::vec::Vec::new();
     for (i, (&(gt_lm, _anchor), lm)) in gt_landmarks.iter().zip(path.landmarks.iter()).enumerate() {
         // Find closest GT pose
@@ -890,7 +890,7 @@ fn main() {
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
         let (gt_pose_pos, gt_pose_ea) = gt_poses[closest_idx];
-        let gt_mr2w = matrix3f::rotation_from_euler_angles(gt_pose_ea);
+        let gt_mr2w = matrix3d::rotation_from_euler_angles(gt_pose_ea);
         let gt_vec = gt_mr2w.transpose() * (gt_lm - gt_pose_pos);
         // Optimized vector from closest opt pose to opt landmark in opt pose's local frame
         let opt_pose = &path.poses[closest_idx];
@@ -955,10 +955,10 @@ fn main() {
     lm_rel_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     if !lm_errs.is_empty() {
         let n = lm_errs.len();
-        let mean: f32 = lm_errs.iter().sum::<f32>() / n as f32;
+        let mean: f64 = lm_errs.iter().sum::<f64>() / n as f64;
         println!("LM pos:  mean={:.3}m  median={:.3}m  min={:.3}m  max={:.3}m",
             mean, lm_errs[n / 2], lm_errs[0], lm_errs[n - 1]);
-        let mean: f32 = lm_rel_errs.iter().sum::<f32>() / n as f32;
+        let mean: f64 = lm_rel_errs.iter().sum::<f64>() / n as f64;
         println!("LM rel:  mean={:.2}%  median={:.2}%  min={:.2}%  max={:.2}%",
             mean, lm_rel_errs[n / 2], lm_rel_errs[0], lm_rel_errs[n - 1]);
     }

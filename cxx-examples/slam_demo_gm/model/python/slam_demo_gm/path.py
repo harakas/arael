@@ -366,7 +366,7 @@ class GpsData:
 
     @pos.setter
     def pos(self, v):
-        _f.path_gps_data_set_pos(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_gps_data_set_pos(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def cov_r(self):
@@ -374,7 +374,7 @@ class GpsData:
 
     @cov_r.setter
     def cov_r(self, v):
-        _f.path_gps_data_set_cov_r(self._p, v if isinstance(v, _m.matrix3f) else _m.matrix3f(v))
+        _f.path_gps_data_set_cov_r(self._p, v if isinstance(v, _m.matrix3d) else _m.matrix3d(v))
 
     @property
     def cov_isigma(self):
@@ -382,7 +382,7 @@ class GpsData:
 
     @cov_isigma.setter
     def cov_isigma(self, v):
-        _f.path_gps_data_set_cov_isigma(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_gps_data_set_cov_isigma(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
 
 class PointFeature:
@@ -407,7 +407,7 @@ class PointFeature:
 
     @pixel.setter
     def pixel(self, v):
-        _f.path_point_feature_set_pixel(self._p, v if isinstance(v, _m.vect2f) else _m.vect2f(v))
+        _f.path_point_feature_set_pixel(self._p, v if isinstance(v, _m.vect2d) else _m.vect2d(v))
 
     @property
     def mf2r(self):
@@ -415,7 +415,7 @@ class PointFeature:
 
     @mf2r.setter
     def mf2r(self, v):
-        _f.path_point_feature_set_mf2r(self._p, v if isinstance(v, _m.matrix3f) else _m.matrix3f(v))
+        _f.path_point_feature_set_mf2r(self._p, v if isinstance(v, _m.matrix3d) else _m.matrix3d(v))
 
     @property
     def camera_pos(self):
@@ -423,7 +423,7 @@ class PointFeature:
 
     @camera_pos.setter
     def camera_pos(self, v):
-        _f.path_point_feature_set_camera_pos(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_point_feature_set_camera_pos(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def isigma(self):
@@ -431,7 +431,7 @@ class PointFeature:
 
     @isigma.setter
     def isigma(self, v):
-        _f.path_point_feature_set_isigma(self._p, v if isinstance(v, _m.vect2f) else _m.vect2f(v))
+        _f.path_point_feature_set_isigma(self._p, v if isinstance(v, _m.vect2d) else _m.vect2d(v))
 
 
 class PointFrine:
@@ -532,7 +532,7 @@ class PointLandmark:
 
     @anchor.setter
     def anchor(self, v):
-        _f.path_point_landmark_set_anchor(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_point_landmark_set_anchor(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def anchor_pose(self):
@@ -548,7 +548,7 @@ class PointLandmark:
 
     @dir_unit.setter
     def dir_unit(self, v):
-        _f.path_point_landmark_dir_set_unit(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_point_landmark_dir_set_unit(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def dir_unit_d0(self):
@@ -670,7 +670,7 @@ class PoseInfo:
 
     @delta_pos.setter
     def delta_pos(self, v):
-        _f.path_pose_info_set_delta_pos(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_pose_info_set_delta_pos(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def delta_rot(self):
@@ -678,7 +678,7 @@ class PoseInfo:
 
     @delta_rot.setter
     def delta_rot(self, v):
-        _f.path_pose_info_set_delta_rot(self._p, v if isinstance(v, _m.matrix3f) else _m.matrix3f(v))
+        _f.path_pose_info_set_delta_rot(self._p, v if isinstance(v, _m.matrix3d) else _m.matrix3d(v))
 
     @property
     def delta_pos_cov_r(self):
@@ -686,7 +686,7 @@ class PoseInfo:
 
     @delta_pos_cov_r.setter
     def delta_pos_cov_r(self, v):
-        _f.path_pose_info_set_delta_pos_cov_r(self._p, v if isinstance(v, _m.matrix3f) else _m.matrix3f(v))
+        _f.path_pose_info_set_delta_pos_cov_r(self._p, v if isinstance(v, _m.matrix3d) else _m.matrix3d(v))
 
     @property
     def delta_pos_cov_isigma(self):
@@ -694,7 +694,7 @@ class PoseInfo:
 
     @delta_pos_cov_isigma.setter
     def delta_pos_cov_isigma(self, v):
-        _f.path_pose_info_set_delta_pos_cov_isigma(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_pose_info_set_delta_pos_cov_isigma(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def delta_rot_cov_r(self):
@@ -702,7 +702,7 @@ class PoseInfo:
 
     @delta_rot_cov_r.setter
     def delta_rot_cov_r(self, v):
-        _f.path_pose_info_set_delta_rot_cov_r(self._p, v if isinstance(v, _m.matrix3f) else _m.matrix3f(v))
+        _f.path_pose_info_set_delta_rot_cov_r(self._p, v if isinstance(v, _m.matrix3d) else _m.matrix3d(v))
 
     @property
     def delta_rot_cov_isigma(self):
@@ -710,7 +710,7 @@ class PoseInfo:
 
     @delta_rot_cov_isigma.setter
     def delta_rot_cov_isigma(self, v):
-        _f.path_pose_info_set_delta_rot_cov_isigma(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_pose_info_set_delta_rot_cov_isigma(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def gps(self):
@@ -732,7 +732,7 @@ class PoseInfo:
 
     @tilt_g.setter
     def tilt_g(self, v):
-        _f.path_pose_info_set_tilt_g(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_pose_info_set_tilt_g(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def features(self):
@@ -761,7 +761,7 @@ class Pose:
 
     @r2w_translation.setter
     def r2w_translation(self, v):
-        _f.path_pose_r2w_set_translation(self._p, v if isinstance(v, _m.vect3f) else _m.vect3f(v))
+        _f.path_pose_r2w_set_translation(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
     def r2w_rotation(self):
@@ -769,7 +769,7 @@ class Pose:
 
     @r2w_rotation.setter
     def r2w_rotation(self, v):
-        _f.path_pose_r2w_set_rotation(self._p, v if isinstance(v, _m.quaternf) else _m.quaternf(v))
+        _f.path_pose_r2w_set_rotation(self._p, v if isinstance(v, _m.quaternd) else _m.quaternd(v))
 
     @property
     def r2w_optimize_translation(self):

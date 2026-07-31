@@ -9,48 +9,48 @@
 
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
-use arael::transform::TransformParamF;
-use arael::unitvec::UnitVecParamF;
-use arael::vect::{vect2f, vect3f};
-use arael::matrix::matrix3f;
+use arael::transform::TransformParam;
+use arael::unitvec::UnitVecParam;
+use arael::vect::{vect2d, vect3d};
+use arael::matrix::matrix3d;
 
 /// A detected point feature in camera frame. The constraint uses
 /// mf2r/camera_pos/isigma; pixel is for debugging.
 #[arael::model]
 #[derive(Default)]
 pub struct PointFeature {
-    pub pixel: vect2f,
+    pub pixel: vect2d,
     /// Feature-to-robot rotation: col0 = view dir, col1/col2 = perp axes.
-    pub mf2r: matrix3f,
+    pub mf2r: matrix3d,
     /// Camera position in robot frame.
-    pub camera_pos: vect3f,
+    pub camera_pos: vect3d,
     /// 1/sigma for angular residuals (rad^-1).
-    pub isigma: vect2f,
+    pub isigma: vect2d,
 }
 
 /// Decomposed GPS reading: position + covariance split into R and 1/sqrt(d).
 #[arael::model]
 #[derive(Default)]
 pub struct GpsData {
-    pub pos: vect3f,
-    pub cov_r: matrix3f,
-    pub cov_isigma: vect3f,
+    pub pos: vect3d,
+    pub cov_r: matrix3d,
+    pub cov_isigma: vect3d,
 }
 
 #[arael::model]
 #[derive(Default)]
 pub struct PoseInfo {
-    pub delta_pos: vect3f,
+    pub delta_pos: vect3d,
     /// Measured relative rotation prev -> cur, as a matrix.
-    pub delta_rot: matrix3f,
-    pub delta_pos_cov_r: matrix3f,
-    pub delta_pos_cov_isigma: vect3f,
-    pub delta_rot_cov_r: matrix3f,
-    pub delta_rot_cov_isigma: vect3f,
+    pub delta_rot: matrix3d,
+    pub delta_pos_cov_r: matrix3d,
+    pub delta_pos_cov_isigma: vect3d,
+    pub delta_rot_cov_r: matrix3d,
+    pub delta_rot_cov_isigma: vect3d,
     pub gps: Option<GpsData>,
     /// Accelerometer tilt reading: the world up direction seen in the
     /// body frame (yaw-free by construction).
-    pub tilt_g: vect3f,
+    pub tilt_g: vect3d,
     pub features: refs::Vec<PointFeature>,
 }
 
@@ -76,7 +76,7 @@ pub struct PoseInfo {
 }))]
 #[derive(Default)]
 pub struct Pose {
-    pub r2w: TransformParamF,
+    pub r2w: TransformParam<f64>,
     pub info: PoseInfo,
     pub hb_pose: SelfBlock<Pose>,
 }
@@ -94,13 +94,13 @@ pub struct Pose {
 }))]
 #[derive(Default)]
 pub struct PointLandmark {
-    pub anchor: vect3f,
+    pub anchor: vect3d,
     /// The observing pose the anchor is snapshotted from. Data only --
     /// no constraint reads it, so the anchor stays constant in the solve.
     #[arael(ref = root.poses)]
     pub anchor_pose: Ref<Pose>,
-    pub dir: UnitVecParamF,
-    pub rho: Param<f32>,
+    pub dir: UnitVecParam<f64>,
+    pub rho: Param<f64>,
     pub frines: std::vec::Vec<PointFrine>,
     pub hb_drift: SelfBlock<PointLandmark>,
 }
@@ -166,14 +166,14 @@ pub struct Path {
     pub poses: refs::Deque<Pose>,
     pub landmarks: refs::Arena<PointLandmark>,
     pub pose_pairs: std::vec::Vec<PosePair>,
-    pub drift_rho_isigma: f32,
-    pub tilt_isigma: f32,
-    pub frine_isigma_scale: f32,
+    pub drift_rho_isigma: f64,
+    pub tilt_isigma: f64,
+    pub frine_isigma_scale: f64,
     /// Squared threshold for the feature blocks (GM 2.99, Cauchy 1.5).
-    pub frine_c2: f32,
+    pub frine_c2: f64,
     /// Feature loss selector: > 0 Cauchy, else Geman-McClure.
-    pub frine_cauchy: f32,
+    pub frine_cauchy: f64,
     /// Geman-McClure squared threshold for the GPS blocks
     /// (chi-square 0.95 quantile, 3 DOF).
-    pub gps_c2: f32,
+    pub gps_c2: f64,
 }

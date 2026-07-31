@@ -1548,107 +1548,107 @@ pub unsafe extern "C" fn path_pose_pairs_truncate(p: *mut PathHandle, len: u32) 
     (*p).model.pose_pairs.truncate(len as usize);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_drift_rho_isigma(p: *const PathHandle) -> f32 {
+pub unsafe extern "C" fn path_drift_rho_isigma(p: *const PathHandle) -> f64 {
     (*p).model.drift_rho_isigma
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_drift_rho_isigma(p: *mut PathHandle, v: f32) {
+pub unsafe extern "C" fn path_set_drift_rho_isigma(p: *mut PathHandle, v: f64) {
     (*p).model.drift_rho_isigma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_tilt_isigma(p: *const PathHandle) -> f32 {
+pub unsafe extern "C" fn path_tilt_isigma(p: *const PathHandle) -> f64 {
     (*p).model.tilt_isigma
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_tilt_isigma(p: *mut PathHandle, v: f32) {
+pub unsafe extern "C" fn path_set_tilt_isigma(p: *mut PathHandle, v: f64) {
     (*p).model.tilt_isigma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_frine_isigma_scale(p: *const PathHandle) -> f32 {
+pub unsafe extern "C" fn path_frine_isigma_scale(p: *const PathHandle) -> f64 {
     (*p).model.frine_isigma_scale
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_frine_isigma_scale(p: *mut PathHandle, v: f32) {
+pub unsafe extern "C" fn path_set_frine_isigma_scale(p: *mut PathHandle, v: f64) {
     (*p).model.frine_isigma_scale = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_frine_c2(p: *const PathHandle) -> f32 {
+pub unsafe extern "C" fn path_frine_c2(p: *const PathHandle) -> f64 {
     (*p).model.frine_c2
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_frine_c2(p: *mut PathHandle, v: f32) {
+pub unsafe extern "C" fn path_set_frine_c2(p: *mut PathHandle, v: f64) {
     (*p).model.frine_c2 = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_frine_cauchy(p: *const PathHandle) -> f32 {
+pub unsafe extern "C" fn path_frine_cauchy(p: *const PathHandle) -> f64 {
     (*p).model.frine_cauchy
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_frine_cauchy(p: *mut PathHandle, v: f32) {
+pub unsafe extern "C" fn path_set_frine_cauchy(p: *mut PathHandle, v: f64) {
     (*p).model.frine_cauchy = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_c2(p: *const PathHandle) -> f32 {
+pub unsafe extern "C" fn path_gps_c2(p: *const PathHandle) -> f64 {
     (*p).model.gps_c2
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_gps_c2(p: *mut PathHandle, v: f32) {
+pub unsafe extern "C" fn path_set_gps_c2(p: *mut PathHandle, v: f64) {
     (*p).model.gps_c2 = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_data_pos(p: *const GpsData) -> CVec3F32 {
+pub unsafe extern "C" fn path_gps_data_pos(p: *const GpsData) -> CVec3F64 {
     (*p).pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_data_set_pos(p: *mut GpsData, v: CVec3F32) {
+pub unsafe extern "C" fn path_gps_data_set_pos(p: *mut GpsData, v: CVec3F64) {
     (*p).pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_data_cov_r(p: *const GpsData) -> CMat3F32 {
+pub unsafe extern "C" fn path_gps_data_cov_r(p: *const GpsData) -> CMat3F64 {
     (*p).cov_r.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_data_set_cov_r(p: *mut GpsData, v: CMat3F32) {
+pub unsafe extern "C" fn path_gps_data_set_cov_r(p: *mut GpsData, v: CMat3F64) {
     (*p).cov_r = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_data_cov_isigma(p: *const GpsData) -> CVec3F32 {
+pub unsafe extern "C" fn path_gps_data_cov_isigma(p: *const GpsData) -> CVec3F64 {
     (*p).cov_isigma.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_gps_data_set_cov_isigma(p: *mut GpsData, v: CVec3F32) {
+pub unsafe extern "C" fn path_gps_data_set_cov_isigma(p: *mut GpsData, v: CVec3F64) {
     (*p).cov_isigma = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_pixel(p: *const PointFeature) -> CVec2F32 {
+pub unsafe extern "C" fn path_point_feature_pixel(p: *const PointFeature) -> CVec2F64 {
     (*p).pixel.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_set_pixel(p: *mut PointFeature, v: CVec2F32) {
+pub unsafe extern "C" fn path_point_feature_set_pixel(p: *mut PointFeature, v: CVec2F64) {
     (*p).pixel = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_mf2r(p: *const PointFeature) -> CMat3F32 {
+pub unsafe extern "C" fn path_point_feature_mf2r(p: *const PointFeature) -> CMat3F64 {
     (*p).mf2r.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_set_mf2r(p: *mut PointFeature, v: CMat3F32) {
+pub unsafe extern "C" fn path_point_feature_set_mf2r(p: *mut PointFeature, v: CMat3F64) {
     (*p).mf2r = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_camera_pos(p: *const PointFeature) -> CVec3F32 {
+pub unsafe extern "C" fn path_point_feature_camera_pos(p: *const PointFeature) -> CVec3F64 {
     (*p).camera_pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_set_camera_pos(p: *mut PointFeature, v: CVec3F32) {
+pub unsafe extern "C" fn path_point_feature_set_camera_pos(p: *mut PointFeature, v: CVec3F64) {
     (*p).camera_pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_isigma(p: *const PointFeature) -> CVec2F32 {
+pub unsafe extern "C" fn path_point_feature_isigma(p: *const PointFeature) -> CVec2F64 {
     (*p).isigma.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_feature_set_isigma(p: *mut PointFeature, v: CVec2F32) {
+pub unsafe extern "C" fn path_point_feature_set_isigma(p: *mut PointFeature, v: CVec2F64) {
     (*p).isigma = v.into();
 }
 #[no_mangle]
@@ -1668,11 +1668,11 @@ pub unsafe extern "C" fn path_point_frine_set_feature(p: *mut PointFrine, v: u32
     (*p).feature = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_anchor(p: *const PointLandmark) -> CVec3F32 {
+pub unsafe extern "C" fn path_point_landmark_anchor(p: *const PointLandmark) -> CVec3F64 {
     (*p).anchor.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_set_anchor(p: *mut PointLandmark, v: CVec3F32) {
+pub unsafe extern "C" fn path_point_landmark_set_anchor(p: *mut PointLandmark, v: CVec3F64) {
     (*p).anchor = v.into();
 }
 #[no_mangle]
@@ -1684,27 +1684,27 @@ pub unsafe extern "C" fn path_point_landmark_set_anchor_pose(p: *mut PointLandma
     (*p).anchor_pose = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_unit(p: *const PointLandmark) -> CVec3F32 {
+pub unsafe extern "C" fn path_point_landmark_dir_unit(p: *const PointLandmark) -> CVec3F64 {
     (*p).dir.unit.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_set_unit(p: *mut PointLandmark, v: CVec3F32) {
+pub unsafe extern "C" fn path_point_landmark_dir_set_unit(p: *mut PointLandmark, v: CVec3F64) {
     (*p).dir.unit = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_unit_d0(p: *const PointLandmark) -> CVec3F32 {
+pub unsafe extern "C" fn path_point_landmark_dir_unit_d0(p: *const PointLandmark) -> CVec3F64 {
     (*p).dir.unit_d[0].into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_unit_d1(p: *const PointLandmark) -> CVec3F32 {
+pub unsafe extern "C" fn path_point_landmark_dir_unit_d1(p: *const PointLandmark) -> CVec3F64 {
     (*p).dir.unit_d[1].into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_rho(p: *const PointLandmark) -> f32 {
+pub unsafe extern "C" fn path_point_landmark_rho(p: *const PointLandmark) -> f64 {
     (*p).rho.value
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_set_rho(p: *mut PointLandmark, v: f32) {
+pub unsafe extern "C" fn path_point_landmark_set_rho(p: *mut PointLandmark, v: f64) {
     (*p).rho.value = v;
 }
 #[no_mangle]
@@ -1748,19 +1748,19 @@ pub unsafe extern "C" fn path_point_landmark_frines_truncate(p: *mut PointLandma
     (*p).frines.truncate(len as usize);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_translation(p: *const Pose) -> CVec3F32 {
+pub unsafe extern "C" fn path_pose_r2w_translation(p: *const Pose) -> CVec3F64 {
     (*p).r2w.translation.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_set_translation(p: *mut Pose, v: CVec3F32) {
+pub unsafe extern "C" fn path_pose_r2w_set_translation(p: *mut Pose, v: CVec3F64) {
     (*p).r2w.translation = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_rotation(p: *const Pose) -> CQuatF32 {
+pub unsafe extern "C" fn path_pose_r2w_rotation(p: *const Pose) -> CQuatF64 {
     (*p).r2w.rotation.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_set_rotation(p: *mut Pose, v: CQuatF32) {
+pub unsafe extern "C" fn path_pose_r2w_set_rotation(p: *mut Pose, v: CQuatF64) {
     (*p).r2w.rotation = v.into();
 }
 #[no_mangle]
@@ -1785,51 +1785,51 @@ pub unsafe extern "C" fn path_pose_info_ptr(p: *mut Pose) -> *mut PoseInfo {
     a as *mut PoseInfo
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_pos(p: *const PoseInfo) -> CVec3F32 {
+pub unsafe extern "C" fn path_pose_info_delta_pos(p: *const PoseInfo) -> CVec3F64 {
     (*p).delta_pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_pos(p: *mut PoseInfo, v: CVec3F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_pos(p: *mut PoseInfo, v: CVec3F64) {
     (*p).delta_pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_rot(p: *const PoseInfo) -> CMat3F32 {
+pub unsafe extern "C" fn path_pose_info_delta_rot(p: *const PoseInfo) -> CMat3F64 {
     (*p).delta_rot.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_rot(p: *mut PoseInfo, v: CMat3F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_rot(p: *mut PoseInfo, v: CMat3F64) {
     (*p).delta_rot = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_pos_cov_r(p: *const PoseInfo) -> CMat3F32 {
+pub unsafe extern "C" fn path_pose_info_delta_pos_cov_r(p: *const PoseInfo) -> CMat3F64 {
     (*p).delta_pos_cov_r.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_r(p: *mut PoseInfo, v: CMat3F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_r(p: *mut PoseInfo, v: CMat3F64) {
     (*p).delta_pos_cov_r = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_pos_cov_isigma(p: *const PoseInfo) -> CVec3F32 {
+pub unsafe extern "C" fn path_pose_info_delta_pos_cov_isigma(p: *const PoseInfo) -> CVec3F64 {
     (*p).delta_pos_cov_isigma.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_isigma(p: *mut PoseInfo, v: CVec3F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_isigma(p: *mut PoseInfo, v: CVec3F64) {
     (*p).delta_pos_cov_isigma = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_rot_cov_r(p: *const PoseInfo) -> CMat3F32 {
+pub unsafe extern "C" fn path_pose_info_delta_rot_cov_r(p: *const PoseInfo) -> CMat3F64 {
     (*p).delta_rot_cov_r.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_r(p: *mut PoseInfo, v: CMat3F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_r(p: *mut PoseInfo, v: CMat3F64) {
     (*p).delta_rot_cov_r = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_rot_cov_isigma(p: *const PoseInfo) -> CVec3F32 {
+pub unsafe extern "C" fn path_pose_info_delta_rot_cov_isigma(p: *const PoseInfo) -> CVec3F64 {
     (*p).delta_rot_cov_isigma.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_isigma(p: *mut PoseInfo, v: CVec3F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_isigma(p: *mut PoseInfo, v: CVec3F64) {
     (*p).delta_rot_cov_isigma = v.into();
 }
 #[no_mangle]
@@ -1854,11 +1854,11 @@ pub unsafe extern "C" fn path_pose_info_gps(p: *mut PoseInfo) -> *mut GpsData {
     }
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_tilt_g(p: *const PoseInfo) -> CVec3F32 {
+pub unsafe extern "C" fn path_pose_info_tilt_g(p: *const PoseInfo) -> CVec3F64 {
     (*p).tilt_g.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_tilt_g(p: *mut PoseInfo, v: CVec3F32) {
+pub unsafe extern "C" fn path_pose_info_set_tilt_g(p: *mut PoseInfo, v: CVec3F64) {
     (*p).tilt_g = v.into();
 }
 #[no_mangle]

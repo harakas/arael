@@ -130,34 +130,34 @@ struct PoseInfo;
 struct PosePair;
 
 extern "C" {
-vect3f path_gps_data_pos(const GpsData*);
-void path_gps_data_set_pos(GpsData*, vect3f);
-matrix3f path_gps_data_cov_r(const GpsData*);
-void path_gps_data_set_cov_r(GpsData*, matrix3f);
-vect3f path_gps_data_cov_isigma(const GpsData*);
-void path_gps_data_set_cov_isigma(GpsData*, vect3f);
-vect2f path_point_feature_pixel(const PointFeature*);
-void path_point_feature_set_pixel(PointFeature*, vect2f);
-matrix3f path_point_feature_mf2r(const PointFeature*);
-void path_point_feature_set_mf2r(PointFeature*, matrix3f);
-vect3f path_point_feature_camera_pos(const PointFeature*);
-void path_point_feature_set_camera_pos(PointFeature*, vect3f);
-vect2f path_point_feature_isigma(const PointFeature*);
-void path_point_feature_set_isigma(PointFeature*, vect2f);
+vect3d path_gps_data_pos(const GpsData*);
+void path_gps_data_set_pos(GpsData*, vect3d);
+matrix3d path_gps_data_cov_r(const GpsData*);
+void path_gps_data_set_cov_r(GpsData*, matrix3d);
+vect3d path_gps_data_cov_isigma(const GpsData*);
+void path_gps_data_set_cov_isigma(GpsData*, vect3d);
+vect2d path_point_feature_pixel(const PointFeature*);
+void path_point_feature_set_pixel(PointFeature*, vect2d);
+matrix3d path_point_feature_mf2r(const PointFeature*);
+void path_point_feature_set_mf2r(PointFeature*, matrix3d);
+vect3d path_point_feature_camera_pos(const PointFeature*);
+void path_point_feature_set_camera_pos(PointFeature*, vect3d);
+vect2d path_point_feature_isigma(const PointFeature*);
+void path_point_feature_set_isigma(PointFeature*, vect2d);
 uint32_t path_point_frine_pose(const PointFrine*);
 void path_point_frine_set_pose(PointFrine*, uint32_t);
 uint32_t path_point_frine_feature(const PointFrine*);
 void path_point_frine_set_feature(PointFrine*, uint32_t);
-vect3f path_point_landmark_anchor(const PointLandmark*);
-void path_point_landmark_set_anchor(PointLandmark*, vect3f);
+vect3d path_point_landmark_anchor(const PointLandmark*);
+void path_point_landmark_set_anchor(PointLandmark*, vect3d);
 uint32_t path_point_landmark_anchor_pose(const PointLandmark*);
 void path_point_landmark_set_anchor_pose(PointLandmark*, uint32_t);
-vect3f path_point_landmark_dir_unit(const PointLandmark*);
-void path_point_landmark_dir_set_unit(PointLandmark*, vect3f);
-vect3f path_point_landmark_dir_unit_d0(const PointLandmark*);
-vect3f path_point_landmark_dir_unit_d1(const PointLandmark*);
-float path_point_landmark_rho(const PointLandmark*);
-void path_point_landmark_set_rho(PointLandmark*, float);
+vect3d path_point_landmark_dir_unit(const PointLandmark*);
+void path_point_landmark_dir_set_unit(PointLandmark*, vect3d);
+vect3d path_point_landmark_dir_unit_d0(const PointLandmark*);
+vect3d path_point_landmark_dir_unit_d1(const PointLandmark*);
+double path_point_landmark_rho(const PointLandmark*);
+void path_point_landmark_set_rho(PointLandmark*, double);
 bool path_point_landmark_rho_optimize(const PointLandmark*);
 void path_point_landmark_rho_set_optimize(PointLandmark*, bool);
 uint32_t path_point_landmark_frines_len(const PointLandmark*);
@@ -167,24 +167,24 @@ PointFrine* path_point_landmark_frines_at(PointLandmark*, uint32_t);
 bool path_point_landmark_frines_pop(PointLandmark*);
 void path_point_landmark_frines_clear(PointLandmark*);
 void path_point_landmark_frines_truncate(PointLandmark*, uint32_t);
-vect3f path_pose_info_delta_pos(const PoseInfo*);
-void path_pose_info_set_delta_pos(PoseInfo*, vect3f);
-matrix3f path_pose_info_delta_rot(const PoseInfo*);
-void path_pose_info_set_delta_rot(PoseInfo*, matrix3f);
-matrix3f path_pose_info_delta_pos_cov_r(const PoseInfo*);
-void path_pose_info_set_delta_pos_cov_r(PoseInfo*, matrix3f);
-vect3f path_pose_info_delta_pos_cov_isigma(const PoseInfo*);
-void path_pose_info_set_delta_pos_cov_isigma(PoseInfo*, vect3f);
-matrix3f path_pose_info_delta_rot_cov_r(const PoseInfo*);
-void path_pose_info_set_delta_rot_cov_r(PoseInfo*, matrix3f);
-vect3f path_pose_info_delta_rot_cov_isigma(const PoseInfo*);
-void path_pose_info_set_delta_rot_cov_isigma(PoseInfo*, vect3f);
+vect3d path_pose_info_delta_pos(const PoseInfo*);
+void path_pose_info_set_delta_pos(PoseInfo*, vect3d);
+matrix3d path_pose_info_delta_rot(const PoseInfo*);
+void path_pose_info_set_delta_rot(PoseInfo*, matrix3d);
+matrix3d path_pose_info_delta_pos_cov_r(const PoseInfo*);
+void path_pose_info_set_delta_pos_cov_r(PoseInfo*, matrix3d);
+vect3d path_pose_info_delta_pos_cov_isigma(const PoseInfo*);
+void path_pose_info_set_delta_pos_cov_isigma(PoseInfo*, vect3d);
+matrix3d path_pose_info_delta_rot_cov_r(const PoseInfo*);
+void path_pose_info_set_delta_rot_cov_r(PoseInfo*, matrix3d);
+vect3d path_pose_info_delta_rot_cov_isigma(const PoseInfo*);
+void path_pose_info_set_delta_rot_cov_isigma(PoseInfo*, vect3d);
 bool path_pose_info_has_gps(const PoseInfo*);
 GpsData* path_pose_info_make_gps(PoseInfo*);
 void path_pose_info_clear_gps(PoseInfo*);
 GpsData* path_pose_info_gps(PoseInfo*);
-vect3f path_pose_info_tilt_g(const PoseInfo*);
-void path_pose_info_set_tilt_g(PoseInfo*, vect3f);
+vect3d path_pose_info_tilt_g(const PoseInfo*);
+void path_pose_info_set_tilt_g(PoseInfo*, vect3d);
 uint32_t path_pose_info_features_len(const PoseInfo*);
 void path_pose_info_features_reserve(PoseInfo*, uint32_t);
 PointFeature* path_pose_info_features_push(PoseInfo*);
@@ -198,10 +198,10 @@ uint32_t path_pose_info_features_last_ref(const PoseInfo*);
 PointFeature* path_pose_info_features_get(PoseInfo*, uint32_t);
 bool path_pose_info_features_contains(const PoseInfo*, uint32_t);
 PointFeature* path_pose_info_features_try_get(PoseInfo*, uint32_t);
-vect3f path_pose_r2w_translation(const Pose*);
-void path_pose_r2w_set_translation(Pose*, vect3f);
-quaternf path_pose_r2w_rotation(const Pose*);
-void path_pose_r2w_set_rotation(Pose*, quaternf);
+vect3d path_pose_r2w_translation(const Pose*);
+void path_pose_r2w_set_translation(Pose*, vect3d);
+quaternd path_pose_r2w_rotation(const Pose*);
+void path_pose_r2w_set_rotation(Pose*, quaternd);
 bool path_pose_r2w_optimize_translation(const Pose*);
 void path_pose_r2w_set_optimize_translation(Pose*, bool);
 bool path_pose_r2w_optimize_rotation(const Pose*);
@@ -256,18 +256,18 @@ PosePair* path_pose_pairs_at(Path*, uint32_t);
 bool path_pose_pairs_pop(Path*);
 void path_pose_pairs_clear(Path*);
 void path_pose_pairs_truncate(Path*, uint32_t);
-float path_drift_rho_isigma(const Path*);
-void path_set_drift_rho_isigma(Path*, float);
-float path_tilt_isigma(const Path*);
-void path_set_tilt_isigma(Path*, float);
-float path_frine_isigma_scale(const Path*);
-void path_set_frine_isigma_scale(Path*, float);
-float path_frine_c2(const Path*);
-void path_set_frine_c2(Path*, float);
-float path_frine_cauchy(const Path*);
-void path_set_frine_cauchy(Path*, float);
-float path_gps_c2(const Path*);
-void path_set_gps_c2(Path*, float);
+double path_drift_rho_isigma(const Path*);
+void path_set_drift_rho_isigma(Path*, double);
+double path_tilt_isigma(const Path*);
+void path_set_tilt_isigma(Path*, double);
+double path_frine_isigma_scale(const Path*);
+void path_set_frine_isigma_scale(Path*, double);
+double path_frine_c2(const Path*);
+void path_set_frine_c2(Path*, double);
+double path_frine_cauchy(const Path*);
+void path_set_frine_cauchy(Path*, double);
+double path_gps_c2(const Path*);
+void path_set_gps_c2(Path*, double);
 double path_cost(Path*);
 int32_t path_solve_band(Path*, uint32_t, const LmConfig*, LmResultT<double>*);
 void path_lm_config(uint32_t, LmConfig*);
@@ -360,12 +360,12 @@ public:
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::GpsData* raw() const { return h_; }
-    vect3f pos() const { return ffi::path_gps_data_pos(h_); }
-    void set_pos(vect3f v) { ffi::path_gps_data_set_pos(h_, v); }
-    matrix3f cov_r() const { return ffi::path_gps_data_cov_r(h_); }
-    void set_cov_r(matrix3f v) { ffi::path_gps_data_set_cov_r(h_, v); }
-    vect3f cov_isigma() const { return ffi::path_gps_data_cov_isigma(h_); }
-    void set_cov_isigma(vect3f v) { ffi::path_gps_data_set_cov_isigma(h_, v); }
+    vect3d pos() const { return ffi::path_gps_data_pos(h_); }
+    void set_pos(vect3d v) { ffi::path_gps_data_set_pos(h_, v); }
+    matrix3d cov_r() const { return ffi::path_gps_data_cov_r(h_); }
+    void set_cov_r(matrix3d v) { ffi::path_gps_data_set_cov_r(h_, v); }
+    vect3d cov_isigma() const { return ffi::path_gps_data_cov_isigma(h_); }
+    void set_cov_isigma(vect3d v) { ffi::path_gps_data_set_cov_isigma(h_, v); }
 private:
     ffi::GpsData* h_;
 };
@@ -382,14 +382,14 @@ public:
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::PointFeature* raw() const { return h_; }
-    vect2f pixel() const { return ffi::path_point_feature_pixel(h_); }
-    void set_pixel(vect2f v) { ffi::path_point_feature_set_pixel(h_, v); }
-    matrix3f mf2r() const { return ffi::path_point_feature_mf2r(h_); }
-    void set_mf2r(matrix3f v) { ffi::path_point_feature_set_mf2r(h_, v); }
-    vect3f camera_pos() const { return ffi::path_point_feature_camera_pos(h_); }
-    void set_camera_pos(vect3f v) { ffi::path_point_feature_set_camera_pos(h_, v); }
-    vect2f isigma() const { return ffi::path_point_feature_isigma(h_); }
-    void set_isigma(vect2f v) { ffi::path_point_feature_set_isigma(h_, v); }
+    vect2d pixel() const { return ffi::path_point_feature_pixel(h_); }
+    void set_pixel(vect2d v) { ffi::path_point_feature_set_pixel(h_, v); }
+    matrix3d mf2r() const { return ffi::path_point_feature_mf2r(h_); }
+    void set_mf2r(matrix3d v) { ffi::path_point_feature_set_mf2r(h_, v); }
+    vect3d camera_pos() const { return ffi::path_point_feature_camera_pos(h_); }
+    void set_camera_pos(vect3d v) { ffi::path_point_feature_set_camera_pos(h_, v); }
+    vect2d isigma() const { return ffi::path_point_feature_isigma(h_); }
+    void set_isigma(vect2d v) { ffi::path_point_feature_set_isigma(h_, v); }
 private:
     ffi::PointFeature* h_;
 };
@@ -508,17 +508,17 @@ public:
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::PointLandmark* raw() const { return h_; }
-    vect3f anchor() const { return ffi::path_point_landmark_anchor(h_); }
-    void set_anchor(vect3f v) { ffi::path_point_landmark_set_anchor(h_, v); }
+    vect3d anchor() const { return ffi::path_point_landmark_anchor(h_); }
+    void set_anchor(vect3d v) { ffi::path_point_landmark_set_anchor(h_, v); }
     PoseRef anchor_pose() const { return PoseRef{ffi::path_point_landmark_anchor_pose(h_)}; }
     void set_anchor_pose(PoseRef r) { ffi::path_point_landmark_set_anchor_pose(h_, r.raw); }
-    vect3f dir_unit() const { return ffi::path_point_landmark_dir_unit(h_); }
-    void set_dir_unit(vect3f v) { ffi::path_point_landmark_dir_set_unit(h_, v); }
+    vect3d dir_unit() const { return ffi::path_point_landmark_dir_unit(h_); }
+    void set_dir_unit(vect3d v) { ffi::path_point_landmark_dir_set_unit(h_, v); }
     /// Chart tangent basis: d unit / d chart, per chart param.
-    vect3f dir_unit_d0() const { return ffi::path_point_landmark_dir_unit_d0(h_); }
-    vect3f dir_unit_d1() const { return ffi::path_point_landmark_dir_unit_d1(h_); }
-    float rho() const { return ffi::path_point_landmark_rho(h_); }
-    void set_rho(float v) { ffi::path_point_landmark_set_rho(h_, v); }
+    vect3d dir_unit_d0() const { return ffi::path_point_landmark_dir_unit_d0(h_); }
+    vect3d dir_unit_d1() const { return ffi::path_point_landmark_dir_unit_d1(h_); }
+    double rho() const { return ffi::path_point_landmark_rho(h_); }
+    void set_rho(double v) { ffi::path_point_landmark_set_rho(h_, v); }
     bool rho_optimize() const { return ffi::path_point_landmark_rho_optimize(h_); }
     void set_rho_optimize(bool v) { ffi::path_point_landmark_rho_set_optimize(h_, v); }
     PointLandmarkFrinesVec frines() { return PointLandmarkFrinesVec(h_); }
@@ -632,18 +632,18 @@ public:
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::PoseInfo* raw() const { return h_; }
-    vect3f delta_pos() const { return ffi::path_pose_info_delta_pos(h_); }
-    void set_delta_pos(vect3f v) { ffi::path_pose_info_set_delta_pos(h_, v); }
-    matrix3f delta_rot() const { return ffi::path_pose_info_delta_rot(h_); }
-    void set_delta_rot(matrix3f v) { ffi::path_pose_info_set_delta_rot(h_, v); }
-    matrix3f delta_pos_cov_r() const { return ffi::path_pose_info_delta_pos_cov_r(h_); }
-    void set_delta_pos_cov_r(matrix3f v) { ffi::path_pose_info_set_delta_pos_cov_r(h_, v); }
-    vect3f delta_pos_cov_isigma() const { return ffi::path_pose_info_delta_pos_cov_isigma(h_); }
-    void set_delta_pos_cov_isigma(vect3f v) { ffi::path_pose_info_set_delta_pos_cov_isigma(h_, v); }
-    matrix3f delta_rot_cov_r() const { return ffi::path_pose_info_delta_rot_cov_r(h_); }
-    void set_delta_rot_cov_r(matrix3f v) { ffi::path_pose_info_set_delta_rot_cov_r(h_, v); }
-    vect3f delta_rot_cov_isigma() const { return ffi::path_pose_info_delta_rot_cov_isigma(h_); }
-    void set_delta_rot_cov_isigma(vect3f v) { ffi::path_pose_info_set_delta_rot_cov_isigma(h_, v); }
+    vect3d delta_pos() const { return ffi::path_pose_info_delta_pos(h_); }
+    void set_delta_pos(vect3d v) { ffi::path_pose_info_set_delta_pos(h_, v); }
+    matrix3d delta_rot() const { return ffi::path_pose_info_delta_rot(h_); }
+    void set_delta_rot(matrix3d v) { ffi::path_pose_info_set_delta_rot(h_, v); }
+    matrix3d delta_pos_cov_r() const { return ffi::path_pose_info_delta_pos_cov_r(h_); }
+    void set_delta_pos_cov_r(matrix3d v) { ffi::path_pose_info_set_delta_pos_cov_r(h_, v); }
+    vect3d delta_pos_cov_isigma() const { return ffi::path_pose_info_delta_pos_cov_isigma(h_); }
+    void set_delta_pos_cov_isigma(vect3d v) { ffi::path_pose_info_set_delta_pos_cov_isigma(h_, v); }
+    matrix3d delta_rot_cov_r() const { return ffi::path_pose_info_delta_rot_cov_r(h_); }
+    void set_delta_rot_cov_r(matrix3d v) { ffi::path_pose_info_set_delta_rot_cov_r(h_, v); }
+    vect3d delta_rot_cov_isigma() const { return ffi::path_pose_info_delta_rot_cov_isigma(h_); }
+    void set_delta_rot_cov_isigma(vect3d v) { ffi::path_pose_info_set_delta_rot_cov_isigma(h_, v); }
     bool has_gps() const { return ffi::path_pose_info_has_gps(h_); }
     GpsData make_gps() { return GpsData(ffi::path_pose_info_make_gps(h_)); }
     void clear_gps() { ffi::path_pose_info_clear_gps(h_); }
@@ -651,8 +651,8 @@ public:
         ffi::GpsData* p = ffi::path_pose_info_gps(h_);
         return p ? option<GpsData>(GpsData(p)) : option<GpsData>();
     }
-    vect3f tilt_g() const { return ffi::path_pose_info_tilt_g(h_); }
-    void set_tilt_g(vect3f v) { ffi::path_pose_info_set_tilt_g(h_, v); }
+    vect3d tilt_g() const { return ffi::path_pose_info_tilt_g(h_); }
+    void set_tilt_g(vect3d v) { ffi::path_pose_info_set_tilt_g(h_, v); }
     PoseInfoFeaturesVec features() { return PoseInfoFeaturesVec(h_); }
 private:
     ffi::PoseInfo* h_;
@@ -670,10 +670,10 @@ public:
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Pose* raw() const { return h_; }
-    vect3f r2w_translation() const { return ffi::path_pose_r2w_translation(h_); }
-    void set_r2w_translation(vect3f v) { ffi::path_pose_r2w_set_translation(h_, v); }
-    quaternf r2w_rotation() const { return ffi::path_pose_r2w_rotation(h_); }
-    void set_r2w_rotation(quaternf v) { ffi::path_pose_r2w_set_rotation(h_, v); }
+    vect3d r2w_translation() const { return ffi::path_pose_r2w_translation(h_); }
+    void set_r2w_translation(vect3d v) { ffi::path_pose_r2w_set_translation(h_, v); }
+    quaternd r2w_rotation() const { return ffi::path_pose_r2w_rotation(h_); }
+    void set_r2w_rotation(quaternd v) { ffi::path_pose_r2w_set_rotation(h_, v); }
     bool r2w_optimize_translation() const { return ffi::path_pose_r2w_optimize_translation(h_); }
     void set_r2w_optimize_translation(bool v) { ffi::path_pose_r2w_set_optimize_translation(h_, v); }
     bool r2w_optimize_rotation() const { return ffi::path_pose_r2w_optimize_rotation(h_); }
@@ -1046,18 +1046,18 @@ public:
     PathPosesDeque poses() { return PathPosesDeque(h_); }
     PathLandmarksArena landmarks() { return PathLandmarksArena(h_); }
     PathPosePairsVec pose_pairs() { return PathPosePairsVec(h_); }
-    float drift_rho_isigma() const { return ffi::path_drift_rho_isigma(h_); }
-    void set_drift_rho_isigma(float v) { ffi::path_set_drift_rho_isigma(h_, v); }
-    float tilt_isigma() const { return ffi::path_tilt_isigma(h_); }
-    void set_tilt_isigma(float v) { ffi::path_set_tilt_isigma(h_, v); }
-    float frine_isigma_scale() const { return ffi::path_frine_isigma_scale(h_); }
-    void set_frine_isigma_scale(float v) { ffi::path_set_frine_isigma_scale(h_, v); }
-    float frine_c2() const { return ffi::path_frine_c2(h_); }
-    void set_frine_c2(float v) { ffi::path_set_frine_c2(h_, v); }
-    float frine_cauchy() const { return ffi::path_frine_cauchy(h_); }
-    void set_frine_cauchy(float v) { ffi::path_set_frine_cauchy(h_, v); }
-    float gps_c2() const { return ffi::path_gps_c2(h_); }
-    void set_gps_c2(float v) { ffi::path_set_gps_c2(h_, v); }
+    double drift_rho_isigma() const { return ffi::path_drift_rho_isigma(h_); }
+    void set_drift_rho_isigma(double v) { ffi::path_set_drift_rho_isigma(h_, v); }
+    double tilt_isigma() const { return ffi::path_tilt_isigma(h_); }
+    void set_tilt_isigma(double v) { ffi::path_set_tilt_isigma(h_, v); }
+    double frine_isigma_scale() const { return ffi::path_frine_isigma_scale(h_); }
+    void set_frine_isigma_scale(double v) { ffi::path_set_frine_isigma_scale(h_, v); }
+    double frine_c2() const { return ffi::path_frine_c2(h_); }
+    void set_frine_c2(double v) { ffi::path_set_frine_c2(h_, v); }
+    double frine_cauchy() const { return ffi::path_frine_cauchy(h_); }
+    void set_frine_cauchy(double v) { ffi::path_set_frine_cauchy(h_, v); }
+    double gps_c2() const { return ffi::path_gps_c2(h_); }
+    void set_gps_c2(double v) { ffi::path_set_gps_c2(h_, v); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1) or a caught panic (-2) -- the same split
