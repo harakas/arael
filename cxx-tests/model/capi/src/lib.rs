@@ -17,7 +17,6 @@ use cxx_fit::{Fit, Gain, GpsObs, Info, N, Obs, Pose, Rig, Tie};
 pub struct FitHandle {
     model: Fit,
     text: CString,
-    cov: Option<CovAssembly>,
     cost_table: Vec<(CString, f64)>,
 }
 
@@ -648,7 +647,6 @@ pub extern "C" fn fit_new() -> *mut FitHandle {
     Box::into_raw(Box::new(FitHandle {
         model: Default::default(),
         text: CString::default(),
-        cov: None,
         cost_table: Vec::new(),
     }))
 }
@@ -1024,20 +1022,50 @@ pub unsafe extern "C" fn fit_cost_table_value(h: *const FitHandle, i: u32) -> f6
     hh.cost_table[i as usize].1
 }
 
-/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
-/// -1 (error, text via fit_last_error), -2 (panic).
+/// An assembled covariance, owned by the caller (release with
+/// fit_cov_free). Independent of later assemblies; entity
+/// arguments to its queries must come from the live model.
+pub struct FitCov {
+    cov: CovAssembly,
+    text: CString,
+}
+
+fn cov_text(c: &mut FitCov, msg: &str) {
+    c.text = CString::new(msg.replace('\0', " ")).unwrap_or_default();
+}
+
+/// Error text of the last failed query on this assembly.
 #[no_mangle]
-pub unsafe extern "C" fn fit_assemble_covariance(h: *mut FitHandle, mode: u32) -> i32 {
+pub unsafe extern "C" fn fit_cov_error(c: *const FitCov) -> *const c_char {
+    (&*c).text.as_ptr()
+}
+
+/// Release an assembly. Null is fine.
+#[no_mangle]
+pub unsafe extern "C" fn fit_cov_free(c: *mut FitCov) {
+    if !c.is_null() {
+        drop(Box::from_raw(c));
+    }
+}
+
+/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. On 0 `out`
+/// holds the owned assembly; -1 (error, text via
+/// fit_last_error), -2 (panic).
+#[no_mangle]
+pub unsafe extern "C" fn fit_assemble_covariance(h: *mut FitHandle, mode: u32, out: *mut *mut FitCov) -> i32 {
     let hh = &mut *h;
+    *out = std::ptr::null_mut();
     let m = match mode {
         0 => CovMode::PerQuery,
         2 => CovMode::TriDiagonal,
         _ => CovMode::AllMarginals,
     };
-    hh.cov = None;
     match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {
         Ok(Ok(c)) => {
-            hh.cov = Some(c);
+            *out = Box::into_raw(Box::new(FitCov {
+                cov: c,
+                text: CString::default(),
+            }));
             set_text(hh, "");
             0
         }
@@ -1054,25 +1082,20 @@ pub unsafe extern "C" fn fit_assemble_covariance(h: *mut FitHandle, mode: u32) -
 }
 
 /// Row-major dim x dim marginal covariance (f64) of one `N`; returns
-/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
-/// small), text via fit_last_error.
+/// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_marginal_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const N,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "marginal_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.marginal_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "marginal_cov: buffer too small");
+                cov_text(cc, "marginal_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1083,12 +1106,12 @@ pub unsafe extern "C" fn fit_n_marginal_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
@@ -1099,21 +1122,17 @@ pub unsafe extern "C" fn fit_n_marginal_cov(
 /// fit_last_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_conditional_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const N,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "conditional_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.conditional_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.conditional_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "conditional_cov: buffer too small");
+                cov_text(cc, "conditional_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1124,36 +1143,32 @@ pub unsafe extern "C" fn fit_n_conditional_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 /// Per-parameter standard deviations (sqrt of the marginal diagonal)
 /// of one `N`; returns the count, or -1 (error) / -2 (panic) / -3
-/// (no assembly or buffer too small), text via fit_last_error.
+/// (no assembly or buffer too small), text via fit_cov_error.
 /// Works on every CovMode, including TriDiagonal.
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_std_dev(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const N,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "std_dev: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.std_dev(&*p))) {
         Ok(Ok(sd)) => {
             if sd.len() as u32 > cap {
-                set_text(hh, "std_dev: buffer too small");
+                cov_text(cc, "std_dev: buffer too small");
                 return -3;
             }
             for (i, v) in sd.iter().enumerate() {
@@ -1162,37 +1177,32 @@ pub unsafe extern "C" fn fit_n_std_dev(
             sd.len() as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major dim x dim marginal covariance (f64) of one `Pose`; returns
-/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
-/// small), text via fit_last_error.
+/// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_marginal_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const Pose,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "marginal_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.marginal_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "marginal_cov: buffer too small");
+                cov_text(cc, "marginal_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1203,12 +1213,12 @@ pub unsafe extern "C" fn fit_pose_marginal_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
@@ -1219,21 +1229,17 @@ pub unsafe extern "C" fn fit_pose_marginal_cov(
 /// fit_last_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_conditional_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const Pose,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "conditional_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.conditional_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.conditional_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "conditional_cov: buffer too small");
+                cov_text(cc, "conditional_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1244,36 +1250,32 @@ pub unsafe extern "C" fn fit_pose_conditional_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 /// Per-parameter standard deviations (sqrt of the marginal diagonal)
 /// of one `Pose`; returns the count, or -1 (error) / -2 (panic) / -3
-/// (no assembly or buffer too small), text via fit_last_error.
+/// (no assembly or buffer too small), text via fit_cov_error.
 /// Works on every CovMode, including TriDiagonal.
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_std_dev(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const Pose,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "std_dev: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.std_dev(&*p))) {
         Ok(Ok(sd)) => {
             if sd.len() as u32 > cap {
-                set_text(hh, "std_dev: buffer too small");
+                cov_text(cc, "std_dev: buffer too small");
                 return -3;
             }
             for (i, v) in sd.iter().enumerate() {
@@ -1282,37 +1284,32 @@ pub unsafe extern "C" fn fit_pose_std_dev(
             sd.len() as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major dim x dim marginal covariance (f64) of one `Rig`; returns
-/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
-/// small), text via fit_last_error.
+/// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_rig_marginal_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const Rig,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "marginal_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.marginal_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "marginal_cov: buffer too small");
+                cov_text(cc, "marginal_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1323,12 +1320,12 @@ pub unsafe extern "C" fn fit_rig_marginal_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
@@ -1339,21 +1336,17 @@ pub unsafe extern "C" fn fit_rig_marginal_cov(
 /// fit_last_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_rig_conditional_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const Rig,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "conditional_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.conditional_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.conditional_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "conditional_cov: buffer too small");
+                cov_text(cc, "conditional_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1364,36 +1357,32 @@ pub unsafe extern "C" fn fit_rig_conditional_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 /// Per-parameter standard deviations (sqrt of the marginal diagonal)
 /// of one `Rig`; returns the count, or -1 (error) / -2 (panic) / -3
-/// (no assembly or buffer too small), text via fit_last_error.
+/// (no assembly or buffer too small), text via fit_cov_error.
 /// Works on every CovMode, including TriDiagonal.
 #[no_mangle]
 pub unsafe extern "C" fn fit_rig_std_dev(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     p: *const Rig,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "std_dev: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.std_dev(&*p))) {
         Ok(Ok(sd)) => {
             if sd.len() as u32 > cap {
-                set_text(hh, "std_dev: buffer too small");
+                cov_text(cc, "std_dev: buffer too small");
                 return -3;
             }
             for (i, v) in sd.iter().enumerate() {
@@ -1402,38 +1391,33 @@ pub unsafe extern "C" fn fit_rig_std_dev(
             sd.len() as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `N` and a
-/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_n_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const N,
     b: *const N,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1444,38 +1428,33 @@ pub unsafe extern "C" fn fit_n_n_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `N` and a
-/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_pose_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const N,
     b: *const Pose,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1486,38 +1465,33 @@ pub unsafe extern "C" fn fit_n_pose_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `N` and a
-/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_rig_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const N,
     b: *const Rig,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1528,38 +1502,33 @@ pub unsafe extern "C" fn fit_n_rig_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
-/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_n_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const Pose,
     b: *const N,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1570,38 +1539,33 @@ pub unsafe extern "C" fn fit_pose_n_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
-/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_pose_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const Pose,
     b: *const Pose,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1612,38 +1576,33 @@ pub unsafe extern "C" fn fit_pose_pose_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
-/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_rig_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const Pose,
     b: *const Rig,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1654,38 +1613,33 @@ pub unsafe extern "C" fn fit_pose_rig_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Rig` and a
-/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_rig_n_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const Rig,
     b: *const N,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1696,38 +1650,33 @@ pub unsafe extern "C" fn fit_rig_n_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Rig` and a
-/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_rig_pose_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const Rig,
     b: *const Pose,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1738,38 +1687,33 @@ pub unsafe extern "C" fn fit_rig_pose_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Rig` and a
-/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via fit_last_error.
+/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn fit_rig_rig_cross_cov(
-    h: *mut FitHandle,
+    c: *mut FitCov,
     a: *const Rig,
     b: *const Rig,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1780,12 +1724,12 @@ pub unsafe extern "C" fn fit_rig_rig_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }

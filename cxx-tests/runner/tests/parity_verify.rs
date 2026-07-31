@@ -144,6 +144,10 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cov_item0"), m[(0, 0)]);
     }
 
+    // Owned, independent assemblies.
+    assert_eq!(g("cov2_ok"), 1.0);
+    assert_eq!(g("cov_independent"), 1.0);
+
     // Per-constraint cost breakdown: identical labels, exact sums.
     {
         use arael::model::JacobianModel;

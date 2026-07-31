@@ -215,25 +215,28 @@ vect3d fit_tie_d(const Tie*);
 void fit_tie_set_d(Tie*, vect3d);
 double fit_tie_w(const Tie*);
 void fit_tie_set_w(Tie*, double);
-int32_t fit_assemble_covariance(Fit*, uint32_t);
-int32_t fit_n_marginal_cov(Fit*, const N*, double*, uint32_t);
-int32_t fit_n_conditional_cov(Fit*, const N*, double*, uint32_t);
-int32_t fit_n_std_dev(Fit*, const N*, double*, uint32_t);
-int32_t fit_pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
-int32_t fit_pose_conditional_cov(Fit*, const Pose*, double*, uint32_t);
-int32_t fit_pose_std_dev(Fit*, const Pose*, double*, uint32_t);
-int32_t fit_rig_marginal_cov(Fit*, const Rig*, double*, uint32_t);
-int32_t fit_rig_conditional_cov(Fit*, const Rig*, double*, uint32_t);
-int32_t fit_rig_std_dev(Fit*, const Rig*, double*, uint32_t);
-int32_t fit_n_n_cross_cov(Fit*, const N*, const N*, double*, uint32_t);
-int32_t fit_n_pose_cross_cov(Fit*, const N*, const Pose*, double*, uint32_t);
-int32_t fit_n_rig_cross_cov(Fit*, const N*, const Rig*, double*, uint32_t);
-int32_t fit_pose_n_cross_cov(Fit*, const Pose*, const N*, double*, uint32_t);
-int32_t fit_pose_pose_cross_cov(Fit*, const Pose*, const Pose*, double*, uint32_t);
-int32_t fit_pose_rig_cross_cov(Fit*, const Pose*, const Rig*, double*, uint32_t);
-int32_t fit_rig_n_cross_cov(Fit*, const Rig*, const N*, double*, uint32_t);
-int32_t fit_rig_pose_cross_cov(Fit*, const Rig*, const Pose*, double*, uint32_t);
-int32_t fit_rig_rig_cross_cov(Fit*, const Rig*, const Rig*, double*, uint32_t);
+struct FitCov;
+int32_t fit_assemble_covariance(Fit*, uint32_t, FitCov**);
+const char* fit_cov_error(const FitCov*);
+void fit_cov_free(FitCov*);
+int32_t fit_n_marginal_cov(FitCov*, const N*, double*, uint32_t);
+int32_t fit_n_conditional_cov(FitCov*, const N*, double*, uint32_t);
+int32_t fit_n_std_dev(FitCov*, const N*, double*, uint32_t);
+int32_t fit_pose_marginal_cov(FitCov*, const Pose*, double*, uint32_t);
+int32_t fit_pose_conditional_cov(FitCov*, const Pose*, double*, uint32_t);
+int32_t fit_pose_std_dev(FitCov*, const Pose*, double*, uint32_t);
+int32_t fit_rig_marginal_cov(FitCov*, const Rig*, double*, uint32_t);
+int32_t fit_rig_conditional_cov(FitCov*, const Rig*, double*, uint32_t);
+int32_t fit_rig_std_dev(FitCov*, const Rig*, double*, uint32_t);
+int32_t fit_n_n_cross_cov(FitCov*, const N*, const N*, double*, uint32_t);
+int32_t fit_n_pose_cross_cov(FitCov*, const N*, const Pose*, double*, uint32_t);
+int32_t fit_n_rig_cross_cov(FitCov*, const N*, const Rig*, double*, uint32_t);
+int32_t fit_pose_n_cross_cov(FitCov*, const Pose*, const N*, double*, uint32_t);
+int32_t fit_pose_pose_cross_cov(FitCov*, const Pose*, const Pose*, double*, uint32_t);
+int32_t fit_pose_rig_cross_cov(FitCov*, const Pose*, const Rig*, double*, uint32_t);
+int32_t fit_rig_n_cross_cov(FitCov*, const Rig*, const N*, double*, uint32_t);
+int32_t fit_rig_pose_cross_cov(FitCov*, const Rig*, const Pose*, double*, uint32_t);
+int32_t fit_rig_rig_cross_cov(FitCov*, const Rig*, const Rig*, double*, uint32_t);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
 bool fit_m_optimize(const Fit*);
@@ -600,111 +603,115 @@ private:
     ffi::Tie* h_;
 };
 
-/// Covariance prepared at the solution (root.assemble_covariance);
-/// queries answer per-entity marginal blocks. Valid until the model
-/// is dropped or reassembled.
+/// An assembled covariance (root.assemble_covariance), OWNED: copies
+/// share it, the last copy releases it, and later assemblies are
+/// independent. Entity arguments must come from the live model.
 class Covariance {
 public:
-    Covariance() : h_(nullptr) {}
-    explicit Covariance(ffi::Fit* h) : h_(h) {}
+    Covariance() : c_(nullptr) {}
+    explicit Covariance(ffi::FitCov* c)
+        : c_(c), guard_(c, ffi::fit_cov_free) {}
+    /// Error text of the last failed query on this assembly.
+    const char* last_error() const { return ffi::fit_cov_error(c_); }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const N& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_n_std_dev(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_n_std_dev(c_, e.raw(), out, cap));
     }
     /// Row-major dim x dim conditional covariance (all other
     /// parameters held fixed) into out; returns dim or a negative code.
     int32_t conditional(const N& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_n_conditional_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_n_conditional_cov(c_, e.raw(), out, cap));
     }
     result<double, CovError> marginal(const N& e) {
         double b[1];
-        if (ck_(ffi::fit_n_marginal_cov(h_, e.raw(), b, 1)) < 0) return fail<double>();
+        if (ck_(ffi::fit_n_marginal_cov(c_, e.raw(), b, 1)) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
     }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Pose& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_pose_std_dev(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_pose_std_dev(c_, e.raw(), out, cap));
     }
     /// Row-major dim x dim conditional covariance (all other
     /// parameters held fixed) into out; returns dim or a negative code.
     int32_t conditional(const Pose& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_pose_conditional_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_pose_conditional_cov(c_, e.raw(), out, cap));
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_pose_marginal_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_pose_marginal_cov(c_, e.raw(), out, cap));
     }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Rig& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_rig_std_dev(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_rig_std_dev(c_, e.raw(), out, cap));
     }
     /// Row-major dim x dim conditional covariance (all other
     /// parameters held fixed) into out; returns dim or a negative code.
     int32_t conditional(const Rig& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_rig_conditional_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_rig_conditional_cov(c_, e.raw(), out, cap));
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Rig& e, double* out, uint32_t cap) {
-        return ck_(ffi::fit_rig_marginal_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::fit_rig_marginal_cov(c_, e.raw(), out, cap));
     }
     /// Row-major N::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const N& a, const N& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_n_n_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_n_n_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major N::param_count x Pose::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const N& a, const Pose& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_n_pose_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_n_pose_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major N::param_count x Rig::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const N& a, const Rig& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_n_rig_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_n_rig_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Pose::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Pose& a, const N& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_pose_n_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_pose_n_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Pose::param_count x Pose::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Pose& a, const Pose& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_pose_pose_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_pose_pose_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Pose::param_count x Rig::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Pose& a, const Rig& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_pose_rig_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_pose_rig_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Rig::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Rig& a, const N& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_rig_n_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_rig_n_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Rig::param_count x Pose::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Rig& a, const Pose& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_rig_pose_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_rig_pose_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Rig::param_count x Rig::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Rig& a, const Rig& b, double* out, uint32_t cap) {
-        return ck_(ffi::fit_rig_rig_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::fit_rig_rig_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
 private:
     /// A caught Rust panic (-2) throws; other codes pass through.
     int32_t ck_(int32_t n) const {
-        if (n == -2) throw PanicError(ffi::fit_last_error(h_));
+        if (n == -2) throw PanicError(ffi::fit_cov_error(c_));
         return n;
     }
     template<class T> result<T, CovError> fail() {
-        return result<T, CovError>::err({ffi::fit_last_error(h_)});
+        return result<T, CovError>::err({ffi::fit_cov_error(c_)});
     }
-    ffi::Fit* h_;
+    ffi::FitCov* c_;
+    std::shared_ptr<void> guard_;
 };
 
 /// `Fit.obs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
@@ -1316,11 +1323,12 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
-        int32_t code = ffi::fit_assemble_covariance(h_, uint32_t(mode));
+        ffi::FitCov* c = nullptr;
+        int32_t code = ffi::fit_assemble_covariance(h_, uint32_t(mode), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({last_error()});
-        return result<Covariance, CovError>::ok(Covariance(h_));
+        return result<Covariance, CovError>::ok(Covariance(c));
     }
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

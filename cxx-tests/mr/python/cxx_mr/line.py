@@ -232,11 +232,12 @@ class Ob:
         _f.line_ob_set_y(self._p, v)
 
 
-def _cov_query(h, fn, p, cap):
+def _cov_query(c, fn, p, cap):
     buf = (ctypes.c_double * cap)()
-    n = fn(h, p, buf, cap)
+    n = fn(c, p, buf, cap)
     if n < 0:
-        raise AraelError(n, _err(h))
+        raise AraelError(
+            n, (_f.line_cov_error(c) or b"").decode())
     return buf
 
 
@@ -257,15 +258,27 @@ def _shape_n(buf, n):
 
 
 class Covariance:
-    """Covariance prepared at the solution; per-entity queries
-    (marginal/conditional by param count: 1 -> float, 2/3 ->
-    matrix2d/3d, larger -> row-major tuples). Valid until the model is
-    dropped or reassembled."""
+    """An assembled covariance, OWNED: released on garbage
+    collection (free() to force it), independent of later assemblies.
+    Per-entity queries (marginal/conditional by param count: 1 ->
+    float, 2/3 -> matrix2d/3d, larger -> row-major tuples). Entity
+    arguments must come from the live model."""
 
     __slots__ = ("_h",)
 
     def __init__(self, h):
         self._h = h
+
+    def free(self):
+        if self._h:
+            _f.line_cov_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
 
     def marginal(self, e):
         """The entity's marginal covariance block."""
@@ -381,10 +394,12 @@ class Line:
                                     ctypes.byref(r)), r)
 
     def assemble_covariance(self, mode=CovMode.ALL_MARGINALS):
-        code = _f.line_assemble_covariance(self._p, int(mode))
+        c = ctypes.c_void_p()
+        code = _f.line_assemble_covariance(self._p, int(mode),
+                                                ctypes.byref(c))
         if code != 0:
             raise AraelError(code, _err(self._p))
-        return Covariance(self._p)
+        return Covariance(c)
 
     def cost(self):
         """Total cost at the current parameter values (no solve)."""

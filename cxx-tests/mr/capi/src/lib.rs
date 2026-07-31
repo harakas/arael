@@ -19,7 +19,6 @@ use cxx_mr::{Cell, Decay};
 pub struct DecayHandle {
     model: Decay,
     text: CString,
-    cov: Option<CovAssembly>,
 }
 
 /// The Rust side of a solve result, boxed behind `CLmResult::detail`:
@@ -649,7 +648,6 @@ pub extern "C" fn decay_new() -> *mut DecayHandle {
     Box::into_raw(Box::new(DecayHandle {
         model: Default::default(),
         text: CString::default(),
-        cov: None,
     }))
 }
 
@@ -977,20 +975,50 @@ pub unsafe extern "C" fn decay_cost(h: *mut DecayHandle) -> f64 {
     }
 }
 
-/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
-/// -1 (error, text via decay_last_error), -2 (panic).
+/// An assembled covariance, owned by the caller (release with
+/// decay_cov_free). Independent of later assemblies; entity
+/// arguments to its queries must come from the live model.
+pub struct DecayCov {
+    cov: CovAssembly,
+    text: CString,
+}
+
+fn cov_text(c: &mut DecayCov, msg: &str) {
+    c.text = CString::new(msg.replace('\0', " ")).unwrap_or_default();
+}
+
+/// Error text of the last failed query on this assembly.
 #[no_mangle]
-pub unsafe extern "C" fn decay_assemble_covariance(h: *mut DecayHandle, mode: u32) -> i32 {
+pub unsafe extern "C" fn decay_cov_error(c: *const DecayCov) -> *const c_char {
+    (&*c).text.as_ptr()
+}
+
+/// Release an assembly. Null is fine.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cov_free(c: *mut DecayCov) {
+    if !c.is_null() {
+        drop(Box::from_raw(c));
+    }
+}
+
+/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. On 0 `out`
+/// holds the owned assembly; -1 (error, text via
+/// decay_last_error), -2 (panic).
+#[no_mangle]
+pub unsafe extern "C" fn decay_assemble_covariance(h: *mut DecayHandle, mode: u32, out: *mut *mut DecayCov) -> i32 {
     let hh = &mut *h;
+    *out = std::ptr::null_mut();
     let m = match mode {
         0 => CovMode::PerQuery,
         2 => CovMode::TriDiagonal,
         _ => CovMode::AllMarginals,
     };
-    hh.cov = None;
     match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {
         Ok(Ok(c)) => {
-            hh.cov = Some(c);
+            *out = Box::into_raw(Box::new(DecayCov {
+                cov: c,
+                text: CString::default(),
+            }));
             set_text(hh, "");
             0
         }
@@ -1007,25 +1035,20 @@ pub unsafe extern "C" fn decay_assemble_covariance(h: *mut DecayHandle, mode: u3
 }
 
 /// Row-major dim x dim marginal covariance (f64) of one `Cell`; returns
-/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
-/// small), text via decay_last_error.
+/// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via decay_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn decay_cell_marginal_cov(
-    h: *mut DecayHandle,
+    c: *mut DecayCov,
     p: *const Cell,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "marginal_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.marginal_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "marginal_cov: buffer too small");
+                cov_text(cc, "marginal_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1036,12 +1059,12 @@ pub unsafe extern "C" fn decay_cell_marginal_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
@@ -1052,21 +1075,17 @@ pub unsafe extern "C" fn decay_cell_marginal_cov(
 /// decay_last_error.
 #[no_mangle]
 pub unsafe extern "C" fn decay_cell_conditional_cov(
-    h: *mut DecayHandle,
+    c: *mut DecayCov,
     p: *const Cell,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "conditional_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.conditional_cov(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.conditional_cov(&*p))) {
         Ok(Ok(m)) => {
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {
-                set_text(hh, "conditional_cov: buffer too small");
+                cov_text(cc, "conditional_cov: buffer too small");
                 return -3;
             }
             for r in 0..dim {
@@ -1077,36 +1096,32 @@ pub unsafe extern "C" fn decay_cell_conditional_cov(
             dim as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 /// Per-parameter standard deviations (sqrt of the marginal diagonal)
 /// of one `Cell`; returns the count, or -1 (error) / -2 (panic) / -3
-/// (no assembly or buffer too small), text via decay_last_error.
+/// (no assembly or buffer too small), text via decay_cov_error.
 /// Works on every CovMode, including TriDiagonal.
 #[no_mangle]
 pub unsafe extern "C" fn decay_cell_std_dev(
-    h: *mut DecayHandle,
+    c: *mut DecayCov,
     p: *const Cell,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "std_dev: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.std_dev(&*p))) {
         Ok(Ok(sd)) => {
             if sd.len() as u32 > cap {
-                set_text(hh, "std_dev: buffer too small");
+                cov_text(cc, "std_dev: buffer too small");
                 return -3;
             }
             for (i, v) in sd.iter().enumerate() {
@@ -1115,38 +1130,33 @@ pub unsafe extern "C" fn decay_cell_std_dev(
             sd.len() as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Cell` and a
-/// `Cell`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via decay_last_error.
+/// `Cell`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via decay_cov_error.
 #[no_mangle]
 pub unsafe extern "C" fn decay_cell_cell_cross_cov(
-    h: *mut DecayHandle,
+    c: *mut DecayCov,
     a: *const Cell,
     b: *const Cell,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
         Ok(Ok(m)) => {
             let (rows, cols) = (m.nrows(), m.ncols());
             if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
+                cov_text(cc, "cross_cov: buffer too small");
                 return -3;
             }
             for r in 0..rows {
@@ -1157,12 +1167,12 @@ pub unsafe extern "C" fn decay_cell_cell_cross_cov(
             rows as i32
         }
         Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
+            cov_text(cc, &format!("{}", e));
             -1
         }
         Err(p2) => {
             let msg = panic_text(p2);
-            set_text(hh, &msg);
+            cov_text(cc, &msg);
             -2
         }
     }
@@ -1289,7 +1299,6 @@ use cxx_mr::{Line, Ob};
 pub struct LineHandle {
     model: Line,
     text: CString,
-    cov: Option<CovAssembly>,
 }
 
 /// The Rust side of a solve result, boxed behind `CLmResult::detail`:
@@ -1919,7 +1928,6 @@ pub extern "C" fn line_new() -> *mut LineHandle {
     Box::into_raw(Box::new(LineHandle {
         model: Default::default(),
         text: CString::default(),
-        cov: None,
     }))
 }
 
@@ -2247,20 +2255,50 @@ pub unsafe extern "C" fn line_cost(h: *mut LineHandle) -> f64 {
     }
 }
 
-/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
-/// -1 (error, text via line_last_error), -2 (panic).
+/// An assembled covariance, owned by the caller (release with
+/// line_cov_free). Independent of later assemblies; entity
+/// arguments to its queries must come from the live model.
+pub struct LineCov {
+    cov: CovAssembly,
+    text: CString,
+}
+
+fn cov_text(c: &mut LineCov, msg: &str) {
+    c.text = CString::new(msg.replace('\0', " ")).unwrap_or_default();
+}
+
+/// Error text of the last failed query on this assembly.
 #[no_mangle]
-pub unsafe extern "C" fn line_assemble_covariance(h: *mut LineHandle, mode: u32) -> i32 {
+pub unsafe extern "C" fn line_cov_error(c: *const LineCov) -> *const c_char {
+    (&*c).text.as_ptr()
+}
+
+/// Release an assembly. Null is fine.
+#[no_mangle]
+pub unsafe extern "C" fn line_cov_free(c: *mut LineCov) {
+    if !c.is_null() {
+        drop(Box::from_raw(c));
+    }
+}
+
+/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. On 0 `out`
+/// holds the owned assembly; -1 (error, text via
+/// line_last_error), -2 (panic).
+#[no_mangle]
+pub unsafe extern "C" fn line_assemble_covariance(h: *mut LineHandle, mode: u32, out: *mut *mut LineCov) -> i32 {
     let hh = &mut *h;
+    *out = std::ptr::null_mut();
     let m = match mode {
         0 => CovMode::PerQuery,
         2 => CovMode::TriDiagonal,
         _ => CovMode::AllMarginals,
     };
-    hh.cov = None;
     match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {
         Ok(Ok(c)) => {
-            hh.cov = Some(c);
+            *out = Box::into_raw(Box::new(LineCov {
+                cov: c,
+                text: CString::default(),
+            }));
             set_text(hh, "");
             0
         }

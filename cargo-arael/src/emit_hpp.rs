@@ -540,52 +540,55 @@ public:
     {
         let mut methods = String::new();
         cpp.ffi.push_str(&format!(
-            "int32_t {root_sn}_assemble_covariance({root}*, uint32_t);\n"));
+            "struct {root}Cov;\n\
+     int32_t {root_sn}_assemble_covariance({root}*, uint32_t, {root}Cov**);\n\
+     const char* {root_sn}_cov_error(const {root}Cov*);\n\
+     void {root_sn}_cov_free({root}Cov*);\n"));
         for (tn, t) in &surfaced {
             if t.role != "entity" || t.param_count == 0 {
                 continue;
             }
             let sn = format!("{root_sn}_{}", snake(tn));
             cpp.ffi.push_str(&format!(
-                "int32_t {sn}_marginal_cov({root}*, const {tn}*, double*, uint32_t);\n\
-                 int32_t {sn}_conditional_cov({root}*, const {tn}*, double*, uint32_t);\n\
-                 int32_t {sn}_std_dev({root}*, const {tn}*, double*, uint32_t);\n"));
+                "int32_t {sn}_marginal_cov({root}Cov*, const {tn}*, double*, uint32_t);\n\
+                 int32_t {sn}_conditional_cov({root}Cov*, const {tn}*, double*, uint32_t);\n\
+                 int32_t {sn}_std_dev({root}Cov*, const {tn}*, double*, uint32_t);\n"));
             methods.push_str(&format!(
 "    /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const {tn}& e, double* out, uint32_t cap) {{
-        return ck_(ffi::{sn}_std_dev(h_, e.raw(), out, cap));
+        return ck_(ffi::{sn}_std_dev(c_, e.raw(), out, cap));
     }}
     /// Row-major dim x dim conditional covariance (all other
     /// parameters held fixed) into out; returns dim or a negative code.
     int32_t conditional(const {tn}& e, double* out, uint32_t cap) {{
-        return ck_(ffi::{sn}_conditional_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::{sn}_conditional_cov(c_, e.raw(), out, cap));
     }}\n"));
             match t.param_count {
                 1 => methods.push_str(&format!(
 "    result<double, CovError> marginal(const {tn}& e) {{
         double b[1];
-        if (ck_(ffi::{sn}_marginal_cov(h_, e.raw(), b, 1)) < 0) return fail<double>();
+        if (ck_(ffi::{sn}_marginal_cov(c_, e.raw(), b, 1)) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
     }}\n")),
                 2 => methods.push_str(&format!(
 "    result<matrix2d, CovError> marginal(const {tn}& e) {{
         double b[4];
-        if (ck_(ffi::{sn}_marginal_cov(h_, e.raw(), b, 4)) < 0) return fail<matrix2d>();
+        if (ck_(ffi::{sn}_marginal_cov(c_, e.raw(), b, 4)) < 0) return fail<matrix2d>();
         return result<matrix2d, CovError>::ok(
             matrix2d::from_elements(b[0], b[1], b[2], b[3]));
     }}\n")),
                 3 => methods.push_str(&format!(
 "    result<matrix3d, CovError> marginal(const {tn}& e) {{
         double b[9];
-        if (ck_(ffi::{sn}_marginal_cov(h_, e.raw(), b, 9)) < 0) return fail<matrix3d>();
+        if (ck_(ffi::{sn}_marginal_cov(c_, e.raw(), b, 9)) < 0) return fail<matrix3d>();
         return result<matrix3d, CovError>::ok(matrix3d::from_elements(
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]));
     }}\n")),
                 _ => methods.push_str(&format!(
 "    /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const {tn}& e, double* out, uint32_t cap) {{
-        return ck_(ffi::{sn}_marginal_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::{sn}_marginal_cov(c_, e.raw(), out, cap));
     }}\n")),
             }
         }
@@ -598,33 +601,37 @@ public:
                 let a_sn = snake(an);
                 let b_sn = snake(bn);
                 cpp.ffi.push_str(&format!(
-                    "int32_t {root_sn}_{a_sn}_{b_sn}_cross_cov({root}*, const {an}*, const {bn}*, double*, uint32_t);\n"));
+                    "int32_t {root_sn}_{a_sn}_{b_sn}_cross_cov({root}Cov*, const {an}*, const {bn}*, double*, uint32_t);\n"));
                 methods.push_str(&format!(
 "    /// Row-major {an}::param_count x {bn}::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const {an}& a, const {bn}& b, double* out, uint32_t cap) {{
-        return ck_(ffi::{root_sn}_{a_sn}_{b_sn}_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::{root_sn}_{a_sn}_{b_sn}_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }}\n"));
             }
         }
         cpp.body.push_str(&format!(
-"/// Covariance prepared at the solution (root.assemble_covariance);
-/// queries answer per-entity marginal blocks. Valid until the model
-/// is dropped or reassembled.
+"/// An assembled covariance (root.assemble_covariance), OWNED: copies
+/// share it, the last copy releases it, and later assemblies are
+/// independent. Entity arguments must come from the live model.
 class Covariance {{
 public:
-    Covariance() : h_(nullptr) {{}}
-    explicit Covariance(ffi::{root}* h) : h_(h) {{}}
+    Covariance() : c_(nullptr) {{}}
+    explicit Covariance(ffi::{root}Cov* c)
+        : c_(c), guard_(c, ffi::{root_sn}_cov_free) {{}}
+    /// Error text of the last failed query on this assembly.
+    const char* last_error() const {{ return ffi::{root_sn}_cov_error(c_); }}
 {methods}private:
     /// A caught Rust panic (-2) throws; other codes pass through.
     int32_t ck_(int32_t n) const {{
-        if (n == -2) throw PanicError(ffi::{root_sn}_last_error(h_));
+        if (n == -2) throw PanicError(ffi::{root_sn}_cov_error(c_));
         return n;
     }}
     template<class T> result<T, CovError> fail() {{
-        return result<T, CovError>::err({{ffi::{root_sn}_last_error(h_)}});
+        return result<T, CovError>::err({{ffi::{root_sn}_cov_error(c_)}});
     }}
-    ffi::{root}* h_;
+    ffi::{root}Cov* c_;
+    std::shared_ptr<void> guard_;
 }};
 
 "));
@@ -880,11 +887,12 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {{
-        int32_t code = ffi::{root_sn}_assemble_covariance(h_, uint32_t(mode));
+        ffi::{root}Cov* c = nullptr;
+        int32_t code = ffi::{root_sn}_assemble_covariance(h_, uint32_t(mode), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({{last_error()}});
-        return result<Covariance, CovError>::ok(Covariance(h_));
+        return result<Covariance, CovError>::ok(Covariance(c));
     }}
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

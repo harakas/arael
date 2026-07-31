@@ -106,7 +106,9 @@ surface reference); the differences are Python idiom:
 - **Covariance**: `assemble_covariance(mode)` returns a view or
   raises; `marginal`/`conditional` shaped by param count (float,
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`
-  a list.
+  a list. The view owns its assembly (freed on garbage collection,
+  `free()` to force it); reassembling never disturbs older views.
+  Entity arguments must come from the live model.
 
 Idiom notes: where C++ has `front()`/`back()`/`empty()` on views,
 Python spells them `view[0]` / `view[-1]` / `len(view)`; where C++

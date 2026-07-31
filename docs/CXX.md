@@ -206,7 +206,10 @@ views are named by their container's nature: `PathPosesDeque`,
   deviations (works on every CovMode, including TriDiagonal);
   `cov->conditional(entity, out, cap)` the conditional covariance
   (all other parameters held fixed).
-  Valid until the model is dropped or reassembled.
+  The view OWNS its assembly: copies share it, the last copy releases
+  it, and every `assemble_covariance` call is independent -- older
+  views keep answering from their own assembly. Entity arguments must
+  come from the live model; `last_error()` carries the failure text.
 - **Solves**: `solve_dense` / `solve_sparse` / `solve_band(kd)` --
   band Cholesky for banded Hessians, `kd` the half-bandwidth in
   scalar parameters. `cost()` on the root evaluates the total cost at

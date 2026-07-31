@@ -103,6 +103,12 @@ m0 = cov.marginal(f.items[0])
 pi("cov_item0_ok", 1 if isinstance(m0, float) else 0)
 p("cov_item0", m0)
 
+# Assemblies are owned and independent: an older view keeps answering
+# from its own assembly after a new one is made.
+cov2 = f.assemble_covariance(fit.CovMode.TRI_DIAGONAL)
+pi("cov2_ok", 1)
+pi("cov_independent", 1 if cov.marginal(f.items[0]) == m0 else 0)
+
 # Per-constraint cost breakdown (the root is jacobian-enabled).
 ct = f.cost_table()
 pi("ct_n", len(ct))

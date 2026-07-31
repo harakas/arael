@@ -104,6 +104,16 @@ int main() {
         p("cov_item0", m.value());
     }
 
+    // Assemblies are owned and independent: an older view keeps
+    // answering from its own assembly after a new one is made.
+    if (cov.is_ok()) {
+        double before = cov->marginal(fit.items()[0]).value();
+        auto cov2 = fit.assemble_covariance(CovMode::TriDiagonal);
+        pi("cov2_ok", cov2.is_ok() ? 1 : 0);
+        pi("cov_independent",
+           cov->marginal(fit.items()[0]).value() == before ? 1 : 0);
+    }
+
     // Per-constraint cost breakdown (the root is jacobian-enabled).
     auto ct = fit.cost_table();
     pi("ct_n", long(ct.size()));

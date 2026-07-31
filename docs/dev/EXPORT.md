@@ -287,6 +287,17 @@ selected inverse stays resident forever, and a second
 aliasing [S]. Joint blocks over a collection/root (any `Model` in
 Rust) stay per-entity over the FFI [M, on demand].
 
+[DONE 2026-07-31 -- lifetime half] The assembly is now an owned
+`{root}Cov` box returned through an out-param: C++ `Covariance` holds
+it behind a shared_ptr guard (last copy calls `{root}_cov_free`),
+Python frees it on GC (`free()` to force). Assemblies are
+independent -- a second `assemble_covariance` leaves older views
+answering from their own assembly -- and nothing stays resident past
+the last view. Query errors carry text via `{root}_cov_error`
+(Python raises `AraelError`, C++ `ck_` throws `PanicError` on a
+caught panic). Parity pins: `cov2_ok` / `cov_independent`. Joint
+blocks stay [M, on demand].
+
 ### 14. Session for band solves [M]
 
 The exported session is sparse-only; a banded chain solved with

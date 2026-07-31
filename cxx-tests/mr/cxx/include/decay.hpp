@@ -92,11 +92,14 @@ float decay_cell_t(const Cell*);
 void decay_cell_set_t(Cell*, float);
 float decay_cell_w(const Cell*);
 void decay_cell_set_w(Cell*, float);
-int32_t decay_assemble_covariance(Decay*, uint32_t);
-int32_t decay_cell_marginal_cov(Decay*, const Cell*, double*, uint32_t);
-int32_t decay_cell_conditional_cov(Decay*, const Cell*, double*, uint32_t);
-int32_t decay_cell_std_dev(Decay*, const Cell*, double*, uint32_t);
-int32_t decay_cell_cell_cross_cov(Decay*, const Cell*, const Cell*, double*, uint32_t);
+struct DecayCov;
+int32_t decay_assemble_covariance(Decay*, uint32_t, DecayCov**);
+const char* decay_cov_error(const DecayCov*);
+void decay_cov_free(DecayCov*);
+int32_t decay_cell_marginal_cov(DecayCov*, const Cell*, double*, uint32_t);
+int32_t decay_cell_conditional_cov(DecayCov*, const Cell*, double*, uint32_t);
+int32_t decay_cell_std_dev(DecayCov*, const Cell*, double*, uint32_t);
+int32_t decay_cell_cell_cross_cov(DecayCov*, const Cell*, const Cell*, double*, uint32_t);
 uint32_t decay_cells_len(const Decay*);
 void decay_cells_reserve(Decay*, uint32_t);
 Cell* decay_cells_push(Decay*);
@@ -214,43 +217,47 @@ private:
     ffi::Cell* h_;
 };
 
-/// Covariance prepared at the solution (root.assemble_covariance);
-/// queries answer per-entity marginal blocks. Valid until the model
-/// is dropped or reassembled.
+/// An assembled covariance (root.assemble_covariance), OWNED: copies
+/// share it, the last copy releases it, and later assemblies are
+/// independent. Entity arguments must come from the live model.
 class Covariance {
 public:
-    Covariance() : h_(nullptr) {}
-    explicit Covariance(ffi::Decay* h) : h_(h) {}
+    Covariance() : c_(nullptr) {}
+    explicit Covariance(ffi::DecayCov* c)
+        : c_(c), guard_(c, ffi::decay_cov_free) {}
+    /// Error text of the last failed query on this assembly.
+    const char* last_error() const { return ffi::decay_cov_error(c_); }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Cell& e, double* out, uint32_t cap) {
-        return ck_(ffi::decay_cell_std_dev(h_, e.raw(), out, cap));
+        return ck_(ffi::decay_cell_std_dev(c_, e.raw(), out, cap));
     }
     /// Row-major dim x dim conditional covariance (all other
     /// parameters held fixed) into out; returns dim or a negative code.
     int32_t conditional(const Cell& e, double* out, uint32_t cap) {
-        return ck_(ffi::decay_cell_conditional_cov(h_, e.raw(), out, cap));
+        return ck_(ffi::decay_cell_conditional_cov(c_, e.raw(), out, cap));
     }
     result<double, CovError> marginal(const Cell& e) {
         double b[1];
-        if (ck_(ffi::decay_cell_marginal_cov(h_, e.raw(), b, 1)) < 0) return fail<double>();
+        if (ck_(ffi::decay_cell_marginal_cov(c_, e.raw(), b, 1)) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
     }
     /// Row-major Cell::param_count x Cell::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Cell& a, const Cell& b, double* out, uint32_t cap) {
-        return ck_(ffi::decay_cell_cell_cross_cov(h_, a.raw(), b.raw(), out, cap));
+        return ck_(ffi::decay_cell_cell_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
 private:
     /// A caught Rust panic (-2) throws; other codes pass through.
     int32_t ck_(int32_t n) const {
-        if (n == -2) throw PanicError(ffi::decay_last_error(h_));
+        if (n == -2) throw PanicError(ffi::decay_cov_error(c_));
         return n;
     }
     template<class T> result<T, CovError> fail() {
-        return result<T, CovError>::err({ffi::decay_last_error(h_)});
+        return result<T, CovError>::err({ffi::decay_cov_error(c_)});
     }
-    ffi::Decay* h_;
+    ffi::DecayCov* c_;
+    std::shared_ptr<void> guard_;
 };
 
 /// `Decay.cells`. Element pointers are STABLE across pushes (chunked storage).
@@ -397,11 +404,12 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
-        int32_t code = ffi::decay_assemble_covariance(h_, uint32_t(mode));
+        ffi::DecayCov* c = nullptr;
+        int32_t code = ffi::decay_assemble_covariance(h_, uint32_t(mode), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({last_error()});
-        return result<Covariance, CovError>::ok(Covariance(h_));
+        return result<Covariance, CovError>::ok(Covariance(c));
     }
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

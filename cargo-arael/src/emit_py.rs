@@ -577,7 +577,12 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
     // Covariance view.
     let mut cov_methods = String::new();
     sig(&mut py, &format!("{root_sn}_assemble_covariance"),
-        &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_int32");
+        &["ctypes.c_void_p", "ctypes.c_uint32",
+          "ctypes.POINTER(ctypes.c_void_p)"], "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_cov_error"), &["ctypes.c_void_p"],
+        "ctypes.c_char_p");
+    sig(&mut py, &format!("{root_sn}_cov_free"), &["ctypes.c_void_p"],
+        "None");
     let cov_entities: Vec<(&String, &Type)> = surfaced.iter()
         .filter(|(_, t)| t.role == "entity" && t.param_count > 0)
         .map(|(tn, t)| (*tn, *t))
@@ -639,7 +644,8 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
         buf = (ctypes.c_double * {sz})()
         rows = _f.{root_sn}_{a_sn}_{b_sn}_cross_cov(self._h, a._p, b._p, buf, {sz})
         if rows < 0:
-            raise AraelError(rows, _err(self._h))
+            raise AraelError(
+                rows, (_f.{root_sn}_cov_error(self._h) or b\"\").decode())
         return tuple(tuple(buf[r * {cols} + c] for c in range({cols}))
                      for r in range(rows))
 ", sz = ta.param_count * tb.param_count, cols = tb.param_count));
@@ -656,11 +662,12 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
     }
 
     py.body.push_str(&format!(
-"def _cov_query(h, fn, p, cap):
+"def _cov_query(c, fn, p, cap):
     buf = (ctypes.c_double * cap)()
-    n = fn(h, p, buf, cap)
+    n = fn(c, p, buf, cap)
     if n < 0:
-        raise AraelError(n, _err(h))
+        raise AraelError(
+            n, (_f.{root_sn}_cov_error(c) or b\"\").decode())
     return buf
 
 
@@ -681,15 +688,27 @@ def _shape_n(buf, n):
 
 
 class Covariance:
-    \"\"\"Covariance prepared at the solution; per-entity queries
-    (marginal/conditional by param count: 1 -> float, 2/3 ->
-    matrix2d/3d, larger -> row-major tuples). Valid until the model is
-    dropped or reassembled.\"\"\"
+    \"\"\"An assembled covariance, OWNED: released on garbage
+    collection (free() to force it), independent of later assemblies.
+    Per-entity queries (marginal/conditional by param count: 1 ->
+    float, 2/3 -> matrix2d/3d, larger -> row-major tuples). Entity
+    arguments must come from the live model.\"\"\"
 
     __slots__ = (\"_h\",)
 
     def __init__(self, h):
         self._h = h
+
+    def free(self):
+        if self._h:
+            _f.{root_sn}_cov_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
 
 {cov_methods}
     def cross(self, a, b):
@@ -827,10 +846,12 @@ class Covariance:
                                     ctypes.byref(r)), r)
 
     def assemble_covariance(self, mode=CovMode.ALL_MARGINALS):
-        code = _f.{root_sn}_assemble_covariance(self._p, int(mode))
+        c = ctypes.c_void_p()
+        code = _f.{root_sn}_assemble_covariance(self._p, int(mode),
+                                                ctypes.byref(c))
         if code != 0:
             raise AraelError(code, _err(self._p))
-        return Covariance(self._p)
+        return Covariance(c)
 
     def cost(self):
         \"\"\"Total cost at the current parameter values (no solve).\"\"\"

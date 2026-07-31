@@ -88,7 +88,10 @@ double line_ob_x(const Ob*);
 void line_ob_set_x(Ob*, double);
 double line_ob_y(const Ob*);
 void line_ob_set_y(Ob*, double);
-int32_t line_assemble_covariance(Line*, uint32_t);
+struct LineCov;
+int32_t line_assemble_covariance(Line*, uint32_t, LineCov**);
+const char* line_cov_error(const LineCov*);
+void line_cov_free(LineCov*);
 double line_k(const Line*);
 void line_set_k(Line*, double);
 bool line_k_optimize(const Line*);
@@ -200,23 +203,27 @@ private:
     ffi::Ob* h_;
 };
 
-/// Covariance prepared at the solution (root.assemble_covariance);
-/// queries answer per-entity marginal blocks. Valid until the model
-/// is dropped or reassembled.
+/// An assembled covariance (root.assemble_covariance), OWNED: copies
+/// share it, the last copy releases it, and later assemblies are
+/// independent. Entity arguments must come from the live model.
 class Covariance {
 public:
-    Covariance() : h_(nullptr) {}
-    explicit Covariance(ffi::Line* h) : h_(h) {}
+    Covariance() : c_(nullptr) {}
+    explicit Covariance(ffi::LineCov* c)
+        : c_(c), guard_(c, ffi::line_cov_free) {}
+    /// Error text of the last failed query on this assembly.
+    const char* last_error() const { return ffi::line_cov_error(c_); }
 private:
     /// A caught Rust panic (-2) throws; other codes pass through.
     int32_t ck_(int32_t n) const {
-        if (n == -2) throw PanicError(ffi::line_last_error(h_));
+        if (n == -2) throw PanicError(ffi::line_cov_error(c_));
         return n;
     }
     template<class T> result<T, CovError> fail() {
-        return result<T, CovError>::err({ffi::line_last_error(h_)});
+        return result<T, CovError>::err({ffi::line_cov_error(c_)});
     }
-    ffi::Line* h_;
+    ffi::LineCov* c_;
+    std::shared_ptr<void> guard_;
 };
 
 /// `Line.obs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
@@ -355,11 +362,12 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
-        int32_t code = ffi::line_assemble_covariance(h_, uint32_t(mode));
+        ffi::LineCov* c = nullptr;
+        int32_t code = ffi::line_assemble_covariance(h_, uint32_t(mode), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({last_error()});
-        return result<Covariance, CovError>::ok(Covariance(h_));
+        return result<Covariance, CovError>::ok(Covariance(c));
     }
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on
