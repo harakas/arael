@@ -304,6 +304,27 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("sessf_envelope"), p5.envelope as u8 as f64);
     }
 
+    // The iterative Schur route through the options struct.
+    {
+        use arael::simple_lm::{
+            CgOptions, SolverReport, SparseFaer, SparseFaerOptions,
+        };
+        let mut f15 = Fit::default();
+        fill(&mut f15);
+        let mut s15 = SparseFaer::from_options(
+            &SparseFaerOptions::forced_schur()
+                .with_iterative_schur(CgOptions::default()));
+        let r15 = f15.solve_with(&mut s15, &cfg).unwrap();
+        assert_eq!(g("cg_end"), r15.end_cost);
+        let p15 = match r15.solver {
+            Some(SolverReport::Schur(p)) => p,
+            _ => panic!("iterative solve carried no plan"),
+        };
+        assert!(p15.cg_iterations.is_some(), "CG total must be reported");
+        assert_eq!(g("cg_iters_has"), 1.0);
+        assert_eq!(g("cg_iters"), p15.cg_iterations.unwrap() as f64);
+    }
+
     // Observer + timing + report + conditional covariance mirrored.
     {
         use std::cell::Cell;

@@ -220,6 +220,103 @@ a real consumer asks.
   subset incl. quaternion normalization and the sqrt-information
   Cholesky blocks; pinned by the cxx_math / py_math golden parity]
 
+## Second review, 2026-07-31
+
+A fresh diff after items 1-8 landed. Two defects first, then gaps by
+priority.
+
+### 9. Skin defects [S]
+
+- C++ `LmSession` stores `session_new`'s return unchecked; invalid
+  options return null and the next `solve()` dereferences it. Python
+  raises. Validate in the ctor (or give the session a bool).
+- `cost_table()` on a panic: C++ returns an empty vector (ambiguous
+  -- empty is a legitimate table), Python raises. Align on the
+  C++ side distinguishing the failure.
+
+### 10. Status helpers [S]
+
+`LmStatus::is_success` is not exported and the obvious substitute
+(code >= 0) is WRONG: `MaxIterations`, `LambdaCeiling`, `TimeLimit`,
+`RetryBudgetExhausted` are all Ok-side non-successes. Every consumer
+re-derives this and most will get it wrong. Ship `is_success()` +
+`as_str()` as inline helpers in both skins.
+
+### 11. Jacobian / conditioning surface [M]
+
+Only `calc_cost_table` crosses; `calc_jacobian` and its diagnostics
+(`singular_values`, `column_l2_norms`, `svd`, `num_residuals`) do
+not -- the DOF/rank analysis the `jacobian` opt-in exists for.
+Minimum viable: `{root}_singular_values(out, cap)` +
+`_column_l2_norms` + `_num_residuals`.
+
+### 12. Gradient check with a chosen tolerance [S-M]
+
+`check_gradients_tol` has no FFI entry; `validate()` runs the check
+only at the default tolerance and always pays the full assembly. Add
+`{root}_check_gradients(h, tol)` (tol <= 0 = default) -- the knob an
+f32-storage model needs.
+
+### 13. Covariance lifetime and joint queries [S-M]
+
+The assembly is a handle slot with no release: an AllMarginals
+selected inverse stays resident forever, and a second
+`assemble_covariance` silently re-points every outstanding
+`Covariance` view. Add `{root}_release_covariance` and document the
+aliasing [S]. Joint blocks over a collection/root (any `Model` in
+Rust) stay per-entity over the FFI [M, on demand].
+
+### 14. Session for band solves [M]
+
+The exported session is sparse-only; a banded chain solved with
+`solve_band` re-analyzes every pass. A kd-carrying session variant
+is the cheap version.
+
+### 15. g2o write-back [S]
+
+The vendored readers stop at `parse`/`load`; `save`/`to_g2o` have no
+counterpart, so a host can load a pose graph but not write the
+optimized one back out.
+
+### 16. Diagnostics detail [S-M each, on demand]
+
+- `LmTiming::steps` / `LmStep` per-iteration timeline (observer
+  covers half the fields, no per-phase durations, and render never
+  prints the steps table).
+- `Style` granularity: unicode-without-colour is unreachable (one
+  extra bool on `result_report`).
+- `SolveFailureKind`'s param index reaches the skins only as prose;
+  the number is what a caller acts on. Decide explicitly.
+- `cost()`/`cost_table()` at an explicit params vector -- blocked on
+  the deferred serialize/deserialize item; pick up together.
+
+### 17. Math/vocabulary parity [S]
+
+- Python lags C++: `is_finite` (only matrix3), `similar` (absent),
+  `quatern.cast` (absent) -- and the golden parity never calls them
+  (a test blind spot).
+- `matrix2/3::similar` and `matrix3::null_space` missing from BOTH
+  skins.
+- `se3` twist type absent from both (nothing blocked; conversion
+  convenience only).
+- C++ views have `front()/back()/empty()`; Python has none.
+- Result accessor idioms differ (Python property + None, C++ method
+  + option) -- pick one idiom per concept and document it.
+
+### Aging exclusion [DONE 2026-07-31]
+
+`SchurSolve::Iterative`/`IterativeImplicit` + `CgOptions` is now the
+only `SparseFaerOptions` field with no crossing and has picked up
+benchmark use; the "experimental" label is aging.
+
+Shipped: `SparseOptions` gained `schur_solve` (Factorize / Iterative
+/ IterativeImplicit) plus `cg_tol` / `cg_max_iters` /
+`cg_restart_every` (the `CgOptions` fields, defaults from Rust), in
+both skins with a `SchurSolve` enum. Parity pins a Force+Iterative
+solve exactly, including the plan's CG iteration total. Every
+`SparseFaerOptions` capability except the marginalize range list now
+crosses.
+
 ## Not planned (unchanged decisions)
 
 - Raw gradient/Hessian assembly surface -- recorded in TODO.md;

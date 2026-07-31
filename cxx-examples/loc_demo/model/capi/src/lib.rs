@@ -281,6 +281,17 @@ pub struct CSparseOptions {
     /// ...and below this cheap ratio it is taken without the exact
     /// pricing.
     pub obvious_flop_ratio: f64,
+    /// Conjugate-gradient tolerance for the iterative routes.
+    pub cg_tol: f64,
+    /// SchurSolve: 0 Factorize, 1 Iterative, 2 IterativeImplicit.
+    /// The iterative routes solve the reduced system by preconditioned
+    /// conjugate gradients; pair them with schur = Force (without a
+    /// reduction the solve fails rather than taking another route).
+    pub schur_solve: u32,
+    /// CG iteration cap; 0 = unlimited.
+    pub cg_max_iters: u32,
+    /// CG restart interval; 0 = never.
+    pub cg_restart_every: u32,
 }
 
 impl CSparseOptions {
@@ -310,13 +321,24 @@ impl CSparseOptions {
             t => return Err(format!("unknown envelope mode tag {t}")),
         };
         let width = self.envelope_panel_width;
-        Ok(SparseFaerOptions::auto()
+        let opts = SparseFaerOptions::auto()
             .with_policy(policy)
             .with_ordering(ordering)
             .with_envelope_schur(envelope)
             .with_envelope_panel_width((width > 0).then_some(width as usize))
             .with_supernodal(self.supernodal)
-            .with_narrow_band(self.narrow_band))
+            .with_narrow_band(self.narrow_band);
+        let cg = arael::simple_lm::CgOptions {
+            tol: self.cg_tol,
+            max_iters: self.cg_max_iters as usize,
+            restart_every: self.cg_restart_every as usize,
+        };
+        Ok(match self.schur_solve {
+            0 => opts,
+            1 => opts.with_iterative_schur(cg),
+            2 => opts.with_implicit_schur(cg),
+            t => return Err(format!("unknown schur solve tag {t}")),
+        })
     }
 }
 
@@ -354,6 +376,10 @@ pub unsafe extern "C" fn path_sparse_options(out: *mut CSparseOptions) {
         narrow_band: d.narrow_band,
         flop_margin,
         obvious_flop_ratio,
+        cg_tol: arael::simple_lm::CgOptions::default().tol,
+        schur_solve: 0,
+        cg_max_iters: 0,
+        cg_restart_every: 0,
     };
 }
 

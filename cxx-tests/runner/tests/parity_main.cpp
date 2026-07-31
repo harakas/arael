@@ -205,6 +205,19 @@ int main() {
     p("sessf_end", rs5.end_cost);
     pi("sessf_envelope", rs5.plan().value().envelope ? 1 : 0);
 
+    // The iterative Schur route: CG solves the reduced system; the
+    // plan carries its iteration total.
+    Fit f15;
+    fill(f15);
+    SparseOptions so15;
+    so15.schur = SchurPolicy::Force;
+    so15.schur_solve = SchurSolve::Iterative;
+    LmResult r15 = f15.solve_sparse(cfg, so15).value();
+    p("cg_end", r15.end_cost);
+    SchurPlan p15 = r15.plan().value();
+    pi("cg_iters_has", p15.cg_iterations.has_value() ? 1 : 0);
+    pi("cg_iters", p15.cg_iterations.has_value() ? long(p15.cg_iterations.value()) : -1);
+
     // Observer callback + timing + report + conditional covariance.
     Fit f7;
     pi("report_default_empty", std::strlen(LmResult().report()) == 0 ? 1 : 0);

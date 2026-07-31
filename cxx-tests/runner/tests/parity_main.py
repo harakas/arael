@@ -207,6 +207,19 @@ rs5 = sessf.solve(f14, cfg)
 p("sessf_end", rs5.end_cost)
 pi("sessf_envelope", 1 if rs5.plan.envelope else 0)
 
+# The iterative Schur route: CG solves the reduced system; the plan
+# carries its iteration total.
+f15 = fit.Fit()
+fill(f15)
+so15 = fit.SparseOptions()
+so15.schur = fit.SchurPolicy.FORCE
+so15.schur_solve = fit.SchurSolve.ITERATIVE
+r15 = f15.solve_sparse(cfg, so15)
+p("cg_end", r15.end_cost)
+p15 = r15.plan
+pi("cg_iters_has", 1 if p15.cg_iterations is not None else 0)
+pi("cg_iters", p15.cg_iterations if p15.cg_iterations is not None else -1)
+
 # Observer callback + timing + report + conditional covariance.
 f7 = fit.Fit()
 pi("report_default_empty", 1 if len(fit.LmResult().report()) == 0 else 0)

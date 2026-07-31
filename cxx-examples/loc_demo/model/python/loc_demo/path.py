@@ -12,7 +12,8 @@ from . import _path_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
                            LmPreset, LmStatus, LmTiming, LogLevel,
-                           ReducedOrdering, SchurPlan, SchurPolicy)
+                           ReducedOrdering, SchurPlan, SchurPolicy,
+                           SchurSolve)
 
 LmIter = _f.LmIter
 

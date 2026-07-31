@@ -94,6 +94,18 @@ class FaerOrdering(enum.IntEnum):
     NESTED_DISSECTION = 4
 
 
+class SchurSolve(enum.IntEnum):
+    """How the reduced Schur system is solved (matches the Rust
+    enum): factorized, or by preconditioned conjugate gradients
+    (ITERATIVE forms the reduced matrix, ITERATIVE_IMPLICIT never
+    does). Pair the iterative routes with SchurPolicy.FORCE --
+    without a reduction the solve fails rather than taking another
+    route."""
+    FACTORIZE = 0
+    ITERATIVE = 1
+    ITERATIVE_IMPLICIT = 2
+
+
 class EnvelopeMode(enum.IntEnum):
     """How the reduced Schur system is factored (matches the Rust
     enum): in block form under its envelope, or by the general sparse
@@ -137,11 +149,19 @@ class SparseOptions(ctypes.Structure):
         # obvious_flop_ratio it is taken without the exact pricing.
         ("flop_margin", ctypes.c_double),
         ("obvious_flop_ratio", ctypes.c_double),
+        # Conjugate-gradient settings for the iterative routes:
+        # tolerance, iteration cap (0 = unlimited), restart interval
+        # (0 = never).
+        ("cg_tol", ctypes.c_double),
+        ("_schur_solve", ctypes.c_uint32),
+        ("cg_max_iters", ctypes.c_uint32),
+        ("cg_restart_every", ctypes.c_uint32),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
     ordering = _enum_property("_ordering", FaerOrdering)
     envelope = _enum_property("_envelope", EnvelopeMode)
+    schur_solve = _enum_property("_schur_solve", SchurSolve)
 
 
 class _OptDouble(ctypes.Structure):

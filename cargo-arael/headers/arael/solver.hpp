@@ -127,6 +127,18 @@ enum class EnvelopeMode : uint32_t {
     Never = 2,
 };
 
+/// How the reduced Schur system is solved (mirrors arael's
+/// SchurSolve): factorized, or by preconditioned conjugate gradients
+/// (Iterative forms the reduced matrix, IterativeImplicit never
+/// does). Pair the iterative routes with SchurPolicy::Force --
+/// without a reduction the solve fails rather than taking another
+/// route.
+enum class SchurSolve : uint32_t {
+    Factorize = 0,
+    Iterative = 1,
+    IterativeImplicit = 2,
+};
+
 /// The sparse backend's options (mirrors arael's SparseFaerOptions).
 /// The generated SparseOptions fills the Rust defaults at
 /// construction; edit fields and pass to solve_sparse. Layout is part
@@ -149,6 +161,13 @@ struct SparseOptionsT {
     /// ...and below this cheap ratio it is taken without the exact
     /// pricing.
     double obvious_flop_ratio;
+    /// Conjugate-gradient tolerance for the iterative routes.
+    double cg_tol;
+    SchurSolve schur_solve;
+    /// CG iteration cap; 0 = unlimited.
+    uint32_t cg_max_iters;
+    /// CG restart interval; 0 = never.
+    uint32_t cg_restart_every;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
