@@ -1,44 +1,56 @@
 //! Geometric primitives for camera models and projections.
 
-use crate::vect::{vect2f, vect3f};
-use crate::matrix::matrix3f;
+use crate::matrix::matrix3;
+use crate::utils::Float;
+use crate::vect::{vect2, vect3};
 
-/// Pinhole camera model with intrinsics and extrinsics.
-pub struct Camera {
+/// Pinhole camera model with intrinsics and extrinsics, generic over
+/// the scalar like the math types; use [`cameraf`] / [`camerad`].
+#[allow(non_camel_case_types)]
+pub struct camera<T: Float> {
     // Intrinsics
-    pub fx: f32,
-    pub fy: f32,
-    pub cx: f32,
-    pub cy: f32,
+    pub fx: T,
+    pub fy: T,
+    pub cx: T,
+    pub cy: T,
     pub width: u32,
     pub height: u32,
     // Extrinsics: position and orientation in robot frame
-    pub camera_pos: vect3f,
+    pub camera_pos: vect3<T>,
     /// Rotation from **c**amera frame to **r**obot frame (`mc2r` = M_camera_to_robot).
-    pub mc2r: matrix3f,
+    pub mc2r: matrix3<T>,
 }
 
-impl Camera {
+/// f32 camera.
+#[allow(non_camel_case_types)]
+pub type cameraf = camera<f32>;
+/// f64 camera.
+#[allow(non_camel_case_types)]
+pub type camerad = camera<f64>;
+/// Legacy alias of [`cameraf`]; new code names the precision.
+pub type Camera = cameraf;
+
+impl<T: Float> camera<T> {
     /// Project a 3D point in camera frame to 2D pixel coordinates.
-    pub fn project(&self, p_cam: vect3f) -> vect2f {
-        vect2f::new(
+    pub fn project(&self, p_cam: vect3<T>) -> vect2<T> {
+        vect2::new(
             self.fx * p_cam.x / p_cam.z + self.cx,
             self.fy * p_cam.y / p_cam.z + self.cy,
         )
     }
 
     /// Unproject a pixel to a unit direction in camera frame.
-    pub fn unproject(&self, px: vect2f) -> vect3f {
-        let dir = vect3f::new(
+    pub fn unproject(&self, px: vect2<T>) -> vect3<T> {
+        let dir = vect3::new(
             (px.x - self.cx) / self.fx,
             (px.y - self.cy) / self.fy,
-            1.0,
+            T::one(),
         );
-        dir * (1.0 / dir.norm())
+        dir * (T::one() / dir.norm())
     }
 
     /// Transform a world point into this camera's frame given robot pose.
-    pub fn world_to_camera(&self, p_world: vect3f, robot_pos: vect3f, mr2w: matrix3f) -> vect3f {
+    pub fn world_to_camera(&self, p_world: vect3<T>, robot_pos: vect3<T>, mr2w: matrix3<T>) -> vect3<T> {
         let mw2r = mr2w.transpose();
         let mr2c = self.mc2r.transpose();
         let p_robot = mw2r * (p_world - robot_pos);
@@ -46,7 +58,7 @@ impl Camera {
     }
 
     /// Unproject pixel to unit direction in robot frame.
-    pub fn unproject_to_robot(&self, px: vect2f) -> vect3f {
+    pub fn unproject_to_robot(&self, px: vect2<T>) -> vect3<T> {
         let dir_cam = self.unproject(px);
         self.mc2r * dir_cam
     }
@@ -57,18 +69,18 @@ impl Camera {
     ///   size_x = fx / ((px.x - cx)^2 + fx^2)
     ///   size_y = fy / ((py.y - cy)^2 + fy^2)
     /// At image center this equals 1/fx; at edges it is smaller.
-    pub fn pixel_angular_size(&self, px: vect2f) -> vect2f {
+    pub fn pixel_angular_size(&self, px: vect2<T>) -> vect2<T> {
         let dx = px.x - self.cx;
         let dy = px.y - self.cy;
-        vect2f::new(
+        vect2::new(
             self.fx / (dx * dx + self.fx * self.fx),
             self.fy / (dy * dy + self.fy * self.fy),
         )
     }
 
     /// Check if a pixel coordinate is within the image bounds.
-    pub fn is_visible(&self, px: vect2f) -> bool {
-        px.x >= 0.0 && px.x < self.width as f32
-            && px.y >= 0.0 && px.y < self.height as f32
+    pub fn is_visible(&self, px: vect2<T>) -> bool {
+        px.x >= T::zero() && px.x < T::from(self.width).unwrap()
+            && px.y >= T::zero() && px.y < T::from(self.height).unwrap()
     }
 }

@@ -94,7 +94,8 @@ views are named by their container's nature: `PathPosesDeque`,
   y=pitch, z=yaw with `R = R(z)R(y)R(x)`, quaternions store the
   scalar part first. `matrix2/3::symmetric_eigen()` matches the Rust
   one (ascending eigenvalues, eigenvector columns) to precision, not
-  bits. `arael/geometry.hpp` carries the pinhole `Camera`;
+  bits. `arael/geometry.hpp` carries the pinhole camera
+  (`cameraf` / `camerad`; `Camera` is a legacy alias of `cameraf`);
   `arael/g2o.hpp` the pose-graph file reader (`Dataset2` for
   VERTEX_SE2/EDGE_SE2, `Dataset3` for VERTEX_SE3:QUAT/EDGE_SE3:QUAT
   with sqrt-information Cholesky blocks).

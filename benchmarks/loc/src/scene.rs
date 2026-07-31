@@ -19,7 +19,7 @@
 // stored prior (the init), not arael's self-updating `_value`, so every
 // system computes the same residual.
 
-use arael::geometry::Camera;
+use arael::geometry::cameraf;
 use arael::matrix::{matrix3d, matrix3f};
 use arael::vect::{vect2f, vect3d, vect3f};
 use rand::prelude::*;
@@ -120,7 +120,7 @@ impl Default for SceneConfig {
     }
 }
 
-fn create_cameras() -> Vec<Camera> {
+fn create_cameras() -> Vec<cameraf> {
     let mut cameras = Vec::new();
     let w = 1024;
     let h = 768;
@@ -137,7 +137,7 @@ fn create_cameras() -> Vec<Camera> {
             vect3f::new(0.0, 0.0, -1.0),
             vect3f::new(cy, sy, 0.0),
         );
-        cameras.push(Camera {
+        cameras.push(cameraf {
             fx, fy,
             cx: w as f32 / 2.0,
             cy: h as f32 / 2.0,

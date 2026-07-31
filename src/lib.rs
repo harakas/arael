@@ -835,9 +835,9 @@
 //! #[arael::model]
 //! struct PointFeature {
 //!     pixel: vect2f,
-//!     // Camera is a Ref<Camera>; we don't want the macro to walk it
-//!     // as a nested Model, so skip it.
-//!     #[arael(skip)] camera: Ref<Camera>,
+//!     // The camera is a Ref<cameraf>; we don't want the macro to walk
+//!     // it as a nested Model, so skip it.
+//!     #[arael(skip)] camera: Ref<cameraf>,
 //!     // ... measurement data ...
 //! }
 //!
@@ -2188,7 +2188,8 @@ pub mod unitvec;
 pub mod simple_lm;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;
-/// Camera model and geometric utilities.
+/// Pinhole camera model (`camera<T>`, `cameraf` / `camerad`) and
+/// geometric utilities.
 pub mod geometry;
 /// .g2o pose-graph file I/O (SE2 and SE3:QUAT records).
 pub mod g2o;

@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
                                 "cargo-arael", "python"))
 
 from arael import g2o                                            # noqa: E402
-from arael.geometry import Camera                                # noqa: E402
+from arael.geometry import camerad, cameraf                                # noqa: E402
 from arael.math import (matrix2d, matrix3d, matrix3f, quaternd,  # noqa: E402
                         quaternf, vect2d, vect2f, vect3d, vect3f)
 
@@ -151,10 +151,10 @@ pv2("eig2_d", d2)
 pm2("eig2_recon", r2e * matrix2d.from_elements(d2.x, 0.0, 0.0, d2.y)
     * r2e.transpose())
 
-# Pinhole camera (f32 storage, compared at f32 accuracy).
-cam = Camera(800.0, 820.0, 512.0, 384.0, 1024, 768,
-             vect3f(0.1, -0.05, 0.3),
-             matrix3f.rotation_from_euler_angles(vect3f(0.1, -0.2, 0.5)))
+# Pinhole camera (cameraf: f32 storage, compared at f32 accuracy).
+cam = cameraf(800.0, 820.0, 512.0, 384.0, 1024, 768,
+              vect3f(0.1, -0.05, 0.3),
+              matrix3f.rotation_from_euler_angles(vect3f(0.1, -0.2, 0.5)))
 px = vect2f(600.0, 300.0)
 pv2("f32_cam_proj", cam.project(vect3f(0.4, -0.3, 2.0)).cast())
 pv3("f32_cam_unproj", cam.unproject(px).cast())
@@ -165,6 +165,17 @@ pv3("f32_cam_unproj_robot", cam.unproject_to_robot(px).cast())
 pv2("f32_cam_pixang", cam.pixel_angular_size(px).cast())
 p("f32_cam_vis_in", 1.0 if cam.is_visible(px) else 0.0)
 p("f32_cam_vis_out", 1.0 if cam.is_visible(vect2f(-1.0, 300.0)) else 0.0)
+
+# Pinhole camera at f64 (camerad), compared exactly.
+cam_d = camerad(800.0, 820.0, 512.0, 384.0, 1024, 768,
+                vect3d(0.1, -0.05, 0.3),
+                matrix3d.rotation_from_euler_angles(vect3d(0.1, -0.2, 0.5)))
+px_d = vect2d(600.0, 300.0)
+pv2("cam_d_proj", cam_d.project(vect3d(0.4, -0.3, 2.0)))
+pv3("cam_d_w2c", cam_d.world_to_camera(
+    vect3d(3.0, 1.0, 0.5), vect3d(1.0, 0.2, 0.0),
+    matrix3d.rotation_from_euler_angles(vect3d(0.02, 0.05, 1.1))))
+pv2("cam_d_pixang", cam_d.pixel_angular_size(px_d))
 
 # g2o SE2 parsing (exact doubles through the text round trip).
 ds = g2o.Dataset2.parse(

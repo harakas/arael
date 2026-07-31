@@ -42,7 +42,7 @@ use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
 use arael::refs::{self, Ref};
-use arael::geometry::Camera;
+use arael::geometry::cameraf;
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -60,7 +60,7 @@ struct PointFeature {
     pixel: vect2f,
     mf2r: matrix3f,       // feature-to-robot rotation: col0=view dir, col1/col2=perp axes
     #[arael(skip)]
-    camera: Ref<Camera>,
+    camera: Ref<cameraf>,
     camera_pos: vect3f,    // camera position in robot frame
     isigma: vect2f,        // 1/sigma for angular residuals (rad^-1)
 }
@@ -256,7 +256,7 @@ impl Default for SceneConfig {
     }
 }
 
-fn create_cameras() -> refs::Vec<Camera> {
+fn create_cameras() -> refs::Vec<cameraf> {
     let mut cameras = refs::Vec::new();
     // 5 cameras at 72-degree intervals around the robot, looking toward horizon
     let w = 1024;
@@ -270,14 +270,14 @@ fn create_cameras() -> refs::Vec<Camera> {
         let yaw = (i as f32) * (360.0_f32 / n as f32).to_radians();
         let sy = yaw.sin();
         let cy = yaw.cos();
-        // Camera looks outward from robot center, Z forward in camera = outward direction
+        // cameraf looks outward from robot center, Z forward in camera = outward direction
         // mc2r rotates camera frame to robot frame: camera Z -> robot (cy, sy, 0)
         let mc2r = matrix3f::from_cols(
             vect3f::new(-sy, cy, 0.0),  // camera X -> robot left (perpendicular to view)
             vect3f::new(0.0, 0.0, -1.0), // camera Y -> robot down (image Y down)
             vect3f::new(cy, sy, 0.0),    // camera Z -> robot forward direction
         );
-        cameras.push(Camera {
+        cameras.push(cameraf {
             fx, fy,
             cx: w as f32 / 2.0,
             cy: h as f32 / 2.0,

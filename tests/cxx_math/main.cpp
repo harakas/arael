@@ -140,9 +140,9 @@ int main() {
             * r2e.transpose());
     }
 
-    // Pinhole camera (f32, printed at double precision).
+    // Pinhole camera (cameraf, printed at double precision).
     {
-        Camera cam{800.0f, 820.0f, 512.0f, 384.0f, 1024, 768,
+        cameraf cam{800.0f, 820.0f, 512.0f, 384.0f, 1024, 768,
             vect3f{0.1f, -0.05f, 0.3f},
             matrix3f::rotation_from_euler_angles({0.1f, -0.2f, 0.5f})};
         vect2f px{600.0f, 300.0f};
@@ -155,6 +155,18 @@ int main() {
         pv2("f32_cam_pixang", cam.pixel_angular_size(px).cast<double>());
         p("f32_cam_vis_in", cam.is_visible(px) ? 1.0 : 0.0);
         p("f32_cam_vis_out", cam.is_visible({-1.0f, 300.0f}) ? 1.0 : 0.0);
+    }
+
+    // Pinhole camera at f64 (camerad), compared exactly.
+    {
+        camerad cam{800.0, 820.0, 512.0, 384.0, 1024, 768,
+            vect3d{0.1, -0.05, 0.3},
+            matrix3d::rotation_from_euler_angles({0.1, -0.2, 0.5})};
+        vect2d px{600.0, 300.0};
+        pv2("cam_d_proj", cam.project({0.4, -0.3, 2.0}));
+        pv3("cam_d_w2c", cam.world_to_camera({3.0, 1.0, 0.5}, {1.0, 0.2, 0.0},
+            matrix3d::rotation_from_euler_angles({0.02, 0.05, 1.1})));
+        pv2("cam_d_pixang", cam.pixel_angular_size(px));
     }
 
     // g2o SE2 parsing (exact doubles through the text round trip).

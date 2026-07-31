@@ -21,7 +21,7 @@ _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_here, "..", "model", "python"))
 
 from loc_demo import path as pathmod  # noqa: E402
-from loc_demo.arael import Camera, CovMode  # noqa: E402
+from loc_demo.arael import cameraf, CovMode  # noqa: E402
 from loc_demo.arael.math import matrix3f, vect2f, vect3f  # noqa: E402
 
 
@@ -51,7 +51,7 @@ def create_cameras():
         sy, cy = math.sin(yaw), math.cos(yaw)
         mc2r = matrix3f.from_cols((-sy, cy, 0.0), (0.0, 0.0, -1.0),
                                   (cy, sy, 0.0))
-        cameras.append(Camera(fx, fx, w / 2.0, h / 2.0, w, h,
+        cameras.append(cameraf(fx, fx, w / 2.0, h / 2.0, w, h,
                               (cy * 0.1, sy * 0.1, 0.3), mc2r))
     return cameras
 

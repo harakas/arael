@@ -55,7 +55,9 @@ surface reference); the differences are Python idiom:
   live in the vendored `arael.math`: the classes ARE the FFI structs,
   with the same operators as the C++ headers (`*` dot, `%` cross,
   `symmetric_eigen`, euler/quaternion conversions...).
-  `arael.geometry.Camera` and the `arael.g2o` pose-graph readers
+  The `arael.geometry` pinhole camera (`cameraf` / `camerad`;
+  `Camera` is a legacy alias of `cameraf`) and the `arael.g2o`
+  pose-graph readers
   (`Dataset2` for SE2, `Dataset3` for SE3:QUAT with sqrt-information
   Cholesky blocks) complete the support library.
 - **Collections** speak Python: `len(f.obs)`, `f.obs[3]` (negative

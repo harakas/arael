@@ -11,7 +11,7 @@ use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
 use arael::refs::{self, Ref};
-use arael::geometry::Camera;
+use arael::geometry::cameraf;
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -27,7 +27,7 @@ struct PointFeature {
     pixel: vect2f,
     mf2r: matrix3f,
     #[arael(skip)]
-    camera: Ref<Camera>,
+    camera: Ref<cameraf>,
     camera_pos: vect3f,
     isigma: vect2f,
 }
@@ -187,7 +187,7 @@ impl Default for SceneConfig {
     }
 }
 
-fn create_cameras() -> refs::Vec<Camera> {
+fn create_cameras() -> refs::Vec<cameraf> {
     let mut cameras = refs::Vec::new();
     let w = 1024u32; let h = 768u32;
     let fov_deg = 80.0_f32;
@@ -202,7 +202,7 @@ fn create_cameras() -> refs::Vec<Camera> {
             vect3f::new(0.0, 0.0, -1.0),
             vect3f::new(cy, sy, 0.0),
         );
-        cameras.push(Camera {
+        cameras.push(cameraf {
             fx, fy, cx: w as f32 / 2.0, cy: h as f32 / 2.0,
             width: w, height: h,
             camera_pos: vect3f::new(cy * 0.1, sy * 0.1, 0.3),

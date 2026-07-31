@@ -146,12 +146,12 @@ pub fn golden() -> Vec<(String, f64)> {
             * r2e.transpose());
     }
 
-    // Pinhole camera (f32, compared at f32 accuracy).
+    // Pinhole camera (cameraf; compared at f32 accuracy).
     {
-        use arael::geometry::Camera;
+        use arael::geometry::cameraf;
         use arael::matrix::matrix3f;
         use arael::vect::{vect2f, vect3f};
-        let cam = Camera {
+        let cam = cameraf {
             fx: 800.0, fy: 820.0, cx: 512.0, cy: 384.0, width: 1024, height: 768,
             camera_pos: vect3f::new(0.1, -0.05, 0.3),
             mc2r: matrix3f::rotation_from_euler_angles(vect3f::new(0.1, -0.2, 0.5)),
@@ -169,6 +169,22 @@ pub fn golden() -> Vec<(String, f64)> {
         p(&mut out, "f32_cam_vis_in", if cam.is_visible(px) { 1.0 } else { 0.0 });
         p(&mut out, "f32_cam_vis_out",
             if cam.is_visible(vect2f::new(-1.0, 300.0)) { 1.0 } else { 0.0 });
+    }
+
+    // Pinhole camera at f64 (camerad), compared exactly.
+    {
+        use arael::geometry::camerad;
+        let cam = camerad {
+            fx: 800.0, fy: 820.0, cx: 512.0, cy: 384.0, width: 1024, height: 768,
+            camera_pos: vect3d::new(0.1, -0.05, 0.3),
+            mc2r: matrix3d::rotation_from_euler_angles(vect3d::new(0.1, -0.2, 0.5)),
+        };
+        let px = vect2d::new(600.0, 300.0);
+        pv2(&mut out, "cam_d_proj", cam.project(vect3d::new(0.4, -0.3, 2.0)));
+        pv3(&mut out, "cam_d_w2c", cam.world_to_camera(
+            vect3d::new(3.0, 1.0, 0.5), vect3d::new(1.0, 0.2, 0.0),
+            matrix3d::rotation_from_euler_angles(vect3d::new(0.02, 0.05, 1.1))));
+        pv2(&mut out, "cam_d_pixang", cam.pixel_angular_size(px));
     }
 
     // g2o SE2 parsing (exact doubles through the text round trip).
