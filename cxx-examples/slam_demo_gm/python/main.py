@@ -337,7 +337,9 @@ def main():
     # reused warm, like the Rust example.
     print("--- Optimization ---", flush=True)
     scales = [1.0] if os.environ.get("SINGLE_PASS") else [0.01, 0.1, 1.0]
-    session = pathmod.LmSession()
+    opts = pathmod.SparseOptions()
+    opts.envelope = pathmod.EnvelopeMode.ALWAYS
+    session = pathmod.LmSession(opts)
     for passno, scale in enumerate(scales, 1):
         path.frine_isigma_scale = scale
         print("\nPass %d (isigma scale=%g):" % (passno, scale), flush=True)

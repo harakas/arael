@@ -427,7 +427,9 @@ int main(int argc, char** argv) {
     std::vector<double> isigma_scales =
         std::getenv("SINGLE_PASS") ? std::vector<double>{1.0}
                                    : std::vector<double>{0.01, 0.1, 1.0};
-    LmSession session;
+    SparseOptions opts;
+    opts.envelope = EnvelopeMode::Always;
+    LmSession session(opts);
     for (size_t pass = 0; pass < isigma_scales.size(); pass++) {
         path.set_frine_isigma_scale(isigma_scales[pass]);
         std::printf("\nPass %zu (isigma scale=%g):\n", pass + 1, isigma_scales[pass]);
