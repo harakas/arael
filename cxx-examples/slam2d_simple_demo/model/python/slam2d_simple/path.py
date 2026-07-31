@@ -10,8 +10,9 @@ import os
 
 from . import _path_ffi as _f
 from .arael import math as _m
-from .arael.solver import (AraelError, CovMode, LmPreset, LmStatus,
-                           LmTiming, ReducedOrdering, SchurPlan)
+from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
+                           LmPreset, LmStatus, LmTiming, ReducedOrdering,
+                           SchurPlan, SchurPolicy)
 
 LmIter = _f.LmIter
 
@@ -80,6 +81,16 @@ class LmConfig(_f.LmConfigRaw):
     @classmethod
     def ill_conditioned(cls):
         return cls(LmPreset.ILL_CONDITIONED)
+
+
+class SparseOptions(_f.SparseOptionsRaw):
+    """The sparse backend's options, holding the actual Rust
+    defaults (fetched through the FFI at construction). Edit fields,
+    pass to solve_sparse."""
+
+    def __init__(self):
+        load()
+        _f.path_sparse_options(ctypes.byref(self))
 
 
 class LmResult(_f.LmResultRaw):
@@ -755,12 +766,16 @@ class Path:
             _f.path_solve_dense(self._p, ctypes.byref(cfg),
                                      ctypes.byref(r)), r)
 
-    def solve_sparse(self, cfg=None):
+    def solve_sparse(self, cfg=None, opts=None):
+        """Sparse solve; `opts` (a SparseOptions) selects the
+        backend's route, None means the defaults."""
         cfg = cfg if cfg is not None else LmConfig()
         r = LmResult()
         return self._solved(
-            _f.path_solve_sparse(self._p, ctypes.byref(cfg),
-                                      ctypes.byref(r)), r)
+            _f.path_solve_sparse(
+                self._p, ctypes.byref(cfg),
+                ctypes.byref(opts) if opts is not None else None,
+                ctypes.byref(r)), r)
 
     def solve_band(self, kd, cfg=None):
         """Band Cholesky solve; kd is the half-bandwidth in scalar

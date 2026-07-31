@@ -12,6 +12,7 @@ _T = _solver.lm_types(ctypes.c_double)
 LmConfigRaw = _T["LmConfig"]
 LmResultRaw = _T["LmResult"]
 LmIter = _T["LmIter"]
+SparseOptionsRaw = _solver.SparseOptions
 
 SIGS = [
     ("graph_edge_a", [ctypes.c_void_p], ctypes.c_uint32),
@@ -55,8 +56,9 @@ SIGS = [
     ("graph_result_free", [ctypes.c_void_p], None),
     ("graph_cost", [ctypes.c_void_p], ctypes.c_double),
     ("graph_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),
+    ("graph_sparse_options", [ctypes.POINTER(_solver.SparseOptions)], None),
     ("graph_solve_dense", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
-    ("graph_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
+    ("graph_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(_solver.SparseOptions), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("graph_solve_band", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("graph_poses_len", [ctypes.c_void_p], ctypes.c_uint32),
     ("graph_poses_reserve", [ctypes.c_void_p, ctypes.c_uint32], None),

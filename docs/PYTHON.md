@@ -70,7 +70,11 @@ surface reference); the differences are Python idiom:
 - **Solves**: `solve_dense/solve_sparse/solve_band(kd)` return an
   `LmResult` for every healthy termination and raise
   `AraelError(status, message)` for a solver failure or a caught Rust
-  panic. `LmConfig` starts from a preset -- `defaults()`,
+  panic. `solve_sparse(cfg, opts)` takes a `SparseOptions` (filled
+  with the actual Rust defaults at construction): Schur policy,
+  elimination ordering, the envelope route for the reduced system,
+  supernodal, narrow band -- the `SchurPolicy` / `FaerOrdering` /
+  `EnvelopeMode` enums live beside it. `LmConfig` starts from a preset -- `defaults()`,
   `conservative()`, `well_conditioned()`, `ill_conditioned()` -- with
   the actual Rust values filled in. `cfg.observer = fn` gets an
   `LmIter` per damped attempt (`it.lambda_`, `it.param(i)`,

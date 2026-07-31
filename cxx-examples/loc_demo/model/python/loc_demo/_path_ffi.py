@@ -12,6 +12,7 @@ _T = _solver.lm_types(ctypes.c_float)
 LmConfigRaw = _T["LmConfig"]
 LmResultRaw = _T["LmResult"]
 LmIter = _T["LmIter"]
+SparseOptionsRaw = _solver.SparseOptions
 
 SIGS = [
     ("path_point_feature_pixel", [ctypes.c_void_p], _m.vect2f),
@@ -91,8 +92,9 @@ SIGS = [
     ("path_result_free", [ctypes.c_void_p], None),
     ("path_cost", [ctypes.c_void_p], ctypes.c_double),
     ("path_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),
+    ("path_sparse_options", [ctypes.POINTER(_solver.SparseOptions)], None),
     ("path_solve_dense", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
-    ("path_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
+    ("path_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(_solver.SparseOptions), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("path_solve_band", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("path_poses_len", [ctypes.c_void_p], ctypes.c_uint32),
     ("path_poses_reserve", [ctypes.c_void_p, ctypes.c_uint32], None),

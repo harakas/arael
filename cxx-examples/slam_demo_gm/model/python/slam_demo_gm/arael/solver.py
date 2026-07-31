@@ -66,6 +66,75 @@ class ReducedOrdering(enum.IntEnum):
     ND = 3
 
 
+class SchurPolicy(enum.IntEnum):
+    """Whether and when the sparse backend marginalizes (matches the
+    Rust enum). AUTO prices the reduction; its tuning lives on
+    SparseOptions."""
+    AUTO = 0
+    FORCE = 1
+    NEVER = 2
+
+
+class FaerOrdering(enum.IntEnum):
+    """Elimination ordering of the factorized system (matches the
+    Rust enum)."""
+    AUTO = 0
+    AMD = 1
+    MARGINALIZE_FIRST = 2
+    NATURAL = 3
+    NESTED_DISSECTION = 4
+
+
+class EnvelopeMode(enum.IntEnum):
+    """How the reduced Schur system is factored (matches the Rust
+    enum): in block form under its envelope, or by the general sparse
+    Cholesky. The envelope route uses less memory on suitable systems;
+    AUTO prices it per problem."""
+    AUTO = 0
+    ALWAYS = 1
+    NEVER = 2
+
+
+def _enum_property(field, enum_cls):
+    """Property mapping a raw u32 field to an enum (any int in)."""
+
+    def get(self):
+        return enum_cls(getattr(self, field))
+
+    def set(self, value):
+        setattr(self, field, int(value))
+
+    return property(get, set)
+
+
+class SparseOptions(ctypes.Structure):
+    """The sparse backend's options (mirror of arael's
+    SparseFaerOptions): whether and when to marginalize, the
+    elimination ordering, and the envelope route for the reduced
+    system. The generated module's subclass fills the actual Rust
+    defaults at construction; edit fields and pass to solve_sparse.
+    Not exposed: the marginalize range list (the model's own hint
+    covers it) and the iterative Schur routes."""
+    _fields_ = [
+        ("_schur", ctypes.c_uint32),
+        ("_ordering", ctypes.c_uint32),
+        ("_envelope", ctypes.c_uint32),
+        # 0 picks the envelope panel width automatically.
+        ("envelope_panel_width", ctypes.c_uint32),
+        ("supernodal", ctypes.c_bool),
+        ("narrow_band", ctypes.c_bool),
+        # SchurPolicy.AUTO tuning: the reduction must beat the whole
+        # system by flop_margin to be taken, and below
+        # obvious_flop_ratio it is taken without the exact pricing.
+        ("flop_margin", ctypes.c_double),
+        ("obvious_flop_ratio", ctypes.c_double),
+    ]
+
+    schur = _enum_property("_schur", SchurPolicy)
+    ordering = _enum_property("_ordering", FaerOrdering)
+    envelope = _enum_property("_envelope", EnvelopeMode)
+
+
 class _OptDouble(ctypes.Structure):
     _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_double)]
 

@@ -717,11 +717,15 @@ class Covariance:
         "ctypes.c_double");
     sig(&mut py, &format!("{root_sn}_lm_config"),
         &["ctypes.c_uint32", "ctypes.POINTER(LmConfigRaw)"], "None");
-    for m in ["solve_dense", "solve_sparse"] {
-        sig(&mut py, &format!("{root_sn}_{m}"),
-            &["ctypes.c_void_p", "ctypes.POINTER(LmConfigRaw)",
-              "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
-    }
+    sig(&mut py, &format!("{root_sn}_sparse_options"),
+        &["ctypes.POINTER(_solver.SparseOptions)"], "None");
+    sig(&mut py, &format!("{root_sn}_solve_dense"),
+        &["ctypes.c_void_p", "ctypes.POINTER(LmConfigRaw)",
+          "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_solve_sparse"),
+        &["ctypes.c_void_p", "ctypes.POINTER(LmConfigRaw)",
+          "ctypes.POINTER(_solver.SparseOptions)",
+          "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
     sig(&mut py, &format!("{root_sn}_solve_band"),
         &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.POINTER(LmConfigRaw)",
           "ctypes.POINTER(LmResultRaw)"], "ctypes.c_int32");
@@ -760,12 +764,16 @@ class Covariance:
             _f.{root_sn}_solve_dense(self._p, ctypes.byref(cfg),
                                      ctypes.byref(r)), r)
 
-    def solve_sparse(self, cfg=None):
+    def solve_sparse(self, cfg=None, opts=None):
+        \"\"\"Sparse solve; `opts` (a SparseOptions) selects the
+        backend's route, None means the defaults.\"\"\"
         cfg = cfg if cfg is not None else LmConfig()
         r = LmResult()
         return self._solved(
-            _f.{root_sn}_solve_sparse(self._p, ctypes.byref(cfg),
-                                      ctypes.byref(r)), r)
+            _f.{root_sn}_solve_sparse(
+                self._p, ctypes.byref(cfg),
+                ctypes.byref(opts) if opts is not None else None,
+                ctypes.byref(r)), r)
 
     def solve_band(self, kd, cfg=None):
         \"\"\"Band Cholesky solve; kd is the half-bandwidth in scalar
@@ -815,6 +823,7 @@ _T = _solver.lm_types({fp})
 LmConfigRaw = _T[\"LmConfig\"]
 LmResultRaw = _T[\"LmResult\"]
 LmIter = _T[\"LmIter\"]
+SparseOptionsRaw = _solver.SparseOptions
 
 SIGS = [
 {sigs}]
@@ -842,8 +851,9 @@ import os
 
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
-from .arael.solver import (AraelError, CovMode, LmPreset, LmStatus,
-                           LmTiming, ReducedOrdering, SchurPlan)
+from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
+                           LmPreset, LmStatus, LmTiming, ReducedOrdering,
+                           SchurPlan, SchurPolicy)
 
 LmIter = _f.LmIter
 
@@ -912,6 +922,16 @@ class LmConfig(_f.LmConfigRaw):
     @classmethod
     def ill_conditioned(cls):
         return cls(LmPreset.ILL_CONDITIONED)
+
+
+class SparseOptions(_f.SparseOptionsRaw):
+    \"\"\"The sparse backend's options, holding the actual Rust
+    defaults (fetched through the FFI at construction). Edit fields,
+    pass to solve_sparse.\"\"\"
+
+    def __init__(self):
+        load()
+        _f.{root_sn}_sparse_options(ctypes.byref(self))
 
 
 class LmResult(_f.LmResultRaw):

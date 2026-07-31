@@ -55,7 +55,7 @@ is unreachable from both skins. Add preset 3 to the shim,
 and 1 (Conservative) produce identical configs because Rust's
 `Default` is `conservative()`; document, do not remove.
 
-## 3. Sparse backend options -- the solver is locked to defaults [M]
+## 3. Sparse backend options -- the solver is locked to defaults [M] [DONE 2026-07-31]
 
 `{root}_solve_sparse` runs `model.solve_sparse(&cfg)`, a
 default-constructed `SparseFaer`. Neither skin can set:
@@ -85,6 +85,19 @@ iterative/implicit Schur (`CgOptions` -- experimental), threads
 (already `LmConfig.num_threads`). Tests: parity fixtures forcing each
 knob and comparing plan and results against the same options driven
 from Rust.
+
+As built: as sketched, plus the Auto policy's tuning (`flop_margin`,
+`obvious_flop_ratio`) and the envelope panel width in the struct.
+Rust prerequisite landed first: `SparseFaerOptions` gained
+`envelope` / `envelope_panel_width` (+ builders), `from_options`
+applies them (tests/narrow_band_cholesky.rs pins it). FFI:
+`CSparseOptions` with u32 enum tags, `{root}_sparse_options` fills
+the Rust defaults, `{root}_solve_sparse` takes a nullable options
+pointer; unknown tags fail the solve with text rather than being
+clamped. Parity pins the defaults field-for-field and two forced
+routes (Force+Natural+Always takes the envelope, Force+Amd+Never
+declines it) against Rust driving `SparseFaer::from_options` with
+the same options.
 
 ## 4. LmResult is a scalar snapshot -- no report, plan, or partial [M] [DONE 2026-07-31]
 

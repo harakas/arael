@@ -12,6 +12,7 @@ _T = _solver.lm_types(ctypes.c_double)
 LmConfigRaw = _T["LmConfig"]
 LmResultRaw = _T["LmResult"]
 LmIter = _T["LmIter"]
+SparseOptionsRaw = _solver.SparseOptions
 
 SIGS = [
     ("fit_gain_ref_g", [ctypes.c_void_p], ctypes.c_double),
@@ -115,8 +116,9 @@ SIGS = [
     ("fit_result_free", [ctypes.c_void_p], None),
     ("fit_cost", [ctypes.c_void_p], ctypes.c_double),
     ("fit_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),
+    ("fit_sparse_options", [ctypes.POINTER(_solver.SparseOptions)], None),
     ("fit_solve_dense", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
-    ("fit_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
+    ("fit_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(_solver.SparseOptions), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("fit_solve_band", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("fit_m", [ctypes.c_void_p], ctypes.c_double),
     ("fit_set_m", [ctypes.c_void_p, ctypes.c_double], None),

@@ -117,6 +117,45 @@ int main() {
         ? plan2->flop_ratio.value() : -1.0);
     pi("plan_dense_none", r.plan().has_value() ? 0 : 1);
 
+    // Sparse options: the defaults are the Rust defaults, and each
+    // knob drives the backend (pinned by the plan it produces).
+    SparseOptions so;
+    pi("so_schur", long(so.schur));
+    pi("so_ordering", long(so.ordering));
+    pi("so_envelope", long(so.envelope));
+    pi("so_panel", so.envelope_panel_width);
+    pi("so_supernodal", so.supernodal ? 1 : 0);
+    pi("so_narrow_band", so.narrow_band ? 1 : 0);
+    p("so_flop_margin", so.flop_margin);
+    p("so_obvious", so.obvious_flop_ratio);
+
+    Fit f11;
+    fill(f11);
+    SparseOptions so11;
+    so11.schur = SchurPolicy::Force;
+    so11.ordering = FaerOrdering::Natural;
+    so11.envelope = EnvelopeMode::Always;
+    LmResult r11 = f11.solve_sparse(cfg, so11).value();
+    p("opt_end", r11.end_cost);
+    SchurPlan p11 = r11.plan().value();
+    pi("opt_reduced", p11.reduced ? 1 : 0);
+    pi("opt_envelope", p11.envelope ? 1 : 0);
+    pi("opt_ordering", p11.ordering.has_value() ? long(p11.ordering.value()) : -1);
+
+    Fit f12;
+    fill(f12);
+    SparseOptions so12;
+    so12.schur = SchurPolicy::Force;
+    so12.ordering = FaerOrdering::Amd;
+    so12.envelope = EnvelopeMode::Never;
+    so12.supernodal = false;
+    LmResult r12 = f12.solve_sparse(cfg, so12).value();
+    p("opt2_end", r12.end_cost);
+    SchurPlan p12 = r12.plan().value();
+    pi("opt2_reduced", p12.reduced ? 1 : 0);
+    pi("opt2_envelope", p12.envelope ? 1 : 0);
+    pi("opt2_ordering", p12.ordering.has_value() ? long(p12.ordering.value()) : -1);
+
     // Observer callback + timing + report + conditional covariance.
     Fit f7;
     pi("report_default_empty", std::strlen(LmResult().report()) == 0 ? 1 : 0);

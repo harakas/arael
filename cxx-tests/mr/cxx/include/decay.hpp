@@ -41,6 +41,10 @@ using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::SchurPolicy;
+using arael::FaerOrdering;
+using arael::EnvelopeMode;
+using arael::SparseOptionsT;
 using arael::CovMode;
 using arael::CovError;
 
@@ -55,6 +59,13 @@ struct LmConfig : LmConfigT<float> {
     static LmConfig conservative() { return LmConfig(LmPreset::Conservative); }
     static LmConfig well_conditioned() { return LmConfig(LmPreset::WellConditioned); }
     static LmConfig ill_conditioned() { return LmConfig(LmPreset::IllConditioned); }
+};
+
+/// The sparse backend's options, holding the actual Rust defaults
+/// (fetched through the FFI at construction). Edit fields, pass to
+/// solve_sparse.
+struct SparseOptions : SparseOptionsT {
+    SparseOptions();
 };
 
 /// Typed handle into the collection that issued it -- the C++
@@ -103,8 +114,9 @@ Decay* decay_new(void);
 void decay_free(Decay*);
 const char* decay_last_error(const Decay*);
 const char* decay_validate(Decay*);
+void decay_sparse_options(SparseOptions*);
 int32_t decay_solve_dense(Decay*, const LmConfig*, LmResultT<float>*);
-int32_t decay_solve_sparse(Decay*, const LmConfig*, LmResultT<float>*);
+int32_t decay_solve_sparse(Decay*, const LmConfig*, const SparseOptions*, LmResultT<float>*);
 const char* decay_result_report(void*, bool);
 bool decay_result_plan(const void*, SchurPlan*);
 void decay_result_free(void*);
@@ -113,6 +125,10 @@ void decay_result_free(void*);
 
 inline LmConfig::LmConfig(LmPreset p) {
     ffi::decay_lm_config(uint32_t(p), this);
+}
+
+inline SparseOptions::SparseOptions() {
+    ffi::decay_sparse_options(this);
 }
 
 /// A completed solve: the plain result fields plus ownership of the
@@ -340,7 +356,13 @@ public:
     }
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
         LmResultT<float> raw;
-        return finish_(ffi::decay_solve_sparse(h_, &cfg, &raw), raw);
+        return finish_(ffi::decay_solve_sparse(h_, &cfg, nullptr, &raw), raw);
+    }
+    /// solve_sparse with explicit backend options: ordering, Schur
+    /// policy, the envelope route.
+    SolveResult solve_sparse(const LmConfig& cfg, const SparseOptions& opts) {
+        LmResultT<float> raw;
+        return finish_(ffi::decay_solve_sparse(h_, &cfg, &opts, &raw), raw);
     }
     /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
     /// in scalar parameters.

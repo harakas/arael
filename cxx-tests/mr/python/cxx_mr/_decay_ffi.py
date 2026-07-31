@@ -12,6 +12,7 @@ _T = _solver.lm_types(ctypes.c_float)
 LmConfigRaw = _T["LmConfig"]
 LmResultRaw = _T["LmResult"]
 LmIter = _T["LmIter"]
+SparseOptionsRaw = _solver.SparseOptions
 
 SIGS = [
     ("decay_cell_v", [ctypes.c_void_p], ctypes.c_float),
@@ -36,8 +37,9 @@ SIGS = [
     ("decay_result_free", [ctypes.c_void_p], None),
     ("decay_cost", [ctypes.c_void_p], ctypes.c_double),
     ("decay_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),
+    ("decay_sparse_options", [ctypes.POINTER(_solver.SparseOptions)], None),
     ("decay_solve_dense", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
-    ("decay_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
+    ("decay_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(_solver.SparseOptions), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("decay_solve_band", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("decay_cells_len", [ctypes.c_void_p], ctypes.c_uint32),
     ("decay_cells_reserve", [ctypes.c_void_p, ctypes.c_uint32], None),

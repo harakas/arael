@@ -148,6 +148,13 @@ views are named by their container's nature: `PathPosesDeque`,
 - **Timing**: set `cfg.gather_timing`; the result then carries
   `timing` (per-phase wall-clock seconds plus call counts,
   `has_timing` flags validity).
+- **Sparse backend options**: `solve_sparse(cfg, opts)` takes a
+  `SparseOptions` -- Schur policy (Auto / Force / Never, with the
+  Auto pricing's tuning), elimination ordering (Auto / Amd /
+  MarginalizeFirst / Natural / NestedDissection), the envelope route
+  for the reduced system (Auto / Always / Never, plus panel width),
+  supernodal on/off, narrow band. Constructed with the actual Rust
+  defaults; the one-argument `solve_sparse(cfg)` uses them.
 - **Reports and the plan**: the returned `LmResult` owns the full
   Rust-side result. `r.report()` / `r.pretty_report()` render it --
   status, costs, iterations, the timing breakdown, the backend's

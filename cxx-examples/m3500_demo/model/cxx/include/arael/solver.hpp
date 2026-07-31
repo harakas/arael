@@ -90,6 +90,59 @@ struct LmConfigT {
     void* observer_user;
 };
 
+/// Whether and when the sparse backend marginalizes (mirrors arael's
+/// SchurPolicy). Auto prices the reduction against factorizing the
+/// whole system; its tuning lives in SparseOptionsT.
+enum class SchurPolicy : uint32_t {
+    Auto = 0,
+    Force = 1,
+    Never = 2,
+};
+
+/// Elimination ordering of the factorized system (mirrors arael's
+/// FaerOrdering).
+enum class FaerOrdering : uint32_t {
+    Auto = 0,
+    Amd = 1,
+    MarginalizeFirst = 2,
+    Natural = 3,
+    NestedDissection = 4,
+};
+
+/// How the reduced Schur system is factored (mirrors arael's
+/// EnvelopeMode): in block form under its envelope, or by the general
+/// sparse Cholesky. The envelope route uses less memory on suitable
+/// systems; Auto prices it per problem.
+enum class EnvelopeMode : uint32_t {
+    Auto = 0,
+    Always = 1,
+    Never = 2,
+};
+
+/// The sparse backend's options (mirrors arael's SparseFaerOptions).
+/// The generated SparseOptions fills the Rust defaults at
+/// construction; edit fields and pass to solve_sparse. Layout is part
+/// of the C ABI -- field order matters. Not exposed: the marginalize
+/// range list (the model's own marginalize hint covers it) and the
+/// iterative Schur routes.
+struct SparseOptionsT {
+    SchurPolicy schur;
+    FaerOrdering ordering;
+    EnvelopeMode envelope;
+    /// Envelope panel width; 0 picks it automatically.
+    uint32_t envelope_panel_width;
+    /// Factorize supernodally (dense panels, BLAS3).
+    bool supernodal;
+    /// Factor a banded whole system in block form under its band.
+    bool narrow_band;
+    /// SchurPolicy::Auto tuning: the reduction must beat the whole
+    /// system by this flop factor to be taken...
+    double flop_margin;
+    /// ...and below this cheap ratio it is taken without the exact
+    /// pricing.
+    double obvious_flop_ratio;
+};
+
 /// Per-phase wall-clock seconds plus call counts, gathered when
 /// LmConfigT::gather_timing is set (see Rust's LmTiming for the
 /// phase definitions; the per-step records stay Rust-side).

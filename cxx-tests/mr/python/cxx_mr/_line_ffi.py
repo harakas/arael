@@ -12,6 +12,7 @@ _T = _solver.lm_types(ctypes.c_double)
 LmConfigRaw = _T["LmConfig"]
 LmResultRaw = _T["LmResult"]
 LmIter = _T["LmIter"]
+SparseOptionsRaw = _solver.SparseOptions
 
 SIGS = [
     ("line_ob_x", [ctypes.c_void_p], ctypes.c_double),
@@ -28,8 +29,9 @@ SIGS = [
     ("line_result_free", [ctypes.c_void_p], None),
     ("line_cost", [ctypes.c_void_p], ctypes.c_double),
     ("line_lm_config", [ctypes.c_uint32, ctypes.POINTER(LmConfigRaw)], None),
+    ("line_sparse_options", [ctypes.POINTER(_solver.SparseOptions)], None),
     ("line_solve_dense", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
-    ("line_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
+    ("line_solve_sparse", [ctypes.c_void_p, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(_solver.SparseOptions), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("line_solve_band", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(LmConfigRaw), ctypes.POINTER(LmResultRaw)], ctypes.c_int32),
     ("line_k", [ctypes.c_void_p], ctypes.c_double),
     ("line_set_k", [ctypes.c_void_p, ctypes.c_double], None),

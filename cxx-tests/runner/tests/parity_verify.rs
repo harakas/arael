@@ -47,6 +47,19 @@ pub fn code(s: &LmStatus) -> f64 {
     }) as f64
 }
 
+/// The shim's ReducedOrdering mapping (kept in lockstep with
+/// emit_ffi); -1 = no reduction.
+pub fn ord_code(o: Option<arael::simple_lm::ReducedOrdering>) -> f64 {
+    use arael::simple_lm::ReducedOrdering;
+    match o {
+        Some(ReducedOrdering::NaturalBanded) => 0.0,
+        Some(ReducedOrdering::NaturalDense) => 1.0,
+        Some(ReducedOrdering::Amd) => 2.0,
+        Some(ReducedOrdering::Nd) => 3.0,
+        None => -1.0,
+    }
+}
+
 pub fn verify(got: &std::collections::HashMap<String, f64>) {
     let g = |n: &str| *got.get(n).unwrap_or_else(|| panic!("output missing `{n}`"));
 
@@ -155,6 +168,68 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("plan_flop_ratio"), plan.flop_ratio.unwrap_or(-1.0));
         assert!(r.solver.is_none(), "dense result must carry no plan");
         assert_eq!(g("plan_dense_none"), 1.0);
+    }
+
+    // Sparse options: the defaults are the Rust defaults, and each
+    // knob drives the backend (pinned by the plan it produces).
+    {
+        use arael::simple_lm::{
+            EnvelopeMode, FaerOrdering, SchurPolicy, SolverReport, SparseFaer,
+            SparseFaerOptions,
+        };
+        let d = SparseFaerOptions::default();
+        let (fm, ofr) = match d.policy {
+            SchurPolicy::Auto { flop_margin, obvious_flop_ratio } => {
+                (flop_margin, obvious_flop_ratio)
+            }
+            _ => panic!("the default policy must be Auto"),
+        };
+        assert_eq!(g("so_schur"), 0.0);
+        assert!(matches!(d.ordering, FaerOrdering::Auto));
+        assert_eq!(g("so_ordering"), 0.0);
+        assert!(matches!(d.envelope, EnvelopeMode::Auto));
+        assert_eq!(g("so_envelope"), 0.0);
+        assert_eq!(g("so_panel"), d.envelope_panel_width.unwrap_or(0) as f64);
+        assert_eq!(g("so_supernodal"), d.supernodal as u8 as f64);
+        assert_eq!(g("so_narrow_band"), d.narrow_band as u8 as f64);
+        assert_eq!(g("so_flop_margin"), fm);
+        assert_eq!(g("so_obvious"), ofr);
+
+        let mut f11 = Fit::default();
+        fill(&mut f11);
+        let mut s11 = SparseFaer::from_options(&SparseFaerOptions::auto()
+            .with_policy(SchurPolicy::Force)
+            .with_ordering(FaerOrdering::Natural)
+            .with_envelope_schur(EnvelopeMode::Always));
+        let r11 = f11.solve_with(&mut s11, &cfg).unwrap();
+        assert_eq!(g("opt_end"), r11.end_cost);
+        let p11 = match r11.solver {
+            Some(SolverReport::Schur(p)) => p,
+            _ => panic!("forced sparse solve carried no plan"),
+        };
+        assert!(p11.reduced, "Force must reduce");
+        assert!(p11.envelope, "Always with a natural order must take the envelope");
+        assert_eq!(g("opt_reduced"), p11.reduced as u8 as f64);
+        assert_eq!(g("opt_envelope"), p11.envelope as u8 as f64);
+        assert_eq!(g("opt_ordering"), ord_code(p11.ordering));
+
+        let mut f12 = Fit::default();
+        fill(&mut f12);
+        let mut s12 = SparseFaer::from_options(&SparseFaerOptions::auto()
+            .with_policy(SchurPolicy::Force)
+            .with_ordering(FaerOrdering::Amd)
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_supernodal(false));
+        let r12 = f12.solve_with(&mut s12, &cfg).unwrap();
+        assert_eq!(g("opt2_end"), r12.end_cost);
+        let p12 = match r12.solver {
+            Some(SolverReport::Schur(p)) => p,
+            _ => panic!("forced sparse solve carried no plan"),
+        };
+        assert!(!p12.envelope, "Never must not take the envelope");
+        assert_eq!(g("opt2_reduced"), p12.reduced as u8 as f64);
+        assert_eq!(g("opt2_envelope"), p12.envelope as u8 as f64);
+        assert_eq!(g("opt2_ordering"), ord_code(p12.ordering));
     }
 
     // Observer + timing + report + conditional covariance mirrored.

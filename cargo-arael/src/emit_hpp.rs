@@ -639,8 +639,9 @@ public:
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
          const char* {root_sn}_validate({root}*);\n\
+         void {root_sn}_sparse_options(SparseOptions*);\n\
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResultT<{fp}>*);\n\
-         int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, LmResultT<{fp}>*);\n\
+         int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
          const char* {root_sn}_result_report(void*, bool);\n\
          bool {root_sn}_result_plan(const void*, SchurPlan*);\n\
          void {root_sn}_result_free(void*);\n"));
@@ -691,6 +692,10 @@ using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::SchurPolicy;
+using arael::FaerOrdering;
+using arael::EnvelopeMode;
+using arael::SparseOptionsT;
 using arael::CovMode;
 using arael::CovError;
 
@@ -707,6 +712,13 @@ struct LmConfig : LmConfigT<{fp}> {{
     static LmConfig ill_conditioned() {{ return LmConfig(LmPreset::IllConditioned); }}
 }};
 
+/// The sparse backend's options, holding the actual Rust defaults
+/// (fetched through the FFI at construction). Edit fields, pass to
+/// solve_sparse.
+struct SparseOptions : SparseOptionsT {{
+    SparseOptions();
+}};
+
 {ref_decls}
 namespace ffi {{
 {opaque_decls}
@@ -716,6 +728,10 @@ extern \"C\" {{
 
 inline LmConfig::LmConfig(LmPreset p) {{
     ffi::{root_sn}_lm_config(uint32_t(p), this);
+}}
+
+inline SparseOptions::SparseOptions() {{
+    ffi::{root_sn}_sparse_options(this);
 }}
 
 /// A completed solve: the plain result fields plus ownership of the
@@ -790,7 +806,13 @@ public:
     }}
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{{}}) {{
         LmResultT<{fp}> raw;
-        return finish_(ffi::{root_sn}_solve_sparse(h_, &cfg, &raw), raw);
+        return finish_(ffi::{root_sn}_solve_sparse(h_, &cfg, nullptr, &raw), raw);
+    }}
+    /// solve_sparse with explicit backend options: ordering, Schur
+    /// policy, the envelope route.
+    SolveResult solve_sparse(const LmConfig& cfg, const SparseOptions& opts) {{
+        LmResultT<{fp}> raw;
+        return finish_(ffi::{root_sn}_solve_sparse(h_, &cfg, &opts, &raw), raw);
     }}
     /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
     /// in scalar parameters.

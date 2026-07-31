@@ -608,7 +608,7 @@ pub fn emit_body(model: &Model, model_crate: &str) -> Result<String, String> {
 use std::os::raw::c_char;
 use std::panic::{{AssertUnwindSafe, catch_unwind}};
 use arael::covariance::{{CovAssembly, CovMode, Covariance}};
-use arael::simple_lm::{{LmConfig, LmProblem, LmStatus}};
+use arael::simple_lm::{{LmConfig, LmProblem, LmStatus, SparseFaer, SparseFaerOptions}};
 use {model_crate}::{{{}}};
 
 /// The opaque handle the C ABI hands out: the model, the error /
@@ -764,6 +764,107 @@ pub struct CLmConfig {{
     pub time_limit_seconds: COptSeconds,
     pub observer: Option<CObserverFn>,
     pub observer_user: *mut core::ffi::c_void,
+}}
+
+/// The sparse backend's options as plain data: constructed by
+/// {root_sn}_sparse_options (which copies the actual Rust defaults),
+/// edited freely, passed to {root_sn}_solve_sparse (null there means
+/// these defaults). Field order is C ABI. Not exposed: the
+/// marginalize range list (the model's own marginalize hint covers
+/// it) and the iterative Schur routes.
+#[repr(C)]
+pub struct CSparseOptions {{
+    /// SchurPolicy: 0 Auto, 1 Force, 2 Never.
+    pub schur: u32,
+    /// FaerOrdering: 0 Auto, 1 Amd, 2 MarginalizeFirst, 3 Natural,
+    /// 4 NestedDissection.
+    pub ordering: u32,
+    /// EnvelopeMode: 0 Auto, 1 Always, 2 Never.
+    pub envelope: u32,
+    /// Envelope panel width; 0 picks it automatically.
+    pub envelope_panel_width: u32,
+    pub supernodal: bool,
+    pub narrow_band: bool,
+    /// SchurPolicy::Auto tuning: the reduction must beat the whole
+    /// system by this flop factor to be taken...
+    pub flop_margin: f64,
+    /// ...and below this cheap ratio it is taken without the exact
+    /// pricing.
+    pub obvious_flop_ratio: f64,
+}}
+
+impl CSparseOptions {{
+    fn to_options(&self) -> Result<SparseFaerOptions, String> {{
+        use arael::simple_lm::{{EnvelopeMode, FaerOrdering, SchurPolicy}};
+        let policy = match self.schur {{
+            0 => SchurPolicy::Auto {{
+                flop_margin: self.flop_margin,
+                obvious_flop_ratio: self.obvious_flop_ratio,
+            }},
+            1 => SchurPolicy::Force,
+            2 => SchurPolicy::Never,
+            t => return Err(format!(\"unknown schur policy tag {{t}}\")),
+        }};
+        let ordering = match self.ordering {{
+            0 => FaerOrdering::Auto,
+            1 => FaerOrdering::Amd,
+            2 => FaerOrdering::MarginalizeFirst,
+            3 => FaerOrdering::Natural,
+            4 => FaerOrdering::NestedDissection,
+            t => return Err(format!(\"unknown ordering tag {{t}}\")),
+        }};
+        let envelope = match self.envelope {{
+            0 => EnvelopeMode::Auto,
+            1 => EnvelopeMode::Always,
+            2 => EnvelopeMode::Never,
+            t => return Err(format!(\"unknown envelope mode tag {{t}}\")),
+        }};
+        let width = self.envelope_panel_width;
+        Ok(SparseFaerOptions::auto()
+            .with_policy(policy)
+            .with_ordering(ordering)
+            .with_envelope_schur(envelope)
+            .with_envelope_panel_width((width > 0).then_some(width as usize))
+            .with_supernodal(self.supernodal)
+            .with_narrow_band(self.narrow_band))
+    }}
+}}
+
+/// Fill `out` with the sparse backend's actual Rust defaults.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_sparse_options(out: *mut CSparseOptions) {{
+    use arael::simple_lm::{{EnvelopeMode, FaerOrdering, SchurPolicy}};
+    let d = SparseFaerOptions::default();
+    let (flop_margin, obvious_flop_ratio) = match d.policy {{
+        SchurPolicy::Auto {{ flop_margin, obvious_flop_ratio }} => {{
+            (flop_margin, obvious_flop_ratio)
+        }}
+        _ => (0.0, 0.0),
+    }};
+    *out = CSparseOptions {{
+        schur: match d.policy {{
+            SchurPolicy::Auto {{ .. }} => 0,
+            SchurPolicy::Force => 1,
+            SchurPolicy::Never => 2,
+        }},
+        ordering: match d.ordering {{
+            FaerOrdering::Auto => 0,
+            FaerOrdering::Amd => 1,
+            FaerOrdering::MarginalizeFirst => 2,
+            FaerOrdering::Natural => 3,
+            FaerOrdering::NestedDissection => 4,
+        }},
+        envelope: match d.envelope {{
+            EnvelopeMode::Auto => 0,
+            EnvelopeMode::Always => 1,
+            EnvelopeMode::Never => 2,
+        }},
+        envelope_panel_width: d.envelope_panel_width.unwrap_or(0) as u32,
+        supernodal: d.supernodal,
+        narrow_band: d.narrow_band,
+        flop_margin,
+        obvious_flop_ratio,
+    }};
 }}
 
 fn preset_config(preset: u32) -> LmConfig<{fp}> {{
@@ -1095,8 +1196,7 @@ pub unsafe extern \"C\" fn {root_sn}_validate(h: *mut {handle}) -> *const c_char
 ",
         used.join(", ")));
 
-    for method in ["solve_dense", "solve_sparse"] {
-        out.push_str(&format!(
+    out.push_str(&format!(
 "
 /// Returns the status code (>= 0: LmStatus; -1: solve failure; -2:
 /// panic). Failure text via {root_sn}_last_error. On success (and on
@@ -1104,7 +1204,7 @@ pub unsafe extern \"C\" fn {root_sn}_validate(h: *mut {handle}) -> *const c_char
 /// the partial result) `out.detail` owns the full Rust result --
 /// release it with {root_sn}_result_free.
 #[no_mangle]
-pub unsafe extern \"C\" fn {root_sn}_{method}(
+pub unsafe extern \"C\" fn {root_sn}_solve_dense(
     h: *mut {handle},
     cfg: *const CLmConfig,
     out: *mut CLmResult,
@@ -1112,7 +1212,59 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    match catch_unwind(AssertUnwindSafe(|| hh.model.{method}(&c))) {{
+    match catch_unwind(AssertUnwindSafe(|| hh.model.solve_dense(&c))) {{
+        Ok(Ok(r)) => {{
+            let code = fill_result(out, &r);
+            (*out).detail = boxed(r);
+            set_text(hh, \"\");
+            code
+        }}
+        Ok(Err(f)) => {{
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {{
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }}
+            -1
+        }}
+        Err(p) => {{
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            (*out).status = -2;
+            -2
+        }}
+    }}
+}}
+
+/// As {root_sn}_solve_dense, with the sparse backend. `opts` selects
+/// its route (ordering, Schur policy, envelope); null means the
+/// defaults ({root_sn}_sparse_options shows them).
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_solve_sparse(
+    h: *mut {handle},
+    cfg: *const CLmConfig,
+    opts: *const CSparseOptions,
+    out: *mut CLmResult,
+) -> i32 {{
+    let hh = &mut *h;
+    let c = (*cfg).to_config();
+    zero_result(out);
+    let solver = if opts.is_null() {{
+        None
+    }} else {{
+        match (*opts).to_options() {{
+            Ok(o) => Some(SparseFaer::<{fp}>::from_options(&o)),
+            Err(e) => {{
+                set_text(hh, &e);
+                return -1;
+            }}
+        }}
+    }};
+    match catch_unwind(AssertUnwindSafe(|| match solver {{
+        Some(mut s) => hh.model.solve_with(&mut s, &c),
+        None => hh.model.solve_sparse(&c),
+    }})) {{
         Ok(Ok(r)) => {{
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
@@ -1137,7 +1289,6 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
     }}
 }}
 "));
-    }
 
     // Band solve: the free-function entry point (no RootProblem
     // method), so the wrapper serializes and deserializes itself.

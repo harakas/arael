@@ -41,6 +41,10 @@ using arael::LmTiming;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::SchurPolicy;
+using arael::FaerOrdering;
+using arael::EnvelopeMode;
+using arael::SparseOptionsT;
 using arael::CovMode;
 using arael::CovError;
 
@@ -55,6 +59,13 @@ struct LmConfig : LmConfigT<double> {
     static LmConfig conservative() { return LmConfig(LmPreset::Conservative); }
     static LmConfig well_conditioned() { return LmConfig(LmPreset::WellConditioned); }
     static LmConfig ill_conditioned() { return LmConfig(LmPreset::IllConditioned); }
+};
+
+/// The sparse backend's options, holding the actual Rust defaults
+/// (fetched through the FFI at construction). Edit fields, pass to
+/// solve_sparse.
+struct SparseOptions : SparseOptionsT {
+    SparseOptions();
 };
 
 /// Typed handle into the collection that issued it -- the C++
@@ -263,8 +274,9 @@ Path* path_new(void);
 void path_free(Path*);
 const char* path_last_error(const Path*);
 const char* path_validate(Path*);
+void path_sparse_options(SparseOptions*);
 int32_t path_solve_dense(Path*, const LmConfig*, LmResultT<double>*);
-int32_t path_solve_sparse(Path*, const LmConfig*, LmResultT<double>*);
+int32_t path_solve_sparse(Path*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
 const char* path_result_report(void*, bool);
 bool path_result_plan(const void*, SchurPlan*);
 void path_result_free(void*);
@@ -273,6 +285,10 @@ void path_result_free(void*);
 
 inline LmConfig::LmConfig(LmPreset p) {
     ffi::path_lm_config(uint32_t(p), this);
+}
+
+inline SparseOptions::SparseOptions() {
+    ffi::path_sparse_options(this);
 }
 
 /// A completed solve: the plain result fields plus ownership of the
@@ -1040,7 +1056,13 @@ public:
     }
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
         LmResultT<double> raw;
-        return finish_(ffi::path_solve_sparse(h_, &cfg, &raw), raw);
+        return finish_(ffi::path_solve_sparse(h_, &cfg, nullptr, &raw), raw);
+    }
+    /// solve_sparse with explicit backend options: ordering, Schur
+    /// policy, the envelope route.
+    SolveResult solve_sparse(const LmConfig& cfg, const SparseOptions& opts) {
+        LmResultT<double> raw;
+        return finish_(ffi::path_solve_sparse(h_, &cfg, &opts, &raw), raw);
     }
     /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
     /// in scalar parameters.

@@ -118,6 +118,45 @@ p("plan_flop_ratio", plan2.flop_ratio
   if plan2 is not None and plan2.flop_ratio is not None else -1.0)
 pi("plan_dense_none", 0 if r.plan is not None else 1)
 
+# Sparse options: the defaults are the Rust defaults, and each knob
+# drives the backend (pinned by the plan it produces).
+so = fit.SparseOptions()
+pi("so_schur", int(so.schur))
+pi("so_ordering", int(so.ordering))
+pi("so_envelope", int(so.envelope))
+pi("so_panel", so.envelope_panel_width)
+pi("so_supernodal", 1 if so.supernodal else 0)
+pi("so_narrow_band", 1 if so.narrow_band else 0)
+p("so_flop_margin", so.flop_margin)
+p("so_obvious", so.obvious_flop_ratio)
+
+f11 = fit.Fit()
+fill(f11)
+so11 = fit.SparseOptions()
+so11.schur = fit.SchurPolicy.FORCE
+so11.ordering = fit.FaerOrdering.NATURAL
+so11.envelope = fit.EnvelopeMode.ALWAYS
+r11 = f11.solve_sparse(cfg, so11)
+p("opt_end", r11.end_cost)
+p11 = r11.plan
+pi("opt_reduced", 1 if p11.reduced else 0)
+pi("opt_envelope", 1 if p11.envelope else 0)
+pi("opt_ordering", int(p11.ordering) if p11.ordering is not None else -1)
+
+f12 = fit.Fit()
+fill(f12)
+so12 = fit.SparseOptions()
+so12.schur = fit.SchurPolicy.FORCE
+so12.ordering = fit.FaerOrdering.AMD
+so12.envelope = fit.EnvelopeMode.NEVER
+so12.supernodal = False
+r12 = f12.solve_sparse(cfg, so12)
+p("opt2_end", r12.end_cost)
+p12 = r12.plan
+pi("opt2_reduced", 1 if p12.reduced else 0)
+pi("opt2_envelope", 1 if p12.envelope else 0)
+pi("opt2_ordering", int(p12.ordering) if p12.ordering is not None else -1)
+
 # Observer callback + timing + report + conditional covariance.
 f7 = fit.Fit()
 pi("report_default_empty", 1 if len(fit.LmResult().report()) == 0 else 0)
