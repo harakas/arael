@@ -850,7 +850,7 @@ impl ScalarCscResolver {
 /// stored cell contributes its full dense tile, so the pattern carries
 /// the tiles' structural zeros (~1% on entity-block models) and needs
 /// no COO pass. Returns the zero-valued matrix and the position
-/// resolver for [`LmProblem::accumulate_hessian_positions`].
+/// resolver for [`LmProblem::bind_hessian_positions`].
 pub fn csc_from_cells<T: Float>(
     partition: &[usize],
     cells: &[(u32, u32)],

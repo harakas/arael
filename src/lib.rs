@@ -1,15 +1,20 @@
 //! **ARAEL** -- Algorithms for Robust Autonomy, Estimation, and Localization.
 //!
-//! Nonlinear optimization framework with compile-time symbolic differentiation.
+//! Nonlinear least-squares optimization framework.
 //!
-//! Define model structs with optimizable parameters, write constraints as
-//! symbolic expressions, and the framework symbolically differentiates at
-//! compile time, applies common subexpression elimination, and generates
-//! compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation)
-//! code.
+//! You write constraints as symbolic expressions inside the model
+//! definition; at compile time Rust's procedural macros differentiate,
+//! simplify, eliminate common subexpressions -- and emit plain Rust for
+//! calculating the cost, gradient, and Gauss-Newton hessian (J^T J).
 //!
-//! Solve problems like linear and nonlinear regression, sensor fusion, SLAM,
-//! bundle adjustment, pose-graph and geometric constraint optimization.
+//! Solve regression and curve fitting, sensor fusion, SLAM, bundle
+//! adjustment, pose-graph and geometric constraint optimization.
+//!
+//! Instead of constructing a graph, you build a hierarchical data structure
+//! from plain Rust structs and containers. This yields high performance and
+//! low memory usage. The optimizer can also be automatically exported to
+//! C++ and Python, where the generated classes mirror your Rust model
+//! structure.
 //!
 //! # Contents
 //!
@@ -26,10 +31,9 @@
 //! - [Solvers](#solvers)
 //! - [Parameter Covariance](#parameter-covariance)
 //! - [Instrumentation & Debugging](#instrumentation--debugging)
-//! - [2D Sketch Editor](#2d-sketch-editor)
 //! - [Robustness and loss functions](#robustness-and-loss-functions)
-//! - [Example: Localization](#example-localization)
 //! - [Examples](#examples)
+//! - [2D Sketch Editor](#2d-sketch-editor)
 //! - [Crate structure](#crate-structure)
 //!
 //! # Features
@@ -164,7 +168,7 @@
 //!
 //! # Scope
 //!
-//! Arael is a **nonlinear optimization framework**, not a complete SLAM or
+//! Arael is a nonlinear optimization framework, not a complete SLAM or
 //! state estimation system. The SLAM and localization demos show how to use
 //! arael as the optimizer backend, but a production SLAM pipeline would
 //! additionally need:
@@ -198,11 +202,12 @@
 //!     let x = symbol("x");
 //!     let f = sin(x) * x + 1.0;
 //!
-//!     println!("f(x)   = {}", f);           // sin(x) * x + 1
-//!     println!("f'(x)  = {}", f.diff("x")); // x * cos(x) + sin(x)
+//!     println!("f(x)    = {}", f);           // sin(x) * x + 1
+//!     println!("f'(x)   = {}", f.diff("x")); // x * cos(x) + sin(x)
+//!     println!("as Rust = {}", f.diff("x").to_rust("f64")); // x * x.cos() + x.sin()
 //!
 //!     let vars = std::collections::HashMap::from([("x", 2.0)]);
-//!     println!("f(2.0) = {}", f.eval(&vars).unwrap()); // 2.8185...
+//!     println!("f(2.0)  = {}", f.eval(&vars).unwrap()); // 2.8185...
 //! }
 //! ```
 //!
@@ -348,6 +353,10 @@
 //! [examples/slam_demo.rs](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)
 //! and the full walkthrough in
 //! [docs/SLAM.md](https://github.com/harakas/arael/blob/master/docs/SLAM.md).
+//! For localization against a known map -- the same model with the
+//! landmarks fixed, whose block-tridiagonal hessian lets the O(n) band
+//! solver run -- see
+//! [examples/loc_demo.rs](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs).
 //!
 //! # Runtime Differentiation
 //!
@@ -357,7 +366,7 @@
 //! formulas in a CAD parametric dimension, configuration-driven curve
 //! fitting, or symbolic constraints loaded from a file.
 //!
-//! Arael supports this through **runtime differentiation**: parse an
+//! Arael supports this through runtime differentiation: parse an
 //! equation string with `arael_sym::parse`, symbolically differentiate
 //! once at setup with `E::diff`, then evaluate the expression tree
 //! numerically each solver iteration. The
@@ -452,7 +461,7 @@
 //! ### Initial values via the `_value` suffix
 //!
 //! Inside a constraint body, `pose.pos_value` (any `<field>_value`)
-//! resolves to the **original** stored value of the parameter -- the
+//! resolves to the original stored value of the parameter -- the
 //! point the LM trial-step is measured against, not the trial step
 //! itself. Use it to build drift / regularising residuals:
 //!
@@ -506,7 +515,7 @@
 //!
 //! ## Hessian block types
 //!
-//! The full Gauss-Newton Hessian is a **symmetric** block matrix,
+//! The full Gauss-Newton Hessian is a symmetric block matrix,
 //! with one block per (entity, entity) pair in the parameter
 //! vector. The block at position `(Ei, Ej)` is the `NEi × NEj`
 //! matrix of second partials; by symmetry
@@ -539,7 +548,7 @@
 //! | [`CrossBlock<A, B>`](model::CrossBlock) | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One per unordered (A, B) entity pair; (A, A) / (B, B) diagonals stay on each entity's `SelfBlock` |
 //! | [`TripletBlock<T>`](model::TripletBlock) | COO across-entity pairs | **always placed on the root** (one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel) that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** -- every entry is a `Vec` push |
 //!
-//! `SelfBlock<Self>` is **required** on every Model that has
+//! `SelfBlock<Self>` is required on every Model that has
 //! parameters -- omitting it is a compile-time error. Grad and
 //! diagonal writes always land on each entity's `SelfBlock`;
 //! `CrossBlock` and `TripletBlock` are cross-only storage.
@@ -588,13 +597,13 @@
 //! - **`constraint(..., root.hbt, { ... })`** -- route across-entity
 //!   pairs into a root-owned `TripletBlock<T>`. One COO
 //!   accumulator on the root absorbs cross pairs from every
-//!   constraint that references it. **The `TripletBlock` always
-//!   lives on the root** -- don't put one on a constraint struct
+//!   constraint that references it. The `TripletBlock` always
+//!   lives on the root -- don't put one on a constraint struct
 //!   or an entity struct; the macro's `root.<field>` block spec is
 //!   the only correct way to reach a `TripletBlock`.
 //!
-//! **Prefer multi-`CrossBlock` whenever the set of cross-pairs is
-//! fixed and dense.** `TripletBlock` carries a significant
+//! Prefer multi-`CrossBlock` whenever the set of cross-pairs is
+//! fixed and dense. `TripletBlock` carries a significant
 //! Hessian-assembly penalty: every cross entry is a
 //! `Vec<(u32, u32, T)>` push (with growth and no locality), whereas
 //! `CrossBlock` writes in place into a pre-sized `NA * NB`
@@ -625,7 +634,7 @@
 //! In both cases the triplet lives on the root, not on a constraint
 //! struct.
 //!
-//! **Caveat for case 1 -- root-level `Param`s destroy sparsity.**
+//! Caveat for case 1 -- root-level `Param`s destroy sparsity.
 //! Every constraint that reads a root param introduces an
 //! (entity, root) cross pair in the Hessian. If *many* constraints
 //! read the same root param -- which is the whole point of
@@ -985,7 +994,7 @@
 //! For Models whose residuals aren't known at compile time (e.g. a
 //! user-supplied expression parsed at runtime), implement
 //! [`model::ExtendedModel`] alongside [`model::Model`]. The macro does
-//! **not** generate the residual evaluation; you write:
+//! not generate the residual evaluation; you write:
 //!
 //! ```ignore
 //! fn extended_update(&mut self, params: &[f64]);
@@ -1082,8 +1091,8 @@
 //!
 //! ## Entry points and backends
 //!
-//! **The main entry point is [`solve_with`](simple_lm::LmProblem::solve_with)
-//! on [`LmProblem`](simple_lm::LmProblem)** -- it wraps the serialize ->
+//! The main entry point is [`solve_with`](simple_lm::LmProblem::solve_with)
+//! on [`LmProblem`](simple_lm::LmProblem) -- it wraps the serialize ->
 //! optimize -> deserialize round trip (parameters are read from the
 //! model and written back) and takes any backend instance. Every
 //! `#[arael(root)]` model gets it: the macro implements
@@ -1144,7 +1153,7 @@
 //! `LambdaDriver` for every damping decision, feeding it each attempted
 //! step's outcome (costs, gradient, Hessian diagonal, attempted step).
 //! `DefaultLambdaDriver` is the classic fixed-multiplier schedule (the
-//! default on every `LmConfig`); **`NielsenLambdaDriver`** is the gain-ratio
+//! default on every `LmConfig`); `NielsenLambdaDriver` is the gain-ratio
 //! adaptive schedule: it scales lambda by how well the
 //! quadratic model predicted the actual cost change, escalating
 //! geometrically on rejections, which removes the fixed schedule's
@@ -1205,11 +1214,11 @@
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
 //! | `num_threads` | `1` | threads for the sparse factorization (needs the `rayon` feature). Measure first -- see below |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
-//! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
+//! | `verbose` | `false` | per-iteration line on stderr. Turn on first whenever debugging |
 //! | `observer` | `None` | an [`LmObserver`](simple_lm::LmObserver) called once per damped attempt with the current state; can stop the solve. Set with `with_observer` |
 //! | `gather_timing` | `false` | gather per-phase timing AND the per-iteration timeline into `LmResult::timing` (`Some` when on, `None` when off) |
 //!
-//! The solver terminates when **all of** `iter >= min_iters`, the
+//! The solver terminates when all of `iter >= min_iters`, the
 //! current step is "small" (below both `abs_precision` and
 //! `rel_precision`), and the preceding `patience` steps were also
 //! small. Or on any of `iter >= max_iters` / `cost <= cost_threshold`.
@@ -1230,8 +1239,8 @@
 //! `H[i,i] + lambda * max(H[i,i], min_diagonal)`, so the floor keeps the damped
 //! system positive definite and the untouched parameter simply does not move.
 //!
-//! **A zero diagonal means the system is badly formulated: a parameter that
-//! nothing constrains. The floor is a bandaid and should be avoided.** It lets the
+//! A zero diagonal means the system is badly formulated: a parameter that
+//! nothing constrains. The floor is a bandaid and should be avoided. It lets the
 //! solve finish, but the parameter it damps through stays unconstrained and its
 //! value is meaningless. Fix the model instead -- constrain the parameter, hold it
 //! fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when
@@ -1273,7 +1282,7 @@
 //!
 //! The defaults are a reasonable middle ground; for a production
 //! solve you'll usually want to tune. The central trade-off is
-//! **iterations vs convergence quality**: every iteration costs
+//! iterations vs convergence quality: every iteration costs
 //! time (one Hessian assembly + one Cholesky + step evaluation),
 //! and the last few iterations often deliver very little cost
 //! improvement. Too many iterations and you pay for marginal
@@ -1318,11 +1327,11 @@
 //!   - **Warm start** (the system was already solved and you're
 //!     adding a small amount of new data, e.g. incremental SLAM
 //!     with one new pose appended to a converged trajectory) --
-//!     use a **small** `initial_lambda` like `1e-6`. Near the
+//!     use a small `initial_lambda` like `1e-6`. Near the
 //!     minimum the linearisation is accurate and Gauss-Newton-style
 //!     steps converge in a handful of iterations.
 //!   - **Cold start** (fresh batch solve, noisy initial estimates
-//!     far from the true state) -- use a **larger** `initial_lambda`
+//!     far from the true state) -- use a larger `initial_lambda`
 //!     like `1e-2` or `1e-1`. Gradient-descent-like steps are more
 //!     stable when the Jacobian is a poor local approximation;
 //!     you'll save several iterations otherwise spent rejecting
@@ -1361,7 +1370,7 @@
 //!
 //! Iteration counts are discrete, so the savings stack
 //! multiplicatively when the counts are small. Going from 4
-//! iterations to 3 is a **25% reduction** in compute cost; 3 to 2
+//! iterations to 3 is a 25% reduction in compute cost; 3 to 2
 //! is 33%; 2 to 1 is 50%. In high-frequency loops (real-time
 //! localisation at 60 Hz, per-frame bundle adjustment) these
 //! single-iteration wins dominate the overall runtime. The tuning
@@ -1783,29 +1792,6 @@
 //! opt-level = 3
 //! ```
 //!
-//! # 2D Sketch Editor
-//!
-//! The `arael-sketch` crate provides an interactive constraint-based 2D sketch
-//! editor built on the optimization framework. It combines both differentiation
-//! modes: geometric constraints (horizontal, coincident, parallel, tangent, etc.)
-//! use compile-time differentiation, while parametric dimensions use runtime
-//! differentiation -- the user types an expression like `d0 * 2 + 3` and the
-//! solver constrains the geometry to satisfy it in real time, with full symbolic
-//! derivatives. Dimensions can reference each other, entity properties
-//! (`L0.length`, `A0.radius`), and arithmetic expressions, making it a fully
-//! parametric constraint solver. Runs natively and in the browser via
-//! WebAssembly.
-//!
-//! [![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/sketch.png)](https://sketch.mare.ee/)
-//!
-//! [Try it in the browser](https://sketch.mare.ee/)
-//!
-//! The editor includes a command panel (`/` to toggle) with 40+ scripting
-//! commands, and an embedded MCP server (`--mcp`) that enables AI agents
-//! like Claude Code to create and modify sketches programmatically.
-//!
-//! ![Dark mode](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/arael-sketch/docs/dark.png)
-//!
 //! # Robustness and loss functions
 //!
 //! Given sensor readings stacked into a vector $L$, model parameters $M$
@@ -2004,13 +1990,6 @@
 //! independently). A loss is for a minority of bad measurements among
 //! unbiased good ones, not a substitute for a correct model.
 //!
-//! # Example: Localization
-//!
-//! Same model as SLAM but landmarks are fixed (known map). With only pose
-//! parameters the hessian is block-tridiagonal, so the band solver gives
-//! O(n) scaling -- 9.4x faster than dense at 500 poses.
-//! See [examples/loc_demo.rs](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs).
-//!
 //! # Examples
 //!
 //! The `examples/` directory is the primary place to see the API in use.
@@ -2144,11 +2123,47 @@
 //!   SLAM model, with assembly vs solve breakdown and numeric
 //!   cross-check of the solutions.
 //!
+//! # 2D Sketch Editor
+//!
+//! The `arael-sketch` crate provides an interactive constraint-based 2D sketch
+//! editor built on the optimization framework. It combines both differentiation
+//! modes: geometric constraints (horizontal, coincident, parallel, tangent, etc.)
+//! use compile-time differentiation, while parametric dimensions use runtime
+//! differentiation -- the user types an expression like `d0 * 2 + 3` and the
+//! solver constrains the geometry to satisfy it in real time, with full symbolic
+//! derivatives. Dimensions can reference each other, entity properties
+//! (`L0.length`, `A0.radius`), and arithmetic expressions, making it a fully
+//! parametric constraint solver. Runs natively and in the browser via
+//! WebAssembly.
+//!
+//! [![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/sketch.png)](https://sketch.mare.ee/)
+//!
+//! [Try it in the browser](https://sketch.mare.ee/)
+//!
+//! The editor includes a command panel (`/` to toggle) with 40+ scripting
+//! commands, and an embedded MCP server (`--mcp`) that enables AI agents
+//! like Claude Code to create and modify sketches programmatically.
+//!
+//! ![Dark mode](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/arael-sketch/docs/dark.png)
+//!
 //! # Crate structure
 //!
-//! - `arael-sym` -- symbolic math engine (expression trees, differentiation, CSE)
-//! - `arael-macros` -- proc macros (`#[arael::model]`, `#[derive(Model)]`)
-//! - `arael` (this crate) -- runtime: model traits, solvers, geometry, vectors
+//! - `arael` (this crate) -- the runtime: the `Model` trait and Hessian
+//!   blocks, the Levenberg-Marquardt solver with dense/band/sparse backends,
+//!   covariance recovery, rotation and transform parameters,
+//!   vectors/matrices, cameras, g2o file I/O, validation
+//! - `arael-sym` -- symbolic math engine: expression trees, differentiation,
+//!   simplification, CSE, Rust/LaTeX code emission (`arael-sym-macros`
+//!   supplies its `sym!` macro)
+//! - `arael-macros` -- the procedural macros: `#[arael::model]`, constraint
+//!   code generation, `#[arael::function]`
+//! - `arael-faer` -- sparse extensions over faer: block CSC storage and the
+//!   Schur-complement reduction
+//! - `cargo-arael` -- the `cargo arael export` subcommand: generates the
+//!   C ABI, C++, and Python interfaces
+//! - `arael-sketch`, `arael-sketch-solver`, `arael-sketch-backend` -- the
+//!   2D sketch editor: GUI, constraint-solver library, and headless
+//!   command/MCP backend
 
 #[macro_use]
 pub mod log;

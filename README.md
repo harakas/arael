@@ -2,9 +2,11 @@
 
 **Algorithms for Robust Autonomy, Estimation, and Localization**
 
-A Rust framework for nonlinear optimization with compile-time symbolic differentiation. Define your model and constraints declaratively -- the macro system symbolically differentiates, applies common subexpression elimination, and generates compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation) code.
+A Rust framework for nonlinear least-squares optimization. You write constraints as symbolic expressions inside the model definition; at compile time Rust's procedural macros differentiate, simplify, eliminate common subexpressions -- and emit plain Rust for calculating the cost, gradient, and Gauss-Newton hessian (J^T J).
 
-Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle adjustment, pose-graph and geometric constraint optimization.
+Solve regression and curve fitting, sensor fusion, SLAM, bundle adjustment, pose-graph and geometric constraint optimization.
+
+Instead of constructing a graph, you build a hierarchical data structure from plain Rust structs and containers. This yields high performance and low memory usage. The optimizer can also be automatically exported to C++ and Python, where the generated classes mirror your Rust model structure.
 
 ## Contents
 
@@ -15,7 +17,6 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - [Quick Example: Robust Linear Regression](#quick-example-robust-linear-regression)
 - [SLAM Path Optimization](#slam-path-optimization)
 - [Robustness and loss functions](#robustness-and-loss-functions)
-- [Localization Demo](#localization-demo)
 - [Examples](#examples)
 - [Solvers](#solvers)
 - [Parameter Covariance](#parameter-covariance)
@@ -100,7 +101,7 @@ solves it with its band Cholesky.
 
 ## Scope
 
-Arael is a **nonlinear optimization framework**, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:
+Arael is a nonlinear optimization framework, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:
 
 - **Front-end perception**: feature detection, descriptor extraction
 - **Data association**: matching observed features to existing landmarks, handling ambiguous or incorrect matches
@@ -127,6 +128,7 @@ sym! {
     println!("f(x, y)    = {}", f);           // x^2 + y * sin(x)
     println!("df/dx      = {}", f.diff(x));   // y * cos(x) + 2 * x
     println!("df/dy      = {}", f.diff(y));   // sin(x)
+    println!("as Rust    = {}", f.diff(x).to_rust("f64")); // y * x.cos() + 2.0_f64 * x
 
     let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
     println!("f(2, 3)    = {}", f.eval(&vars).unwrap()); // 6.7278...
@@ -289,7 +291,9 @@ Full runnable demo: [examples/slam2d_simple_demo.rs](examples/slam2d_simple_demo
 For the 3D version -- full position and orientation per pose, camera bearings,
 and rejection of wrong measurements -- see
 [examples/slam_demo.rs](examples/slam_demo.rs) and the full walkthrough in
-[docs/SLAM.md](docs/SLAM.md).
+[docs/SLAM.md](docs/SLAM.md). For localization against a known map -- the same
+model with the landmarks fixed, whose block-tridiagonal hessian lets the O(n)
+band solver run -- see [examples/loc_demo.rs](examples/loc_demo.rs).
 
 ## Robustness and loss functions
 
@@ -412,14 +416,6 @@ jointly with the state (observable when the geometry constrains it
 independently). A loss is for a minority of bad measurements among unbiased
 good ones, not a substitute for a correct model.
 
-## Localization Demo
-
-Same model as SLAM but landmarks are fixed (known map). Since landmark positions are not optimized, there is no gauge freedom and absolute pose errors are meaningful. No GPS needed -- the known landmarks anchor the solution.
-
-The frine constraint uses a **remote block** (`pose.hb_pose`) -- the hessian block lives on Pose, not on PointFrine, since only Pose has parameters. With only pose parameters, the hessian is block-tridiagonal (kd=11 for 6-param poses), so the band solver can be used for O(n) scaling instead of O(n^3) dense -- 9.4x faster at 500 poses.
-
-See [examples/loc_demo.rs](examples/loc_demo.rs).
-
 ## Examples
 
 The `examples/` directory is the primary place to see the API in use. Each file is a runnable `cargo run --release --example <name>`.
@@ -454,7 +450,7 @@ Levenberg-Marquardt with pluggable linear-algebra backends behind one
 trait (`LmSolver`) and one config (`LmConfig`). Full reference:
 [docs/SOLVERS.md](docs/SOLVERS.md).
 
-**The main entry point is `solve_with` on `LmProblem`** -- it wraps
+The main entry point is `solve_with` on `LmProblem` -- it wraps
 the serialize -> optimize -> deserialize round trip (parameters are
 read from the model and written back) and takes any backend instance.
 Every `#[arael(root)]` model gets it: the macro implements `RootProblem`
@@ -511,7 +507,7 @@ The lambda schedule is pluggable: the LM loop consults a
 `LambdaDriver` for every damping decision, feeding it each attempted
 step's outcome (costs, gradient, Hessian diagonal, attempted step).
 `DefaultLambdaDriver` is the classic fixed-multiplier schedule (the
-default on every `LmConfig`); **`NielsenLambdaDriver`** is the gain-ratio
+default on every `LmConfig`); `NielsenLambdaDriver` is the gain-ratio
 adaptive schedule: it scales lambda by how well the
 quadratic model predicted the actual cost change, escalating
 geometrically on rejections, which removes the fixed schedule's
@@ -558,7 +554,7 @@ Recover the covariance of the solved parameters, `Sigma = 2 H^-1`, without ever
 forming the dense inverse. Full reference:
 [docs/COVARIANCE.md](docs/COVARIANCE.md).
 
-**The entry point is `assemble_covariance` on the `Covariance` trait** -- it
+The entry point is `assemble_covariance` on the `Covariance` trait -- it
 re-assembles `H` at the current solution and prepares it for querying. Read
 per-entity blocks through the entity itself: any `Model` reports its parameter
 span, so a pose, a landmark, or a whole collection is a valid query.
@@ -744,7 +740,7 @@ Python drivers over shared models. See [docs/CXX.md](docs/CXX.md) and
 
 1. **Cost breakdown by label.** Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable.
 
-2. **NaN or Inf residuals / derivatives.** The verbose-mode output from step 0 already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. **Before reaching for them, prefer to redesign the constraint so the singularity can't be hit.** A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals -- the 3D formulation is simpler, better conditioned, and has no pixel-wraparound / behind-camera pathology.
+2. **NaN or Inf residuals / derivatives.** The verbose-mode output from step 0 already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. Before reaching for them, prefer to redesign the constraint so the singularity can't be hit. A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals -- the 3D formulation is simpler, better conditioned, and has no pixel-wraparound / behind-camera pathology.
 
 3. **Non-positive diagonal.** A solve that fails with `SolveFailureKind::DegenerateDiagonal { param, fault }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
 
