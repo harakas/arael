@@ -976,9 +976,16 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
   src/
     lib.rs          Crate documentation, arael::prelude
     model.rs        Param<T>, rotation params, Model trait, SelfBlock, CrossBlock, TripletBlock
+    angle.rs        AngleParam: 2D heading with a cached rotation matrix
+    transform.rs    TransformParam: rigid transform with a coupled 6-DOF twist step
+    unitvec.rs      UnitVecParam: unit direction with 2 degrees of freedom
+    se3.rs          se(3) twists: compact rigid-transform form and conversions
     simple_lm.rs    LM solver, LmProblem/RootProblem/FitProblem, Dense/Band/Sparse backends
                     (SparseFaer: sparse Cholesky + Schur marginalization)
+    covariance.rs   Parameter covariance recovery (Sigma = 2 H^-1) at the solution
     geometry.rs     Camera models and projections (pinhole intrinsics/extrinsics)
+    g2o.rs          .g2o pose-graph file I/O (2D and 3D, read and write)
+    validate.rs     Model validation report types (Diagnostic, Issue)
     user_fn.rs      Runtime registry for #[arael::function] user-defined functions
     utils.rs        Float f32/f64 trait, angle utilities, fast atan
     refs.rs         Type-safe Vec<T>, Deque<T>, Arena<T>, Ref<T>
@@ -991,12 +998,16 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
 cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python interface generator (docs/CXX.md, docs/PYTHON.md)
 cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
 cxx-examples/       demos over generated interfaces: shared Rust models, C++ and Python drivers
+export-tests/       Standalone mini-workspace proving cross-crate model export/import
 
 arael-faer/         faer extensions (block CSC + Schur complement), staged for upstreaming
   src/
     lib.rs          Crate documentation
     bsc.rs          Sparse matrix over a variable block partition (block CSC)
     schur.rs        Schur-complement reduction and back-substitution
+    cg.rs           Preconditioned conjugate gradients on a symmetric block matrix
+    envelope.rs     Envelope (profile) Cholesky in natural order
+    nd.rs           Nested-dissection fill-reducing ordering
 
 arael-sym/          Symbolic math library
   src/
@@ -1017,6 +1028,7 @@ arael-macros/       Procedural macros
     lib.rs          #[arael::model], sym!, field rewriting
     constraint.rs   Constraint code generation, CSE integration
     function.rs     #[arael::function] user-defined function codegen
+    sidecar.rs      JSON model sidecar for the interface generators (docs/SIDECAR.md)
 
 arael-sketch-solver/ 2D constraint solver library
   src/
@@ -1051,22 +1063,32 @@ arael-sketch/       Interactive sketch editor GUI (egui/eframe)
     colors.rs       Color scheme (light/dark)
 
 examples/           Runnable demos (see Examples section above)
+benches/            Criterion micro-benchmarks
+scripts/            Feature-matrix build check, CSE comparison, plot helpers
 
 docs/               Extended documentation
   MODEL.md          #[arael::model] macro reference
   SOLVERS.md        Solver backends and entry points
   SYM.md            arael-sym symbolic math reference
+  COVARIANCE.md     Parameter covariance reference
+  CXX.md            Generated C++ interface reference
+  PYTHON.md         Generated Python interface reference
+  SIDECAR.md        JSON model sidecar format
   LINEAR.md         Robust linear regression walkthrough
   SLAM.md           SLAM example walkthrough
   ARAEL_SKETCH.md   Sketch editor overview
+  dev/              Internal design notes
 
 benchmarks/         Solver benchmarks vs Ceres / g2o / GTSAM / SymForce / factrs / tiny-solver
   bal/              Bundle Adjustment in the Large
   pgo/              Pose-graph optimization
   slam/             Heterogeneous monocular SLAM (+ Raspberry Pi edge run)
   loc/              Localization against a known landmark map (+ Raspberry Pi edge run)
+  plane/            Plane SLAM: plane landmarks (unit normal + distance) on a closed loop
   aerobatics/       Rotation-parameterization conditioning (arael-only)
-  make_slam_loc_chart.py  Generates the README SLAM/localization chart SVGs
+  harness/          Shared benchmark scaffolding
+  charts/           Generated chart SVGs, versioned per release
+  make_*_chart.py   Chart generators for the README/docs SVGs
 ```
 
 ## License
