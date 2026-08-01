@@ -19,7 +19,7 @@
 // Stacked Borrows violation inside nalgebra's Cholesky views).
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock, CrossBlock, JacobianModel};
+use arael::model::{Param, SelfBlock, CrossBlock, JacobianModel};
 use arael::simple_lm::{self, LmConfig, LmProblem, CooMatrix, CscMatrix};
 use arael::refs::{self, Ref};
 

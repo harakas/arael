@@ -120,7 +120,7 @@ fn build(off: f64, win: usize) -> World {
         let (ax, ay) = pose_true(i - 1);
         let (bx, by) = pose_true(i);
         w.odos.push(Odo {
-            a: w.poses.ref_at((i - 1)),
+            a: w.poses.ref_at(i - 1),
             b: w.poses.ref_at(i),
             dx: bx - ax,
             dy: by - ay,
@@ -303,7 +303,7 @@ fn build_chain(off: f64) -> World {
         let (ax, ay) = pose_true(i - 1);
         let (bx, by) = pose_true(i);
         w.odos.push(Odo {
-            a: w.poses.ref_at((i - 1)),
+            a: w.poses.ref_at(i - 1),
             b: w.poses.ref_at(i),
             dx: bx - ax,
             dy: by - ay,

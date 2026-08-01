@@ -3,7 +3,7 @@
 // and analytic gradients against central finite differences of calc_cost.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
+use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect2d, vect3d};
 use arael::matrix::{matrix2d, matrix3d};

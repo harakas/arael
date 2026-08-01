@@ -4,7 +4,7 @@
 //! to no root location and was silently dropped (the documented TODO gap);
 //! here it must fire and wire its block indices two hops down.
 
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::LmConfig;
 use arael::simple_lm::LmProblem;
 

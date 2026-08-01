@@ -6,7 +6,7 @@
 // the f64 value a folded literal would bake in).
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig};
 
 // Near-Gauss-Newton, tight precision so the linear residual converges all the

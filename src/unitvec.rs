@@ -274,7 +274,7 @@ mod tests {
         Model::serialize_params(&mut p, &mut std::vec::Vec::<f64>::new());
         // Drive the proper cycle: value -> update_self syncs the working
         // copy and refreshes unit + unit_d.
-        let mut at = |p: &mut UnitVecParam<f64>, dx: f64, dy: f64| -> (vect3<f64>, [vect3<f64>; 2]) {
+        let at = |p: &mut UnitVecParam<f64>, dx: f64, dy: f64| -> (vect3<f64>, [vect3<f64>; 2]) {
             p.d.value = vect2::new(dx, dy);
             Model::update_self(p);
             (p.unit, p.unit_d)

@@ -167,8 +167,8 @@ impl EnvelopeSymbolic {
     /// [`new`](Self::new) with the super-panel width chosen by the caller
     /// rather than from the envelope.
     ///
-    /// `None` derives it: half the mean envelope height, bounded by
-    /// [`PANEL_WIDTH_MIN`] and [`PANEL_WIDTH_MAX`]. That is the right shape --
+    /// `None` derives it: half the mean envelope height, bounded to
+    /// 8..=48. That is the right shape --
     /// a wide panel pays for itself only while it stays well under the band it
     /// sits on -- and it is what a caller should normally leave alone. An
     /// explicit width is for measuring the curve, and is clamped to a width

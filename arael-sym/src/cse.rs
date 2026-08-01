@@ -161,7 +161,7 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
 /// traversal. A node structurally equal to a target is replaced wholesale;
 /// other nodes are rebuilt around their substituted children. A per-node
 /// pointer memo makes each shared subtree cost once, so this does the work of N
-/// separate [`replace`] passes in a single walk.
+/// separate [`replace_pub`] passes in a single walk.
 ///
 /// `subs` is an ordered list: on a duplicate target the first pair wins, as if
 /// the substitutions were applied in sequence. Targets match by exact

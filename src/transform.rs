@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn jacobian_caches_match_finite_differences() {
         let mut p = sample();
-        let mut at = |p: &mut TransformParam<f64>, w: vect3<f64>, d: vect3<f64>| {
+        let at = |p: &mut TransformParam<f64>, w: vect3<f64>, d: vect3<f64>| {
             p.w.value = w;
             p.d.value = d;
             Model::update_self(p);

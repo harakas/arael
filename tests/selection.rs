@@ -131,7 +131,7 @@ impl Scene {
         if self.odometry {
             for i in 1..self.poses {
                 w.odos.push(Odo {
-                    a: w.poses.ref_at((i - 1)),
+                    a: w.poses.ref_at(i - 1),
                     b: w.poses.ref_at(i),
                     dx: 1.0,
                     dy: 0.0,

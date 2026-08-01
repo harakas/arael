@@ -106,7 +106,7 @@ fn build(off: f64) -> World {
         let (ax, ay) = pose_true(i - 1);
         let (bx, by) = pose_true(i);
         w.odos.push(Odo {
-            a: w.poses.ref_at((i - 1)),
+            a: w.poses.ref_at(i - 1),
             b: w.poses.ref_at(i),
             dx: bx - ax,
             dy: by - ay,
@@ -265,7 +265,7 @@ fn a_pose_graph_is_never_reduced() {
     }
     for i in 1..5 {
         c.odos.push(Odo {
-            a: c.poses.ref_at((i - 1)),
+            a: c.poses.ref_at(i - 1),
             b: c.poses.ref_at(i),
             dx: 1.0,
             dy: 0.5,

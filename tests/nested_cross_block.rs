@@ -18,7 +18,7 @@
 //! recover its true position -- which it can only do if all of the above wire
 //! correctly.
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::LmConfig;
 use arael::simple_lm::LmProblem;

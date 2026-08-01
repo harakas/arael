@@ -211,7 +211,7 @@ fn min_diagonal_does_not_rescue_a_nan_diagonal() {
 // scatter every subsequent block into wrong slots -- silently wrong
 // Hessian values with no error anywhere.
 
-use arael::model::{Model, Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock, TripletBlock};
 use arael::refs;
 
 #[arael::model]

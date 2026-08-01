@@ -1313,7 +1313,7 @@ impl FunctionBag {
     /// `None` means the name isn't in the bag -- callers that want
     /// built-ins as a fallback should route through
     /// [`parse::parse_with_functions`] or
-    /// [`function_by_name`](crate::function_by_name).
+    /// [`crate::function_by_name`].
     pub fn call(&self, name: &str, args: &[E]) -> Option<Result<E, String>> {
         let f = self.table.get(name)?;
         if args.len() != f.params.len() {

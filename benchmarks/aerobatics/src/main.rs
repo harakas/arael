@@ -18,7 +18,7 @@
 //   ROUNDS=50 cargo run --release
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, SelfBlock, CrossBlock, EulerAngleParam, SimpleEulerAngleParam, QuaternionParam};
+use arael::model::{SelfBlock, CrossBlock, EulerAngleParam, SimpleEulerAngleParam, QuaternionParam};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::vect::vect3d;
 use arael::matrix::matrix3d;

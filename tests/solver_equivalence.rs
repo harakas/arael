@@ -93,7 +93,7 @@ fn build() -> Chain {
     }
     for i in 1..N_POINTS {
         chain.links.push(Link {
-            a: chain.points.ref_at((i - 1)),
+            a: chain.points.ref_at(i - 1),
             b: chain.points.ref_at(i),
             rest: 1.1,
             hb: CrossBlock::new(),

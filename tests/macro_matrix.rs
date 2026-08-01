@@ -903,6 +903,7 @@ fn skipped_collection_is_fully_excluded() {
 struct SkMid {
     subs: std::vec::Vec<P>,
     #[arael(skip)]
+    #[allow(dead_code)]  // never read on purpose: the point is that it is skipped
     dead: std::vec::Vec<P>,
 }
 
@@ -1111,6 +1112,7 @@ use arael::refs::Vec as AliasVec;
 struct AAliasSkip {
     items: refs::Vec<P>,
     #[arael(skip)]
+    #[allow(dead_code)]  // never read on purpose: the point is that it is skipped
     stash: AliasVec<P>,
 }
 
@@ -1362,6 +1364,7 @@ struct Nf32 {
 struct ASkipStash {
     items: std::vec::Vec<P>,
     #[arael(skip)]
+    #[allow(dead_code)]  // never read on purpose: the point is that it is skipped
     stash: std::vec::Vec<Nf32>,
 }
 

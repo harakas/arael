@@ -6,7 +6,7 @@
 //! match numerical reference.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 
 // Opaque numerical evaluators -- sin and cos by another name. The

@@ -13,7 +13,7 @@
 //!   left. This is the landmark/point marginalization that makes bundle
 //!   adjustment and SLAM tractable, and it needs the block structure to be
 //!   cheap.
-//! - **Band Cholesky** ([`band`]) -- factorize a block-CSC matrix that is
+//! - **Band Cholesky** ([`envelope`]) -- factorize a block-CSC matrix that is
 //!   banded in natural order directly in block form, fill confined to each
 //!   column's envelope. A trajectory's Hessian, and its reduced pose system,
 //!   are banded, so this needs no fill-reducing ordering and no symbolic phase.

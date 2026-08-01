@@ -8,7 +8,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
-    lm_solve, CgOptions, LmConfig, LmProblem, RootProblem, SchurPolicy, SolveError,
+    lm_solve, CgOptions, LmConfig, RootProblem, SchurPolicy, SolveError,
     SolveFailureKind, SolverReport, SparseFaer,
 };
 

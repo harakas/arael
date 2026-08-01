@@ -5,9 +5,9 @@
 // silently optimized nothing.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig};
-use arael::refs::{self, Ref};
+use arael::refs;
 
 #[arael::model]
 #[arael(constraint(hb, {

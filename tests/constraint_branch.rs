@@ -5,7 +5,7 @@
 // differentiates each arm; the switch contributes nothing).
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 use arael::refs;

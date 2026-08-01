@@ -4,7 +4,7 @@
 // solve_sparse on LmProblem -- usable generically, not just as inherent
 // methods on a concrete struct.
 
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{Band, LmConfig, LmProblem, RootProblem, SolveResult};
 
 #[arael::model]

@@ -278,7 +278,7 @@ struct Pv {
 
 #[test]
 fn a_model_of_these_params_solves_the_same_after_a_round_trip() {
-    use arael::model::Model;
+    
     use arael::simple_lm::{LmConfig, LmProblem};
     const H: f64 = std::f64::consts::FRAC_1_SQRT_2;
 

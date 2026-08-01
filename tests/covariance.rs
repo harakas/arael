@@ -149,7 +149,7 @@ fn path_chain(n: usize) -> Chain {
         c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
     }
     for i in 0..n - 1 {
-        c.ties.push(Tie { a: c.nodes.ref_at(i), b: c.nodes.ref_at((i + 1)), isig: 1.0, hb: CrossBlock::new() });
+        c.ties.push(Tie { a: c.nodes.ref_at(i), b: c.nodes.ref_at(i + 1), isig: 1.0, hb: CrossBlock::new() });
     }
     c
 }
@@ -210,7 +210,7 @@ fn precompute_selected_inverse_denser_fill() {
             if i + step < n {
                 c.ties.push(Tie {
                     a: c.nodes.ref_at(i),
-                    b: c.nodes.ref_at((i + step)),
+                    b: c.nodes.ref_at(i + step),
                     isig: 1.0,
                     hb: CrossBlock::new(),
                 });
@@ -260,7 +260,7 @@ fn tridiagonal_rejects_singular_hessian() {
         c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
     }
     for i in 1..3 {
-        c.ties.push(Tie { a: c.nodes.ref_at(i), b: c.nodes.ref_at((i + 1)),
+        c.ties.push(Tie { a: c.nodes.ref_at(i), b: c.nodes.ref_at(i + 1),
             isig: 1.0, hb: CrossBlock::new() });
     }
     assert_eq!(c.assemble_covariance(CovMode::TriDiagonal).err(),
@@ -313,7 +313,7 @@ fn tridiagonal_2dof_matches_solve() {
         c.poses.push(Pose2 { x: Param::new(0.0), y: Param::new(0.0), pi: 1.0, hb: SelfBlock::new() });
     }
     for i in 0..n - 1 {
-        c.ties.push(Tie2 { a: c.poses.ref_at(i), b: c.poses.ref_at((i + 1)), t: 1.0, hb: CrossBlock::new() });
+        c.ties.push(Tie2 { a: c.poses.ref_at(i), b: c.poses.ref_at(i + 1), t: 1.0, hb: CrossBlock::new() });
     }
 
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
@@ -345,7 +345,7 @@ fn all_marginals_dense_matches_solve() {
     for i in 0..n {
         for step in [1usize, 2, 3] {
             if i + step < n {
-                c.ties.push(Tie2 { a: c.poses.ref_at(i), b: c.poses.ref_at((i + step)), t: 1.0, hb: CrossBlock::new() });
+                c.ties.push(Tie2 { a: c.poses.ref_at(i), b: c.poses.ref_at(i + step), t: 1.0, hb: CrossBlock::new() });
             }
         }
     }
@@ -422,7 +422,7 @@ fn tridiagonal_singular_backward_block_does_not_panic() {
         c.poses.push(PoseY { x: Param::new(0.0), y: Param::new(0.0), pix: 1.0, piy, hb: SelfBlock::new() });
     }
     for i in 0..n - 1 {
-        c.ties.push(TieY { a: c.poses.ref_at(i), b: c.poses.ref_at((i + 1)), t: 1.0, hb: CrossBlock::new() });
+        c.ties.push(TieY { a: c.poses.ref_at(i), b: c.poses.ref_at(i + 1), t: 1.0, hb: CrossBlock::new() });
     }
 
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();

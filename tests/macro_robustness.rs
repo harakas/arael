@@ -2,7 +2,7 @@
 // wiring for Arena and direct-composed entities.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::refs::{self, Ref};
 

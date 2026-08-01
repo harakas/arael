@@ -170,7 +170,7 @@ fn build() -> World {
     // and its line observations -- two genuinely different pose groups)
     for i in 1..N_A {
         w.odos.push(Odo {
-            a: w.poses_a.ref_at((i - 1)),
+            a: w.poses_a.ref_at(i - 1),
             b: w.poses_a.ref_at(i),
             dx: 1.0,
             dy: 0.0,

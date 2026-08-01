@@ -352,7 +352,7 @@ fn build_rt_path() -> RtPath {
 
 #[test]
 fn a_model_solves_the_same_after_a_round_trip() {
-    use arael::model::Model;
+    
     use arael::simple_lm::{LmConfig, LmProblem};
 
     let mut a = build_rt_path();

@@ -3,7 +3,7 @@
 // silently ignored in cost and grad/hessian computation.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock, Model};
+use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 

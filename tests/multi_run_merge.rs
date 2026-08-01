@@ -8,7 +8,7 @@
 //! landmark of BOTH runs -- which can only happen if the shared landmarks merge
 //! the two runs into one frame.
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::vect::vect2f;
 use arael::matrix::matrix2f;
 use arael::refs::{self, Ref};

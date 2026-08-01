@@ -4,7 +4,7 @@
 // stay the exact rational forms (solves still converge).
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::utils::{fast_atan, fast_atan2};
 
