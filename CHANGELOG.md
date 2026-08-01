@@ -50,6 +50,8 @@ is cut.
   factorization can beat, which is a bound rather than a cost.
 - A Python element wrapper cached a pointer into its collection, so growing that
   collection left it reading the old buffer. Wrappers now re-resolve on access.
+- A constraint sweep over an `Option` frine field emitted `for x in &field`,
+  which raises `for_loops_over_fallibles` in the model crate's own build.
 
 ### Performance
 

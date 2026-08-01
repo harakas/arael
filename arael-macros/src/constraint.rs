@@ -5151,7 +5151,7 @@ pub fn generate_root_methods(
                 {
                     #marker
                     let #parent_ident = __item;
-                    for __frine in &__item.#frines_ident {
+                    for __frine in __item.#frines_ident.iter() {
                         #(#resolve_stmts)*
                         let #root_var_ident = &*__self_ref;
                         #nested_cost_body
@@ -5209,7 +5209,7 @@ pub fn generate_root_methods(
                     {
                         #marker_j
                         let #parent_ident = __item;
-                        for __frine in &__item.#frines_ident {
+                        for __frine in __item.#frines_ident.iter() {
                             #(#resolve_stmts_j)*
                             let #root_var_ident = &*__self_ref;
                             #jac_body
