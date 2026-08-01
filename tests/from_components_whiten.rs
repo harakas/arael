@@ -4,6 +4,7 @@
 // matrix's transpose, producing a 3-element residual. Checks the analytic cost
 // against the runtime vector math and the gradient against finite differences.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect2d, vect3d};
@@ -50,7 +51,7 @@ fn build() -> (Root, Vec<f64>) {
         hb: SelfBlock::new(),
     });
     let mut params = Vec::new();
-    root.serialize64(&mut params);
+    root.serialize(&mut params);
     (root, params)
 }
 

@@ -5849,38 +5849,25 @@ pub fn generate_root_methods(
         quote! {}
     };
 
-    // Precision-dependent pieces for the generated RootProblem impl (the
-    // solve_with / solve_dense / solve_sparse entry points are LmProblem
-    // default methods gated on it -- nothing solver-side is generated).
-    let (solve_serialize, solve_deserialize) = if precision == "f32" {
-        (quote! { serialize32 }, quote! { deserialize32 })
-    } else {
-        (quote! { serialize64 }, quote! { deserialize64 })
-    };
     let requires_compute = custom || has_triplet_block;
-
-    // `extended_deserialize` carries no width in its signature, and the
-    // root implements `ExtendedModel` only at its solve precision -- so
-    // only the matching inherent deserialize wrapper calls the hook.
-    let (extended_deser64_call, extended_deser32_call) = if precision == "f32" {
-        (quote! {},
-         quote! { <#root_name as arael::model::ExtendedModel<f32>>::extended_deserialize(self); })
-    } else {
-        (quote! { <#root_name as arael::model::ExtendedModel<f64>>::extended_deserialize(self); },
-         quote! {})
-    };
 
     let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
 
+    // The entry points own the root post-passes: Model::serialize_params /
+    // deserialize_params stay pure tree walks, and the RootProblem impl
+    // appends the block wiring / the extended-deserialize hook (the latter
+    // via UFCS -- it carries no width in its signature).
     let mut tokens = quote! {
         #(#constraint_impls)*
 
         impl arael::simple_lm::RootProblem<#prec_type> for #root_name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
-                self.#solve_serialize(data)
+                arael::model::Model::serialize_params(self, data);
+                self.__set_block_indices();
             }
             fn deserialize(&mut self, data: &[#prec_type]) {
-                self.#solve_deserialize(data)
+                arael::model::Model::deserialize_params(self, data);
+                <#root_name as arael::model::ExtendedModel<#prec_type>>::extended_deserialize(self);
             }
             fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
                 let mut __out = std::vec::Vec::new();
@@ -5892,23 +5879,6 @@ pub fn generate_root_methods(
         }
 
         impl #root_name {
-            pub fn serialize64(&mut self, data: &mut std::vec::Vec<f64>) {
-                arael::model::Model::serialize_params(self, data);
-                self.__set_block_indices();
-            }
-            pub fn deserialize64(&mut self, data: &[f64]) {
-                arael::model::Model::deserialize_params(self, data);
-                #extended_deser64_call
-            }
-            pub fn serialize32(&mut self, data: &mut std::vec::Vec<f32>) {
-                arael::model::Model::serialize_params(self, data);
-                self.__set_block_indices();
-            }
-            pub fn deserialize32(&mut self, data: &[f32]) {
-                arael::model::Model::deserialize_params(self, data);
-                #extended_deser32_call
-            }
-
             fn __set_block_indices(&mut self) {
                 let mut __cid: u32 = 0;
                 let _ = &__cid; // suppress unused warning when no constraint_index fields

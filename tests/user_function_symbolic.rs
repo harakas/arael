@@ -4,6 +4,7 @@
 //! inside a constraint body. Residual value, gradient, and Hessian
 //! from the generated code must match numerical reference.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael_sym::E;
@@ -28,7 +29,7 @@ struct M {
 fn make() -> (M, Vec<f64>) {
     let mut m = M { x: Param::new(2.0), isigma: 1.0, hb: SelfBlock::new() };
     let mut p = Vec::new();
-    m.serialize64(&mut p);
+    m.serialize(&mut p);
     (m, p)
 }
 

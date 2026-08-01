@@ -5,6 +5,7 @@
 // -- and the gradient/Hessian must carry d(exp(w))/dw, which the FD check
 // verifies.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 
@@ -52,7 +53,7 @@ fn build() -> M {
 fn gradient_carries_the_symbolic_derivative() {
     let mut m = build();
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     let n = params.len();
 
     let mut ag = vec![0.0; n];

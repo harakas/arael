@@ -9,6 +9,7 @@
 // bal.rs). No gauge prior -- BAL problems are benchmarked with the
 // 7-DOF gauge left to LM damping, as Ceres runs them.
 
+use arael::simple_lm::RootProblem;
 use crate::bal::{CameraIn, Dataset};
 use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::quatern::{quaternd, quaternf};
@@ -340,8 +341,8 @@ impl bench_harness::arael::Model for Scene {
     const NIELSEN: bool = true;
     fn lambda0(p: &Problem) -> f64 { p.lambda0 }
     fn build(p: &Problem) -> Self { build_f64(&p.ds) }
-    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
-    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) { cfg.lambda_floor = lambda_floor(); }
     fn solution(&self) -> Solution {
         Solution {
@@ -408,10 +409,10 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
         scene.cameras[1].ea.optimize = false;
     }
     let mut params: Vec<f64> = Vec::new();
-    scene.serialize64(&mut params);
+    scene.serialize(&mut params);
     let cfg = bench_harness::arael::config::<Scene>(problem, 100);
     let result = solve64_schur(&params, &mut scene, &cfg).expect("covariance solve failed");
-    scene.deserialize64(&result.x);
+    scene.deserialize(&result.x);
 
     let (ncam, npt) = (scene.cameras.len(), scene.points.len());
     let free = ncam - 2; // cameras 0 and 1 are the fixed gauge
@@ -465,8 +466,8 @@ impl bench_harness::arael::Model for SceneF {
     const NIELSEN: bool = true;
     fn lambda0(p: &Problem) -> f64 { p.lambda0 }
     fn build(p: &Problem) -> Self { build_f32(&p.ds) }
-    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
-    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) { cfg.lambda_floor = lambda_floor() as f32; }
     fn solution(&self) -> Solution {
         Solution {
@@ -577,7 +578,7 @@ mod tests {
 
         let mut s = build_f64(&ds);
         let mut params: Vec<f64> = Vec::new();
-        s.serialize64(&mut params);
+        s.serialize(&mut params);
         let arael_cost = s.calc_cost(&params);
         assert!(((arael_cost - reference) / reference).abs() < 1e-9,
             "arael {} vs reference {}", arael_cost, reference);

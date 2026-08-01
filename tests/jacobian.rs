@@ -1,5 +1,6 @@
 // Integration tests for Jacobian computation via #[arael(root, jacobian)].
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -95,7 +96,7 @@ fn make_test_model() -> (TestModel, Vec<f64>) {
         hb: CrossBlock::new(),
     });
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 
@@ -213,7 +214,7 @@ fn jacobian_fixed_params() {
         ci: 0, hb: CrossBlock::new(),
     });
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
 
     // Only 2 params (point 1 x,y), not 4
     assert_eq!(params.len(), 2);

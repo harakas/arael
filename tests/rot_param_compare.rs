@@ -9,6 +9,7 @@
 //
 //   cargo test -r --test rot_param_compare -- --nocapture
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, SelfBlock, CrossBlock, EulerAngleParam, SimpleEulerAngleParam, QuaternionParam};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::vect::vect3d;
@@ -90,9 +91,9 @@ fn run_simple() -> (usize, usize, f64, f64) {
         sky.pairs.push(PairS { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     let r = solve_once(&mut sky, &params);
-    sky.deserialize64(&r.x);
+    sky.deserialize(&r.x);
     let rots: Vec<matrix3d> = (0..truth.len())
         .map(|i| matrix3d::rotation_from_euler_angles(sky.poses[i as usize].ea.value)).collect();
     (r.iterations, r.accepted_iterations, r.end_cost, max_pose_err(&rots, &truth))
@@ -133,9 +134,9 @@ fn run_euler() -> (usize, usize, f64, f64) {
         sky.pairs.push(PairE { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     let r = solve_once(&mut sky, &params);
-    sky.deserialize64(&r.x);
+    sky.deserialize(&r.x);
     let rots: Vec<matrix3d> = (0..truth.len())
         .map(|i| matrix3d::rotation_from_euler_angles(sky.poses[i as usize].ea.value)).collect();
     (r.iterations, r.accepted_iterations, r.end_cost, max_pose_err(&rots, &truth))
@@ -176,9 +177,9 @@ fn run_quat() -> (usize, usize, f64, f64) {
         sky.pairs.push(PairQ { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     let r = solve_once(&mut sky, &params);
-    sky.deserialize64(&r.x);
+    sky.deserialize(&r.x);
     let rots: Vec<matrix3d> = (0..truth.len())
         .map(|i| sky.poses[i as usize].ea.value.rotation_matrix()).collect();
     (r.iterations, r.accepted_iterations, r.end_cost, max_pose_err(&rots, &truth))

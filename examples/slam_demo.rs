@@ -36,6 +36,7 @@
 //   preventing parameters from diverging during early passes when feature
 //   constraints are scaled down.
 
+use arael::simple_lm::RootProblem;
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
@@ -560,7 +561,7 @@ fn print_usage() {
 // Enabled by SLAM_HESSIAN_BITMAP=<path.png> (or =1 for the default hessian.png).
 fn write_hessian_bitmap(path: &mut Path, out: &str) {
     let mut params: std::vec::Vec<f64> = std::vec::Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let n = params.len();
     let mut grad = vec![0.0f64; n];
     let mut coo = arael::simple_lm::CooMatrix::new(n);
@@ -602,7 +603,7 @@ fn main() {
     let (mut path, gt_poses, gt_landmarks, gps_offset) = build_path(&cfg);
 
     let mut params = std::vec::Vec::new();
-    path.serialize32(&mut params);
+    path.serialize(&mut params);
 
     let n_frines: usize = path.landmarks.iter().map(|lm| lm.frines.len()).sum();
     println!("Path: {} poses, {} landmarks, {} frines, {} pose_pairs",
@@ -638,7 +639,7 @@ fn main() {
         path.frine_isigma_scale = scale;
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
-        path.serialize64(&mut params64);
+        path.serialize(&mut params64);
         let _n = params64.len();
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
@@ -659,7 +660,7 @@ fn main() {
             _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
         };
         let result = result.unwrap();
-        path.deserialize64(&result.x);
+        path.deserialize(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
     }
 
@@ -675,7 +676,7 @@ fn main() {
             ea_err_sum += (pose.ea.value - gt_e).norm();
         }
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
-        path.serialize64(&mut params64);
+        path.serialize(&mut params64);
         let cost = path.calc_cost(&params64);
         println!("\nFinal cost: {:.4}  Simulated GPS systematic offset: ({:.3}, {:.3}, {:.3}) |{:.3}|m",
             cost, gps_offset.x, gps_offset.y, gps_offset.z, gps_offset.norm());

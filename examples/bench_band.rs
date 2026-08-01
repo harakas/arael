@@ -7,6 +7,7 @@
 // Run: cargo run -r --example bench_band
 // With LAPACK: cargo run -r --features lapack --example bench_band
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -345,7 +346,7 @@ fn main() {
         for _ in 0..runs {
             let mut path = build_path(&cfg);
             let mut params: Vec<f32> = Vec::new();
-            path.serialize32(&mut params);
+            path.serialize(&mut params);
             n = params.len();
             let t0 = std::time::Instant::now();
             let _r = arael::simple_lm::solve_f32(&params, &mut path, &solve_config).unwrap();
@@ -353,7 +354,7 @@ fn main() {
 
             let mut path = build_path(&cfg);
             let mut params: Vec<f32> = Vec::new();
-            path.serialize32(&mut params);
+            path.serialize(&mut params);
             let t0 = std::time::Instant::now();
             let _r = arael::simple_lm::solve_band_f32(&params, kd, &mut path, &solve_config).unwrap();
             band_times.push(t0.elapsed().as_micros() as f64);
@@ -362,7 +363,7 @@ fn main() {
             {
                 let mut path = build_path(&cfg);
                 let mut params: Vec<f32> = Vec::new();
-                path.serialize32(&mut params);
+                path.serialize(&mut params);
                 let t0 = std::time::Instant::now();
                 let _r = arael::simple_lm::solve_band_lapack_f32(&params, kd, &mut path, &solve_config).unwrap();
                 lapack_times.push(t0.elapsed().as_micros() as f64);

@@ -7,6 +7,7 @@
 //   cargo run -r --features faer --example bench_sparse
 //   OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 cargo run -r --features faer --example bench_sparse
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -368,7 +369,7 @@ fn main() {
         let cfg = SceneConfig { num_poses, num_landmarks, ..Default::default() };
         let mut path = build_path(&cfg);
         let mut params: Vec<f64> = Vec::new();
-        path.serialize64(&mut params);
+        path.serialize(&mut params);
         let n = params.len();
 
         // Compute sparsity info
@@ -441,7 +442,7 @@ fn main() {
         {
             let mut path = build_path(&cfg);
             let mut params: Vec<f64> = Vec::new();
-            path.serialize64(&mut params);
+            path.serialize(&mut params);
             bench_solver("dense", &mut arael::simple_lm::Dense, &mut path, &params, runs);
         }
 
@@ -449,7 +450,7 @@ fn main() {
         {
             let mut path = build_path(&cfg);
             let mut params: Vec<f64> = Vec::new();
-            path.serialize64(&mut params);
+            path.serialize(&mut params);
             bench_solver("faer", &mut arael::simple_lm::SparseFaer::new(), &mut path, &params, runs);
         }
 
@@ -459,7 +460,7 @@ fn main() {
         {
             let mut path = build_path(&cfg);
             let mut params: Vec<f64> = Vec::new();
-            path.serialize64(&mut params);
+            path.serialize(&mut params);
             bench_solver("eigen", &mut arael::simple_lm::SparseEigen::new(), &mut path, &params, runs);
         }
 
@@ -468,7 +469,7 @@ fn main() {
         {
             let mut path = build_path(&cfg);
             let mut params: Vec<f64> = Vec::new();
-            path.serialize64(&mut params);
+            path.serialize(&mut params);
             bench_solver("cholmod", &mut arael::simple_lm::SparseCholmod::new(), &mut path, &params, runs);
         }
 

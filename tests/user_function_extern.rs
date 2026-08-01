@@ -5,6 +5,7 @@
 //! `dg/dx = -f(x)`). Use inside a constraint; check residual + grad
 //! match numerical reference.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 
@@ -36,7 +37,7 @@ struct M {
 fn make() -> (M, Vec<f64>) {
     let mut m = M { x: Param::new(0.0), isigma: 1.0, hb: SelfBlock::new() };
     let mut p = Vec::new();
-    m.serialize64(&mut p);
+    m.serialize(&mut p);
     (m, p)
 }
 

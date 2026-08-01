@@ -148,8 +148,8 @@ impl Pipeline for Graph3 {
     type Solution = Vec<Pose3In>;
     fn lambda0(_: &Dataset3) -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f64(ds) }
-    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
-    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<Pose3In> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> crate::arael_runner::Solved<f64> {
@@ -163,8 +163,8 @@ impl Pipeline for Graph3F {
     type Solution = Vec<Pose3In>;
     fn lambda0(_: &Dataset3) -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f32(ds) }
-    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
-    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<Pose3In> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> crate::arael_runner::Solved<f32> {
@@ -243,7 +243,7 @@ pub(crate) mod tests {
 
         let mut g = build_f64(&ds);
         let mut params: Vec<f64> = Vec::new();
-        g.serialize64(&mut params);
+        g.serialize(&mut params);
         let arael_cost = g.calc_cost(&params);
         assert!(((arael_cost - reference) / reference).abs() < 1e-12,
             "arael {} vs reference {}", arael_cost, reference);

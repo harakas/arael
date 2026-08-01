@@ -13,6 +13,7 @@
 // condition -- a branch or a saturated robustifier can produce it from
 // data), carrying the partial state.
 
+use arael::simple_lm::RootProblem;
 use arael::simple_lm::{self, BandOverflow, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
@@ -246,7 +247,7 @@ fn pattern_drift_detected_in_indexed_assembly() {
         hbt: TripletBlock::new(),
     };
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let n = params.len();
 
     // First iteration: build the pattern with the guard active.

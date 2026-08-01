@@ -9,7 +9,8 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{
-    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+    LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
+    SparseFaerOptions,
 };
 use cxx_mr::{Cell, Decay};
 
@@ -1081,9 +1082,9 @@ pub unsafe extern "C" fn decay_solve_band(
     zero_result(out);
     match catch_unwind(AssertUnwindSafe(|| {
         let mut x0 = Vec::new();
-        hh.model.serialize32(&mut x0);
+        hh.model.serialize(&mut x0);
         arael::simple_lm::solve_band_f32(&x0, kd as usize, &mut hh.model, &c).map(|r| {
-            hh.model.deserialize32(&r.x);
+            hh.model.deserialize(&r.x);
             r
         })
     })) {
@@ -1123,7 +1124,7 @@ pub unsafe extern "C" fn decay_cost(h: *mut DecayHandle) -> f64 {
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {
         let mut params = Vec::new();
-        hh.model.serialize32(&mut params);
+        hh.model.serialize(&mut params);
         hh.model.calc_cost(&params) as f64
     })) {
         Ok(c) => {
@@ -1452,7 +1453,8 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{
-    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+    LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
+    SparseFaerOptions,
 };
 use cxx_mr::{Line, Ob};
 
@@ -2524,9 +2526,9 @@ pub unsafe extern "C" fn line_solve_band(
     zero_result(out);
     match catch_unwind(AssertUnwindSafe(|| {
         let mut x0 = Vec::new();
-        hh.model.serialize64(&mut x0);
+        hh.model.serialize(&mut x0);
         arael::simple_lm::solve_band(&x0, kd as usize, &mut hh.model, &c).map(|r| {
-            hh.model.deserialize64(&r.x);
+            hh.model.deserialize(&r.x);
             r
         })
     })) {
@@ -2566,7 +2568,7 @@ pub unsafe extern "C" fn line_cost(h: *mut LineHandle) -> f64 {
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {
         let mut params = Vec::new();
-        hh.model.serialize64(&mut params);
+        hh.model.serialize(&mut params);
         hh.model.calc_cost(&params)
     })) {
         Ok(c) => {

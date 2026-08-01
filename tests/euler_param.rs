@@ -1,5 +1,6 @@
 // EulerAngleParam behavior through the macro and solver.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, SelfBlock, CrossBlock, EulerAngleParam};
 use arael::simple_lm::{self, LmConfig};
 use arael::vect::{vect3d, vect3f};
@@ -43,9 +44,9 @@ fn fixed_euler_angle_param_does_not_panic_in_advance() {
     });
 
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut w, &LmConfig::default()).unwrap();
-    w.deserialize64(&result.x);
+    w.deserialize(&result.x);
 
     let free = &w.nodes[0];
     assert!((free.ea.value - vect3d::new(0.3, -0.2, 0.4)).norm() < 1e-6,
@@ -81,10 +82,10 @@ fn fixed_euler_angle_param_drives_constraints() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut w,
         &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
-    w.deserialize64(&result.x);
+    w.deserialize(&result.x);
 
     let m = matrix3d::rotation_from_euler_angles(w.free_ea.value);
     let t = matrix3d::rotation_from_euler_angles(ea);
@@ -142,10 +143,10 @@ fn root_level_euler_angle_param_advances_through_gimbal() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    rig.serialize64(&mut params);
+    rig.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
         &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
-    rig.deserialize64(&result.x);
+    rig.deserialize(&result.x);
 
     assert!(result.end_cost < 1e-12,
         "root-level EA must converge through the gimbal, cost={}", result.end_cost);
@@ -249,7 +250,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
     }
 
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     let result = simple_lm::solve_sparse(&params, &mut sky,
         // VERBOSE=1 cargo test -r --test euler_param aerobatics -- --nocapture
         // prints the LM iteration trace.
@@ -258,7 +259,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
             verbose: std::env::var("VERBOSE").is_ok(),
             ..Default::default()
         }).unwrap();
-    sky.deserialize64(&result.x);
+    sky.deserialize(&result.x);
 
     assert!(result.end_cost < 1e-10,
         "aerobatics chain must converge, cost={} after {} iters",
@@ -354,13 +355,13 @@ fn aerobatics_slam_f32() {
     }
 
     let mut params = Vec::new();
-    sky.serialize32(&mut params);
+    sky.serialize(&mut params);
     let result = simple_lm::solve_sparse_f32(&params, &mut sky, &LmConfig {
         max_iters: 500,
         verbose: std::env::var("VERBOSE").is_ok(),
         ..Default::default()
     }).unwrap();
-    sky.deserialize32(&result.x);
+    sky.deserialize(&result.x);
 
     // f32 floor: residuals of ~2 ulps per matrix element.
     assert!(result.end_cost < 1e-7,

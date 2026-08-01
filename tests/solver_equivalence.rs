@@ -16,6 +16,7 @@
 // TripletBlock band-format equivalence is covered by unit tests in
 // src/model.rs (tripletblock_band_matches_*).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{
     self, CooMatrix, CscMatrix, LmConfig, LmProblem, SolveError,
@@ -149,7 +150,7 @@ fn densify_csc(csc: &CscMatrix<f64>) -> Vec<f64> {
 fn hessian_formats_agree() {
     let mut chain = build();
     let mut params = std::vec::Vec::new();
-    chain.serialize64(&mut params);
+    chain.serialize(&mut params);
     let n = params.len();
     assert_eq!(n, (N_POINTS - 1) * 2, "one point is fixed");
 
@@ -195,7 +196,7 @@ fn hessian_formats_agree() {
 fn band_error_on_underdeclared_kd() {
     let mut chain = build();
     let mut params = std::vec::Vec::new();
-    chain.serialize64(&mut params);
+    chain.serialize(&mut params);
     let n = params.len();
     let kd = 1; // links couple indices up to distance 3
     let mut grad = vec![0.0; n];
@@ -214,7 +215,7 @@ fn solvers_reach_same_minimizer() {
     let run = |which: &str| -> std::vec::Vec<f64> {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
-        chain.serialize64(&mut p);
+        chain.serialize(&mut p);
         #[allow(deprecated)] // the COO/direct baselines are the point here
         let r = match which {
             "dense" => simple_lm::solve_dense(&p, &mut chain, &cfg),
@@ -258,12 +259,12 @@ fn band_lapack_matches_dense() {
     };
     let mut chain = build();
     let mut p = std::vec::Vec::new();
-    chain.serialize64(&mut p);
+    chain.serialize(&mut p);
     let reference = simple_lm::solve_dense(&p, &mut chain, &cfg).unwrap().x;
 
     let mut chain = build();
     let mut p = std::vec::Vec::new();
-    chain.serialize64(&mut p);
+    chain.serialize(&mut p);
     let r = simple_lm::solve_band_lapack(&p, KD, &mut chain, &cfg).unwrap();
     assert!(r.end_cost < r.start_cost, "lapack: no improvement");
     for i in 0..reference.len() {
@@ -348,13 +349,13 @@ fn band_lapack_f32_matches_band() {
     let kd = 3;
     let mut c = build_f32();
     let mut p = std::vec::Vec::new();
-    c.serialize32(&mut p);
+    c.serialize(&mut p);
     let reference = simple_lm::solve_band_f32(&p, kd, &mut c, &cfg).unwrap();
     assert!(reference.end_cost < reference.start_cost, "band f32: no improvement");
 
     let mut c = build_f32();
     let mut p = std::vec::Vec::new();
-    c.serialize32(&mut p);
+    c.serialize(&mut p);
     let r = simple_lm::solve_band_lapack_f32(&p, kd, &mut c, &cfg).unwrap();
     assert!(r.end_cost < r.start_cost, "lapack f32: no improvement");
     for i in 0..reference.x.len() {
@@ -379,7 +380,7 @@ fn threaded_faer_matches_single_thread() {
         };
         let mut chain = build();
         let mut p = std::vec::Vec::new();
-        chain.serialize64(&mut p);
+        chain.serialize(&mut p);
         let r = simple_lm::solve_sparse(&p, &mut chain, &cfg).unwrap();
         assert!(r.end_cost < r.start_cost, "threads={threads}: no improvement");
         r.x
@@ -410,7 +411,7 @@ fn generated_solve_methods_match_manual_dance() {
     let reference = {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
-        chain.serialize64(&mut p);
+        chain.serialize(&mut p);
         simple_lm::solve_dense(&p, &mut chain, &cfg).unwrap().x
     };
 
@@ -418,7 +419,7 @@ fn generated_solve_methods_match_manual_dance() {
     let mut chain = build();
     let r = chain.solve_dense(&cfg).unwrap();
     let mut back = std::vec::Vec::new();
-    chain.serialize64(&mut back);
+    chain.serialize(&mut back);
     assert_eq!(back, r.x, "solve_dense must write the solution back into the model");
     for i in 0..reference.len() {
         assert!((r.x[i] - reference[i]).abs() < 1e-12,
@@ -429,7 +430,7 @@ fn generated_solve_methods_match_manual_dance() {
     let faer = {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
-        chain.serialize64(&mut p);
+        chain.serialize(&mut p);
         simple_lm::solve_sparse(&p, &mut chain, &cfg).unwrap().x
     };
     let mut chain = build();
@@ -451,7 +452,7 @@ fn generated_solve_methods_match_manual_dance() {
     let free_nielsen = {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
-        chain.serialize64(&mut p);
+        chain.serialize(&mut p);
         simple_lm::solve_sparse(&p, &mut chain, &nielsen_cfg).unwrap().x
     };
     let mut chain = build();
@@ -473,7 +474,7 @@ fn solver_kind_dispatches_to_the_named_backend() {
     let free = |run: &dyn Fn(&[f64], &mut Chain) -> simple_lm::SolveResult<f64>| {
         let mut c = build();
         let mut p = std::vec::Vec::new();
-        c.serialize64(&mut p);
+        c.serialize(&mut p);
         run(&p, &mut c).unwrap().x
     };
     let cases: [(SolverKind, std::vec::Vec<f64>); 3] = [
@@ -496,7 +497,7 @@ fn solver_kind_dispatches_to_the_named_backend() {
         }
         // The solution is written back into the model.
         let mut back = std::vec::Vec::new();
-        chain.serialize64(&mut back);
+        chain.serialize(&mut back);
         assert_eq!(back, r.x, "{kind:?}: solve must write the solution back into the model");
     }
 }
@@ -509,7 +510,7 @@ fn sparse_auto_options_equal_default_faer() {
     let free = {
         let mut c = build();
         let mut p = std::vec::Vec::new();
-        c.serialize64(&mut p);
+        c.serialize(&mut p);
         simple_lm::solve_sparse(&p, &mut c, &cfg).unwrap().x
     };
     let mut chain = build();
@@ -545,7 +546,7 @@ fn f32_cholmod_is_unavailable() {
     let cfg = LmConfig::<f32>::default();
     let mut m = build32();
     let mut before = std::vec::Vec::new();
-    m.serialize32(&mut before);
+    m.serialize(&mut before);
     let e = m.solve(SolverKind::Cholmod, &cfg)
         .expect_err("cholmod at f32 must be unavailable");
     assert!(
@@ -554,7 +555,7 @@ fn f32_cholmod_is_unavailable() {
     );
     assert!(e.partial.is_none(), "nothing ran");
     let mut after = std::vec::Vec::new();
-    m.serialize32(&mut after);
+    m.serialize(&mut after);
     assert_eq!(before, after, "an unavailable solve must not touch the parameters");
 }
 

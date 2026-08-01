@@ -6,6 +6,7 @@
 // The FD check validates the whole chain: chart, cached rotation, symbolic
 // embed, span folding into the owner's block.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 use arael::unitvec::UnitVecParam;
@@ -56,7 +57,7 @@ fn expected() -> vect3<f64> {
 fn grad_hessian_match_finite_differences() {
     let mut m = build(vect3::new(0.2, -0.5, 0.9));
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     assert_eq!(params.len(), 3, "dir.d (2) + w (1)");
 
     let n = params.len();
@@ -112,7 +113,7 @@ fn fixed_direction_stays_put() {
     let mut m = build(start);
     m.lms[0].dir = UnitVecParam::fixed(start);
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     assert_eq!(params.len(), 1, "only w remains");
     let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);

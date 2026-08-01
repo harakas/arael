@@ -7,7 +7,8 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{
-    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+    LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
+    SparseFaerOptions,
 };
 use m3500_demo::{Edge, Graph, Pose2, Prior};
 
@@ -1079,9 +1080,9 @@ pub unsafe extern "C" fn graph_solve_band(
     zero_result(out);
     match catch_unwind(AssertUnwindSafe(|| {
         let mut x0 = Vec::new();
-        hh.model.serialize64(&mut x0);
+        hh.model.serialize(&mut x0);
         arael::simple_lm::solve_band(&x0, kd as usize, &mut hh.model, &c).map(|r| {
-            hh.model.deserialize64(&r.x);
+            hh.model.deserialize(&r.x);
             r
         })
     })) {
@@ -1121,7 +1122,7 @@ pub unsafe extern "C" fn graph_cost(h: *mut GraphHandle) -> f64 {
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {
         let mut params = Vec::new();
-        hh.model.serialize64(&mut params);
+        hh.model.serialize(&mut params);
         hh.model.calc_cost(&params)
     })) {
         Ok(c) => {

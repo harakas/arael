@@ -2,6 +2,7 @@
 // This is a regression test for a bug where TripletBlock guards were
 // silently ignored in cost and grad/hessian computation.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock, Model};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -96,7 +97,7 @@ fn make_cross_model(active: bool) -> (TestModel, Vec<f64>) {
         hb: CrossBlock::new(),
     });
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 
@@ -116,7 +117,7 @@ fn make_triplet_model(active: bool) -> (TestModel, Vec<f64>) {
         hb: TripletBlock::new(),
     });
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 

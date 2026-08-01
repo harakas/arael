@@ -61,6 +61,7 @@
 //   need none: GPS + odometry + tilt determine every pose at all ramp
 //   scales.
 
+use arael::simple_lm::RootProblem;
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::quatern::quaternd;
@@ -638,7 +639,7 @@ fn print_usage() {
 // Enabled by SLAM_HESSIAN_BITMAP=<path.png> (or =1 for the default hessian.png).
 fn write_hessian_bitmap(path: &mut Path, out: &str) {
     let mut params: std::vec::Vec<f64> = std::vec::Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let n = params.len();
     let mut grad = vec![0.0f64; n];
     let mut coo = arael::simple_lm::CooMatrix::new(n);
@@ -693,7 +694,7 @@ fn main() {
     }
 
     let mut params = std::vec::Vec::new();
-    path.serialize32(&mut params);
+    path.serialize(&mut params);
 
     let n_frines: usize = path.landmarks.iter().map(|lm| lm.frines.len()).sum();
     println!("Path: {} poses, {} landmarks, {} frines, {} pose_pairs",
@@ -798,7 +799,7 @@ fn main() {
             ea_err_sum += (pose.r2w.rotation.get_euler_angles() - gt_e).norm();
         }
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
-        path.serialize64(&mut params64);
+        path.serialize(&mut params64);
         let cost = path.calc_cost(&params64);
         println!("\nFinal cost: {:.4}", cost);
         println!("Mean pose error vs GT: pos={:.4}m  ea={:.3}deg",

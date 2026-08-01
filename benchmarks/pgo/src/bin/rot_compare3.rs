@@ -17,6 +17,7 @@
 #[path = "../g2o3.rs"]
 mod g2o3;
 
+use arael::simple_lm::RootProblem;
 use arael::matrix::{matrix3, matrix3d, matrix3f};
 use arael::model::{
     CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam,
@@ -156,14 +157,14 @@ fn run_s(ds: &Dataset3, lambda0: f64) -> RunOut {
     let (poses, edges) = build_s_parts(ds);
     let mut g = SGraph3 { poses, edges };
     let mut params: Vec<f64> = Vec::new();
-    g.serialize64(&mut params);
+    g.serialize(&mut params);
     let t0 = std::time::Instant::now();
     let _ = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(1, lambda0));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize64(&result.x);
+    g.deserialize(&result.x);
     let poses = g.poses.iter()
         .map(|p| Pose3In {
             t: p.pos.value,
@@ -177,14 +178,14 @@ fn run_s_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
     let (poses, edges) = build_s_parts(ds);
     let mut g = SGraph3F { poses, edges };
     let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
+    g.serialize(&mut params);
     let t0 = std::time::Instant::now();
     let _ = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
+    g.deserialize(&result.x);
     let poses = g.poses.iter()
         .map(|p| Pose3In {
             t: vect3d::from(p.pos.value),
@@ -290,14 +291,14 @@ fn run_e(ds: &Dataset3, lambda0: f64) -> RunOut {
     let (poses, edges) = build_e_parts(ds);
     let mut g = EGraph3 { poses, edges };
     let mut params: Vec<f64> = Vec::new();
-    g.serialize64(&mut params);
+    g.serialize(&mut params);
     let t0 = std::time::Instant::now();
     let _ = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(1, lambda0));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize64(&result.x);
+    g.deserialize(&result.x);
     let poses = g.poses.iter()
         .map(|p| Pose3In {
             t: p.pos.value,
@@ -311,14 +312,14 @@ fn run_e_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
     let (poses, edges) = build_e_parts(ds);
     let mut g = EGraph3F { poses, edges };
     let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
+    g.serialize(&mut params);
     let t0 = std::time::Instant::now();
     let _ = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
+    g.deserialize(&result.x);
     let poses = g.poses.iter()
         .map(|p| Pose3In {
             t: vect3d::from(p.pos.value),
@@ -426,14 +427,14 @@ fn run_q(ds: &Dataset3, lambda0: f64) -> RunOut {
     let (poses, edges) = build_q_parts(ds);
     let mut g = QGraph3 { poses, edges };
     let mut params: Vec<f64> = Vec::new();
-    g.serialize64(&mut params);
+    g.serialize(&mut params);
     let t0 = std::time::Instant::now();
     let _ = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(1, lambda0));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize64(&result.x);
+    g.deserialize(&result.x);
     let poses = g.poses.iter()
         .map(|p| {
             // QuaternionParam.value is the solved unit quaternion (delta folded
@@ -449,14 +450,14 @@ fn run_q_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
     let (poses, edges) = build_q_parts(ds);
     let mut g = QGraph3F { poses, edges };
     let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
+    g.serialize(&mut params);
     let t0 = std::time::Instant::now();
     let _ = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
+    g.deserialize(&result.x);
     let poses = g.poses.iter()
         .map(|p| {
             let v = p.ea.value;

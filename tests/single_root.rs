@@ -7,6 +7,7 @@
 // arael-macros/src/constraint.rs (EntityLocation::RootSelf /
 // EntityLocation::DirectField).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{JacobianModel, Model, Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 
@@ -49,7 +50,7 @@ fn make_model() -> (SingleRoot, Vec<f64>) {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     (m, params)
 }
 
@@ -99,7 +100,7 @@ fn lm_solve_converges_to_fixed_values() {
     let (mut m, params) = make_model();
     let config = LmConfig::<f64> { verbose: false, ..Default::default() };
     let result = simple_lm::solve(&params, &mut m, &config).unwrap();
-    m.deserialize64(&result.x);
+    m.deserialize(&result.x);
     assert!((m.x.value - 3.0).abs() < 1e-10, "x.value = {}", m.x.value);
     assert!((m.y.value - 4.0).abs() < 1e-10, "y.value = {}", m.y.value);
     assert!((m.sub.z.value - 5.0).abs() < 1e-10, "sub.z.value = {}", m.sub.z.value);
@@ -109,7 +110,7 @@ fn lm_solve_converges_to_fixed_values() {
 #[test]
 fn constraint_indices_are_assigned() {
     // Both the root and the direct-composed Sub have #[arael(constraint_index)]
-    // fields. After serialize64 (which runs __set_block_indices), they must
+    // fields. After serialize (which runs __set_block_indices), they must
     // have been filled in with distinct, sequential IDs.
     let (m, _) = make_model();
     // Three constraints total; IDs assigned in traversal order. The exact

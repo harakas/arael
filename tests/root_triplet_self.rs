@@ -16,6 +16,7 @@
 // Hessian must match numerical derivatives exactly (up to f.d. noise).
 
 #[allow(unused_imports)]
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, TripletBlock, Model};
 use arael::simple_lm::LmProblem;
 
@@ -52,7 +53,7 @@ fn build_model() -> (TestModel, Vec<f64>) {
         hbt: TripletBlock::new(),
     };
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 

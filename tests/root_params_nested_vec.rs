@@ -11,6 +11,7 @@
 // global_delta/global_rot params.
 
 #[allow(unused_imports)]
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, Model};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -72,7 +73,7 @@ fn build_model() -> (TestModel, Vec<f64>) {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 

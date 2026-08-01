@@ -136,9 +136,9 @@ the first iteration on its own:
 
 ```rust,ignore
 let mut params = Vec::<f32>::new();
-model.serialize32(&mut params);
+model.serialize(&mut params);                               // RootProblem
 let result = solve_sparse_f32(&params, &mut model, &cfg);   // free function
-model.deserialize32(&result.x);
+model.deserialize(&result.x);
 ```
 
 ## `LmConfig` -- every field, with defaults
@@ -729,7 +729,7 @@ For the **steady-state cost per iteration**, use the `mean_*` methods --
 cost does not skew the average), or `None` when only the first call ran.
 
 After a successful solve, hand `result.x` back to the model via
-`model.deserialize32(&result.x)` (or `deserialize64`).
+`model.deserialize(&result.x)`.
 
 ## Graduated optimisation
 

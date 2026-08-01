@@ -5,6 +5,7 @@
 // with residuals and derivatives supplied at runtime must reach the
 // closed-form least-squares solution, on the dense and the sparse path.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{ExtendedModel, Param, TripletBlock};
 use arael::refs;
 use arael::simple_lm::{self, LmConfig, LmProblem};
@@ -96,9 +97,9 @@ fn extended_line_fit_matches_normal_equations() {
     // entity SelfBlocks exist to declare the pattern).
     let mut sparse = build();
     let mut p = Vec::new();
-    sparse.serialize64(&mut p);
+    sparse.serialize(&mut p);
     let r = simple_lm::solve_sparse(&p, &mut sparse, &cfg).unwrap();
-    sparse.deserialize64(&r.x);
+    sparse.deserialize(&r.x);
     assert!((sparse.coeffs[0].value.value - a_ref).abs() < 1e-8,
         "sparse a {} vs {}", sparse.coeffs[0].value.value, a_ref);
     assert!((sparse.coeffs[1].value.value - b_ref).abs() < 1e-8,

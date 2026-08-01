@@ -7,6 +7,7 @@
 //   cargo run -r --features faer --example bench_sparse
 //   OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 cargo run -r --features faer --example bench_sparse
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -381,7 +382,7 @@ fn main() {
     let cfg = SceneConfig { num_poses, num_landmarks, ..Default::default() };
     let mut path = build_path(&cfg);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let n = params.len();
 
     // Build sparse matrix and save sparsity pattern
@@ -536,7 +537,7 @@ fn main() {
     {
         let mut path = build_path(&cfg);
         let mut params: Vec<f64> = Vec::new();
-        path.serialize64(&mut params);
+        path.serialize(&mut params);
         delta_dense = time_one("dense", &mut arael::simple_lm::Dense, &mut path, &params);
     }
 
@@ -562,7 +563,7 @@ fn main() {
         {
         let mut path = build_path(&cfg);
         let mut params: Vec<f64> = Vec::new();
-        path.serialize64(&mut params);
+        path.serialize(&mut params);
         let delta = time_one("faer", &mut arael::simple_lm::SparseFaer::new(), &mut path, &params);
         compare("faer", &delta, &delta_dense);
     }
@@ -572,7 +573,7 @@ fn main() {
     {
         let mut path = build_path(&cfg);
         let mut params: Vec<f64> = Vec::new();
-        path.serialize64(&mut params);
+        path.serialize(&mut params);
         let delta = time_one("eigen", &mut arael::simple_lm::SparseEigen::new(), &mut path, &params);
         compare("eigen", &delta, &delta_dense);
     }
@@ -582,7 +583,7 @@ fn main() {
     {
         let mut path = build_path(&cfg);
         let mut params: Vec<f64> = Vec::new();
-        path.serialize64(&mut params);
+        path.serialize(&mut params);
         let delta = time_one("cholmod", &mut arael::simple_lm::SparseCholmod::new(), &mut path, &params);
         compare("cholmod", &delta, &delta_dense);
     }

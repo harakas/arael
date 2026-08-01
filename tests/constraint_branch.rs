@@ -4,6 +4,7 @@
 // right side and that the DERIVATIVE selects that side's slope (branch
 // differentiates each arm; the switch contributes nothing).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -31,7 +32,7 @@ fn cost_and_grad(px: f64, target: f64) -> (f64, Vec<f64>) {
     let mut w = World { nodes: refs::Vec::new() };
     w.nodes.push(Node { pos: Param::new(vect2d::new(px, 0.0)), target, hb: SelfBlock::new() });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let cost = w.calc_cost(&params);
     let n = params.len();
     let mut grad = vec![0.0; n];

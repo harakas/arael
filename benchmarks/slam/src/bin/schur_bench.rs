@@ -56,7 +56,7 @@ fn main() {
 
     let mut path = arael_runner::build(&scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let n = params.len();
 
     // block H via the two-scan assembly (as SparseFaer's fast path)

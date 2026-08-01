@@ -4,6 +4,7 @@
 // the first one. check_gradients()/numeric_gradient() are the
 // standalone gradient pieces.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::LmProblem;
@@ -152,7 +153,7 @@ fn a_wrong_declared_derivative_is_a_gradient_mismatch() {
 
     // The standalone checker sees the same thing over a raw vector.
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let d = w.check_gradients(&params);
     assert!(!d.is_clean());
 }
@@ -163,7 +164,7 @@ fn a_wrong_declared_derivative_is_a_gradient_mismatch() {
 fn numeric_gradient_matches_a_healthy_assembly() {
     let mut c = chain(4);
     let mut params = Vec::new();
-    c.serialize64(&mut params);
+    c.serialize(&mut params);
 
     let n = params.len();
     let mut grad = vec![0.0; n];

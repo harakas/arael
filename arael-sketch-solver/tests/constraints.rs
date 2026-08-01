@@ -1,3 +1,4 @@
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, Param};
 use arael::refs::Ref;
 use arael::vect::vect2d;
@@ -803,7 +804,7 @@ fn test_circle_has_4_params() {
     let mut sketch = Sketch::new();
     sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, std::f64::consts::TAU, true);
     let mut params = Vec::new();
-    sketch.serialize64(&mut params);
+    sketch.serialize(&mut params);
     assert_eq!(params.len(), 4, "circle should have 4 params (cx, cy, r, rb)");
 }
 
@@ -815,7 +816,7 @@ fn test_arc_has_6_params() {
     let mut sketch = Sketch::new();
     sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, 1.5, false);
     let mut params = Vec::new();
-    sketch.serialize64(&mut params);
+    sketch.serialize(&mut params);
     assert_eq!(params.len(), 6, "arc should have 6 params (cx, cy, r, rb, sa, ea)");
 }
 

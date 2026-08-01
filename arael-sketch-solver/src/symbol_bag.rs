@@ -2,6 +2,7 @@
 //! indices and symbolic expressions. Used for parametric equations in
 //! dimensions.
 
+use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael_sym::E;
 use crate::Sketch;
@@ -21,7 +22,7 @@ pub struct SymbolBag {
 
 impl SymbolBag {
     /// Build a symbol bag from the current sketch state.
-    /// Must be called after `serialize64()` so parameter indices are assigned.
+    /// Must be called after `serialize()` so parameter indices are assigned.
     pub fn build(sketch: &Sketch) -> Self {
         let mut param_indices = HashMap::new();
         let mut dim_values = HashMap::new();
@@ -245,7 +246,7 @@ mod tests {
 
         // Must serialize to assign indices
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
 
         let bag = SymbolBag::build(&sketch);
 
@@ -277,7 +278,7 @@ mod tests {
         sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 4.0));
 
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         let bag = SymbolBag::build(&sketch);
 
         // Direct param resolves to symbol
@@ -301,7 +302,7 @@ mod tests {
         sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, sa, ea, false);
 
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         let bag = SymbolBag::build(&sketch);
 
         // Check derived endpoint symbols exist

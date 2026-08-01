@@ -3,6 +3,7 @@
 // calc_jacobian, and exercises analyze_blockers over the real
 // macro-generated row layout.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel};
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
@@ -15,7 +16,7 @@ fn run_analysis(
 ) -> Option<BlockerReport> {
     // Pre-apply: populate cids / nids by running calc_jacobian once.
     let mut pre_params = Vec::new();
-    pre.serialize64(&mut pre_params);
+    pre.serialize(&mut pre_params);
     let _ = pre.calc_jacobian(&pre_params);
     let pre_nids: std::collections::HashSet<u32> = pre
         .constraint_nid_cid_pairs()
@@ -28,7 +29,7 @@ fn run_analysis(
     let saved = post.drift_isigma;
     post.drift_isigma = 0.0;
     let mut post_params = Vec::new();
-    post.serialize64(&mut post_params);
+    post.serialize(&mut post_params);
     let jac = post.calc_jacobian(&post_params);
     post.drift_isigma = saved;
 
@@ -154,7 +155,7 @@ fn expression_backed_dimension_in_dim_map() {
     });
     sketch.prepare_expr_constraints();
     let mut params = Vec::new();
-    sketch.serialize64(&mut params);
+    sketch.serialize(&mut params);
     // Running calc_jacobian populates cids on expr_constraints.
     let _ = sketch.calc_jacobian(&params);
 

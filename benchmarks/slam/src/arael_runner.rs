@@ -7,6 +7,7 @@
 // instantiate one shared model. Bodies reach the root's globals through
 // the `root` alias, which resolves under either root.
 
+use arael::simple_lm::RootProblem;
 use crate::scene::{Scene, Solution};
 use arael::matrix::matrix3;
 use arael::model::{CrossBlock, Param, SelfBlock, SimpleEulerAngleParam};
@@ -393,7 +394,7 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     use arael::simple_lm::LmProblem;
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     path.calc_cost(&params)
 }
 
@@ -404,7 +405,7 @@ pub fn write_hessian_bitmap(scene: &Scene, out: &str) {
     use arael::simple_lm::LmProblem;
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let n = params.len();
     let mut grad = vec![0.0f64; n];
     let mut coo = arael::simple_lm::CooMatrix::new(n);
@@ -472,19 +473,19 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
 pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let result = solve64(&params, &mut path, &cfg(max_iters)).expect("capped solve failed");
-    path.deserialize64(&result.x);
+    path.deserialize(&result.x);
     extract(&path)
 }
 
 pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut path = build_f32(scene);
     let mut params: Vec<f32> = Vec::new();
-    path.serialize32(&mut params);
+    path.serialize(&mut params);
     let result = solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()))
         .expect("capped solve failed");
-    path.deserialize32(&result.x);
+    path.deserialize(&result.x);
     extract_f32(&path)
 }
 
@@ -516,8 +517,8 @@ impl bench_harness::arael::Model for Path {
     type Solution = Solution;
     fn lambda0(scene: &Scene) -> f64 { lambda0(scene.poses.len(), false) }
     fn build(scene: &Scene) -> Self { build(scene) }
-    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
-    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> Solved<f64> { solve64(params, m, cfg) }
@@ -533,8 +534,8 @@ impl bench_harness::arael::Model for PathF {
     type Solution = Solution;
     fn lambda0(scene: &Scene) -> f64 { lambda0(scene.poses.len(), true) }
     fn build(scene: &Scene) -> Self { build_f32(scene) }
-    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
-    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> Solved<f32> { solve32(params, m, cfg) }
@@ -579,9 +580,9 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
 
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let result = solve64(&params, &mut path, &cfg(200)).expect("covariance solve failed");
-    path.deserialize64(&result.x);
+    path.deserialize(&result.x);
     let (np, nl) = (path.poses.len(), path.landmarks.len());
     let budget = Duration::from_secs_f64(budget_s);
     let cap_s = cell_cap_s();

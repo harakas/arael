@@ -17,6 +17,7 @@
 //   cargo run --release          # median of 20 rounds
 //   ROUNDS=50 cargo run --release
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, SelfBlock, CrossBlock, EulerAngleParam, SimpleEulerAngleParam, QuaternionParam};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::vect::vect3d;
@@ -90,7 +91,7 @@ fn build_s(deltas: &[matrix3d], n: usize) -> (SkyS, Vec<f64>) {
         sky.pairs.push(PairS { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     (sky, params)
 }
 
@@ -126,7 +127,7 @@ fn build_e(deltas: &[matrix3d], n: usize) -> (SkyE, Vec<f64>) {
         sky.pairs.push(PairE { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     (sky, params)
 }
 
@@ -162,7 +163,7 @@ fn build_q(deltas: &[matrix3d], n: usize) -> (SkyQ, Vec<f64>) {
         sky.pairs.push(PairQ { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
-    sky.serialize64(&mut params);
+    sky.serialize(&mut params);
     (sky, params)
 }
 

@@ -3,6 +3,7 @@
 // in both the cost path and the grad/hessian path, while derivatives
 // stay the exact rational forms (solves still converge).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::utils::{fast_atan, fast_atan2};
@@ -54,12 +55,12 @@ fn cost_routes_through_the_selected_atan() {
 
     let mut m = M { a: Param::new(a), b: Param::new(b), t, hb: SelfBlock::new() };
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     assert_eq!(m.calc_cost(&params), expected_std);
 
     let mut mf = Mf { a: Param::new(a), b: Param::new(b), t, s: 0.0, hb: SelfBlock::new() };
     let mut params = Vec::new();
-    mf.serialize64(&mut params);
+    mf.serialize(&mut params);
     assert_eq!(mf.calc_cost(&params), expected_fast);
 
     // The two routes genuinely differ at this point (otherwise the two
@@ -92,7 +93,7 @@ fn fast_atan_callable_directly_in_constraints() {
     };
     let mut md = Md { a: Param::new(a), b: Param::new(b), t, hb: SelfBlock::new() };
     let mut params = Vec::new();
-    md.serialize64(&mut params);
+    md.serialize(&mut params);
     assert_eq!(md.calc_cost(&params), expected);
 }
 
@@ -122,10 +123,10 @@ fn fast_model_solves_to_the_optimum() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    mf.serialize64(&mut params);
+    mf.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut mf,
         &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
-    mf.deserialize64(&result.x);
+    mf.deserialize(&result.x);
 
     assert!(result.end_cost < 1e-14, "fast model must converge, cost={}", result.end_cost);
     assert!((fast_atan(mf.a.value) - s).abs() < 1e-7,

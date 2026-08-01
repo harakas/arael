@@ -39,6 +39,7 @@ pub use expr_constraint::ExpressionConstraint;
 pub mod blocker;
 pub use blocker::{BlockerReport, analyze as analyze_blockers};
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
 
 const TIMING_DEBUG: bool = false;
@@ -1585,7 +1586,7 @@ impl Sketch {
         // Need param indices assigned for SymbolBag; serialize to assign them.
         {
             let mut tmp = std::vec::Vec::new();
-            self.serialize64(&mut tmp);
+            self.serialize(&mut tmp);
         }
         let mut bag = SymbolBag::build(self);
 
@@ -1732,7 +1733,7 @@ impl Sketch {
         let parsed = arael_sym::parse(expr_str).map_err(|e| e.to_string())?;
         {
             let mut tmp = std::vec::Vec::new();
-            self.serialize64(&mut tmp);
+            self.serialize(&mut tmp);
         }
         let bag = SymbolBag::build(self);
         let expanded = expr_constraint::expand_derived(&parsed, &bag);
@@ -2118,7 +2119,7 @@ impl Sketch {
         self.rebuild_expr_constraints();
         if !self.expr_constraints.is_empty() {
             let mut tmp = Vec::new();
-            self.serialize64(&mut tmp);
+            self.serialize(&mut tmp);
             let bag = SymbolBag::build(self);
             for ec in &mut self.expr_constraints {
                 ec.resolve(&bag);
@@ -2202,7 +2203,7 @@ impl Sketch {
         self.drift_isigma = 0.0;
 
         let mut params = Vec::new();
-        self.serialize64(&mut params);
+        self.serialize(&mut params);
         let n = params.len();
         if n == 0 {
             self.drift_isigma = saved_drift;
@@ -2374,7 +2375,7 @@ impl Sketch {
         self.drift_isigma = 0.0;
 
         let mut params = Vec::new();
-        self.serialize64(&mut params);
+        self.serialize(&mut params);
         let n = params.len();
         if n == 0 {
             self.drift_isigma = saved_drift;
@@ -2793,7 +2794,7 @@ impl Sketch {
         self.update_line_dir_flags();
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
-        self.serialize64(&mut params64);
+        self.serialize(&mut params64);
         let n = params64.len();
 
         if n == 0 {
@@ -2850,7 +2851,7 @@ impl Sketch {
             self.constraint_isigma = full_isigma * scale;
 
             let mut params = std::vec::Vec::new();
-            self.serialize64(&mut params);
+            self.serialize(&mut params);
             let cost = self.calc_cost(&params);
 
             let lambda = if cost > 1.0 {
@@ -2875,7 +2876,7 @@ impl Sketch {
             };
             match stage_result {
                 Ok(r) => {
-                    self.deserialize64(&r.x);
+                    self.deserialize(&r.x);
                     total_iters += r.iterations;
                     total_accepted += r.accepted_iterations;
                     result.end_cost = r.end_cost;
@@ -2891,7 +2892,7 @@ impl Sketch {
                     // panic, and the previous committed values stand.
                     eprintln!("sketch solve stage failed: {}", e);
                     if let Some(p) = e.into_partial() {
-                        self.deserialize64(&p.x);
+                        self.deserialize(&p.x);
                         total_iters += p.iterations;
                         total_accepted += p.accepted_iterations;
                         result.end_cost = p.end_cost;
@@ -2943,7 +2944,7 @@ impl Sketch {
         if !has_work { return; }
         let bag = SymbolBag::build(self);
         let mut params = Vec::new();
-        self.serialize64(&mut params);
+        self.serialize(&mut params);
         let vars = bag.eval_vars(&params);
         // Update user params first (dims may reference them)
         for p in &mut self.user_params {
@@ -3028,7 +3029,7 @@ mod jacobian_tests {
 
         sketch.prepare_expr_constraints();
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         (sketch, params)
     }
 

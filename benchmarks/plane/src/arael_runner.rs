@@ -9,6 +9,7 @@
 // The entities are generic over the scalar; the two concrete roots
 // (`World` f64, `WorldF` f32) instantiate one shared model.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
 use arael::transform::TransformParam;
@@ -149,7 +150,7 @@ pub struct World {
 pub fn parameter_count(raw: &RawScene) -> usize {
     let mut world = build(raw);
     let mut params: Vec<f64> = Vec::new();
-    world.serialize64(&mut params);
+    world.serialize(&mut params);
     params.len()
 }
 
@@ -299,7 +300,7 @@ pub fn initial_cost(raw: &RawScene) -> f64 {
     use arael::simple_lm::LmProblem;
     let mut world = build(raw);
     let mut params: Vec<f64> = Vec::new();
-    world.serialize64(&mut params);
+    world.serialize(&mut params);
     world.calc_cost(&params)
 }
 
@@ -315,8 +316,8 @@ impl bench_harness::arael::Model for World {
     // driver holds it.
     const NIELSEN: bool = true;
     fn build(raw: &RawScene) -> Self { build(raw) }
-    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
-    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
         -> Result<LmResult<f64>, SolveFailure<f64>> {
@@ -340,20 +341,20 @@ pub fn run_f32(raw: &RawScene) -> RunOut { bench_harness::arael::run::<WorldF>(r
 pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let mut world = build(raw);
     let mut params: Vec<f64> = Vec::new();
-    world.serialize64(&mut params);
+    world.serialize(&mut params);
     let cfg = bench_harness::arael::config::<World>(raw, max_iters);
     let r = lm_solve(&params, &mut SparseFaer::<f64>::new(), &mut world, &cfg).unwrap();
-    world.deserialize64(&r.x);
+    world.deserialize(&r.x);
     extract(&world)
 }
 
 pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let mut world = build_f32(raw);
     let mut params: Vec<f32> = Vec::new();
-    world.serialize32(&mut params);
+    world.serialize(&mut params);
     let cfg = bench_harness::arael::config::<WorldF>(raw, max_iters);
     let r = lm_solve(&params, &mut SparseFaer::<f32>::new(), &mut world, &cfg).unwrap();
-    world.deserialize32(&r.x);
+    world.deserialize(&r.x);
     extract_f32(&world)
 }
 
@@ -376,8 +377,8 @@ impl bench_harness::arael::Model for WorldF {
     fn lambda0(_: &RawScene) -> f64 { 1e-8 }
     const NIELSEN: bool = true;
     fn build(raw: &RawScene) -> Self { build_f32(raw) }
-    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
-    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
         -> Result<LmResult<f32>, SolveFailure<f32>> {
@@ -443,7 +444,7 @@ mod tests {
         let solve_with = |policy| {
             let mut world = super::build(&raw);
             let mut params: Vec<f64> = Vec::new();
-            world.serialize64(&mut params);
+            world.serialize(&mut params);
             let mut solver = SparseFaer::<f64>::new()
                 .with_policy(policy)
                 .with_envelope_schur(EnvelopeMode::Always);

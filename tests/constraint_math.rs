@@ -2,6 +2,7 @@
 // the macro. Residual values are checked against the runtime vector math,
 // and analytic gradients against central finite differences of calc_cost.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect2d, vect3d};
@@ -266,7 +267,7 @@ fn build() -> (Space, Vec<f64>) {
         hb: SelfBlock::new(),
     });
     let mut params = Vec::new();
-    space.serialize64(&mut params);
+    space.serialize(&mut params);
     (space, params)
 }
 

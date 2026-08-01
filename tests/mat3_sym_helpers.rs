@@ -4,6 +4,7 @@
 // produce identical gradients and Hessians -- they are the same
 // expressions, so the generated code is bit-identical.
 
+use arael::simple_lm::RootProblem;
 use arael::matrix::matrix3d;
 use arael::model::{Param, SelfBlock};
 use arael::refs;
@@ -107,7 +108,7 @@ fn build() -> (W, Vec<f64>) {
     w.rowa.push(RowA { ea: Param::new(ea), g, hb: SelfBlock::new() });
     w.rowb.push(RowB { ea: Param::new(ea), g, hb: SelfBlock::new() });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     (w, params)
 }
 

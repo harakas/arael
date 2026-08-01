@@ -2,6 +2,7 @@
 // by the generated constraint code (verified by `cargo expand`), and the
 // assembled gradient must match finite differences.
 
+use arael::simple_lm::RootProblem;
 use arael::angle::AngleParam;
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
@@ -98,7 +99,7 @@ fn build() -> Graph {
 fn gradient_matches_finite_difference() {
     let mut g = build();
     let mut params = std::vec::Vec::new();
-    g.serialize64(&mut params);
+    g.serialize(&mut params);
     let d = g.check_gradients(&params);
     assert!(d.is_clean(), "assembled gradient disagrees with FD:\n{}", d);
 }
@@ -107,7 +108,7 @@ fn gradient_matches_finite_difference() {
 fn solves_the_loop() {
     let mut g = build();
     let mut params = std::vec::Vec::new();
-    g.serialize64(&mut params);
+    g.serialize(&mut params);
     let cfg = arael::simple_lm::LmConfig::default();
     let r = arael::simple_lm::solve_dense(&params, &mut g, &cfg).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);

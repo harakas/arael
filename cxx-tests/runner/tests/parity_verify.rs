@@ -5,7 +5,7 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
-use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SolveFailureKind};
+use arael::simple_lm::{LmConfig, LmProblem, LmStatus, RootProblem, SolveFailureKind};
 use arael::vect::{vect2d, vect3d};
 use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Rig, Tie};
 use std::collections::HashMap;
@@ -496,9 +496,9 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     let mut fitb = Fit::default();
     fill(&mut fitb);
     let mut x0 = std::vec::Vec::new();
-    fitb.serialize64(&mut x0);
+    fitb.serialize(&mut x0);
     let rb2 = arael::simple_lm::solve_band(&x0, 4, &mut fitb, &cfg).unwrap();
-    fitb.deserialize64(&rb2.x);
+    fitb.deserialize(&rb2.x);
     assert_eq!(g("band_status"), code(&rb2.status));
     assert_eq!(g("band_end"), rb2.end_cost);
     assert_eq!(g("band_m"), fitb.m.value);

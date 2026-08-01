@@ -18,6 +18,7 @@
 /// --init <vals>      Initial parameter values, e.g. "a=1,b=0.5,c=-0.1"
 /// --sigma <value>    Residual normalization (default: 0.01)
 
+use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael::model::{ExtendedModel, Param, TripletBlock};
 use arael::simple_lm::LmConfig;
@@ -192,7 +193,7 @@ fn build_model(equation: &str, data: Vec<(f64, f64)>, init: &HashMap<String, f64
     // Serialize to assign param indices
     {
         let mut tmp = Vec::new();
-        model.serialize64(&mut tmp);
+        model.serialize(&mut tmp);
     }
 
     // Pre-compute symbolic derivatives
@@ -294,12 +295,12 @@ fn main() {
 
     let result = {
         let mut params = Vec::new();
-        model.serialize64(&mut params);
+        model.serialize(&mut params);
         // conservative: a runtime-parsed user expression with no informed
         // starting values has unknown conditioning.
         let config = LmConfig::conservative().with_verbose(true);
         let result = arael::simple_lm::solve_sparse(&params, &mut model, &config).unwrap();
-        model.deserialize64(&result.x);
+        model.deserialize(&result.x);
         result
     };
 
@@ -325,7 +326,7 @@ fn main() {
     // interval, not a strict Gaussian interval.
     use arael::simple_lm::LmProblem;
     let mut params_final = Vec::new();
-    model.serialize64(&mut params_final);
+    model.serialize(&mut params_final);
     let n_p = params_final.len();
     let mut grad = vec![0.0_f64; n_p];
     let mut hess = vec![0.0_f64; n_p * n_p];

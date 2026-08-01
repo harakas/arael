@@ -42,6 +42,7 @@
 //!
 //! Run:  cargo run -r --example slam2d_align_demo
 
+use arael::simple_lm::RootProblem;
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
@@ -490,7 +491,7 @@ fn main() {
     // Stage-2 consensus covariance (2 H^-1) -> 95% ellipses (chi^2(0.95,2)=5.991),
     // the decoupled counterpart to slam2d_multi's joint landmark ellipses.
     let mut sparams: std::vec::Vec<f32> = std::vec::Vec::new();
-    amap.serialize32(&mut sparams);
+    amap.serialize(&mut sparams);
     let sn = sparams.len();
     let mut sgrad = vec![0.0_f32; sn];
     let mut shess = vec![0.0_f32; sn * sn];

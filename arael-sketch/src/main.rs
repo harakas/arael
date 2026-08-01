@@ -9,6 +9,7 @@ mod tools;
 mod drawing;
 mod app_update;
 
+use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use eframe::egui;
 use arael::model::{Param, CrossBlock};
@@ -1863,7 +1864,7 @@ impl EditorApp {
     /// Recompute cached cost from the current sketch state.
     pub fn update_cost(&mut self) {
         let mut params = Vec::new();
-        self.sketch.serialize64(&mut params);
+        self.sketch.serialize(&mut params);
         self.last_cost = self.sketch.calc_cost(&params);
     }
 
@@ -2109,7 +2110,7 @@ impl EditorApp {
         let snapshot = bincode::serialize(&self.sketch).ok();
         let old_cost = {
             let mut params = Vec::new();
-            self.sketch.serialize64(&mut params);
+            self.sketch.serialize(&mut params);
             self.sketch.calc_cost(&params)
         };
         self.begin_group();

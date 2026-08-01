@@ -6,6 +6,7 @@
 // `finish` writes the user-facing value back. The body reads `off.c`, whose
 // `symbolic =` expansion carries d(c)/d(delta) = 1 through the constraint.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Component, CrossBlock, Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 use arael::vect::vect3d;
@@ -81,7 +82,7 @@ fn build() -> M {
 fn grad_hessian_match_finite_differences() {
     let mut m = build();
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     assert_eq!(params.len(), 4, "w + d per item");
 
     let n = params.len();
@@ -208,7 +209,7 @@ fn build_sq() -> MSq {
 fn declared_deriv_cache_matches_finite_differences() {
     let mut m = build_sq();
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     let n = params.len();
     let mut ag = vec![0.0; n];
     let mut ah = vec![0.0; n * n];
@@ -335,7 +336,7 @@ fn build_chain() -> Chain {
 fn component_only_entity_gets_a_live_system() {
     let mut c = build_chain();
     let mut params = Vec::new();
-    c.serialize64(&mut params);
+    c.serialize(&mut params);
     assert_eq!(params.len(), 6, "two free nodes, 3 params each");
 
     let n = params.len();

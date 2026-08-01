@@ -93,7 +93,7 @@ fn main() {
         let ds = bal::load(path);
         let mut scene = arael_runner::build_f64(&ds);
         let mut params: Vec<f64> = Vec::new();
-        scene.serialize64(&mut params);
+        scene.serialize(&mut params);
         let n = params.len();
 
         let mut spans = Vec::new();

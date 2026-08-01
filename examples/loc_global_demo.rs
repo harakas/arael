@@ -23,6 +23,7 @@
 //     Pose. Cross pairs land in path.hbt (COO).
 // The rest (drift on raw params, odometry) is unchanged from loc_demo.
 
+use arael::simple_lm::RootProblem;
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
@@ -392,10 +393,10 @@ impl Path {
         self.global_rot.optimize = true;
 
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        self.serialize32(&mut params);
+        self.serialize(&mut params);
         let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
         let result = arael::simple_lm::solve_sparse_f32(&params, self, &config).unwrap();
-        self.deserialize32(&result.x);
+        self.deserialize(&result.x);
         println!("optimise_center: {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
             result.iterations, result.start_cost, result.end_cost,
             self.global_delta.value, self.global_rot.value);
@@ -606,7 +607,7 @@ fn main() {
     let (mut path, gt_poses, _gt_landmarks) = build_path(&cfg);
 
     let mut params = std::vec::Vec::new();
-    path.serialize32(&mut params);
+    path.serialize(&mut params);
 
     let n_frines: usize = path.landmarks.iter().map(|lm| lm.frines.len()).sum();
     println!("Path: {} poses, {} landmarks, {} frines, {} pose_pairs",
@@ -635,7 +636,7 @@ fn main() {
     {
         use arael::model::JacobianModel;
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
         let jac = path.calc_jacobian(&params);
         use std::collections::HashMap;
         let mut per_label: HashMap<&'static str, (usize, f32, f32)> = HashMap::new();
@@ -664,7 +665,7 @@ fn main() {
     // pose<->root cross pair correctly.
     {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
         let n = params.len();
         let mut ag = vec![0.0f32; n];
         let mut ah = vec![0.0f32; n * n];
@@ -706,12 +707,12 @@ fn main() {
         path.frine_isigma_scale = scale;
 
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
         let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
         let result = arael::simple_lm::solve_sparse_f32(&params, &mut path, &config).unwrap();
-        path.deserialize32(&result.x);
+        path.deserialize(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
             result.iterations, result.start_cost, result.end_cost,
             path.global_delta.value, path.global_rot.value);
@@ -721,7 +722,7 @@ fn main() {
     // they are optimized; the pose-refinement passes hold them fixed.
     if path.global_delta.optimize {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
         let n = params.len();
         let mut ag = vec![0.0f32; n];
         let mut ah = vec![0.0f32; n * n];
@@ -751,7 +752,7 @@ fn main() {
     // Absolute pose errors vs GT (meaningful -- no gauge freedom)
     {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
         let cost = path.calc_cost(&params);
         println!("\nFinal cost: {:.4}", cost);
 

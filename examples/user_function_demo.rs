@@ -19,6 +19,7 @@
 //! two residuals -- `sigmoid(x) = 0.8` and `my_safe_asin(x) = 0.5` --
 //! weighted equally. LM converges to a single best-fit x.
 
+use arael::simple_lm::RootProblem;
 use arael::info;
 use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
@@ -76,12 +77,12 @@ fn main() {
     };
 
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     info!("Start x = {:.6}, cost = {:.6}", params[0], m.calc_cost(&params));
 
     let config = LmConfig::conservative().with_verbose(true).with_max_iters(50);
     let result = simple_lm::solve(&params, &mut m, &config).unwrap();
-    m.deserialize64(&result.x);
+    m.deserialize(&result.x);
 
     let r1 = sigmoid_f64(m.x.value) - 0.8;
     let r2 = my_safe_asin_eval(m.x.value) - 0.5;

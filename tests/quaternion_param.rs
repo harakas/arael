@@ -3,6 +3,7 @@
 // EulerAngleParam's universal constraint codegen (ref_rotation * rotation(delta))
 // -- only the re-centering differs (quaternion product + renormalize).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, SelfBlock, QuaternionParam};
 use arael::simple_lm::{self, LmConfig};
 use arael::vect::vect3d;
@@ -40,10 +41,10 @@ fn quaternion_param_advances_through_gimbal() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    rig.serialize64(&mut params);
+    rig.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
         &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
-    rig.deserialize64(&result.x);
+    rig.deserialize(&result.x);
 
     assert!(result.end_cost < 1e-12,
         "QuaternionParam must converge through the gimbal, cost={}", result.end_cost);
@@ -72,7 +73,7 @@ fn value_syncs_only_on_deserialize() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    rig.serialize64(&mut params);
+    rig.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
         &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     assert!(result.end_cost < 1e-12, "solve must converge, cost={}", result.end_cost);
@@ -83,7 +84,7 @@ fn value_syncs_only_on_deserialize() {
         "value must stay at the initial guess until deserialize");
 
     // After deserialize, value carries the optimized orientation.
-    rig.deserialize64(&result.x);
+    rig.deserialize(&result.x);
     let m = rig.att.value.rotation_matrix();
     let err: f64 = (0..3).map(|i| (0..3).map(|j| (m[i][j] - target[i][j]).abs()).sum::<f64>()).sum();
     assert!(err < 1e-6, "deserialized value must recompose the result, err={}", err);
@@ -157,10 +158,10 @@ fn fixed_quaternion_param_drives_constraints() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    rig.serialize64(&mut params);
+    rig.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
         &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
-    rig.deserialize64(&result.x);
+    rig.deserialize(&result.x);
 
     let m = rig.free_att.value.rotation_matrix();
     let t = q.rotation_matrix();
@@ -192,7 +193,7 @@ fn fixed_quaternion_param_has_no_params() {
         hb: SelfBlock::new(),
     };
     let mut params = Vec::new();
-    rig.serialize64(&mut params);
+    rig.serialize(&mut params);
     assert_eq!(params.len(), 0, "a fixed QuaternionParam must serialize no params");
     assert_eq!(rig.att.index(), u32::MAX);
 }

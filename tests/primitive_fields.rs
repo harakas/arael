@@ -4,6 +4,7 @@
 // bool, char, String). Non-parameter primitives are read at runtime, e.g. in a
 // guard.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock};
 use arael::refs;
 use arael::simple_lm::LmProblem;
@@ -52,7 +53,7 @@ fn world(kind: i32) -> (W, Vec<f64>) {
         hb: SelfBlock::new(),
     });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     (w, params)
 }
 

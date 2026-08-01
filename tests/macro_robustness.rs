@@ -1,6 +1,7 @@
 // Macro robustness: guard rewriting on the AST, passive SelfBlock
 // wiring for Arena and direct-composed entities.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael::refs::{self, Ref};
@@ -120,7 +121,7 @@ struct WD {
 fn direct_composed_passive_entity_is_wired() {
     let mut wd = WD { direct: DirectPt { x: Param::new(1.0), hb: SelfBlock::new() } };
     let mut params = Vec::new();
-    wd.serialize64(&mut params);
+    wd.serialize(&mut params);
     assert_eq!(params.len(), 1);
     assert!(wd.direct.hb.is_active(),
         "direct-composed passive SelfBlock must have wired indices after serialize");
@@ -138,7 +139,7 @@ fn guard_with_more_than_ten_self_references() {
     w.g11s.push(mk(1.0));  // guard sum 11 > 0: active
     w.g11s.push(mk(-1.0)); // guard sum -11: inactive
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let cost = w.calc_cost(&params);
     // Only the active instance contributes (5^2); the inactive one's
     // residual must be guarded off. If the 11th `self.` survived the
@@ -152,7 +153,7 @@ fn guard_with_block_expression() {
     w.gblks.push(GBlk { x: Param::new(0.0), target: 3.0, threshold: 0.5, lvl: 1.0, hb: SelfBlock::new() });
     w.gblks.push(GBlk { x: Param::new(0.0), target: 3.0, threshold: 0.5, lvl: 0.0, hb: SelfBlock::new() });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     let cost = w.calc_cost(&params);
     assert!((cost - 9.0).abs() < 1e-12, "cost={}", cost);
 }
@@ -164,14 +165,14 @@ fn arena_passive_entity_is_wired() {
     let pt = w.pts.push(ArenaPt { x: Param::new(0.0), hb: SelfBlock::new() });
     w.ties.push(Tie { anchor: w.anchors.ref_at(0), pt, gap: 1.5, hb: CrossBlock::new() });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     // Pre-fix, the Arena entity's SelfBlock kept u32::MAX indices: its
     // diagonal stayed zero, which now terminates the solve immediately
     // (B20). Post-fix the solve converges: anchor -> 2, pt -> 0.5.
     let result = simple_lm::solve(&params, &mut w, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-12, "cost={} iters={}", result.end_cost, result.iterations);
     assert!(result.iterations > 0, "solve must actually iterate");
-    w.deserialize64(&result.x);
+    w.deserialize(&result.x);
     let a = w.anchors[0].x.value;
     assert!((a - 2.0).abs() < 1e-6, "anchor={}", a);
 }

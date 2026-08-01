@@ -18,6 +18,7 @@
 // (add MIRIFLAGS=-Zmiri-tree-borrows to get past a known upstream
 // Stacked Borrows violation inside nalgebra's Cholesky views).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock, CrossBlock, JacobianModel};
 use arael::simple_lm::{self, LmConfig, LmProblem, CooMatrix, CscMatrix};
 use arael::refs::{self, Ref};
@@ -64,7 +65,7 @@ fn build() -> (M, Vec<f64>) {
     m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(0), hb: CrossBlock::new() });
     m.pairs.push(Pair { a: m.pts.ref_at(1), b: m.pts.ref_at(2), hb: CrossBlock::new() });
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     (m, params)
 }
 
@@ -215,14 +216,14 @@ fn aliased_pair_converges() {
     m.pts.push(Pt { x: Param::new(0.5), hb: SelfBlock::new() });
     m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(0), hb: CrossBlock::new() });
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut m, &LmConfig::default()).unwrap();
-    m.deserialize64(&result.x);
+    m.deserialize(&result.x);
     let n = params.len();
     let mut grad = vec![0.0; n];
     let mut h = vec![0.0; n * n];
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     m.calc_grad_hessian_dense(&params, &mut grad, &mut h);
     // Analytic stationary point of (x^2-4)^2 + x^2: x = sqrt(3.5).
     let x = m.pts[0].x.value;
@@ -245,7 +246,7 @@ fn distinct_entities_still_solve() {
     m.pts.push(Pt { x: Param::new(1.8), hb: SelfBlock::new() });
     m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(1), hb: CrossBlock::new() });
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     let result = simple_lm::solve(&params, &mut m, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-20, "cost={}", result.end_cost);
 }
@@ -324,7 +325,7 @@ fn aliased_cross_equals_self_formulation() {
     };
     ws.p2s.push(P2 { x: Param::new(x), y: Param::new(y), hb: SelfBlock::new() });
     let mut params_s = Vec::new();
-    ws.serialize64(&mut params_s);
+    ws.serialize(&mut params_s);
     let n = params_s.len();
     let mut g_s = vec![0.0; n];
     let mut h_s = vec![0.0; n * n];
@@ -338,7 +339,7 @@ fn aliased_cross_equals_self_formulation() {
     wc.q2s.push(Q2 { x: Param::new(x), y: Param::new(y), hb: SelfBlock::new() });
     wc.pairs.push(PairQ { a: wc.q2s.ref_at(0), b: wc.q2s.ref_at(0), hb: CrossBlock::new() });
     let mut params_c = Vec::new();
-    wc.serialize64(&mut params_c);
+    wc.serialize(&mut params_c);
     assert_eq!(params_c.len(), n);
     let mut g_c = vec![0.0; n];
     let mut h_c = vec![0.0; n * n];

@@ -4,6 +4,7 @@
 // constraint fired unconditionally (found via a robust curve fit where three
 // mode-guarded constraints all activated at once).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::LmProblem;
@@ -46,7 +47,7 @@ fn world(active: bool) -> (World, Vec<f64>) {
     let obs = vec![Obs { curve: cref, target: 3.0, active }];
     w.batches.push(Batch { obs });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     (w, params)
 }
 

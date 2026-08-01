@@ -715,13 +715,13 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// all stashed `constraint` attributes in the model hierarchy. Generates
 /// the `LmProblem` trait implementation (`calc_cost()`, the
 /// `calc_grad_hessian_*` assembly family, `advance()`) and the
-/// `RootProblem` impl (`serialize` / `deserialize` -- the parameter round
-/// trip), which unlocks LmProblem's default solve entry points
+/// `RootProblem` impl (`serialize` / `deserialize` -- the parameter
+/// round trip, block-index wiring, and the extended-deserialize hook),
+/// which unlocks LmProblem's default solve entry points
 /// `solve_with` / `solve_dense` / `solve_sparse` on the type
 /// (`use arael::simple_lm::LmProblem` to call them).
-/// Also generates suffixed `serialize64()` / `deserialize64()` (and
-/// `32`) convenience methods and `__set_block_indices()` /
-/// `__compute_blocks()` internals.
+/// Also generates the `__set_block_indices()` / `__compute_blocks()`
+/// internals.
 ///
 /// Use `f32` for single-precision optimization.
 ///

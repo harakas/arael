@@ -4,6 +4,7 @@
 // `self.pos` must remain a differentiated Param) and a cross-block (Link, where
 // `self.offset` / `self.w` are the constraint's own data fields).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -61,7 +62,7 @@ fn build() -> (World, Vec<f64>) {
     w.points.push(Pt { pos: Param::new(vect2d::new(0.5, -0.5)), hb: SelfBlock::new() });
     w.links.push(Link { a: w.points.ref_at(0), b: w.points.ref_at(1), offset: 0.4, w: 2.0, hb: CrossBlock::new() });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     (w, params)
 }
 

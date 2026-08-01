@@ -336,10 +336,10 @@ fn main() {
     let n_frines: usize = path.landmarks.iter().map(|l| l.frines.len()).sum();
     println!("Path: {} poses, {} pose_pairs, {} landmarks, {} frines",
         path.poses.len(), path.pose_pairs.len(), path.landmarks.len(), n_frines);
-    // Report the flattened parameter count (serialize32 collects every
+    // Report the flattened parameter count (serialize collects every
     // optimize = true param into one vector).
     let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-    path.serialize32(&mut params);
+    path.serialize(&mut params);
     println!("Parameters: {} (Pose={}, Landmark={})\n",
         params.len(), Pose::PARAM_COUNT, Landmark::PARAM_COUNT);
 

@@ -6,6 +6,7 @@
 // forms (`root.` alias vs lowercased type name, `root.hb` vs the param-less
 // `[hb, root.hbt]` triplet spelling) must agree on the optimum.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, TripletBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 
@@ -44,7 +45,7 @@ fn build() -> Fit {
 fn grad_hessian_match_finite_differences() {
     let mut m = build();
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     let n = params.len();
     assert_eq!(n, 2, "only the root's params serialize");
 

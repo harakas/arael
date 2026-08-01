@@ -99,7 +99,7 @@ fn main() {
     // ---- build S exactly as the solver backend does ----------------------
     let mut path = arael_runner::build(&scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let n = params.len();
     let mut spans = Vec::new();
     path.collect_param_block_spans(&mut spans);

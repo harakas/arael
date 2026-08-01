@@ -10,6 +10,7 @@
 //     inside it.
 //   - The same holds across a CrossBlock (cross Hessian scaled too).
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::LmProblem;
@@ -167,7 +168,7 @@ fn build_self() -> (W, Vec<f64>) {
     // Inside the threshold (s < k2) huber is exactly least squares.
     w.huber_in.push(PtH { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, k2: C2, hb: SelfBlock::new() });
     let mut params = Vec::new();
-    w.serialize64(&mut params);
+    w.serialize(&mut params);
     (w, params)
 }
 
@@ -363,14 +364,14 @@ fn cross_block_loss_scales_the_cross_hessian() {
     plain.nodes.push(Node { x: Param::new(n1.0), y: Param::new(n1.1), hb: SelfBlock::new() });
     plain.links.push(Lp { a: plain.nodes.ref_at(0), b: plain.nodes.ref_at(1), dx: 0.0, dy: 0.0, hb: CrossBlock::new() });
     let mut pp = Vec::new();
-    plain.serialize64(&mut pp);
+    plain.serialize(&mut pp);
 
     let mut cauchy = CrossCauchy { nodes: refs::Vec::new(), links: std::vec::Vec::new() };
     cauchy.nodes.push(Node { x: Param::new(n0.0), y: Param::new(n0.1), hb: SelfBlock::new() });
     cauchy.nodes.push(Node { x: Param::new(n1.0), y: Param::new(n1.1), hb: SelfBlock::new() });
     cauchy.links.push(Lc { a: cauchy.nodes.ref_at(0), b: cauchy.nodes.ref_at(1), dx: 0.0, dy: 0.0, c2: C2, hb: CrossBlock::new() });
     let mut cp = Vec::new();
-    cauchy.serialize64(&mut cp);
+    cauchy.serialize(&mut cp);
 
     let n = pp.len();
     assert_eq!(n, 4);

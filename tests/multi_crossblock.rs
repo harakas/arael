@@ -6,6 +6,7 @@
 // "never drop cross-Hessian" invariant under the multi-cross refactor.
 
 #[allow(unused_imports)]
+use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock, Model};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -119,7 +120,7 @@ fn make_triplet_model() -> (TestModel, Vec<f64>) {
         hb: TripletBlock::new(),
     });
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 
@@ -140,7 +141,7 @@ fn make_multi_cross_model() -> (TestModel, Vec<f64>) {
         hb_bc: CrossBlock::new(),
     });
     let mut params = Vec::new();
-    model.serialize64(&mut params);
+    model.serialize(&mut params);
     (model, params)
 }
 

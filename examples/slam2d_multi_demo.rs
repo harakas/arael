@@ -21,6 +21,7 @@
 //! Run:
 //!     cargo run -r --example slam2d_multi_demo
 
+use arael::simple_lm::RootProblem;
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
@@ -227,7 +228,7 @@ fn main() {
     println!("Map: {} runs, {} poses total, {} shared landmarks, {} sightings",
         map.paths.len(), n_poses, map.landmarks.len(), n_frines);
     let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-    map.serialize32(&mut params);
+    map.serialize(&mut params);
     println!("Parameters: {} (Pose={}, Landmark={})\n",
         params.len(), Pose::PARAM_COUNT, Landmark::PARAM_COUNT);
 

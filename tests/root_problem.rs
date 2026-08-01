@@ -66,17 +66,17 @@ fn generic_over_root_model() {
 
 // RootProblem's round trip is the same one the suffixed inherent methods do.
 #[test]
-fn root_model_round_trip_matches_serialize64() {
+fn root_model_round_trip_matches_serialize() {
     let mut a = model();
     let mut b = model();
     let mut va = Vec::new();
     let mut vb = Vec::new();
     RootProblem::serialize(&mut a, &mut va);
-    b.serialize64(&mut vb);
+    b.serialize(&mut vb);
     assert_eq!(va, vb);
     va[0] = 7.0;
     RootProblem::deserialize(&mut a, &va);
-    b.deserialize64(&va);
+    b.deserialize(&va);
     assert_eq!(a.x.value, 7.0);
     assert_eq!(a.x.value, b.x.value);
 }

@@ -17,7 +17,7 @@
 //! ```ignore
 //! // After defining your model with #[arael(root)]:
 //! let mut params = Vec::new();
-//! path.serialize64(&mut params);
+//! path.serialize(&mut params);
 //!
 //! let config = arael::simple_lm::LmConfig {
 //!     verbose: true,
@@ -33,7 +33,7 @@
 //! // Sparse solver (faer, pure Rust):
 //! let result = arael::simple_lm::solve_sparse(&params, &mut path, &config);
 //!
-//! path.deserialize64(&result.x);
+//! path.deserialize(&result.x);
 //! println!("cost: {} -> {} in {} iterations",
 //!     result.start_cost, result.end_cost, result.iterations);
 //! ```

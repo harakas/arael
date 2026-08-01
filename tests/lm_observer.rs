@@ -5,6 +5,7 @@
 // cloned per solve like the lambda driver, so shared state rides in
 // Rc/Arc handles.
 
+use arael::simple_lm::RootProblem;
 use std::cell::RefCell;
 use std::ops::ControlFlow;
 use std::rc::Rc;
@@ -91,7 +92,7 @@ fn break_stops_the_solve_and_keeps_the_best_state() {
     assert!(r.end_cost < r.start_cost, "the accepted work is kept");
     // The model holds the observer-stopped state, not the optimum.
     let mut back = Vec::new();
-    w.serialize64(&mut back);
+    w.serialize(&mut back);
     assert_eq!(back, r.x);
 }
 

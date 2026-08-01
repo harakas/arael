@@ -5,6 +5,7 @@
 //! it evaluates the expression and derivatives numerically, accumulating
 //! into a TripletBlock.
 
+use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael_sym::E;
 use arael::model::TripletBlock;  // used in compute() parameter
@@ -139,7 +140,7 @@ mod tests {
         });
 
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         let bag = SymbolBag::build(&sketch);
 
         // Create expression constraint: L1.length - d0 = 0
@@ -164,7 +165,7 @@ mod tests {
         sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 4.0));
 
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         let bag = SymbolBag::build(&sketch);
 
         // L0.length should be 5

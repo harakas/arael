@@ -8,6 +8,7 @@
 ///
 /// Use `cargo expand --example jacobian_demo` to inspect generated code.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
@@ -86,7 +87,7 @@ fn main() {
     });
 
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     // Perturb
     params[0] += 0.1;
     params[3] -= 0.2;

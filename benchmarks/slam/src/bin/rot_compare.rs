@@ -19,6 +19,7 @@
 #[path = "../scene.rs"]
 mod scene;
 
+use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
@@ -378,7 +379,7 @@ fn build_se(scene: &Scene) -> (SePath, Vec<f64>) {
         });
     }
     let mut params = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     (path, params)
 }
 
@@ -420,7 +421,7 @@ fn build_eu(scene: &Scene) -> (EuPath, Vec<f64>) {
         });
     }
     let mut params = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     (path, params)
 }
 
@@ -462,7 +463,7 @@ fn build_qu(scene: &Scene) -> (QuPath, Vec<f64>) {
         });
     }
     let mut params = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     (path, params)
 }
 

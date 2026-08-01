@@ -8,6 +8,7 @@
 // block lives on Pose, not on PointFrine. This is possible because only
 // Pose has parameters; landmarks contribute no derivatives.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::covariance::{Covariance, CovMode};
 use arael::simple_lm::LmProblem;
@@ -454,7 +455,7 @@ fn main() {
     let (mut path, gt_poses, _gt_landmarks) = build_path(&cfg);
 
     let mut params = std::vec::Vec::new();
-    path.serialize32(&mut params);
+    path.serialize(&mut params);
 
     let n_frines: usize = path.landmarks.iter().map(|lm| lm.frines.len()).sum();
     println!("Path: {} poses, {} landmarks, {} frines, {} pose_pairs",
@@ -485,20 +486,20 @@ fn main() {
         path.frine_isigma_scale = scale;
 
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
         let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
         // kd = 2*6 - 1 = 11 (block-tridiagonal with 6-param poses)
         let result = arael::simple_lm::solve_band_f32(&params, 11, &mut path, &config).unwrap();
-        path.deserialize32(&result.x);
+        path.deserialize(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
     }
 
     // Absolute pose errors vs GT (meaningful -- no gauge freedom)
     {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize32(&mut params);
+        path.serialize(&mut params);
         let cost = path.calc_cost(&params);
         println!("\nFinal cost: {:.4}", cost);
 

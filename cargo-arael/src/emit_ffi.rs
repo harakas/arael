@@ -621,7 +621,8 @@ use std::os::raw::c_char;
 use std::panic::{{AssertUnwindSafe, catch_unwind}};
 use arael::covariance::{{CovAssembly, CovMode, Covariance}};
 use arael::simple_lm::{{
-    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+    LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
+    SparseFaerOptions,
 }};
 use {model_crate}::{{{}}};
 
@@ -1592,13 +1593,10 @@ pub unsafe extern \"C\" fn {root_sn}_session_solve(
 }}
 "));
 
-    // Band solve: the free-function entry point (no RootProblem
-    // method), so the wrapper serializes and deserializes itself.
-    let (b_ser, b_deser, b_fn) = if fp == "f32" {
-        ("serialize32", "deserialize32", "solve_band_f32")
-    } else {
-        ("serialize64", "deserialize64", "solve_band")
-    };
+    // Band solve: the free-function entry point (not an LmProblem
+    // default method), so the wrapper serializes and deserializes
+    // itself through RootProblem.
+    let b_fn = if fp == "f32" { "solve_band_f32" } else { "solve_band" };
     out.push_str(&format!(
 "
 /// Band Cholesky solve; `kd` is the Hessian half-bandwidth in scalar
@@ -1617,9 +1615,9 @@ pub unsafe extern \"C\" fn {root_sn}_solve_band(
     zero_result(out);
     match catch_unwind(AssertUnwindSafe(|| {{
         let mut x0 = Vec::new();
-        hh.model.{b_ser}(&mut x0);
+        hh.model.serialize(&mut x0);
         arael::simple_lm::{b_fn}(&x0, kd as usize, &mut hh.model, &c).map(|r| {{
-            hh.model.{b_deser}(&r.x);
+            hh.model.deserialize(&r.x);
             r
         }})
     }})) {{
@@ -1652,11 +1650,7 @@ pub unsafe extern \"C\" fn {root_sn}_solve_band(
 "));
 
     // Cost evaluation at the current parameter values.
-    let (ser, cast) = if fp == "f32" {
-        ("serialize32", " as f64")
-    } else {
-        ("serialize64", "")
-    };
+    let cast = if fp == "f32" { " as f64" } else { "" };
     out.push_str(&format!(
 "
 /// Total cost at the current parameter values (evaluated at the
@@ -1668,7 +1662,7 @@ pub unsafe extern \"C\" fn {root_sn}_cost(h: *mut {handle}) -> f64 {{
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {{
         let mut params = Vec::new();
-        hh.model.{ser}(&mut params);
+        hh.model.serialize(&mut params);
         hh.model.calc_cost(&params){cast}
     }})) {{
         Ok(c) => {{
@@ -1702,7 +1696,7 @@ pub unsafe extern \"C\" fn {root_sn}_cost_table(h: *mut {handle}) -> i32 {{
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {{
         let mut params = Vec::new();
-        hh.model.{ser}(&mut params);
+        hh.model.serialize(&mut params);
         arael::model::JacobianModel::calc_cost_table(&mut hh.model, &params)
     }})) {{
         Ok(t) => {{
@@ -1771,7 +1765,7 @@ pub unsafe extern \"C\" fn {root_sn}_calc_jacobian(h: *mut {handle}, out: *mut *
     *out = std::ptr::null_mut();
     match catch_unwind(AssertUnwindSafe(|| {{
         let mut params = Vec::new();
-        hh.model.{ser}(&mut params);
+        hh.model.serialize(&mut params);
         arael::model::JacobianModel::calc_jacobian(&mut hh.model, &params)
     }})) {{
         Ok(j) => {{

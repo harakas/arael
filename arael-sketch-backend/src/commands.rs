@@ -1,6 +1,7 @@
 // Command system: parse and execute text commands for the sketch.
 // Decoupled from GUI -- operates on CommandContext which holds sketch state.
 
+use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael::model::JacobianModel;
 use arael::refs::Ref;
@@ -283,7 +284,7 @@ pub fn validate_and_apply_constraint(
     let snapshot = bincode::serialize(sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         sketch.calc_cost(&params)
     };
 
@@ -315,7 +316,7 @@ pub fn validate_and_apply_constraint(
     // Quick cost check
     let quick_cost = {
         let mut params = Vec::new();
-        sketch.serialize64(&mut params);
+        sketch.serialize(&mut params);
         sketch.calc_cost(&params)
     };
     let new_cost = if quick_cost <= old_cost + 1e-6 {
@@ -408,7 +409,7 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> (String, 
     let saved_drift = sketch.drift_isigma;
     sketch.drift_isigma = 0.0;
     let mut post_params = Vec::new();
-    sketch.serialize64(&mut post_params);
+    sketch.serialize(&mut post_params);
     let post_jac = sketch.calc_jacobian(&post_params);
     sketch.drift_isigma = saved_drift;
 
@@ -1622,7 +1623,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "cost" => {
             use arael::simple_lm::LmProblem;
             let mut params = Vec::new();
-            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.serialize(&mut params);
             let cost = ctx.sketch.calc_cost(&params);
             ok(format!("Cost: {:.6}", cost))
         }
@@ -1937,14 +1938,14 @@ fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<Strin
     for (action, desc) in candidates {
         let old_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.serialize(&mut params);
             ctx.sketch.calc_cost(&params)
         };
         // Push constraint directly (no solve)
         action.apply_without_solve(&mut ctx.sketch);
         let new_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.serialize(&mut params);
             ctx.sketch.calc_cost(&params)
         };
         if new_cost <= old_cost + cost_threshold {
@@ -2029,13 +2030,13 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
     for (action, desc) in candidates {
         let old_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.serialize(&mut params);
             ctx.sketch.calc_cost(&params)
         };
         action.apply_without_solve(&mut ctx.sketch);
         let new_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.serialize(&mut params);
             ctx.sketch.calc_cost(&params)
         };
         if new_cost <= old_cost + cost_threshold {
@@ -4112,7 +4113,7 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let snapshot = bincode::serialize(&ctx.sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
-        ctx.sketch.serialize64(&mut params);
+        ctx.sketch.serialize(&mut params);
         ctx.sketch.calc_cost(&params)
     };
     // Check if param exists -> update
@@ -4318,7 +4319,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let snapshot = bincode::serialize(&ctx.sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
-        ctx.sketch.serialize64(&mut params);
+        ctx.sketch.serialize(&mut params);
         ctx.sketch.calc_cost(&params)
     };
 
@@ -4473,7 +4474,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // Check cost
     let new_cost = {
         let mut params = Vec::new();
-        ctx.sketch.serialize64(&mut params);
+        ctx.sketch.serialize(&mut params);
         ctx.sketch.calc_cost(&params)
     };
     if new_cost > old_cost + 1e-3
@@ -8031,7 +8032,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     let saved_drift = ctx.sketch.drift_isigma;
     ctx.sketch.drift_isigma = 0.0;
     let mut params = Vec::new();
-    ctx.sketch.serialize64(&mut params);
+    ctx.sketch.serialize(&mut params);
     let n = params.len();
     let bag = SymbolBag::build(&ctx.sketch);
     let mut idx_to_name: Vec<String> = vec![String::new(); n];
@@ -8160,7 +8161,7 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
     let saved_drift = ctx.sketch.drift_isigma;
     ctx.sketch.drift_isigma = 0.0;
     let mut params = Vec::new();
-    ctx.sketch.serialize64(&mut params);
+    ctx.sketch.serialize(&mut params);
     let n = params.len();
     if n == 0 {
         ctx.sketch.drift_isigma = saved_drift;

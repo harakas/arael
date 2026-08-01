@@ -7,7 +7,8 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{
-    LmConfig, LmProblem, LmSession, LmStatus, SparseFaer, SparseFaerOptions,
+    LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
+    SparseFaerOptions,
 };
 use cxx_fit::{Fit, Gain, GpsObs, Info, N, Obs, Pose, Rig, Tie};
 
@@ -1081,9 +1082,9 @@ pub unsafe extern "C" fn fit_solve_band(
     zero_result(out);
     match catch_unwind(AssertUnwindSafe(|| {
         let mut x0 = Vec::new();
-        hh.model.serialize64(&mut x0);
+        hh.model.serialize(&mut x0);
         arael::simple_lm::solve_band(&x0, kd as usize, &mut hh.model, &c).map(|r| {
-            hh.model.deserialize64(&r.x);
+            hh.model.deserialize(&r.x);
             r
         })
     })) {
@@ -1123,7 +1124,7 @@ pub unsafe extern "C" fn fit_cost(h: *mut FitHandle) -> f64 {
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {
         let mut params = Vec::new();
-        hh.model.serialize64(&mut params);
+        hh.model.serialize(&mut params);
         hh.model.calc_cost(&params)
     })) {
         Ok(c) => {
@@ -1150,7 +1151,7 @@ pub unsafe extern "C" fn fit_cost_table(h: *mut FitHandle) -> i32 {
     let hh = &mut *h;
     match catch_unwind(AssertUnwindSafe(|| {
         let mut params = Vec::new();
-        hh.model.serialize64(&mut params);
+        hh.model.serialize(&mut params);
         arael::model::JacobianModel::calc_cost_table(&mut hh.model, &params)
     })) {
         Ok(t) => {
@@ -1219,7 +1220,7 @@ pub unsafe extern "C" fn fit_calc_jacobian(h: *mut FitHandle, out: *mut *mut Fit
     *out = std::ptr::null_mut();
     match catch_unwind(AssertUnwindSafe(|| {
         let mut params = Vec::new();
-        hh.model.serialize64(&mut params);
+        hh.model.serialize(&mut params);
         arael::model::JacobianModel::calc_jacobian(&mut hh.model, &params)
     })) {
         Ok(j) => {

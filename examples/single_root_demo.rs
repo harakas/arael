@@ -7,6 +7,7 @@
 // Contrast with jacobian_demo / loc_demo / slam_demo, which use the
 // `refs::Vec<Entity>` container pattern. Both shapes are now supported.
 
+use arael::simple_lm::RootProblem;
 use arael::model::{JacobianModel, Model, Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 
@@ -56,7 +57,7 @@ fn main() {
     };
 
     let mut params = Vec::new();
-    m.serialize64(&mut params);
+    m.serialize(&mut params);
     println!("Serialized params: {:?}", params);
     println!("PARAM_COUNT = {}", SingleRoot::PARAM_COUNT);
 
@@ -88,7 +89,7 @@ fn main() {
 
     let config = LmConfig::well_conditioned().with_verbose(true);
     let result = simple_lm::solve(&params, &mut m, &config).unwrap();
-    m.deserialize64(&result.x);
+    m.deserialize(&result.x);
 
     println!(
         "\nLM: {} iterations, cost {:.6} -> {:.6}",

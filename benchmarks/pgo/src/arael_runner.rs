@@ -198,8 +198,8 @@ impl Pipeline for Graph {
         let (poses, edges, prior) = build_parts(ds);
         Graph { poses, edges, prior }
     }
-    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
-    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<PoseIn> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> Solved<f64> { solve_f64(params, m, cfg) }
@@ -214,8 +214,8 @@ impl Pipeline for GraphF {
         let (poses, edges, prior) = build_parts(ds);
         GraphF { poses, edges, prior }
     }
-    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
-    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<PoseIn> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> Solved<f32> { solve_f32(params, m, cfg) }

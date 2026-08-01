@@ -8,6 +8,7 @@
 // residuals go through arael::utils::fast_atan2 (max error < 1e-6 rad) --
 // the reason for the shared INITIAL_COST_RTOL in main.rs.
 
+use arael::simple_lm::RootProblem;
 use crate::scene::{Scene, Solution};
 use arael::matrix::matrix3;
 use arael::model::{CrossBlock, Param, SelfBlock, SimpleEulerAngleParam};
@@ -310,10 +311,10 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
 
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     let cfg = bench_harness::arael::config::<Path>(scene, 200);
     let result = solve64(&params, &mut path, &cfg).expect("covariance solve failed");
-    path.deserialize64(&result.x);
+    path.deserialize(&result.x);
     let np = path.poses.len();
     let last = np - 1;
     let budget = Duration::from_secs_f64(budget_s);
@@ -380,8 +381,8 @@ impl bench_harness::arael::Model for Path {
     type Solution = Solution;
     fn lambda0(_: &Scene) -> f64 { 1e-8 }
     fn build(scene: &Scene) -> Self { build(scene) }
-    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
-    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> Solved<f64> { solve64(params, m, cfg) }
@@ -401,8 +402,8 @@ impl bench_harness::arael::Model for PathF {
         if scene.poses.len() <= 60 { 1e-7 } else { 1e-8 }
     }
     fn build(scene: &Scene) -> Self { build_f32(scene) }
-    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
-    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
+    fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> Solved<f32> { solve32(params, m, cfg) }
@@ -420,7 +421,7 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     use arael::simple_lm::LmProblem;
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
+    path.serialize(&mut params);
     path.calc_cost(&params)
 }
 
