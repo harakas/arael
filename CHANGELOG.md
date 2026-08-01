@@ -3,6 +3,60 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.8.1 - 2026-08-01
+
+### Added
+
+- **Iterative Schur.** `SchurSolve::Iterative` solves the reduced system by
+  preconditioned conjugate gradients instead of factorizing it;
+  `SchurSolve::IterativeImplicit` never forms it, applying the operator block by
+  block. On Ladybug-1723-clean the iteration is 5.7x and 6.6x cheaper than the
+  factorized route, the implicit one on under half the memory.
+- **`EnvelopeMode`** prices the envelope factorization of the reduced system
+  against the ordered sparse factor it would replace, per solve. `SchurPlan`
+  reports which route ran.
+- **`camera<T>`**, with `cameraf` and `camerad`. `Camera` remains as an alias.
+- **C++ and Python interfaces** gained the per-constraint cost table, Jacobian
+  diagnostics (singular values, column norms), covariance views that own their
+  assembly, `LmSession` warm reuse, the sparse backend options including
+  iterative Schur, the per-attempt timeline, structured `SolveFailure` as data,
+  log-level control, SE3 g2o reading, and g2o write-back. A caught Rust panic
+  raises in both skins instead of aborting the process.
+
+### Breaking
+
+- **`Model` is generic over the solve width.** Each 32/64 method pair collapses
+  into one method: `serialize_params`, `deserialize_params`, `update_params`,
+  `advance_params` and the `accumulate_hessian*` family take `<F: Float>`;
+  `collect_hessian_cells` and `bind_hessian_positions` lose their suffixes.
+  `ParamType` follows, with `write_to<F>` / `read_from<F>`.
+- **`ExtendedModel` is `ExtendedModel<F: Float>`**, implemented at the root's
+  precision, and its methods drop the 32/64 suffixes.
+- **The generated `serialize64` / `serialize32` / `deserialize64` /
+  `deserialize32` are gone.** Call `RootProblem::serialize` / `deserialize`,
+  which is in the prelude; off-width serialization is
+  `Model::serialize_params::<F>`.
+- `SchurPlan::narrow_band` is renamed `SchurPlan::envelope`: both band routes set
+  it, and the reduced system's envelope is often not narrow.
+  `SparseFaer::with_narrow_band` keeps its name.
+
+### Fixed
+
+- Robust losses reached neither `calc_cost_table` nor `calc_jacobian`: the table
+  summed raw squared residuals, and the Jacobian rows broke the `J^T J` /
+  `2 J^T r` match with the assembled system on lossy models.
+- `SchurPolicy::Auto` could take a reduction that keeps the system nearly whole.
+  Its cheap flop ratio prices the reduced route against a floor no whole-system
+  factorization can beat, which is a bound rather than a cost.
+- A Python element wrapper cached a pointer into its collection, so growing that
+  collection left it reading the old buffer. Wrappers now re-resolve on access.
+
+### Performance
+
+- Peak memory is down 6-35% across the pose-graph and bundle-adjustment suites:
+  the assembly scatter map rides in the blocks, and value-buffer offsets and the
+  sparse structures index 32 bits wide.
+
 ## 0.8.0 - 2026-07-27
 
 ### Added
