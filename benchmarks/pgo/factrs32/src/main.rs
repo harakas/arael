@@ -30,7 +30,7 @@ fn main() {
 
     let mut text = String::new();
     for p in &out.solution {
-        text.push_str(&format!("{} {} {}\n", p.x, p.y, p.th));
+        text.push_str(&format!("{} {} {}\n", p.t.x, p.t.y, p.th));
     }
     std::fs::write(poses_out, text).unwrap();
 
