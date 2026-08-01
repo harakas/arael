@@ -69,8 +69,8 @@ effect is close to arbitrary; the tables report totals and iterations
 because they are facts about the run, not because they are comparable.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/pgo-setup-dark.svg">
-  <img alt="2x2 bar charts, one per dataset: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.0/pgo-setup-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/pgo-setup-dark.svg">
+  <img alt="2x2 bar charts, one per dataset: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.1/pgo-setup-light.svg">
 </picture>
 
 The same four datasets with the setup drawn alongside the iteration it
@@ -87,7 +87,7 @@ from a source checkout.
 
 | system | version |
 |--------|---------|
-| arael | 0.8.0 (this tree) |
+| arael | 0.8.1 (this tree) |
 | Ceres | 2.2.0 (libceres-dev) |
 | g2o | 2023-08-06 snapshot (libg2o-dev) |
 | GTSAM | 4.2.0 (libgtsam-dev, python3-gtsam) |
@@ -327,7 +327,7 @@ same `PANELS` table -- one bar per system, its best validated
 configuration -- so they cannot disagree. After re-running the benchmark,
 update that table from the results below and re-run it.
 
-## Results (2026-07-26, aarch64 VM, single core enforced by the harness, min of 32 interleaved rounds)
+## Results (2026-08-01, aarch64 VM, single core enforced by the harness, min of 32 interleaved rounds)
 
 What each column means:
 
@@ -351,36 +351,36 @@ Each dataset carries its own notes below.
 ### M3500 (10500 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64    |    13.73 |   6(6) |    2.29 |      1.87 |     1.000 |        4.37 |    15.0 |   137.9130 |
-| arael LM f32    |    13.64 |   7(7) |    1.95 |      1.60 |     0.856 |        4.04 |    13.2 |   137.9219 |
-| factrs GN       |    42.15 |   6(6) |    7.02 |      6.16 |     3.294 |       12.22 |    20.4 |   137.9130 |
-| factrs LM       |    53.42 |   6(6) |    8.90 |      6.98 |     3.733 |       14.68 |    22.9 |   137.9130 |
-| factrs GN f32   |    61.03 |   9(9) |    6.78 |      5.95 |     3.182 |       12.47 |    17.4 |   137.9194 |
-| factrs LM f32   |    76.04 |   9(9) |    8.45 |      7.34 |     3.925 |       14.57 |    18.2 |   137.9194 |
-| ceres LM        |    36.22 |   6(6) |    6.04 |      4.88 |     2.610 |       12.47 |    22.1 |   137.9136 |
-| g2o LM          |    26.66 |   6(6) |    4.44 |      3.61 |     1.930 |        7.93 |    21.1 |   137.9136 |
-| g2o GN          |    25.20 |   6(6) |    4.20 |      3.55 |     1.898 |        7.43 |    20.8 |   137.9136 |
-| symforce LM     |    36.78 |   6(6) |    6.13 |      3.48 |     1.861 |       18.66 |    30.9 |   137.9136 |
-| symforce LM f32 |    36.01 |   6(6) |    6.00 |      3.48 |     1.861 |       18.48 |    28.0 |   137.9157 |
-| gtsam LM        |   100.48 |      6 |   16.75 |     16.76 |     8.963 |       17.48 |    86.8 |   137.9273 |
-| gtsam GN        |    82.18 |      6 |   13.70 |     13.66 |     7.305 |       14.49 |    85.3 |   137.9273 |
+| arael LM f64    |    13.25 |   6(6) |    2.21 |      1.87 |     1.000 |        4.02 |    12.8 |   137.9130 |
+| arael LM f32    |    13.17 |   7(7) |    1.88 |      1.55 |     0.831 |        3.68 |    10.3 |   137.9219 |
+| factrs GN       |    42.10 |   6(6) |    7.02 |      6.19 |     3.315 |       12.12 |    20.4 |   137.9130 |
+| factrs LM       |    52.13 |   6(6) |    8.69 |      7.76 |     4.156 |       14.84 |    22.7 |   137.9130 |
+| factrs GN f32   |    60.05 |   9(9) |    6.67 |      5.88 |     3.149 |       11.89 |    17.4 |   137.9194 |
+| factrs LM f32   |    74.13 |   9(9) |    8.24 |      6.97 |     3.731 |       14.07 |    19.3 |   137.9194 |
+| ceres LM        |    35.91 |   6(6) |    5.99 |      4.72 |     2.527 |       12.35 |    22.2 |   137.9136 |
+| g2o LM          |    26.57 |   6(6) |    4.43 |      3.85 |     2.061 |        7.62 |    21.3 |   137.9136 |
+| g2o GN          |    24.88 |   6(6) |    4.15 |      3.48 |     1.860 |        7.42 |    21.0 |   137.9136 |
+| symforce LM     |    35.93 |   6(6) |    5.99 |      3.44 |     1.839 |       18.49 |    31.0 |   137.9136 |
+| symforce LM f32 |    35.56 |   6(6) |    5.93 |      3.32 |     1.779 |       18.15 |    28.0 |   137.9157 |
+| gtsam LM        |    99.62 |      6 |   16.60 |     16.40 |     8.778 |       17.20 |    86.8 |   137.9273 |
+| gtsam GN        |    81.49 |      6 |   13.58 |     13.63 |     7.297 |       14.08 |    85.4 |   137.9273 |
 
 All 13 rows reach the common optimum, both precisions included.
 
 ### city10000 (30000 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64    |    77.28 |   7(7) |   11.04 |      9.54 |     1.000 |       19.05 |    43.5 |   511.9852 |
-| arael LM f32    |   104.14 |  7(13) |    8.01 |      7.53 |     0.789 |       16.82 |    38.0 |   511.9860 |
-| factrs GN       |   181.30 |   7(7) |   25.90 |     22.90 |     2.400 |       45.23 |    76.2 |   511.9852 |
-| factrs LM       |   223.01 |   7(7) |   31.86 |     28.41 |     2.978 |       51.12 |    70.7 |   511.9852 |
-| ceres LM        |   176.50 |   7(7) |   25.21 |     21.64 |     2.268 |       48.30 |    57.9 |   511.9880 |
-| g2o LM          |   144.69 |   7(7) |   20.67 |     18.00 |     1.887 |       33.93 |    55.4 |   511.9880 |
-| g2o GN          |   138.08 |   7(7) |   19.73 |     17.39 |     1.823 |       32.61 |    54.5 |   511.9880 |
-| symforce LM     |   220.90 |   7(7) |   31.56 |     21.82 |     2.287 |       91.95 |    98.8 |   511.9881 |
-| symforce LM f32 |   379.50 |  7(15) |   25.30 |         - |         - |           - |    87.3 |   511.9941 |
-| gtsam LM\*\*     |  4340.31 |     30 |  144.68 |     66.31 |     6.951 |       67.68 |   125.7 | 2386736.14 |
-| gtsam GN\*\*     |   223.73 |      4 |   55.93 |     55.85 |     5.854 |       57.36 |   119.9 |  247510639 |
+| arael LM f64    |    75.65 |   7(7) |   10.81 |      9.58 |     1.000 |       18.04 |    38.9 |   511.9852 |
+| arael LM f32    |   101.35 |  7(13) |    7.80 |      7.51 |     0.783 |       15.81 |    27.0 |   511.9860 |
+| factrs GN       |   183.81 |   7(7) |   26.26 |     22.97 |     2.398 |       45.47 |    76.2 |   511.9852 |
+| factrs LM       |   226.42 |   7(7) |   32.35 |     28.88 |     3.014 |       51.03 |    77.2 |   511.9852 |
+| ceres LM        |   176.41 |   7(7) |   25.20 |     22.30 |     2.327 |       48.00 |    58.0 |   511.9880 |
+| g2o LM          |   145.09 |   7(7) |   20.73 |     18.74 |     1.956 |       33.77 |    55.6 |   511.9880 |
+| g2o GN          |   137.68 |   7(7) |   19.67 |     17.31 |     1.806 |       32.67 |    54.7 |   511.9880 |
+| symforce LM     |   221.75 |   7(7) |   31.68 |     22.23 |     2.321 |       92.28 |    98.9 |   511.9881 |
+| symforce LM f32 |   378.56 |  7(15) |   25.24 |         - |         - |           - |    87.3 |   511.9941 |
+| gtsam LM\*\*     |  4341.66 |     30 |  144.72 |     66.00 |     6.889 |       67.87 |   125.8 | 2386736.14 |
+| gtsam GN\*\*     |   223.93 |      4 |   55.98 |     55.62 |     5.805 |       57.40 |   120.0 |  247510639 |
 
 symforce f32 rejects a step inside its first iteration, so that iteration
 is not one iteration: neither it nor the full-iter derived from it is
@@ -392,17 +392,17 @@ non-positive pivot at 30000 parameters in single precision.
 ### sphere2500 (3D, 15000 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64    |   103.35 |   6(6) |   17.23 |     16.12 |     1.000 |       21.80 |    48.1 |  1351.2157 |
-| arael LM f32    |    84.14 |   7(7) |   12.02 |     11.18 |     0.694 |       16.50 |    34.6 |  1351.3874 |
-| factrs GN       |   177.75 |   6(6) |   29.62 |     26.41 |     1.638 |       44.01 |    72.1 |  1351.2157 |
-| factrs LM       |   188.29 |   6(6) |   31.38 |     28.79 |     1.786 |       45.43 |    73.5 |  1351.2157 |
-| ceres LM        |   148.38 |   6(6) |   24.73 |     22.85 |     1.417 |       35.75 |    45.2 |  1351.2182 |
-| g2o LM          |   158.36 |   8(8) |   19.80 |     19.19 |     1.190 |       23.58 |    45.3 |  1351.2162 |
-| g2o GN\*\*       |   266.02 | 14(14) |   19.00 |     18.49 |     1.147 |       23.26 |    44.8 |  3053.9288 |
-| symforce LM     |   485.66 |   6(6) |   80.94 |     77.28 |     4.794 |       98.55 |    64.3 |  1351.2158 |
-| symforce LM f32 |   462.03 |   6(6) |   77.01 |     73.60 |     4.566 |       95.56 |    48.3 |  1351.3300 |
-| gtsam LM        |   184.65 |      6 |   30.78 |     30.41 |     1.886 |       30.55 |   109.5 |  1351.2988 |
-| gtsam GN        |   168.46 |      6 |   28.08 |     28.21 |     1.750 |       28.24 |   106.8 |  1351.2988 |
+| arael LM f64    |   102.59 |   6(6) |   17.10 |     16.34 |     1.000 |       20.97 |    44.9 |  1351.2157 |
+| arael LM f32    |    82.47 |   7(7) |   11.78 |     11.12 |     0.681 |       15.65 |    28.8 |  1351.3874 |
+| factrs GN       |   182.71 |   6(6) |   30.45 |     25.99 |     1.591 |       44.68 |    72.1 |  1351.2157 |
+| factrs LM       |   188.27 |   6(6) |   31.38 |     28.59 |     1.750 |       46.13 |    73.5 |  1351.2157 |
+| ceres LM        |   149.16 |   6(6) |   24.86 |     23.52 |     1.440 |       35.85 |    45.3 |  1351.2182 |
+| g2o LM          |   159.45 |   8(8) |   19.93 |     19.27 |     1.179 |       23.82 |    45.5 |  1351.2162 |
+| g2o GN\*\*       |   266.59 | 14(14) |   19.04 |     18.62 |     1.140 |       23.43 |    44.9 |  3053.9288 |
+| symforce LM     |   485.38 |   6(6) |   80.90 |     77.51 |     4.744 |       99.10 |    64.4 |  1351.2158 |
+| symforce LM f32 |   463.23 |   6(6) |   77.21 |     73.74 |     4.513 |       96.50 |    48.3 |  1351.3300 |
+| gtsam LM        |   185.01 |      6 |   30.84 |     30.61 |     1.873 |       30.70 |   109.5 |  1351.2988 |
+| gtsam GN        |   169.21 |      6 |   28.20 |     28.53 |     1.746 |       28.29 |   106.9 |  1351.2988 |
 
 factrs f32 does not run this dataset: its Cholesky hits a non-positive
 pivot (single precision loses positive definiteness at 15000 parameters,
@@ -420,19 +420,19 @@ step and the solve retries all the way down (12 accepted of 17 attempts,
 ### parking-garage (3D, 9966 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64    |    21.59 |   4(4) |    5.40 |      4.33 |     1.000 |        8.33 |    36.4 |     1.2684 |
-| arael LM f32\*  |    25.98 |   6(6) |    4.33 |      3.82 |     0.882 |        7.56 |    31.4 |     1.2687 |
-| factrs GN       |   104.57 |   4(4) |   26.14 |     20.17 |     4.658 |       43.76 |    57.4 |     1.2684 |
-| factrs LM       |   114.64 |   4(4) |   28.66 |     23.55 |     5.439 |       43.99 |    63.3 |     1.2684 |
-| factrs GN f32\* |   173.92 |   6(6) |   28.99 |     25.96 |     5.995 |       48.28 |    44.7 |     1.2690 |
-| factrs LM f32\* |   221.40 |  5(12) |   18.45 |     27.89 |     6.441 |       51.40 |    51.2 |     1.2687 |
-| ceres LM        |    55.17 |   4(4) |   13.79 |     12.08 |     2.790 |       26.17 |    33.5 |     1.2696 |
-| g2o LM          |    32.40 |   4(4) |    8.10 |      6.48 |     1.497 |       12.33 |    34.3 |     1.2696 |
-| g2o GN          |    30.86 |   4(4) |    7.72 |      6.32 |     1.460 |       11.62 |    33.9 |     1.2696 |
-| symforce LM     |    57.52 |   4(4) |   14.38 |      9.73 |     2.247 |       28.24 |    52.6 |     1.2696 |
-| symforce LM f32\* |  55.59 |   4(4) |   13.90 |      9.29 |     2.145 |       27.86 |    40.3 |     1.2699 |
-| gtsam LM        |    91.35 |      6 |   15.22 |     15.35 |     3.545 |       15.50 |    91.4 |     1.2684 |
-| gtsam GN        |    52.14 |      4 |   13.04 |     13.21 |     3.051 |       13.37 |    90.0 |     1.2684 |
+| arael LM f64    |    21.06 |   4(4) |    5.27 |      4.36 |     1.000 |        7.93 |    32.2 |     1.2684 |
+| arael LM f32\*  |    25.48 |   6(6) |    4.25 |      3.65 |     0.835 |        7.03 |    23.8 |     1.2687 |
+| factrs GN       |   106.97 |   4(4) |   26.74 |     19.61 |     4.493 |       44.42 |    57.3 |     1.2684 |
+| factrs LM       |   116.85 |   4(4) |   29.21 |     22.29 |     5.107 |       48.55 |    63.3 |     1.2684 |
+| factrs GN f32\* |   176.77 |   6(6) |   29.46 |     26.97 |     6.179 |       49.02 |    44.8 |     1.2690 |
+| factrs LM f32\* |   227.02 |  5(12) |   18.92 |     27.17 |     6.225 |       53.48 |    51.6 |     1.2687 |
+| ceres LM        |    56.32 |   4(4) |   14.08 |     12.98 |     2.973 |       26.49 |    33.6 |     1.2696 |
+| g2o LM          |    33.11 |   4(4) |    8.28 |      6.51 |     1.491 |       12.62 |    34.4 |     1.2696 |
+| g2o GN          |    31.54 |   4(4) |    7.89 |      6.27 |     1.436 |       12.12 |    34.1 |     1.2696 |
+| symforce LM     |    58.14 |   4(4) |   14.54 |      9.68 |     2.218 |       29.18 |    52.6 |     1.2696 |
+| symforce LM f32\* |  55.84 |   4(4) |   13.96 |      9.25 |     2.120 |       28.13 |    40.3 |     1.2699 |
+| gtsam LM        |    92.29 |      6 |   15.38 |     15.70 |     3.597 |       15.48 |    91.5 |     1.2684 |
+| gtsam GN        |    53.44 |      4 |   13.36 |     13.24 |     3.033 |       13.69 |    90.0 |     1.2684 |
 
 \* the f32 rows reach the optimum cost to within 0.02-0.12% (well inside
 the cost gate) but sit 0.21-0.25 m from the f64 solution along the
