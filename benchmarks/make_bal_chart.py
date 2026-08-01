@@ -17,44 +17,66 @@
 # cancelled); first-iter is that same iteration plus the setup paid once.
 # Rows: arael first, then the rest, each group by full-iter ascending.
 PANELS = [
-    ("Ladybug-49 -- 23,769 params", 1, (50.0, 10.0), [
-        ("arael f32 Schur", 8.03, 13.09, "arael"),
-        ("arael f64 Schur", 10.27, 15.50, "arael"),
-        ("arael f32 sparse", 17.01, 29.67, "arael"),
-        ("arael f64 sparse", 19.56, 34.52, "arael"),
-        ("Ceres sparse_schur", 18.79, 48.24, "other"),
-        ("Ceres dense_schur", 19.21, 37.38, "other"),
-        ("g2o (Schur)", 19.46, 33.00, "other"),
-        ("Ceres iterative_schur", 30.09, 34.35, "other"),
+    ("Ladybug-49 -- 23,769 params", 1, (60.0, 20.0), [
+        ("arael f32 Schur-CG", 8.78, 11.21, "arael"),
+        ("arael f32 Schur", 8.83, 12.05, "arael"),
+        ("arael f64 Schur-CG", 10.91, 13.30, "arael"),
+        ("arael f64 Schur", 11.28, 14.94, "arael"),
+        ("arael f32 sparse", 17.15, 28.53, "arael"),
+        ("arael f32 CG-implicit", 19.96, 14.77, "arael"),
+        ("arael f64 sparse", 21.18, 38.26, "arael"),
+        ("arael f64 CG-implicit", 23.92, 17.21, "arael"),
+        ("g2o (PCG)", 19.09, 33.09, "other"),
+        ("Ceres dense_schur", 20.17, 39.45, "other"),
+        ("g2o (Schur)", 20.42, 34.68, "other"),
+        ("Ceres sparse_schur", 20.54, 50.74, "other"),
+        ("Ceres iterative_schur", 31.46, 36.35, "other"),
     ]),
     ("Ladybug-138 -- 60,876 params", 1, (200.0, 50.0), [
-        ("arael f32 Schur", 29.73, 47.12, "arael"),
-        ("arael f64 Schur", 40.38, 64.12, "arael"),
-        ("arael f32 sparse", 58.18, 167.38, "arael"),
-        ("arael f64 sparse", 68.65, 183.65, "arael"),
-        ("Ceres iterative_schur", 52.15, 111.52, "other"),
-        ("g2o (Schur)", 66.55, 120.07, "other"),
-        ("Ceres sparse_schur", 69.22, 164.10, "other"),
-        ("Ceres dense_schur", 75.99, 134.37, "other"),
+        ("arael f32 Schur-CG", 26.34, 33.52, "arael"),
+        ("arael f32 Schur", 29.93, 42.56, "arael"),
+        ("arael f64 Schur-CG", 35.93, 45.01, "arael"),
+        ("arael f64 Schur", 42.11, 58.23, "arael"),
+        ("arael f32 CG-implicit", 47.87, 41.41, "arael"),
+        ("arael f64 CG-implicit", 55.54, 50.50, "arael"),
+        ("arael f32 sparse", 56.58, 138.88, "arael"),
+        ("arael f64 sparse", 64.46, 180.17, "arael"),
+        ("Ceres iterative_schur", 54.80, 115.86, "other"),
+        ("g2o (PCG)", 63.25, 112.00, "other"),
+        ("g2o (Schur)", 68.16, 124.64, "other"),
+        ("Ceres sparse_schur", 69.52, 171.63, "other"),
+        ("Ceres dense_schur", 75.76, 142.62, "other"),
     ]),
     ("Ladybug-372 -- 145,617 params", 1, (800.0, 200.0), [
-        ("arael f32 Schur", 124.88, 198.52, "arael"),
-        ("arael f32 sparse", 188.82, 486.72, "arael"),
-        ("arael f64 Schur", 196.64, 285.86, "arael"),
-        ("arael f64 sparse", 250.71, 567.49, "arael"),
-        ("Ceres iterative_schur", 142.63, 309.69, "other"),
-        ("Ceres sparse_schur", 267.02, 558.51, "other"),
-        ("g2o (Schur)", 272.30, 419.09, "other"),
-        ("Ceres dense_schur", 463.86, 641.63, "other"),
+        ("arael f32 Schur-CG", 79.95, 86.72, "arael"),
+        ("arael f64 Schur-CG", 111.85, 132.10, "arael"),
+        ("arael f32 Schur", 124.83, 183.53, "arael"),
+        ("arael f32 CG-implicit", 157.77, 95.19, "arael"),
+        ("arael f64 CG-implicit", 189.46, 133.20, "arael"),
+        ("arael f32 sparse", 189.62, 445.06, "arael"),
+        ("arael f64 Schur", 199.48, 285.08, "arael"),
+        ("arael f64 sparse", 254.49, 549.38, "arael"),
+        ("Ceres iterative_schur", 143.31, 319.66, "other"),
+        ("g2o (PCG)", 165.75, 291.85, "other"),
+        ("Ceres sparse_schur", 263.21, 565.99, "other"),
+        ("g2o (Schur)", 275.80, 428.74, "other"),
+        ("Ceres dense_schur", 478.41, 668.33, "other"),
     ]),
-    # Exploratory: no system meets the shared tolerances here, and arael's f32
-    # rows fail on a NaN Hessian diagonal, so neither is plotted.
-    ("Ladybug-1723 -- 485,013 params (exploratory)", 0, (4500.0, 1500.0), [
-        ("arael f64 Schur", 1795.93, 2252.61, "arael"),
-        ("arael f64 sparse", 2820.94, 4053.87, "arael"),
-        ("Ceres iterative_schur", 403.98, 1188.57, "other"),
-        ("g2o (Schur)", 2304.76, 2945.06, "other"),
-        ("Ceres sparse_schur", 2835.45, 4093.28, "other"),
+    # Exploratory: no system meets the shared tolerances here, and the f32 rows
+    # stop far above the plateau the f64 rows reach -- see the panel footnote.
+    ("Ladybug-1723-clean -- 484,842 params (exploratory)", 0, (4500.0, 1500.0), [
+        ("arael f32 CG-implicit", 216.70, 316.40, "arael"),
+        ("arael f32 Schur-CG", 227.33, 322.21, "arael"),
+        ("arael f64 CG-implicit", 268.00, 418.77, "arael"),
+        ("arael f64 Schur-CG", 309.68, 461.86, "arael"),
+        ("arael f32 Schur", 1050.68, 1340.15, "arael"),
+        ("arael f32 sparse", 1713.74, 2628.49, "arael"),
+        ("arael f64 Schur", 1766.45, 2108.39, "arael"),
+        ("arael f64 sparse", 2789.82, 3659.28, "arael"),
+        ("Ceres iterative_schur", 405.56, 1196.43, "other"),
+        ("g2o (PCG)", 567.24, 1041.88, "other"),
+        ("g2o (Schur)", 2315.97, 2939.97, "other"),
+        ("Ceres sparse_schur", 2942.00, 4216.32, "other"),
     ]),
 ]
 
@@ -64,10 +86,12 @@ SUBTITLE = ("Solid: one complete iteration. Faded: the setup, paid once. "
 FOOT = [
     ("Setup is assembly, ordering and symbolic factorization: done once, "
      "reused by every later iteration."),
-    ("Ceres iterative_schur takes inexact CG steps, so its iteration is a "
-     "different unit of work from the factorizations."),
-    ("Ladybug-1723 is exploratory: no system reaches the shared tolerances "
-     "there, and arael's f32 rows cannot run it at all."),
+    ("The CG rows -- arael Schur-CG and CG-implicit, Ceres iterative_schur, "
+     "g2o PCG -- take inexact steps, a different unit of work from the "
+     "factorizations. The implicit ones never form the reduced system."),
+    ("Ladybug-1723-clean is exploratory: no system reaches the shared "
+     "tolerances there, and its f32 rows stop well above the plateau the f64 "
+     "rows reach, so their iterations are not doing the same work."),
 ]
 
 THEMES = {
@@ -100,7 +124,7 @@ BAR_H = 12
 PITCH = 19
 PANEL_TITLE_H = 20
 AXIS_H = 20
-GRID_ROWS = 8   # tallest panel; sets each grid row's height so axes align
+GRID_ROWS = 13  # tallest panel; sets each grid row's height so axes align
 GRID_ROW_H = PANEL_TITLE_H + GRID_ROWS * PITCH + AXIS_H
 HEADER_H = 58
 
