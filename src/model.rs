@@ -86,7 +86,7 @@ impl<T: ParamType> Param<T> {
         Param { optimize: false, value, work: T::default(), index: u32::MAX }
     }
 
-    /// Return the current working-copy value (set during `update`).
+    /// Return the current working-copy value (set during `update_params`).
     pub fn work(&self) -> T { self.work }
     /// Return a reference to the current working-copy value.
     pub fn work_ref(&self) -> &T { &self.work }
@@ -248,7 +248,7 @@ pub trait Component {
 /// Extension hooks for custom constraints on `#[arael(root, extended)]` structs.
 ///
 /// Use this when you need constraints that can't be expressed via
-/// `#[arael(constraint(...))]` at compile time — for example, constraints
+/// `#[arael(constraint(...))]` at compile time -- for example, constraints
 /// parsed from user input at runtime, or constraints that need access to
 /// the full root struct.
 ///
@@ -273,16 +273,16 @@ pub trait Component {
 /// # Execution order
 ///
 /// Each solver iteration runs:
-/// 1. `Model::update` — copies params into working values
-/// 2. **`extended_update`** — set up derived state before calculations
-/// 3. `zero_blocks` — zeros all Hessian blocks (including TripletBlocks)
-/// 4. Macro-generated constraint loops — fill SelfBlock/CrossBlock
-/// 5. **`extended_compute`** — fill TripletBlocks with custom residuals
+/// 1. `Model::update_params` -- copies params into working values
+/// 2. **`extended_update`** -- set up derived state before calculations
+/// 3. `zero_blocks` -- zeros all Hessian blocks (including TripletBlocks)
+/// 4. Macro-generated constraint loops -- fill SelfBlock/CrossBlock
+/// 5. **`extended_compute`** -- fill TripletBlocks with custom residuals
 ///    (writes grad entries directly into the LM-provided global slice)
-/// 6. `accumulate_hessian*` — reads all Hessian blocks into global Hessian
+/// 6. `accumulate_hessian*` -- reads all Hessian blocks into global Hessian
 ///
-/// For cost evaluation: `Model::update` → `extended_update` →
-/// macro-generated cost loop → **`extended_cost`**.
+/// For cost evaluation: `Model::update_params` -> `extended_update` ->
+/// macro-generated cost loop -> **`extended_cost`**.
 ///
 /// # Example
 ///
@@ -1292,7 +1292,7 @@ fn ascending(indices: &[u32]) -> bool {
 /// Accumulates the upper triangle of the Gauss-Newton Hessian approximation
 /// (2·dr·dr^T) from constraint residuals involving one model's parameters.
 /// Gradient entries (2·r·dr) are written directly to the global gradient
-/// vector by `add_residual` — no per-block grad buffer.
+/// vector by `add_residual` -- no per-block grad buffer.
 /// `N` equals `A::PARAM_COUNT`. `T` is the float type (f32 or f64, default f64).
 ///
 /// Created by generated constraint code; users rarely construct these manually.
@@ -1710,7 +1710,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
     }
 }
 
-/// Hessian block coupling two model types — stores ONLY the rectangular A×B
+/// Hessian block coupling two model types -- stores ONLY the rectangular A x B
 /// cross Hessian pairs. A's gradient and A-A diagonal live in A's own
 /// [`SelfBlock`]; same for B. This matches the refactor where every
 /// params-having Model owns a `SelfBlock<Self>`, and cross blocks carry only
@@ -2261,7 +2261,7 @@ impl<T: crate::utils::Float> TripletBlock<T> {
 
     /// Macro-emission entry for N-ary constraints where each participating
     /// entity has its own `SelfBlock<Self>` holding its grad + within-entity
-    /// Hessian diagonal. Stores ONLY across-entity pairs — within-entity
+    /// Hessian diagonal. Stores ONLY across-entity pairs -- within-entity
     /// pairs are skipped (they live in the entity SelfBlock).
     ///
     /// `entity_offsets` is the cumulative span boundary list

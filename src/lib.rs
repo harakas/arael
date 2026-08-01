@@ -1054,8 +1054,8 @@
 //!
 //! A crate holding a root model exports to other languages with one
 //! command: `cargo install cargo-arael`, then `cargo arael export` in
-//! the model crate. This generates a C ABI shim crate (`capi/`, cdylib
-//! + staticlib), C++ wrapper classes with vendored math headers
+//! the model crate. This generates a C ABI shim crate (`capi/`, cdylib +
+//! staticlib), C++ wrapper classes with vendored math headers
 //! (`cxx/`, with CMake glue), and a pure-`ctypes` Python package
 //! (`python/`, stdlib only -- one cdylib serves every CPython 3.x).
 //!
@@ -1405,9 +1405,9 @@
 //! 2. **Damp**: assemble `J^T J + λ * diag(J^T J)` and `J^T r`.
 //! 3. **Solve** the damped system with the chosen backend. Cholesky
 //!    either succeeds (matrix is positive-definite) or rejects.
-//! 4. **Accept or reject** by comparing new cost to old: better →
-//!    accept and shrink λ (0.2×); worse → reject and grow λ (10×),
-//!    retry with the new damping.
+//! 4. **Accept or reject** by comparing new cost to old: better ->
+//!    accept and shrink lambda (0.2x); worse -> reject and grow
+//!    lambda (10x), retry with the new damping.
 //! 5. **Repeat** until termination rules fire.
 //!
 //! `λ` behaves as a trust-region radius: large λ = small, safe
@@ -1425,7 +1425,7 @@
 //! | Field | Meaning |
 //! |---|---|
 //! | `3/0` | iteration / inner-retry counter. `0` = Cholesky succeeded first try |
-//! | `44.5679->44.5403` | cost before → cost after the step |
+//! | `44.5679->44.5403` | cost before -> cost after the step |
 //! | `0.0276` | absolute cost improvement |
 //! | `lambda=2e-5` | damping in effect |
 //! | `(step=91)` | microseconds for this iteration |
@@ -1439,7 +1439,7 @@
 //! | Field | What it says |
 //! |---|---|
 //! | `lambda=1.6e-7 -> 1.6e-6` | new λ for the retry (×10) |
-//! | `non-finite: grad=N diag=N x=N matrix=N` | NaN/Inf counts in each scratch buffer. All zero → matrix is fully finite; any non-zero → find the bad residual or derivative |
+//! | `non-finite: grad=N diag=N x=N matrix=N` | NaN/Inf counts in each scratch buffer. All zero -> matrix is fully finite; any non-zero -> find the bad residual or derivative |
 //!
 //! When all counts are 0, the rejection is f32 accumulation noise at
 //! tiny λ -- LM recovers by bumping λ. When any are non-zero, stop

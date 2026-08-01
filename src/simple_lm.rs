@@ -47,7 +47,7 @@ use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-/// Format a float like C's `%g` — 6 significant digits, uses the shorter of
+/// Format a float like C's `%g` -- 6 significant digits, uses the shorter of
 /// fixed or scientific notation, strips trailing zeros.
 struct G<T>(T);
 
