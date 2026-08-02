@@ -156,6 +156,9 @@ pub struct SupernodalSymbolic {
     batched_pairs: usize,
     /// per stored tile of the matrix, its panel target
     tiles: Vec<TileTarget>,
+    /// tile indices grouped by target supernode, `tile_ptr` bounds
+    tile_ptr: Vec<u32>,
+    tile_order: Vec<u32>,
     /// factor scalar count (panel volumes)
     n_vals: usize,
     /// factorization cost, one squared-height term per scalar column
@@ -483,6 +486,7 @@ impl SupernodalSymbolic {
         let sup_col_start =
             |s: usize| -> u32 { sc_start[sup_begin[s] as usize] };
         let mut tiles = Vec::with_capacity(a.nblocks());
+        let mut tile_super = vec![0u32; a.nblocks()];
         for j_old in 0..nblk {
             for b in a.col_range(j_old) {
                 let i_old = a.blk_row(b);
@@ -509,7 +513,25 @@ impl SupernodalSymbolic {
                 let dst = val_ptr[s]
                     + row_off as ValueIndex
                     + col_off as ValueIndex * nrows[s] as ValueIndex;
+                tile_super[tiles.len()] = s as u32;
                 tiles.push(TileTarget { dst, stride: nrows[s], trans });
+            }
+        }
+        // Tiles grouped by target supernode, so the seed can run
+        // panel-by-panel right after each panel is zeroed.
+        let mut tile_ptr = vec![0u32; ns + 1];
+        for &s in &tile_super {
+            tile_ptr[s as usize + 1] += 1;
+        }
+        for s in 0..ns {
+            tile_ptr[s + 1] += tile_ptr[s];
+        }
+        let mut tile_order = vec![0u32; tiles.len()];
+        {
+            let mut pos: Vec<u32> = tile_ptr[..ns].to_vec();
+            for (b, &s) in tile_super.iter().enumerate() {
+                tile_order[pos[s as usize] as usize] = b as u32;
+                pos[s as usize] += 1;
             }
         }
 
@@ -676,6 +698,8 @@ impl SupernodalSymbolic {
             max_b_cat,
             batched_pairs,
             tiles,
+            tile_ptr,
+            tile_order,
             n_vals: n_vals as usize,
             flops,
         })
@@ -1084,6 +1108,38 @@ fn apply_bucket<T: SchurReal>(
     );
 }
 
+/// Reusable workspace for [`supernodal_factorize`] and
+/// [`supernodal_solve`]. Allocates nothing on construction; each call
+/// grows what it needs to the symbolic-derived bound and never
+/// allocates again -- across damped attempts, and across problems (a
+/// bigger structure regrows it).
+#[derive(Default)]
+pub struct SupernodalContext<T> {
+    upd: Vec<T>,
+    blk_row: Vec<u32>,
+    runs: Vec<(u32, u32, u32)>,
+    a_cat: Vec<T>,
+    b_cat: Vec<T>,
+    chol_mem: Vec<core::mem::MaybeUninit<u8>>,
+    x: Vec<T>,
+    tmp: Vec<T>,
+}
+
+impl<T> SupernodalContext<T> {
+    pub fn new() -> Self {
+        Self {
+            upd: Vec::new(),
+            blk_row: Vec::new(),
+            runs: Vec::new(),
+            a_cat: Vec::new(),
+            b_cat: Vec::new(),
+            chol_mem: Vec::new(),
+            x: Vec::new(),
+            tmp: Vec::new(),
+        }
+    }
+}
+
 /// Factor `L L^T = P A P^T` into the panels, left-looking by supernode.
 ///
 /// `a` is the matrix the symbolic analysis was built from (same
@@ -1091,58 +1147,40 @@ fn apply_bucket<T: SchurReal>(
 /// transposition live in the precomputed tile map, so the matrix is
 /// read exactly once, tile by tile. Damping is the caller's: write it
 /// into `a`'s diagonal tiles before calling, as the other block routes
-/// do. The factor buffer is caller-owned and reused across attempts.
+/// do. The factor buffer and the context are caller-owned and reused
+/// across attempts; each panel is zeroed and seeded at its own turn,
+/// so no pass over the whole buffer precedes the work.
 pub fn supernodal_factorize<T: SchurReal>(
     sym: &SupernodalSymbolic,
     a: &SparseBlockColMat<SparseIndex, T>,
     factor: &mut [T],
+    ctx: &mut SupernodalContext<T>,
 ) -> Result<(), SupernodalError> {
     assert_eq!(factor.len(), sym.factor_val_count());
     let asym = a.symbolic();
     assert_eq!(asym.nblocks(), sym.tiles.len());
-    factor.fill(T::ZERO);
 
-    // Seed: every stored tile to its precomputed panel target, columns
-    // contiguous when the orientations agree, transposed otherwise.
+    ctx.upd.resize(sym.max_update, T::ZERO);
+    ctx.blk_row.resize(sym.nblk, 0);
+    ctx.a_cat.resize(sym.max_a_cat, T::ZERO);
+    ctx.b_cat.resize(sym.max_b_cat, T::ZERO);
+    let chol_req = faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
+        sym.max_ncols,
+        faer::Par::Seq,
+        faer::Spec::default(),
+    )
+    .unaligned_bytes_required();
+    ctx.chol_mem.resize(chol_req, core::mem::MaybeUninit::uninit());
+    let (upd, blk_row, runs, a_cat, b_cat, chol_mem) = (
+        &mut ctx.upd,
+        &mut ctx.blk_row,
+        &mut ctx.runs,
+        &mut ctx.a_cat,
+        &mut ctx.b_cat,
+        &mut ctx.chol_mem,
+    );
+
     let vals = a.vals();
-    for b in 0..asym.nblocks() {
-        let t = sym.tiles[b];
-        let (wi, wj) = asym.block_dims(b);
-        let src = &vals[asym.val_range(b)];
-        let stride = t.stride as usize;
-        let dst0 = t.dst as usize;
-        if !t.trans {
-            for c in 0..wj {
-                factor[dst0 + c * stride..dst0 + c * stride + wi]
-                    .clone_from_slice(&src[c * wi..(c + 1) * wi]);
-            }
-        } else {
-            for c in 0..wi {
-                for r in 0..wj {
-                    factor[dst0 + c * stride + r] = src[c + r * wi];
-                }
-            }
-        }
-    }
-
-    // Workspace: the largest single update, the current panel's block
-    // row map, the update's row runs, the batch pack buffers, and the
-    // dense kernel's scratch.
-    let mut upd = vec![T::ZERO; sym.max_update];
-    let mut blk_row = vec![0u32; sym.nblk];
-    let mut runs: Vec<(u32, u32, u32)> = Vec::new();
-    let mut a_cat = vec![T::ZERO; sym.max_a_cat];
-    let mut b_cat = vec![T::ZERO; sym.max_b_cat];
-    let mut chol_mem = vec![
-        core::mem::MaybeUninit::<u8>::uninit();
-        faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
-            sym.max_ncols,
-            faer::Par::Seq,
-            faer::Spec::default(),
-        )
-        .unaligned_bytes_required()
-    ];
-
     for s in 0..sym.ns {
         let (q, h) = sym.supernode_dims(s);
         let col0 = sym.sc_start[sym.sup_begin[s] as usize];
@@ -1158,25 +1196,49 @@ pub fn supernodal_factorize<T: SchurReal>(
         let (head, tail) = factor.split_at_mut(sym.val_ptr[s] as usize);
         let panel = &mut tail[..h * q];
 
+        // Zero and seed this panel now, while it is about to be hot:
+        // every stored tile of its columns lands at its precomputed
+        // target, columns contiguous when the orientations agree,
+        // transposed otherwise.
+        panel.fill(T::ZERO);
+        let base = sym.val_ptr[s] as usize;
+        for &bi in &sym.tile_order[sym.tile_ptr[s] as usize..sym.tile_ptr[s + 1] as usize] {
+            let b = bi as usize;
+            let t = sym.tiles[b];
+            let (wi, wj) = asym.block_dims(b);
+            let src = &vals[asym.val_range(b)];
+            let stride = t.stride as usize;
+            let dst0 = t.dst as usize - base;
+            if !t.trans {
+                for c in 0..wj {
+                    panel[dst0 + c * stride..dst0 + c * stride + wi]
+                        .clone_from_slice(&src[c * wi..(c + 1) * wi]);
+                }
+            } else {
+                for c in 0..wi {
+                    for r in 0..wj {
+                        panel[dst0 + c * stride + r] = src[c + r * wi];
+                    }
+                }
+            }
+        }
+
         // Left-looking: subtract every descendant's contribution --
         // pair by pair, or bucket by bucket when the analysis batched
         // them.
         if sym.bucket_end.is_empty() {
             for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
-                apply_pair(sym, pi as usize, head, panel, &blk_row, &mut upd, &mut runs, h, col0);
+                apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0);
             }
         } else {
             let mut p0 = sym.desc_ptr[s];
             for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
                 let p1 = sym.bucket_end[b as usize];
                 if p1 - p0 == 1 {
-                    apply_pair(
-                        sym, p0 as usize, head, panel, &blk_row, &mut upd, &mut runs, h, col0,
-                    );
+                    apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0);
                 } else {
                     apply_bucket(
-                        sym, b as usize, p0, p1, head, panel, &blk_row,
-                        &mut a_cat, &mut b_cat, h, col0,
+                        sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0,
                     );
                 }
                 p0 = p1;
@@ -1187,7 +1249,7 @@ pub fn supernodal_factorize<T: SchurReal>(
         let top = unsafe {
             faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr(), q, q, 1, h as isize)
         };
-        let stack = faer::dyn_stack::MemStack::new(&mut chol_mem);
+        let stack = faer::dyn_stack::MemStack::new(chol_mem);
         faer::linalg::cholesky::llt::factor::cholesky_in_place(
             top,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
@@ -1219,6 +1281,7 @@ pub fn supernodal_solve<T: SchurReal>(
     sym: &SupernodalSymbolic,
     factor: &[T],
     rhs: &mut [T],
+    ctx: &mut SupernodalContext<T>,
 ) {
     assert_eq!(factor.len(), sym.factor_val_count());
     assert_eq!(rhs.len(), sym.n);
@@ -1229,8 +1292,9 @@ pub fn supernodal_solve<T: SchurReal>(
         })
         .max()
         .unwrap_or(0);
-    let mut x = vec![T::ZERO; sym.n];
-    let mut tmp = vec![T::ZERO; max_below];
+    ctx.x.resize(sym.n, T::ZERO);
+    ctx.tmp.resize(max_below, T::ZERO);
+    let (x, tmp) = (&mut ctx.x, &mut ctx.tmp);
 
     // Into elimination order.
     for k in 0..sym.nblk {
@@ -1628,9 +1692,9 @@ mod tests {
                         let sn =
                             SupernodalSymbolic::new(a.symbolic(), Some(order), &params).unwrap();
                         let mut factor = vec![0.0f64; sn.factor_val_count()];
-                        supernodal_factorize(&sn, &a, &mut factor).unwrap();
+                        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()).unwrap();
                         let mut x = rhs.clone();
-                        supernodal_solve(&sn, &factor, &mut x);
+                        supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
                         let resid = rel_resid(&dense, n, &x, &rhs);
                         assert!(
                             resid < 1e-10,
@@ -1661,9 +1725,9 @@ mod tests {
         let sn = SupernodalSymbolic::new(a.symbolic(), Some(&nd), &SupernodalParams::default())
             .unwrap();
         let mut factor = vec![0.0f32; sn.factor_val_count()];
-        supernodal_factorize(&sn, &a, &mut factor).unwrap();
+        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()).unwrap();
         let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
-        supernodal_solve(&sn, &factor, &mut x32);
+        supernodal_solve(&sn, &factor, &mut x32, &mut SupernodalContext::new());
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
         let resid = rel_resid(&dense, n, &x, &rhs);
         assert!(resid < 1e-3, "resid {}", resid);
@@ -1750,9 +1814,9 @@ mod tests {
             )
             .unwrap();
             let mut factor = vec![0.0f64; sn.factor_val_count()];
-            supernodal_factorize(&sn, &a, &mut factor).unwrap();
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()).unwrap();
             let mut x = rhs.clone();
-            supernodal_solve(&sn, &factor, &mut x);
+            supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
             (x, sn.batched_pairs())
         };
         let (x_plain, b_plain) = solve_with(None);
@@ -1762,6 +1826,27 @@ mod tests {
         assert!(rel_resid(&dense, n, &x_batch, &rhs) < 1e-10);
         for (a, b) in std::iter::zip(&x_plain, &x_batch) {
             assert!((a - b).abs() < 1e-9, "batched diverges: {} vs {}", a, b);
+        }
+    }
+
+    /// One context serves repeated attempts and then a bigger problem:
+    /// the buffers regrow as needed and the answers stay exact.
+    #[test]
+    fn a_context_is_reusable_across_attempts_and_problems() {
+        let mut ctx = SupernodalContext::new();
+        for (nblk, seed) in [(12usize, 4u64), (48, 5), (20, 6)] {
+            let (a, dense, rhs) = random_spd(nblk, 4, 2, seed);
+            let n = a.symbolic().ncols();
+            let sn =
+                SupernodalSymbolic::new(a.symbolic(), None, &SupernodalParams::default()).unwrap();
+            let mut factor = vec![0.0f64; sn.factor_val_count()];
+            for _ in 0..3 {
+                supernodal_factorize(&sn, &a, &mut factor, &mut ctx).unwrap();
+                let mut x = rhs.clone();
+                supernodal_solve(&sn, &factor, &mut x, &mut ctx);
+                let resid = rel_resid(&dense, n, &x, &rhs);
+                assert!(resid < 1e-10, "resid {} nblk {}", resid, nblk);
+            }
         }
     }
 
@@ -1776,7 +1861,7 @@ mod tests {
         let sn = SupernodalSymbolic::new(&asym, None, &SupernodalParams::default()).unwrap();
         let mut factor = vec![0.0f64; sn.factor_val_count()];
         assert_eq!(
-            supernodal_factorize(&sn, &a, &mut factor),
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()),
             Err(SupernodalError::NotPositiveDefinite),
         );
     }

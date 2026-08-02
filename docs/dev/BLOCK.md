@@ -446,7 +446,9 @@ here. README/charts only move when a default flips (later stage).
   (17.4 vs 15.7 ms) and is at parity elsewhere; ~1% of the attempt
   there. OPEN, low value.
 
-### Stage 5 -- parallel numeric (optional, the differentiator)
+### Stage 5 -- parallel numeric (deprioritized 2026-08-02: threads are
+### a fringe deployment for the target applications; see the roadmap's
+### tail)
 
 Etree-level scheduling: process independent subtrees across threads,
 switch `Par` into the dense kernels for the big trailing panels.
@@ -465,6 +467,157 @@ factorization dominates (bal).
   covariance over this factor; incremental refactorization.
 - Docs (arael-faer README + lib.rs, SOLVERS.md), CHANGELOG at the next
   release, benchmark README refresh where defaults changed.
+
+## Performance and memory roadmap (2026-08-02)
+
+The open improvements, prioritized. Supersedes the "still open"
+scraps in stage 4: everything live is here. Performance is the primary
+axis; memory items are marked, and an opt-in that buys ~30% memory for
+some speed is considered worth shipping. Each item follows the
+stage-4 rule -- measured on the benchmark suite, keep or kill.
+
+### P1. Persistent numeric workspace, panel-local zeroing
+### [DONE 2026-08-02, except the scratch cap]
+
+Shipped: `SupernodalContext` on the `SchurContext` grow-once pattern
+(factorize scratch + solve vectors), owned by `SparseFaer` and passed
+through the public entry points (signature change); the whole-factor
+upfront `fill(ZERO)` replaced by per-panel zero-and-seed at each
+supernode's own turn, with the tile map grouped by target supernode in
+the symbolic to make that possible.
+
+Measured (same-run comparisons, our factor times): bal-372 111.5 ->
+105.2 ms (-5%), bal-1723c ~1455 -> 1418 (-2.5%), solve 1.7-2.1 -> 1.5
+and 15.5-17.4 -> 15.1 there; pgo factors -3-7% (garage 1.68 -> 1.57,
+city 7.38 -> 7.13, sphere 13.66 -> 12.95); slam whole-H a wash (its
+factor is GEMM-dominated), +0.4 MB resident from the buffers now
+persisting across attempts.
+
+Remaining from this item: chunk oversized updates by row block so
+`upd` (largest single update; big on bal's separators) is bounded --
+memory-only, fold into the P5/P6 memory work.
+
+### P2. The supernodal against the envelope on the reduced banded S
+
+Never measured: the slam DEFAULT route factors its banded reduced
+system with the envelope. A banded S under natural order is the
+supernodal's easy case -- fundamental chains, contiguous patterns, the
+direct-accumulate path firing everywhere -- and batching gives it a
+lever the envelope lacks. If it matches or beats the envelope, the
+flagship slam rows get whatever the margin is, and stage 6's
+subsumption question answers itself (one route fewer to maintain).
+
+Do: measure head-to-head on slam-60/120/300 S and the loc system
+(`SLAM_ENVELOPE=never ARAEL_BLOCK_SUPERNODAL=1` against the default),
+f64 and f32. Expected: unknown -- this is a measurement, not a bet.
+Risk: none to ship; either the envelope keeps its regime with numbers
+attached, or it retires.
+
+### P3. Postorder the block elimination tree
+
+We inherited faer's shortcut: no postorder pass, relying on the
+ordering being near-postordered. AMD roughly is; nested dissection
+only approximately. Columns that are etree-adjacent but not
+consecutive fail the fundamental-supernode test, and relaxed
+amalgamation buys the merge back WITH padding -- part of the +18%
+factor values against faer's scalar analysis at bal-372
+(performance AND memory: padding is both flops and factor bytes).
+
+Do: postorder the block etree after the Liu pass (one DFS over block
+nodes, children ordered; compose into the elimination order before
+everything downstream). Verify with the existing scalar cross-check
+test -- fill is invariant under postordering, so `factor_scalar_nnz`
+must not change while supernode count drops and padding shrinks.
+Expected: fewer, bigger fundamental supernodes on ND orders; some of
+the bal padding gone. Risk: low; the invariant is testable exactly.
+
+### P4. Hint-derived block order for the whole-Hessian route
+
+`setup_whole_supernodal` always orders by block-AMD (or ND on
+request). Two consequences: on BA-fill systems AMD drowns in point
+cliques (the reason the scalar route ships landmarks-first there), and
+batching's unions are scattered because AMD separates the landmark
+neighbors that see the same poses. The model's marginalize hint --
+already available on this path -- gives an eliminate-first block order
+for free: landmarks consecutive, then the trajectory.
+
+Do: when the model names or detects an eliminable set and the solve
+does not reduce, order those blocks first (their natural order), the
+rest after; fall back to block-AMD otherwise. Measure on the slam and
+bal whole-H rows. Expected: tighter batch buckets (the -5% batching
+win was measured under block-AMD's scattered order, so there is
+headroom), and a sane bal whole-H ordering. Risk: low -- ordering
+choice only, correctness unaffected.
+
+### P5. f32 factor under an f64 solve, opt-in (the memory headline)
+
+Store the FACTOR in f32 while the matrix, right-hand side and step
+stay f64: half the factor buffer -- the dominant allocation of every
+factorized route (299 -> 150 MB at Ladybug-1723c, 41.5 -> 21 at 372)
+-- and the update GEMMs run at twice the SIMD width, so it may not
+even cost time. The LM step is a damped trial, inexact by nature (the
+CG routes ship far looser steps); one refinement pass -- residual
+`r = b - S x` at f64 through `mul_symmetric_upper`, correction solved
+through the f32 factor, `x += dx` -- restores most of the lost digits
+for two extra solves' worth of work.
+
+Do: type-split `supernodal_factorize`/`solve` over (matrix T, factor
+F); an opt-in knob (`SparseFaer` + options + benchmark env); refinement
+on by default under it; measure accuracy against the f64 route on the
+bal and slam suites (final cost and step-quality, the
+`schur_f32_accuracy` methodology) and peak `VmHWM`. Expected: factor
+memory halved, speed neutral-to-better; the risk is conditioning --
+ill-conditioned S may need the refinement pass or a fallback, which is
+why it ships opt-in. Route-peak effect from the measured numbers: the
+factor is 49.1 of the 233 MB peak at bal-372 (~10% of peak saved) and
+303 of the ~1110 MB peak recorded for the factorized route at 1723
+(~14%); combined with P6 and P1's scratch cap the option lands in the
+20-30% band on factor-heavy systems.
+
+### P6. Memory-lean amalgamation preset (measured, shelf-ready)
+
+The stage-4 sweep already measured it: a single `(MAX, 0.02)` relax
+rung matches the default table's speed on wide-block S while holding
+16% less factor (41.3 vs 49.1 MB at bal-372). Ship it as a named
+preset (`SupernodalParams::memory_lean()` or an auto-pick when the
+mean block width is >= ~6), opt-in beside P5. Expected: -10-16%
+factor on wide-block systems, ~0 speed cost there; do NOT auto-apply
+to narrow-block systems, where the small rungs earn 10-20% speed.
+Risk: none, numbers exist.
+
+### P7. Solve-path polish
+
+The solve trails faer ~10% on big-supernode shapes (17.4 vs 15.7 ms at
+bal-1723c; ~1% of the attempt) and allocates per call (folded into
+P1's context). The factorization's direct-accumulate trick applies
+here too: a supernode whose pattern is one contiguous run can GEMV
+straight against the x segment, no gather/scatter. Expected: small;
+do it opportunistically when touching the solve for P1/P5.
+
+### P8. Batch-acceptance tuning
+
+The acceptance charges each candidate its column SPAN rather than its
+exact mid width (over-counts individual flops, so some good batches
+are refused), and `BATCH_DEPTH_MAX`/`BATCH_K_MAX` (16/512) were set,
+not swept. P4's ordering change re-shapes the buckets anyway, so
+tune after it lands. Expected: small; measure on the slam whole-H
+row.
+
+### Tail, in this order and no earlier
+
+- **Threads** (was stage 5): a fringe deployment for the target
+  applications; do at the very end. First the cheap tier (pass the
+  solver's `Par` into the dense kernels -- until then, multithreaded
+  users should prefer the scalar faer route, which does), then
+  etree-level tasking if demand exists.
+- **`private-gemm-x86`**: maybe never. x86-only, unsafe raw-pointer
+  contract, version-lockstep with faer -- and direct accumulate
+  measured the traffic it would save as small at our defaults. ARM is
+  the deployment target; faer's own fallback there scatters
+  scalar-by-scalar while ours moves block runs.
+- **Scalar micro-kernels of any kind**: killed by measurement (stage
+  4, twice). The GEMM path's packing IS the win; do not revisit
+  without new evidence.
 
 ## Risks
 
@@ -485,6 +638,21 @@ factorization dominates (bal).
 
 ## Log
 
+- 2026-08-02: P1 shipped: `SupernodalContext` (grow-once workspace for
+  factorize and solve, a signature change on both entry points) and
+  panel-local zero-and-seed replacing the whole-factor memset. Factor
+  -2.5-7% across bal and pgo, solve visibly down, slam neutral. The
+  update-chunking scratch cap deferred to the memory items.
+- 2026-08-02: Performance and memory roadmap written (P1-P8 + tail),
+  superseding stage 4's leftover bullets. Directives recorded: threads
+  land last (fringe for the target applications), `private-gemm-x86`
+  is maybe-never. New items from the re-survey: the whole-factor
+  upfront zeroing and per-attempt scratch allocation (P1), the
+  never-run supernodal-vs-envelope measurement on the banded reduced
+  system (P2), the missing block-etree postorder (P3), the
+  hint-derived whole-H ordering (P4), and the f32-factor-with-
+  refinement opt-in as the memory headline (P5, ~halves the factor
+  buffer). P6 ships the already-measured memory-lean relax preset.
 - 2026-08-02: Batch default 1.2 -> 1.5. Direct accumulate deleted the
   batch product buffer, and with it the entire ratio-dependent memory
   overhead (peak at slam-300 is 61.5 MB flat at every ratio, where 1.5

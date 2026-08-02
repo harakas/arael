@@ -4700,6 +4700,7 @@ pub struct SparseFaer<T = f64> {
     sn_active: bool,
     sn_sym: Option<arael_faer::supernodal::SupernodalSymbolic>,
     sn_factor: Vec<T>,
+    sn_ctx: arael_faer::supernodal::SupernodalContext<T>,
     // Conjugate gradients on the reduced system ([`SchurSolve::Iterative`]).
     // The preconditioner is rebuilt per damped solve -- S changes with every
     // lambda -- while the scratch vectors persist so no iteration allocates.
@@ -4765,6 +4766,7 @@ impl<T> SparseFaer<T> {
             sn_active: false,
             sn_sym: None,
             sn_factor: Vec::new(),
+            sn_ctx: arael_faer::supernodal::SupernodalContext::new(),
             schur_solve: SchurSolve::default(),
             cg_work: arael_faer::cg::CgWorkspace::default(),
             cg_iters: 0,
@@ -6386,13 +6388,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if self.schur.is_none() {
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
-                if arael_faer::supernodal::supernodal_factorize(sn, h, &mut self.sn_factor)
-                    .is_err()
+                if arael_faer::supernodal::supernodal_factorize(
+                    sn, h, &mut self.sn_factor, &mut self.sn_ctx,
+                )
+                .is_err()
                 {
                     return false;
                 }
                 delta.copy_from_slice(grad);
-                arael_faer::supernodal::supernodal_solve(sn, &self.sn_factor, delta);
+                arael_faer::supernodal::supernodal_solve(
+                    sn, &self.sn_factor, delta, &mut self.sn_ctx,
+                );
                 return true;
             }
             let bsym = self.envelope_sym.as_ref().unwrap();
@@ -6495,11 +6501,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // ordering baked into the seed scatter.
             let sn = self.sn_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
-            if arael_faer::supernodal::supernodal_factorize(sn, s, &mut self.sn_factor).is_err() {
+            if arael_faer::supernodal::supernodal_factorize(
+                sn, s, &mut self.sn_factor, &mut self.sn_ctx,
+            )
+            .is_err()
+            {
                 return false;
             }
             self.x_kept.copy_from_slice(&self.rhs_kept);
-            arael_faer::supernodal::supernodal_solve(sn, &self.sn_factor, &mut self.x_kept);
+            arael_faer::supernodal::supernodal_solve(
+                sn, &self.sn_factor, &mut self.x_kept, &mut self.sn_ctx,
+            );
         } else {
             self.s.as_ref().unwrap().csc_vals_into(&mut self.s_vals);
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
