@@ -559,22 +559,69 @@ removes a whole class of ordering-quality hazards for orders we do
 not control (user-supplied ones included).
 
 ### P4. Hint-derived block order for the whole-Hessian route
+### [DONE 2026-08-02]
 
-`setup_whole_supernodal` always orders by block-AMD (or ND on
-request). Two consequences: on BA-fill systems AMD drowns in point
-cliques (the reason the scalar route ships landmarks-first there), and
-batching's unions are scattered because AMD separates the landmark
-neighbors that see the same poses. The model's marginalize hint --
-already available on this path -- gives an eliminate-first block order
-for free: landmarks consecutive, then the trajectory.
+Shipped: `setup_whole_supernodal` mirrors `full_symbolic`'s ordering
+rule exactly, in block units -- a NAMED marginalize set (the caller's
+`with_marginalize` or the model's `marginalize(..)` attr, never one
+the solver merely detected) goes first in natural order under Auto or
+MarginalizeFirst; nested dissection and natural on request; block-AMD
+otherwise. Named-only is deliberate and inherited: the scalar route's
+doc records that a DETECTED set as an ordering cost 6% on Ladybug-49,
+and the bal runner records that points-first hurt scalar whole-H
+there.
 
-Do: when the model names or detects an eliminable set and the solve
-does not reduce, order those blocks first (their natural order), the
-rest after; fall back to block-AMD otherwise. Measure on the slam and
-bal whole-H rows. Expected: tighter batch buckets (the -5% batching
-win was measured under block-AMD's scattered order, so there is
-headroom), and a sane bal whole-H ordering. Risk: low -- ordering
-choice only, correctness unaffected.
+Measured on the real slam whole-H structure (scratch bin, min of 5):
+landmarks-first vs block-AMD is factor 66.5 -> 42.7 ms (-36%) at 300
+poses with the factor 25.1 -> 19.3 MB (-23%), and the batch pairs
+nearly double (781 -> 1410) -- the adjacency prediction confirmed; at
+120 poses -23% factor. Route test pins that the ordering does not
+change the answer.
+
+Two notes for later. The slam benchmark model does NOT name its set
+(the runner's "landmarks-first" comment is 0.7-era history), so its
+faer row stays block-AMD until someone adds the attr -- a benchmark-
+model decision, since it would move published rows. And whether the
+DETECTED set should order the BLOCK route (where batching changes the
+trade the scalar rule was tuned on) is untested on bal whole-H --
+the -36% above suggests the block route's answer may differ from the
+scalar route's; measure before believing.
+
+Against the reduction, route level (full-iter, t(2)-t(1), slam
+structure): Schur remains the right default -- schur-supernodal 40.8
+ms at 300 poses against whole-H landmarks-first 52.2 and whole-H
+block-AMD 78.4 (5.1 / 6.4 / 7.0 at 120). The elimination is the same
+on paper, but the reduction runs it through the fixed-shape schur
+kernels and never materializes the landmark half of the factor
+(back-substitution recomputes from H), while the whole-H route builds
+and stores those panels. What P4 changed: the whole-H fallback went
+from 1.9x behind the default to 1.3x -- the route for models where
+marginalization is off or not legal.
+
+### P4b. Auto ordering for whole-H from detected structure
+
+The named-only rule leaves the -36% (and -23% memory) of P4 on the
+table for every model that does not carry a `marginalize(..)` attr --
+while the solver already DETECTS the same sets from the coupling graph
+for the Schur decision. What is missing is the confidence rule, and
+the discriminator is itself cheap structure, already computed:
+`kept_bandwidth` of the implied reduction.
+
+Do: when the solve does not reduce, a detected candidate set exists,
+and the implied kept system is narrow-banded (the slam shape: local
+eliminables), order the detected set first; otherwise keep block-AMD.
+The common cases this covers: trajectory + local landmarks ->
+eliminables-first; pose graph (no candidates) -> block-AMD; BA-shaped
+(global eliminables, dense kept system) -> block-AMD pending the gate
+below; pure band -> natural (already handled upstream).
+
+Gate before shipping: measure detected-first on bal WHOLE-H with the
+block route. The "detected-first hurts" evidence (Ladybug-49, +6%) is
+scalar-route evidence, and batching changes that trade -- the block
+route's answer may differ. If bal measures well, the bandwidth test
+may not even be needed; if it measures badly, the test earns its
+place. Risk: low -- ordering only; the answer is ordering-invariant
+(pinned by the P4 route test).
 
 ### P5. f32 factor under an f64 solve, opt-in (the memory headline)
 
@@ -665,6 +712,20 @@ row.
 
 ## Log
 
+- 2026-08-02: P4b added to the roadmap (auto ordering for whole-H from
+  detected structure, gated on a bal whole-H measurement), after the
+  route-level comparison placed whole-H landmarks-first at 52.2 ms
+  full-iter against the Schur default's 40.8 at slam-300: the
+  reduction keeps its crown, the whole-H fallback closed from 1.9x
+  behind to 1.3x.
+- 2026-08-02: P4 shipped: the whole-Hessian supernodal route orders a
+  NAMED marginalize set first (block twin of the scalar rule; ND /
+  natural / block-AMD otherwise). On the slam whole-H structure,
+  landmarks-first vs block-AMD measures factor -36% and factor memory
+  -23% at 300 poses, with batch pairs nearly doubled. The slam bench
+  model names no set, so its rows are unchanged; adding the attr there
+  is a benchmark-model decision left open, as is whether detected sets
+  should order the block route (untested on bal whole-H).
 - 2026-08-02: P3 shipped (`SupernodalParams::postorder`, default on):
   block-etree postorder composed into the elimination order, etree and
   counts relabeled in place. Guarantees no fundamental merge is lost

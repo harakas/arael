@@ -263,6 +263,38 @@ fn the_options_struct_carries_block_supernodal() {
     assert!(sn.plan().expect("a plan").block_supernodal);
 }
 
+/// A named marginalize set under SchurPolicy::Never orders those blocks
+/// first in the whole-Hessian supernodal factorization (the block twin
+/// of the scalar route's marginalize-first rule) -- and the answer must
+/// not depend on the ordering.
+#[test]
+fn whole_system_orders_a_named_set_first() {
+    let mut w = build(0.1, 2);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let n = params.len();
+    let lm_start = 2 * N_POSES;
+
+    let mut amd = SparseFaer::new()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(true);
+    let (x_amd, c_amd) = solve(&mut amd, 2);
+
+    let mut mf = SparseFaer::new()
+        .with_policy(SchurPolicy::Never)
+        .with_marginalize(lm_start..n)
+        .with_block_supernodal(true);
+    let (x_mf, c_mf) = solve(&mut mf, 2);
+    let plan = mf.plan().expect("a plan");
+    assert!(!plan.reduced, "SchurPolicy::Never must not reduce");
+    assert!(plan.block_supernodal);
+
+    assert!(c_amd < 1e-12 && c_mf < 1e-12, "{} {}", c_amd, c_mf);
+    for (a, b) in std::iter::zip(&x_amd, &x_mf) {
+        assert!((a - b).abs() < 1e-9, "orderings disagree: {} vs {}", a, b);
+    }
+}
+
 /// Update batching is a user knob: disabling it must change nothing about
 /// the answer, only how the updates are applied.
 #[test]

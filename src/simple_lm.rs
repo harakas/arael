@@ -5216,9 +5216,11 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     /// Set up the whole Hessian (no reduction) for the supernodal block
     /// Cholesky: the block form is kept and factored directly under a
     /// block-level ordering -- nested dissection when the caller asked for
-    /// it, block-AMD otherwise. Reached from `compute` when
-    /// `with_block_supernodal` is on, the solve does not reduce, and the
-    /// narrow-band route did not take the system first.
+    /// it, a named marginalize set first under Auto/MarginalizeFirst
+    /// (mirroring `full_symbolic`'s rule), natural on request, block-AMD
+    /// otherwise. Reached from `compute` when `with_block_supernodal` is
+    /// on, the solve does not reduce, and the narrow-band route did not
+    /// take the system first.
     fn setup_whole_supernodal(
         &mut self,
         problem: &mut dyn LmProblem<T>,
@@ -5260,18 +5262,46 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             }
         }
 
-        let block_order: Vec<usize> =
-            if matches!(self.ordering, FaerOrdering::NestedDissection) {
-                arael_faer::nd::order_graph(
-                    &arael_faer::nd::Graph::of_blocks(&hsym),
-                    arael_faer::nd::NdParams::default(),
-                )
-            } else {
-                arael_faer::supernodal::amd_block_order(&hsym)
-            };
+        // The block-level twin of full_symbolic's ordering rule: a NAMED
+        // marginalize set (the caller's or the model's -- never one the
+        // solver detected) goes first in natural order under Auto or
+        // MarginalizeFirst, exactly the elimination the reduction would
+        // have performed. It also keeps marginalized neighbors adjacent,
+        // which is what makes the update batches tight.
+        let named = self.named_marginalize();
+        let marg_first = matches!(
+            self.ordering,
+            FaerOrdering::Auto | FaerOrdering::MarginalizeFirst
+        ) && !named.is_empty();
+        let block_order: Option<Vec<usize>> = match self.ordering {
+            FaerOrdering::NestedDissection => Some(arael_faer::nd::order_graph(
+                &arael_faer::nd::Graph::of_blocks(&hsym),
+                arael_faer::nd::NdParams::default(),
+            )),
+            FaerOrdering::Natural => None,
+            _ if marg_first => {
+                let mut order: Vec<usize> = Vec::with_capacity(nblk);
+                let mut taken = vec![false; nblk];
+                for r in &named {
+                    for b in 0..nblk {
+                        if !taken[b] && r.start <= partition[b] && partition[b + 1] <= r.end {
+                            taken[b] = true;
+                            order.push(b);
+                        }
+                    }
+                }
+                for (b, &t) in taken.iter().enumerate() {
+                    if !t {
+                        order.push(b);
+                    }
+                }
+                Some(order)
+            }
+            _ => Some(arael_faer::supernodal::amd_block_order(&hsym)),
+        };
         let sn = arael_faer::supernodal::SupernodalSymbolic::new(
             &hsym,
-            Some(&block_order),
+            block_order.as_deref(),
             &arael_faer::supernodal::SupernodalParams {
                 batch_ratio: self.sn_batch_ratio,
                 ..Default::default()
