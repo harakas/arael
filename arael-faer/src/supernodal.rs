@@ -49,10 +49,17 @@ const NONE: u32 = u32::MAX;
 /// Since the batch product accumulates straight into the panel, the
 /// ratio carries no memory cost: only the span-by-depth pack buffers
 /// remain, in the noise at any measured ratio.
+/// `postorder`: relabel the block elimination tree in postorder before
+/// detecting supernodes. In a postorder every only child sits
+/// immediately before its parent, so the fundamental-supernode
+/// adjacency test never misses a mergeable chain; fill and flops are
+/// invariant under the relabeling. Costs one DFS over the block tree.
+/// Off exists for measurement only.
 #[derive(Clone, Debug)]
 pub struct SupernodalParams {
     pub relax: Option<Vec<(usize, f64)>>,
     pub batch_ratio: Option<f64>,
+    pub postorder: bool,
 }
 
 impl Default for SupernodalParams {
@@ -60,6 +67,7 @@ impl Default for SupernodalParams {
         Self {
             relax: Some(vec![(4, 1.0), (16, 0.8), (48, 0.1), (usize::MAX, 0.05)]),
             batch_ratio: Some(1.5),
+            postorder: true,
         }
     }
 }
@@ -234,6 +242,72 @@ impl SupernodalSymbolic {
                 }
             }
         }
+
+        // Postorder the block etree (children before parents, sibling
+        // subtrees in ascending order), composed into the elimination
+        // order. Every only child then sits immediately before its
+        // parent, so the adjacency test below never misses a mergeable
+        // chain. The permuted matrix's etree and column counts relabel
+        // directly -- a postorder is a topological order of the tree --
+        // and the filled pattern is invariant, so fill and flops do not
+        // move. A natural banded order postorders to itself.
+        let (order, inv, width_p, sc_start, parent, cc_blk, cc_sc) = if params.postorder {
+            let mut head = vec![NONE; nblk];
+            let mut sib = vec![NONE; nblk];
+            for k in (0..nblk).rev() {
+                if parent[k] != NONE {
+                    let p = parent[k] as usize;
+                    sib[k] = head[p];
+                    head[p] = k as u32;
+                }
+            }
+            let mut post: Vec<u32> = Vec::with_capacity(nblk);
+            let mut stack: Vec<u32> = Vec::new();
+            for r in 0..nblk {
+                if parent[r] != NONE {
+                    continue;
+                }
+                stack.push(r as u32);
+                while let Some(&top) = stack.last() {
+                    let t = top as usize;
+                    if head[t] != NONE {
+                        let c = head[t];
+                        head[t] = sib[c as usize];
+                        stack.push(c);
+                    } else {
+                        post.push(top);
+                        stack.pop();
+                    }
+                }
+            }
+            debug_assert_eq!(post.len(), nblk);
+            let mut pos = vec![0u32; nblk];
+            for (n, &o) in post.iter().enumerate() {
+                pos[o as usize] = n as u32;
+            }
+            let order2: Vec<u32> = post.iter().map(|&o| order[o as usize]).collect();
+            let mut inv2 = vec![NONE; nblk];
+            for (k, &b) in order2.iter().enumerate() {
+                inv2[b as usize] = k as u32;
+            }
+            let width2: Vec<u32> = post.iter().map(|&o| width_p[o as usize]).collect();
+            let mut sc2 = vec![0u32; nblk + 1];
+            for k in 0..nblk {
+                sc2[k + 1] = sc2[k] + width2[k];
+            }
+            let parent2: Vec<u32> = post
+                .iter()
+                .map(|&o| {
+                    let p = parent[o as usize];
+                    if p == NONE { NONE } else { pos[p as usize] }
+                })
+                .collect();
+            let ccb2: Vec<u32> = post.iter().map(|&o| cc_blk[o as usize]).collect();
+            let ccs2: Vec<u32> = post.iter().map(|&o| cc_sc[o as usize]).collect();
+            (order2, inv2, width2, sc2, parent2, ccb2, ccs2)
+        } else {
+            (order, inv, width_p, sc_start, parent, cc_blk, cc_sc)
+        };
 
         // Fundamental supernodes: a column joins its predecessor's
         // supernode iff it is the predecessor's parent, its only child,
@@ -1687,6 +1761,7 @@ mod tests {
                         SupernodalParams {
                             relax: None,
                             batch_ratio: Some(1.2),
+                            ..Default::default()
                         },
                     ] {
                         let sn =
@@ -1827,6 +1902,68 @@ mod tests {
         for (a, b) in std::iter::zip(&x_plain, &x_batch) {
             assert!((a - b).abs() < 1e-9, "batched diverges: {} vs {}", a, b);
         }
+    }
+
+    /// Postordering must not move fill (the filled pattern is invariant
+    /// under the relabeling) and must never find FEWER fundamental
+    /// supernodes -- in a postorder every only child is adjacent to its
+    /// parent. The targeted case: a block chain eliminated in an
+    /// interleaved order, where without the postorder almost no
+    /// adjacency survives.
+    #[test]
+    fn postorder_keeps_fill_and_recovers_supernodes() {
+        let on = SupernodalParams { relax: None, ..Default::default() };
+        let off = SupernodalParams { relax: None, postorder: false, ..Default::default() };
+        for seed in [13u64, 29] {
+            let sym = random_structure(50, 4, 2, seed);
+            let nblk = sym.nblk_cols();
+            let nd = order_graph(&Graph::of_blocks(&sym), NdParams::default());
+            let scrambled: Vec<usize> =
+                (0..nblk).step_by(2).chain((1..nblk).step_by(2)).collect();
+            for order in [&nd, &scrambled] {
+                let a = SupernodalSymbolic::new(&sym, Some(order), &on).unwrap();
+                let b = SupernodalSymbolic::new(&sym, Some(order), &off).unwrap();
+                assert_eq!(a.factor_scalar_nnz(), b.factor_scalar_nnz(), "fill moved");
+                assert!(
+                    a.n_supernodes() <= b.n_supernodes(),
+                    "postorder lost supernodes: {} vs {}",
+                    a.n_supernodes(),
+                    b.n_supernodes(),
+                );
+            }
+        }
+        // Two disconnected block CLIQUES, eliminated alternately. Within
+        // a clique the column patterns nest exactly (each column holds
+        // the remaining members), so each clique is one fundamental
+        // supernode -- but only if its columns are consecutive. The
+        // alternating order denies that adjacency; the postorder
+        // restores it.
+        let mut part: Vec<SparseIndex> = vec![0];
+        for _ in 0..24 {
+            part.push(part.last().unwrap() + 3);
+        }
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for comp in 0..2 {
+            let base = comp * 12;
+            for j in base..base + 12 {
+                for i in base..=j {
+                    cells.push((i * 3, j * 3));
+                }
+            }
+        }
+        let (cliques, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.clone(),
+            part,
+            cells.len(),
+            |k| cells[k],
+        );
+        // A0, B0, A1, B1, ... (component A = blocks 0..12, B = 12..24).
+        let alternating: Vec<usize> = (0..12).flat_map(|i| [i, i + 12]).collect();
+        let a = SupernodalSymbolic::new(&cliques, Some(&alternating), &on).unwrap();
+        let b = SupernodalSymbolic::new(&cliques, Some(&alternating), &off).unwrap();
+        assert_eq!(a.factor_scalar_nnz(), b.factor_scalar_nnz());
+        assert_eq!(a.n_supernodes(), 2, "each clique should collapse to one supernode");
+        assert!(b.n_supernodes() >= 12, "without postorder the alternation blocks merging");
     }
 
     /// One context serves repeated attempts and then a bigger problem:

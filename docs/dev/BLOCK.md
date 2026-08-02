@@ -498,38 +498,65 @@ Remaining from this item: chunk oversized updates by row block so
 memory-only, fold into the P5/P6 memory work.
 
 ### P2. The supernodal against the envelope on the reduced banded S
+### [MEASURED 2026-08-02; default flip deferred to stage 6]
 
-Never measured: the slam DEFAULT route factors its banded reduced
-system with the envelope. A banded S under natural order is the
-supernodal's easy case -- fundamental chains, contiguous patterns, the
-direct-accumulate path firing everywhere -- and batching gives it a
-lever the envelope lacks. If it matches or beats the envelope, the
-flagship slam rows get whatever the margin is, and stage 6's
-subsumption question answers itself (one route fewer to maintain).
+Head-to-head on the slam reduced system (natural order on both routes,
+so the comparison is purely the factorization strategy; interleaved at
+300, single runs at 60/120; this VM):
 
-Do: measure head-to-head on slam-60/120/300 S and the loc system
-(`SLAM_ENVELOPE=never ARAEL_BLOCK_SUPERNODAL=1` against the default),
-f64 and f32. Expected: unknown -- this is a measurement, not a bet.
-Risk: none to ship; either the envelope keeps its regime with numbers
-attached, or it retires.
+| size | envelope full-iter f64/f32 | supernodal f64/f32 | peak f64 env/sn |
+|------|---------------------------:|-------------------:|----------------:|
+| 60 | 1.70 / 1.48 | 1.74 / 1.37 | 9.8 / 10.4 |
+| 120 | 5.23 / 3.78 | 4.96 / 3.71 | 16.5 / 17.7 |
+| 300 | 39.4-39.5 / 26.8-27.9 | 36.0-38.4 / 23.9-24.7 | 53.3 / 62.6 |
+
+The supernodal matches or beats the envelope on full-iter at every
+size (up to ~5-9% at 300), and at 300 the f32 rows differ in QUALITY,
+not just speed: the envelope route rejected a step in both interleaved
+rounds (2 accepted of 4 attempts, final cost 24243.923) while the
+supernodal accepted 3(3) and reached 24243.910, tracking the f64
+optimum. Costs: +5-7 ms first iteration at 300 (the envelope's
+symbolic is nearly free) and +9.3 MB peak f64 (+17%) from
+amalgamation padding and the update scratch.
+
+loc-1000 (whole-H, kd=11): a wash -- band 16.3, narrow_band 17.1,
+faer 17.4, supernodal 17.0 ms full-iter; the iteration is
+assembly-dominated and the tuned scalar band solver keeps its
+default.
+
+Verdict: the supernodal is the faster factorization for the flagship
+slam route, and the sturdier one at f32; the envelope keeps a real
+edge in setup cost and peak memory. The default flip is a stage-6
+decision and should be taken together with P6 (memory-lean relax) and
+the P5 scratch cap, which attack exactly the +17% peak that argues
+for the envelope.
 
 ### P3. Postorder the block elimination tree
+### [DONE 2026-08-02 -- shipped as insurance, measured ~neutral]
 
-We inherited faer's shortcut: no postorder pass, relying on the
-ordering being near-postordered. AMD roughly is; nested dissection
-only approximately. Columns that are etree-adjacent but not
-consecutive fail the fundamental-supernode test, and relaxed
-amalgamation buys the merge back WITH padding -- part of the +18%
-factor values against faer's scalar analysis at bal-372
-(performance AND memory: padding is both flops and factor bytes).
+Shipped: after the Liu pass the block etree is postordered (children
+before parents, sibling subtrees ascending) and composed into the
+elimination order; the etree and both column counts relabel directly
+(a postorder is a topological order of the tree), so no second pass.
+`SupernodalParams::postorder`, default on; off exists for measurement.
 
-Do: postorder the block etree after the Liu pass (one DFS over block
-nodes, children ordered; compose into the elimination order before
-everything downstream). Verify with the existing scalar cross-check
-test -- fill is invariant under postordering, so `factor_scalar_nnz`
-must not change while supernode count drops and padding shrinks.
-Expected: fewer, bigger fundamental supernodes on ND orders; some of
-the bal padding gone. Risk: low; the invariant is testable exactly.
+What it guarantees: in a postorder every only child sits immediately
+before its parent, so fundamental detection can never lose a merge to
+the ordering. The targeted test (two dense block cliques eliminated
+alternately) shows the difference: 2 supernodes against 12+ without
+the postorder, at identical fill.
+
+What it changes on the real benchmark orderings: almost nothing. bal's
+nested dissection already emits separators contiguously -- identical
+supernode counts at 49-372, and at 1723c a wash (128 vs 127
+supernodes, factor 302.3 vs 303.5 MB, times within same-run noise).
+The instructive negative: the +18% padding against faer's scalar
+analysis at bal-372 is NOT lost adjacency -- pure chains are not
+fundamentally mergeable at all (a tridiagonal's column patterns do not
+nest); that padding is intrinsic to block-granular amalgamation.
+Kept because it is one O(nblk) DFS, symbolic time unchanged, and it
+removes a whole class of ordering-quality hazards for orders we do
+not control (user-supplied ones included).
 
 ### P4. Hint-derived block order for the whole-Hessian route
 
@@ -638,6 +665,20 @@ row.
 
 ## Log
 
+- 2026-08-02: P3 shipped (`SupernodalParams::postorder`, default on):
+  block-etree postorder composed into the elimination order, etree and
+  counts relabeled in place. Guarantees no fundamental merge is lost
+  to the ordering (clique test: 2 supernodes vs 12+); measured
+  ~neutral on the benchmark orderings, kept as free insurance. Learned
+  on the way: the bal-372 padding gap vs scalar analysis is intrinsic
+  block-granularity amalgamation, not lost adjacency -- pure chains
+  are not fundamentally mergeable.
+- 2026-08-02: P2 measured. The supernodal matches or beats the
+  envelope on the slam reduced system's full-iter at every size and is
+  markedly sturdier at f32 (no rejected steps, better final cost at
+  300), for +5-7 ms setup and +17% peak at 300. loc whole-H is a wash
+  across all routes. Default flip deferred to stage 6, coupled to the
+  memory items that would erase the peak argument.
 - 2026-08-02: P1 shipped: `SupernodalContext` (grow-once workspace for
   factorize and solve, a signature change on both entry points) and
   panel-local zero-and-seed replacing the whole-factor memset. Factor
