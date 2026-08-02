@@ -725,6 +725,7 @@ pub fn order_graph(g: &Graph, p: NdParams) -> Vec<usize> {
 pub struct NestedDissection {
     fwd: Vec<crate::SparseIndex>,
     inv: Vec<crate::SparseIndex>,
+    block_order: Vec<usize>,
 }
 
 impl NestedDissection {
@@ -744,7 +745,7 @@ impl NestedDissection {
         for (new, &old) in fwd.iter().enumerate() {
             inv[old as usize] = new as crate::SparseIndex;
         }
-        NestedDissection { fwd, inv }
+        NestedDissection { fwd, inv, block_order }
     }
 
     /// The permutation, as faer wants it.
@@ -755,6 +756,13 @@ impl NestedDissection {
     /// `fwd[k]` is the scalar index eliminated k-th.
     pub fn forward(&self) -> &[crate::SparseIndex] {
         &self.fwd
+    }
+
+    /// The order in BLOCK units the scalar permutation was expanded from:
+    /// `block_order()[k]` is the block eliminated k-th. What a block-level
+    /// factorization ([`crate::supernodal`]) consumes.
+    pub fn block_order(&self) -> &[usize] {
+        &self.block_order
     }
 }
 

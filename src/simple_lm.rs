@@ -4228,6 +4228,9 @@ pub struct SparseFaerOptions {
     /// Block-column panel width for the envelope factorization; `None` picks
     /// it automatically (see [`SparseFaer::with_envelope_panel_width`]).
     pub envelope_panel_width: Option<usize>,
+    /// Factor with the supernodal block Cholesky instead of faer's scalar
+    /// one (see [`SparseFaer::with_block_supernodal`]). Off by default.
+    pub block_supernodal: bool,
     /// Parameter ranges to marginalize, named explicitly rather than left to
     /// the policy to detect.
     pub marginalize: Vec<std::ops::Range<usize>>,
@@ -4250,6 +4253,7 @@ impl SparseFaerOptions {
             narrow_band: false,
             envelope: EnvelopeMode::default(),
             envelope_panel_width: None,
+            block_supernodal: false,
             marginalize: Vec::new(),
         }
     }
@@ -4312,6 +4316,12 @@ impl SparseFaerOptions {
     /// [`SparseFaer::with_envelope_panel_width`]).
     pub fn with_envelope_panel_width(mut self, width: Option<usize>) -> Self {
         self.envelope_panel_width = width;
+        self
+    }
+    /// Toggle the supernodal block Cholesky (see
+    /// [`SparseFaer::with_block_supernodal`]).
+    pub fn with_block_supernodal(mut self, on: bool) -> Self {
+        self.block_supernodal = on;
         self
     }
     /// Add a parameter range to marginalize (may be called several times).
@@ -4553,6 +4563,11 @@ pub struct SchurPlan {
     /// dissection leave no envelope), when an iterative route ran, or when the
     /// envelope route was declined.
     pub envelope: bool,
+    /// Whether the system was factorized by the supernodal block Cholesky
+    /// ([`SparseFaer::with_block_supernodal`]) instead of faer's scalar one.
+    /// As with [`envelope`](Self::envelope), which system depends on
+    /// [`reduced`](Self::reduced).
+    pub block_supernodal: bool,
 }
 
 /// Sparse Cholesky via faer, pure Rust -- the default backend.
@@ -4663,6 +4678,15 @@ pub struct SparseFaer<T = f64> {
     envelope_active: bool,
     envelope_sym: Option<arael_faer::envelope::EnvelopeSymbolic>,
     envelope_factor: Vec<T>,
+    // Opt-in supernodal block Cholesky (with_block_supernodal): factor the
+    // system -- reduced S, or the whole block Hessian -- directly in block
+    // form under a block-level ordering. No scalar CSC, no scalar symbolic.
+    // block_supernodal is the config; sn_active is whether this solve took
+    // the route; sn_sym and sn_factor are its structure and factor buffer.
+    block_supernodal: bool,
+    sn_active: bool,
+    sn_sym: Option<arael_faer::supernodal::SupernodalSymbolic>,
+    sn_factor: Vec<T>,
     // Conjugate gradients on the reduced system ([`SchurSolve::Iterative`]).
     // The preconditioner is rebuilt per damped solve -- S changes with every
     // lambda -- while the scratch vectors persist so no iteration allocates.
@@ -4723,6 +4747,10 @@ impl<T> SparseFaer<T> {
             envelope_active: false,
             envelope_sym: None,
             envelope_factor: Vec::new(),
+            block_supernodal: false,
+            sn_active: false,
+            sn_sym: None,
+            sn_factor: Vec::new(),
             schur_solve: SchurSolve::default(),
             cg_work: arael_faer::cg::CgWorkspace::default(),
             cg_iters: 0,
@@ -4844,6 +4872,27 @@ impl<T> SparseFaer<T> {
         self
     }
 
+    /// Factor with the supernodal block Cholesky instead of flattening to
+    /// scalar CSC and using faer's. Off by default.
+    ///
+    /// The factorization runs directly on the block matrix -- the reduced
+    /// Schur system when the solve reduces, the whole block Hessian when it
+    /// does not -- under a block-level ordering (nested dissection when that
+    /// is the ordering, block-AMD otherwise), so the scalar pattern, the
+    /// scalar symbolic analysis and the per-attempt scalar copies are never
+    /// built. Measured at or ahead of the scalar route on every benchmark
+    /// matrix (1.0-1.3x per attempt), with a 2-10x cheaper symbolic phase;
+    /// see docs/dev/BLOCK.md. Opt-in while the route matures.
+    ///
+    /// Routes that never factorize (iterative Schur) and the envelope routes,
+    /// when they engage, keep precedence. Models without block structure
+    /// (hand-built problems, TripletBlock) cannot take it and fall back to
+    /// the scalar route.
+    pub fn with_block_supernodal(mut self, on: bool) -> Self {
+        self.block_supernodal = on;
+        self
+    }
+
     /// What the first compute decided (`None` before the first compute).
     pub fn plan(&self) -> Option<SchurPlan> {
         self.plan
@@ -4857,7 +4906,8 @@ impl<T> SparseFaer<T> {
             .with_supernodal(opts.supernodal)
             .with_narrow_band(opts.narrow_band)
             .with_envelope_schur(opts.envelope)
-            .with_envelope_panel_width(opts.envelope_panel_width);
+            .with_envelope_panel_width(opts.envelope_panel_width)
+            .with_block_supernodal(opts.block_supernodal);
         solver.schur_solve = opts.schur_solve;
         for range in &opts.marginalize {
             solver = solver.with_marginalize(range.clone());
@@ -5116,6 +5166,120 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             ordering: Some(ReducedOrdering::NaturalBanded),
             kept_bandwidth: band,
             envelope: true,
+            block_supernodal: false,
+        });
+
+        // First numeric fill. Everything above it was analysis.
+        let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        let t_a = self.measure.then(Instant::now);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        if let Some(t) = t_a {
+            self.assembly_time = t.elapsed();
+        }
+        matrix.h = Some(h);
+        self.positions = Some(positions);
+        Ok(cost)
+    }
+
+    /// Set up the whole Hessian (no reduction) for the supernodal block
+    /// Cholesky: the block form is kept and factored directly under a
+    /// block-level ordering -- nested dissection when the caller asked for
+    /// it, block-AMD otherwise. Reached from `compute` when
+    /// `with_block_supernodal` is on, the solve does not reduce, and the
+    /// narrow-band route did not take the system first.
+    fn setup_whole_supernodal(
+        &mut self,
+        problem: &mut dyn LmProblem<T>,
+        params: &[T],
+        grad: &mut [T],
+        matrix: &mut FaerMatrix<T>,
+        partition: &[usize],
+        hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+        vb: bool,
+    ) -> Result<T, SolveError> {
+        // Factoring the whole system is not a reduction, so the iterative
+        // Schur routes have nothing to solve here -- same as the band route.
+        if self.schur_solve.cg().is_some() {
+            return Err(SolveError::IterativeSchurWithoutReduction);
+        }
+        let n = *partition.last().unwrap();
+        let nblk = partition.len() - 1;
+        // No scalar CSC, no Schur, no faer factorization on this route.
+        matrix.csc = None;
+        self.schur = None;
+        self.s = None;
+        self.s_vals = Vec::new();
+        self.rhs_kept = Vec::new();
+        self.x_kept = Vec::new();
+
+        // Scalar diagonal positions inside the block Hessian's diagonal tiles
+        // (damping and extract_diagonal read and write through these).
+        self.bdiag_pos.clear();
+        self.bdiag_pos.resize(n, ValueIndex::MAX);
+        for b in 0..nblk {
+            let w = partition[b + 1] - partition[b];
+            let diag = hsym
+                .col_range(b)
+                .find(|&x| hsym.blk_row(x) == b)
+                .ok_or(SolveError::UnconstrainedParameter { param: partition[b] })?;
+            let base = hsym.val_range(diag).start;
+            for k in 0..w {
+                self.bdiag_pos[partition[b] + k] = value_index(base + k * (w + 1));
+            }
+        }
+
+        let block_order: Vec<usize> =
+            if matches!(self.ordering, FaerOrdering::NestedDissection) {
+                arael_faer::nd::order_graph(
+                    &arael_faer::nd::Graph::of_blocks(&hsym),
+                    arael_faer::nd::NdParams::default(),
+                )
+            } else {
+                arael_faer::supernodal::amd_block_order(&hsym)
+            };
+        let sn = arael_faer::supernodal::SupernodalSymbolic::new(
+            &hsym,
+            Some(&block_order),
+            &arael_faer::supernodal::SupernodalParams::default(),
+        )
+        .map_err(|_| SolveError::SymbolicFactorization { reduced: false })?;
+        self.sn_factor.resize(sn.factor_val_count(), T::zero());
+        self.sn_active = true;
+        self.envelope_active = false;
+        self.envelope_sym = None;
+        if vb {
+            info!(
+                "supernodal: whole system {} params, block factorization -- {} \
+                 supernodes, {} factor values",
+                n,
+                sn.n_supernodes(),
+                sn.factor_val_count(),
+            );
+        }
+        self.sn_sym = Some(sn);
+
+        let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
+        let mut positions = std::vec::Vec::new();
+        problem.bind_hessian_positions(
+            &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+                resolver.resolve_tile(i as usize, j as usize)
+            }),
+            &mut positions,
+        );
+
+        self.plan = Some(SchurPlan {
+            reduced: false,
+            eliminated_blocks: 0,
+            eliminated_params: 0,
+            kept_params: n,
+            fill_ratio: None,
+            route_flops: None,
+            cg_iterations: None,
+            flop_ratio: None,
+            ordering: None,
+            kept_bandwidth: 0,
+            envelope: false,
+            block_supernodal: true,
         });
 
         // First numeric fill. Everything above it was analysis.
@@ -5259,6 +5423,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.llt_symbolic = None;
         self.envelope_sym = None;
         self.envelope_active = false;
+        self.sn_sym = None;
+        self.sn_active = false;
         self.plan = None;
         self.cg_iters = 0;
         // Buffer allocations are kept; they are resized when the next
@@ -5363,6 +5529,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // nothing, once per solve.
         self.needs_rebind = false;
         self.envelope_active = false;
+        self.sn_active = false;
+        self.sn_sym = None;
         let n = matrix.n;
 
         // Verbose mode narrates the one-time structural work below: what was
@@ -5419,6 +5587,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 ordering: None,
                 kept_bandwidth: 0,
                 envelope: false,
+                block_supernodal: false,
             });
             return self.setup_full(problem, params, grad, matrix, n, None, None, vb);
         }
@@ -5497,19 +5666,26 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     },
                 );
             }
-            // Whole-system narrow-band route: the caller asked for it and the
-            // whole Hessian is banded in natural order, so factor it with the
-            // block band Cholesky instead of faer's general sparse Cholesky.
-            if self.narrow_band_enabled {
+            // Whole-system block routes: the narrow-band Cholesky when the
+            // caller asked for it and the whole Hessian is banded in natural
+            // order, else the supernodal block Cholesky when the caller asked
+            // for that -- both factor H in block form instead of flattening
+            // it for faer's general sparse Cholesky.
+            if self.narrow_band_enabled || self.block_supernodal {
                 let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
                     partition_idx(&partition),
                     partition_idx(&partition),
                     cells.len(),
                     |k| (cells[k].0 as usize, cells[k].1 as usize),
                 );
-                let band = block_half_bandwidth(&hsym);
-                if matches!(ordering_for(hsym.val_count(), n, band), ReducedOrdering::NaturalBanded) {
-                    return self.setup_whole_band(problem, params, grad, matrix, &partition, hsym, band, vb);
+                if self.narrow_band_enabled {
+                    let band = block_half_bandwidth(&hsym);
+                    if matches!(ordering_for(hsym.val_count(), n, band), ReducedOrdering::NaturalBanded) {
+                        return self.setup_whole_band(problem, params, grad, matrix, &partition, hsym, band, vb);
+                    }
+                }
+                if self.block_supernodal {
+                    return self.setup_whole_supernodal(problem, params, grad, matrix, &partition, hsym, vb);
                 }
             }
             self.plan = Some(SchurPlan {
@@ -5524,6 +5700,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 ordering: None,
                 kept_bandwidth: 0,
                 envelope: false,
+                block_supernodal: false,
             });
             return self.setup_full(
                 problem, params, grad, matrix, n, Some((&partition, &cells)), None, vb,
@@ -5806,6 +5983,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             ordering: None,
             kept_bandwidth: if reduced { band } else { 0 },
             envelope: false,
+            block_supernodal: false,
         });
 
         // A DECLINED reduction marginalizes nothing, so the block layout
@@ -5955,6 +6133,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.l_vals = Vec::new();
             self.factor_mem = Vec::new();
             self.solve_mem = Vec::new();
+            self.sn_factor = Vec::new();
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense), solving it with \
@@ -5984,6 +6163,51 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 );
             }
             self.envelope_sym = Some(bsym);
+        } else if self.block_supernodal {
+            // Supernodal block route: factor S directly in block form under a
+            // block-level ordering. No scalar pattern, no scalar symbolic, no
+            // per-attempt flatten.
+            self.envelope_sym = None;
+            self.llt_symbolic = None;
+            self.s_col_ptr = Vec::new();
+            self.s_row_idx = Vec::new();
+            self.s_vals = Vec::new();
+            self.l_vals = Vec::new();
+            self.factor_mem = Vec::new();
+            self.solve_mem = Vec::new();
+            let block_order: Option<Vec<usize>> = match &nd {
+                Some(nd) => Some(nd.block_order().to_vec()),
+                None => match ord {
+                    ReducedOrdering::Amd | ReducedOrdering::Nd => {
+                        Some(arael_faer::supernodal::amd_block_order(&schur.s))
+                    }
+                    ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense => None,
+                },
+            };
+            let sn = arael_faer::supernodal::SupernodalSymbolic::new(
+                &schur.s,
+                block_order.as_deref(),
+                &arael_faer::supernodal::SupernodalParams::default(),
+            )
+            .map_err(|_| SolveError::SymbolicFactorization { reduced: true })?;
+            self.sn_factor.resize(sn.factor_val_count(), T::zero());
+            if vb {
+                info!(
+                    "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
+                     supernodal block factorization -- {} supernodes, {} factor values",
+                    nk,
+                    100.0 * schur.s.scalar_upper_nnz() as f64
+                        / (nk as f64 * (nk as f64 + 1.0) / 2.0),
+                    band,
+                    sn.n_supernodes(),
+                    sn.factor_val_count(),
+                );
+            }
+            self.sn_sym = Some(sn);
+            self.sn_active = true;
+            if let Some(plan) = self.plan.as_mut() {
+                plan.block_supernodal = true;
+            }
         } else {
             // General sparse route: S flattened to scalar CSC and factorized
             // by faer, under the chosen ordering.
@@ -6119,10 +6343,22 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
 
-        // Whole-system band route: no reduction, factor the damped H directly
-        // and solve. Distinguished from the reduced route by the absence of a
-        // Schur symbolic (matrix.h is block form only in these two cases).
+        // Whole-system block routes: no reduction, factor the damped H
+        // directly and solve -- the band Cholesky or the supernodal one.
+        // Distinguished from the reduced route by the absence of a Schur
+        // symbolic (matrix.h is block form only in these cases).
         if self.schur.is_none() {
+            if self.sn_active {
+                let sn = self.sn_sym.as_ref().unwrap();
+                if arael_faer::supernodal::supernodal_factorize(sn, h, &mut self.sn_factor)
+                    .is_err()
+                {
+                    return false;
+                }
+                delta.copy_from_slice(grad);
+                arael_faer::supernodal::supernodal_solve(sn, &self.sn_factor, delta);
+                return true;
+            }
             let bsym = self.envelope_sym.as_ref().unwrap();
             if arael_faer::envelope::envelope_factorize(bsym, h, &mut self.envelope_factor).is_err() {
                 return false;
@@ -6218,6 +6454,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
             self.x_kept.copy_from_slice(&self.rhs_kept);
             arael_faer::envelope::envelope_solve(bsym, &self.envelope_factor, &mut self.x_kept);
+        } else if self.sn_active {
+            // Supernodal block Cholesky on S: no scalar CSC round trip, the
+            // ordering baked into the seed scatter.
+            let sn = self.sn_sym.as_ref().unwrap();
+            let s = self.s.as_ref().unwrap();
+            if arael_faer::supernodal::supernodal_factorize(sn, s, &mut self.sn_factor).is_err() {
+                return false;
+            }
+            self.x_kept.copy_from_slice(&self.rhs_kept);
+            arael_faer::supernodal::supernodal_solve(sn, &self.sn_factor, &mut self.x_kept);
         } else {
             self.s.as_ref().unwrap().csc_vals_into(&mut self.s_vals);
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(

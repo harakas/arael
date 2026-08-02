@@ -191,6 +191,7 @@ pub mod bsc;
 pub mod cg;
 pub mod nd;
 pub mod schur;
+pub mod supernodal;
 
 #[cfg(test)]
 mod value_index_tests {

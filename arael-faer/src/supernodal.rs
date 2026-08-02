@@ -1,0 +1,1364 @@
+//! Supernodal block Cholesky, symbolic analysis (docs/dev/BLOCK.md).
+//!
+//! Given a symmetric block-CSC matrix (upper-tile storage) and an
+//! optional block elimination order, compute everything the numeric
+//! factorization needs, on the block graph -- no scalar pattern is ever
+//! formed:
+//!
+//! - the block elimination tree and per-column counts (block and scalar
+//!   units, one pass);
+//! - fundamental block supernodes, then relaxed amalgamation under a
+//!   zero-fill budget counted in scalar units;
+//! - each supernode's sorted block pattern, via an up-looking reach
+//!   over the supernodal etree;
+//! - the descendant graph (who updates whom), transposed and
+//!   deduplicated;
+//! - the dense panel layout (one column-major panel per supernode, the
+//!   factor stored as lower L), and the tile source map: for every
+//!   stored tile of the matrix, its target offset, stride and
+//!   orientation inside the panels. The permutation lives in this map;
+//!   the matrix is never permuted or copied.
+
+use crate::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
+use crate::nd::Graph;
+use crate::schur::SchurReal;
+use crate::{SparseIndex, ValueIndex};
+
+const NONE: u32 = u32::MAX;
+
+/// Amalgamation control: merge a supernode into its parent while the
+/// merged panel stays under a zero-fill budget.
+///
+/// Each `(max_cols, max_zero_fraction)` row permits a merge whose
+/// combined scalar column count is at most `max_cols` and whose
+/// accumulated explicit zeros stay under `max_zero_fraction` of the
+/// merged panel. `None` disables amalgamation (fundamental supernodes
+/// only). The default table is the one faer tunes for scalar
+/// supernodes; stage 4 of the plan sweeps it on block units.
+#[derive(Clone, Debug)]
+pub struct SupernodalParams {
+    pub relax: Option<Vec<(usize, f64)>>,
+}
+
+impl Default for SupernodalParams {
+    fn default() -> Self {
+        Self {
+            relax: Some(vec![(4, 1.0), (16, 0.8), (48, 0.1), (usize::MAX, 0.05)]),
+        }
+    }
+}
+
+/// What a supernodal pass can fail with: the symbolic analysis rejects
+/// a factor a [`ValueIndex`] cannot address, the numeric factorization
+/// a matrix that is not positive definite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupernodalError {
+    /// The factor holds more scalars than a [`ValueIndex`] addresses.
+    IndexOverflow { required: u64 },
+    /// A diagonal pivot was not strictly positive; the caller raises
+    /// the damping and retries, as with the other factorizations.
+    NotPositiveDefinite,
+}
+
+/// Where one stored tile of the matrix lands inside the factor panels.
+#[derive(Clone, Copy, Debug)]
+pub struct TileTarget {
+    /// Offset of the tile's (0, 0) scalar in the factor value buffer.
+    pub dst: ValueIndex,
+    /// Column stride at the target -- the panel's scalar height.
+    pub stride: u32,
+    /// The tile is written transposed (an upper tile crossing to the
+    /// lower factor, or a diagonal tile mirrored into its lower half).
+    pub trans: bool,
+}
+
+/// The symbolic factorization: supernode structure, patterns, panel
+/// layout, descendant lists and the seed scatter map. Built once per
+/// sparsity structure; every damped attempt reuses it.
+pub struct SupernodalSymbolic {
+    /// scalar dimension
+    n: usize,
+    /// block dimension
+    nblk: usize,
+    /// number of supernodes
+    ns: usize,
+    /// block elimination order: `order[k]` = old block eliminated k-th
+    order: Vec<u32>,
+    /// inverse: `inv[old]` = position in the elimination order
+    inv: Vec<u32>,
+    /// permuted scalar column starts, `nblk + 1`
+    sc_start: Vec<u32>,
+    /// permuted block column -> supernode
+    index_to_super: Vec<u32>,
+    /// supernode -> first permuted block column, `ns + 1`
+    sup_begin: Vec<u32>,
+    /// supernodal elimination tree, `NONE` at a root
+    super_etree: Vec<u32>,
+    /// pattern bounds per supernode, `ns + 1`
+    pat_ptr: Vec<u32>,
+    /// concatenated patterns: permuted block columns below each
+    /// supernode, sorted ascending
+    pat_blk: Vec<u32>,
+    /// per pattern entry, the scalar row of the block inside the panel
+    pat_row: Vec<u32>,
+    /// panel value offsets, `ns + 1`
+    val_ptr: Vec<ValueIndex>,
+    /// panel scalar heights
+    nrows: Vec<u32>,
+    /// descendant bounds per supernode, `ns + 1`
+    desc_ptr: Vec<u32>,
+    /// concatenated descendant lists, sorted ascending
+    desc_idx: Vec<u32>,
+    /// per descendant pair, the split of the descendant's pattern:
+    /// (first entry inside the target, entries inside the target)
+    desc_split: Vec<(u32, u32)>,
+    /// old (unpermuted) scalar column starts per old block
+    old_start: Vec<u32>,
+    /// largest descendant update, in scalars
+    max_update: usize,
+    /// widest supernode, in scalar columns
+    max_ncols: usize,
+    /// per stored tile of the matrix, its panel target
+    tiles: Vec<TileTarget>,
+    /// factor scalar count (panel volumes)
+    n_vals: usize,
+    /// factorization cost, one squared-height term per scalar column
+    flops: f64,
+}
+
+impl SupernodalSymbolic {
+    /// Analyse a symmetric block matrix under an optional block
+    /// elimination order (`order[k]` = block eliminated k-th, e.g. from
+    /// [`crate::nd::order_graph`]); `None` is the natural order.
+    pub fn new(
+        a: &SymbolicSparseBlockColMat<SparseIndex>,
+        order: Option<&[usize]>,
+        params: &SupernodalParams,
+    ) -> Result<Self, SupernodalError> {
+        let nblk = a.nblk_cols();
+        assert_eq!(a.nblk_rows(), nblk, "the matrix must be square in blocks");
+        assert_eq!(a.nrows(), a.ncols());
+        let n = a.ncols();
+
+        // Permutation, both directions, in block units.
+        let order: Vec<u32> = match order {
+            Some(o) => {
+                assert_eq!(o.len(), nblk);
+                o.iter().map(|&b| b as u32).collect()
+            }
+            None => (0..nblk as u32).collect(),
+        };
+        let mut inv = vec![NONE; nblk];
+        for (k, &b) in order.iter().enumerate() {
+            debug_assert!(inv[b as usize] == NONE, "order names a block twice");
+            inv[b as usize] = k as u32;
+        }
+
+        // Permuted scalar widths and column starts.
+        let width_p: Vec<u32> =
+            (0..nblk).map(|k| a.col_span(order[k] as usize).len() as u32).collect();
+        let mut sc_start = vec![0u32; nblk + 1];
+        for k in 0..nblk {
+            sc_start[k + 1] = sc_start[k] + width_p[k];
+        }
+        debug_assert_eq!(sc_start[nblk] as usize, n);
+
+        // Symmetric block adjacency, old indices, no diagonal.
+        let g = Graph::of_blocks(a);
+
+        // Block elimination tree and column counts, block and scalar
+        // units in one up-looking pass over the permuted columns.
+        let mut parent = vec![NONE; nblk];
+        let mut visited = vec![NONE; nblk];
+        let mut cc_blk = vec![0u32; nblk];
+        let mut cc_sc = vec![0u32; nblk];
+        for k in 0..nblk {
+            visited[k] = k as u32;
+            cc_blk[k] = 1;
+            cc_sc[k] = width_p[k];
+            for &nbr in g.neighbours(order[k] as usize) {
+                let mut i = inv[nbr] as usize;
+                if i >= k {
+                    continue;
+                }
+                while visited[i] != k as u32 {
+                    let next = if parent[i] == NONE {
+                        parent[i] = k as u32;
+                        k
+                    } else {
+                        parent[i] as usize
+                    };
+                    cc_blk[i] += 1;
+                    cc_sc[i] += width_p[k];
+                    visited[i] = k as u32;
+                    i = next;
+                }
+            }
+        }
+
+        // Fundamental supernodes: a column joins its predecessor's
+        // supernode iff it is the predecessor's parent, its only child,
+        // and the patterns nest (block counts differ by exactly one).
+        let mut child_count = vec![0u32; nblk];
+        for k in 0..nblk {
+            if parent[k] != NONE {
+                child_count[parent[k] as usize] += 1;
+            }
+        }
+        let mut fund_begin: Vec<u32> = vec![0];
+        for k in 1..nblk {
+            let merge = parent[k - 1] == k as u32
+                && child_count[k] == 1
+                && cc_blk[k - 1] == cc_blk[k] + 1;
+            if !merge {
+                fund_begin.push(k as u32);
+            }
+        }
+        fund_begin.push(nblk as u32);
+        let nf = fund_begin.len() - 1;
+
+        // Fundamental supernodal etree.
+        let mut fund_of = vec![0u32; nblk];
+        for s in 0..nf {
+            for k in fund_begin[s]..fund_begin[s + 1] {
+                fund_of[k as usize] = s as u32;
+            }
+        }
+        let fund_parent = |s: usize| -> u32 {
+            let last = fund_begin[s + 1] as usize - 1;
+            if parent[last] == NONE { NONE } else { fund_of[parent[last] as usize] }
+        };
+
+        // Relaxed amalgamation, scalar units. A supernode may absorb
+        // the live supernode immediately before it when that one is its
+        // child in the supernodal etree and the zero-fill budget holds.
+        let sc_of = |s: usize, begin: &[u32]| -> u32 {
+            sc_start[fund_begin[s + 1] as usize] - sc_start[begin[s] as usize]
+        };
+        let mut begin: Vec<u32> = (0..nf).map(|s| fund_begin[s]).collect();
+        let mut alive = vec![true; nf];
+        let mut rep: Vec<u32> = (0..nf as u32).collect();
+        if let Some(relax) = &params.relax {
+            let mut ncols_sc: Vec<u64> = (0..nf).map(|s| sc_of(s, &begin) as u64).collect();
+            let degree_sc: Vec<u64> = (0..nf)
+                .map(|s| {
+                    let last = fund_begin[s + 1] as usize - 1;
+                    (cc_sc[last] - width_p[last]) as u64
+                })
+                .collect();
+            let mut nzeros = vec![0u64; nf];
+            let mut prev: Vec<u32> = (0..nf).map(|s| s.wrapping_sub(1) as u32).collect();
+            let find = |rep: &mut [u32], mut s: u32| -> u32 {
+                while rep[s as usize] != s {
+                    let up = rep[rep[s as usize] as usize];
+                    rep[s as usize] = up;
+                    s = up;
+                }
+                s
+            };
+            for p in 1..nf {
+                loop {
+                    let c = prev[p];
+                    if c == NONE {
+                        break;
+                    }
+                    let c = c as usize;
+                    let cp = fund_parent(c);
+                    if cp == NONE || find(&mut rep, cp) != p as u32 {
+                        break;
+                    }
+                    // faer's budget: pad the child's columns to the
+                    // parent's height, accept per the relax table.
+                    let new_zeros =
+                        (ncols_sc[p] + degree_sc[p] - degree_sc[c]) * ncols_sc[c];
+                    let total_zeros = new_zeros + nzeros[p] + nzeros[c];
+                    let ok = if new_zeros == 0 {
+                        true
+                    } else {
+                        let combined = ncols_sc[p] + ncols_sc[c];
+                        let expanded =
+                            combined * (combined + 1) / 2 + degree_sc[p] * combined;
+                        relax.iter().any(|&(max_n, max_z)| {
+                            combined as usize <= max_n
+                                && (expanded as f64) * max_z >= total_zeros as f64
+                        })
+                    };
+                    if !ok {
+                        break;
+                    }
+                    ncols_sc[p] += ncols_sc[c];
+                    nzeros[p] = total_zeros;
+                    begin[p] = begin[c];
+                    alive[c] = false;
+                    rep[c] = p as u32;
+                    prev[p] = prev[c];
+                }
+            }
+        }
+
+        // Compact to the final supernodes.
+        let mut sup_begin: Vec<u32> = Vec::with_capacity(nf + 1);
+        for s in 0..nf {
+            if alive[s] {
+                sup_begin.push(begin[s]);
+            }
+        }
+        sup_begin.push(nblk as u32);
+        let ns = sup_begin.len() - 1;
+        let mut index_to_super = vec![0u32; nblk];
+        for s in 0..ns {
+            for k in sup_begin[s]..sup_begin[s + 1] {
+                index_to_super[k as usize] = s as u32;
+            }
+        }
+        let mut super_etree = vec![NONE; ns];
+        for s in 0..ns {
+            let last = sup_begin[s + 1] as usize - 1;
+            if parent[last] != NONE {
+                super_etree[s] = index_to_super[parent[last] as usize];
+            }
+        }
+
+        // Pattern bounds from the block degrees (exact: the merged
+        // supernode's pattern is its last column's), then the patterns
+        // by an up-looking reach. Emission in ascending column order
+        // leaves every pattern sorted.
+        let mut pat_ptr = vec![0u32; ns + 1];
+        for s in 0..ns {
+            let last = sup_begin[s + 1] as usize - 1;
+            pat_ptr[s + 1] = pat_ptr[s] + (cc_blk[last] - 1);
+        }
+        let mut pat_blk = vec![0u32; pat_ptr[ns] as usize];
+        {
+            let mut pos: Vec<u32> = pat_ptr[..ns].to_vec();
+            let mut vis = vec![NONE; ns];
+            for k in 0..nblk {
+                let sk = index_to_super[k] as usize;
+                vis[sk] = k as u32;
+                for &nbr in g.neighbours(order[k] as usize) {
+                    let i = inv[nbr] as usize;
+                    if i >= k {
+                        continue;
+                    }
+                    let mut d = index_to_super[i] as usize;
+                    while vis[d] != k as u32 {
+                        pat_blk[pos[d] as usize] = k as u32;
+                        pos[d] += 1;
+                        vis[d] = k as u32;
+                        d = super_etree[d] as usize;
+                    }
+                }
+            }
+            for s in 0..ns {
+                assert_eq!(
+                    pos[s], pat_ptr[s + 1],
+                    "pattern fill disagrees with the degree bound"
+                );
+            }
+        }
+
+        // Panel layout: scalar rows per pattern entry, heights, value
+        // offsets (checked against the ValueIndex range), flops.
+        let mut pat_row = vec![0u32; pat_blk.len()];
+        let mut nrows = vec![0u32; ns];
+        let mut val_ptr = vec![0 as ValueIndex; ns + 1];
+        let mut n_vals: u64 = 0;
+        let mut flops = 0.0f64;
+        for s in 0..ns {
+            let ncols = sc_start[sup_begin[s + 1] as usize] - sc_start[sup_begin[s] as usize];
+            let mut row = ncols;
+            for p in pat_ptr[s]..pat_ptr[s + 1] {
+                pat_row[p as usize] = row;
+                row += width_p[pat_blk[p as usize] as usize];
+            }
+            nrows[s] = row;
+            if n_vals <= ValueIndex::MAX as u64 {
+                val_ptr[s] = n_vals as ValueIndex;
+            }
+            n_vals += row as u64 * ncols as u64;
+            let (h, q) = (row as f64, ncols as f64);
+            // sum_{c=0..q} (h - c)^2
+            flops += q * h * h - h * q * (q - 1.0) + q * (q - 1.0) * (2.0 * q - 1.0) / 6.0;
+        }
+        if n_vals > ValueIndex::MAX as u64 {
+            return Err(SupernodalError::IndexOverflow { required: n_vals });
+        }
+        val_ptr[ns] = n_vals as ValueIndex;
+
+        // Descendant lists: transpose the pattern's supernode
+        // occurrences. Patterns are sorted, so occurrences of one
+        // target are consecutive; emitting s ascending leaves each
+        // target's list sorted.
+        let mut desc_ptr = vec![0u32; ns + 1];
+        for s in 0..ns {
+            let mut last_t = NONE;
+            for p in pat_ptr[s]..pat_ptr[s + 1] {
+                let t = index_to_super[pat_blk[p as usize] as usize];
+                if t != last_t {
+                    desc_ptr[t as usize + 1] += 1;
+                    last_t = t;
+                }
+            }
+        }
+        for s in 0..ns {
+            desc_ptr[s + 1] += desc_ptr[s];
+        }
+        let mut desc_idx = vec![0u32; desc_ptr[ns] as usize];
+        let mut desc_split = vec![(0u32, 0u32); desc_ptr[ns] as usize];
+        let mut max_update = 0usize;
+        {
+            // One entry per (target, descendant) pair, with the
+            // descendant's pattern split precomputed so the numeric
+            // loop never searches: entries [start, start+mid) lie in
+            // the target's columns, everything from start participates
+            // as update rows.
+            let row_at = |s: usize, rel: u32| -> u32 {
+                let p = pat_ptr[s] + rel;
+                if p < pat_ptr[s + 1] { pat_row[p as usize] } else { nrows[s] }
+            };
+            let mut pos: Vec<u32> = desc_ptr[..ns].to_vec();
+            for s in 0..ns {
+                let mut p = pat_ptr[s];
+                while p < pat_ptr[s + 1] {
+                    let t = index_to_super[pat_blk[p as usize] as usize];
+                    let start = p - pat_ptr[s];
+                    let mut mid = 0u32;
+                    while p < pat_ptr[s + 1]
+                        && index_to_super[pat_blk[p as usize] as usize] == t
+                    {
+                        mid += 1;
+                        p += 1;
+                    }
+                    desc_idx[pos[t as usize] as usize] = s as u32;
+                    desc_split[pos[t as usize] as usize] = (start, mid);
+                    pos[t as usize] += 1;
+                    let m = (nrows[s] - row_at(s, start)) as usize;
+                    let k = (row_at(s, start + mid) - row_at(s, start)) as usize;
+                    max_update = max_update.max(m * k);
+                }
+            }
+        }
+
+        // The tile source map. A stored tile (i, j), i <= j, holds
+        // A[rows(i), cols(j)]; in the permuted lower factor it lands at
+        // block (max, min) of the permuted pair -- as-is when the panel
+        // column is old j, transposed when it is old i (and a diagonal
+        // tile mirrors its upper triangle into the panel's lower).
+        let sup_col_start =
+            |s: usize| -> u32 { sc_start[sup_begin[s] as usize] };
+        let mut tiles = Vec::with_capacity(a.nblocks());
+        for j_old in 0..nblk {
+            for b in a.col_range(j_old) {
+                let i_old = a.blk_row(b);
+                let (pi, pj) = (inv[i_old] as usize, inv[j_old] as usize);
+                let (c, r, trans) = if i_old == j_old {
+                    (pi, pi, true)
+                } else if pj < pi {
+                    (pj, pi, false)
+                } else {
+                    (pi, pj, true)
+                };
+                let s = index_to_super[c] as usize;
+                let col_off = sc_start[c] - sup_col_start(s);
+                let row_off = if r < sup_begin[s + 1] as usize {
+                    debug_assert!(r >= sup_begin[s] as usize);
+                    sc_start[r] - sup_col_start(s)
+                } else {
+                    let pat = &pat_blk[pat_ptr[s] as usize..pat_ptr[s + 1] as usize];
+                    let p = pat.binary_search(&(r as u32)).expect(
+                        "a stored tile's row block is missing from the factor pattern",
+                    );
+                    pat_row[pat_ptr[s] as usize + p]
+                };
+                let dst = val_ptr[s]
+                    + row_off as ValueIndex
+                    + col_off as ValueIndex * nrows[s] as ValueIndex;
+                tiles.push(TileTarget { dst, stride: nrows[s], trans });
+            }
+        }
+
+        let old_start: Vec<u32> =
+            (0..nblk).map(|b| a.col_span(b).start as u32).collect();
+        let max_ncols = (0..ns)
+            .map(|s| {
+                (sc_start[sup_begin[s + 1] as usize] - sc_start[sup_begin[s] as usize]) as usize
+            })
+            .max()
+            .unwrap_or(0);
+
+        Ok(Self {
+            n,
+            nblk,
+            ns,
+            order,
+            inv,
+            sc_start,
+            index_to_super,
+            sup_begin,
+            super_etree,
+            pat_ptr,
+            pat_blk,
+            pat_row,
+            val_ptr,
+            nrows,
+            desc_ptr,
+            desc_idx,
+            desc_split,
+            old_start,
+            max_update,
+            max_ncols,
+            tiles,
+            n_vals: n_vals as usize,
+            flops,
+        })
+    }
+
+    /// Scalar dimension of the matrix.
+    pub fn dim(&self) -> usize {
+        self.n
+    }
+
+    /// Block dimension of the matrix.
+    pub fn n_blk(&self) -> usize {
+        self.nblk
+    }
+
+    /// The supernode a permuted block column belongs to.
+    pub fn supernode_of(&self, permuted_block: usize) -> usize {
+        self.index_to_super[permuted_block] as usize
+    }
+
+    /// The supernode's panel in the factor value buffer.
+    pub fn panel_range(&self, s: usize) -> core::ops::Range<usize> {
+        self.val_ptr[s] as usize..self.val_ptr[s + 1] as usize
+    }
+
+    /// Number of supernodes.
+    pub fn n_supernodes(&self) -> usize {
+        self.ns
+    }
+
+    /// Scalars in the factor buffer (panel volumes, the diagonal
+    /// blocks' unused upper triangles included).
+    pub fn factor_val_count(&self) -> usize {
+        self.n_vals
+    }
+
+    /// The factor's structural scalar count: the lower triangle only,
+    /// amalgamation padding included. Comparable to a scalar symbolic
+    /// factorization's `len_val` when amalgamation is off.
+    pub fn factor_scalar_nnz(&self) -> u64 {
+        let mut nnz = 0u64;
+        for s in 0..self.ns {
+            let q = (self.sc_start[self.sup_begin[s + 1] as usize]
+                - self.sc_start[self.sup_begin[s] as usize]) as u64;
+            let h = self.nrows[s] as u64;
+            nnz += q * (q + 1) / 2 + q * (h - q);
+        }
+        nnz
+    }
+
+    /// The factorization's cost: one squared-height term per scalar
+    /// column, the same yardstick as
+    /// [`envelope_flops`](crate::envelope::envelope_flops).
+    pub fn flops(&self) -> f64 {
+        self.flops
+    }
+
+    /// The supernode's block-column range, in elimination order.
+    pub fn supernode_cols(&self, s: usize) -> core::ops::Range<usize> {
+        self.sup_begin[s] as usize..self.sup_begin[s + 1] as usize
+    }
+
+    /// The supernode's panel shape: scalar columns and scalar rows
+    /// (columns included).
+    pub fn supernode_dims(&self, s: usize) -> (usize, usize) {
+        let q = self.sc_start[self.sup_begin[s + 1] as usize]
+            - self.sc_start[self.sup_begin[s] as usize];
+        (q as usize, self.nrows[s] as usize)
+    }
+
+    /// The supernode's below-diagonal pattern: permuted block columns,
+    /// sorted ascending.
+    pub fn supernode_pattern(&self, s: usize) -> &[u32] {
+        &self.pat_blk[self.pat_ptr[s] as usize..self.pat_ptr[s + 1] as usize]
+    }
+
+    /// The supernodes that update `s`, sorted ascending.
+    pub fn descendants(&self, s: usize) -> &[u32] {
+        &self.desc_idx[self.desc_ptr[s] as usize..self.desc_ptr[s + 1] as usize]
+    }
+
+    /// The pattern entries' scalar rows inside the panel, parallel to
+    /// [`supernode_pattern`](Self::supernode_pattern).
+    pub fn supernode_pattern_rows(&self, s: usize) -> &[u32] {
+        &self.pat_row[self.pat_ptr[s] as usize..self.pat_ptr[s + 1] as usize]
+    }
+
+    /// The supernode's parent in the supernodal elimination tree, or
+    /// `None` at a root.
+    pub fn supernode_parent(&self, s: usize) -> Option<usize> {
+        (self.super_etree[s] != NONE).then_some(self.super_etree[s] as usize)
+    }
+
+    /// The seed scatter map, one entry per stored tile of the matrix in
+    /// storage order.
+    pub fn tile_targets(&self) -> &[TileTarget] {
+        &self.tiles
+    }
+
+    /// The block elimination order the analysis ran under.
+    pub fn order(&self) -> &[u32] {
+        &self.order
+    }
+
+    /// Where an old (unpermuted) block sits in the elimination order.
+    pub fn position_of(&self, old_block: usize) -> usize {
+        self.inv[old_block] as usize
+    }
+}
+
+/// Approximate-minimum-degree order of the BLOCK graph: faer's amd run
+/// on the block adjacency, so blocks stay whole by construction. On the
+/// pose-graph benchmarks it matches scalar AMD's fill while ordering a
+/// graph 3-6x smaller. Returns the block elimination order
+/// [`SupernodalSymbolic::new`] takes.
+pub fn amd_block_order(a: &SymbolicSparseBlockColMat<SparseIndex>) -> Vec<usize> {
+    let nblk = a.nblk_cols();
+    let (_, _, bcp, bri, _) = a.parts();
+    let pattern =
+        faer::sparse::SymbolicSparseColMatRef::new_checked(nblk, nblk, bcp, None, bri);
+    let mut fwd = vec![0 as SparseIndex; nblk];
+    let mut inv = vec![0 as SparseIndex; nblk];
+    let mut mem = vec![
+        core::mem::MaybeUninit::<u8>::uninit();
+        faer::sparse::linalg::amd::order_maybe_unsorted_scratch::<SparseIndex>(
+            nblk,
+            a.nblocks(),
+        )
+        .unaligned_bytes_required()
+    ];
+    faer::sparse::linalg::amd::order(
+        &mut fwd,
+        &mut inv,
+        pattern,
+        faer::sparse::linalg::amd::Control::default(),
+        faer::dyn_stack::MemStack::new(&mut mem),
+    )
+    .expect("amd on a checked block pattern");
+    fwd.into_iter().map(|b| b as usize).collect()
+}
+
+fn one<T: SchurReal>() -> T {
+    T::from_f64(1.0)
+}
+
+fn minus_one<T: SchurReal>() -> T {
+    T::ZERO - one::<T>()
+}
+
+/// Factor `L L^T = P A P^T` into the panels, left-looking by supernode.
+///
+/// `a` is the matrix the symbolic analysis was built from (same
+/// structure, any values); the permutation and the upper-to-lower
+/// transposition live in the precomputed tile map, so the matrix is
+/// read exactly once, tile by tile. Damping is the caller's: write it
+/// into `a`'s diagonal tiles before calling, as the other block routes
+/// do. The factor buffer is caller-owned and reused across attempts.
+pub fn supernodal_factorize<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    a: &SparseBlockColMat<SparseIndex, T>,
+    factor: &mut [T],
+) -> Result<(), SupernodalError> {
+    assert_eq!(factor.len(), sym.factor_val_count());
+    let asym = a.symbolic();
+    assert_eq!(asym.nblocks(), sym.tiles.len());
+    factor.fill(T::ZERO);
+
+    // Seed: every stored tile to its precomputed panel target, columns
+    // contiguous when the orientations agree, transposed otherwise.
+    let vals = a.vals();
+    for b in 0..asym.nblocks() {
+        let t = sym.tiles[b];
+        let (wi, wj) = asym.block_dims(b);
+        let src = &vals[asym.val_range(b)];
+        let stride = t.stride as usize;
+        let dst0 = t.dst as usize;
+        if !t.trans {
+            for c in 0..wj {
+                factor[dst0 + c * stride..dst0 + c * stride + wi]
+                    .clone_from_slice(&src[c * wi..(c + 1) * wi]);
+            }
+        } else {
+            for c in 0..wi {
+                for r in 0..wj {
+                    factor[dst0 + c * stride + r] = src[c + r * wi];
+                }
+            }
+        }
+    }
+
+    // Workspace: the largest single update, the current panel's block
+    // row map, the update's row runs, and the dense kernel's scratch.
+    let mut upd = vec![T::ZERO; sym.max_update];
+    let mut blk_row = vec![0u32; sym.nblk];
+    let mut runs: Vec<(u32, u32, u32)> = Vec::new();
+    let mut chol_mem = vec![
+        core::mem::MaybeUninit::<u8>::uninit();
+        faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
+            sym.max_ncols,
+            faer::Par::Seq,
+            faer::Spec::default(),
+        )
+        .unaligned_bytes_required()
+    ];
+
+    for s in 0..sym.ns {
+        let (q, h) = sym.supernode_dims(s);
+        let col0 = sym.sc_start[sym.sup_begin[s] as usize];
+
+        // Permuted block -> scalar row inside this panel.
+        for k in sym.sup_begin[s]..sym.sup_begin[s + 1] {
+            blk_row[k as usize] = sym.sc_start[k as usize] - col0;
+        }
+        for p in sym.pat_ptr[s]..sym.pat_ptr[s + 1] {
+            blk_row[sym.pat_blk[p as usize] as usize] = sym.pat_row[p as usize];
+        }
+
+        let (head, tail) = factor.split_at_mut(sym.val_ptr[s] as usize);
+        let panel = &mut tail[..h * q];
+
+        // Left-looking: subtract every descendant's contribution. The
+        // update is one GEMM into packed scratch (the full rectangle;
+        // the mid-by-mid part's upper triangle lands in the diagonal
+        // block's unused upper storage), then a block-run scatter.
+        for di in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
+            let d = sym.desc_idx[di as usize] as usize;
+            let (start, mid) = sym.desc_split[di as usize];
+            let dq = {
+                let (dq, _) = sym.supernode_dims(d);
+                dq
+            };
+            let dh = sym.nrows[d] as usize;
+            let dpat_row = sym.supernode_pattern_rows(d);
+            let dpat_blk = sym.supernode_pattern(d);
+            let r0 = dpat_row[start as usize] as usize;
+            let m = dh - r0;
+            let kend = start + mid;
+            let kw = (if (kend as usize) < dpat_row.len() {
+                dpat_row[kend as usize] as usize
+            } else {
+                dh
+            }) - r0;
+            let dpanel = &head[sym.val_ptr[d] as usize..sym.val_ptr[d + 1] as usize];
+
+            // upd (m x kw) = Ld[r0.., :] * Ld[r0..r0+kw, :]^T, in two
+            // parts: the mid-by-mid top is symmetric and only its lower
+            // triangle is needed (its upper lands in unused diagonal
+            // storage, so the scatter needn't mask it), the rest is a
+            // plain rectangle.
+            let b_v = unsafe {
+                faer::MatRef::from_raw_parts(dpanel.as_ptr().add(r0), kw, dq, 1, dh as isize)
+            };
+            let u_top = unsafe {
+                faer::MatMut::from_raw_parts_mut(upd.as_mut_ptr(), kw, kw, 1, m as isize)
+            };
+            faer::linalg::matmul::triangular::matmul(
+                u_top,
+                faer::linalg::matmul::triangular::BlockStructure::TriangularLower,
+                faer::Accum::Replace,
+                b_v,
+                faer::linalg::matmul::triangular::BlockStructure::Rectangular,
+                b_v.transpose(),
+                faer::linalg::matmul::triangular::BlockStructure::Rectangular,
+                one::<T>(),
+                faer::Par::Seq,
+            );
+            if m > kw {
+                let a_bot = unsafe {
+                    faer::MatRef::from_raw_parts(
+                        dpanel.as_ptr().add(r0 + kw),
+                        m - kw,
+                        dq,
+                        1,
+                        dh as isize,
+                    )
+                };
+                let u_bot = unsafe {
+                    faer::MatMut::from_raw_parts_mut(
+                        upd.as_mut_ptr().add(kw),
+                        m - kw,
+                        kw,
+                        1,
+                        m as isize,
+                    )
+                };
+                faer::linalg::matmul::matmul(
+                    u_bot,
+                    faer::Accum::Replace,
+                    a_bot,
+                    b_v.transpose(),
+                    one::<T>(),
+                    faer::Par::Seq,
+                );
+            }
+
+            // Row runs: (target row, update row, width) per pattern
+            // block from `start` on -- every one a contiguous segment.
+            runs.clear();
+            for e in start as usize..dpat_blk.len() {
+                let kb = dpat_blk[e] as usize;
+                let dr = dpat_row[e] as usize - r0;
+                let w = sym.sc_start[kb + 1] - sym.sc_start[kb];
+                runs.push((blk_row[kb], dr as u32, w));
+            }
+            let mut cc = 0usize;
+            for f in start as usize..kend as usize {
+                let kf = dpat_blk[f] as usize;
+                let wf = (sym.sc_start[kf + 1] - sym.sc_start[kf]) as usize;
+                let tc0 = (sym.sc_start[kf] - col0) as usize;
+                for c in 0..wf {
+                    let pcol = (tc0 + c) * h;
+                    let ucol = (cc + c) * m;
+                    for &(tr, dr, w) in &runs {
+                        let dst = pcol + tr as usize;
+                        let srcx = ucol + dr as usize;
+                        for r in 0..w as usize {
+                            panel[dst + r] = panel[dst + r] - upd[srcx + r];
+                        }
+                    }
+                }
+                cc += wf;
+            }
+        }
+
+        // Dense diagonal factor, then the panel below it.
+        let top = unsafe {
+            faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr(), q, q, 1, h as isize)
+        };
+        let stack = faer::dyn_stack::MemStack::new(&mut chol_mem);
+        faer::linalg::cholesky::llt::factor::cholesky_in_place(
+            top,
+            faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+            faer::Par::Seq,
+            stack,
+            faer::Spec::default(),
+        )
+        .map_err(|_| SupernodalError::NotPositiveDefinite)?;
+        if h > q {
+            let l11 =
+                unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+            let bot = unsafe {
+                faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr().add(q), h - q, q, 1, h as isize)
+            };
+            faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+                l11,
+                bot.transpose_mut(),
+                faer::Par::Seq,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Solve `A x = rhs` in place from a factor produced by
+/// [`supernodal_factorize`]. The permutation is applied on entry and
+/// undone on exit; `rhs` stays in the matrix's own ordering.
+pub fn supernodal_solve<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    rhs: &mut [T],
+) {
+    assert_eq!(factor.len(), sym.factor_val_count());
+    assert_eq!(rhs.len(), sym.n);
+    let max_below = (0..sym.ns)
+        .map(|s| {
+            let (q, h) = sym.supernode_dims(s);
+            h - q
+        })
+        .max()
+        .unwrap_or(0);
+    let mut x = vec![T::ZERO; sym.n];
+    let mut tmp = vec![T::ZERO; max_below];
+
+    // Into elimination order.
+    for k in 0..sym.nblk {
+        let ob = sym.order[k] as usize;
+        let w = (sym.sc_start[k + 1] - sym.sc_start[k]) as usize;
+        let src = sym.old_start[ob] as usize;
+        let dst = sym.sc_start[k] as usize;
+        x[dst..dst + w].clone_from_slice(&rhs[src..src + w]);
+    }
+
+    // Forward sweep: L y = x.
+    for s in 0..sym.ns {
+        let (q, h) = sym.supernode_dims(s);
+        let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
+        let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
+        let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+        {
+            let x_top =
+                faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
+            faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+                l11,
+                x_top,
+                faer::Par::Seq,
+            );
+        }
+        if h > q {
+            let bot = unsafe {
+                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), h - q, q, 1, h as isize)
+            };
+            let x_top = faer::col::ColRef::from_slice(&x[c0..c0 + q]).as_mat();
+            let t = unsafe {
+                faer::MatMut::from_raw_parts_mut(tmp.as_mut_ptr(), h - q, 1, 1, (h - q) as isize)
+            };
+            faer::linalg::matmul::matmul(
+                t,
+                faer::Accum::Replace,
+                bot,
+                x_top,
+                one::<T>(),
+                faer::Par::Seq,
+            );
+            for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
+                let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
+                let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
+                let dst = sym.sc_start[k as usize] as usize;
+                for r in 0..w {
+                    x[dst + r] = x[dst + r] - tmp[dr + r];
+                }
+            }
+        }
+    }
+
+    // Backward sweep: L^T x = y.
+    for s in (0..sym.ns).rev() {
+        let (q, h) = sym.supernode_dims(s);
+        let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
+        let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
+        let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+        if h > q {
+            for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
+                let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
+                let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
+                let src = sym.sc_start[k as usize] as usize;
+                tmp[dr..dr + w].clone_from_slice(&x[src..src + w]);
+            }
+            let bot = unsafe {
+                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), h - q, q, 1, h as isize)
+            };
+            let t = unsafe {
+                faer::MatRef::from_raw_parts(tmp.as_ptr(), h - q, 1, 1, (h - q) as isize)
+            };
+            let x_top =
+                faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
+            faer::linalg::matmul::matmul(
+                x_top,
+                faer::Accum::Add,
+                bot.transpose(),
+                t,
+                minus_one::<T>(),
+                faer::Par::Seq,
+            );
+        }
+        let x_top = faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
+        faer::linalg::triangular_solve::solve_upper_triangular_in_place(
+            l11.transpose(),
+            x_top,
+            faer::Par::Seq,
+        );
+    }
+
+    // Back to the matrix's ordering.
+    for k in 0..sym.nblk {
+        let ob = sym.order[k] as usize;
+        let w = (sym.sc_start[k + 1] - sym.sc_start[k]) as usize;
+        let dst = sym.old_start[ob] as usize;
+        let src = sym.sc_start[k] as usize;
+        rhs[dst..dst + w].clone_from_slice(&x[src..src + w]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bsc::SymbolicSparseBlockColMat;
+    use crate::nd::{order_graph, Graph, NdParams};
+
+    /// Deterministic PRNG, the house pattern.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() >> 33) as usize % n
+        }
+    }
+
+    /// A random symmetric block structure: random widths, a chain for
+    /// connectivity, extra random couplings, full diagonal.
+    fn random_structure(
+        nblk: usize,
+        max_width: usize,
+        extra_per_col: usize,
+        seed: u64,
+    ) -> SymbolicSparseBlockColMat<SparseIndex> {
+        let mut rng = Lcg(seed);
+        let mut part: Vec<SparseIndex> = vec![0];
+        for _ in 0..nblk {
+            let w = 1 + rng.below(max_width);
+            part.push(part.last().unwrap() + w as SparseIndex);
+        }
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for j in 0..nblk {
+            cells.push((part[j] as usize, part[j] as usize));
+            if j > 0 {
+                cells.push((part[j - 1] as usize, part[j] as usize));
+            }
+            for _ in 0..extra_per_col {
+                let i = rng.below(j + 1);
+                cells.push((part[i] as usize, part[j] as usize));
+            }
+        }
+        let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.clone(),
+            part,
+            cells.len(),
+            |k| cells[k],
+        );
+        sym
+    }
+
+    /// Textbook scalar etree + column counts on the tile-expanded,
+    /// permuted pattern -- an independent reference for the block
+    /// analysis.
+    fn scalar_factor_nnz(
+        sym: &SymbolicSparseBlockColMat<SparseIndex>,
+        order: &[usize],
+    ) -> u64 {
+        let nblk = sym.nblk_cols();
+        let mut inv = vec![0usize; nblk];
+        for (k, &b) in order.iter().enumerate() {
+            inv[b] = k;
+        }
+        let mut sc_start = vec![0usize; nblk + 1];
+        for k in 0..nblk {
+            sc_start[k + 1] = sc_start[k] + sym.col_span(order[k]).len();
+        }
+        let n = sc_start[nblk];
+        // Upper scalar adjacency of the permuted expansion.
+        let mut cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for j in 0..nblk {
+            for b in sym.col_range(j) {
+                let i = sym.blk_row(b);
+                let (pi, pj) = (inv[i], inv[j]);
+                let ri = sc_start[pi]..sc_start[pi] + sym.col_span(i).len();
+                let rj = sc_start[pj]..sc_start[pj] + sym.col_span(j).len();
+                for r in ri.clone() {
+                    for c in rj.clone() {
+                        if r < c {
+                            cols[c].push(r);
+                        } else if c < r {
+                            cols[r].push(c);
+                        }
+                    }
+                }
+            }
+        }
+        let mut parent = vec![usize::MAX; n];
+        let mut visited = vec![usize::MAX; n];
+        let mut count = vec![0u64; n];
+        for j in 0..n {
+            visited[j] = j;
+            count[j] = 1;
+            for &e in &cols[j] {
+                let mut i = e;
+                while visited[i] != j {
+                    let next = if parent[i] == usize::MAX {
+                        parent[i] = j;
+                        j
+                    } else {
+                        parent[i]
+                    };
+                    count[i] += 1;
+                    visited[i] = j;
+                    i = next;
+                }
+            }
+        }
+        count.iter().sum()
+    }
+
+    /// With amalgamation off, the block analysis must reproduce the
+    /// scalar factorization's fill exactly -- natural, reversed and
+    /// nested-dissection orders alike.
+    #[test]
+    fn fundamental_fill_matches_the_scalar_reference() {
+        let no_relax = SupernodalParams { relax: None };
+        for seed in [1u64, 7, 42] {
+            for nblk in [1usize, 2, 13, 60] {
+                let sym = random_structure(nblk, 4, 2, seed);
+                let natural: Vec<usize> = (0..nblk).collect();
+                let reversed: Vec<usize> = (0..nblk).rev().collect();
+                let nd = order_graph(&Graph::of_blocks(&sym), NdParams::default());
+                for order in [&natural, &reversed, &nd] {
+                    let sn = SupernodalSymbolic::new(&sym, Some(order), &no_relax).unwrap();
+                    assert_eq!(
+                        sn.factor_scalar_nnz(),
+                        scalar_factor_nnz(&sym, order),
+                        "seed {} nblk {} order {:?}",
+                        seed,
+                        nblk,
+                        &order[..order.len().min(8)]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Amalgamation only ever pads: the panel volume grows or stays,
+    /// the supernode count shrinks or stays, and the structural fill
+    /// (which counts the padding) never shrinks.
+    #[test]
+    fn amalgamation_only_grows_the_factor() {
+        for seed in [3u64, 9] {
+            let sym = random_structure(80, 3, 2, seed);
+            let fund =
+                SupernodalSymbolic::new(&sym, None, &SupernodalParams { relax: None }).unwrap();
+            let relaxed =
+                SupernodalSymbolic::new(&sym, None, &SupernodalParams::default()).unwrap();
+            assert!(relaxed.factor_val_count() >= fund.factor_val_count());
+            assert!(relaxed.n_supernodes() <= fund.n_supernodes());
+            assert!(relaxed.factor_scalar_nnz() >= fund.factor_scalar_nnz());
+        }
+    }
+
+    /// Structural invariants: sorted patterns strictly below their
+    /// supernode, panel rows within bounds, supernode ranges contiguous
+    /// and exhaustive, descendant lists sorted and consistent with the
+    /// patterns.
+    #[test]
+    fn structure_invariants_hold() {
+        for (order_kind, seed) in [(0, 11u64), (1, 12), (2, 13)] {
+            let sym = random_structure(50, 4, 3, seed);
+            let nblk = sym.nblk_cols();
+            let order: Vec<usize> = match order_kind {
+                0 => (0..nblk).collect(),
+                1 => (0..nblk).rev().collect(),
+                _ => order_graph(&Graph::of_blocks(&sym), NdParams::default()),
+            };
+            let sn = SupernodalSymbolic::new(&sym, Some(&order), &SupernodalParams::default())
+                .unwrap();
+            let ns = sn.n_supernodes();
+            let mut col_cursor = 0usize;
+            for s in 0..ns {
+                let cols = sn.supernode_cols(s);
+                assert_eq!(cols.start, col_cursor);
+                col_cursor = cols.end;
+                let (q, h) = sn.supernode_dims(s);
+                assert!(q >= 1 && h >= q);
+                let pat = sn.supernode_pattern(s);
+                for w in pat.windows(2) {
+                    assert!(w[0] < w[1], "pattern not strictly sorted");
+                }
+                for &k in pat {
+                    assert!((k as usize) >= cols.end, "pattern block inside the supernode");
+                }
+                for &d in sn.descendants(s) {
+                    assert!((d as usize) < s);
+                    let dpat = sn.supernode_pattern(d as usize);
+                    let hit = dpat.iter().any(|&k| {
+                        let t = sn.supernode_cols(s);
+                        (k as usize) >= t.start && (k as usize) < t.end
+                    });
+                    assert!(hit, "descendant without a pattern block in the target");
+                }
+            }
+            assert_eq!(col_cursor, nblk);
+            assert_eq!(sn.tile_targets().len(), sym.nblocks());
+            assert_eq!(sn.dim(), sym.ncols());
+        }
+    }
+
+    /// A random SPD block matrix on a random structure: values filled
+    /// tile by tile (diagonal tiles upper-only, per the storage
+    /// convention), mirrored into a dense twin, diagonal made dominant
+    /// in both.
+    fn random_spd(
+        nblk: usize,
+        max_width: usize,
+        extra_per_col: usize,
+        seed: u64,
+    ) -> (SparseBlockColMat<SparseIndex, f64>, Vec<f64>, Vec<f64>) {
+        let sym = random_structure(nblk, max_width, extra_per_col, seed);
+        let n = sym.ncols();
+        let mut rng = Lcg(seed ^ 0x9e3779b97f4a7c15);
+        let mut a = SparseBlockColMat::<SparseIndex, f64>::zeroed(sym);
+        let mut dense = vec![0.0f64; n * n];
+        let asym = a.symbolic().clone();
+        for j in 0..asym.nblk_cols() {
+            let cj = asym.col_span(j).start;
+            for b in asym.col_range(j) {
+                let i = asym.blk_row(b);
+                let ri = asym.row_span(i).start;
+                let (wi, wj) = asym.block_dims(b);
+                let base = asym.val_range(b).start;
+                for cc in 0..wj {
+                    for rr in 0..wi {
+                        if i == j && rr > cc {
+                            continue;
+                        }
+                        let v = (rng.below(2001) as f64 - 1000.0) / 1000.0;
+                        a.vals_mut()[base + rr + cc * wi] = v;
+                        dense[(ri + rr) + (cj + cc) * n] = v;
+                        dense[(cj + cc) + (ri + rr) * n] = v;
+                    }
+                }
+            }
+        }
+        // Dominance, written through both forms.
+        for j in 0..asym.nblk_cols() {
+            let b = asym.col_range(j).find(|&b| asym.blk_row(b) == j).unwrap();
+            let (w, _) = asym.block_dims(b);
+            let base = asym.val_range(b).start;
+            let cj = asym.col_span(j).start;
+            for k in 0..w {
+                let boost = 2.0 * n as f64;
+                a.vals_mut()[base + k * (w + 1)] += boost;
+                dense[(cj + k) * (n + 1)] += boost;
+            }
+        }
+        let rhs: Vec<f64> =
+            (0..n).map(|_| (rng.below(2001) as f64 - 1000.0) / 500.0).collect();
+        (a, dense, rhs)
+    }
+
+    fn rel_resid(dense: &[f64], n: usize, x: &[f64], rhs: &[f64]) -> f64 {
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for r in 0..n {
+            let mut ax = 0.0;
+            for c in 0..n {
+                ax += dense[r + c * n] * x[c];
+            }
+            num += (ax - rhs[r]) * (ax - rhs[r]);
+            den += rhs[r] * rhs[r];
+        }
+        (num / den).sqrt()
+    }
+
+    /// Factor + solve against the dense twin, across orders and with
+    /// amalgamation on and off.
+    #[test]
+    fn factorize_and_solve_match_the_dense_reference() {
+        for seed in [2u64, 21, 77] {
+            for nblk in [1usize, 2, 17, 48] {
+                let (a, dense, rhs) = random_spd(nblk, 4, 2, seed);
+                let n = a.symbolic().ncols();
+                let natural: Vec<usize> = (0..nblk).collect();
+                let reversed: Vec<usize> = (0..nblk).rev().collect();
+                let nd = order_graph(&Graph::of_blocks(a.symbolic()), NdParams::default());
+                for order in [&natural, &reversed, &nd] {
+                    for params in
+                        [SupernodalParams { relax: None }, SupernodalParams::default()]
+                    {
+                        let sn =
+                            SupernodalSymbolic::new(a.symbolic(), Some(order), &params).unwrap();
+                        let mut factor = vec![0.0f64; sn.factor_val_count()];
+                        supernodal_factorize(&sn, &a, &mut factor).unwrap();
+                        let mut x = rhs.clone();
+                        supernodal_solve(&sn, &factor, &mut x);
+                        let resid = rel_resid(&dense, n, &x, &rhs);
+                        assert!(
+                            resid < 1e-10,
+                            "resid {} seed {} nblk {} relax {}",
+                            resid,
+                            seed,
+                            nblk,
+                            params.relax.is_some(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same in f32: storage, kernels and solve all at single
+    /// precision, with the tolerance that precision supports.
+    #[test]
+    fn f32_factorize_and_solve_hold_their_tolerance() {
+        let (a64, dense, rhs) = random_spd(40, 3, 2, 5);
+        let sym32 = a64.symbolic().clone();
+        let mut a = SparseBlockColMat::<SparseIndex, f32>::zeroed(sym32);
+        for (dst, &src) in a.vals_mut().iter_mut().zip(a64.vals()) {
+            *dst = src as f32;
+        }
+        let n = a.symbolic().ncols();
+        let nd = order_graph(&Graph::of_blocks(a.symbolic()), NdParams::default());
+        let sn = SupernodalSymbolic::new(a.symbolic(), Some(&nd), &SupernodalParams::default())
+            .unwrap();
+        let mut factor = vec![0.0f32; sn.factor_val_count()];
+        supernodal_factorize(&sn, &a, &mut factor).unwrap();
+        let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
+        supernodal_solve(&sn, &factor, &mut x32);
+        let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
+        let resid = rel_resid(&dense, n, &x, &rhs);
+        assert!(resid < 1e-3, "resid {}", resid);
+    }
+
+    /// An indefinite matrix is a clean error, not a factor of garbage.
+    #[test]
+    fn an_indefinite_matrix_is_rejected() {
+        let (mut a, _, _) = random_spd(12, 3, 2, 8);
+        let asym = a.symbolic().clone();
+        let b = asym.col_range(5).find(|&b| asym.blk_row(b) == 5).unwrap();
+        let base = asym.val_range(b).start;
+        a.vals_mut()[base] = -1.0;
+        let sn = SupernodalSymbolic::new(&asym, None, &SupernodalParams::default()).unwrap();
+        let mut factor = vec![0.0f64; sn.factor_val_count()];
+        assert_eq!(
+            supernodal_factorize(&sn, &a, &mut factor),
+            Err(SupernodalError::NotPositiveDefinite),
+        );
+    }
+
+    /// A factor bigger than a ValueIndex addresses is an error from the
+    /// symbolic phase, before anything numeric is allocated. The matrix
+    /// itself fits the index comfortably (a 100-wide block band, 6e7
+    /// stored scalars); its fill does not (about 1e10).
+    #[test]
+    fn an_unaddressable_factor_is_rejected() {
+        let nblk = 2000usize;
+        let w = 100usize;
+        let band = 500usize;
+        let part: Vec<SparseIndex> = (0..=nblk).map(|i| (i * w) as SparseIndex).collect();
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for j in 0..nblk {
+            cells.push((j * w, j * w));
+            if j >= 1 {
+                cells.push(((j - 1) * w, j * w));
+            }
+            if j >= band {
+                cells.push(((j - band) * w, j * w));
+            }
+        }
+        let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.clone(),
+            part,
+            cells.len(),
+            |k| cells[k],
+        );
+        match SupernodalSymbolic::new(&sym, None, &SupernodalParams::default()) {
+            Err(SupernodalError::IndexOverflow { required }) => {
+                assert!(required > ValueIndex::MAX as u64);
+            }
+            other => panic!("expected IndexOverflow, got {:?}", other.map(|_| ())),
+        }
+    }
+}
