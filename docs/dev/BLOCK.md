@@ -754,6 +754,14 @@ nothing.
 
 ## Log
 
+- 2026-08-02: Flip follow-up bug, found by the user reading plane's
+  verbose log: the DECLINED-reduction path (Auto weighs the reduction
+  and says no) fell through to the scalar route, bypassing the new
+  default -- a different branch from "nothing to marginalize". Routed
+  to the supernodal with the decline's pricing evidence preserved in
+  the plan; regression test forces the decline with a zero flop
+  margin. The scalar route's verbose lines now say "scalar sparse
+  (faer)" so the two factorizations cannot be confused.
 - 2026-08-02: Measurement scaffolding retired: the three block_stage0
   scratch bins deleted, the machine-local `[patch.crates-io]` faer
   overrides removed from the bal/pgo/slam benchmark Cargo.tomls (locks

@@ -263,6 +263,36 @@ fn auto_yields_to_the_scalar_route_when_threaded() {
     );
 }
 
+/// A DECLINED reduction (Auto weighed it and said no) must still land on
+/// the supernodal for the whole system -- the decline path is a different
+/// branch from "nothing to marginalize", and it used to fall through to
+/// the scalar route. A zero flop margin forces the decline.
+#[test]
+fn a_declined_reduction_still_takes_the_supernodal() {
+    let mut auto = SparseFaer::new().with_policy(SchurPolicy::Auto {
+        flop_margin: 0.0,
+        obvious_flop_ratio: 0.0,
+    });
+    let (x_a, c_a) = solve(&mut auto, 2);
+    let plan = auto.plan().expect("a plan");
+    assert!(!plan.reduced, "a zero margin must decline the reduction");
+    assert!(
+        plan.block_supernodal,
+        "the declined-reduction path must reach the supernodal route",
+    );
+
+    let mut scalar = SparseFaer::new()
+        .with_policy(SchurPolicy::Auto { flop_margin: 0.0, obvious_flop_ratio: 0.0 })
+        .with_block_supernodal(BlockSupernodalMode::Never);
+    let (x_s, c_s) = solve(&mut scalar, 2);
+    assert!(!scalar.plan().expect("a plan").block_supernodal);
+
+    assert!(c_a < 1e-12 && c_s < 1e-12, "{} {}", c_a, c_s);
+    for (a, b) in std::iter::zip(&x_a, &x_s) {
+        assert!((a - b).abs() < 1e-9, "routes disagree: {} vs {}", a, b);
+    }
+}
+
 /// The whole-Hessian flavor: no reduction, the block Hessian factored
 /// directly. BlockSupernodalMode::Never restores the scalar route.
 #[test]

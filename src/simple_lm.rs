@@ -5161,7 +5161,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         };
         if vb && reused {
             info!(
-                "sparse: whole system {} params, its factor holds {} values",
+                "scalar sparse (faer): whole system {} params, its factor holds {} values",
                 n,
                 llt.len_val(),
             );
@@ -5568,7 +5568,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         .map_err(|_| SolveError::SymbolicFactorization { reduced: false })?;
         if vb {
             info!(
-                "sparse: whole system {} params, ordered by {}, symbolic \
+                "scalar sparse (faer): whole system {} params, ordered by {}, symbolic \
                  factorization {:.1} ms, its factor holds {} values",
                 n,
                 name,
@@ -6189,16 +6189,34 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 (Some(pat), Some(llt)) => Some((pat, llt)),
                 _ => None,
             };
-            // Release the block machinery first. It is all dead now -- the
-            // block symbolic and the reduction's structure, including its
-            // observer-pair targets -- and holding it while the scalar CSC
-            // and its position map are built (one entry per Hessian nonzero,
-            // both large) only makes that build fight for memory.
+            // Release the reduction's machinery first. It is dead now -- the
+            // Schur structure including its observer-pair targets -- and
+            // holding it while the whole system's structures are built only
+            // makes that build fight for memory.
             drop(schur);
-            drop(hsym);
-            let cost = self.setup_full(
-                problem, params, grad, matrix, n, Some((&partition, &cells)), prebuilt, vb,
-            );
+            // The whole system, down whichever factorization the mode picks:
+            // the supernodal block route keeps the block Hessian and needs
+            // none of the scalar machinery (the pricing pass's scalar
+            // analysis is dropped with the reduction it priced); the scalar
+            // route reuses that analysis instead of rebuilding it.
+            let cost = if self.sn_take() {
+                let cost = self.setup_whole_supernodal(
+                    problem, params, grad, matrix, &partition, hsym, &eliminated, vb,
+                );
+                // The route setup writes a bare whole-system plan; the
+                // decline's evidence (the priced comparison) belongs in it.
+                if let Some(plan) = self.plan.as_mut() {
+                    plan.fill_ratio = fill_ratio;
+                    plan.route_flops = route_flops;
+                    plan.flop_ratio = flop_ratio;
+                }
+                cost
+            } else {
+                drop(hsym);
+                self.setup_full(
+                    problem, params, grad, matrix, n, Some((&partition, &cells)), prebuilt, vb,
+                )
+            };
             if vb {
                 let rest = lap(true);
                 info!(
