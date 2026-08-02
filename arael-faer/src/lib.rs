@@ -13,10 +13,15 @@
 //!   left. This is the landmark/point marginalization that makes bundle
 //!   adjustment and SLAM tractable, and it needs the block structure to be
 //!   cheap.
-//! - **Band Cholesky** ([`envelope`]) -- factorize a block-CSC matrix that is
-//!   banded in natural order directly in block form, fill confined to each
-//!   column's envelope. A trajectory's Hessian, and its reduced pose system,
-//!   are banded, so this needs no fill-reducing ordering and no symbolic phase.
+//! - **Conjugate gradients** ([`cg`]) -- solve a symmetric system by repeated
+//!   multiplication instead of factorizing it, preconditioned by the Cholesky
+//!   factor of each diagonal block. No fill and no factor to store, at the
+//!   price of an inexact solution. The operator is a closure, so it can be a
+//!   matrix that was never formed.
+//! - **Envelope Cholesky** ([`envelope`]) -- factorize a block-CSC matrix in
+//!   natural order directly in block form, fill confined to each column's
+//!   envelope. A trajectory's Hessian, and its reduced pose system, keep a
+//!   narrow one, so this needs no fill-reducing ordering and no symbolic phase.
 //! - **Nested dissection** ([`nd`]) -- a fill-reducing ordering for matrices
 //!   with no band and no small degrees, where minimum degree has nothing to
 //!   chew on. faer offers AMD, natural, or a custom permutation; this computes
@@ -91,6 +96,28 @@
 //! The caller factorizes S itself (`csc_pattern` + faer's sparse Cholesky, or
 //! any other solver), then calls `schur_backsub`. See
 //! `arael::simple_lm::SparseFaer` for the whole loop.
+//!
+//! # cg -- conjugate gradients
+//!
+//! Solve `A x = b` for symmetric positive-definite `A` by repeated
+//! multiplication: no factorization, so no fill and no factor to store. The
+//! step it returns is inexact by construction -- it stops when the residual
+//! has fallen far enough -- which suits a damped solve, where the step is a
+//! trial anyway.
+//!
+//! * [`cg::solve`] -- takes the operator as a closure, so `A` can
+//!   be a matrix held in block CSC
+//!   ([`mul_symmetric_upper`](bsc::SparseBlockColMat::mul_symmetric_upper)) or
+//!   one that is never built at all
+//! * [`BlockJacobi`](cg::BlockJacobi) -- the preconditioner: the Cholesky
+//!   factor of each diagonal block, built from a matrix or handed the blocks
+//!   directly
+//! * [`CgOptions`](cg::CgOptions) / [`CgStats`](cg::CgStats) -- tolerance and
+//!   iteration cap in, iterations and final residual out
+//!
+//! The reductions run in f64 whatever the storage type. Paired with
+//! [`schur_apply`](schur::schur_apply) this solves the reduced camera system
+//! without ever forming it.
 //!
 //! # envelope -- envelope (profile, skyline) Cholesky
 //!
