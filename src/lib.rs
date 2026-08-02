@@ -130,8 +130,8 @@
 //! # Benchmarks
 //!
 //! <picture>
-//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/pgo-dark.svg">
-//!   <img alt="2x2 bar charts of per-iteration solve time on the M3500, city10000, sphere2500 and parking-garage pose graphs, comparing arael in f32 and f64 against g2o, Ceres, SymForce, factrs and GTSAM" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/pgo-light.svg">
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/pgo-dark.svg">
+//!   <img alt="2x2 bar charts of per-iteration solve time on the M3500, city10000, sphere2500 and parking-garage pose graphs, comparing arael in f32 and f64 against g2o, Ceres, SymForce, factrs and GTSAM" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/pgo-light.svg">
 //! </picture>
 //!
 //! Time per iteration on the four canonical pose-graph datasets, 2D and

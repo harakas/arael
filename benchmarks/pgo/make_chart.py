@@ -17,46 +17,46 @@
 # Per panel: (title, [ (label, full_iter_ms, first_iter_ms, kind) ]).
 # full-iter is one complete iteration (t(2 iters) - t(1 iter), setup cancelled).
 # first-iter is that same iteration plus the setup paid once. Their difference
-# is the setup, which the second chart draws. 2026-08-01, min of 32 rounds; one
+# is the setup, which the second chart draws. 2026-08-02, min of 32 rounds; one
 # row per system, its best validated configuration by total time.
 # kind: "arael" solid blue, "other" neutral, "arael*" adds a star to the value.
 # full_iter None -> italic text row (did not converge).
 PANELS = [
     ("M3500 (2D, 10.5k params)", [
-        ("arael (f32)", 1.55, 3.68, "arael"),
-        ("arael (f64)", 1.87, 4.02, "arael"),
-        ("SymForce (f32)", 3.32, 18.15, "other"),
-        ("g2o (GN)", 3.48, 7.42, "other"),
-        ("Ceres (LM)", 4.72, 12.35, "other"),
-        ("factrs (GN)", 6.19, 12.12, "other"),
-        ("GTSAM (GN)", 13.63, 14.08, "other"),
+        ("arael (f32)", 1.36, 3.05, "arael"),
+        ("arael (f64)", 1.64, 3.28, "arael"),
+        ("SymForce (f32)", 3.38, 18.35, "other"),
+        ("g2o (GN)", 3.55, 7.29, "other"),
+        ("Ceres (LM)", 4.89, 12.29, "other"),
+        ("factrs (GN)", 6.37, 12.31, "other"),
+        ("GTSAM (GN)", 13.28, 14.27, "other"),
     ]),
     ("city10000 (2D, 30k params)", [
-        ("arael (f32)", 7.51, 15.81, "arael"),
-        ("arael (f64)", 9.58, 18.04, "arael"),
-        ("g2o (GN)", 17.31, 32.67, "other"),
-        ("SymForce (f64)", 22.23, 92.28, "other"),
-        ("Ceres (LM)", 22.30, 48.00, "other"),
-        ("factrs (GN)", 22.97, 45.47, "other"),
+        ("arael (f32)", 6.91, 12.26, "arael"),
+        ("arael (f64)", 8.58, 14.16, "arael"),
+        ("g2o (GN)", 16.00, 30.91, "other"),
+        ("SymForce (f64)", 19.79, 86.38, "other"),
+        ("Ceres (LM)", 20.28, 45.04, "other"),
+        ("factrs (GN)", 22.23, 41.87, "other"),
         ("GTSAM", None, None, "other"),
     ]),
     ("sphere2500 (3D, 15k params)", [
-        ("arael (f32)", 11.12, 15.65, "arael"),
-        ("arael (f64)", 16.34, 20.97, "arael"),
-        ("g2o (LM)", 19.27, 23.82, "other"),
-        ("Ceres (LM)", 23.52, 35.85, "other"),
-        ("factrs (GN)", 25.99, 44.68, "other"),
-        ("GTSAM (GN)", 28.53, 28.29, "other"),
-        ("SymForce (f32)", 73.74, 96.50, "other"),
+        ("arael (f32)", 10.78, 12.02, "arael"),
+        ("arael (f64)", 15.44, 16.78, "arael"),
+        ("g2o (LM)", 19.42, 23.66, "other"),
+        ("Ceres (LM)", 23.74, 35.63, "other"),
+        ("factrs (GN)", 26.20, 43.91, "other"),
+        ("GTSAM (GN)", 28.42, 27.96, "other"),
+        ("SymForce (f32)", 73.79, 96.07, "other"),
     ]),
     ("parking-garage (3D, 10k params)", [
-        ("arael (f32)", 3.65, 7.03, "arael*"),
-        ("arael (f64)", 4.36, 7.93, "arael"),
-        ("g2o (GN)", 6.27, 12.12, "other"),
-        ("SymForce (f32)", 9.25, 28.13, "other"),
-        ("Ceres (LM)", 12.98, 26.49, "other"),
-        ("GTSAM (GN)", 13.24, 13.69, "other"),
-        ("factrs (GN)", 19.61, 44.42, "other"),
+        ("arael (f32)", 3.05, 3.93, "arael*"),
+        ("arael (f64)", 3.55, 4.83, "arael"),
+        ("g2o (GN)", 6.50, 12.07, "other"),
+        ("SymForce (f32)", 9.51, 28.54, "other"),
+        ("Ceres (LM)", 12.66, 26.79, "other"),
+        ("GTSAM (GN)", 13.18, 13.77, "other"),
+        ("factrs (GN)", 20.55, 43.36, "other"),
     ]),
 ]
 
