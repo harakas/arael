@@ -709,6 +709,12 @@ impl SupernodalSymbolic {
                     let col_lo = sc_start[fmid] - col0;
                     let col_hi = sc_start[lmid + 1] - col0;
                     let m_i = (nrows[d] - drow[start as usize]) as f64;
+                    // Deliberately the SPAN, not the exact mid width: it
+                    // over-states the pair's own flops, which loosens the
+                    // acceptance -- and the measured ratio optimum was
+                    // tuned with exactly that looseness. Tightening it to
+                    // the exact width collapsed batching (slam-300: 1410
+                    // -> 437 pairs, factor 42.7 -> 53.3 ms).
                     let kw_i = (col_hi - col_lo) as f64;
                     let f_i = m_i * kw_i * dq as f64;
                     let joinable = dq <= BATCH_DEPTH_MAX;
@@ -1364,6 +1370,19 @@ pub fn supernodal_factorize<T: SchurReal>(
     Ok(())
 }
 
+/// The permuted scalar position of the supernode's below-pattern when
+/// it is ONE contiguous run of `m` scalars -- the common banded and
+/// trajectory case. O(1): the pattern's rows are sorted, so span equal
+/// to total width means no gaps.
+fn contiguous_below(sym: &SupernodalSymbolic, s: usize, m: usize) -> Option<usize> {
+    let pat = sym.supernode_pattern(s);
+    let first = pat[0] as usize;
+    let last = pat[pat.len() - 1] as usize;
+    let lo = sym.sc_start[first] as usize;
+    let hi = sym.sc_start[last + 1] as usize;
+    (hi - lo == m).then_some(lo)
+}
+
 /// Solve `A x = rhs` in place from a factor produced by
 /// [`supernodal_factorize`]. The permutation is applied on entry and
 /// undone on exit; `rhs` stays in the matrix's own ordering.
@@ -1414,24 +1433,42 @@ pub fn supernodal_solve<T: SchurReal>(
             let bot = unsafe {
                 faer::MatRef::from_raw_parts(panel.as_ptr().add(q), h - q, q, 1, h as isize)
             };
-            let x_top = faer::col::ColRef::from_slice(&x[c0..c0 + q]).as_mat();
-            let t = unsafe {
-                faer::MatMut::from_raw_parts_mut(tmp.as_mut_ptr(), h - q, 1, 1, (h - q) as isize)
-            };
-            faer::linalg::matmul::matmul(
-                t,
-                faer::Accum::Replace,
-                bot,
-                x_top,
-                one::<T>(),
-                faer::Par::Seq,
-            );
-            for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
-                let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
-                let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
-                let dst = sym.sc_start[k as usize] as usize;
-                for r in 0..w {
-                    x[dst + r] = x[dst + r] - tmp[dr + r];
+            // A contiguous pattern (one scalar run below the supernode,
+            // the common banded/trajectory case) subtracts straight into
+            // the x segment; scattered patterns go through tmp.
+            let m = h - q;
+            if let Some(seg) = contiguous_below(sym, s, m) {
+                let (lo, hi) = x.split_at_mut(seg);
+                let x_top = faer::col::ColRef::from_slice(&lo[c0..c0 + q]).as_mat();
+                let dst = faer::col::ColMut::from_slice_mut(&mut hi[..m]).as_mat_mut();
+                faer::linalg::matmul::matmul(
+                    dst,
+                    faer::Accum::Add,
+                    bot,
+                    x_top,
+                    minus_one::<T>(),
+                    faer::Par::Seq,
+                );
+            } else {
+                let x_top = faer::col::ColRef::from_slice(&x[c0..c0 + q]).as_mat();
+                let t = unsafe {
+                    faer::MatMut::from_raw_parts_mut(tmp.as_mut_ptr(), m, 1, 1, m as isize)
+                };
+                faer::linalg::matmul::matmul(
+                    t,
+                    faer::Accum::Replace,
+                    bot,
+                    x_top,
+                    one::<T>(),
+                    faer::Par::Seq,
+                );
+                for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
+                    let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
+                    let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
+                    let dst = sym.sc_start[k as usize] as usize;
+                    for r in 0..w {
+                        x[dst + r] = x[dst + r] - tmp[dr + r];
+                    }
                 }
             }
         }
@@ -1444,28 +1481,44 @@ pub fn supernodal_solve<T: SchurReal>(
         let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
         let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
         if h > q {
-            for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
-                let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
-                let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
-                let src = sym.sc_start[k as usize] as usize;
-                tmp[dr..dr + w].clone_from_slice(&x[src..src + w]);
-            }
+            let m = h - q;
             let bot = unsafe {
-                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), h - q, q, 1, h as isize)
+                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize)
             };
-            let t = unsafe {
-                faer::MatRef::from_raw_parts(tmp.as_ptr(), h - q, 1, 1, (h - q) as isize)
-            };
-            let x_top =
-                faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
-            faer::linalg::matmul::matmul(
-                x_top,
-                faer::Accum::Add,
-                bot.transpose(),
-                t,
-                minus_one::<T>(),
-                faer::Par::Seq,
-            );
+            if let Some(seg) = contiguous_below(sym, s, m) {
+                let (lo, hi) = x.split_at_mut(seg);
+                let xseg = faer::col::ColRef::from_slice(&hi[..m]).as_mat();
+                let x_top =
+                    faer::col::ColMut::from_slice_mut(&mut lo[c0..c0 + q]).as_mat_mut();
+                faer::linalg::matmul::matmul(
+                    x_top,
+                    faer::Accum::Add,
+                    bot.transpose(),
+                    xseg,
+                    minus_one::<T>(),
+                    faer::Par::Seq,
+                );
+            } else {
+                for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
+                    let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
+                    let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
+                    let src = sym.sc_start[k as usize] as usize;
+                    tmp[dr..dr + w].clone_from_slice(&x[src..src + w]);
+                }
+                let t = unsafe {
+                    faer::MatRef::from_raw_parts(tmp.as_ptr(), m, 1, 1, m as isize)
+                };
+                let x_top =
+                    faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
+                faer::linalg::matmul::matmul(
+                    x_top,
+                    faer::Accum::Add,
+                    bot.transpose(),
+                    t,
+                    minus_one::<T>(),
+                    faer::Par::Seq,
+                );
+            }
         }
         let x_top = faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
         faer::linalg::triangular_solve::solve_upper_triangular_in_place(

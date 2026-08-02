@@ -669,23 +669,31 @@ bal-372 schur peak 233.0 -> 226.3 MB at identical speed and cost
 more factor than the default on wide blocks; the route answer is
 unchanged; lean is in the golden dense grid.
 
-### P7. Solve-path polish
+### P7. Solve-path polish [DONE 2026-08-02, neutral]
 
-The solve trails faer ~10% on big-supernode shapes (17.4 vs 15.7 ms at
-bal-1723c; ~1% of the attempt) and allocates per call (folded into
-P1's context). The factorization's direct-accumulate trick applies
-here too: a supernode whose pattern is one contiguous run can GEMV
-straight against the x segment, no gather/scatter. Expected: small;
-do it opportunistically when touching the solve for P1/P5.
+Shipped: a supernode whose below-pattern is one contiguous scalar run
+(an O(1) span check) runs both solve sweeps straight against the x
+segment -- no gather/scatter through tmp; scattered patterns keep the
+tmp path. P1's context had already removed the solve's allocations
+(bal-1723c 17.4 -> 15.1 ms); this change measured neutral within
+noise on every bin. Kept: it is the structurally right path for
+banded and trajectory shapes, costs one comparison, and regresses
+nothing.
 
-### P8. Batch-acceptance tuning
+### P8. Batch-acceptance tuning [DONE 2026-08-02, no change --
+### with one premise inverted by measurement]
 
-The acceptance charges each candidate its column SPAN rather than its
-exact mid width (over-counts individual flops, so some good batches
-are refused), and `BATCH_DEPTH_MAX`/`BATCH_K_MAX` (16/512) were set,
-not swept. P4's ordering change re-shapes the buckets anyway, so
-tune after it lands. Expected: small; measure on the slam whole-H
-row.
+- The "over-counting" hypothesis was BACKWARDS: charging each
+  candidate its column span rather than its exact mid width
+  over-states its own flops, which LOOSENS the acceptance -- and the
+  measured ratio optimum (1.2-2.0 flat, 1.5 shipped) was tuned with
+  that looseness. Switching to the exact width collapsed batching
+  (slam-300: 1410 -> 437 pairs, factor 42.7 -> 53.3 ms). Reverted,
+  with the reason recorded at the code site.
+- `BATCH_DEPTH_MAX` swept at 8/16/32: flat (1400/1410/1410 pairs,
+  factor 45.3/45.1/45.1 ms on slam-300 whole-H) -- the ratio test,
+  not the cap, is what bounds membership. 16 stays; `BATCH_K_MAX`
+  is even further from binding and was left alone.
 
 ### Tail, in this order and no earlier
 
@@ -725,6 +733,12 @@ row.
 
 ## Log
 
+- 2026-08-02: P7 and P8 closed. P7: contiguous-pattern solve sweeps go
+  straight to the x segment; measured neutral, kept as the right path
+  for banded shapes. P8: no change shipped -- the exact-mid-width
+  "fix" measured badly backwards (batching collapsed; the span
+  estimate's looseness is part of the tuned optimum, now documented at
+  the code site), and the depth cap swept flat at 8/16/32.
 - 2026-08-02: P6 shipped: `SupernodalParams::memory_lean()`, the
   solver knob and options twin, `ARAEL_BLOCK_SUPERNODAL_LEAN=1` in the
   five runners. bal-372 schur peak 233.0 -> 226.3 MB at identical
