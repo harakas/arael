@@ -177,13 +177,22 @@ pub fn schur_ordering() -> arael::simple_lm::FaerOrdering {
     }
 }
 
-/// ARAEL_BLOCK_SUPERNODAL=1 factors with the supernodal block Cholesky
-/// (`SparseFaer::with_block_supernodal`) instead of flattening to scalar CSC
-/// for faer -- same equations, block-native factorization. Applies to the
-/// factorizing routes only; the conjugate-gradient rows never factor.
-/// Cross-benchmark name, like ARAEL_LAMBDA_FLOOR. See docs/dev/BLOCK.md.
-pub fn block_supernodal() -> bool {
-    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+/// ARAEL_BLOCK_SUPERNODAL picks when the supernodal block Cholesky
+/// factorizes instead of the scalar faer route (the library default is
+/// Auto: supernodal on sequential solves). `0`/`off`/`scalar` restores the
+/// scalar route, `1`/`always` forces the supernodal even threaded, unset
+/// keeps Auto. A typo is rejected rather than silently ignored.
+pub fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
+    use arael::simple_lm::BlockSupernodalMode as M;
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref() {
+        None | Some("auto") => M::Auto,
+        Some("1") | Some("always") => M::Always,
+        Some("0") | Some("off") | Some("scalar") => M::Never,
+        Some(other) => panic!(
+            "ARAEL_BLOCK_SUPERNODAL={}: expected auto, 1/always, or 0/off/scalar",
+            other
+        ),
+    }
 }
 
 /// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update

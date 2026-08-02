@@ -459,14 +459,35 @@ factorization dominates (bal).
 
 ### Stage 6 -- consolidation
 
-- Auto route selection priced from the symbolic flop/fill counts (the
-  `EnvelopeMode` pattern), replacing the opt-in.
-- Envelope subsumption question: natural-order supernodal vs envelope
-  on banded systems -- measure; envelope stays if it stays ahead.
+- **Default flip [DONE 2026-08-02].** `BlockSupernodalMode { Auto,
+  Always, Never }` on the `EnvelopeMode` pattern;
+  `with_block_supernodal` takes it on the solver and the options.
+  Auto is the default: the supernodal factorizes wherever the scalar
+  route would -- the whole Hessian, and a reduced S the envelope
+  declined -- when the solve is sequential; `num_threads > 1` keeps
+  the scalar route (its dense kernels use the threads; ours cannot
+  until the tail's thread work), and `Always`/`Never` override both
+  ways. The envelope and iterative routes keep precedence in every
+  mode; structureless models always take the scalar route. Benchmark
+  env re-keyed: `ARAEL_BLOCK_SUPERNODAL` = `auto` (unset) / `1`,
+  `always` / `0`, `off`, `scalar`. Verified: pgo garage's DEFAULT row
+  is now the supernodal (4.1 ms/iter, 26.2 MB; `=scalar` restores
+  5.7, 32.2), bal's default schur plan reports the route; tests cover
+  Auto-takes-it, Never-restores-scalar, and (rayon-gated)
+  Auto-yields-when-threaded.
+- **Landing work still owed for the flip:** full before/after
+  benchmark sweeps and the README tables/charts (published numbers --
+  the user runs those), the C++/Python mirror of
+  `BlockSupernodalMode`, the knobs and `SchurPlan.block_supernodal`,
+  and the user-facing docs (SOLVERS.md, crate docs, arael-faer
+  README/lib.rs supernodal section). CHANGELOG at the next release
+  from the commit log.
+- Envelope subsumption question (the slam S seat, deferred by the
+  user): supernodal measured faster and sturdier at f32 (P2); the
+  envelope keeps setup and peak-memory edges. Revisit with the flip's
+  soak experience.
 - Later candidates, recorded not planned: block selected inverse for
   covariance over this factor; incremental refactorization.
-- Docs (arael-faer README + lib.rs, SOLVERS.md), CHANGELOG at the next
-  release, benchmark README refresh where defaults changed.
 
 ## Performance and memory roadmap (2026-08-02)
 
@@ -733,6 +754,14 @@ nothing.
 
 ## Log
 
+- 2026-08-02: THE DEFAULT FLIPPED. `BlockSupernodalMode::Auto` is the
+  default: the supernodal block Cholesky factorizes wherever scalar
+  faer would on a sequential solve; threaded solves keep the scalar
+  route until the tail's thread work. `ARAEL_BLOCK_SUPERNODAL=scalar`
+  is the way back in every benchmark. Verified on the real rows and
+  covered by three new route tests. Still owed: published benchmark
+  tables/charts (user-run), cxx/python mirror, user docs -- listed in
+  stage 6.
 - 2026-08-02: P7 and P8 closed. P7: contiguous-pattern solve sweeps go
   straight to the x segment; measured neutral, kept as the right path
   for banded shapes. P8: no change shipped -- the exact-mid-width

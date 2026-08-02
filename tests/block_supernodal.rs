@@ -1,11 +1,13 @@
-// The supernodal block Cholesky is an alternative factorization of whichever
-// system the solve factors -- the reduced Schur system or the whole Hessian --
-// run directly on the block form under a block-level ordering. Enabled with
-// with_block_supernodal(true), it must reach the same optimum as the default
-// scalar route, on both systems and at both precisions.
+// The supernodal block Cholesky factorizes whichever system the solve
+// factors -- the reduced Schur system or the whole Hessian -- directly on
+// the block form under a block-level ordering. It is the default where the
+// scalar route would otherwise run (BlockSupernodalMode::Auto, sequential
+// solves); every mode must reach the same optimum as the scalar route, on
+// both systems and at both precisions.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::simple_lm::{
+    BlockSupernodalMode,
     lm_solve, EnvelopeMode, LmConfig, RootProblem, SchurPolicy, SparseFaer,
 };
 use arael::refs::{self, Ref};
@@ -214,7 +216,7 @@ fn supernodal_schur_route_matches_the_default() {
 
     let mut sn = SparseFaer::new()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_sn, c_sn) = solve(&mut sn, 2);
     let plan = sn.plan().expect("a plan");
     assert!(plan.reduced, "the landmarks should marginalize");
@@ -227,17 +229,53 @@ fn supernodal_schur_route_matches_the_default() {
     }
 }
 
+/// The default is now the supernodal wherever the scalar factorization
+/// would run on a sequential solve: a plain solver on this model takes
+/// it without being asked.
+#[test]
+fn auto_default_takes_the_supernodal_route() {
+    let mut auto = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let (_, c) = solve(&mut auto, 2);
+    assert!(c < 1e-12, "end_cost {}", c);
+    assert!(
+        auto.plan().expect("a plan").block_supernodal,
+        "Auto on a sequential solve must take the supernodal route",
+    );
+}
+
+/// Auto yields to the scalar route when the solve is threaded: faer's
+/// dense kernels use the threads, the supernodal factorization cannot
+/// yet. (Meaningful only with the rayon feature -- without it
+/// num_threads collapses to sequential and Auto stays supernodal.)
+#[cfg(feature = "rayon")]
+#[test]
+fn auto_yields_to_the_scalar_route_when_threaded() {
+    let cfg = LmConfig { max_iters: 60, num_threads: 2, ..Default::default() };
+    let mut w = build(0.1, 2);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
+    assert!(r.end_cost < 1e-12, "end_cost {}", r.end_cost);
+    assert!(
+        !solver.plan().expect("a plan").block_supernodal,
+        "Auto must take the scalar route when num_threads > 1",
+    );
+}
+
 /// The whole-Hessian flavor: no reduction, the block Hessian factored
-/// directly under block-AMD.
+/// directly. BlockSupernodalMode::Never restores the scalar route.
 #[test]
 fn supernodal_whole_system_matches_the_scalar_route() {
-    let mut scalar = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let mut scalar = SparseFaer::new()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Never);
     let (x_sc, c_sc) = solve(&mut scalar, 2);
     assert!(!scalar.plan().expect("a plan").block_supernodal);
 
     let mut sn = SparseFaer::new()
         .with_policy(SchurPolicy::Never)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_sn, c_sn) = solve(&mut sn, 2);
     let plan = sn.plan().expect("a plan");
     assert!(!plan.reduced);
@@ -256,7 +294,7 @@ fn the_options_struct_carries_block_supernodal() {
     let mut sn = SparseFaer::from_options(
         &SparseFaerOptions::auto()
             .with_envelope_schur(EnvelopeMode::Never)
-            .with_block_supernodal(true),
+            .with_block_supernodal(BlockSupernodalMode::Always),
     );
     let (_, c) = solve(&mut sn, 2);
     assert!(c < 1e-12, "end_cost {}", c);
@@ -277,13 +315,13 @@ fn whole_system_orders_a_named_set_first() {
 
     let mut amd = SparseFaer::new()
         .with_policy(SchurPolicy::Never)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_amd, c_amd) = solve(&mut amd, 2);
 
     let mut mf = SparseFaer::new()
         .with_policy(SchurPolicy::Never)
         .with_marginalize(lm_start..n)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_mf, c_mf) = solve(&mut mf, 2);
     let plan = mf.plan().expect("a plan");
     assert!(!plan.reduced, "SchurPolicy::Never must not reduce");
@@ -301,12 +339,12 @@ fn whole_system_orders_a_named_set_first() {
 fn batching_can_be_disabled_without_changing_the_answer() {
     let mut on = SparseFaer::new()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_on, c_on) = solve(&mut on, 2);
 
     let mut off = SparseFaer::new()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(true)
+        .with_block_supernodal(BlockSupernodalMode::Always)
         .with_block_supernodal_batching(None);
     let (x_off, c_off) = solve(&mut off, 2);
     assert!(off.plan().expect("a plan").block_supernodal);
@@ -323,12 +361,12 @@ fn batching_can_be_disabled_without_changing_the_answer() {
 fn memory_lean_changes_nothing_about_the_answer() {
     let mut dflt = SparseFaer::new()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_d, c_d) = solve(&mut dflt, 2);
 
     let mut lean = SparseFaer::new()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(true)
+        .with_block_supernodal(BlockSupernodalMode::Always)
         .with_block_supernodal_memory_lean(true);
     let (x_l, c_l) = solve(&mut lean, 2);
     assert!(lean.plan().expect("a plan").block_supernodal);
@@ -349,7 +387,7 @@ fn f32_supernodal_schur_route_solves() {
     RootProblem::serialize(&mut w, &mut params);
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(true);
+        .with_block_supernodal(BlockSupernodalMode::Always);
     let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     assert!(solver.plan().expect("a plan").block_supernodal);
     assert!(r.end_cost < 1e-6, "end_cost {}", r.end_cost);

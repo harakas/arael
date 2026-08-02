@@ -259,13 +259,23 @@ pub fn backend() -> String {
 
 type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
 
-// ARAEL_BLOCK_SUPERNODAL=1 factors the faer and narrow_band routes with the
-// supernodal block Cholesky (SparseFaer::with_block_supernodal) instead of the
-// scalar faer route. Cross-benchmark name, like ARAEL_LAMBDA_FLOOR; see
-// docs/dev/BLOCK.md. The default `band` route is a different solver entirely
-// and does not read it.
-fn block_supernodal() -> bool {
-    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+// ARAEL_BLOCK_SUPERNODAL picks when the supernodal block Cholesky
+// factorizes on the faer and narrow_band routes (the library default is
+// Auto: supernodal on sequential solves). `0`/`off`/`scalar` restores the
+// scalar route, `1`/`always` forces the supernodal even threaded, unset
+// keeps Auto. The default `band` route is a different solver entirely and
+// does not read it. A typo is rejected rather than silently ignored.
+fn block_supernodal() -> arael::simple_lm::BlockSupernodalMode {
+    use arael::simple_lm::BlockSupernodalMode as M;
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL").ok().as_deref() {
+        None | Some("auto") => M::Auto,
+        Some("1") | Some("always") => M::Always,
+        Some("0") | Some("off") | Some("scalar") => M::Never,
+        Some(other) => panic!(
+            "ARAEL_BLOCK_SUPERNODAL={}: expected auto, 1/always, or 0/off/scalar",
+            other
+        ),
+    }
 }
 
 // ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update batching:

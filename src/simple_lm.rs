@@ -4161,6 +4161,32 @@ pub enum EnvelopeMode {
     Never,
 }
 
+/// When the supernodal block Cholesky factorizes instead of faer's scalar
+/// one -- in the seats the scalar route otherwise holds: the whole Hessian,
+/// and a reduced Schur system the envelope route declined. The envelope and
+/// the iterative routes keep their precedence in every mode; models without
+/// block structure (hand-built problems, TripletBlock) always take the
+/// scalar route.
+///
+/// Measured at or ahead of the scalar route on every benchmark, with a
+/// 2-10x cheaper symbolic phase and 17-35% less peak memory (see
+/// docs/dev/BLOCK.md). The one place the scalar route still wins is a
+/// multi-threaded solve: its dense kernels use [`LmConfig::num_threads`]
+/// while the supernodal factorization is sequential -- which is what
+/// [`Auto`](Self::Auto) guards on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlockSupernodalMode {
+    /// The supernodal route when the solve is sequential (`num_threads`
+    /// is 1, the default); the scalar route when threaded. The default.
+    #[default]
+    Auto,
+    /// The supernodal route whenever the model has block structure, threads
+    /// or not (the factorization itself stays sequential).
+    Always,
+    /// Always the scalar route.
+    Never,
+}
+
 /// How the reduced system is solved once the Schur reduction has formed it.
 ///
 /// Only consulted on the reduced route: with nothing marginalized there is no
@@ -4228,9 +4254,9 @@ pub struct SparseFaerOptions {
     /// Block-column panel width for the envelope factorization; `None` picks
     /// it automatically (see [`SparseFaer::with_envelope_panel_width`]).
     pub envelope_panel_width: Option<usize>,
-    /// Factor with the supernodal block Cholesky instead of faer's scalar
-    /// one (see [`SparseFaer::with_block_supernodal`]). Off by default.
-    pub block_supernodal: bool,
+    /// When the supernodal block Cholesky factorizes instead of faer's
+    /// scalar one (see [`SparseFaer::with_block_supernodal`]).
+    pub block_supernodal: BlockSupernodalMode,
     /// Update-batching acceptance ratio for the supernodal block route;
     /// `None` disables batching (see
     /// [`SparseFaer::with_block_supernodal_batching`]).
@@ -4260,7 +4286,7 @@ impl SparseFaerOptions {
             narrow_band: false,
             envelope: EnvelopeMode::default(),
             envelope_panel_width: None,
-            block_supernodal: false,
+            block_supernodal: BlockSupernodalMode::default(),
             block_supernodal_batch: arael_faer::supernodal::SupernodalParams::default()
                 .batch_ratio,
             block_supernodal_memory_lean: false,
@@ -4328,10 +4354,10 @@ impl SparseFaerOptions {
         self.envelope_panel_width = width;
         self
     }
-    /// Toggle the supernodal block Cholesky (see
+    /// Set when the supernodal block Cholesky factorizes (see
     /// [`SparseFaer::with_block_supernodal`]).
-    pub fn with_block_supernodal(mut self, on: bool) -> Self {
-        self.block_supernodal = on;
+    pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
+        self.block_supernodal = mode;
         self
     }
     /// Set or disable the supernodal route's update batching (see
@@ -4700,12 +4726,12 @@ pub struct SparseFaer<T = f64> {
     envelope_active: bool,
     envelope_sym: Option<arael_faer::envelope::EnvelopeSymbolic>,
     envelope_factor: Vec<T>,
-    // Opt-in supernodal block Cholesky (with_block_supernodal): factor the
+    // Supernodal block Cholesky (with_block_supernodal): factor the
     // system -- reduced S, or the whole block Hessian -- directly in block
     // form under a block-level ordering. No scalar CSC, no scalar symbolic.
-    // block_supernodal is the config; sn_active is whether this solve took
+    // block_supernodal is the mode; sn_active is whether this solve took
     // the route; sn_sym and sn_factor are its structure and factor buffer.
-    block_supernodal: bool,
+    block_supernodal: BlockSupernodalMode,
     sn_batch_ratio: Option<f64>,
     sn_memory_lean: bool,
     sn_active: bool,
@@ -4772,7 +4798,7 @@ impl<T> SparseFaer<T> {
             envelope_active: false,
             envelope_sym: None,
             envelope_factor: Vec::new(),
-            block_supernodal: false,
+            block_supernodal: BlockSupernodalMode::default(),
             sn_batch_ratio: arael_faer::supernodal::SupernodalParams::default().batch_ratio,
             sn_memory_lean: false,
             sn_active: false,
@@ -4910,15 +4936,29 @@ impl<T> SparseFaer<T> {
     /// scalar symbolic analysis and the per-attempt scalar copies are never
     /// built. Measured at or ahead of the scalar route on every benchmark
     /// matrix (1.0-1.3x per attempt), with a 2-10x cheaper symbolic phase;
-    /// see docs/dev/BLOCK.md. Opt-in while the route matures.
+    /// see docs/dev/BLOCK.md and [`BlockSupernodalMode`].
     ///
-    /// Routes that never factorize (iterative Schur) and the envelope routes,
-    /// when they engage, keep precedence. Models without block structure
-    /// (hand-built problems, TripletBlock) cannot take it and fall back to
-    /// the scalar route.
-    pub fn with_block_supernodal(mut self, on: bool) -> Self {
-        self.block_supernodal = on;
+    /// Default [`BlockSupernodalMode::Auto`]: the supernodal route on a
+    /// sequential solve, the scalar route when
+    /// [`num_threads`](LmConfig::num_threads) asks for parallelism (faer's
+    /// dense kernels use it; the supernodal factorization is sequential).
+    /// Routes that never factorize (iterative Schur) and the envelope
+    /// routes, when they engage, keep precedence in every mode. Models
+    /// without block structure (hand-built problems, TripletBlock) always
+    /// take the scalar route.
+    pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
+        self.block_supernodal = mode;
         self
+    }
+
+    /// Whether this solve takes the supernodal block route where the scalar
+    /// factorization would otherwise run.
+    fn sn_take(&self) -> bool {
+        match self.block_supernodal {
+            BlockSupernodalMode::Always => true,
+            BlockSupernodalMode::Never => false,
+            BlockSupernodalMode::Auto => matches!(self.par, faer::Par::Seq),
+        }
     }
 
     /// The supernodal route's parameter base: the default table, or the
@@ -5371,7 +5411,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 let (f_det, f_amd) = (price(&det_first), price(&amd));
                 if vb {
                     info!(
-                        "supernodal: whole-system ordering -- detected-first {:.2e} \
+                        "block supernodal: whole-system ordering -- detected-first {:.2e} \
                          flops, block-AMD {:.2e}: {}",
                         f_det,
                         f_amd,
@@ -5401,7 +5441,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         self.envelope_sym = None;
         if vb {
             info!(
-                "supernodal: whole system {} params, block factorization -- {} \
+                "block supernodal: whole system {} params, factoring in block form -- {} \
                  supernodes, {} factor values",
                 n,
                 sn.n_supernodes(),
@@ -5823,7 +5863,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // order, else the supernodal block Cholesky when the caller asked
             // for that -- both factor H in block form instead of flattening
             // it for faer's general sparse Cholesky.
-            if self.narrow_band_enabled || self.block_supernodal {
+            if self.narrow_band_enabled || self.sn_take() {
                 let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
                     partition_idx(&partition),
                     partition_idx(&partition),
@@ -5836,7 +5876,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                         return self.setup_whole_band(problem, params, grad, matrix, &partition, hsym, band, vb);
                     }
                 }
-                if self.block_supernodal {
+                if self.sn_take() {
                     return self.setup_whole_supernodal(
                         problem, params, grad, matrix, &partition, hsym, &eliminated, vb,
                     );
@@ -6317,7 +6357,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 );
             }
             self.envelope_sym = Some(bsym);
-        } else if self.block_supernodal {
+        } else if self.sn_take() {
             // Supernodal block route: factor S directly in block form under a
             // block-level ordering. No scalar pattern, no scalar symbolic, no
             // per-attempt flatten.
@@ -6351,7 +6391,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
-                     supernodal block factorization -- {} supernodes, {} factor values",
+                     factoring with the block supernodal Cholesky -- {} supernodes, {} factor values",
                     nk,
                     100.0 * schur.s.scalar_upper_nnz() as f64
                         / (nk as f64 * (nk as f64 + 1.0) / 2.0),
