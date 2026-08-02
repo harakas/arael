@@ -146,6 +146,27 @@ pub(crate) fn schur_policy() -> arael::simple_lm::SchurPolicy {
     parse_schur(std::env::var("PGO_SCHUR").ok().as_deref())
 }
 
+/// ARAEL_BLOCK_SUPERNODAL=1 factors with the supernodal block Cholesky
+/// (`SparseFaer::with_block_supernodal`) instead of flattening to scalar CSC
+/// for faer. Cross-benchmark name, like ARAEL_LAMBDA_FLOOR; see
+/// docs/dev/BLOCK.md.
+pub(crate) fn block_supernodal() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+}
+
+/// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update
+/// batching: a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the
+/// library default. A typo is rejected rather than silently ignored.
+pub(crate) fn block_supernodal_batch() -> Option<f64> {
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
+        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse().unwrap_or_else(|_| {
+            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
+        })),
+    }
+}
+
 fn parse_schur(v: Option<&str>) -> arael::simple_lm::SchurPolicy {
     use arael::simple_lm::SchurPolicy;
     match v {
@@ -169,7 +190,9 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
 ) -> Solved<f64> {
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_ordering(ordering())
-        .with_policy(schur_policy());
+        .with_policy(schur_policy())
+        .with_block_supernodal(block_supernodal())
+        .with_block_supernodal_batching(block_supernodal_batch());
     arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
@@ -180,7 +203,9 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
 ) -> Solved<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_ordering(ordering())
-        .with_policy(schur_policy());
+        .with_policy(schur_policy())
+        .with_block_supernodal(block_supernodal())
+        .with_block_supernodal_batching(block_supernodal_batch());
     arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 

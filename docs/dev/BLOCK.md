@@ -384,21 +384,54 @@ here. README/charts only move when a default flips (later stage).
 
 ### Stage 4 -- measured pushes (each keep-or-kill on the benchmarks)
 
-- **Relax-table sweep** on block units per matrix class (BA S, pgo H,
-  BA-fill H) -- faer's defaults were tuned for scalar supernodes.
-- **Fixed-shape update kernels** through `gemm_sub` where the shape
-  census (stage 1 knows it) says a small shape dominates.
-- **Update batching** -- the roofline attack: bucket small-k
-  descendants sharing a target panel by column overlap, gather their
-  panels into one packed B, one GEMM per bucket, one pass over the
-  target. Aims at the 6.6 GFLOP/s regime (37-44 ms of the 60-66 ms
-  slam-300 whole-H factorization). Kill criterion: <10% on that route
-  after the bucketing is honest about zero-padding.
-- **Block-AMD**: faer's `amd` run on the block adjacency vs scalar AMD
-  -- compare fill and ordering time; pick per class alongside ND.
+- **Relax-table sweep** [DONE 2026-08-02, no change]. Swept none /
+  faer-default / single-rung zero caps (2%, 5%, 10%) / a 4x-widened
+  table, on all four pgo matrices and all four bal S matrices
+  (block_stage0 bins). The faer-default table wins or ties on attempt
+  time everywhere: the small size-capped rungs earn their keep on
+  3-wide blocks (m3500 1.18x vs 0.95x for a bare zero cap), and
+  nothing beats it on the 9-wide bal blocks either. One alternative
+  worth remembering: a single `(MAX, 0.02)` rung matches the default's
+  speed on bal S while holding 8 MB less factor at 372 (41.3 vs 49.1)
+  -- a memory-lean choice if the route ever wants a per-class table.
+  Amalgamation off is 10-20% slower on every matrix with enough
+  structure to merge. Default stays.
+- **Fused tiny updates** [MEASURED AND KILLED 2026-08-02]. A scalar
+  axpy path writing small updates straight into the target panel (no
+  GEMM dispatch, no scratch) was 40-80% SLOWER on the pgo matrices
+  (m3500 factor 1.14 -> 2.05 ms): without packing, the destination
+  segments are re-streamed once per depth step, while the GEMM path's
+  scratch round trip IS the packing that lets faer's microkernels
+  touch everything once. Reverted.
+- **Fixed-shape update kernels** through `gemm_sub`: not attempted --
+  the fused-update result applies. `gemm_sub`'s contract is packed
+  contiguous tiles; the update operands are strided panel windows, so
+  the pack step would cost what the GEMM path already pays.
+- **Update batching** [SHIPPED 2026-08-02, `batch_ratio` default 1.2].
+  Consecutive descendants of a target whose zero-padded joint update
+  stays within `batch_ratio` of their individual flops are packed
+  (depth-capped at 16-wide members, 512 total) into one A/B pair over
+  the union target span -- one GEMM, one dense subtract, one pass over
+  the shared region instead of one per member. The ratio is the whole
+  game, measured interleaved on slam-300 whole-H (block-AMD order):
+  1.2 / 1.5 / 2.0 give the same -4-5% ms/iter (91 -> 87-89) and -4-6%
+  full-iter, while 3.0 LOSES 9% -- past ~2, the padding's arithmetic
+  outruns the traffic it saves. Neutral on bal S (194 ms/iter, parity)
+  and a shade ahead on pgo garage (4.2 -> 4.1; both measured at 1.2).
+  The default is 1.2, the memory-lean end of the flat optimum: batch
+  buffers cost +0.1 MB peak at slam-300 against 1.5's +4.0, 2.0's
+  +6.6 and 3.0's +12.4. Possible follow-up: a marginalize-first block
+  order on the whole-H route would make landmark neighbors adjacent in
+  elimination order and tighten the unions block-AMD scatters.
+- **Block-AMD** [DONE at stage 2]: matches scalar AMD's fill on every
+  pgo dataset, 0.1-2.2 ms on the block graph; shipped as the
+  supernodal route's default ordering.
 - **Seed fusion for whole-H**: bind model scatter positions directly
   into pristine panels, skipping block-CSC H where no reduction needs
-  it.
+  it. OPEN, small expected gain (the seed is one tile-wise pass).
+- **Solve path**: ours trails faer's supernodal solve ~10% on bal-1723
+  (17.4 vs 15.7 ms) and is at parity elsewhere; ~1% of the attempt
+  there. OPEN, low value.
 
 ### Stage 5 -- parallel numeric (optional, the differentiator)
 
@@ -439,6 +472,36 @@ factorization dominates (bal).
 
 ## Log
 
+- 2026-08-02: Stage 4, second pass: update batching shipped
+  (`SupernodalParams::batch_ratio`, default 1.2 -- the memory-lean end
+  of the 1.2-2.0 flat optimum, +0.1 MB of batch buffers against 1.5's
+  +4.0) -- -4-5% ms/iter on the slam-300 whole-H route,
+  neutral-to-positive on pgo and bal, tests pinning batched ==
+  unbatched. User control: `SparseFaer::with_block_supernodal_batching`
+  (and the options twin) sets the ratio or disables batching with
+  `None`; the default flows from `SupernodalParams::default()`. The
+  whole-H supernodal baseline measured on the way: parity with the
+  landmarks-first faer row on ms/iter, -11% first iteration, peak 75.4
+  -> 61.2 MB. Ratio 3.0 measured 9% WORSE -- the acceptance ratio is
+  the entire trade. Still open, both small: whole-H seed fusion,
+  solve-path tuning.
+- 2026-08-02: Stage 4, first pass: relax sweep run on all eight
+  matrices -- the faer-default table confirmed as the right default
+  (kept); fused tiny-update path measured 40-80% slower and killed
+  (the GEMM scratch round trip is the packing); fixed-shape kernels
+  ruled out by the same mechanism; block-AMD already shipped. Left
+  open: update batching (the big one, own session), whole-H seed
+  fusion and solve-path tuning (both small).
+- 2026-08-02: Benchmark wiring: `ARAEL_BLOCK_SUPERNODAL=1` (one
+  cross-benchmark name, like ARAEL_LAMBDA_FLOOR) flips the arael rows
+  of pgo, bal, slam and loc onto the route; CG rows ignore it (they
+  never factor). `ARAEL_BLOCK_SUPERNODAL_BATCH` tunes the route's
+  update batching in the same four runners: a ratio overrides the
+  default, `0`/`off` disables, a typo aborts the run. Real-row spot checks, interleaved, this VM: pgo
+  garage f64 ms/iter 5.8 -> 4.2, 1st-iter 8.6 -> 4.9, peak 32.2 ->
+  26.1 MB; bal-372 schur ms/iter 197 -> 195 (parity as measured at
+  stage 2), 1st-iter 281 -> 264, peak 280.5 -> 233.1 MB. Same costs
+  and iteration counts everywhere.
 - 2026-08-02: Stage 3 shipped: `with_block_supernodal` on `SparseFaer`
   and `SparseFaerOptions`, both the reduced-S and whole-Hessian arms,
   `SchurPlan::block_supernodal`, `NestedDissection::block_order`,

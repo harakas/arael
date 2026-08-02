@@ -263,6 +263,28 @@ fn the_options_struct_carries_block_supernodal() {
     assert!(sn.plan().expect("a plan").block_supernodal);
 }
 
+/// Update batching is a user knob: disabling it must change nothing about
+/// the answer, only how the updates are applied.
+#[test]
+fn batching_can_be_disabled_without_changing_the_answer() {
+    let mut on = SparseFaer::new()
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(true);
+    let (x_on, c_on) = solve(&mut on, 2);
+
+    let mut off = SparseFaer::new()
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(true)
+        .with_block_supernodal_batching(None);
+    let (x_off, c_off) = solve(&mut off, 2);
+    assert!(off.plan().expect("a plan").block_supernodal);
+
+    assert!(c_on < 1e-12 && c_off < 1e-12, "{} {}", c_on, c_off);
+    for (a, b) in std::iter::zip(&x_on, &x_off) {
+        assert!((a - b).abs() < 1e-9, "batching changed the answer: {} vs {}", a, b);
+    }
+}
+
 /// The f32 twin takes the same route and lands on the optimum at its own
 /// precision.
 #[test]

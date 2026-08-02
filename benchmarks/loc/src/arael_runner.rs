@@ -259,12 +259,44 @@ pub fn backend() -> String {
 
 type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
 
+// ARAEL_BLOCK_SUPERNODAL=1 factors the faer and narrow_band routes with the
+// supernodal block Cholesky (SparseFaer::with_block_supernodal) instead of the
+// scalar faer route. Cross-benchmark name, like ARAEL_LAMBDA_FLOOR; see
+// docs/dev/BLOCK.md. The default `band` route is a different solver entirely
+// and does not read it.
+fn block_supernodal() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+}
+
+// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update batching:
+// a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the library default.
+// A typo is rejected rather than silently ignored.
+fn block_supernodal_batch() -> Option<f64> {
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
+        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse().unwrap_or_else(|_| {
+            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
+        })),
+    }
+}
+
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> Solved<f64> {
     match solver_kind().as_str() {
-        "faer" => arael::simple_lm::solve_sparse(params, path, cfg),
+        "faer" => arael::simple_lm::lm_solve(
+            params,
+            &mut arael::simple_lm::SparseFaer::new()
+                .with_block_supernodal(block_supernodal())
+                .with_block_supernodal_batching(block_supernodal_batch()),
+            path, cfg),
         "narrow_band" => arael::simple_lm::lm_solve(
-            params, &mut arael::simple_lm::SparseFaer::new().with_narrow_band(true), path, cfg),
+            params,
+            &mut arael::simple_lm::SparseFaer::new()
+                .with_narrow_band(true)
+                .with_block_supernodal(block_supernodal())
+                .with_block_supernodal_batching(block_supernodal_batch()),
+            path, cfg),
         _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
     }
 }
@@ -272,9 +304,19 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
     -> Solved<f32> {
     match solver_kind().as_str() {
-        "faer" => arael::simple_lm::solve_sparse_f32(params, path, cfg),
+        "faer" => arael::simple_lm::lm_solve(
+            params,
+            &mut arael::simple_lm::SparseFaerF32::new()
+                .with_block_supernodal(block_supernodal())
+                .with_block_supernodal_batching(block_supernodal_batch()),
+            path, cfg),
         "narrow_band" => arael::simple_lm::lm_solve(
-            params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(true), path, cfg),
+            params,
+            &mut arael::simple_lm::SparseFaerF32::new()
+                .with_narrow_band(true)
+                .with_block_supernodal(block_supernodal())
+                .with_block_supernodal_batching(block_supernodal_batch()),
+            path, cfg),
         _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
     }
 }

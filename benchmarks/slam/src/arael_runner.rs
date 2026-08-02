@@ -312,6 +312,28 @@ fn narrow_band_enabled() -> bool {
     std::env::var("SLAM_NARROW_BAND").map_or(false, |v| v == "1")
 }
 
+// ARAEL_BLOCK_SUPERNODAL=1 factors with the supernodal block Cholesky
+// (SparseFaer::with_block_supernodal) instead of flattening to scalar CSC for
+// faer. On the default schur route it only engages where the envelope
+// declines. Cross-benchmark name, like ARAEL_LAMBDA_FLOOR; see
+// docs/dev/BLOCK.md.
+fn block_supernodal() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+}
+
+// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update batching:
+// a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the library default.
+// A typo is rejected rather than silently ignored.
+fn block_supernodal_batch() -> Option<f64> {
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
+        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse().unwrap_or_else(|_| {
+            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
+        })),
+    }
+}
+
 // SLAM_ENVELOPE=auto|always|never picks how the reduced Schur system is
 // factored. A typo here would silently benchmark the other route, so an
 // unknown value is an error rather than a fallback.
@@ -367,7 +389,9 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             arael::simple_lm::lm_solve(
                 params,
                 &mut arael::simple_lm::SparseFaer::new()
-                    .with_policy(arael::simple_lm::SchurPolicy::Never),
+                    .with_policy(arael::simple_lm::SchurPolicy::Never)
+                    .with_block_supernodal(block_supernodal())
+                    .with_block_supernodal_batching(block_supernodal_batch()),
                 path,
                 cfg,
             )
@@ -380,7 +404,9 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                 params,
                 &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled())
                     .with_envelope_schur(envelope_mode())
-                    .with_envelope_panel_width(envelope_panel_width()),
+                    .with_envelope_panel_width(envelope_panel_width())
+                    .with_block_supernodal(block_supernodal())
+                    .with_block_supernodal_batching(block_supernodal_batch()),
                 path,
                 cfg,
             )
@@ -458,7 +484,9 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
         return arael::simple_lm::lm_solve(
             params,
             &mut arael::simple_lm::SparseFaerF32::new()
-                .with_policy(arael::simple_lm::SchurPolicy::Never),
+                .with_policy(arael::simple_lm::SchurPolicy::Never)
+                .with_block_supernodal(block_supernodal())
+                    .with_block_supernodal_batching(block_supernodal_batch()),
             path,
             cfg,
         );
@@ -466,7 +494,9 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     arael::simple_lm::lm_solve(
         params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled())
                     .with_envelope_schur(envelope_mode())
-                    .with_envelope_panel_width(envelope_panel_width()), path, cfg)
+                    .with_envelope_panel_width(envelope_panel_width())
+                    .with_block_supernodal(block_supernodal())
+                    .with_block_supernodal_batching(block_supernodal_batch()), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

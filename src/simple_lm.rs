@@ -4231,6 +4231,10 @@ pub struct SparseFaerOptions {
     /// Factor with the supernodal block Cholesky instead of faer's scalar
     /// one (see [`SparseFaer::with_block_supernodal`]). Off by default.
     pub block_supernodal: bool,
+    /// Update-batching acceptance ratio for the supernodal block route;
+    /// `None` disables batching (see
+    /// [`SparseFaer::with_block_supernodal_batching`]).
+    pub block_supernodal_batch: Option<f64>,
     /// Parameter ranges to marginalize, named explicitly rather than left to
     /// the policy to detect.
     pub marginalize: Vec<std::ops::Range<usize>>,
@@ -4254,6 +4258,8 @@ impl SparseFaerOptions {
             envelope: EnvelopeMode::default(),
             envelope_panel_width: None,
             block_supernodal: false,
+            block_supernodal_batch: arael_faer::supernodal::SupernodalParams::default()
+                .batch_ratio,
             marginalize: Vec::new(),
         }
     }
@@ -4322,6 +4328,12 @@ impl SparseFaerOptions {
     /// [`SparseFaer::with_block_supernodal`]).
     pub fn with_block_supernodal(mut self, on: bool) -> Self {
         self.block_supernodal = on;
+        self
+    }
+    /// Set or disable the supernodal route's update batching (see
+    /// [`SparseFaer::with_block_supernodal_batching`]).
+    pub fn with_block_supernodal_batching(mut self, ratio: Option<f64>) -> Self {
+        self.block_supernodal_batch = ratio;
         self
     }
     /// Add a parameter range to marginalize (may be called several times).
@@ -4684,6 +4696,7 @@ pub struct SparseFaer<T = f64> {
     // block_supernodal is the config; sn_active is whether this solve took
     // the route; sn_sym and sn_factor are its structure and factor buffer.
     block_supernodal: bool,
+    sn_batch_ratio: Option<f64>,
     sn_active: bool,
     sn_sym: Option<arael_faer::supernodal::SupernodalSymbolic>,
     sn_factor: Vec<T>,
@@ -4748,6 +4761,7 @@ impl<T> SparseFaer<T> {
             envelope_sym: None,
             envelope_factor: Vec::new(),
             block_supernodal: false,
+            sn_batch_ratio: arael_faer::supernodal::SupernodalParams::default().batch_ratio,
             sn_active: false,
             sn_sym: None,
             sn_factor: Vec::new(),
@@ -4893,6 +4907,21 @@ impl<T> SparseFaer<T> {
         self
     }
 
+    /// Set the supernodal block route's update-batching acceptance ratio,
+    /// or disable batching with `None`.
+    ///
+    /// Batching packs neighboring small descendant updates into one GEMM
+    /// over their joint span while the zero-padding stays within this factor
+    /// of the members' own flops -- fewer passes over the shared target
+    /// region, at the price of the padding's arithmetic and a packing
+    /// buffer. The default (1.2) is the memory-lean end of the measured
+    /// optimum; ratios past ~2 lose outright. Ignored unless the supernodal
+    /// route runs at all.
+    pub fn with_block_supernodal_batching(mut self, ratio: Option<f64>) -> Self {
+        self.sn_batch_ratio = ratio;
+        self
+    }
+
     /// What the first compute decided (`None` before the first compute).
     pub fn plan(&self) -> Option<SchurPlan> {
         self.plan
@@ -4907,7 +4936,8 @@ impl<T> SparseFaer<T> {
             .with_narrow_band(opts.narrow_band)
             .with_envelope_schur(opts.envelope)
             .with_envelope_panel_width(opts.envelope_panel_width)
-            .with_block_supernodal(opts.block_supernodal);
+            .with_block_supernodal(opts.block_supernodal)
+            .with_block_supernodal_batching(opts.block_supernodal_batch);
         solver.schur_solve = opts.schur_solve;
         for range in &opts.marginalize {
             solver = solver.with_marginalize(range.clone());
@@ -5240,7 +5270,10 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let sn = arael_faer::supernodal::SupernodalSymbolic::new(
             &hsym,
             Some(&block_order),
-            &arael_faer::supernodal::SupernodalParams::default(),
+            &arael_faer::supernodal::SupernodalParams {
+                batch_ratio: self.sn_batch_ratio,
+                ..Default::default()
+            },
         )
         .map_err(|_| SolveError::SymbolicFactorization { reduced: false })?;
         self.sn_factor.resize(sn.factor_val_count(), T::zero());
@@ -6187,7 +6220,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let sn = arael_faer::supernodal::SupernodalSymbolic::new(
                 &schur.s,
                 block_order.as_deref(),
-                &arael_faer::supernodal::SupernodalParams::default(),
+                &arael_faer::supernodal::SupernodalParams {
+                    batch_ratio: self.sn_batch_ratio,
+                    ..Default::default()
+                },
             )
             .map_err(|_| SolveError::SymbolicFactorization { reduced: true })?;
             self.sn_factor.resize(sn.factor_val_count(), T::zero());

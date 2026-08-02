@@ -177,6 +177,28 @@ pub fn schur_ordering() -> arael::simple_lm::FaerOrdering {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL=1 factors with the supernodal block Cholesky
+/// (`SparseFaer::with_block_supernodal`) instead of flattening to scalar CSC
+/// for faer -- same equations, block-native factorization. Applies to the
+/// factorizing routes only; the conjugate-gradient rows never factor.
+/// Cross-benchmark name, like ARAEL_LAMBDA_FLOOR. See docs/dev/BLOCK.md.
+pub fn block_supernodal() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+}
+
+/// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update
+/// batching: a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the
+/// library default. A typo is rejected rather than silently ignored.
+pub fn block_supernodal_batch() -> Option<f64> {
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
+        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse().unwrap_or_else(|_| {
+            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
+        })),
+    }
+}
+
 // Damping floor (env ARAEL_LAMBDA_FLOOR, library default 1e-12). Under
 // the fixed schedule bundle adjustment needed a raised floor against
 // gauge-driven Cholesky failure spirals; the Nielsen driver's gain
@@ -201,7 +223,9 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>)
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaer::new()
-        .with_policy(arael::simple_lm::SchurPolicy::Never);
+        .with_policy(arael::simple_lm::SchurPolicy::Never)
+        .with_block_supernodal(block_supernodal())
+        .with_block_supernodal_batching(block_supernodal_batch());
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
@@ -219,7 +243,9 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(policy)
-        .with_ordering(ordering);
+        .with_ordering(ordering)
+        .with_block_supernodal(block_supernodal())
+        .with_block_supernodal_batching(block_supernodal_batch());
     let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -301,7 +327,9 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaerF32::new()
-        .with_policy(arael::simple_lm::SchurPolicy::Never);
+        .with_policy(arael::simple_lm::SchurPolicy::Never)
+        .with_block_supernodal(block_supernodal())
+        .with_block_supernodal_batching(block_supernodal_batch());
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
@@ -309,7 +337,9 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
-        .with_ordering(ordering);
+        .with_ordering(ordering)
+        .with_block_supernodal(block_supernodal())
+        .with_block_supernodal_batching(block_supernodal_batch());
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
