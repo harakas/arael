@@ -754,6 +754,14 @@ nothing.
 
 ## Log
 
+- 2026-08-02: Measurement scaffolding retired: the three block_stage0
+  scratch bins deleted, the machine-local `[patch.crates-io]` faer
+  overrides removed from the bal/pgo/slam benchmark Cargo.tomls (locks
+  regenerated to their committed state), and pgo's bin-only arael-faer
+  dependency dropped. The instrumented faer clone at
+  `~/.local/opt/faer-rs` (July's FAER_DBG_TIMING diff plus this
+  session's permute-copy timer) lives outside the repo and stays as
+  the user's; the stage-0 numbers it produced are recorded above.
 - 2026-08-02: THE DEFAULT FLIPPED. `BlockSupernodalMode::Auto` is the
   default: the supernodal block Cholesky factorizes wherever scalar
   faer would on a sequential solve; threaded solves keep the scalar

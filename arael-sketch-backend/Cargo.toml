@@ -1,6 +1,6 @@
 [package]
 name = "arael-sketch-backend"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 readme = "../docs/ARAEL_SKETCH.md"
@@ -11,9 +11,9 @@ keywords = ["constraint-solver", "sketch", "cad", "2d", "mcp"]
 categories = ["mathematics", "science"]
 
 [dependencies]
-arael = { version = "0.8.1", path = ".." }
-arael-sym = { version = "0.8.1", path = "../arael-sym" }
-arael-sketch-solver = { version = "0.8.1", path = "../arael-sketch-solver" }
+arael = { version = "0.8.2", path = ".." }
+arael-sym = { version = "0.8.2", path = "../arael-sym" }
+arael-sketch-solver = { version = "0.8.2", path = "../arael-sketch-solver" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"

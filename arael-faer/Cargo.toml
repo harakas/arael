@@ -1,6 +1,6 @@
 [package]
 name = "arael-faer"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 description = "faer extensions: variable-block sparse matrix storage (block CSC), Schur-complement reduction, and a nested-dissection ordering"
