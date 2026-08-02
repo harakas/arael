@@ -407,7 +407,9 @@ here. README/charts only move when a default flips (later stage).
   the fused-update result applies. `gemm_sub`'s contract is packed
   contiguous tiles; the update operands are strided panel windows, so
   the pack step would cost what the GEMM path already pays.
-- **Update batching** [SHIPPED 2026-08-02, `batch_ratio` default 1.2].
+- **Update batching** [SHIPPED 2026-08-02, `batch_ratio` default 1.5
+  since direct accumulate removed the ratio's memory cost -- see the
+  log; the paragraph below records the pre-direct-accumulate sweep].
   Consecutive descendants of a target whose zero-padded joint update
   stays within `batch_ratio` of their individual flops are packed
   (depth-capped at 16-wide members, 512 total) into one A/B pair over
@@ -423,6 +425,17 @@ here. README/charts only move when a default flips (later stage).
   +6.6 and 3.0's +12.4. Possible follow-up: a marginalize-first block
   order on the whole-H route would make landmark neighbors adjacent in
   elimination order and tighten the unions block-AMD scatters.
+- **Direct accumulate** [SHIPPED 2026-08-02, kept for simplification].
+  Batched updates now GEMM straight into their contiguous target
+  sub-panel (`Accum::Add`, no product buffer, no subtract pass -- the
+  batch product scratch is gone entirely), and single-pair updates
+  whose target rows and columns are each one contiguous range take the
+  same two-GEMM direct path. Measured: garage factor 1.76 -> 1.68 ms
+  (~5%), everything else neutral within this VM's noise. Kept: less
+  code, one less buffer, one less pass -- but the scratch traffic it
+  deletes is measurably small at the default batch ratio, which also
+  further deprioritizes a `private-gemm-x86` (x86-only fused scatter)
+  experiment: what it would save is what this measured as small.
 - **Block-AMD** [DONE at stage 2]: matches scalar AMD's fill on every
   pgo dataset, 0.1-2.2 ms on the block graph; shipped as the
   supernodal route's default ordering.
@@ -472,6 +485,12 @@ factorization dominates (bal).
 
 ## Log
 
+- 2026-08-02: Batch default 1.2 -> 1.5. Direct accumulate deleted the
+  batch product buffer, and with it the entire ratio-dependent memory
+  overhead (peak at slam-300 is 61.5 MB flat at every ratio, where 1.5
+  used to cost +4.0 MB and 3.0 +12.4). Re-measured interleaved
+  post-change: 1.5-2.0 lead 1.2 by ~3% full-iter (81.4 vs 84.1 ms), so
+  the memory reason for 1.2 is gone and 1.5 wins on speed.
 - 2026-08-02: Stage 4, second pass: update batching shipped
   (`SupernodalParams::batch_ratio`, default 1.2 -- the memory-lean end
   of the 1.2-2.0 flat optimum, +0.1 MB of batch buffers against 1.5's

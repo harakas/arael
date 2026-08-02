@@ -170,6 +170,27 @@ pub fn schur_policy() -> SchurPolicy {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL=1 factors with the supernodal block Cholesky
+/// (`SparseFaer::with_block_supernodal`) instead of flattening to scalar CSC
+/// for faer. Cross-benchmark name, like ARAEL_LAMBDA_FLOOR; see
+/// docs/dev/BLOCK.md.
+pub fn block_supernodal() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL").as_deref() == Ok("1")
+}
+
+/// ARAEL_BLOCK_SUPERNODAL_BATCH tunes the supernodal route's update
+/// batching: a ratio (e.g. 1.5), or 0/off to disable. Unset keeps the
+/// library default. A typo is rejected rather than silently ignored.
+pub fn block_supernodal_batch() -> Option<f64> {
+    match std::env::var("ARAEL_BLOCK_SUPERNODAL_BATCH").ok().as_deref() {
+        None => arael::simple_lm::SparseFaerOptions::auto().block_supernodal_batch,
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v.parse().unwrap_or_else(|_| {
+            panic!("ARAEL_BLOCK_SUPERNODAL_BATCH={}: expected a ratio, or 0/off", v)
+        })),
+    }
+}
+
 /// PLANE_ENVELOPE=auto|always|never picks how a reduced system is factored.
 ///
 /// Only bites when there is a reduced system, so on this scene it needs
@@ -323,7 +344,9 @@ impl bench_harness::arael::Model for World {
         -> Result<LmResult<f64>, SolveFailure<f64>> {
         lm_solve(params, &mut SparseFaer::<f64>::new()
             .with_policy(schur_policy())
-            .with_envelope_schur(envelope_mode()), m, cfg)
+            .with_envelope_schur(envelope_mode())
+            .with_block_supernodal(block_supernodal())
+            .with_block_supernodal_batching(block_supernodal_batch()), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -343,7 +366,15 @@ pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let mut params: Vec<f64> = Vec::new();
     world.serialize(&mut params);
     let cfg = bench_harness::arael::config::<World>(raw, max_iters);
-    let r = lm_solve(&params, &mut SparseFaer::<f64>::new(), &mut world, &cfg).unwrap();
+    let r = lm_solve(
+        &params,
+        &mut SparseFaer::<f64>::new()
+            .with_block_supernodal(block_supernodal())
+            .with_block_supernodal_batching(block_supernodal_batch()),
+        &mut world,
+        &cfg,
+    )
+    .unwrap();
     world.deserialize(&r.x);
     extract(&world)
 }
@@ -353,7 +384,15 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let mut params: Vec<f32> = Vec::new();
     world.serialize(&mut params);
     let cfg = bench_harness::arael::config::<WorldF>(raw, max_iters);
-    let r = lm_solve(&params, &mut SparseFaer::<f32>::new(), &mut world, &cfg).unwrap();
+    let r = lm_solve(
+        &params,
+        &mut SparseFaer::<f32>::new()
+            .with_block_supernodal(block_supernodal())
+            .with_block_supernodal_batching(block_supernodal_batch()),
+        &mut world,
+        &cfg,
+    )
+    .unwrap();
     world.deserialize(&r.x);
     extract_f32(&world)
 }
@@ -384,7 +423,9 @@ impl bench_harness::arael::Model for WorldF {
         -> Result<LmResult<f32>, SolveFailure<f32>> {
         lm_solve(params, &mut SparseFaer::<f32>::new()
             .with_policy(schur_policy())
-            .with_envelope_schur(envelope_mode()), m, cfg)
+            .with_envelope_schur(envelope_mode())
+            .with_block_supernodal(block_supernodal())
+            .with_block_supernodal_batching(block_supernodal_batch()), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;

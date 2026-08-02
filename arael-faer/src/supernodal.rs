@@ -42,11 +42,13 @@ const NONE: u32 = u32::MAX;
 /// stay within this factor of the individual updates' flops. Trades
 /// arithmetic for one pass over the shared target region -- the win
 /// where rank-3 landmark updates are memory-bound. `None` disables
-/// batching. The 1.2 default is measured: 1.2-2.0 give the same -4-5%
-/// per iteration on the landmark-heavy whole-Hessian factorization and
-/// are neutral elsewhere, while 3.0 loses 9% -- past ~2, the padding's
-/// arithmetic outruns the traffic it saves. 1.2 is picked over its
-/// equals for the batch buffers: +0.1 MB peak against 1.5's +4.0.
+/// batching. The 1.5 default is measured: 1.5-2.0 are ahead of 1.2 by
+/// ~3% per full iteration on the landmark-heavy whole-Hessian
+/// factorization, all are neutral elsewhere, and 3.0 loses outright --
+/// past ~2, the padding's arithmetic outruns the traffic it saves.
+/// Since the batch product accumulates straight into the panel, the
+/// ratio carries no memory cost: only the span-by-depth pack buffers
+/// remain, in the noise at any measured ratio.
 #[derive(Clone, Debug)]
 pub struct SupernodalParams {
     pub relax: Option<Vec<(usize, f64)>>,
@@ -57,7 +59,7 @@ impl Default for SupernodalParams {
     fn default() -> Self {
         Self {
             relax: Some(vec![(4, 1.0), (16, 0.8), (48, 0.1), (usize::MAX, 0.05)]),
-            batch_ratio: Some(1.2),
+            batch_ratio: Some(1.5),
         }
     }
 }
@@ -147,10 +149,9 @@ pub struct SupernodalSymbolic {
     bucket_span: Vec<[u32; 4]>,
     /// per bucket, the packed depth (sum of member widths)
     bucket_k: Vec<u32>,
-    /// packed-operand and product scratch bounds for the batched path
+    /// packed-operand scratch bounds for the batched path
     max_a_cat: usize,
     max_b_cat: usize,
-    max_c_buf: usize,
     /// how many descendant pairs landed in multi-member buckets
     batched_pairs: usize,
     /// per stored tile of the matrix, its panel target
@@ -532,7 +533,6 @@ impl SupernodalSymbolic {
         let mut bucket_k: Vec<u32> = Vec::new();
         let mut max_a_cat = 0usize;
         let mut max_b_cat = 0usize;
-        let mut max_c_buf = 0usize;
         let mut batched_pairs = 0usize;
         if let Some(ratio) = params.batch_ratio {
             tb_ptr.push(0);
@@ -562,8 +562,7 @@ impl SupernodalSymbolic {
                              bucket_k: &mut Vec<u32>,
                              batched_pairs: &mut usize,
                              max_a: &mut usize,
-                             max_b: &mut usize,
-                             max_c: &mut usize| {
+                             max_b: &mut usize| {
                     if *members == 0 {
                         return;
                     }
@@ -576,7 +575,6 @@ impl SupernodalSymbolic {
                         let cs = (span[3] - span[2]) as usize;
                         *max_a = (*max_a).max(rs * *kk);
                         *max_b = (*max_b).max(cs * *kk);
-                        *max_c = (*max_c).max(rs * cs);
                     }
                     *members = 0;
                     *kk = 0;
@@ -626,7 +624,6 @@ impl SupernodalSymbolic {
                             &mut members, &mut span, &mut kk, &mut flops_ind, pi,
                             &mut bucket_end, &mut bucket_span, &mut bucket_k,
                             &mut batched_pairs, &mut max_a_cat, &mut max_b_cat,
-                            &mut max_c_buf,
                         );
                         span = [row_lo, row_hi, col_lo, col_hi];
                         kk = dq;
@@ -637,7 +634,6 @@ impl SupernodalSymbolic {
                                 &mut members, &mut span, &mut kk, &mut flops_ind, pi + 1,
                                 &mut bucket_end, &mut bucket_span, &mut bucket_k,
                                 &mut batched_pairs, &mut max_a_cat, &mut max_b_cat,
-                                &mut max_c_buf,
                             );
                         }
                     }
@@ -645,7 +641,7 @@ impl SupernodalSymbolic {
                 flush(
                     &mut members, &mut span, &mut kk, &mut flops_ind, desc_ptr[t + 1],
                     &mut bucket_end, &mut bucket_span, &mut bucket_k,
-                    &mut batched_pairs, &mut max_a_cat, &mut max_b_cat, &mut max_c_buf,
+                    &mut batched_pairs, &mut max_a_cat, &mut max_b_cat,
                 );
                 tb_ptr.push(bucket_end.len() as u32);
             }
@@ -678,7 +674,6 @@ impl SupernodalSymbolic {
             bucket_k,
             max_a_cat,
             max_b_cat,
-            max_c_buf,
             batched_pairs,
             tiles,
             n_vals: n_vals as usize,
@@ -876,6 +871,75 @@ fn apply_pair<T: SchurReal>(
     let b_v = unsafe {
         faer::MatRef::from_raw_parts(dpanel.as_ptr().add(r0), kw, dq, 1, dh as isize)
     };
+
+    // When the target rows and columns are each one contiguous range
+    // (banded and trajectory-shaped patterns, mostly), accumulate the
+    // two GEMMs straight into the panel: no product scratch, no
+    // scatter. The mid block lands at (tc0, tc0) because a block's
+    // diagonal-panel row equals its column offset.
+    {
+        let first = dpat_blk[start as usize] as usize;
+        let last = dpat_blk[dpat_blk.len() - 1] as usize;
+        let lmid = dpat_blk[(kend - 1) as usize] as usize;
+        let rows_contig = (blk_row[last] as usize
+            + (sym.sc_start[last + 1] - sym.sc_start[last]) as usize
+            - blk_row[first] as usize)
+            == m;
+        let cols_contig = (sym.sc_start[lmid + 1] - sym.sc_start[first]) as usize == kw;
+        if rows_contig && cols_contig {
+            let tc0 = (sym.sc_start[first] - col0) as usize;
+            let top = unsafe {
+                faer::MatMut::from_raw_parts_mut(
+                    panel.as_mut_ptr().add(tc0 * h + tc0),
+                    kw,
+                    kw,
+                    1,
+                    h as isize,
+                )
+            };
+            faer::linalg::matmul::triangular::matmul(
+                top,
+                faer::linalg::matmul::triangular::BlockStructure::TriangularLower,
+                faer::Accum::Add,
+                b_v,
+                faer::linalg::matmul::triangular::BlockStructure::Rectangular,
+                b_v.transpose(),
+                faer::linalg::matmul::triangular::BlockStructure::Rectangular,
+                minus_one::<T>(),
+                faer::Par::Seq,
+            );
+            if m > kw {
+                let a_bot = unsafe {
+                    faer::MatRef::from_raw_parts(
+                        dpanel.as_ptr().add(r0 + kw),
+                        m - kw,
+                        dq,
+                        1,
+                        dh as isize,
+                    )
+                };
+                let bot = unsafe {
+                    faer::MatMut::from_raw_parts_mut(
+                        panel.as_mut_ptr().add(tc0 * h + tc0 + kw),
+                        m - kw,
+                        kw,
+                        1,
+                        h as isize,
+                    )
+                };
+                faer::linalg::matmul::matmul(
+                    bot,
+                    faer::Accum::Add,
+                    a_bot,
+                    b_v.transpose(),
+                    minus_one::<T>(),
+                    faer::Par::Seq,
+                );
+            }
+            return;
+        }
+    }
+
     let u_top = unsafe {
         faer::MatMut::from_raw_parts_mut(upd.as_mut_ptr(), kw, kw, 1, m as isize)
     };
@@ -938,8 +1002,9 @@ fn apply_pair<T: SchurReal>(
 
 /// A bucket of consecutive descendants applied as ONE update: their
 /// panels packed (zero-padded) into a joint A and B over the union
-/// target span, one GEMM, one dense subtract over the shared region --
-/// one pass over the target instead of one per member.
+/// target span, then one GEMM accumulating straight into the panel --
+/// the span is a contiguous sub-panel, so no product buffer and no
+/// scatter, one pass over the target instead of one per member.
 #[allow(clippy::too_many_arguments)]
 fn apply_bucket<T: SchurReal>(
     sym: &SupernodalSymbolic,
@@ -951,7 +1016,6 @@ fn apply_bucket<T: SchurReal>(
     blk_row: &[u32],
     a_cat: &mut [T],
     b_cat: &mut [T],
-    c_buf: &mut [T],
     h: usize,
     col0: u32,
 ) {
@@ -1001,16 +1065,23 @@ fn apply_bucket<T: SchurReal>(
 
     let a_v = unsafe { faer::MatRef::from_raw_parts(a_cat.as_ptr(), rs, kk, 1, rs as isize) };
     let b_v = unsafe { faer::MatRef::from_raw_parts(b_cat.as_ptr(), cs, kk, 1, cs as isize) };
-    let c_v = unsafe { faer::MatMut::from_raw_parts_mut(c_buf.as_mut_ptr(), rs, cs, 1, rs as isize) };
-    faer::linalg::matmul::matmul(c_v, faer::Accum::Replace, a_v, b_v.transpose(), one::<T>(), faer::Par::Seq);
-
-    for c in 0..cs {
-        let dst = (col_lo + c) * h + row_lo;
-        let src = c * rs;
-        for r in 0..rs {
-            panel[dst + r] = panel[dst + r] - c_buf[src + r];
-        }
-    }
+    let dst = unsafe {
+        faer::MatMut::from_raw_parts_mut(
+            panel.as_mut_ptr().add(col_lo * h + row_lo),
+            rs,
+            cs,
+            1,
+            h as isize,
+        )
+    };
+    faer::linalg::matmul::matmul(
+        dst,
+        faer::Accum::Add,
+        a_v,
+        b_v.transpose(),
+        minus_one::<T>(),
+        faer::Par::Seq,
+    );
 }
 
 /// Factor `L L^T = P A P^T` into the panels, left-looking by supernode.
@@ -1062,7 +1133,6 @@ pub fn supernodal_factorize<T: SchurReal>(
     let mut runs: Vec<(u32, u32, u32)> = Vec::new();
     let mut a_cat = vec![T::ZERO; sym.max_a_cat];
     let mut b_cat = vec![T::ZERO; sym.max_b_cat];
-    let mut c_buf = vec![T::ZERO; sym.max_c_buf];
     let mut chol_mem = vec![
         core::mem::MaybeUninit::<u8>::uninit();
         faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
@@ -1106,7 +1176,7 @@ pub fn supernodal_factorize<T: SchurReal>(
                 } else {
                     apply_bucket(
                         sym, b as usize, p0, p1, head, panel, &blk_row,
-                        &mut a_cat, &mut b_cat, &mut c_buf, h, col0,
+                        &mut a_cat, &mut b_cat, h, col0,
                     );
                 }
                 p0 = p1;
