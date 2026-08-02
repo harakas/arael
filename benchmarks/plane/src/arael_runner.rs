@@ -191,6 +191,13 @@ pub fn block_supernodal_batch() -> Option<f64> {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
+/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+
+pub fn block_supernodal_lean() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
+}
+
 /// PLANE_ENVELOPE=auto|always|never picks how a reduced system is factored.
 ///
 /// Only bites when there is a reduced system, so on this scene it needs
@@ -346,7 +353,8 @@ impl bench_harness::arael::Model for World {
             .with_policy(schur_policy())
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
-            .with_block_supernodal_batching(block_supernodal_batch()), m, cfg)
+            .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -370,7 +378,8 @@ pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
         &params,
         &mut SparseFaer::<f64>::new()
             .with_block_supernodal(block_supernodal())
-            .with_block_supernodal_batching(block_supernodal_batch()),
+            .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
         &mut world,
         &cfg,
     )
@@ -388,7 +397,8 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
         &params,
         &mut SparseFaer::<f32>::new()
             .with_block_supernodal(block_supernodal())
-            .with_block_supernodal_batching(block_supernodal_batch()),
+            .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
         &mut world,
         &cfg,
     )
@@ -425,7 +435,8 @@ impl bench_harness::arael::Model for WorldF {
             .with_policy(schur_policy())
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
-            .with_block_supernodal_batching(block_supernodal_batch()), m, cfg)
+            .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;

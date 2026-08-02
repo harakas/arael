@@ -334,6 +334,13 @@ fn block_supernodal_batch() -> Option<f64> {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
+/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+
+fn block_supernodal_lean() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
+}
+
 // SLAM_ENVELOPE=auto|always|never picks how the reduced Schur system is
 // factored. A typo here would silently benchmark the other route, so an
 // unknown value is an error rather than a fallback.
@@ -391,7 +398,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                 &mut arael::simple_lm::SparseFaer::new()
                     .with_policy(arael::simple_lm::SchurPolicy::Never)
                     .with_block_supernodal(block_supernodal())
-                    .with_block_supernodal_batching(block_supernodal_batch()),
+                    .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
                 path,
                 cfg,
             )
@@ -406,7 +414,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                     .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
-                    .with_block_supernodal_batching(block_supernodal_batch()),
+                    .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
                 path,
                 cfg,
             )
@@ -486,7 +495,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
             &mut arael::simple_lm::SparseFaerF32::new()
                 .with_policy(arael::simple_lm::SchurPolicy::Never)
                 .with_block_supernodal(block_supernodal())
-                    .with_block_supernodal_batching(block_supernodal_batch()),
+                    .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
             path,
             cfg,
         );
@@ -496,7 +506,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                     .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
-                    .with_block_supernodal_batching(block_supernodal_batch()), path, cfg)
+                    .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

@@ -199,6 +199,13 @@ pub fn block_supernodal_batch() -> Option<f64> {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
+/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+
+pub fn block_supernodal_lean() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
+}
+
 // Damping floor (env ARAEL_LAMBDA_FLOOR, library default 1e-12). Under
 // the fixed schedule bundle adjustment needed a raised floor against
 // gauge-driven Cholesky failure spirals; the Nielsen driver's gain
@@ -225,7 +232,8 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>)
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
-        .with_block_supernodal_batching(block_supernodal_batch());
+        .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean());
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
@@ -245,7 +253,8 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
         .with_policy(policy)
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
-        .with_block_supernodal_batching(block_supernodal_batch());
+        .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean());
     let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -329,7 +338,8 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
-        .with_block_supernodal_batching(block_supernodal_batch());
+        .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean());
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
@@ -339,7 +349,8 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
-        .with_block_supernodal_batching(block_supernodal_batch());
+        .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean());
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 

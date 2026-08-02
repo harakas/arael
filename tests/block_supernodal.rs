@@ -317,6 +317,28 @@ fn batching_can_be_disabled_without_changing_the_answer() {
     }
 }
 
+/// The memory-lean amalgamation is a user knob: it changes how much the
+/// supernodes pad, never the answer.
+#[test]
+fn memory_lean_changes_nothing_about_the_answer() {
+    let mut dflt = SparseFaer::new()
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(true);
+    let (x_d, c_d) = solve(&mut dflt, 2);
+
+    let mut lean = SparseFaer::new()
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(true)
+        .with_block_supernodal_memory_lean(true);
+    let (x_l, c_l) = solve(&mut lean, 2);
+    assert!(lean.plan().expect("a plan").block_supernodal);
+
+    assert!(c_d < 1e-12 && c_l < 1e-12, "{} {}", c_d, c_l);
+    for (a, b) in std::iter::zip(&x_d, &x_l) {
+        assert!((a - b).abs() < 1e-9, "lean changed the answer: {} vs {}", a, b);
+    }
+}
+
 /// The f32 twin takes the same route and lands on the optimum at its own
 /// precision.
 #[test]

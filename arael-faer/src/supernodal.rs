@@ -72,6 +72,22 @@ impl Default for SupernodalParams {
     }
 }
 
+impl SupernodalParams {
+    /// The memory-lean amalgamation: a single 2%-zero rung instead of
+    /// the default table. On wide-block systems (bundle adjustment's
+    /// 9-wide cameras) it matches the default's speed while holding
+    /// less factor -- 41.3 against 49.1 MB on the Ladybug-372 reduced
+    /// system. On narrow-block systems the default's size-capped rungs
+    /// are worth 10-20% of the factorization time, so this is an
+    /// opt-in, not an auto-pick.
+    pub fn memory_lean() -> Self {
+        Self {
+            relax: Some(vec![(usize::MAX, 0.02)]),
+            ..Default::default()
+        }
+    }
+}
+
 /// A descendant wider than this never joins a batch: its own update is
 /// already arithmetic-bound.
 const BATCH_DEPTH_MAX: usize = 16;
@@ -1757,6 +1773,7 @@ mod tests {
                     for params in [
                         SupernodalParams { relax: None, ..Default::default() },
                         SupernodalParams::default(),
+                        SupernodalParams::memory_lean(),
                         SupernodalParams { batch_ratio: Some(3.0), ..Default::default() },
                         SupernodalParams {
                             relax: None,
@@ -1806,6 +1823,43 @@ mod tests {
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
         let resid = rel_resid(&dense, n, &x, &rhs);
         assert!(resid < 1e-3, "resid {}", resid);
+    }
+
+    /// The memory-lean preset must never hold MORE factor than the
+    /// default on a wide-block structure, and it must solve exactly.
+    #[test]
+    fn memory_lean_holds_less_factor_on_wide_blocks() {
+        // Wide blocks with clique-ish coupling, the shape it exists for.
+        let mut rng = Lcg(17);
+        let nblk = 40usize;
+        let mut part: Vec<SparseIndex> = vec![0];
+        for _ in 0..nblk {
+            part.push(part.last().unwrap() + 9);
+        }
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for j in 0..nblk {
+            cells.push((j * 9, j * 9));
+            for _ in 0..6 {
+                let i = rng.below(j + 1);
+                cells.push((i * 9, j * 9));
+            }
+        }
+        let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.clone(),
+            part,
+            cells.len(),
+            |k| cells[k],
+        );
+        let dflt =
+            SupernodalSymbolic::new(&sym, None, &SupernodalParams::default()).unwrap();
+        let lean =
+            SupernodalSymbolic::new(&sym, None, &SupernodalParams::memory_lean()).unwrap();
+        assert!(
+            lean.factor_val_count() <= dflt.factor_val_count(),
+            "lean holds more: {} vs {}",
+            lean.factor_val_count(),
+            dflt.factor_val_count(),
+        );
     }
 
     /// Batching must actually fire on the shape it exists for -- many

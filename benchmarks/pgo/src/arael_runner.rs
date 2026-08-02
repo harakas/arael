@@ -167,6 +167,13 @@ pub(crate) fn block_supernodal_batch() -> Option<f64> {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
+/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+
+pub(crate) fn block_supernodal_lean() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
+}
+
 fn parse_schur(v: Option<&str>) -> arael::simple_lm::SchurPolicy {
     use arael::simple_lm::SchurPolicy;
     match v {
@@ -192,7 +199,8 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
         .with_ordering(ordering())
         .with_policy(schur_policy())
         .with_block_supernodal(block_supernodal())
-        .with_block_supernodal_batching(block_supernodal_batch());
+        .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean());
     arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
@@ -205,7 +213,8 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
         .with_ordering(ordering())
         .with_policy(schur_policy())
         .with_block_supernodal(block_supernodal())
-        .with_block_supernodal_batching(block_supernodal_batch());
+        .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean());
     arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 

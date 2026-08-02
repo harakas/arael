@@ -599,31 +599,40 @@ from 1.9x behind the default to 1.3x -- the route for models where
 marginalization is off or not legal.
 
 ### P4b. Auto ordering for whole-H from detected structure
+### [DONE 2026-08-02 -- shipped with flop pricing, not the bandwidth gate]
 
-The named-only rule leaves the -36% (and -23% memory) of P4 on the
-table for every model that does not carry a `marginalize(..)` attr --
-while the solver already DETECTS the same sets from the coupling graph
-for the Schur decision. What is missing is the confidence rule, and
-the discriminator is itself cheap structure, already computed:
-`kept_bandwidth` of the implied reduction.
+Shipped: under `FaerOrdering::Auto` with no named set but a DETECTED
+candidate set, the whole-H supernodal route builds both orders --
+detected-first and block-AMD -- prices each with the block symbolic
+(milliseconds), and takes the fewer flops. With the kernel held fixed
+the flop count is the one statistic that predicts the wall clock;
+every structural heuristic tried here failed measurement:
 
-Do: when the solve does not reduce, a detected candidate set exists,
-and the implied kept system is narrow-banded (the slam shape: local
-eliminables), order the detected set first; otherwise keep block-AMD.
-The common cases this covers: trajectory + local landmarks ->
-eliminables-first; pose graph (no candidates) -> block-AMD; BA-shaped
-(global eliminables, dense kept system) -> block-AMD pending the gate
-below; pure band -> natural (already handled upstream).
+- The gate measurement (bal whole-H): points-first is BAD for the
+  block route too -- factor +24/+31/+76% against block-AMD at
+  49/138/372, memory 88 -> 126 MB at 372, batch pairs collapsing
+  (23055 -> 3104). The scalar-era caution confirmed. Block-ND on the
+  whole graph also loses to AMD there (312 vs 190 ms).
+- The planned bandwidth gate REJECTS the good case: slam's implied
+  kept kd is 900 of 1800 (one wide landmark's clique) while
+  detected-first measures -36% there; and density separates nothing
+  (slam S 69% dense wants detected-first, bal S 40% dense wants AMD).
 
-Gate before shipping: measure detected-first on bal WHOLE-H with the
-block route. The "detected-first hurts" evidence (Ladybug-49, +6%) is
-scalar-route evidence, and batching changes that trade -- the block
-route's answer may differ. If bal measures well, the bandwidth test
-may not even be needed; if it measures badly, the test earns its
-place. Risk: low -- ordering only; the answer is ordering-invariant
-(pinned by the P4 route test).
+Route-level effect at slam-300: the no-hint whole-H config went 79.6
+-> 52.1 ms full-iter, matching the named-set row -- P4's win without
+the annotation. bal picks AMD as it must; its whole-H sparse row
+under the flag now runs 58.4 ms/iter at 92.4 MB against the scalar
+row's 77.8 at 142.6 (1.33x, -35% peak) at Ladybug-138.
 
-### P5. f32 factor under an f64 solve, opt-in (the memory headline)
+Found and fixed on the way: `nd::order_graph` overflowed the stack on
+the 47.8k-block bal whole graph -- the dissection recursed once per
+cut with no balance guarantee. Now an explicit work stack (identical
+traversal), with a BA-shaped regression test pinned to a 256 KB
+thread stack.
+
+### P5. f32 factor under an f64 solve, opt-in
+### [DEPRIORITIZED 2026-08-02 to the tail, after threads: a fringe
+### memory reduction that pays with unknown quality changes]
 
 Store the FACTOR in f32 while the matrix, right-hand side and step
 stay f64: half the factor buffer -- the dominant allocation of every
@@ -648,16 +657,17 @@ factor is 49.1 of the 233 MB peak at bal-372 (~10% of peak saved) and
 (~14%); combined with P6 and P1's scratch cap the option lands in the
 20-30% band on factor-heavy systems.
 
-### P6. Memory-lean amalgamation preset (measured, shelf-ready)
+### P6. Memory-lean amalgamation preset [DONE 2026-08-02]
 
-The stage-4 sweep already measured it: a single `(MAX, 0.02)` relax
-rung matches the default table's speed on wide-block S while holding
-16% less factor (41.3 vs 49.1 MB at bal-372). Ship it as a named
-preset (`SupernodalParams::memory_lean()` or an auto-pick when the
-mean block width is >= ~6), opt-in beside P5. Expected: -10-16%
-factor on wide-block systems, ~0 speed cost there; do NOT auto-apply
-to narrow-block systems, where the small rungs earn 10-20% speed.
-Risk: none, numbers exist.
+Shipped: `SupernodalParams::memory_lean()` (the single `(MAX, 0.02)`
+rung), `SparseFaer::with_block_supernodal_memory_lean` with the
+options twin, and `ARAEL_BLOCK_SUPERNODAL_LEAN=1` in all five
+runners. Opt-in, never auto-applied: narrow-block systems pay 10-20%
+factorization time for it. Verified at the route level, interleaved:
+bal-372 schur peak 233.0 -> 226.3 MB at identical speed and cost
+(the sweep's predicted -7.8 MB of factor). Tests: lean never holds
+more factor than the default on wide blocks; the route answer is
+unchanged; lean is in the golden dense grid.
 
 ### P7. Solve-path polish
 
@@ -684,6 +694,9 @@ row.
   solver's `Par` into the dense kernels -- until then, multithreaded
   users should prefer the scalar faer route, which does), then
   etree-level tasking if demand exists.
+- **P5, f32 factor + refinement**: only after threads, if ever -- the
+  memory saving is real but pays with quality changes that would need
+  their own validation campaign.
 - **`private-gemm-x86`**: maybe never. x86-only, unsafe raw-pointer
   contract, version-lockstep with faer -- and direct accumulate
   measured the traffic it would save as small at our defaults. ARM is
@@ -712,6 +725,20 @@ row.
 
 ## Log
 
+- 2026-08-02: P6 shipped: `SupernodalParams::memory_lean()`, the
+  solver knob and options twin, `ARAEL_BLOCK_SUPERNODAL_LEAN=1` in the
+  five runners. bal-372 schur peak 233.0 -> 226.3 MB at identical
+  speed, interleaved. Opt-in only.
+- 2026-08-02: P4b shipped: the whole-H route prices detected-first
+  against block-AMD with two throwaway block symbolics and takes the
+  fewer flops -- the bandwidth gate died on slam's wide landmarks
+  (implied kd 900 of 1800 on the -36% case) and density separates
+  nothing. slam's no-hint whole-H config: 79.6 -> 52.1 ms full-iter;
+  bal keeps AMD and its whole-H row under the flag is 1.33x the scalar
+  route at -35% peak. Also found and fixed: `nd::order_graph` stack
+  overflow on the 47.8k-block bal whole graph (unbalanced dissection
+  recursion -> explicit work stack + small-stack regression test).
+  P5 deprioritized to the tail, after threads, per direction.
 - 2026-08-02: P4b added to the roadmap (auto ordering for whole-H from
   detected structure, gated on a bal whole-H measurement), after the
   route-level comparison placed whole-H landmarks-first at 52.2 ms

@@ -281,6 +281,13 @@ fn block_supernodal_batch() -> Option<f64> {
     }
 }
 
+/// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
+/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+
+fn block_supernodal_lean() -> bool {
+    std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
+}
+
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> Solved<f64> {
     match solver_kind().as_str() {
@@ -288,14 +295,16 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             params,
             &mut arael::simple_lm::SparseFaer::new()
                 .with_block_supernodal(block_supernodal())
-                .with_block_supernodal_batching(block_supernodal_batch()),
+                .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
             path, cfg),
         "narrow_band" => arael::simple_lm::lm_solve(
             params,
             &mut arael::simple_lm::SparseFaer::new()
                 .with_narrow_band(true)
                 .with_block_supernodal(block_supernodal())
-                .with_block_supernodal_batching(block_supernodal_batch()),
+                .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
             path, cfg),
         _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
     }
@@ -308,14 +317,16 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
             params,
             &mut arael::simple_lm::SparseFaerF32::new()
                 .with_block_supernodal(block_supernodal())
-                .with_block_supernodal_batching(block_supernodal_batch()),
+                .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
             path, cfg),
         "narrow_band" => arael::simple_lm::lm_solve(
             params,
             &mut arael::simple_lm::SparseFaerF32::new()
                 .with_narrow_band(true)
                 .with_block_supernodal(block_supernodal())
-                .with_block_supernodal_batching(block_supernodal_batch()),
+                .with_block_supernodal_batching(block_supernodal_batch())
+        .with_block_supernodal_memory_lean(block_supernodal_lean()),
             path, cfg),
         _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
     }

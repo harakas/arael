@@ -678,32 +678,53 @@ fn amd_leaf(g: &Graph, nodes: &[usize], s: &mut Scratch) -> Vec<usize> {
     perm.iter().map(|&i| nodes[i]).collect()
 }
 
-fn dissect(g: &Graph, nodes: Vec<usize>, p: NdParams, s: &mut Scratch, out: &mut Vec<usize>) {
-    if nodes.len() <= p.leaf {
-        let leaf = amd_leaf(g, &nodes, s);
-        out.extend(leaf);
-        return;
-    }
-    for &u in &nodes {
-        s.inset[u] = true;
-    }
-    let (mut a, mut b, mut sep) = bisect(g, &nodes, s);
-    if p.fm_passes > 0 {
-        refine(g, &nodes, &mut a, &mut b, &mut sep, s, p);
-    }
-    for &u in &nodes {
-        s.inset[u] = false;
-    }
+// An explicit work stack rather than recursion: the bisection makes no
+// balance promise, and on a bundle-adjustment whole-graph (tens of
+// thousands of point leaves peeled a few at a time) the recursion depth
+// grew past the thread stack. The LIFO order reproduces the recursive
+// traversal exactly: dissect A fully, then B, then emit the separator
+// (eliminated last: it pays for both halves).
+enum DissectTask {
+    Dissect(Vec<usize>),
+    EmitSep(Vec<usize>),
+}
 
-    // A cut that separates nothing would recurse forever.
-    if a.is_empty() || b.is_empty() {
-        let leaf = amd_leaf(g, &nodes, s);
-        out.extend(leaf);
-        return;
+fn dissect(g: &Graph, nodes: Vec<usize>, p: NdParams, s: &mut Scratch, out: &mut Vec<usize>) {
+    let mut work = vec![DissectTask::Dissect(nodes)];
+    while let Some(task) = work.pop() {
+        let nodes = match task {
+            DissectTask::EmitSep(sep) => {
+                out.extend(sep);
+                continue;
+            }
+            DissectTask::Dissect(nodes) => nodes,
+        };
+        if nodes.len() <= p.leaf {
+            let leaf = amd_leaf(g, &nodes, s);
+            out.extend(leaf);
+            continue;
+        }
+        for &u in &nodes {
+            s.inset[u] = true;
+        }
+        let (mut a, mut b, mut sep) = bisect(g, &nodes, s);
+        if p.fm_passes > 0 {
+            refine(g, &nodes, &mut a, &mut b, &mut sep, s, p);
+        }
+        for &u in &nodes {
+            s.inset[u] = false;
+        }
+
+        // A cut that separates nothing would loop forever.
+        if a.is_empty() || b.is_empty() {
+            let leaf = amd_leaf(g, &nodes, s);
+            out.extend(leaf);
+            continue;
+        }
+        work.push(DissectTask::EmitSep(sep));
+        work.push(DissectTask::Dissect(b));
+        work.push(DissectTask::Dissect(a));
     }
-    dissect(g, a, p, s, out);
-    dissect(g, b, p, s, out);
-    out.extend(sep); // the separator is eliminated last: it pays for both halves
 }
 
 /// Order a graph's nodes by nested dissection. The result is the elimination
@@ -769,6 +790,47 @@ impl NestedDissection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bundle-adjustment-shaped graph -- a chain of camera hubs, each
+    /// with a crowd of point leaves seen by neighboring hubs too -- makes
+    /// the bisection peel small pieces, which used to grow the dissection
+    /// recursion past the thread stack (a 47k-block whole Hessian
+    /// overflowed 8 MB). Run in a deliberately small-stack thread so any
+    /// return to deep recursion fails here first.
+    #[test]
+    fn a_ba_shaped_graph_dissects_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let hubs = 300usize;
+                let per_hub = 60usize;
+                let n = hubs + hubs * per_hub;
+                let mut edges: Vec<(usize, usize)> = Vec::new();
+                for h in 1..hubs {
+                    edges.push((h - 1, h));
+                }
+                for h in 0..hubs {
+                    for l in 0..per_hub {
+                        let leaf = hubs + h * per_hub + l;
+                        edges.push((h, leaf));
+                        if h + 1 < hubs {
+                            edges.push((h + 1, leaf));
+                        }
+                    }
+                }
+                let g = Graph::from_edges(n, edges);
+                let order = order_graph(&g, NdParams::default());
+                assert_eq!(order.len(), n);
+                let mut seen = vec![false; n];
+                for &u in &order {
+                    assert!(!seen[u], "node {} ordered twice", u);
+                    seen[u] = true;
+                }
+            })
+            .expect("spawn")
+            .join()
+            .expect("the dissection must not overflow a small stack");
+    }
 
     /// A grid: the classic nested-dissection case. A separator down the middle
     /// splits it, and every recursion does the same. The ordering must be a
