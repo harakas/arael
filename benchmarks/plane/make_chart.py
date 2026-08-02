@@ -14,48 +14,48 @@
 # Per panel: (title, [ (label, full_iter_ms, first_iter_ms, kind) ]).
 # full-iter is one complete iteration (t(2 iters) - t(1 iter), setup cancelled).
 # first-iter is that same iteration plus the setup paid once. Their difference
-# is the setup, drawn faded. 2026-07-29, min of 128 rounds (64 at 900 poses).
+# is the setup, drawn faded. 2026-08-02, min of 128 rounds (64 at 900 poses).
 # kind: "arael" solid blue, "other" neutral, "arael*" adds a star to the value.
 # full_iter None -> italic text row (no clean first iteration to measure).
 PANELS = [
     ("60 poses, 24 planes (492 params)", [
-        ("arael (f32)", 0.11, 0.29, "arael"),
-        ("arael (f64)", 0.12, 0.31, "arael"),
-        ("SymForce (f32)", 0.16, 0.91, "other"),
-        ("SymForce (f64)", 0.20, 0.91, "other"),
-        ("Ceres", 0.38, 0.87, "other"),
-        ("GTSAM", 0.54, 0.65, "other"),
-        ("factrs", 0.62, 1.14, "other"),
-        ("g2o", 1.04, 1.12, "other"),
+        ("arael (f32)", 0.09, 0.30, "arael"),
+        ("arael (f64)", 0.10, 0.32, "arael"),
+        ("SymForce (f32)", 0.17, 0.91, "other"),
+        ("SymForce (f64)", 0.19, 0.92, "other"),
+        ("Ceres", 0.39, 0.90, "other"),
+        ("GTSAM", 0.56, 0.65, "other"),
+        ("factrs", 0.64, 1.14, "other"),
+        ("g2o", 1.06, 1.13, "other"),
     ]),
     ("120 poses, 45 planes (975 params)", [
-        ("arael (f32)", 0.22, 0.82, "arael"),
-        ("arael (f64)", 0.24, 0.87, "arael"),
-        ("SymForce (f32)", 0.37, 1.74, "other"),
-        ("SymForce (f64)", 0.39, 1.77, "other"),
-        ("Ceres", 0.78, 1.73, "other"),
-        ("GTSAM", 1.16, 1.27, "other"),
-        ("factrs", 1.34, 2.36, "other"),
-        ("g2o", 2.03, 2.16, "other"),
+        ("arael (f32)", 0.19, 0.84, "arael"),
+        ("arael (f64)", 0.21, 0.87, "arael"),
+        ("SymForce (f32)", 0.39, 1.78, "other"),
+        ("SymForce (f64)", 0.42, 1.80, "other"),
+        ("Ceres", 0.84, 1.73, "other"),
+        ("GTSAM", 1.15, 1.30, "other"),
+        ("factrs", 1.26, 2.51, "other"),
+        ("g2o", 2.02, 2.18, "other"),
     ]),
     ("300 poses, 114 planes (2442 params)", [
-        ("arael (f32)", 0.57, 2.12, "arael"),
-        ("arael (f64)", 0.61, 2.22, "arael"),
-        ("SymForce (f32)", 1.01, 4.68, "other"),
-        ("SymForce (f64)", 1.16, 4.73, "other"),
-        ("Ceres", 1.99, 4.51, "other"),
-        ("GTSAM", 3.03, 3.26, "other"),
-        ("factrs", 3.34, 6.59, "other"),
-        ("g2o", 5.19, 5.51, "other"),
+        ("arael (f32)", 0.54, 2.13, "arael"),
+        ("arael (f64)", 0.64, 2.24, "arael"),
+        ("SymForce (f32)", 1.00, 4.74, "other"),
+        ("SymForce (f64)", 1.13, 4.83, "other"),
+        ("Ceres", 2.13, 4.57, "other"),
+        ("GTSAM", 3.13, 3.34, "other"),
+        ("factrs", 3.45, 6.71, "other"),
+        ("g2o", 5.30, 5.60, "other"),
     ]),
     ("900 poses, 339 planes (7317 params)", [
-        ("arael (f32)", 1.81, 6.62, "arael*"),
-        ("arael (f64)", 2.00, 6.88, "arael"),
-        ("SymForce (f32)", 3.23, 15.54, "other"),
-        ("SymForce (f64)", 3.87, 15.62, "other"),
-        ("Ceres", 6.42, 14.24, "other"),
-        ("GTSAM", 9.34, 56.19, "other"),
-        ("g2o", 15.81, 16.82, "other"),
+        ("arael (f32)", 1.56, 6.64, "arael*"),
+        ("arael (f64)", 1.73, 6.96, "arael"),
+        ("SymForce (f32)", 3.33, 15.62, "other"),
+        ("SymForce (f64)", 3.80, 15.69, "other"),
+        ("Ceres", 6.67, 14.24, "other"),
+        ("GTSAM", 9.49, 56.98, "other"),
+        ("g2o", 16.35, 17.10, "other"),
         ("factrs", None, None, "other"),
     ]),
 ]
@@ -77,7 +77,7 @@ FOOT = [
      "reused by every later iteration."),
     ("Every bar is validated against its scene's common optimum (cost within "
      "1%, distance to the best solution under 5 cm; f32 rows 10x that)."),
-    ("* arael f32 at 900 poses passes the cost gate but sits 0.30 m from the "
+    ("* arael f32 at 900 poses passes the cost gate but sits 0.32 m from the "
      "f64 solution -- the single-precision floor on this scene."),
 ]
 
@@ -124,12 +124,14 @@ def bar_path(x0, y, w, h, r):
 def panel_decimals(rows):
     """Decimals for a panel's value labels.
 
-    One decimal reads best, but on a panel of sub-millisecond solves it can
-    round two different rows onto the same label. Use two whenever that would
-    happen rather than keying off the axis, which does not track how close the
-    rows actually are.
+    One decimal reads best, but it is not enough twice over: a panel with
+    sub-millisecond bars throws away a real digit ("0.5" for 0.54), and a
+    close pair can round onto the same label. Two decimals in either case.
     """
-    at_one = [f"{full:.1f}" for _, full, _, _ in rows if full is not None]
+    fulls = [full for _, full, _, _ in rows if full is not None]
+    if min(fulls) < 1.0:
+        return 2
+    at_one = [f"{f:.1f}" for f in fulls]
     return 2 if len(set(at_one)) < len(at_one) else 1
 
 

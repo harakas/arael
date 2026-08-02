@@ -115,8 +115,8 @@ count do not**, and reading them as a ranking will mislead you: they are set by
 each system's damping schedule.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/plane-setup-dark.svg">
-  <img alt="2x2 bar charts, one per scene size: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.1/plane-setup-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/plane-setup-dark.svg">
+  <img alt="2x2 bar charts, one per scene size: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.2/plane-setup-light.svg">
 </picture>
 
 Setup drawn alongside the iteration it is paid in: solid is one complete
@@ -125,7 +125,7 @@ is what a system does once and reuses -- assembly structure, fill-reducing
 ordering, symbolic factorization -- so on a solve of five iterations it is a
 fifth of the bill, and on a long-running estimator it rounds to nothing.
 
-## Results (2026-07-29, Apple M4 Pro, single core enforced by the harness, min of 128 interleaved rounds; 64 at 900 poses)
+## Results (2026-08-02, Apple M4 Pro, single core enforced by the harness, min of 128 interleaved rounds; 64 at 900 poses)
 
 What each column means:
 
@@ -149,55 +149,55 @@ All eight rows reach the common optimum at all four sizes.
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f32    |     0.61 |   4(4) |    0.15 |      0.11 |     0.885 |        0.29 |     4.3 |   866.5574 |
-| arael LM f64    |     0.93 |   6(6) |    0.15 |      0.12 |     1.000 |        0.31 |     4.2 |   866.5573 |
-| symforce LM f32 |     1.48 |   4(4) |    0.37 |      0.16 |     1.326 |        0.91 |     7.9 |   866.5574 |
-| symforce LM f64 |     1.96 |   6(6) |    0.33 |      0.20 |     1.650 |        0.91 |     8.2 |   866.5573 |
-| ceres LM        |     2.69 |   6(6) |    0.45 |      0.38 |     3.134 |        0.87 |     9.6 |   866.5573 |
-| gtsam LM        |     3.49 |   6(6) |    0.58 |      0.54 |     4.502 |        0.65 |     8.7 |   866.5573 |
-| factrs LM       |     4.42 |   6(6) |    0.74 |      0.62 |     5.130 |        1.14 |     5.0 |   866.5573 |
-| g2o LM          |     6.31 |   6(6) |    1.05 |      1.04 |     8.663 |        1.12 |     6.0 |   866.5573 |
+| arael LM f32    |     0.58 |   4(4) |    0.14 |      0.09 |     0.897 |        0.30 |     4.6 |   866.5574 |
+| arael LM f64    |     0.86 |   6(6) |    0.14 |      0.10 |     1.000 |        0.32 |     4.2 |   866.5573 |
+| symforce LM f32 |     1.49 |   4(4) |    0.37 |      0.17 |     1.685 |        0.91 |     7.8 |   866.5574 |
+| symforce LM f64 |     1.99 |   6(6) |    0.33 |      0.19 |     1.885 |        0.92 |     8.2 |   866.5573 |
+| ceres LM        |     2.76 |   6(6) |    0.46 |      0.39 |     3.909 |        0.90 |     9.6 |   866.5573 |
+| gtsam LM        |     3.60 |   6(6) |    0.60 |      0.56 |     5.604 |        0.65 |     8.7 |   866.5573 |
+| factrs LM       |     4.52 |   6(6) |    0.75 |      0.64 |     6.418 |        1.14 |     5.1 |   866.5573 |
+| g2o LM          |     6.37 |   6(6) |    1.06 |      1.06 |    10.569 |        1.13 |     6.0 |   866.5573 |
 
 ### 120 poses (45 planes, 119 odometry pairs, 585 observations, 849 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f32    |     1.46 |   4(4) |    0.37 |      0.22 |     0.894 |        0.82 |     4.8 |  1630.3924 |
-| arael LM f64    |     1.84 |   5(5) |    0.37 |      0.24 |     1.000 |        0.87 |     4.8 |  1630.3923 |
-| symforce LM f32 |     2.95 |   4(4) |    0.74 |      0.37 |     1.544 |        1.74 |     9.8 |  1630.3924 |
-| symforce LM f64 |     3.43 |   5(5) |    0.69 |      0.39 |     1.635 |        1.77 |    10.0 |  1630.3923 |
-| ceres LM        |     4.62 |   5(5) |    0.92 |      0.78 |     3.225 |        1.73 |    10.5 |  1630.3924 |
-| gtsam LM        |     5.77 |   5(5) |    1.15 |      1.16 |     4.815 |        1.27 |     9.5 |  1630.3923 |
-| factrs LM       |     7.60 |   5(5) |    1.52 |      1.34 |     5.581 |        2.36 |     7.1 |  1630.3923 |
-| g2o LM          |    10.23 |   5(5) |    2.05 |      2.03 |     8.418 |        2.16 |     6.9 |  1630.3923 |
+| arael LM f32    |     1.40 |   4(4) |    0.35 |      0.19 |     0.878 |        0.84 |     4.9 |  1630.3924 |
+| arael LM f64    |     1.79 |   5(5) |    0.36 |      0.21 |     1.000 |        0.87 |     4.7 |  1630.3923 |
+| symforce LM f32 |     3.00 |   4(4) |    0.75 |      0.39 |     1.844 |        1.78 |     9.7 |  1630.3924 |
+| symforce LM f64 |     3.50 |   5(5) |    0.70 |      0.42 |     1.985 |        1.80 |    10.0 |  1630.3923 |
+| ceres LM        |     4.69 |   5(5) |    0.94 |      0.84 |     3.975 |        1.73 |    10.4 |  1630.3924 |
+| gtsam LM        |     5.95 |   5(5) |    1.19 |      1.15 |     5.432 |        1.30 |     9.5 |  1630.3923 |
+| factrs LM       |     7.60 |   5(5) |    1.52 |      1.26 |     5.931 |        2.51 |     7.2 |  1630.3923 |
+| g2o LM          |    10.28 |   5(5) |    2.06 |      2.02 |     9.543 |        2.18 |     6.9 |  1630.3923 |
 
 ### 300 poses (114 planes, 299 odometry pairs, 1482 observations, 2136 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f32    |     3.85 |   4(4) |    0.96 |      0.57 |     0.934 |        2.12 |     6.0 |  4046.0552 |
-| arael LM f64    |     4.77 |   5(5) |    0.95 |      0.61 |     1.000 |        2.22 |     6.8 |  4046.0548 |
-| symforce LM f32 |     7.73 |   4(4) |    1.93 |      1.01 |     1.670 |        4.68 |    15.6 |  4046.0552 |
-| symforce LM f64 |     9.22 |   5(5) |    1.84 |      1.16 |     1.909 |        4.73 |    16.8 |  4046.0548 |
-| ceres LM        |    12.06 |   5(5) |    2.41 |      1.99 |     3.278 |        4.51 |    13.4 |  4046.0551 |
-| gtsam LM        |    15.50 |   5(5) |    3.10 |      3.03 |     5.011 |        3.26 |    11.9 |  4046.0548 |
-| factrs LM       |    19.77 |   5(5) |    3.95 |      3.34 |     5.516 |        6.59 |    13.3 |  4046.0548 |
-| g2o LM          |    26.45 |   5(5) |    5.29 |      5.19 |     8.570 |        5.51 |     9.8 |  4046.0548 |
+| arael LM f32    |     3.70 |   4(4) |    0.93 |      0.54 |     0.849 |        2.13 |     6.1 |  4046.0552 |
+| arael LM f64    |     4.61 |   5(5) |    0.92 |      0.64 |     1.000 |        2.24 |     6.3 |  4046.0548 |
+| symforce LM f32 |     7.96 |   4(4) |    1.99 |      1.00 |     1.563 |        4.74 |    15.5 |  4046.0552 |
+| symforce LM f64 |     9.42 |   5(5) |    1.88 |      1.13 |     1.767 |        4.83 |    16.8 |  4046.0548 |
+| ceres LM        |    12.37 |   5(5) |    2.47 |      2.13 |     3.338 |        4.57 |    13.3 |  4046.0551 |
+| gtsam LM        |    15.75 |   5(5) |    3.15 |      3.13 |     4.892 |        3.34 |    11.9 |  4046.0548 |
+| factrs LM       |    20.48 |   5(5) |    4.10 |      3.45 |     5.405 |        6.71 |    13.3 |  4046.0548 |
+| g2o LM          |    26.94 |   5(5) |    5.39 |      5.30 |     8.294 |        5.60 |     9.7 |  4046.0548 |
 
 ### 900 poses (339 planes, 899 odometry pairs, 4407 observations, 6411 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f32\*  |    19.08 |   8(8) |    2.39 |      1.81 |     0.903 |        6.62 |    11.3 | 12202.9128 |
-| arael LM f64    |    17.27 |   6(6) |    2.88 |      2.00 |     1.000 |        6.88 |    13.5 | 12202.8496 |
-| symforce LM f32 |    35.92 |   7(7) |    5.13 |      3.23 |     1.614 |       15.54 |    31.3 | 12202.8497 |
-| symforce LM f64 |    37.92 |   7(7) |    5.42 |      3.87 |     1.935 |       15.62 |    39.3 | 12202.8495 |
-| ceres LM        |    81.19 | 11(12) |    6.77 |      6.42 |     3.214 |       14.24 |    22.7 | 12202.8497 |
-| gtsam LM        |   104.09 |   6(6) |   17.35 |      9.34 |     4.670 |       56.19 |    20.4 | 12202.8496 |
-| g2o LM          |   140.00 |  8(12) |   11.67 |     15.81 |     7.910 |       16.82 |    18.8 | 12202.8496 |
-| factrs LM       |    84.42 |   6(8) |   10.55 |         - |         - |           - |    32.8 | 12202.8496 |
+| arael LM f32\*  |    17.63 |   8(8) |    2.20 |      1.56 |     0.905 |        6.64 |    11.4 | 12202.9133 |
+| arael LM f64    |    15.81 |   6(6) |    2.64 |      1.73 |     1.000 |        6.96 |    12.4 | 12202.8496 |
+| symforce LM f32 |    36.30 |   7(7) |    5.19 |      3.33 |     1.925 |       15.62 |    31.3 | 12202.8497 |
+| symforce LM f64 |    38.92 |   7(7) |    5.56 |      3.80 |     2.198 |       15.69 |    39.2 | 12202.8495 |
+| ceres LM        |    82.02 | 11(12) |    6.83 |      6.67 |     3.861 |       14.24 |    22.6 | 12202.8497 |
+| gtsam LM        |   105.15 |   6(6) |   17.53 |      9.49 |     5.490 |       56.98 |    20.3 | 12202.8496 |
+| g2o LM          |   142.46 |  8(12) |   11.87 |     16.35 |     9.461 |       17.10 |    18.8 | 12202.8496 |
+| factrs LM       |    81.65 |   6(8) |   10.21 |         - |         - |           - |    32.8 | 12202.8496 |
 
-\* arael f32 passes the cost gate but sits 0.30 m from the f64 solution,
+\* arael f32 passes the cost gate but sits 0.32 m from the f64 solution,
 outside the 5 cm geometric gate -- the single-precision floor on this scene.
 The harness marks the row and counts it against the looser f32 gate.
 
