@@ -83,8 +83,10 @@ Full methodology, the initial-damping policy, and the cross-system
 validation harness: [benchmarks/pgo](benchmarks/pgo/README.md). A
 bundle-adjustment benchmark on the BAL Ladybug problems (arael vs Ceres
 and g2o): [benchmarks/bal](benchmarks/bal/README.md). A heterogeneous
-monocular SLAM benchmark (six factor types, seven systems),
-including a Raspberry Pi edge run: [benchmarks/slam](benchmarks/slam/README.md).
+monocular SLAM benchmark (six factor types, seven systems), without loop
+closure in its main tables and with a closed loop and a figure-8 in their
+own, including a Raspberry Pi edge run:
+[benchmarks/slam](benchmarks/slam/README.md).
 A plane-landmark SLAM benchmark, where six systems each parameterize the
 plane normal differently: [benchmarks/plane](benchmarks/plane/README.md).
 

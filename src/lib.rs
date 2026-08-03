@@ -148,7 +148,8 @@
 //! Ceres and g2o):
 //! [benchmarks/bal](https://github.com/harakas/arael/tree/master/benchmarks/bal).
 //! A heterogeneous monocular SLAM benchmark (six factor types, seven
-//! systems), including a Raspberry Pi edge run:
+//! systems), without loop closure in its main tables and with a closed loop
+//! and a figure-8 in their own, including a Raspberry Pi edge run:
 //! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
 //! A plane-landmark SLAM benchmark, where six systems each parameterize the
 //! plane normal differently:

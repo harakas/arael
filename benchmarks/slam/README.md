@@ -5,6 +5,11 @@ pose-graph ([benchmarks/pgo](../pgo)) and bundle-adjustment
 ([benchmarks/bal](../bal)) benchmarks -- each a single factor type -- this
 problem is heterogeneous: six factor types, several nonlinear.
 
+The main tables are **SLAM without loop closure**: the trajectory drives on
+without revisiting, so each landmark is seen from one run of consecutive
+poses. Loop-closing trajectories -- a closed loop and a figure-8 -- have
+their own tables under [Loop closure](#loop-closure-2026-08-03-min-of-4-rounds).
+
 arael is compared against:
 
 - **[Ceres](http://ceres-solver.org)** -- C++, template autodiff. Three
@@ -70,7 +75,7 @@ visibility there is spatial rather than by pose index, so both passes
 through the crossing see the same landmarks -- coupling the middle of the
 pose ordering instead of its ends.
 
-Results below are the S-curve.
+Results below are the S-curve, except the loop-closure tables.
 
 This is the **outlier-free** scenario: the bearing and GPS residuals are
 plain Gaussian (max-likelihood when there are no outliers). The
@@ -340,6 +345,51 @@ optimum.
 **symforce f32** at 300 poses sits at the single-precision floor: 0.06 m
 from the f64 optimum (cost 24244.08 vs 24243.91), just inside the relaxed
 f32 gate on the largest scene. Its f64 build is exact.
+
+### Loop closure (2026-08-03, min of 4 rounds)
+
+The other two trajectories, where poses far apart in the ordering are tied
+together: a closed loop whose landmark visibility wraps across the seam
+(`SLAM_TRAJECTORY=loop`), and a figure-8 whose two passes through the
+crossing share landmarks (`eight`).
+
+600 poses, closed loop (2,400 landmarks, 96,985 observations, 10,800 parameters):
+
+| system                  | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-------------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64            |   778.36 |   3(3) |  259.45 |    223.14 |     1.000 |      326.85 |   190.6 | 57925.6479 |
+| arael LM f32            |   474.11 |   3(3) |  158.04 |    132.44 |     0.594 |      206.32 |   114.0 | 57925.6702 |
+| arael CG f64\*          |   672.02 |   5(5) |  134.40 |         - |         - |       79.60 |   104.1 | 57925.6474 |
+| arael CG f32\*          |   611.33 |   4(5) |  122.27 |         - |         - |       58.00 |    69.0 | 57925.7789 |
+| factrs LM               |  1408.46 |   3(3) |  469.49 |    413.25 |     1.852 |      571.27 |   389.2 | 57925.6474 |
+| ceres sparse_cholesky   |  1038.80 |   3(3) |  346.27 |    327.84 |     1.469 |      424.83 |   216.3 | 57925.6501 |
+| ceres sparse_schur      |  1304.99 |   3(3) |  435.00 |    366.72 |     1.643 |      612.36 |   252.6 | 57925.6501 |
+| ceres iterative_schur\* |  1092.39 |   8(8) |  136.55 |         - |         - |      176.35 |    83.6 | 57927.0403 |
+| symforce LM f64         |  2009.00 |   3(3) |  669.67 |    584.17 |     2.618 |      830.01 |   394.8 | 57925.6474 |
+| symforce LM f32         |  5562.16 | 10(10) |  556.22 |    531.48 |     2.382 |      774.76 |   368.1 | 57926.6285 |
+| g2o LM                  |  1111.04 |   3(3) |  370.35 |    321.41 |     1.440 |      470.26 |   317.4 | 57925.6474 |
+| gtsam LM                |  1787.55 |   3(3) |  595.85 |    594.14 |     2.663 |      619.72 |  1801.6 | 57925.6474 |
+
+11/12 at the common optimum.
+
+1200 poses, figure-8 (4,800 landmarks, 216,387 observations, 21,600 parameters):
+
+| system                  | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB |  final cost |
+|-------------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|------------:|
+| arael LM f64            |  4054.42 |   3(3) | 1351.47 |   1262.98 |     1.000 |     1522.75 |   593.4 | 129821.8680 |
+| arael LM f32            |  2390.08 |   3(3) |  796.69 |    716.44 |     0.567 |      955.72 |   335.3 | 129821.9494 |
+| arael CG f64\*          |  2392.29 |   5(5) |  478.46 |         - |         - |      257.98 |   243.6 | 129821.8658 |
+| arael CG f32\*          |  2172.86 |   5(5) |  434.57 |         - |         - |      178.53 |   160.1 | 129821.8724 |
+| factrs LM               |  4517.55 |   3(3) | 1505.85 |   1374.75 |     1.088 |     1745.79 |   865.1 | 129821.8658 |
+| ceres sparse_cholesky   |  3729.97 |   3(3) | 1243.32 |   1184.41 |     0.938 |     1438.27 |   461.0 | 129821.8714 |
+| ceres sparse_schur      |  5541.33 |   3(3) | 1847.11 |   1639.12 |     1.298 |     2401.38 |   603.0 | 129821.8714 |
+| ceres iterative_schur\* |  2568.74 |   7(7) |  366.96 |         - |         - |      447.03 |   174.3 | 129825.0723 |
+| symforce LM f64         |  5807.20 |   3(3) | 1935.73 |   1716.58 |     1.359 |     2392.73 |   838.7 | 129821.8658 |
+| symforce LM f32         | 21499.65 | 13(13) | 1653.82 |   1595.94 |     1.264 |     2224.41 |   802.7 | 129826.1223 |
+| g2o LM                  |  3754.12 |   3(3) | 1251.38 |   1104.26 |     0.874 |     1565.21 |   729.8 | 129821.8658 |
+| gtsam LM                |  5962.68 |   3(3) | 1987.56 |   1416.94 |     1.122 |     2566.14 |  4691.3 | 129821.8658 |
+
+11/12 at the common optimum.
 
 ### SLAM on the edge: Raspberry Pi
 
