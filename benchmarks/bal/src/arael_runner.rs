@@ -421,6 +421,9 @@ impl bench_harness::arael::Model for Scene {
                 arael::simple_lm::solve_sparse_cholmod_supernodal(params, m, cfg),
         }
     }
+    fn inexact(p: &Problem) -> bool {
+        matches!(p.route, Route::SchurCg | Route::SchurCgImplicit)
+    }
 }
 
 /// One covariance-scaling run: `(N, median_ms, reps)` per query count.
@@ -548,6 +551,9 @@ impl bench_harness::arael::Model for SceneF {
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl => unreachable!("cholmod-gpl is an f64-only row"),
         }
+    }
+    fn inexact(p: &Problem) -> bool {
+        matches!(p.route, Route::SchurCg | Route::SchurCgImplicit)
     }
 }
 

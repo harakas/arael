@@ -128,6 +128,13 @@ full-iter, full-norm and 1st-iter are dropped ("-") for any system whose first
 iteration was not a single accepted step: such an iteration is mostly wasted
 factorizations, and every number derived from it inherits that.
 
+full-iter and full-norm are dropped for the inexact rows as well -- the two
+`schur-cg` routes, Ceres's `iterative_schur` and g2o's `pcg`. Conjugate
+gradients does a variable amount of work per outer step, because the inner
+solve gets harder as the outer one converges, so one iteration does not stand
+for the rest and differencing two of them measures neither. Those rows are read
+on total ms and ms/iter.
+
 t(1) and t(2) are each minimized over rounds before being subtracted, so a row
 whose t(1) happened to sample unusually well reads a full-iter below what its
 own iterations cost. For the same reason 1st-iter minus full-iter is not the
@@ -142,15 +149,15 @@ second.
 | arael LM f32 sparse              |   364.93 |  18(21) |   17.38 |     17.15 |     1.521 |       28.53 |    39.3 |  26691.0295 |
 | arael LM f64 schur               |   240.83 |  21(21) |   11.47 |     11.28 |     1.000 |       14.94 |    30.6 |  26689.2948 |
 | arael LM f32 schur               |   182.92 |  18(22) |    8.31 |      8.83 |     0.783 |       12.05 |    20.6 |  26690.8931 |
-| arael LM f64 schur-cg\*          |   242.11 |  22(22) |   11.00 |     10.91 |     0.968 |       13.30 |    26.6 |  26689.2782 |
-| arael LM f32 schur-cg\*          |   187.46 |  21(21) |    8.93 |      8.78 |     0.779 |       11.21 |    18.2 |  26689.6291 |
-| arael LM f64 schur-cg-implicit\* |   566.25 |  22(22) |   25.74 |     23.92 |     2.121 |       17.21 |    26.0 |  26689.2782 |
-| arael LM f32 schur-cg-implicit\* |   449.55 |  21(22) |   20.43 |     19.96 |     1.769 |       14.77 |    18.2 |  26689.4655 |
+| arael LM f64 schur-cg\*          |   242.11 |  22(22) |   11.00 |         - |         - |       13.30 |    26.6 |  26689.2782 |
+| arael LM f32 schur-cg\*          |   187.46 |  21(21) |    8.93 |         - |         - |       11.21 |    18.2 |  26689.6291 |
+| arael LM f64 schur-cg-implicit\* |   566.25 |  22(22) |   25.74 |         - |         - |       17.21 |    26.0 |  26689.2782 |
+| arael LM f32 schur-cg-implicit\* |   449.55 |  21(22) |   20.43 |         - |         - |       14.77 |    18.2 |  26689.4655 |
 | ceres dense_schur                |   448.33 |  22(22) |   20.38 |     20.17 |     1.789 |       39.45 |    38.4 |  26689.7174 |
 | ceres sparse_schur               |   473.11 |  22(22) |   21.50 |     20.54 |     1.821 |       50.74 |    41.7 |  26689.7174 |
-| ceres iterative_schur\*          |   681.93 |  24(24) |   28.41 |     31.46 |     2.789 |       36.35 |    36.9 |  26689.5841 |
+| ceres iterative_schur\*          |   681.93 |  24(24) |   28.41 |         - |         - |       36.35 |    36.9 |  26689.5841 |
 | g2o LM (schur)                   |  1007.63 |  42(58) |   17.37 |     20.42 |     1.810 |       34.68 |    45.3 |  26714.5561 |
-| g2o LM (pcg)\*                   |  1366.17 |  46(70) |   19.52 |     19.09 |     1.693 |       33.09 |    40.2 |  26735.3208 |
+| g2o LM (pcg)\*                   |  1366.17 |  46(70) |   19.52 |         - |         - |       33.09 |    40.2 |  26735.3208 |
 
 ### Ladybug-138 (60876 parameters)
 
@@ -160,15 +167,15 @@ second.
 | arael LM f32 sparse              |  1454.91 |  21(24) |   60.62 |     56.58 |     1.344 |      138.88 |    98.7 | 119054.7050 |
 | arael LM f64 schur               |  1003.69 |  21(24) |   41.82 |     42.11 |     1.000 |       58.23 |    87.9 | 119055.9244 |
 | arael LM f32 schur               |   710.51 |  21(24) |   29.60 |     29.93 |     0.711 |       42.56 |    56.1 | 119054.9954 |
-| arael LM f64 schur-cg\*          |   901.48 |  21(25) |   36.06 |     35.93 |     0.853 |       45.01 |    68.5 | 118752.9362 |
-| arael LM f32 schur-cg\*          |   676.56 |  21(25) |   27.06 |     26.34 |     0.625 |       33.52 |    44.6 | 118751.5858 |
-| arael LM f64 schur-cg-implicit\* |  1864.52 |  21(25) |   74.58 |     55.54 |     1.319 |       50.50 |    65.1 | 118752.9305 |
-| arael LM f32 schur-cg-implicit\* |  1706.31 |  21(25) |   68.25 |     47.87 |     1.137 |       41.41 |    42.8 | 118752.1327 |
+| arael LM f64 schur-cg\*          |   901.48 |  21(25) |   36.06 |         - |         - |       45.01 |    68.5 | 118752.9362 |
+| arael LM f32 schur-cg\*          |   676.56 |  21(25) |   27.06 |         - |         - |       33.52 |    44.6 | 118751.5858 |
+| arael LM f64 schur-cg-implicit\* |  1864.52 |  21(25) |   74.58 |         - |         - |       50.50 |    65.1 | 118752.9305 |
+| arael LM f32 schur-cg-implicit\* |  1706.31 |  21(25) |   68.25 |         - |         - |       41.41 |    42.8 | 118752.1327 |
 | ceres dense_schur                |  1893.37 |  23(24) |   78.89 |     75.76 |     1.799 |      142.62 |    98.0 | 119056.6359 |
 | ceres sparse_schur               |  1721.87 |  23(24) |   71.74 |     69.52 |     1.651 |      171.63 |   105.7 | 119056.6359 |
-| ceres iterative_schur\*          |  2504.86 |  23(27) |   92.77 |     54.80 |     1.301 |      115.86 |    85.4 | 118753.5020 |
+| ceres iterative_schur\*          |  2504.86 |  23(27) |   92.77 |         - |         - |      115.86 |    85.4 | 118753.5020 |
 | g2o LM (schur)                   |  3541.83 |  40(59) |   60.03 |     68.16 |     1.618 |      124.64 |   120.5 | 118904.3429 |
-| g2o LM (pcg)\*                   | 10026.55 | 64(104) |   96.41 |     63.25 |     1.502 |      112.00 |    97.8 | 118835.8811 |
+| g2o LM (pcg)\*                   | 10026.55 | 64(104) |   96.41 |         - |         - |      112.00 |    97.8 | 118835.8811 |
 
 ### Ladybug-372 (145617 parameters)
 
@@ -178,15 +185,15 @@ second.
 | arael LM f32 sparse              |  3656.54 |  11(19) |  192.45 |    189.62 |     0.951 |      445.06 |   247.5 | 225483.8390 |
 | arael LM f64 schur               |  3660.49 |  10(19) |  192.66 |    199.48 |     1.000 |      285.08 |   280.4 | 225431.3936 |
 | arael LM f32 schur               |  2175.08 |  10(18) |  120.84 |    124.83 |     0.626 |      183.53 |   177.8 | 225474.0976 |
-| arael LM f64 schur-cg\*          |  1607.84 |   9(16) |  100.49 |    111.85 |     0.561 |      132.10 |   170.3 | 225347.2179 |
-| arael LM f32 schur-cg\*          |  1178.63 |   9(17) |   69.33 |     79.95 |     0.401 |       86.72 |   107.1 | 225354.6949 |
-| arael LM f64 schur-cg-implicit\* |  2766.26 |   9(16) |  172.89 |    189.46 |     0.950 |      133.20 |   153.3 | 225347.2179 |
-| arael LM f32 schur-cg-implicit\* |  1954.26 |   8(15) |  130.28 |    157.77 |     0.791 |       95.19 |    98.6 | 225390.6886 |
+| arael LM f64 schur-cg\*          |  1607.84 |   9(16) |  100.49 |         - |         - |      132.10 |   170.3 | 225347.2179 |
+| arael LM f32 schur-cg\*          |  1178.63 |   9(17) |   69.33 |         - |         - |       86.72 |   107.1 | 225354.6949 |
+| arael LM f64 schur-cg-implicit\* |  2766.26 |   9(16) |  172.89 |         - |         - |      133.20 |   153.3 | 225347.2179 |
+| arael LM f32 schur-cg-implicit\* |  1954.26 |   8(15) |  130.28 |         - |         - |       95.19 |    98.6 | 225390.6886 |
 | ceres dense_schur                |  7575.58 |  10(17) |  445.62 |    478.41 |     2.398 |      668.33 |   285.5 | 225447.1709 |
 | ceres sparse_schur               |  4326.17 |  10(17) |  254.48 |    263.21 |     1.320 |      565.99 |   287.2 | 225447.1709 |
-| ceres iterative_schur\*          |  2283.46 |  13(17) |  134.32 |    143.31 |     0.718 |      319.66 |   191.0 | 225696.1695 |
+| ceres iterative_schur\*          |  2283.46 |  13(17) |  134.32 |         - |         - |      319.66 |   191.0 | 225696.1695 |
 | g2o LM (schur)                   |  9311.05 |  28(35) |  266.03 |    275.80 |     1.383 |      428.74 |   358.0 | 226586.4232 |
-| g2o LM (pcg)\*                   |  8038.23 |  28(35) |  229.66 |    165.75 |     0.831 |      291.85 |   236.4 | 226586.6244 |
+| g2o LM (pcg)\*                   |  8038.23 |  28(35) |  229.66 |         - |         - |      291.85 |   236.4 | 226586.6244 |
 
 All thirteen rows validate on all three datasets.
 
@@ -213,14 +220,14 @@ different, arbitrary stopping point.
 | arael LM f32 sparse\*\*               | 45521.10 |  18(26) | 1750.81 |   1713.74 |     0.970 |     2628.49 |   961.3 | 4534761.2853 |
 | arael LM f64 schur                    | 47450.49 |  18(27) | 1757.43 |   1766.45 |     1.000 |     2108.39 |  1110.1 |  771218.8250 |
 | arael LM f32 schur\*\*                | 27373.35 |  18(26) | 1052.82 |   1050.68 |     0.595 |     1340.15 |   664.3 | 4535532.0263 |
-| arael LM f64 schur-cg\*               |  9441.27 |  23(32) |  295.04 |    309.68 |     0.175 |      461.86 |   574.3 |  765600.3135 |
+| arael LM f64 schur-cg\*               |  9441.27 |  23(32) |  295.04 |         - |         - |      461.86 |   574.3 |  765600.3135 |
 | arael LM f32 schur-cg\* \*\*          |  6107.99 |  21(29) |  210.62 |    227.33 |     0.129 |      322.21 |   358.6 | 4326124.2911 |
-| arael LM f64 schur-cg-implicit\*      |  8160.53 |  23(32) |  255.02 |    268.00 |     0.152 |      418.77 |   500.4 |  765600.3135 |
+| arael LM f64 schur-cg-implicit\*      |  8160.53 |  23(32) |  255.02 |         - |         - |      418.77 |   500.4 |  765600.3135 |
 | arael LM f32 schur-cg-implicit\* \*\* |  5843.01 |  22(30) |  194.77 |    216.70 |     0.123 |      316.40 |   321.8 | 4322293.6387 |
 | ceres sparse_schur                    | 75537.61 |  18(26) | 2905.29 |   2942.00 |     1.665 |     4216.32 |  1244.1 |  765439.5587 |
-| ceres iterative_schur\*               |  9111.55 |  19(25) |  364.46 |    405.56 |     0.230 |     1196.43 |   618.4 |  769150.2812 |
+| ceres iterative_schur\*               |  9111.55 |  19(25) |  364.46 |         - |         - |     1196.43 |   618.4 |  769150.2812 |
 | g2o LM (schur)                        | 349919.36 | 92(142) | 2464.22 |   2315.97 |     1.311 |     2939.97 |  1539.8 |  779611.7031 |
-| g2o LM (pcg)\*                        | 179618.46 | 100(158) | 1136.83 |    567.24 |     0.321 |     1041.88 |   789.8 |  771546.7358 |
+| g2o LM (pcg)\*                        | 179618.46 | 100(158) | 1136.83 |         - |         - |     1041.88 |   789.8 |  771546.7358 |
 
 6/12 at the common optimum, anchored by two external systems. The six that miss
 are the four f32 rows (below) and both g2o rows, whose camera centres land

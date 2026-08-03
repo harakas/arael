@@ -270,7 +270,8 @@ fn main() {
                 }
                 let c = run_ceres(scene_path, solver, n_poses);
                 check_initial(&label, c.initial_cost, initial_cost);
-                t.record(&label, c.row);
+                // iterative_schur is preconditioned CG, not a factorization.
+                t.record(&label, c.row.inexact(solver == "iterative_schur"));
             }
         }
         if symforce_ok {

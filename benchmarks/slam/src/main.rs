@@ -14,10 +14,11 @@ use scene::{Scene, SceneConfig, Solution, Trajectory};
 /// The settings this run used, printed before anything else: a pasted result has
 /// to carry them. Values come from the objects the run actually uses, so the
 /// header cannot drift from what ran.
-fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
+fn print_header(problem: &arael_runner::Problem, cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
                 systems_filter: &Option<String>, ceres_solvers: &[String]) {
     use bench_harness::header::{on_off, Header};
-    let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(scene, 0);
+    let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(problem, 0);
+    let cg = arael_runner::cg_options();
     Header::new("slam-bench")
         .rounds(rounds)
         .line("scene", format!("{} poses, {} landmarks, seed {} [SLAM_POSES]",
@@ -33,8 +34,8 @@ fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool
         .line("optional systems", format!("tiny-solver {} [RUN_TINY]", on_off(skip_tiny)))
         .line("ceres solvers", format!("{} [CERES_SOLVERS]", ceres_solvers.join(", ")))
         .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
-            bench_harness::arael::lambda0::<arael_runner::Path>(scene),
-            bench_harness::arael::lambda0::<arael_runner::PathF>(scene)))
+            bench_harness::arael::lambda0::<arael_runner::Path>(problem),
+            bench_harness::arael::lambda0::<arael_runner::PathF>(problem)))
         .line("arael damping", format!("{} [DRIVER: fixed|nielsen]",
             if bench_harness::arael::nielsen::<arael_runner::Path>() { "Nielsen gain-ratio driver" }
             else { "fixed ladder (default driver)" }))
@@ -42,6 +43,11 @@ fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool
             std::env::var("SLAM_ARAEL_SOLVER").unwrap_or_else(|_| "schur".to_string())))
         .line("arael envelope", format!("{:?} [SLAM_ENVELOPE: auto|always|never]",
             arael_runner::envelope_mode()))
+        .line("arael CG rows", format!("tol {:e}, max_iters {}, restart every {} \
+            [SLAM_CG_TOL, SLAM_CG_MAXITER, SLAM_CG_RESTART]",
+            cg.tol, if cg.max_iters == 0 { "system dimension".to_string() }
+                    else { cg.max_iters.to_string() },
+            cg.restart_every))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))
@@ -103,6 +109,10 @@ fn mem_pass() -> bool {
     match which.as_str() {
         "arael LM f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
         "arael LM f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
+        "arael CG f64" => { std::hint::black_box(
+            arael_runner::run_capped_route(&scene, iters, arael_runner::Route::Cg)); }
+        "arael CG f32" => { std::hint::black_box(
+            arael_runner::run_f32_capped_route(&scene, iters, arael_runner::Route::Cg)); }
         "tiny-solver LM" => {
             std::env::set_var("TINY_MAXITER", iters.to_string());
             tiny_runner::install_iter_counter();
@@ -140,8 +150,11 @@ fn main() {
     // validates only against whatever ran -- for iterating, not publishing.
     let systems_filter = std::env::var("SLAM_SYSTEMS").ok();
 
-    let scene = scene::generate(&cfg);
-    print_header(&scene, &cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
+    // Shared by every arael row: the same scene down more than one linear route.
+    let scene = std::rc::Rc::new(scene::generate(&cfg));
+    let factorized = arael_runner::Problem::new(&scene, arael_runner::Route::Factorize);
+    let cg = arael_runner::Problem::new(&scene, arael_runner::Route::Cg);
+    print_header(&factorized, &cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
 
     let init_sol = initial_solution(&scene);
     let initial_cost = scene::reference_cost(&scene, &init_sol);
@@ -221,12 +234,20 @@ fn main() {
     }
     for _ in 0..rounds {
         if want("arael LM f64") {
-        let a = arael_runner::run(&scene);
+        let a = arael_runner::run(&factorized);
         t.record_result("arael LM f64", a);
         }
         if want("arael LM f32") {
-        let a32 = arael_runner::run_f32(&scene);
+        let a32 = arael_runner::run_f32(&factorized);
         t.record_result("arael LM f32", a32);
+        }
+        if want("arael CG f64") {
+        let c = arael_runner::run(&cg);
+        t.record_result("arael CG f64", c);
+        }
+        if want("arael CG f32") {
+        let c32 = arael_runner::run_f32(&cg);
+        t.record_result("arael CG f32", c32);
         }
         if !skip_tiny && want("tiny-solver LM") {
             t.record("tiny-solver LM", tiny_runner::run_lm(&scene));
@@ -243,7 +264,8 @@ fn main() {
                 let rel = ((c.initial_cost - initial_cost) / initial_cost).abs();
                 assert!(rel < 1e-9, "ceres initial cost {} vs reference {} (rel {:.2e})",
                     c.initial_cost, initial_cost, rel);
-                t.record(&ceres_label(solver), c.row);
+                // iterative_schur is preconditioned CG, not a factorization.
+                t.record(&ceres_label(solver), c.row.inexact(solver == "iterative_schur"));
             }
         }
         if symforce_ok {
@@ -276,7 +298,8 @@ fn main() {
 
     if std::env::var("SLAM_NO_MEM").is_err() {
         let poses = scene.poses.len().to_string();
-        for label in ["arael LM f64", "arael LM f32", "tiny-solver LM", "factrs LM"] {
+        for label in ["arael LM f64", "arael LM f32", "arael CG f64", "arael CG f32",
+                      "tiny-solver LM", "factrs LM"] {
             if !want(label) || (skip_tiny && label == "tiny-solver LM") {
                 continue;
             }

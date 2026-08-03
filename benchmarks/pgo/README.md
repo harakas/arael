@@ -346,6 +346,12 @@ full-iter, full-norm and 1st-iter are dropped ("-") for any system whose
 first iteration was not a single accepted step: such an iteration is mostly
 wasted factorizations, and every number derived from it inherits that.
 
+full-iter and full-norm are dropped for the g2o PCG rows (`RUN_PCG=1`) as
+well. Conjugate gradients does a variable amount of work per outer step,
+because the inner solve gets harder as the outer one converges, so one
+iteration does not stand for the rest and differencing two of them measures
+neither. Those rows are read on total ms and ms/iter.
+
 Each dataset carries its own notes below.
 
 ### M3500 (10500 parameters)

@@ -30,6 +30,11 @@ pub struct Row<S> {
     /// process-wide high-water mark, so solvers sharing a process contaminate
     /// each other's peak.
     pub peak_mb: Option<f64>,
+    /// An inexact linear solver: conjugate gradients rather than a
+    /// factorization. Its iterations are not equal-cost -- the inner solve
+    /// gets harder as the outer one converges -- so one iteration does not
+    /// stand for the rest and the table prints "-" for full-iter.
+    pub inexact: bool,
     pub solution: S,
 }
 
@@ -43,8 +48,16 @@ impl<S> Row<S> {
             accepted: None,
             full_ms: None,
             peak_mb: None,
+            inexact: false,
             solution,
         }
+    }
+
+    /// Mark the row as solved by an inexact (conjugate-gradient) route -- see
+    /// [`Self::inexact`].
+    pub fn inexact(mut self, inexact: bool) -> Self {
+        self.inexact = inexact;
+        self
     }
 
     pub fn accepted(mut self, accepted: usize) -> Self {
@@ -60,8 +73,12 @@ impl<S> Row<S> {
     /// What one COMPLETE iteration cost: `t(2 iterations) - t(1 iteration)`.
     /// `None` where the pair cannot be differenced -- no `t(2)`, or a first
     /// iteration that was not one clean accepted step, which leaves nothing
-    /// meaningful to subtract.
+    /// meaningful to subtract -- and `None` for an inexact route, whose
+    /// iterations are not equal-cost ([`Self::inexact`]).
     pub fn full_iter_ms(&self) -> Option<f64> {
+        if self.inexact {
+            return None;
+        }
         match self.full_ms {
             Some(two) if two > self.first_iter_ms => Some(two - self.first_iter_ms),
             _ => None,
@@ -363,6 +380,15 @@ mod tests {
         // A first iteration that was not one clean accepted step is NaN, and
         // every comparison against it is false, so it yields no full-iter.
         assert_eq!(row(f64::NAN, Some(18.0)).full_iter_ms(), None);
+    }
+
+    /// An inexact route has no full-iter even from a pair that differences
+    /// cleanly: its iterations are not equal-cost, so the difference prices
+    /// the second iteration and nothing else.
+    #[test]
+    fn an_inexact_route_has_no_full_iter() {
+        assert_eq!(row(10.0, Some(18.0)).inexact(true).full_iter_ms(), None);
+        assert_eq!(row(10.0, Some(18.0)).inexact(false).full_iter_ms(), Some(8.0));
     }
 
     /// The reference row is named, and normalizing against it makes that row

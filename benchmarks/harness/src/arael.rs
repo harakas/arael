@@ -57,6 +57,11 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     /// Anything else this benchmark wants on the config. The defaults below are
     /// the ones every benchmark has agreed on so far.
     fn tune(_cfg: &mut LmConfig<Self::Scalar>) {}
+
+    /// Whether this row's linear solve is inexact (conjugate gradients). It
+    /// reads the input because the route is what distinguishes such a row from
+    /// an exact one over the same model. See [`Row::inexact`].
+    fn inexact(_input: &Self::Input) -> bool { false }
 }
 
 /// ARAEL_LAMBDA0 overrides the model's damping, for experiments.
@@ -199,7 +204,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     });
     match failure {
         Some(why) => Err(why),
-        None => Ok(row),
+        None => Ok(row.inexact(M::inexact(input))),
     }
 }
 

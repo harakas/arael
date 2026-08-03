@@ -431,7 +431,9 @@ fn main() {
                     match run_ceres(path, linsolver, ceres_radius0(b, linsolver), &ds) {
                         Ok(e) => {
                             check_initial(&label, e.initial_cost, initial_cost);
-                            t.record(&label, e.row);
+                            // iterative_schur is preconditioned CG, not a
+                            // factorization.
+                            t.record(&label, e.row.inexact(*linsolver == "iterative_schur"));
                         }
                         Err(why) => t.record_failure(&label, why),
                     }
@@ -445,7 +447,8 @@ fn main() {
                     match run_g2o(path, &ds, &row) {
                         Ok(e) => {
                             check_initial(&row.label, e.initial_cost, initial_cost);
-                            t.record(&row.label, e.row);
+                            // pcg solves the reduced system iteratively.
+                            t.record(&row.label, e.row.inexact(row.pcg));
                         }
                         Err(why) => t.record_failure(&row.label, why),
                     }

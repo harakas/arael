@@ -74,8 +74,8 @@ each system's damping schedule.
 cannot be compared one on one.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/slam-loc-setup-dark.svg">
-  <img alt="Two bar charts, landmark SLAM and localization: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.1/slam-loc-setup-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-setup-dark.svg">
+  <img alt="Two bar charts, landmark SLAM and localization: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.2/slam-loc-setup-light.svg">
 </picture>
 
 The same two panels as the chart on the front page, with the setup drawn
@@ -105,6 +105,12 @@ full-iter, full-norm and 1st-iter are dropped ("-") for any system whose first i
 was not a single accepted step: such an iteration is mostly wasted
 factorizations, and every number derived from it inherits that.
 
+full-iter and full-norm are dropped for Ceres's `iterative_schur` as well.
+Conjugate gradients does a variable amount of work per outer step, because the
+inner solve gets harder as the outer one converges, so one iteration does not
+stand for the rest and differencing two of them measures neither. That row is
+read on total ms and ms/iter.
+
 `LOC_POSES=N` sets the pose count (landmarks scale as `4N`). The arael rows use
 `fast_atan` (above).
 
@@ -119,7 +125,7 @@ factorizations, and every number derived from it inherits that.
 | g2o LM                |     4.61 |   3(3) |    1.54 |      1.10 |     4.400 |        2.14 |    11.2 |  3274.6025 |
 | ceres sparse_cholesky |     6.24 |   3(3) |    2.08 |      1.83 |     7.320 |        3.90 |    12.9 |  3274.6025 |
 | ceres sparse_schur    |     6.33 |   3(3) |    2.11 |      2.11 |     8.440 |        3.86 |    12.9 |  3274.6025 |
-| ceres iterative_schur\* |   6.73 |   3(3) |    2.24 |      2.04 |     8.160 |        3.90 |    12.0 |  3274.6025 |
+| ceres iterative_schur\* |   6.73 |   3(3) |    2.24 |         - |         - |        3.90 |    12.0 |  3274.6025 |
 | gtsam LM              |    10.54 |   3(3) |    3.51 |      3.50 |    14.000 |        3.79 |    14.6 |  3274.6025 |
 | factrs LM             |    12.42 |   3(3) |    4.14 |      3.12 |    12.480 |        5.48 |    11.9 |  3274.6025 |
 
@@ -134,7 +140,7 @@ factorizations, and every number derived from it inherits that.
 | g2o LM                |    38.80 |   3(3) |   12.93 |      9.85 |     4.104 |       18.60 |    37.7 | 25269.0409 |
 | ceres sparse_cholesky |    51.06 |   3(3) |   17.02 |     14.70 |     6.125 |       31.86 |    42.2 | 25269.0409 |
 | ceres sparse_schur    |    51.46 |   3(3) |   17.15 |     15.12 |     6.300 |       31.02 |    37.1 | 25269.0409 |
-| ceres iterative_schur\* |  52.44 |   3(3) |   17.48 |     16.63 |     6.929 |       30.48 |    37.2 | 25269.0409 |
+| ceres iterative_schur\* |  52.44 |   3(3) |   17.48 |         - |         - |       30.48 |    37.2 | 25269.0409 |
 | gtsam LM              |    86.38 |   3(3) |   28.79 |     27.92 |    11.633 |       32.41 |    58.9 | 25269.0409 |
 | factrs LM             |    91.50 |   3(3) |   30.50 |     24.22 |    10.092 |       42.51 |    64.9 | 25269.0409 |
 
@@ -149,7 +155,7 @@ factorizations, and every number derived from it inherits that.
 | g2o LM                |    16.22 |   3(3) |    5.41 |      4.04 |     3.811 |        7.84 |    10.1 |  3274.6025 |
 | ceres sparse_cholesky |    18.56 |   3(3) |    6.19 |      5.34 |     5.038 |       11.42 |    11.5 |  3274.6025 |
 | ceres sparse_schur    |    19.78 |   3(3) |    6.59 |      5.73 |     5.406 |       11.82 |    11.3 |  3274.6025 |
-| ceres iterative_schur\* |  19.64 |   3(3) |    6.55 |      5.94 |     5.604 |       11.34 |    11.0 |  3274.6025 |
+| ceres iterative_schur\* |  19.64 |   3(3) |    6.55 |         - |         - |       11.34 |    11.0 |  3274.6025 |
 | gtsam LM              |    44.29 |   3(3) |   14.76 |     13.74 |    12.962 |       16.34 |    15.4 |  3274.6025 |
 | factrs LM             |    46.16 |   3(3) |   15.39 |     13.06 |    12.321 |       20.47 |    12.1 |  3274.6025 |
 

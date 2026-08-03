@@ -354,15 +354,15 @@ fn block_supernodal_lean() -> bool {
 // factored. A typo here would silently benchmark the other route, so an
 // unknown value is an error rather than a fallback.
 //
-// The default is `always`, not arael's `auto`: the published tables are the
-// envelope route, and a benchmark should pin what it measures rather than let
-// a gate re-decide it as the gate's threshold moves. `auto` is still selectable
-// to measure the gate itself.
+// The default is arael's own `auto`, so the published tables measure the route
+// a user gets without asking. On this problem the gate declines the envelope
+// and the reduced system goes to the block supernodal Cholesky; `always` pins
+// the envelope to measure it against.
 pub fn envelope_mode() -> arael::simple_lm::EnvelopeMode {
     use arael::simple_lm::EnvelopeMode;
     match std::env::var("SLAM_ENVELOPE").as_deref() {
-        Err(_) | Ok("always") => EnvelopeMode::Always,
-        Ok("auto") => EnvelopeMode::Auto,
+        Err(_) | Ok("auto") => EnvelopeMode::Auto,
+        Ok("always") => EnvelopeMode::Always,
         Ok("never") => EnvelopeMode::Never,
         Ok(other) => panic!("SLAM_ENVELOPE: expected auto, always or never, got {:?}", other),
     }
@@ -521,22 +521,111 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
 pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
+    run_capped_route(scene, max_iters, Route::Factorize)
+}
+
+pub fn run_capped_route(scene: &Scene, max_iters: usize, route: Route) -> Solution {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
     path.serialize(&mut params);
-    let result = solve64(&params, &mut path, &cfg(max_iters)).expect("capped solve failed");
+    let result = route.solve64(&params, &mut path, &cfg(max_iters))
+        .expect("capped solve failed");
     path.deserialize(&result.x);
     extract(&path)
 }
 
 pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
+    run_f32_capped_route(scene, max_iters, Route::Factorize)
+}
+
+pub fn run_f32_capped_route(scene: &Scene, max_iters: usize, route: Route) -> Solution {
     let mut path = build_f32(scene);
     let mut params: Vec<f32> = Vec::new();
     path.serialize(&mut params);
-    let result = solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()))
+    let result = route.solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()))
         .expect("capped solve failed");
     path.deserialize(&result.x);
     extract_f32(&path)
+}
+
+/// The same scene through more than one linear route, the way the bundle
+/// benchmark runs one dataset through several: what distinguishes the arael
+/// rows from each other lives here, not in the model.
+pub struct Problem {
+    /// Shared, not copied -- 900 poses is 144k observations.
+    pub scene: std::rc::Rc<Scene>,
+    pub route: Route,
+}
+
+impl Problem {
+    pub fn new(scene: &std::rc::Rc<Scene>, route: Route) -> Self {
+        Problem { scene: scene.clone(), route }
+    }
+}
+
+/// How the reduced pose system is solved once the landmarks are marginalized.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Route {
+    /// Factorized -- the default, and what the published tables measure.
+    Factorize,
+    /// Solved by preconditioned conjugate gradients instead, on a reduced
+    /// system that is still formed explicitly. SLAM_CG_TOL sets the inner
+    /// tolerance, SLAM_CG_MAXITER the iteration cap, SLAM_CG_RESTART the
+    /// true-residual recompute interval.
+    Cg,
+}
+
+// The inner CG settings. Benchmarks give each algorithm the settings the
+// problem wants (see the README's damping policy); for an inexact route that
+// includes its inner tolerance. Measured at 300 poses: 1e-4 gives the fastest
+// solve that still lands on the common optimum. Tighter buys nothing -- it
+// costs more per iteration without saving an LM step -- and looser converges
+// to a worse cost.
+pub fn cg_options() -> arael::simple_lm::CgOptions {
+    let d = arael::simple_lm::CgOptions::default();
+    fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
+        std::env::var(k).ok().and_then(|v| v.parse().ok())
+    }
+    arael::simple_lm::CgOptions {
+        tol: env("SLAM_CG_TOL").unwrap_or(1e-4),
+        max_iters: env("SLAM_CG_MAXITER").unwrap_or(d.max_iters),
+        restart_every: env("SLAM_CG_RESTART").unwrap_or(d.restart_every),
+    }
+}
+
+impl Route {
+    fn solve64(self, params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
+        -> Solved<f64> {
+        match self {
+            Route::Factorize => solve64(params, path, cfg),
+            // Force, not Auto: the iterative route has nothing to solve
+            // without a reduction and says so rather than falling back, and
+            // the benchmark wants the route it asked for.
+            Route::Cg => arael::simple_lm::lm_solve(
+                params,
+                &mut arael::simple_lm::SparseFaer::new()
+                    .with_policy(arael::simple_lm::SchurPolicy::Force)
+                    .with_iterative_schur(cg_options()),
+                path,
+                cfg,
+            ),
+        }
+    }
+
+    fn solve32(self, params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
+        -> Solved<f32> {
+        match self {
+            Route::Factorize => solve32(params, path, cfg),
+            Route::Cg => arael::simple_lm::lm_solve(
+                params,
+                &mut arael::simple_lm::SparseFaerF32::new()
+                    .with_policy(arael::simple_lm::SchurPolicy::Force)
+                    .with_iterative_schur(cg_options()),
+                path,
+                cfg,
+            ),
+        }
+    }
 }
 
 
@@ -563,15 +652,16 @@ fn lambda0(poses: usize, single_precision: bool) -> f64 {
 
 impl bench_harness::arael::Model for Path {
     type Scalar = f64;
-    type Input = Scene;
+    type Input = Problem;
     type Solution = Solution;
-    fn lambda0(scene: &Scene) -> f64 { lambda0(scene.poses.len(), false) }
-    fn build(scene: &Scene) -> Self { build(scene) }
+    fn lambda0(p: &Problem) -> f64 { lambda0(p.scene.poses.len(), false) }
+    fn build(p: &Problem) -> Self { build(&p.scene) }
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
-    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> Solved<f64> { solve64(params, m, cfg) }
+    fn solve(p: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+        -> Solved<f64> { p.route.solve64(params, m, cfg) }
+    fn inexact(p: &Problem) -> bool { p.route == Route::Cg }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) {
         cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
         cfg.predicted_reduction_tolerance = std::env::var("SLAM_PRED_TOL").ok().and_then(|v| v.parse().ok());
@@ -580,15 +670,16 @@ impl bench_harness::arael::Model for Path {
 
 impl bench_harness::arael::Model for PathF {
     type Scalar = f32;
-    type Input = Scene;
+    type Input = Problem;
     type Solution = Solution;
-    fn lambda0(scene: &Scene) -> f64 { lambda0(scene.poses.len(), true) }
-    fn build(scene: &Scene) -> Self { build_f32(scene) }
+    fn lambda0(p: &Problem) -> f64 { lambda0(p.scene.poses.len(), true) }
+    fn build(p: &Problem) -> Self { build_f32(&p.scene) }
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
-    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> Solved<f32> { solve32(params, m, cfg) }
+    fn solve(p: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+        -> Solved<f32> { p.route.solve32(params, m, cfg) }
+    fn inexact(p: &Problem) -> bool { p.route == Route::Cg }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) {
         cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
         cfg.predicted_reduction_tolerance = std::env::var("SLAM_PRED_TOL").ok().and_then(|v| v.parse().ok());
@@ -598,8 +689,8 @@ impl bench_harness::arael::Model for PathF {
 /// `Err` is why the solve failed, for the table to show in place of the row.
 pub type RunOut = Result<bench_harness::table::Row<Solution>, String>;
 
-pub fn run(scene: &Scene) -> RunOut { bench_harness::arael::run::<Path>(scene) }
-pub fn run_f32(scene: &Scene) -> RunOut { bench_harness::arael::run::<PathF>(scene) }
+pub fn run(p: &Problem) -> RunOut { bench_harness::arael::run::<Path>(p) }
+pub fn run_f32(p: &Problem) -> RunOut { bench_harness::arael::run::<PathF>(p) }
 
 // ----------------------------------------------------------- covariance
 

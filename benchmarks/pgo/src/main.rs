@@ -281,7 +281,8 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
                     g2o_cmd,
                     &[path, kind, &poses_out], &poses_out,
                     ds.poses.len(), Some("initial_cost"), &check);
-                t.record(&label, row);
+                // The PCG rows solve iteratively rather than factorizing.
+                t.record(&label, row.inexact(kind.ends_with("-pcg")));
             }
             if symforce3_available {
                 for prec in ["f64", "f32"] {
