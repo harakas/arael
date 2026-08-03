@@ -3859,6 +3859,26 @@ fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<
 /// 1% wherever this margin refused one.
 const ENVELOPE_FLOP_MARGIN: f64 = 0.97;
 
+/// The same, against the block supernodal Cholesky, which is what a declined
+/// envelope hands the reduced system to unless the solver is threaded.
+///
+/// Far below the scalar margin because the two routes run at different rates,
+/// not just different operation counts: the supernodal packs its updates into
+/// dense rectangles and spends them in one GEMM per pair, where the envelope
+/// works down variable-width panels. Equal flops therefore means the envelope
+/// loses, and it has to do substantially less arithmetic to win the wall clock
+/// back.
+///
+/// The two regimes measured are far apart, which is why the exact value here
+/// does not matter much. A reduced pose system holds this ratio between 0.87
+/// and 0.98 whatever its bandwidth -- a narrow band cuts the envelope's
+/// arithmetic, but it also splits the supernodal into many small supernodes,
+/// which cuts its own by about as much -- and the supernodal matched or beat
+/// the envelope across that whole range. The ratio only collapses where the
+/// blocks are small and the band is a few blocks wide, and there it goes to
+/// 0.13-0.28, well clear of this threshold from the other side.
+const ENVELOPE_FLOP_MARGIN_BLOCK: f64 = 0.5;
+
 /// Share of the parameters a reduction may keep and still be waved through by
 /// [`SchurPolicy::Auto`]'s cheap pre-filter.
 ///
@@ -4118,10 +4138,16 @@ pub use arael_faer::cg::{CgOptions, CgStats};
 /// How to factor the reduced Schur system: under its envelope, or by sparse
 /// Cholesky.
 ///
-/// **What it is for.** The envelope route uses 12-48% less peak memory, and
-/// more of it the larger the problem. Solve time is roughly unchanged: across
-/// landmark SLAM it ran anywhere from 8% faster to 18% slower per iteration.
-/// So this is a memory setting, not a speed one.
+/// **What it is for.** Memory, on a reduced system that stays a narrow band.
+/// That means SLAM without loop closure: a trajectory that moves on without
+/// revisiting, each landmark seen from a short run of consecutive poses. A
+/// loop closure ties distant poses together and widens the band, which is what
+/// the envelope has to keep narrow to be worth anything.
+///
+/// The envelope route uses 4-15% less peak memory than the block supernodal
+/// Cholesky it competes with, and 12-48% less than faer's scalar route. It
+/// pays for that in time: on landmark SLAM at 60 to 900 poses the supernodal
+/// ran 2-12% faster per iteration.
 ///
 /// **When it applies.** Only when the reduced system is left in its natural
 /// order, which arael decides from the system's density and bandwidth. If it
@@ -4134,30 +4160,31 @@ pub use arael_faer::cg::{CgOptions, CgStats};
 /// - Default ([`Self::Auto`]) if you have no particular constraint.
 /// - [`Self::Always`] if memory is what limits you -- an embedded target, or a
 ///   problem that will not fit otherwise.
-/// - [`Self::Never`] if you need the fastest possible iteration and have
-///   measured that it wins on your problem.
+/// - [`Self::Never`] to keep the envelope out of the way entirely.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EnvelopeMode {
     /// Use the envelope only where it is also the cheaper factorization.
     ///
-    /// Gives up the memory saving wherever the sparse route is faster, so it
-    /// is the wrong choice if memory is your constraint. Costs one extra
-    /// analysis of the reduced system to compare the two, paid once per
-    /// structure.
+    /// It is priced against whichever route would take the system if the
+    /// envelope declined -- the block supernodal Cholesky, or faer's scalar one
+    /// where the supernodal is off. A reduced pose system rarely wins that
+    /// comparison, so this gives up the memory saving on most SLAM problems;
+    /// it is the wrong choice if memory is your constraint. Costs one extra
+    /// analysis of the reduced system, paid once per structure and handed on to
+    /// the winner rather than thrown away.
     #[default]
     Auto,
     /// Use the envelope wherever it applies, whether or not it is faster.
     ///
     /// The lowest-memory setting, and the fastest to set up: it is the only
-    /// mode that skips the ordering and analysis entirely, worth 5-19% of the
-    /// first iteration. Can cost up to 18% per iteration afterwards on
-    /// problems that revisit earlier parameters, such as a trajectory closing
-    /// a loop.
+    /// mode that skips the ordering and analysis entirely.
     Always,
-    /// Never use the envelope; the reduced system goes to sparse Cholesky.
+    /// Never use the envelope; the reduced system goes to the block supernodal
+    /// or scalar sparse Cholesky.
     ///
-    /// The most memory of the three. Worth setting only to measure against, or
-    /// where you have confirmed it is faster on your problem.
+    /// The most memory of the three. On a naturally ordered system this is what
+    /// [`Self::Auto`] usually settles on anyway, so it is mostly worth setting
+    /// to take the gate's analysis out of the first iteration.
     Never,
 }
 
@@ -6051,6 +6078,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // it is exactly what the reduction needs next, so it is kept rather
         // than recomputed.
         let mut reduced_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>> = None;
+        // The same, for the supernodal route: the envelope gate prices against
+        // it, and hands it on when it declines the envelope.
+        let mut reduced_sn: Option<arael_faer::supernodal::SupernodalSymbolic> = None;
         // Verbose accounting of the one-time work, phase by phase.
         let mut t_sym_reduced = 0.0;
         let mut t_amd_full = 0.0;
@@ -6253,50 +6283,89 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let mut take_envelope =
             !iterative && natural && self.envelope_mode != EnvelopeMode::Never;
         if take_envelope && self.envelope_mode == EnvelopeMode::Auto {
-            // Auto prices the envelope against the factorization it replaces.
-            // The envelope's own cost is exact -- Cholesky preserves the
-            // envelope, so the pattern gives the flops -- but its competition
-            // is the ORDERED sparse factor, and pricing that means analysing
-            // it: the step the envelope route exists to skip.
+            // Auto prices the envelope against the factorization it replaces --
+            // whichever route that is. The envelope's own cost is exact
+            // (Cholesky preserves the envelope, so the pattern gives the
+            // flops); the competitor has to be analysed to be priced, which is
+            // the step the envelope route exists to skip.
             //
             // Worth paying. The analysis is one-time per structure and is
             // handed on below when the gate declines, so it is only wasted
             // where the envelope wins, while a wrong choice is paid on every
             // iteration.
+            //
+            // The envelope only applies to a naturally ordered system, so the
+            // competing symbolic is built in that same order -- no block order
+            // for the supernodal, `ord` for the scalar route.
             let env_flops = arael_faer::envelope::envelope_flops(&schur.s);
-            let (col_ptr, row_idx) = schur.s.csc_pattern();
-            let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-                nk, nk, &col_ptr, None, &row_idx,
-            );
-            let faer_ord = match &nd {
-                Some(nd) => faer::sparse::linalg::cholesky::SymmetricOrdering::Custom(nd.perm()),
-                None => ord.faer(),
-            };
-            match faer::sparse::linalg::cholesky::factorize_symbolic_cholesky(
-                sym_ref, faer::Side::Upper, faer_ord, chol_params(self.supernodal),
-            ) {
-                Ok(llt) => {
-                    let sparse_flops = symbolic_factor_flops(&llt);
-                    take_envelope = env_flops <= ENVELOPE_FLOP_MARGIN * sparse_flops;
-                    if vb {
-                        info!(
-                            "schur: reduced system -- envelope {:.2e} flops, sparse \
-                             {:.2e} ({:.0}% of sparse, threshold {:.0}%): {}",
-                            env_flops, sparse_flops,
-                            100.0 * env_flops / sparse_flops,
-                            100.0 * ENVELOPE_FLOP_MARGIN,
-                            if take_envelope { "below threshold, using the envelope" }
-                            else { "above threshold, using the sparse Cholesky" },
-                        );
+            if self.sn_take() {
+                match arael_faer::supernodal::SupernodalSymbolic::new(
+                    &schur.s,
+                    None,
+                    &arael_faer::supernodal::SupernodalParams {
+                        batch_ratio: self.sn_batch_ratio,
+                        ..self.sn_params_base()
+                    },
+                ) {
+                    Ok(sn) => {
+                        let sn_flops = sn.flops();
+                        take_envelope = env_flops <= ENVELOPE_FLOP_MARGIN_BLOCK * sn_flops;
+                        if vb {
+                            info!(
+                                "schur: reduced system -- envelope {:.2e} flops, block \
+                                 supernodal {:.2e} ({:.0}% of supernodal, threshold {:.0}%): {}",
+                                env_flops, sn_flops,
+                                100.0 * env_flops / sn_flops,
+                                100.0 * ENVELOPE_FLOP_MARGIN_BLOCK,
+                                if take_envelope { "below threshold, using the envelope" }
+                                else { "above threshold, using the block supernodal" },
+                            );
+                        }
+                        // Reused by the supernodal route below rather than rebuilt.
+                        if !take_envelope {
+                            reduced_sn = Some(sn);
+                        }
                     }
-                    // Reused by the sparse route below rather than rebuilt.
-                    if !take_envelope && reduced_llt.is_none() {
-                        reduced_llt = Some(llt);
-                    }
+                    // The analysis failed, so the supernodal route cannot run
+                    // either. Leave the envelope to it and let the error
+                    // surface there.
+                    Err(_) => {}
                 }
-                // The analysis failed, so the sparse route cannot run either.
-                // Leave the envelope to it and let the error surface there.
-                Err(_) => {}
+            } else {
+                let (col_ptr, row_idx) = schur.s.csc_pattern();
+                let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                    nk, nk, &col_ptr, None, &row_idx,
+                );
+                let faer_ord = match &nd {
+                    Some(nd) => faer::sparse::linalg::cholesky::SymmetricOrdering::Custom(nd.perm()),
+                    None => ord.faer(),
+                };
+                match faer::sparse::linalg::cholesky::factorize_symbolic_cholesky(
+                    sym_ref, faer::Side::Upper, faer_ord, chol_params(self.supernodal),
+                ) {
+                    Ok(llt) => {
+                        let sparse_flops = symbolic_factor_flops(&llt);
+                        take_envelope = env_flops <= ENVELOPE_FLOP_MARGIN * sparse_flops;
+                        if vb {
+                            info!(
+                                "schur: reduced system -- envelope {:.2e} flops, sparse \
+                                 {:.2e} ({:.0}% of sparse, threshold {:.0}%): {}",
+                                env_flops, sparse_flops,
+                                100.0 * env_flops / sparse_flops,
+                                100.0 * ENVELOPE_FLOP_MARGIN,
+                                if take_envelope { "below threshold, using the envelope" }
+                                else { "above threshold, using the sparse Cholesky" },
+                            );
+                        }
+                        // Reused by the sparse route below rather than rebuilt.
+                        if !take_envelope && reduced_llt.is_none() {
+                            reduced_llt = Some(llt);
+                        }
+                    }
+                    // The analysis failed, so the sparse route cannot run either.
+                    // Leave the envelope to it and let the error surface there.
+                    Err(_) => {}
+                }
             }
         }
         self.envelope_active = take_envelope;
@@ -6396,15 +6465,20 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense => None,
                 },
             };
-            let sn = arael_faer::supernodal::SupernodalSymbolic::new(
-                &schur.s,
-                block_order.as_deref(),
-                &arael_faer::supernodal::SupernodalParams {
-                    batch_ratio: self.sn_batch_ratio,
-                    ..self.sn_params_base()
-                },
-            )
-            .map_err(|_| SolveError::SymbolicFactorization { reduced: true })?;
+            let sn = match reduced_sn {
+                // Built by the envelope gate, in the natural order this route
+                // uses when the envelope was on the table at all.
+                Some(sn) => sn,
+                None => arael_faer::supernodal::SupernodalSymbolic::new(
+                    &schur.s,
+                    block_order.as_deref(),
+                    &arael_faer::supernodal::SupernodalParams {
+                        batch_ratio: self.sn_batch_ratio,
+                        ..self.sn_params_base()
+                    },
+                )
+                .map_err(|_| SolveError::SymbolicFactorization { reduced: true })?,
+            };
             self.sn_factor.resize(sn.factor_val_count(), T::zero());
             if vb {
                 info!(

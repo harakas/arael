@@ -172,6 +172,50 @@ fn auto_takes_the_envelope_on_a_banded_reduction() {
     }
 }
 
+/// Widen the covisibility window and the reduced system stops being a narrow
+/// band: the envelope's arithmetic advantage goes with it, and Auto hands the
+/// system to the block supernodal instead -- which must reach the same answer.
+#[test]
+fn auto_declines_the_envelope_on_a_band_dense_reduction() {
+    let mut auto = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
+    let (x_auto, c_auto) = solve(&mut auto, 30);
+    let plan = auto.plan().expect("a plan");
+    assert!(!plan.envelope,
+            "a band-dense reduction is not what the envelope route is for");
+    assert!(plan.block_supernodal,
+            "the declined envelope hands the system to the block supernodal");
+
+    let mut always = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let (x_always, c_always) = solve(&mut always, 30);
+    assert!(c_auto < 1e-12 && c_always < 1e-12, "{} {}", c_auto, c_always);
+    for (a, b) in std::iter::zip(&x_auto, &x_always) {
+        assert!((a - b).abs() < 1e-9, "Auto and Always disagree: {} vs {}", a, b);
+    }
+}
+
+/// Auto prices the envelope against the route that would actually take the
+/// system. With the block supernodal switched off that is faer's scalar
+/// Cholesky, which is a different comparison with a margin of its own.
+#[test]
+fn auto_prices_against_whichever_route_would_run() {
+    use arael::simple_lm::BlockSupernodalMode;
+    let mut scalar = SparseFaer::new()
+        .with_envelope_schur(EnvelopeMode::Auto)
+        .with_block_supernodal(BlockSupernodalMode::Never);
+    let (x_scalar, c_scalar) = solve(&mut scalar, 30);
+    let plan = scalar.plan().expect("a plan");
+    assert!(!plan.block_supernodal, "the supernodal route is switched off");
+
+    let mut block = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
+    let (x_block, c_block) = solve(&mut block, 30);
+    assert!(block.plan().expect("a plan").block_supernodal);
+
+    assert!(c_scalar < 1e-12 && c_block < 1e-12, "{} {}", c_scalar, c_block);
+    for (a, b) in std::iter::zip(&x_scalar, &x_block) {
+        assert!((a - b).abs() < 1e-9, "routes disagree: {} vs {}", a, b);
+    }
+}
+
 /// Whatever Auto decides, the answer must not depend on it.
 #[test]
 fn every_envelope_mode_reaches_the_same_optimum() {

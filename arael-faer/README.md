@@ -162,9 +162,11 @@ natural order.
 | `EnvelopeError` | the matrix was not positive definite |
 
 It holds less than an ordered sparse factor while the envelope stays narrow, and
-more once it widens, so the choice is worth pricing. `arael::simple_lm::EnvelopeMode`
-prices it for the reduced Schur system; `SparseFaer::with_narrow_band` takes the
-whole Hessian and warns when its band is too wide to pay.
+more once it widens, so the choice is worth pricing. The narrow case is SLAM
+without loop closure -- a trajectory that never revisits, so no pose is tied to
+a distant one. `arael::simple_lm::EnvelopeMode` prices it for the reduced Schur
+system; `SparseFaer::with_narrow_band` takes the whole Hessian and warns when
+its band is too wide to pay.
 
 ## License
 
