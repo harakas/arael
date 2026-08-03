@@ -214,7 +214,12 @@ fn supernodal_schur_route_matches_the_default() {
     let mut default = SparseFaer::new();
     let (x_def, c_def) = solve(&mut default, 2);
 
+    // Force, not Auto: this is about the supernodal factorization of a
+    // REDUCED system, and Auto prices the whole system under nested
+    // dissection too -- on this scene it wins, leaving nothing reduced to
+    // factorize.
     let mut sn = SparseFaer::new()
+        .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
         .with_block_supernodal(BlockSupernodalMode::Always);
     let (x_sn, c_sn) = solve(&mut sn, 2);

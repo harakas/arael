@@ -5335,6 +5335,10 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         partition: &[usize],
         hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
         detected: &[usize],
+        // The block elimination order to use, when the caller already chose
+        // one -- the Auto gate priced the whole route under it, so the route
+        // has to run it. `None` applies this solver's own ordering rule.
+        block_order_in: Option<Vec<usize>>,
         vb: bool,
     ) -> Result<T, SolveError> {
         // Factoring the whole system is not a reduction, so the iterative
@@ -5380,6 +5384,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             FaerOrdering::Auto | FaerOrdering::MarginalizeFirst
         ) && !named.is_empty();
         let block_order: Option<Vec<usize>> = match self.ordering {
+            _ if block_order_in.is_some() => block_order_in,
             FaerOrdering::NestedDissection => Some(arael_faer::nd::order_graph(
                 &arael_faer::nd::Graph::of_blocks(&hsym),
                 arael_faer::nd::NdParams::default(),
@@ -5905,7 +5910,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 }
                 if self.sn_take() {
                     return self.setup_whole_supernodal(
-                        problem, params, grad, matrix, &partition, hsym, &eliminated, vb,
+                        problem, params, grad, matrix, &partition, hsym, &eliminated, None, vb,
                     );
                 }
             }
@@ -6074,6 +6079,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // and the declined route needs exactly this object.
         let mut declined_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>> = None;
         let mut declined_pat: Option<(Vec<SparseIndex>, Vec<SparseIndex>)> = None;
+        // Set when the whole route was priced cheapest under nested
+        // dissection, so the block route runs the ordering that was priced.
+        let mut declined_nd: Option<arael_faer::nd::NestedDissection> = None;
+        // Which ordering won the whole route's price, for the report.
+        let mut full_is_nd = false;
         // The reduced system's symbolic factorization, when the gate built one:
         // it is exactly what the reduction needs next, so it is kept rather
         // than recomputed.
@@ -6084,6 +6094,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Verbose accounting of the one-time work, phase by phase.
         let mut t_sym_reduced = 0.0;
         let mut t_amd_full = 0.0;
+        let mut t_nd_full = 0.0;
         if let SchurPolicy::Auto { flop_margin, obvious_flop_ratio } = self.policy
             && !eliminated.is_empty()
             // Cheap pre-filter: is the reduction obviously right? When the
@@ -6116,8 +6127,33 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let s_llt = analyze(&s_pat.0, &s_pat.1, nk, s_ord);
             t_sym_reduced = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
             let t0 = vb.then(Instant::now);
-            let h_llt = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
+            let h_amd = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
             t_amd_full = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
+            // The whole route costs what its BEST ordering costs, and AMD is
+            // not always that. A trajectory that revisits -- a loop closure,
+            // a figure-8 crossing -- leaves a separator structure nested
+            // dissection exploits and AMD does not, and pricing the reduction
+            // against the worse of the two hands it the comparison.
+            let t0 = vb.then(Instant::now);
+            let nd_full = arael_faer::nd::NestedDissection::of_blocks(
+                &hsym, arael_faer::nd::NdParams::default(),
+            );
+            let h_nd = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Custom(nd_full.perm()));
+            t_nd_full = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
+            // Whichever ordering the whole route would actually run under.
+            let (h_llt, nd_won) = match (h_amd, h_nd) {
+                (Some(a), Some(d)) => {
+                    if symbolic_factor_flops(&d) < symbolic_factor_flops(&a) {
+                        (Some(d), true)
+                    } else {
+                        (Some(a), false)
+                    }
+                }
+                (a @ Some(_), None) => (a, false),
+                (None, d @ Some(_)) => (d, true),
+                (None, None) => (None, false),
+            };
+            full_is_nd = nd_won;
             if let (Some(sl), Some(hl)) = (s_llt, h_llt)
                 && hl.len_val() > 0
             {
@@ -6136,6 +6172,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     eliminated.clear();
                     declined_llt = Some(hl);
                     declined_pat = Some(h_pat);
+                    // The block route needs the same ordering the price was
+                    // taken at, in block units.
+                    if nd_won {
+                        declined_nd = Some(nd_full);
+                    }
                 } else {
                     reduced_llt = Some(sl);
                 }
@@ -6148,10 +6189,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             String::from(" (skipped)")
         } else {
             std::format!(
-                " (ordering the reduced system {:.1}, AMD over the whole system {:.1}{})",
+                " (ordering the reduced system {:.1}, AMD over the whole system {:.1}, \
+                 nested dissection over it {:.1}{})",
                 t_sym_reduced,
                 t_amd_full,
-                if reduced { ", the latter only to compare against" } else { ", the one now in use" },
+                t_nd_full,
+                if reduced { ", the last two only to compare against" }
+                else { ", the cheaper of the last two now in use" },
             )
         };
         if vb {
@@ -6171,7 +6215,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 (Some(flop), Some((red, full))) => info!(
                     "schur: {} -- not obviously right ({}), so both routes were \
                      priced exactly: reduction + reduced factor {:.2e} flops/iter \
-                     vs whole factor {:.2e} -- {} (factor sizes {:.2}x)",
+                     vs whole factor {:.2e} under {} -- {} (factor sizes {:.2}x)",
                     if reduced { "REDUCING" } else { "NOT reducing, factorizing the whole system" },
                     if keeps_most_of_the_system {
                         std::format!(
@@ -6184,7 +6228,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     },
                     red,
                     full,
-                    if reduced { "the reduced route wins" } else { "the whole system is cheaper" },
+                    if full_is_nd { "nested dissection" } else { "AMD" },
+                    match (reduced, red <= full) {
+                        (true, true) => "the reduced route is cheaper",
+                        (true, false) => "the reduced route costs more, but stays inside the margin",
+                        (false, _) => "the whole system is cheaper",
+                    },
                     fill_ratio.unwrap_or(f64::NAN),
                 ),
                 _ => info!("schur: REDUCING -- forced, nothing analysed"),
@@ -6231,7 +6280,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // route reuses that analysis instead of rebuilding it.
             let cost = if self.sn_take() {
                 let cost = self.setup_whole_supernodal(
-                    problem, params, grad, matrix, &partition, hsym, &eliminated, vb,
+                    problem, params, grad, matrix, &partition, hsym, &eliminated,
+                    declined_nd.map(|nd| nd.block_order().to_vec()), vb,
                 );
                 // The route setup writes a bare whole-system plan; the
                 // decline's evidence (the priced comparison) belongs in it.
