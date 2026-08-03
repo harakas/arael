@@ -89,8 +89,8 @@ A plane-landmark SLAM benchmark, where six systems each parameterize the
 plane normal differently: [benchmarks/plane](benchmarks/plane/README.md).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/slam-loc-dark.svg">
-  <img alt="2x2 bar charts of per-iteration solve time (top) and peak process memory (bottom): landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="benchmarks/charts/v0.8.1/slam-loc-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-dark.svg">
+  <img alt="2x2 bar charts of per-iteration solve time (top) and peak process memory (bottom): landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="benchmarks/charts/v0.8.2/slam-loc-light.svg">
 </picture>
 
 The same per-iteration metric, and the peak memory of those runs, on the

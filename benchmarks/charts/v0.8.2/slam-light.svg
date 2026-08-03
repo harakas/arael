@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="824" height="494" viewBox="0 0 824 494" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="823" height="493" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<text x="18" y="30" font-size="15" font-weight="600" fill="#0b0b0b">Monocular SLAM: per-iteration cost and one-time setup</text>
+<text x="806" y="30" font-size="11.5" text-anchor="end" fill="#85847c">arael 0.8.2</text>
+<text x="18" y="48" font-size="11.5" fill="#5f5e58">Solid: one complete iteration. Faded: the setup, paid once. Single thread, best validated configuration per system. Lower is better.</text>
+<text x="18" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">60 poses, 1,080 params -- Apple M4 Pro</text>
+<line x1="102.0" y1="78" x2="102.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="102.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="184.7" y1="78" x2="184.7" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="184.7" y="226" font-size="10" text-anchor="middle" fill="#85847c">6</text>
+<line x1="267.3" y1="78" x2="267.3" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="267.3" y="226" font-size="10" text-anchor="middle" fill="#85847c">12</text>
+<line x1="350.0" y1="78" x2="350.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="350.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">18 ms</text>
+<text x="94" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f32)</text>
+<path d="M102,81.5 L117.18666666666667,81.5 Q120.18666666666667,81.5 120.18666666666667,84.5 L120.18666666666667,90.5 Q120.18666666666667,93.5 117.18666666666667,93.5 L102,93.5 Z" fill="#2a78d6"/>
+<path d="M122.18666666666667,81.5 L126.35111111111112,81.5 Q129.35111111111112,81.5 129.35111111111112,84.5 L129.35111111111112,90.5 Q129.35111111111112,93.5 126.35111111111112,93.5 L122.18666666666667,93.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="135.4" y="91.0" font-size="10.5" font-weight="600" fill="#0b0b0b">1.3 + 0.5</text>
+<text x="94" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f64)</text>
+<path d="M102,100.5 L122.97333333333333,100.5 Q125.97333333333333,100.5 125.97333333333333,103.5 L125.97333333333333,109.5 Q125.97333333333333,112.5 122.97333333333333,112.5 L102,112.5 Z" fill="#2a78d6"/>
+<path d="M127.97333333333333,100.5 L130.89777777777778,100.5 Q133.89777777777778,100.5 133.89777777777778,103.5 L133.89777777777778,109.5 Q133.89777777777778,112.5 130.89777777777778,112.5 L127.97333333333333,112.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="139.9" y="110.0" font-size="10.5" font-weight="600" fill="#0b0b0b">1.7 + 0.4</text>
+<text x="94" y="129.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (LM)</text>
+<path d="M102,119.5 L147.77333333333334,119.5 Q150.77333333333334,119.5 150.77333333333334,122.5 L150.77333333333334,128.5 Q150.77333333333334,131.5 147.77333333333334,131.5 L102,131.5 Z" fill="#8f8e86"/>
+<path d="M152.77333333333334,119.5 L195.10222222222222,119.5 Q198.10222222222222,119.5 198.10222222222222,122.5 L198.10222222222222,128.5 Q198.10222222222222,131.5 195.10222222222222,131.5 L152.77333333333334,131.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="204.1" y="129.0" font-size="10.5" fill="#0b0b0b">3.5 + 3.3</text>
+<text x="94" y="148.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres (LM)</text>
+<path d="M102,138.5 L170.92000000000002,138.5 Q173.92000000000002,138.5 173.92000000000002,141.5 L173.92000000000002,147.5 Q173.92000000000002,150.5 170.92000000000002,150.5 L102,150.5 Z" fill="#8f8e86"/>
+<path d="M175.92000000000002,138.5 L246.35555555555558,138.5 Q249.35555555555558,138.5 249.35555555555558,141.5 L249.35555555555558,147.5 Q249.35555555555558,150.5 246.35555555555558,150.5 L175.92000000000002,150.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="255.4" y="148.0" font-size="10.5" fill="#0b0b0b">5.2 + 5.3</text>
+<text x="94" y="167.0" font-size="11.5" text-anchor="end" fill="#5f5e58">SymForce (f64)</text>
+<path d="M102,157.5 L172.8488888888889,157.5 Q175.8488888888889,157.5 175.8488888888889,160.5 L175.8488888888889,166.5 Q175.8488888888889,169.5 172.8488888888889,169.5 L102,169.5 Z" fill="#8f8e86"/>
+<path d="M177.8488888888889,157.5 L305.32444444444445,157.5 Q308.32444444444445,157.5 308.32444444444445,160.5 L308.32444444444445,166.5 Q308.32444444444445,169.5 305.32444444444445,169.5 L177.8488888888889,169.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="314.3" y="167.0" font-size="10.5" fill="#0b0b0b">5.4 + 9.5</text>
+<text x="94" y="186.0" font-size="11.5" text-anchor="end" fill="#5f5e58">factrs (LM)</text>
+<path d="M102,176.5 L213.07999999999998,176.5 Q216.07999999999998,176.5 216.07999999999998,179.5 L216.07999999999998,185.5 Q216.07999999999998,188.5 213.07999999999998,188.5 L102,188.5 Z" fill="#8f8e86"/>
+<path d="M218.07999999999998,176.5 L301.1911111111111,176.5 Q304.1911111111111,176.5 304.1911111111111,179.5 L304.1911111111111,185.5 Q304.1911111111111,188.5 301.1911111111111,188.5 L218.07999999999998,188.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="310.2" y="186.0" font-size="10.5" fill="#0b0b0b">8.3 + 6.2</text>
+<text x="94" y="205.0" font-size="11.5" text-anchor="end" fill="#5f5e58">GTSAM (LM)</text>
+<path d="M102,195.5 L236.08888888888887,195.5 Q239.08888888888887,195.5 239.08888888888887,198.5 L239.08888888888887,204.5 Q239.08888888888887,207.5 236.08888888888887,207.5 L102,207.5 Z" fill="#8f8e86"/>
+<path d="M241.08888888888887,195.5 L257.37777777777774,195.5 Q260.37777777777774,195.5 260.37777777777774,198.5 L260.37777777777774,204.5 Q260.37777777777774,207.5 257.37777777777774,207.5 L241.08888888888887,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="266.4" y="205.0" font-size="10.5" fill="#0b0b0b">9.9 + 1.4</text>
+<text x="420" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">300 poses, 5,400 params -- Apple M4 Pro</text>
+<line x1="504.0" y1="78" x2="504.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="504.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="553.6" y1="78" x2="553.6" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="553.6" y="226" font-size="10" text-anchor="middle" fill="#85847c">50</text>
+<line x1="603.2" y1="78" x2="603.2" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="603.2" y="226" font-size="10" text-anchor="middle" fill="#85847c">100</text>
+<line x1="652.8" y1="78" x2="652.8" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="652.8" y="226" font-size="10" text-anchor="middle" fill="#85847c">150</text>
+<line x1="702.4" y1="78" x2="702.4" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="702.4" y="226" font-size="10" text-anchor="middle" fill="#85847c">200</text>
+<line x1="752.0" y1="78" x2="752.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="752.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">250 ms</text>
+<text x="496" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f32)</text>
+<path d="M504,81.5 L526.38528,81.5 Q529.38528,81.5 529.38528,84.5 L529.38528,90.5 Q529.38528,93.5 526.38528,93.5 L504,93.5 Z" fill="#2a78d6"/>
+<path d="M531.38528,81.5 L535.08128,81.5 Q538.08128,81.5 538.08128,84.5 L538.08128,90.5 Q538.08128,93.5 535.08128,93.5 L531.38528,93.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="544.1" y="91.0" font-size="10.5" font-weight="600" fill="#0b0b0b">25.6 + 6.8</text>
+<text x="496" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f64)</text>
+<path d="M504,100.5 L539.99552,100.5 Q542.99552,100.5 542.99552,103.5 L542.99552,109.5 Q542.99552,112.5 539.99552,112.5 L504,112.5 Z" fill="#2a78d6"/>
+<path d="M544.99552,100.5 L549.6041600000001,100.5 Q552.6041600000001,100.5 552.6041600000001,103.5 L552.6041600000001,109.5 Q552.6041600000001,112.5 549.6041600000001,112.5 L544.99552,112.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="558.6" y="110.0" font-size="10.5" font-weight="600" fill="#0b0b0b">39.3 + 7.7</text>
+<text x="496" y="129.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (LM)</text>
+<path d="M504,119.5 L562.61312,119.5 Q565.61312,119.5 565.61312,122.5 L565.61312,128.5 Q565.61312,131.5 562.61312,131.5 L504,131.5 Z" fill="#8f8e86"/>
+<path d="M567.61312,119.5 L616.36576,119.5 Q619.36576,119.5 619.36576,122.5 L619.36576,128.5 Q619.36576,131.5 616.36576,131.5 L567.61312,131.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="625.4" y="129.0" font-size="10.5" fill="#0b0b0b">62.1 + 52.2</text>
+<text x="496" y="148.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres (LM)</text>
+<path d="M504,138.5 L584.35776,138.5 Q587.35776,138.5 587.35776,141.5 L587.35776,147.5 Q587.35776,150.5 584.35776,150.5 L504,150.5 Z" fill="#8f8e86"/>
+<path d="M589.35776,138.5 L666.25344,138.5 Q669.25344,138.5 669.25344,141.5 L669.25344,147.5 Q669.25344,150.5 666.25344,150.5 L589.35776,150.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="675.3" y="148.0" font-size="10.5" fill="#0b0b0b">84.0 + 80.5</text>
+<text x="496" y="167.0" font-size="11.5" text-anchor="end" fill="#5f5e58">factrs (LM)</text>
+<path d="M504,157.5 L623.54176,157.5 Q626.54176,157.5 626.54176,160.5 L626.54176,166.5 Q626.54176,169.5 623.54176,169.5 L504,169.5 Z" fill="#8f8e86"/>
+<path d="M628.54176,157.5 L676.7587199999999,157.5 Q679.7587199999999,157.5 679.7587199999999,160.5 L679.7587199999999,166.5 Q679.7587199999999,169.5 676.7587199999999,169.5 L628.54176,169.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="685.8" y="167.0" font-size="10.5" fill="#0b0b0b">123.5 + 51.6</text>
+<text x="496" y="186.0" font-size="11.5" text-anchor="end" fill="#5f5e58">SymForce (f64)</text>
+<path d="M504,176.5 L634.76128,176.5 Q637.76128,176.5 637.76128,179.5 L637.76128,185.5 Q637.76128,188.5 634.76128,188.5 L504,188.5 Z" fill="#8f8e86"/>
+<path d="M639.76128,176.5 L733.8483200000001,176.5 Q736.8483200000001,176.5 736.8483200000001,179.5 L736.8483200000001,185.5 Q736.8483200000001,188.5 733.8483200000001,188.5 L639.76128,188.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="742.8" y="186.0" font-size="10.5" fill="#0b0b0b">134.8 + 97.9</text>
+<text x="496" y="205.0" font-size="11.5" text-anchor="end" fill="#5f5e58">GTSAM (LM)</text>
+<path d="M504,195.5 L659.5513599999999,195.5 Q662.5513599999999,195.5 662.5513599999999,198.5 L662.5513599999999,204.5 Q662.5513599999999,207.5 659.5513599999999,207.5 L504,207.5 Z" fill="#8f8e86"/>
+<path d="M664.5513599999999,195.5 L674.0307199999999,195.5 Q677.0307199999999,195.5 677.0307199999999,198.5 L677.0307199999999,204.5 Q677.0307199999999,207.5 674.0307199999999,207.5 L664.5513599999999,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="683.0" y="205.0" font-size="10.5" fill="#0b0b0b">159.8 + 12.6</text>
+<text x="18" y="263" font-size="12.5" font-weight="600" fill="#0b0b0b">60 poses, 1,080 params -- Raspberry Pi 5</text>
+<line x1="102.0" y1="271" x2="102.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="102.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="164.0" y1="271" x2="164.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="164.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">16</text>
+<line x1="226.0" y1="271" x2="226.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="226.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">32</text>
+<line x1="288.0" y1="271" x2="288.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="288.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">48</text>
+<line x1="350.0" y1="271" x2="350.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="350.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">64 ms</text>
+<text x="94" y="284.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f32)</text>
+<path d="M102,274.5 L123.14125,274.5 Q126.14125,274.5 126.14125,277.5 L126.14125,283.5 Q126.14125,286.5 123.14125,286.5 L102,286.5 Z" fill="#2a78d6"/>
+<path d="M128.14125,274.5 L132.54250000000002,274.5 Q135.54250000000002,274.5 135.54250000000002,277.5 L135.54250000000002,283.5 Q135.54250000000002,286.5 132.54250000000002,286.5 L128.14125,286.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="141.5" y="284.0" font-size="10.5" font-weight="600" fill="#0b0b0b">6.2 + 1.9</text>
+<text x="94" y="303.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f64)</text>
+<path d="M102,293.5 L132.44125,293.5 Q135.44125,293.5 135.44125,296.5 L135.44125,302.5 Q135.44125,305.5 132.44125,305.5 L102,305.5 Z" fill="#2a78d6"/>
+<path d="M137.44125,293.5 L143.16,293.5 Q146.16,293.5 146.16,296.5 L146.16,302.5 Q146.16,305.5 143.16,305.5 L137.44125,305.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="152.2" y="303.0" font-size="10.5" font-weight="600" fill="#0b0b0b">8.6 + 2.2</text>
+<text x="94" y="322.0" font-size="11.5" text-anchor="end" fill="#5f5e58">SymForce (f64)</text>
+<path d="M102,312.5 L165.76625,312.5 Q168.76625,312.5 168.76625,315.5 L168.76625,321.5 Q168.76625,324.5 165.76625,324.5 L102,324.5 Z" fill="#8f8e86"/>
+<path d="M170.76625,312.5 L323.1925,312.5 Q326.1925,312.5 326.1925,315.5 L326.1925,321.5 Q326.1925,324.5 323.1925,324.5 L170.76625,324.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="332.2" y="322.0" font-size="10.5" fill="#0b0b0b">17.2 + 40.1</text>
+<text x="94" y="341.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (LM)</text>
+<path d="M102,331.5 L167.78125,331.5 Q170.78125,331.5 170.78125,334.5 L170.78125,340.5 Q170.78125,343.5 167.78125,343.5 L102,343.5 Z" fill="#8f8e86"/>
+<path d="M172.78125,331.5 L220.15625,331.5 Q223.15625,331.5 223.15625,334.5 L223.15625,340.5 Q223.15625,343.5 220.15625,343.5 L172.78125,343.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="229.2" y="341.0" font-size="10.5" fill="#0b0b0b">17.8 + 13.0</text>
+<text x="94" y="360.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres (LM)</text>
+<path d="M102,350.5 L196.30124999999998,350.5 Q199.30124999999998,350.5 199.30124999999998,353.5 L199.30124999999998,359.5 Q199.30124999999998,362.5 196.30124999999998,362.5 L102,362.5 Z" fill="#8f8e86"/>
+<path d="M201.30124999999998,350.5 L273.9025,350.5 Q276.9025,350.5 276.9025,353.5 L276.9025,359.5 Q276.9025,362.5 273.9025,362.5 L201.30124999999998,362.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="282.9" y="360.0" font-size="10.5" fill="#0b0b0b">25.1 + 19.5</text>
+<text x="94" y="379.0" font-size="11.5" text-anchor="end" fill="#5f5e58">factrs (LM)</text>
+<path d="M102,369.5 L243.65375,369.5 Q246.65375,369.5 246.65375,372.5 L246.65375,378.5 Q246.65375,381.5 243.65375,381.5 L102,381.5 Z" fill="#8f8e86"/>
+<path d="M248.65375,369.5 L324.20000000000005,369.5 Q327.20000000000005,369.5 327.20000000000005,372.5 L327.20000000000005,378.5 Q327.20000000000005,381.5 324.20000000000005,381.5 L248.65375,381.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="333.2" y="379.0" font-size="10.5" fill="#0b0b0b">37.3 + 20.3</text>
+<text x="94" y="398.0" font-size="11.5" text-anchor="end" fill="#5f5e58">GTSAM (LM)</text>
+<path d="M102,388.5 L289.185,388.5 Q292.185,388.5 292.185,391.5 L292.185,397.5 Q292.185,400.5 289.185,400.5 L102,400.5 Z" fill="#8f8e86"/>
+<path d="M294.185,388.5 L314.745,388.5 Q317.745,388.5 317.745,391.5 L317.745,397.5 Q317.745,400.5 314.745,400.5 L294.185,400.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="323.7" y="398.0" font-size="10.5" fill="#0b0b0b">49.1 + 6.1</text>
+<text x="420" y="263" font-size="12.5" font-weight="600" fill="#0b0b0b">60 poses, 1,080 params -- Raspberry Pi Zero W (ARMv6)</text>
+<line x1="504.0" y1="271" x2="504.0" y2="331" stroke="#e1e0d9" stroke-width="1"/>
+<text x="504.0" y="343" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="566.0" y1="271" x2="566.0" y2="331" stroke="#e1e0d9" stroke-width="1"/>
+<text x="566.0" y="343" font-size="10" text-anchor="middle" fill="#85847c">500</text>
+<line x1="628.0" y1="271" x2="628.0" y2="331" stroke="#e1e0d9" stroke-width="1"/>
+<text x="628.0" y="343" font-size="10" text-anchor="middle" fill="#85847c">1000</text>
+<line x1="690.0" y1="271" x2="690.0" y2="331" stroke="#e1e0d9" stroke-width="1"/>
+<text x="690.0" y="343" font-size="10" text-anchor="middle" fill="#85847c">1500</text>
+<line x1="752.0" y1="271" x2="752.0" y2="331" stroke="#e1e0d9" stroke-width="1"/>
+<text x="752.0" y="343" font-size="10" text-anchor="middle" fill="#85847c">2000 ms</text>
+<text x="496" y="284.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f32)</text>
+<path d="M504,274.5 L526.9284,274.5 Q529.9284,274.5 529.9284,277.5 L529.9284,283.5 Q529.9284,286.5 526.9284,286.5 L504,286.5 Z" fill="#2a78d6"/>
+<path d="M531.9284,274.5 L534.28892,274.5 Q537.28892,274.5 537.28892,277.5 L537.28892,283.5 Q537.28892,286.5 534.28892,286.5 L531.9284,286.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="543.3" y="284.0" font-size="10.5" font-weight="600" fill="#0b0b0b">209.1 + 43.2</text>
+<text x="496" y="303.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f64)</text>
+<path d="M504,293.5 L541.92868,293.5 Q544.92868,293.5 544.92868,296.5 L544.92868,302.5 Q544.92868,305.5 541.92868,305.5 L504,305.5 Z" fill="#2a78d6"/>
+<path d="M546.92868,293.5 L549.98236,293.5 Q552.98236,293.5 552.98236,296.5 L552.98236,302.5 Q552.98236,305.5 549.98236,305.5 L546.92868,305.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="559.0" y="303.0" font-size="10.5" font-weight="600" fill="#0b0b0b">330.1 + 48.8</text>
+<text x="496" y="322.0" font-size="11.5" text-anchor="end" fill="#5f5e58">factrs (LM)</text>
+<path d="M504,312.5 L657.06392,312.5 Q660.06392,312.5 660.06392,315.5 L660.06392,321.5 Q660.06392,324.5 657.06392,324.5 L504,324.5 Z" fill="#8f8e86"/>
+<path d="M662.06392,312.5 L697.4034800000001,312.5 Q700.4034800000001,312.5 700.4034800000001,315.5 L700.4034800000001,321.5 Q700.4034800000001,324.5 697.4034800000001,324.5 L662.06392,324.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="706.4" y="322.0" font-size="10.5" fill="#0b0b0b">1258.6 + 309.2</text>
+<text x="18" y="442" font-size="10.5" fill="#85847c">Setup is assembly, ordering and symbolic factorization: done once, reused by every later iteration.</text>
+<text x="18" y="456" font-size="10.5" fill="#85847c">Ceres is sparse_schur, SymForce is f64; the inexact iterative_schur is omitted. Every bar reaches the common optimum.</text>
+<text x="18" y="470" font-size="10.5" fill="#85847c">The Pi Zero W (ARMv6) has no C++ cross-build, so only arael and factrs run there.</text>
+</svg>

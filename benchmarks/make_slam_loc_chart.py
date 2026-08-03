@@ -21,17 +21,18 @@
 # the setup, which the second chart draws.
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
-    # 2026-07-30, min of 32 rounds (benchmarks/slam README, 300-pose table). Best
+    # 2026-08-03, min of 32 rounds (benchmarks/slam README, 300-pose table). Best
     # validated configuration per system: Ceres is sparse_schur (iterative_schur
-    # is inexact and misses the gate), SymForce is f64.
+    # is inexact and misses the gate), SymForce is f64. The arael CG rows are
+    # inexact too, and have no full-iter to plot.
     ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 1, [
-        ("arael (f32)", 27.12, 33.24, "arael"),
-        ("arael (f64)", 40.25, 46.47, "arael"),
-        ("g2o (LM)", 60.80, 110.33, "other"),
-        ("Ceres (LM)", 83.45, 159.51, "other"),
-        ("factrs (LM)", 122.72, 177.29, "other"),
-        ("SymForce (f64)", 129.57, 226.54, "other"),
-        ("GTSAM (LM)", 152.02, 165.94, "other"),
+        ("arael (f32)", 25.59, 32.34, "arael"),
+        ("arael (f64)", 39.31, 46.98, "arael"),
+        ("g2o (LM)", 62.11, 114.28, "other"),
+        ("Ceres (LM)", 84.03, 164.57, "other"),
+        ("factrs (LM)", 123.53, 175.16, "other"),
+        ("SymForce (f64)", 134.84, 232.71, "other"),
+        ("GTSAM (LM)", 159.83, 172.41, "other"),
     ]),
     # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
@@ -53,13 +54,13 @@ PANELS = [
 # Per panel: (title, value decimals, [(label, peak_mb, kind)])
 MEM_PANELS = [
     ("Landmark SLAM -- peak process memory", 1, [
-        ("arael (f32)", 35.1, "arael"),
-        ("arael (f64)", 53.6, "arael"),
+        ("arael (f32)", 39.5, "arael"),
+        ("arael (f64)", 62.4, "arael"),
         ("Ceres (LM)", 87.1, "other"),
-        ("g2o (LM)", 114.2, "other"),
-        ("SymForce (f64)", 177.1, "other"),
-        ("factrs (LM)", 188.7, "other"),
-        ("GTSAM (LM)", 607.8, "other"),
+        ("g2o (LM)", 114.3, "other"),
+        ("SymForce (f64)", 177.0, "other"),
+        ("factrs (LM)", 188.5, "other"),
+        ("GTSAM (LM)", 607.7, "other"),
     ]),
     ("Localization -- peak process memory", 1, [
         ("arael (f32)", 4.3, "arael"),
