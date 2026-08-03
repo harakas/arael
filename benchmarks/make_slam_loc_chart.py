@@ -73,12 +73,51 @@ MEM_PANELS = [
     ]),
 ]
 
+class Axis:
+    """Value to a fraction of the plot width, plus the ticks to draw.
+
+    Linear by default. With `break_at` set, values above it are compressed
+    logarithmically into the last `tail` of the width. That is for a panel
+    with one outlier: GTSAM's SLAM peak is 3x the next system and 15x arael's,
+    and on a linear axis it flattens every other bar into the left margin.
+    """
+
+    def __init__(self, x_max, tick, break_at=None, tail=0.28, break_ticks=()):
+        self.x_max, self.tick = x_max, tick
+        self.break_at, self.tail, self.break_ticks = break_at, tail, break_ticks
+
+    def pos(self, v):
+        """Fraction of the plot width, 0 to 1."""
+        if self.break_at is None:
+            return v / self.x_max
+        head = 1.0 - self.tail
+        if v <= self.break_at:
+            return v / self.break_at * head
+        import math
+        span = math.log(self.x_max / self.break_at)
+        return head + math.log(v / self.break_at) / span * self.tail
+
+    def ticks(self):
+        """(value, fraction, is_break) up the axis, in drawing order."""
+        out, t = [], 0.0
+        top = self.break_at if self.break_at is not None else self.x_max
+        while t <= top + 1e-9:
+            out.append((t, self.pos(t), self.break_at is not None and t == top))
+            t += self.tick
+        for t in self.break_ticks:
+            out.append((t, self.pos(t), False))
+        return out
+
+
 # Axis per panel, per chart: the two charts plot different quantities, so they do
-# not share a scale. (x_max, tick), in PANELS order.
+# not share a scale. In PANELS order.
 AXES = {
-    "iter":  [(170.0, 50.0), (16.0, 4.0)],
-    "setup": [(240.0, 60.0), (25.0, 5.0)],
-    "mem":   [(640.0, 160.0), (24.0, 6.0)],
+    "iter":  [Axis(170.0, 50.0), Axis(16.0, 4.0)],
+    "setup": [Axis(240.0, 60.0), Axis(25.0, 5.0)],
+    # SLAM memory is linear to 200 MB and logarithmic above, so the field is
+    # readable against arael without dropping GTSAM's bar off the panel.
+    "mem":   [Axis(640.0, 50.0, break_at=200.0, break_ticks=(400.0, 640.0)),
+              Axis(24.0, 6.0)],
 }
 
 # The two charts. "iter" is the front-page one: one bar, the durable cross-system
@@ -101,6 +140,8 @@ CHARTS = {
             ("Peak memory is the process high-water mark (VmHWM), each solver "
              "measured in a process of its own. Each row is ordered by its own "
              "metric."),
+            ("The SLAM memory axis is linear to 200 MB and logarithmic past "
+             "the dashed line, so one outlier does not flatten the rest."),
         ],
     },
     "setup": {
@@ -120,6 +161,8 @@ CHARTS = {
 
 # Appended to both charts.
 FOOT = [
+    ("The SLAM scene has no loop closure: the trajectory does not revisit, "
+     "so each landmark is seen from one run of consecutive poses."),
     ("Every bar reaches its problem's common optimum, cross-validated "
      "against all systems."),
     ("arael solves the SLAM panel with its Schur solver, the localization "
@@ -173,7 +216,7 @@ def bar_path(x0, y, w, h, r):
             f"L{x0},{y + h} Z")
 
 
-def render_panel(s, c, px, py, title, x_max, tick, decimals, rows,
+def render_panel(s, c, px, py, title, axis, decimals, rows,
                  with_setup, plot_w, unit):
     plot_x = px + LABEL_W
     plot_top = py + PANEL_TITLE_H
@@ -181,17 +224,19 @@ def render_panel(s, c, px, py, title, x_max, tick, decimals, rows,
     s.append(f'<text x="{px}" y="{py + 12}" font-size="12.5" '
              f'font-weight="600" fill="{c["ink"]}">{title}</text>')
     # gridlines + ticks
-    t = 0.0
-    while t <= x_max + 1e-9:
-        x = plot_x + t / x_max * plot_w
+    ticks = axis.ticks()
+    for t, frac, is_break in ticks:
+        x = plot_x + frac * plot_w
+        # The break is where the scale changes, so it is drawn as a broken
+        # line rather than another gridline.
+        dash = ' stroke-dasharray="2 2"' if is_break else ""
         s.append(f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" '
                  f'y2="{plot_top + plot_h + 3}" stroke="{c["grid"]}" '
-                 f'stroke-width="1"/>')
-        label = f"{t:.0f} {unit}" if t + tick > x_max + 1e-9 else f"{t:.0f}"
+                 f'stroke-width="1"{dash}/>')
+        label = f"{t:.0f} {unit}" if t == ticks[-1][0] else f"{t:.0f}"
         s.append(f'<text x="{x:.1f}" y="{plot_top + plot_h + 15}" '
                  f'font-size="10" text-anchor="middle" '
                  f'fill="{c["muted"]}">{label}</text>')
-        t += tick
     for i, row in enumerate(rows):
         # Time rows carry (label, full, first, kind); memory rows have no
         # second segment and drop the middle field.
@@ -205,14 +250,14 @@ def render_panel(s, c, px, py, title, x_max, tick, decimals, rows,
         s.append(f'<text x="{plot_x - 8}" y="{ty:.1f}" font-size="11.5" '
                  f'text-anchor="end"{weight} fill="{name_ink}">{label}</text>')
         fill = c["arael"] if is_arael else c["other"]
-        w = full / x_max * plot_w
+        w = axis.pos(full) * plot_w
         s.append(f'<path d="{bar_path(plot_x, y, w, BAR_H, 3)}" fill="{fill}"/>')
         end, value = plot_x + w, f"{full:.{decimals}f}"
         if with_setup:
             # Setup is a measured difference, so on a system that has none it can
             # land marginally below zero (arael's band solver on the Pi 5).
             setup = max(0.0, first - full)
-            w2 = setup / x_max * plot_w
+            w2 = (axis.pos(first) - axis.pos(full)) * plot_w
             if w2 > 0.5:
                 x2 = plot_x + w + 2   # 2px surface gap between the segments
                 s.append(f'<path d="{bar_path(x2, y, w2, BAR_H, 3)}" '
@@ -278,9 +323,8 @@ def render(theme, chart):
     for bi, (panels, axis_key, unit, with_setup) in enumerate(bands):
         for k, (title, decimals, rows) in enumerate(panels):
             px = MARGIN + k * (PANEL_W + COL_GAP)
-            x_max, tick = AXES[axis_key][k]
-            render_panel(s, c, px, band_y[bi], title, x_max, tick, decimals,
-                         rows, with_setup, plot_w, unit)
+            render_panel(s, c, px, band_y[bi], title, AXES[axis_key][k],
+                         decimals, rows, with_setup, plot_w, unit)
 
     for i, line in enumerate(foot):
         s.append(f'<text x="{MARGIN}" y="{foot_y + i * 14}" font-size="10.5" '
