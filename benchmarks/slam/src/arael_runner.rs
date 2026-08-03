@@ -368,6 +368,35 @@ pub fn envelope_mode() -> arael::simple_lm::EnvelopeMode {
     }
 }
 
+// SLAM_SCHUR=auto|force|never picks whether the landmarks are marginalized.
+// `auto` (the default) prices both routes. A typo is an error, not a silent
+// fallback.
+pub fn schur_policy() -> arael::simple_lm::SchurPolicy {
+    use arael::simple_lm::SchurPolicy;
+    match std::env::var("SLAM_SCHUR").as_deref() {
+        Err(_) | Ok("auto") => SchurPolicy::default(),
+        Ok("force") => SchurPolicy::Force,
+        Ok("never") => SchurPolicy::Never,
+        Ok(other) => panic!("SLAM_SCHUR: expected auto, force or never, got {:?}", other),
+    }
+}
+
+// SLAM_ORDERING=auto|amd|nd|natural|marginalize-first orders whichever system
+// is factorized. `auto` (the default) is arael's own rule. A typo is an error.
+pub fn ordering() -> arael::simple_lm::FaerOrdering {
+    use arael::simple_lm::FaerOrdering as O;
+    match std::env::var("SLAM_ORDERING").as_deref() {
+        Err(_) | Ok("auto") => O::Auto,
+        Ok("amd") => O::Amd,
+        Ok("nd") => O::NestedDissection,
+        Ok("natural") => O::Natural,
+        Ok("marginalize-first") => O::MarginalizeFirst,
+        Ok(other) => panic!(
+            "SLAM_ORDERING: expected auto, amd, nd, natural or marginalize-first, got {:?}",
+            other),
+    }
+}
+
 // SLAM_PANEL_WIDTH=N sets the envelope factorization's super-panel width,
 // for sweeping that curve. Unset lets arael derive it.
 fn envelope_panel_width() -> Option<usize> {
@@ -420,6 +449,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             arael::simple_lm::lm_solve(
                 params,
                 &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled())
+                    .with_policy(schur_policy())
+                    .with_ordering(ordering())
                     .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
@@ -512,6 +543,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     }
     arael::simple_lm::lm_solve(
         params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled())
+                    .with_policy(schur_policy())
+                    .with_ordering(ordering())
                     .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
