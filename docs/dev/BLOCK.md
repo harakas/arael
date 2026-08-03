@@ -723,6 +723,17 @@ nothing.
   solver's `Par` into the dense kernels -- until then, multithreaded
   users should prefer the scalar faer route, which does), then
   etree-level tasking if demand exists.
+
+  Revisit with it: `BlockSupernodalMode::Auto` takes the supernodal
+  only on a sequential solve, so `num_threads` selects the route and
+  with it the last ulp of the answer. `tests/threading.rs` pins the
+  scalar route to keep testing what it means to test -- one
+  factorization at two thread counts -- and nothing covers `Auto`
+  under threads. Once the supernodal takes `Par`, `Auto` can stop
+  branching on thread count and bit-identity across `num_threads`
+  comes back on the default route; the test should go back to the
+  default and gain the case it lost. The two routes currently agree to
+  4.6e-16 relative on that chain.
 - **P5, f32 factor + refinement**: only after threads, if ever -- the
   memory saving is real but pays with quality changes that would need
   their own validation campaign.
@@ -754,6 +765,26 @@ nothing.
 
 ## Log
 
+- 2026-08-03: `tests/threading.rs` went red on CI's rayon job, from
+  the default flip (464f332), not from that day's work: `Auto` takes
+  the supernodal only when sequential, so `num_threads` picks the
+  factorization and the two disagree in the last ulp. Verified that
+  bit-identity survives per route -- pinned to either `Never` or
+  `Always`, 1 and 4 threads match exactly -- so the test now pins the
+  scalar route and the question is deferred to the threads item in the
+  tail.
+- 2026-08-03: `EnvelopeMode::Auto` repriced. It compared the envelope
+  against faer's scalar symbolic, which stopped being the competitor
+  when the supernodal became the default for a declined envelope; it
+  now prices against a supernodal symbolic in the same natural order
+  and hands it on rather than rebuilding. Margin 0.5 against the
+  supernodal, from a bandwidth sweep on slam-300: a reduced pose
+  system holds the envelope/supernodal flop ratio at 0.87-0.98 at
+  every bandwidth (a narrow band cuts the envelope's arithmetic, but
+  splits the supernodal into small supernodes, cutting its own by
+  about as much), while a small-block narrow band sits at 0.13-0.28.
+  Only slam reaches this gate -- plane declines the reduction, bal
+  orders S by nested dissection, loc runs the band solver.
 - 2026-08-02: Flip follow-up bug, found by the user reading plane's
   verbose log: the DECLINED-reduction path (Auto weighs the reduction
   and says no) fell through to the scalar route, bypassing the new
