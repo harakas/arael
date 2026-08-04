@@ -2,8 +2,8 @@
 # chart-slam-loc-light.svg / chart-slam-loc-dark.svg and embedded in the
 # top-level README.md and src/lib.rs.
 #
-# Two panels side by side -- landmark SLAM at 300 poses on an Apple M4 Pro
-# (benchmarks/slam README, 300-pose table) and fixed-map localization at 60
+# Two panels side by side -- landmark SLAM at 1200 poses on an Apple M4 Pro
+# (benchmarks/slam README, 1200-pose figure-8 table) and localization at 60
 # poses on a Raspberry Pi 5 (benchmarks/loc README, Pi 5 table) -- over two
 # rows: ms per solver iteration, then peak memory for those same runs. One
 # bar per system showing its best validated configuration, all arael rows
@@ -21,18 +21,19 @@
 # the setup, which the second chart draws.
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
-    # 2026-08-03, min of 32 rounds (benchmarks/slam README, 300-pose table). Best
-    # validated configuration per system: Ceres is sparse_schur (iterative_schur
-    # is inexact and misses the gate), SymForce is f64. The arael CG rows are
-    # inexact too, and have no full-iter to plot.
-    ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 1, [
-        ("arael (f32)", 25.59, 32.34, "arael"),
-        ("arael (f64)", 39.31, 46.98, "arael"),
-        ("g2o (LM)", 62.11, 114.28, "other"),
-        ("Ceres (LM)", 84.03, 164.57, "other"),
-        ("factrs (LM)", 123.53, 175.16, "other"),
-        ("SymForce (f64)", 134.84, 232.71, "other"),
-        ("GTSAM (LM)", 159.83, 172.41, "other"),
+    # 2026-08-04, min of 8 rounds (benchmarks/slam README, 1200-pose figure-8
+    # table). Best validated configuration per system: Ceres is sparse_cholesky
+    # (its sparse_schur is slower on this scene, and iterative_schur is inexact
+    # and misses the gate), SymForce is f64. The arael CG rows are inexact too,
+    # and have no full-iter to plot.
+    ("Landmark SLAM -- 1200 poses, 21.6k params (Apple M4 Pro)", 1, [
+        ("arael (f32)", 203.54, 574.21, "arael"),
+        ("arael (f64)", 312.93, 725.00, "arael"),
+        ("g2o (LM)", 1075.42, 1516.79, "other"),
+        ("Ceres (LM)", 1162.71, 1430.46, "other"),
+        ("GTSAM (LM)", 1322.54, 2544.32, "other"),
+        ("factrs (LM)", 1401.12, 1764.26, "other"),
+        ("SymForce (f64)", 1695.11, 2384.76, "other"),
     ]),
     # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
@@ -54,13 +55,13 @@ PANELS = [
 # Per panel: (title, value decimals, [(label, peak_mb, kind)])
 MEM_PANELS = [
     ("Landmark SLAM -- peak process memory", 1, [
-        ("arael (f32)", 39.5, "arael"),
-        ("arael (f64)", 62.4, "arael"),
-        ("Ceres (LM)", 87.1, "other"),
-        ("g2o (LM)", 114.3, "other"),
-        ("SymForce (f64)", 177.0, "other"),
-        ("factrs (LM)", 188.5, "other"),
-        ("GTSAM (LM)", 607.7, "other"),
+        ("arael (f32)", 216.4, "arael"),
+        ("arael (f64)", 298.2, "arael"),
+        ("Ceres (LM)", 461.0, "other"),
+        ("g2o (LM)", 729.8, "other"),
+        ("SymForce (f64)", 838.7, "other"),
+        ("factrs (LM)", 865.0, "other"),
+        ("GTSAM (LM)", 4691.3, "other"),
     ]),
     ("Localization -- peak process memory", 1, [
         ("arael (f32)", 4.3, "arael"),
@@ -112,11 +113,11 @@ class Axis:
 # Axis per panel, per chart: the two charts plot different quantities, so they do
 # not share a scale. In PANELS order.
 AXES = {
-    "iter":  [Axis(170.0, 50.0), Axis(16.0, 4.0)],
-    "setup": [Axis(240.0, 60.0), Axis(25.0, 5.0)],
-    # SLAM memory is linear to 200 MB and logarithmic above, so the field is
+    "iter":  [Axis(1800.0, 600.0), Axis(16.0, 4.0)],
+    "setup": [Axis(2700.0, 900.0), Axis(25.0, 5.0)],
+    # SLAM memory is linear to 1 GB and logarithmic above, so the field is
     # readable against arael without dropping GTSAM's bar off the panel.
-    "mem":   [Axis(640.0, 50.0, break_at=200.0, break_ticks=(400.0, 640.0)),
+    "mem":   [Axis(4800.0, 250.0, break_at=1000.0, break_ticks=(2000.0, 4800.0)),
               Axis(24.0, 6.0)],
 }
 
@@ -140,8 +141,8 @@ CHARTS = {
             ("Peak memory is the process high-water mark (VmHWM), each solver "
              "measured in a process of its own. Each row is ordered by its own "
              "metric."),
-            ("The SLAM memory axis is linear to 200 MB and logarithmic past "
-             "the dashed line, so one outlier does not flatten the rest."),
+            ("The SLAM memory axis is linear to 1 GB and logarithmic past the "
+             "dashed line, so one outlier does not flatten the rest."),
         ],
     },
     "setup": {
@@ -161,12 +162,11 @@ CHARTS = {
 
 # Appended to both charts.
 FOOT = [
-    ("The SLAM scene has no loop closure: the trajectory does not revisit, "
-     "so each landmark is seen from one run of consecutive poses."),
     ("Every bar reaches its problem's common optimum, cross-validated "
      "against all systems."),
-    ("arael solves the SLAM panel with its Schur solver, the localization "
-     "panel with its band solver."),
+    ("arael factorizes the whole SLAM system under nested dissection -- on "
+     "this scene it prices the Schur reduction and declines it -- and solves "
+     "the localization panel with its band solver."),
 ]
 
 THEMES = {

@@ -1,47 +1,45 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="315" viewBox="0 0 880 315" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-<rect x="0.5" y="0.5" width="879" height="314" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="301" viewBox="0 0 880 301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="879" height="300" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
 <text x="18" y="30" font-size="15" font-weight="600" fill="#0b0b0b">Landmark SLAM and localization: per-iteration cost and one-time setup</text>
 <text x="862" y="30" font-size="11.5" text-anchor="end" fill="#85847c">arael 0.8.2</text>
 <text x="18" y="48" font-size="11.5" fill="#5f5e58">Solid: one complete iteration. Faded: the setup, paid once. Together they are what the first iteration costs.</text>
-<text x="18" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)</text>
+<text x="18" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">Landmark SLAM -- 1200 poses, 21.6k params (Apple M4 Pro)</text>
 <line x1="110.0" y1="78" x2="110.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
 <text x="110.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">0</text>
-<line x1="172.5" y1="78" x2="172.5" y2="214" stroke="#e1e0d9" stroke-width="1"/>
-<text x="172.5" y="226" font-size="10" text-anchor="middle" fill="#85847c">60</text>
-<line x1="235.0" y1="78" x2="235.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
-<text x="235.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">120</text>
-<line x1="297.5" y1="78" x2="297.5" y2="214" stroke="#e1e0d9" stroke-width="1"/>
-<text x="297.5" y="226" font-size="10" text-anchor="middle" fill="#85847c">180</text>
+<line x1="193.3" y1="78" x2="193.3" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="193.3" y="226" font-size="10" text-anchor="middle" fill="#85847c">900</text>
+<line x1="276.7" y1="78" x2="276.7" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="276.7" y="226" font-size="10" text-anchor="middle" fill="#85847c">1800</text>
 <line x1="360.0" y1="78" x2="360.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
-<text x="360.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">240 ms</text>
+<text x="360.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">2700 ms</text>
 <text x="102" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f32)</text>
-<path d="M110,81.5 L133.65625,81.5 Q136.65625,81.5 136.65625,84.5 L136.65625,90.5 Q136.65625,93.5 133.65625,93.5 L110,93.5 Z" fill="#2a78d6"/>
-<path d="M138.65625,81.5 L142.6875,81.5 Q145.6875,81.5 145.6875,84.5 L145.6875,90.5 Q145.6875,93.5 142.6875,93.5 L138.65625,93.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
-<text x="151.7" y="91.0" font-size="10.5" font-weight="600" fill="#0b0b0b">25.6 + 6.8</text>
+<path d="M110,81.5 L125.84629629629629,81.5 Q128.8462962962963,81.5 128.8462962962963,84.5 L128.8462962962963,90.5 Q128.8462962962963,93.5 125.84629629629629,93.5 L110,93.5 Z" fill="#2a78d6"/>
+<path d="M130.8462962962963,81.5 L162.1675925925926,81.5 Q165.1675925925926,81.5 165.1675925925926,84.5 L165.1675925925926,90.5 Q165.1675925925926,93.5 162.1675925925926,93.5 L130.8462962962963,93.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="171.2" y="91.0" font-size="10.5" font-weight="600" fill="#0b0b0b">203.5 + 370.7</text>
 <text x="102" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (f64)</text>
-<path d="M110,100.5 L147.94791666666666,100.5 Q150.94791666666666,100.5 150.94791666666666,103.5 L150.94791666666666,109.5 Q150.94791666666666,112.5 147.94791666666666,112.5 L110,112.5 Z" fill="#2a78d6"/>
-<path d="M152.94791666666666,100.5 L157.93749999999997,100.5 Q160.93749999999997,100.5 160.93749999999997,103.5 L160.93749999999997,109.5 Q160.93749999999997,112.5 157.93749999999997,112.5 L152.94791666666666,112.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
-<text x="166.9" y="110.0" font-size="10.5" font-weight="600" fill="#0b0b0b">39.3 + 7.7</text>
+<path d="M110,100.5 L135.975,100.5 Q138.975,100.5 138.975,103.5 L138.975,109.5 Q138.975,112.5 135.975,112.5 L110,112.5 Z" fill="#2a78d6"/>
+<path d="M140.975,100.5 L176.12962962962962,100.5 Q179.12962962962962,100.5 179.12962962962962,103.5 L179.12962962962962,109.5 Q179.12962962962962,112.5 176.12962962962962,112.5 L140.975,112.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="185.1" y="110.0" font-size="10.5" font-weight="600" fill="#0b0b0b">312.9 + 412.1</text>
 <text x="102" y="129.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (LM)</text>
-<path d="M110,119.5 L171.69791666666666,119.5 Q174.69791666666666,119.5 174.69791666666666,122.5 L174.69791666666666,128.5 Q174.69791666666666,131.5 171.69791666666666,131.5 L110,131.5 Z" fill="#8f8e86"/>
-<path d="M176.69791666666666,119.5 L228.04166666666666,119.5 Q231.04166666666666,119.5 231.04166666666666,122.5 L231.04166666666666,128.5 Q231.04166666666666,131.5 228.04166666666666,131.5 L176.69791666666666,131.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
-<text x="237.0" y="129.0" font-size="10.5" fill="#0b0b0b">62.1 + 52.2</text>
+<path d="M110,119.5 L206.57592592592593,119.5 Q209.57592592592593,119.5 209.57592592592593,122.5 L209.57592592592593,128.5 Q209.57592592592593,131.5 206.57592592592593,131.5 L110,131.5 Z" fill="#8f8e86"/>
+<path d="M211.57592592592593,119.5 L249.44351851851852,119.5 Q252.44351851851852,119.5 252.44351851851852,122.5 L252.44351851851852,128.5 Q252.44351851851852,131.5 249.44351851851852,131.5 L211.57592592592593,131.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="258.4" y="129.0" font-size="10.5" fill="#0b0b0b">1075.4 + 441.4</text>
 <text x="102" y="148.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres (LM)</text>
-<path d="M110,138.5 L194.53125,138.5 Q197.53125,138.5 197.53125,141.5 L197.53125,147.5 Q197.53125,150.5 194.53125,150.5 L110,150.5 Z" fill="#8f8e86"/>
-<path d="M199.53125,138.5 L280.4270833333333,138.5 Q283.4270833333333,138.5 283.4270833333333,141.5 L283.4270833333333,147.5 Q283.4270833333333,150.5 280.4270833333333,150.5 L199.53125,150.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
-<text x="289.4" y="148.0" font-size="10.5" fill="#0b0b0b">84.0 + 80.5</text>
-<text x="102" y="167.0" font-size="11.5" text-anchor="end" fill="#5f5e58">factrs (LM)</text>
-<path d="M110,157.5 L235.67708333333334,157.5 Q238.67708333333334,157.5 238.67708333333334,160.5 L238.67708333333334,166.5 Q238.67708333333334,169.5 235.67708333333334,169.5 L110,169.5 Z" fill="#8f8e86"/>
-<path d="M240.67708333333334,157.5 L291.45833333333337,157.5 Q294.45833333333337,157.5 294.45833333333337,160.5 L294.45833333333337,166.5 Q294.45833333333337,169.5 291.45833333333337,169.5 L240.67708333333334,169.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
-<text x="300.5" y="167.0" font-size="10.5" fill="#0b0b0b">123.5 + 51.6</text>
-<text x="102" y="186.0" font-size="11.5" text-anchor="end" fill="#5f5e58">SymForce (f64)</text>
-<path d="M110,176.5 L247.45833333333331,176.5 Q250.45833333333331,176.5 250.45833333333331,179.5 L250.45833333333331,185.5 Q250.45833333333331,188.5 247.45833333333331,188.5 L110,188.5 Z" fill="#8f8e86"/>
-<path d="M252.45833333333331,176.5 L351.40625,176.5 Q354.40625,176.5 354.40625,179.5 L354.40625,185.5 Q354.40625,188.5 351.40625,188.5 L252.45833333333331,188.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
-<text x="360.4" y="186.0" font-size="10.5" fill="#0b0b0b">134.8 + 97.9</text>
-<text x="102" y="205.0" font-size="11.5" text-anchor="end" fill="#5f5e58">GTSAM (LM)</text>
-<path d="M110,195.5 L273.48958333333337,195.5 Q276.48958333333337,195.5 276.48958333333337,198.5 L276.48958333333337,204.5 Q276.48958333333337,207.5 273.48958333333337,207.5 L110,207.5 Z" fill="#8f8e86"/>
-<path d="M278.48958333333337,195.5 L288.59375,195.5 Q291.59375,195.5 291.59375,198.5 L291.59375,204.5 Q291.59375,207.5 288.59375,207.5 L278.48958333333337,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
-<text x="297.6" y="205.0" font-size="10.5" fill="#0b0b0b">159.8 + 12.6</text>
+<path d="M110,138.5 L214.65833333333336,138.5 Q217.65833333333336,138.5 217.65833333333336,141.5 L217.65833333333336,147.5 Q217.65833333333336,150.5 214.65833333333336,150.5 L110,150.5 Z" fill="#8f8e86"/>
+<path d="M219.65833333333336,138.5 L241.45000000000005,138.5 Q244.45000000000005,138.5 244.45000000000005,141.5 L244.45000000000005,147.5 Q244.45000000000005,150.5 241.45000000000005,150.5 L219.65833333333336,150.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="250.5" y="148.0" font-size="10.5" fill="#0b0b0b">1162.7 + 267.8</text>
+<text x="102" y="167.0" font-size="11.5" text-anchor="end" fill="#5f5e58">GTSAM (LM)</text>
+<path d="M110,157.5 L229.4574074074074,157.5 Q232.4574074074074,157.5 232.4574074074074,160.5 L232.4574074074074,166.5 Q232.4574074074074,169.5 229.4574074074074,169.5 L110,169.5 Z" fill="#8f8e86"/>
+<path d="M234.4574074074074,157.5 L344.5851851851852,157.5 Q347.5851851851852,157.5 347.5851851851852,160.5 L347.5851851851852,166.5 Q347.5851851851852,169.5 344.5851851851852,169.5 L234.4574074074074,169.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="353.6" y="167.0" font-size="10.5" fill="#0b0b0b">1322.5 + 1221.8</text>
+<text x="102" y="186.0" font-size="11.5" text-anchor="end" fill="#5f5e58">factrs (LM)</text>
+<path d="M110,176.5 L236.73333333333332,176.5 Q239.73333333333332,176.5 239.73333333333332,179.5 L239.73333333333332,185.5 Q239.73333333333332,188.5 236.73333333333332,188.5 L110,188.5 Z" fill="#8f8e86"/>
+<path d="M241.73333333333332,176.5 L272.35740740740744,176.5 Q275.35740740740744,176.5 275.35740740740744,179.5 L275.35740740740744,185.5 Q275.35740740740744,188.5 272.35740740740744,188.5 L241.73333333333332,188.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="281.4" y="186.0" font-size="10.5" fill="#0b0b0b">1401.1 + 363.1</text>
+<text x="102" y="205.0" font-size="11.5" text-anchor="end" fill="#5f5e58">SymForce (f64)</text>
+<path d="M110,195.5 L263.9546296296296,195.5 Q266.9546296296296,195.5 266.9546296296296,198.5 L266.9546296296296,204.5 Q266.9546296296296,207.5 263.9546296296296,207.5 L110,207.5 Z" fill="#8f8e86"/>
+<path d="M268.9546296296296,195.5 L329.81111111111113,195.5 Q332.81111111111113,195.5 332.81111111111113,198.5 L332.81111111111113,204.5 Q332.81111111111113,207.5 329.81111111111113,207.5 L268.9546296296296,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="338.8" y="205.0" font-size="10.5" fill="#0b0b0b">1695.1 + 689.7</text>
 <text x="444" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">Localization -- 60 poses, 360 params (Raspberry Pi 5)</text>
 <line x1="536.0" y1="78" x2="536.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
 <text x="536.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">0</text>
@@ -82,7 +80,6 @@
 <path d="M675.4,195.5 L698.0,195.5 Q701.0,195.5 701.0,198.5 L701.0,204.5 Q701.0,207.5 698.0,207.5 L675.4,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
 <text x="707.0" y="205.0" font-size="10.5" fill="#0b0b0b">13.74 + 2.56</text>
 <text x="18" y="249" font-size="10.5" fill="#85847c">Setup is assembly, ordering and symbolic factorization: done once, reused by every later iteration. arael's band solver has almost none to do.</text>
-<text x="18" y="263" font-size="10.5" fill="#85847c">The SLAM scene has no loop closure: the trajectory does not revisit, so each landmark is seen from one run of consecutive poses.</text>
-<text x="18" y="277" font-size="10.5" fill="#85847c">Every bar reaches its problem's common optimum, cross-validated against all systems.</text>
-<text x="18" y="291" font-size="10.5" fill="#85847c">arael solves the SLAM panel with its Schur solver, the localization panel with its band solver.</text>
+<text x="18" y="263" font-size="10.5" fill="#85847c">Every bar reaches its problem's common optimum, cross-validated against all systems.</text>
+<text x="18" y="277" font-size="10.5" fill="#85847c">arael factorizes the whole SLAM system under nested dissection -- on this scene it prices the Schur reduction and declines it -- and solves the localization panel with its band solver.</text>
 </svg>

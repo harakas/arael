@@ -188,7 +188,7 @@ cell per machine:
 `../charts/v<version>/`: `slam-loc-*.svg`, the per-iteration chart embedded in
 the top-level README, and `slam-loc-setup-*.svg`, the one further up. Both read
 the same `PANELS` table -- the localization panel from the Raspberry Pi 5 rows,
-the SLAM panel from `benchmarks/slam`'s 300-pose rows. `slam-loc-*.svg` carries a
+the SLAM panel from `benchmarks/slam`'s 1200-pose figure-8 rows. `slam-loc-*.svg` carries a
 second row of panels for peak memory, from `MEM_PANELS` and the `peak MB` column
 of those same two tables.
 

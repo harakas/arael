@@ -57,8 +57,6 @@ SUBTITLE = ("Solid: one complete iteration. Faded: the setup, paid once. "
             "Single thread, best validated configuration per system. "
             "Lower is better.")
 FOOT = [
-    ("The scene has no loop closure: the trajectory does not revisit, so "
-     "each landmark is seen from one run of consecutive poses."),
     ("Setup is assembly, ordering and symbolic factorization: done once, "
      "reused by every later iteration."),
     ("Ceres is sparse_schur, SymForce is f64; the inexact iterative_schur "

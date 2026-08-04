@@ -148,8 +148,8 @@
 //! Ceres and g2o):
 //! [benchmarks/bal](https://github.com/harakas/arael/tree/master/benchmarks/bal).
 //! A heterogeneous monocular SLAM benchmark (six factor types, seven
-//! systems), without loop closure in its main tables and with a closed loop
-//! and a figure-8 in their own, including a Raspberry Pi edge run:
+//! systems), over open, loop-closing and figure-8 trajectories and
+//! including a Raspberry Pi edge run:
 //! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
 //! A plane-landmark SLAM benchmark, where six systems each parameterize the
 //! plane normal differently:
@@ -157,7 +157,7 @@
 //!
 //! <picture>
 //!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-dark.svg">
-//!   <img alt="2x2 bar charts of per-iteration solve time (top) and peak process memory (bottom): landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-light.svg">
+//!   <img alt="2x2 bar charts of per-iteration solve time (top) and peak process memory (bottom): landmark SLAM at 1200 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-light.svg">
 //! </picture>
 //!
 //! The same per-iteration metric, and the peak memory of those runs, on
