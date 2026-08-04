@@ -9,3 +9,7 @@ tmp/
 __pycache__
 benchmarks/robust_pgo/
 benchmarks/registration/
+
+# Local scratch: plotting scripts, dumped data, throwaway patches.
+# Never committed.
+/scratch/
