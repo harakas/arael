@@ -214,6 +214,17 @@ def _enum_property(field, enum_cls):
     return property(get, set)
 
 
+class BlockSupernodalMode(enum.IntEnum):
+    """When the block supernodal Cholesky factorizes instead of faer's
+    scalar one (matches the Rust enum), in the seats the scalar route
+    otherwise holds: the whole Hessian, and a reduced Schur system the
+    envelope route declined. AUTO takes it on a sequential solve and
+    leaves threaded solves to the scalar route."""
+    AUTO = 0
+    ALWAYS = 1
+    NEVER = 2
+
+
 class SparseOptions(ctypes.Structure):
     """The sparse backend's options (mirror of arael's
     SparseFaerOptions): whether and when to marginalize, the
@@ -242,12 +253,20 @@ class SparseOptions(ctypes.Structure):
         ("_schur_solve", ctypes.c_uint32),
         ("cg_max_iters", ctypes.c_uint32),
         ("cg_restart_every", ctypes.c_uint32),
+        ("_block_supernodal", ctypes.c_uint32),
+        # Update-batching acceptance ratio for the block supernodal
+        # route; 0 disables batching.
+        ("block_supernodal_batch", ctypes.c_double),
+        # Memory-lean amalgamation for that route: a smaller factor,
+        # at some cost in speed.
+        ("block_supernodal_memory_lean", ctypes.c_bool),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
     ordering = _enum_property("_ordering", FaerOrdering)
     envelope = _enum_property("_envelope", EnvelopeMode)
     schur_solve = _enum_property("_schur_solve", SchurSolve)
+    block_supernodal = _enum_property("_block_supernodal", BlockSupernodalMode)
 
 
 class _OptDouble(ctypes.Structure):
@@ -285,7 +304,9 @@ class SchurPlan(ctypes.Structure):
     whether the Schur reduction ran, what it eliminated, how the
     factored system was ordered, and the evidence behind the Auto
     decisions. `envelope` says the system was factored in block form
-    under its envelope; optional statistics read as None when absent."""
+    under its envelope and `block_supernodal` that the block supernodal
+    Cholesky factorized it rather than faer's scalar one; optional
+    statistics read as None when absent."""
     _fields_ = [
         ("reduced", ctypes.c_bool),
         ("eliminated_blocks", ctypes.c_uint32),
@@ -298,6 +319,7 @@ class SchurPlan(ctypes.Structure):
         ("_ordering", _OptI32),
         ("kept_bandwidth", ctypes.c_uint32),
         ("envelope", ctypes.c_bool),
+        ("block_supernodal", ctypes.c_bool),
     ]
 
     fill_ratio = _plan_opt("_fill_ratio", float)

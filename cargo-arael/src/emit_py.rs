@@ -1017,9 +1017,10 @@ import os
 
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
-from .arael.solver import (AraelError, CovMode, DiagonalFault, EnvelopeMode,
-                           FaerOrdering, LmPreset, LmStatus, LmStep, LmTiming,
-                           LogLevel, ReducedOrdering, SchurPlan, SchurPolicy,
+from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
+                           DiagonalFault, EnvelopeMode, FaerOrdering,
+                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
+                           ReducedOrdering, SchurPlan, SchurPolicy,
                            SchurSolve, SolveFailure, SolveFailureKind)
 
 LmIter = _f.LmIter

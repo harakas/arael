@@ -78,8 +78,10 @@ surface reference); the differences are Python idiom:
   panic. `solve_sparse(cfg, opts)` takes a `SparseOptions` (filled
   with the actual Rust defaults at construction): Schur policy,
   elimination ordering, the envelope route for the reduced system,
-  supernodal, narrow band -- the `SchurPolicy` / `FaerOrdering` /
-  `EnvelopeMode` enums live beside it. `LmSession()` (optionally over
+  supernodal, narrow band, and the block supernodal Cholesky (mode,
+  batching ratio, memory-lean amalgamation) -- the `SchurPolicy` /
+  `FaerOrdering` / `EnvelopeMode` / `BlockSupernodalMode` enums live
+  beside it. `LmSession()` (optionally over
   a `SparseOptions`) keeps the sparsity analysis warm across repeated
   `sess.solve(model, cfg)` calls -- bit-identical to cold solves;
   `invalidate()` after a structural change at the same parameter

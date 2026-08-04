@@ -49,6 +49,7 @@ using arael::RouteFlops;
 using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
+using arael::BlockSupernodalMode;
 using arael::SchurSolve;
 using arael::SparseOptionsT;
 using arael::LogLevel;

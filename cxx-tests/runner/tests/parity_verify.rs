@@ -219,8 +219,8 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     // knob drives the backend (pinned by the plan it produces).
     {
         use arael::simple_lm::{
-            EnvelopeMode, FaerOrdering, SchurPolicy, SolverReport, SparseFaer,
-            SparseFaerOptions,
+            BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+            SolverReport, SparseFaer, SparseFaerOptions,
         };
         let d = SparseFaerOptions::default();
         let (fm, ofr) = match d.policy {
@@ -239,6 +239,10 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("so_narrow_band"), d.narrow_band as u8 as f64);
         assert_eq!(g("so_flop_margin"), fm);
         assert_eq!(g("so_obvious"), ofr);
+        assert!(matches!(d.block_supernodal, BlockSupernodalMode::Auto));
+        assert_eq!(g("so_block_sn"), 0.0);
+        assert_eq!(g("so_bs_batch"), d.block_supernodal_batch.unwrap_or(0.0));
+        assert_eq!(g("so_bs_lean"), d.block_supernodal_memory_lean as u8 as f64);
 
         let mut f11 = Fit::default();
         fill(&mut f11);
@@ -275,6 +279,38 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("opt2_reduced"), p12.reduced as u8 as f64);
         assert_eq!(g("opt2_envelope"), p12.envelope as u8 as f64);
         assert_eq!(g("opt2_ordering"), ord_code(p12.ordering));
+
+        // The block supernodal knobs, against the same solves in Rust.
+        let mut f13 = Fit::default();
+        fill(&mut f13);
+        let mut s13 = SparseFaer::from_options(&SparseFaerOptions::auto()
+            .with_policy(SchurPolicy::Force)
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_block_supernodal(BlockSupernodalMode::Always)
+            .with_block_supernodal_memory_lean(true));
+        let r13 = f13.solve_with(&mut s13, &cfg).unwrap();
+        let p13 = match r13.solver {
+            Some(SolverReport::Schur(p)) => p,
+            _ => panic!("forced sparse solve carried no plan"),
+        };
+        assert!(p13.block_supernodal, "Always must take the block supernodal");
+        assert_eq!(g("opt3_end"), r13.end_cost);
+        assert_eq!(g("opt3_block_sn"), p13.block_supernodal as u8 as f64);
+
+        let mut f14 = Fit::default();
+        fill(&mut f14);
+        let mut s14 = SparseFaer::from_options(&SparseFaerOptions::auto()
+            .with_policy(SchurPolicy::Force)
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_block_supernodal(BlockSupernodalMode::Never));
+        let r14 = f14.solve_with(&mut s14, &cfg).unwrap();
+        let p14 = match r14.solver {
+            Some(SolverReport::Schur(p)) => p,
+            _ => panic!("forced sparse solve carried no plan"),
+        };
+        assert!(!p14.block_supernodal, "Never must leave it to the scalar route");
+        assert_eq!(g("opt4_end"), r14.end_cost);
+        assert_eq!(g("opt4_block_sn"), p14.block_supernodal as u8 as f64);
     }
 
     // LmSession: warm solves reuse the analysis and stay bit-identical

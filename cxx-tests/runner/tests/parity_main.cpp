@@ -173,6 +173,9 @@ int main() {
     pi("so_narrow_band", so.narrow_band ? 1 : 0);
     p("so_flop_margin", so.flop_margin);
     p("so_obvious", so.obvious_flop_ratio);
+    pi("so_block_sn", long(so.block_supernodal));
+    p("so_bs_batch", so.block_supernodal_batch);
+    pi("so_bs_lean", so.block_supernodal_memory_lean ? 1 : 0);
 
     Fit f11;
     fill(f11);
@@ -200,6 +203,29 @@ int main() {
     pi("opt2_reduced", p12.reduced ? 1 : 0);
     pi("opt2_envelope", p12.envelope ? 1 : 0);
     pi("opt2_ordering", p12.ordering.has_value() ? long(p12.ordering.value()) : -1);
+
+    // The block supernodal knobs: Always takes that route where the
+    // envelope declined, Never leaves it to faer's scalar one.
+    Fit f20;
+    fill(f20);
+    SparseOptions so20;
+    so20.schur = SchurPolicy::Force;
+    so20.envelope = EnvelopeMode::Never;
+    so20.block_supernodal = BlockSupernodalMode::Always;
+    so20.block_supernodal_memory_lean = true;
+    LmResult r20 = f20.solve_sparse(cfg, so20).value();
+    p("opt3_end", r20.end_cost);
+    pi("opt3_block_sn", r20.plan().value().block_supernodal ? 1 : 0);
+
+    Fit f21;
+    fill(f21);
+    SparseOptions so21;
+    so21.schur = SchurPolicy::Force;
+    so21.envelope = EnvelopeMode::Never;
+    so21.block_supernodal = BlockSupernodalMode::Never;
+    LmResult r21 = f21.solve_sparse(cfg, so21).value();
+    p("opt4_end", r21.end_cost);
+    pi("opt4_block_sn", r21.plan().value().block_supernodal ? 1 : 0);
 
     // LmSession: warm solves reuse the analysis and stay bit-identical
     // to cold ones; a parameter-count change re-analyzes by itself.

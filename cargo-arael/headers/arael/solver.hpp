@@ -234,6 +234,17 @@ enum class EnvelopeMode : uint32_t {
     Never = 2,
 };
 
+/// When the block supernodal Cholesky factorizes instead of faer's
+/// scalar one (mirrors arael's BlockSupernodalMode), in the seats the
+/// scalar route otherwise holds: the whole Hessian, and a reduced
+/// Schur system the envelope route declined. Auto takes it on a
+/// sequential solve and leaves threaded solves to the scalar route.
+enum class BlockSupernodalMode : uint32_t {
+    Auto = 0,
+    Always = 1,
+    Never = 2,
+};
+
 /// How the reduced Schur system is solved (mirrors arael's
 /// SchurSolve): factorized, or by preconditioned conjugate gradients
 /// (Iterative forms the reduced matrix, IterativeImplicit never
@@ -275,6 +286,14 @@ struct SparseOptionsT {
     uint32_t cg_max_iters;
     /// CG restart interval; 0 = never.
     uint32_t cg_restart_every;
+    /// When the block supernodal Cholesky factorizes.
+    BlockSupernodalMode block_supernodal;
+    /// Update-batching acceptance ratio for that route; 0 disables
+    /// batching.
+    double block_supernodal_batch;
+    /// Memory-lean amalgamation for that route: a smaller factor, at
+    /// some cost in speed.
+    bool block_supernodal_memory_lean;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
@@ -400,6 +419,9 @@ struct SchurPlan {
     /// general sparse Cholesky: the reduced system when `reduced`,
     /// the whole Hessian otherwise.
     bool envelope;
+    /// Factored by the block supernodal Cholesky rather than faer's
+    /// scalar one, over the same system `envelope` refers to.
+    bool block_supernodal;
 };
 
 /// How much covariance to prepare (mirrors arael's CovMode).

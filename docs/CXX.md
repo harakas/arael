@@ -165,7 +165,9 @@ views are named by their container's nature: `PathPosesDeque`,
   Auto pricing's tuning), elimination ordering (Auto / Amd /
   MarginalizeFirst / Natural / NestedDissection), the envelope route
   for the reduced system (Auto / Always / Never, plus panel width),
-  supernodal on/off, narrow band. Constructed with the actual Rust
+  supernodal on/off, narrow band, and the block supernodal Cholesky
+  (`BlockSupernodalMode` Auto / Always / Never, its batching ratio and
+  its memory-lean amalgamation). Constructed with the actual Rust
   defaults; the one-argument `solve_sparse(cfg)` uses them.
 - **LmSession**: warm reuse over repeated sparse solves --
   `LmSession sess;` (optionally over a `SparseOptions`), then
@@ -190,9 +192,9 @@ views are named by their container's nature: `PathPosesDeque`,
   status, costs, iterations, the timing breakdown, the backend's
   plan -- and stay valid however many solves follow. `r.plan()`
   returns the sparse backend's `SchurPlan` as data (reduction taken
-  or not, eliminated/kept parameters, ordering, bandwidth, envelope
-  route, the Auto policy's evidence); empty for dense and band
-  solves. Copies of a result share ownership.
+  or not, eliminated/kept parameters, ordering, bandwidth, whether the
+  envelope or the block supernodal route factorized, the Auto policy's
+  evidence); empty for dense and band solves. Copies of a result share ownership.
 - **result / option** mirror Rust's shapes; reading the wrong side
   prints the failed check and aborts (`arael_assert_true` -- always
   on).

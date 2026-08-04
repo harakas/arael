@@ -168,6 +168,9 @@ pi("so_supernodal", 1 if so.supernodal else 0)
 pi("so_narrow_band", 1 if so.narrow_band else 0)
 p("so_flop_margin", so.flop_margin)
 p("so_obvious", so.obvious_flop_ratio)
+pi("so_block_sn", int(so.block_supernodal))
+p("so_bs_batch", so.block_supernodal_batch)
+pi("so_bs_lean", 1 if so.block_supernodal_memory_lean else 0)
 
 f11 = fit.Fit()
 fill(f11)
@@ -195,6 +198,29 @@ p12 = r12.plan
 pi("opt2_reduced", 1 if p12.reduced else 0)
 pi("opt2_envelope", 1 if p12.envelope else 0)
 pi("opt2_ordering", int(p12.ordering) if p12.ordering is not None else -1)
+
+# The block supernodal knobs: ALWAYS takes that route where the
+# envelope declined, NEVER leaves it to faer's scalar one.
+f20 = fit.Fit()
+fill(f20)
+so20 = fit.SparseOptions()
+so20.schur = fit.SchurPolicy.FORCE
+so20.envelope = fit.EnvelopeMode.NEVER
+so20.block_supernodal = fit.BlockSupernodalMode.ALWAYS
+so20.block_supernodal_memory_lean = True
+r20 = f20.solve_sparse(cfg, so20)
+p("opt3_end", r20.end_cost)
+pi("opt3_block_sn", 1 if r20.plan.block_supernodal else 0)
+
+f21 = fit.Fit()
+fill(f21)
+so21 = fit.SparseOptions()
+so21.schur = fit.SchurPolicy.FORCE
+so21.envelope = fit.EnvelopeMode.NEVER
+so21.block_supernodal = fit.BlockSupernodalMode.NEVER
+r21 = f21.solve_sparse(cfg, so21)
+p("opt4_end", r21.end_cost)
+pi("opt4_block_sn", 1 if r21.plan.block_supernodal else 0)
 
 # LmSession: warm solves reuse the analysis and stay bit-identical to
 # cold ones; a parameter-count change re-analyzes by itself.

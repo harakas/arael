@@ -389,6 +389,14 @@ pub struct CSparseOptions {
     pub cg_max_iters: u32,
     /// CG restart interval; 0 = never.
     pub cg_restart_every: u32,
+    /// BlockSupernodalMode: 0 Auto, 1 Always, 2 Never. Auto takes the
+    /// block supernodal Cholesky on a sequential solve.
+    pub block_supernodal: u32,
+    /// Update-batching acceptance ratio for the block supernodal route;
+    /// 0 disables batching.
+    pub block_supernodal_batch: f64,
+    /// Memory-lean amalgamation for the block supernodal route.
+    pub block_supernodal_memory_lean: bool,
 }
 
 impl CSparseOptions {
@@ -396,7 +404,9 @@ impl CSparseOptions {
     /// surfaces as PanicError / AraelError with the tag in the
     /// message. Unreachable through the typed wrappers.
     fn to_options(&self) -> SparseFaerOptions {
-        use arael::simple_lm::{EnvelopeMode, FaerOrdering, SchurPolicy};
+        use arael::simple_lm::{
+            BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+        };
         let policy = match self.schur {
             0 => SchurPolicy::Auto {
                 flop_margin: self.flop_margin,
@@ -420,6 +430,13 @@ impl CSparseOptions {
             2 => EnvelopeMode::Never,
             t => panic!("unknown envelope mode tag {t}"),
         };
+        let block_supernodal = match self.block_supernodal {
+            0 => BlockSupernodalMode::Auto,
+            1 => BlockSupernodalMode::Always,
+            2 => BlockSupernodalMode::Never,
+            t => panic!("unknown block supernodal mode tag {t}"),
+        };
+        let batch = self.block_supernodal_batch;
         let width = self.envelope_panel_width;
         let opts = SparseFaerOptions::auto()
             .with_policy(policy)
@@ -427,7 +444,10 @@ impl CSparseOptions {
             .with_envelope_schur(envelope)
             .with_envelope_panel_width((width > 0).then_some(width as usize))
             .with_supernodal(self.supernodal)
-            .with_narrow_band(self.narrow_band);
+            .with_narrow_band(self.narrow_band)
+            .with_block_supernodal(block_supernodal)
+            .with_block_supernodal_batching((batch > 0.0).then_some(batch))
+            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean);
         let cg = arael::simple_lm::CgOptions {
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
@@ -445,7 +465,9 @@ impl CSparseOptions {
 /// Fill `out` with the sparse backend's actual Rust defaults.
 #[no_mangle]
 pub unsafe extern "C" fn fit_sparse_options(out: *mut CSparseOptions) {
-    use arael::simple_lm::{EnvelopeMode, FaerOrdering, SchurPolicy};
+    use arael::simple_lm::{
+        BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+    };
     let d = SparseFaerOptions::default();
     let (flop_margin, obvious_flop_ratio) = match d.policy {
         SchurPolicy::Auto { flop_margin, obvious_flop_ratio } => {
@@ -480,6 +502,13 @@ pub unsafe extern "C" fn fit_sparse_options(out: *mut CSparseOptions) {
         schur_solve: 0,
         cg_max_iters: 0,
         cg_restart_every: 0,
+        block_supernodal: match d.block_supernodal {
+            BlockSupernodalMode::Auto => 0,
+            BlockSupernodalMode::Always => 1,
+            BlockSupernodalMode::Never => 2,
+        },
+        block_supernodal_batch: d.block_supernodal_batch.unwrap_or(0.0),
+        block_supernodal_memory_lean: d.block_supernodal_memory_lean,
     };
 }
 
@@ -666,6 +695,9 @@ pub struct CSchurPlan {
     pub ordering: COptI32,
     pub kept_bandwidth: u32,
     pub envelope: bool,
+    /// Whether the block supernodal Cholesky factorized, rather than
+    /// faer's scalar one.
+    pub block_supernodal: bool,
 }
 
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
@@ -709,6 +741,7 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
         },
         kept_bandwidth: p.kept_bandwidth as u32,
         envelope: p.envelope,
+        block_supernodal: p.block_supernodal,
     };
 }
 
