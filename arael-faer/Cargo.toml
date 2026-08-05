@@ -22,6 +22,11 @@ categories = ["mathematics", "science", "algorithms"]
 # measure on yours with `gemmbench` before believing either result.
 x86-v4 = ["nano-gemm/x86-v4"]
 
+# faer's threaded kernels, and with them the supernodal factorization's own
+# subtree parallelism. Off by default: everything here is sequential unless
+# the caller asks for threads.
+rayon = ["faer/rayon"]
+
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 # The GEMM fallback for tile shapes with no unrolled kernel -- see schur.rs. Its

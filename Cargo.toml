@@ -26,7 +26,7 @@ cholmod-gpl = ["cholmod"]
 # Let the sparse factorization and triangular solve run on faer's rayon thread
 # pool. Off by default: arael is single-threaded, and an edge target usually
 # wants it that way. Without it `LmConfig::num_threads` must stay 1.
-rayon = ["faer/rayon"]
+rayon = ["faer/rayon", "arael-faer/rayon"]
 
 [dependencies]
 arael-macros = { version = "0.8.2", path = "arael-macros" }

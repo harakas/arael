@@ -1240,12 +1240,12 @@ fn apply_bucket<T: SchurReal>(
 /// bigger structure regrows it).
 #[derive(Default)]
 pub struct SupernodalContext<T> {
-    upd: Vec<T>,
-    blk_row: Vec<u32>,
-    runs: Vec<(u32, u32, u32)>,
-    a_cat: Vec<T>,
-    b_cat: Vec<T>,
-    chol_mem: Vec<core::mem::MaybeUninit<u8>>,
+    /// The scratch the sequential path uses, and the parallel path's top.
+    main: Scratch<T>,
+    /// One scratch per worker on the parallel path, grown once and kept.
+    /// This is what threading costs in memory: `max_update` and the two
+    /// packing buffers, times the thread count.
+    workers: Vec<Scratch<T>>,
     x: Vec<T>,
     tmp: Vec<T>,
 }
@@ -1253,16 +1253,192 @@ pub struct SupernodalContext<T> {
 impl<T> SupernodalContext<T> {
     pub fn new() -> Self {
         Self {
-            upd: Vec::new(),
-            blk_row: Vec::new(),
-            runs: Vec::new(),
-            a_cat: Vec::new(),
-            b_cat: Vec::new(),
-            chol_mem: Vec::new(),
+            main: Scratch::new(),
+            workers: Vec::new(),
             x: Vec::new(),
             tmp: Vec::new(),
         }
     }
+}
+
+/// The factor buffer, shared across workers that write disjoint panels.
+///
+/// Rust cannot express "these threads write non-overlapping ranges of one
+/// allocation" through `&mut`, so the parallel path passes the pointer and
+/// carries the disjointness as an invariant: a worker owns whole subtrees,
+/// a panel's contributors are all inside its own subtree, and panels of
+/// different supernodes never overlap (`val_ptr` partitions the buffer).
+struct FactorPtr<T>(*mut T);
+impl<T> Clone for FactorPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for FactorPtr<T> {}
+// SAFETY: see the invariant above; every worker writes a disjoint range.
+unsafe impl<T> Send for FactorPtr<T> {}
+unsafe impl<T> Sync for FactorPtr<T> {}
+
+/// Everything one worker needs that cannot be shared: the update scratch,
+/// the block-row map and faer's Cholesky stack.
+struct Scratch<T> {
+    upd: Vec<T>,
+    blk_row: Vec<u32>,
+    runs: Vec<(u32, u32, u32)>,
+    a_cat: Vec<T>,
+    b_cat: Vec<T>,
+    chol_mem: Vec<core::mem::MaybeUninit<u8>>,
+}
+
+impl<T> Default for Scratch<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Scratch<T> {
+    fn new() -> Self {
+        Scratch {
+            upd: Vec::new(), blk_row: Vec::new(), runs: Vec::new(),
+            a_cat: Vec::new(), b_cat: Vec::new(), chol_mem: Vec::new(),
+        }
+    }
+
+    fn size_for(&mut self, sym: &SupernodalSymbolic, par: faer::Par)
+    where
+        T: SchurReal,
+    {
+        self.upd.resize(sym.max_update, T::ZERO);
+        self.blk_row.resize(sym.nblk, 0);
+        self.a_cat.resize(sym.max_a_cat, T::ZERO);
+        self.b_cat.resize(sym.max_b_cat, T::ZERO);
+        let req = faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
+            sym.max_ncols,
+            gate(sym.max_ncols.pow(3), PAR_MIN_LLT, par),
+            faer::Spec::default(),
+        )
+        .unaligned_bytes_required();
+        self.chol_mem.resize(req, core::mem::MaybeUninit::uninit());
+    }
+}
+
+/// One supernode: seed its panel from the matrix, subtract every
+/// descendant's contribution, factor the diagonal block and solve the
+/// panel below it.
+fn factor_panel<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    asym: &SymbolicSparseBlockColMat<SparseIndex>,
+    vals: &[T],
+    factor: FactorPtr<T>,
+    s: usize,
+    sc: &mut Scratch<T>,
+    par: faer::Par,
+) -> Result<(), SupernodalError> {
+    let (upd, blk_row, runs, a_cat, b_cat, chol_mem) = (
+        &mut sc.upd, &mut sc.blk_row, &mut sc.runs,
+        &mut sc.a_cat, &mut sc.b_cat, &mut sc.chol_mem,
+    );
+
+    let (q, h) = sym.supernode_dims(s);
+    let col0 = sym.sc_start[sym.sup_begin[s] as usize];
+
+    // Permuted block -> scalar row inside this panel.
+    for k in sym.sup_begin[s]..sym.sup_begin[s + 1] {
+        blk_row[k as usize] = sym.sc_start[k as usize] - col0;
+    }
+    for p in sym.pat_ptr[s]..sym.pat_ptr[s + 1] {
+        blk_row[sym.pat_blk[p as usize] as usize] = sym.pat_row[p as usize];
+    }
+
+    // SAFETY: `head` is everything already written, which this panel only
+    // reads; `panel` is this supernode's own range, which nothing else in
+    // this call writes. The parallel path upholds the same split per
+    // worker -- see `factor_subtrees`.
+    let base = sym.val_ptr[s] as usize;
+    let (head, panel) = unsafe {
+        (
+            core::slice::from_raw_parts(factor.0, base),
+            core::slice::from_raw_parts_mut(factor.0.add(base), h * q),
+        )
+    };
+
+    // Zero and seed this panel now, while it is about to be hot:
+    // every stored tile of its columns lands at its precomputed
+    // target, columns contiguous when the orientations agree,
+    // transposed otherwise.
+    panel.fill(T::ZERO);
+    let base = sym.val_ptr[s] as usize;
+    for &bi in &sym.tile_order[sym.tile_ptr[s] as usize..sym.tile_ptr[s + 1] as usize] {
+        let b = bi as usize;
+        let t = sym.tiles[b];
+        let (wi, wj) = asym.block_dims(b);
+        let src = &vals[asym.val_range(b)];
+        let stride = t.stride as usize;
+        let dst0 = t.dst as usize - base;
+        if !t.trans {
+            for c in 0..wj {
+                panel[dst0 + c * stride..dst0 + c * stride + wi]
+                    .clone_from_slice(&src[c * wi..(c + 1) * wi]);
+            }
+        } else {
+            for c in 0..wi {
+                for r in 0..wj {
+                    panel[dst0 + c * stride + r] = src[c + r * wi];
+                }
+            }
+        }
+    }
+
+    // Left-looking: subtract every descendant's contribution --
+    // pair by pair, or bucket by bucket when the analysis batched
+    // them.
+    if sym.bucket_end.is_empty() {
+        for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
+            apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0, par);
+        }
+    } else {
+        let mut p0 = sym.desc_ptr[s];
+        for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
+            let p1 = sym.bucket_end[b as usize];
+            if p1 - p0 == 1 {
+                apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0, par);
+            } else {
+                apply_bucket(
+                    sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0,
+                    par,
+                );
+            }
+            p0 = p1;
+        }
+    }
+
+    // Dense diagonal factor, then the panel below it.
+    let top = unsafe {
+        faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr(), q, q, 1, h as isize)
+    };
+    let stack = faer::dyn_stack::MemStack::new(chol_mem);
+    faer::linalg::cholesky::llt::factor::cholesky_in_place(
+        top,
+        faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+        gate(q * q * q, PAR_MIN_LLT, par),
+        stack,
+        faer::Spec::default(),
+    )
+    .map_err(|_| SupernodalError::NotPositiveDefinite)?;
+    if h > q {
+        let l11 =
+            unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+        let bot = unsafe {
+            faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr().add(q), h - q, q, 1, h as isize)
+        };
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            l11,
+            bot.transpose_mut(),
+            gate((h - q) * q * q, PAR_MIN_TRSM, par),
+        );
+    }
+
+    Ok(())
 }
 
 /// Factor `L L^T = P A P^T` into the panels, left-looking by supernode.
@@ -1285,118 +1461,189 @@ pub fn supernodal_factorize<T: SchurReal>(
     assert_eq!(factor.len(), sym.factor_val_count());
     let asym = a.symbolic();
     assert_eq!(asym.nblocks(), sym.tiles.len());
+    let vals = a.vals();
+    let ptr = FactorPtr(factor.as_mut_ptr());
 
-    ctx.upd.resize(sym.max_update, T::ZERO);
-    ctx.blk_row.resize(sym.nblk, 0);
-    ctx.a_cat.resize(sym.max_a_cat, T::ZERO);
-    ctx.b_cat.resize(sym.max_b_cat, T::ZERO);
-    let chol_req = faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
-        sym.max_ncols,
-        gate(sym.max_ncols.pow(3), PAR_MIN_LLT, par),
-        faer::Spec::default(),
-    )
-    .unaligned_bytes_required();
-    ctx.chol_mem.resize(chol_req, core::mem::MaybeUninit::uninit());
-    let (upd, blk_row, runs, a_cat, b_cat, chol_mem) = (
-        &mut ctx.upd,
-        &mut ctx.blk_row,
-        &mut ctx.runs,
-        &mut ctx.a_cat,
-        &mut ctx.b_cat,
-        &mut ctx.chol_mem,
+    let workers = match par {
+        faer::Par::Seq => 1,
+        #[cfg(feature = "rayon")]
+        faer::Par::Rayon(n) => n.get(),
+        #[allow(unreachable_patterns)]
+        _ => 1,
+    };
+    ctx.main.size_for(sym, par);
+    if workers > 1 {
+        if let Some(cut) = subtree_cut(sym, workers) {
+            return factor_subtrees(sym, asym, vals, ptr, ctx, par, workers, &cut);
+        }
+    }
+    for s in 0..sym.ns {
+        factor_panel(sym, asym, vals, ptr, s, &mut ctx.main, par)?;
+    }
+    Ok(())
+}
+
+/// How the tree splits into chunks: whole subtrees small enough that one
+/// worker can own each, plus the top the split could not reach.
+struct Cut {
+    /// Subtree roots, largest first so the long poles start earliest.
+    chunks: Vec<usize>,
+    /// Supernodes above the chunks, in elimination order. Factored
+    /// sequentially after the chunks join, with the dense kernels
+    /// threaded (they are the big panels).
+    top: Vec<usize>,
+}
+
+/// Cut the elimination tree for `workers` threads, or `None` when the
+/// shape does not repay it.
+///
+/// A chunk is a subtree whose work fits comfortably inside one worker's
+/// share; everything on a path from a root down to those chunks stays in
+/// `top`. A reduced Schur system is a chain -- every node is on the path
+/// and no chunk exists -- and this returns `None` rather than paying for a
+/// thread scope that would run one worker.
+fn subtree_cut(sym: &SupernodalSymbolic, workers: usize) -> Option<Cut> {
+    let ns = sym.ns;
+    let cost = |s: usize| -> f64 {
+        let (q, h) = sym.supernode_dims(s);
+        let (q, p) = (q as f64, (h - q) as f64);
+        q * q * q / 3.0 + p * q * q + p * p * q
+    };
+    // Subtree work, children before parents: the elimination order is
+    // already a topological one.
+    let mut sub = vec![0.0f64; ns];
+    let mut total = 0.0;
+    for s in 0..ns {
+        sub[s] += cost(s);
+        total += cost(s);
+        if let Some(p) = sym.supernode_parent(s) {
+            let v = sub[s];
+            sub[p] += v;
+        }
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    // Aim a little below an equal share so the chunks can be balanced by
+    // taking the big ones first.
+    let target = total / (workers as f64 * 1.5);
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); ns];
+    let mut roots = Vec::new();
+    for s in 0..ns {
+        match sym.supernode_parent(s) {
+            Some(p) => kids[p].push(s),
+            None => roots.push(s),
+        }
+    }
+    let (mut top, mut chunks) = (Vec::new(), Vec::new());
+    let mut stack = roots;
+    while let Some(s) = stack.pop() {
+        if sub[s] > target {
+            top.push(s);
+            stack.extend_from_slice(&kids[s]);
+        } else {
+            chunks.push(s);
+        }
+    }
+    // Nothing to gain when the split leaves one chunk, or leaves the top
+    // holding nearly everything.
+    let par_work: f64 = chunks.iter().map(|&c| sub[c]).sum();
+    if chunks.len() < 2 || par_work < 0.15 * total {
+        return None;
+    }
+    chunks.sort_by(|&a, &b| sub[b].partial_cmp(&sub[a]).unwrap());
+    top.sort_unstable();
+    Some(Cut { chunks, top })
+}
+
+/// The parallel path: each worker takes whole subtrees, then the top is
+/// factored sequentially with threaded kernels.
+///
+/// Correctness rests on one property of the elimination tree: every
+/// supernode that contributes to `s` is a descendant of `s`. A worker
+/// owning a subtree therefore reads and writes only panels inside it, and
+/// panels of different supernodes are disjoint ranges of the factor.
+fn factor_subtrees<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    asym: &SymbolicSparseBlockColMat<SparseIndex>,
+    vals: &[T],
+    ptr: FactorPtr<T>,
+    ctx: &mut SupernodalContext<T>,
+    par: faer::Par,
+    workers: usize,
+    cut: &Cut,
+) -> Result<(), SupernodalError> {
+    // The supernodes of each chunk, in elimination order.
+    //
+    // Ownership flows from a chunk root DOWN to its descendants, and a
+    // parent's index is always above its children's, so this walks the
+    // supernodes backwards: by the time a child is reached its parent has
+    // been decided. (Forwards it would reach only a root's immediate
+    // children and silently leave the rest of the subtree unfactored.)
+    let mut order: Vec<Vec<usize>> = cut.chunks.iter().map(|_| Vec::new()).collect();
+    let mut owner = vec![usize::MAX; sym.ns];
+    for (i, &r) in cut.chunks.iter().enumerate() {
+        owner[r] = i;
+    }
+    for s in (0..sym.ns).rev() {
+        if owner[s] == usize::MAX
+            && let Some(p) = sym.supernode_parent(s)
+        {
+            owner[s] = owner[p];
+        }
+        if owner[s] != usize::MAX {
+            order[owner[s]].push(s);
+        }
+    }
+    for v in order.iter_mut() {
+        v.sort_unstable();
+    }
+    // Every supernode is factored exactly once: in a chunk, or in the top.
+    debug_assert_eq!(
+        order.iter().map(|v| v.len()).sum::<usize>() + cut.top.len(),
+        sym.ns,
+        "the cut lost supernodes",
     );
 
-    let vals = a.vals();
-    for s in 0..sym.ns {
-        let (q, h) = sym.supernode_dims(s);
-        let col0 = sym.sc_start[sym.sup_begin[s] as usize];
+    ctx.workers.resize_with(workers, Scratch::new);
+    for w in ctx.workers.iter_mut() {
+        // Inside a chunk the panels are small; the kernels stay sequential
+        // and the threads are spent on whole subtrees instead.
+        w.size_for(sym, faer::Par::Seq);
+    }
 
-        // Permuted block -> scalar row inside this panel.
-        for k in sym.sup_begin[s]..sym.sup_begin[s + 1] {
-            blk_row[k as usize] = sym.sc_start[k as usize] - col0;
-        }
-        for p in sym.pat_ptr[s]..sym.pat_ptr[s + 1] {
-            blk_row[sym.pat_blk[p as usize] as usize] = sym.pat_row[p as usize];
-        }
-
-        let (head, tail) = factor.split_at_mut(sym.val_ptr[s] as usize);
-        let panel = &mut tail[..h * q];
-
-        // Zero and seed this panel now, while it is about to be hot:
-        // every stored tile of its columns lands at its precomputed
-        // target, columns contiguous when the orientations agree,
-        // transposed otherwise.
-        panel.fill(T::ZERO);
-        let base = sym.val_ptr[s] as usize;
-        for &bi in &sym.tile_order[sym.tile_ptr[s] as usize..sym.tile_ptr[s + 1] as usize] {
-            let b = bi as usize;
-            let t = sym.tiles[b];
-            let (wi, wj) = asym.block_dims(b);
-            let src = &vals[asym.val_range(b)];
-            let stride = t.stride as usize;
-            let dst0 = t.dst as usize - base;
-            if !t.trans {
-                for c in 0..wj {
-                    panel[dst0 + c * stride..dst0 + c * stride + wi]
-                        .clone_from_slice(&src[c * wi..(c + 1) * wi]);
-                }
-            } else {
-                for c in 0..wi {
-                    for r in 0..wj {
-                        panel[dst0 + c * stride + r] = src[c + r * wi];
+    let next = core::sync::atomic::AtomicUsize::new(0);
+    let failed = core::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for w in ctx.workers.iter_mut() {
+            let (next, failed, order) = (&next, &failed, &order);
+            let ptr_copy = ptr;
+            scope.spawn(move || {
+                use core::sync::atomic::Ordering::Relaxed;
+                loop {
+                    let i = next.fetch_add(1, Relaxed);
+                    if i >= order.len() || failed.load(Relaxed) {
+                        return;
+                    }
+                    for &s in &order[i] {
+                        // SAFETY: `s` is in chunk `i`, which no other
+                        // worker touches, and its contributors are in the
+                        // same chunk.
+                        if factor_panel(sym, asym, vals, ptr_copy, s, w, faer::Par::Seq).is_err() {
+                            failed.store(true, Relaxed);
+                            return;
+                        }
                     }
                 }
-            }
+            });
         }
+    });
+    if failed.load(core::sync::atomic::Ordering::Relaxed) {
+        return Err(SupernodalError::NotPositiveDefinite);
+    }
 
-        // Left-looking: subtract every descendant's contribution --
-        // pair by pair, or bucket by bucket when the analysis batched
-        // them.
-        if sym.bucket_end.is_empty() {
-            for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
-                apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0, par);
-            }
-        } else {
-            let mut p0 = sym.desc_ptr[s];
-            for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
-                let p1 = sym.bucket_end[b as usize];
-                if p1 - p0 == 1 {
-                    apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0, par);
-                } else {
-                    apply_bucket(
-                        sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0,
-                        par,
-                    );
-                }
-                p0 = p1;
-            }
-        }
-
-        // Dense diagonal factor, then the panel below it.
-        let top = unsafe {
-            faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr(), q, q, 1, h as isize)
-        };
-        let stack = faer::dyn_stack::MemStack::new(chol_mem);
-        faer::linalg::cholesky::llt::factor::cholesky_in_place(
-            top,
-            faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-            gate(q * q * q, PAR_MIN_LLT, par),
-            stack,
-            faer::Spec::default(),
-        )
-        .map_err(|_| SupernodalError::NotPositiveDefinite)?;
-        if h > q {
-            let l11 =
-                unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
-            let bot = unsafe {
-                faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr().add(q), h - q, q, 1, h as isize)
-            };
-            faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-                l11,
-                bot.transpose_mut(),
-                gate((h - q) * q * q, PAR_MIN_TRSM, par),
-            );
-        }
+    for &s in &cut.top {
+        factor_panel(sym, asym, vals, ptr, s, &mut ctx.main, par)?;
     }
     Ok(())
 }
@@ -1868,7 +2115,7 @@ mod tests {
                         let sn =
                             SupernodalSymbolic::new(a.symbolic(), Some(order), &params).unwrap();
                         let mut factor = vec![0.0f64; sn.factor_val_count()];
-                        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()).unwrap();
+                        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq).unwrap();
                         let mut x = rhs.clone();
                         supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
                         let resid = rel_resid(&dense, n, &x, &rhs);
@@ -1901,7 +2148,7 @@ mod tests {
         let sn = SupernodalSymbolic::new(a.symbolic(), Some(&nd), &SupernodalParams::default())
             .unwrap();
         let mut factor = vec![0.0f32; sn.factor_val_count()];
-        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()).unwrap();
+        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq).unwrap();
         let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
         supernodal_solve(&sn, &factor, &mut x32, &mut SupernodalContext::new());
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
@@ -2027,7 +2274,7 @@ mod tests {
             )
             .unwrap();
             let mut factor = vec![0.0f64; sn.factor_val_count()];
-            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()).unwrap();
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq).unwrap();
             let mut x = rhs.clone();
             supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
             (x, sn.batched_pairs())
@@ -2116,12 +2363,96 @@ mod tests {
                 SupernodalSymbolic::new(a.symbolic(), None, &SupernodalParams::default()).unwrap();
             let mut factor = vec![0.0f64; sn.factor_val_count()];
             for _ in 0..3 {
-                supernodal_factorize(&sn, &a, &mut factor, &mut ctx).unwrap();
+                supernodal_factorize(&sn, &a, &mut factor, &mut ctx, faer::Par::Seq).unwrap();
                 let mut x = rhs.clone();
                 supernodal_solve(&sn, &factor, &mut x, &mut ctx);
                 let resid = rel_resid(&dense, n, &x, &rhs);
                 assert!(resid < 1e-10, "resid {} nblk {}", resid, nblk);
             }
+        }
+    }
+
+    /// Every contributor to a supernode is a descendant of it in the
+    /// supernodal etree. This is what makes a subtree a self-contained
+    /// unit of work, and so what makes the parallel path sound.
+    #[test]
+    fn contributors_are_descendants() {
+        for (nblk, seed) in [(400usize, 21u64), (900, 22)] {
+            let (a, _, _) = random_spd(nblk, 4, 3, seed);
+            let order = order_graph(&Graph::of_blocks(a.symbolic()), NdParams::default());
+            let sn = SupernodalSymbolic::new(
+                a.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
+            for s in 0..sn.n_supernodes() {
+                for &d in sn.descendants(s) {
+                    let mut cur = sn.supernode_parent(d as usize);
+                    while let Some(c) = cur {
+                        if c == s {
+                            break;
+                        }
+                        cur = sn.supernode_parent(c);
+                    }
+                    assert_eq!(cur, Some(s), "{} contributes to {} but is not below it", d, s);
+                }
+            }
+        }
+    }
+
+    /// The parallel path factors the same matrix to the same bits as the
+    /// sequential one, and factors ALL of it.
+    ///
+    /// The bug this exists for: ownership of a chunk flows from its root
+    /// down to its descendants, and a parent's index is above its
+    /// children's, so a forward walk assigned only a root's immediate
+    /// children and left the rest of every subtree unfactored -- the
+    /// panels kept whatever the buffer held, and the solve returned NaN.
+    /// A small problem never splits, so only a tree with real subtrees
+    /// catches it; hence the sizes here, and the assert that they split.
+    ///
+    /// Compared entry by entry EXCEPT the diagonal block's strictly upper
+    /// triangle, which the update scatter fills from scratch without
+    /// masking and the factor never reads: sequential reuses one scratch
+    /// buffer across panels while each worker has its own, so that
+    /// padding legitimately differs.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn the_parallel_path_matches_the_sequential_one() {
+        // extra=1 keeps the couplings sparse, like a trajectory: a denser
+        // random matrix has a separator so dominant that the cut declines.
+        for (nblk, extra, seed) in [(400usize, 3usize, 21u64), (900, 1, 21), (1400, 1, 21)] {
+            let (a, dense, rhs) = random_spd(nblk, 4, extra, seed);
+            let n = a.symbolic().ncols();
+            let order = order_graph(&Graph::of_blocks(a.symbolic()), NdParams::default());
+            let sn = SupernodalSymbolic::new(
+                a.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
+            assert!(subtree_cut(&sn, 4).is_some(), "nblk {} never splits", nblk);
+
+            let mut seq = vec![0.0f64; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a, &mut seq, &mut SupernodalContext::new(),
+                                 faer::Par::Seq).unwrap();
+            // Start from dirt: a panel nobody factored must not pass as zero.
+            let mut par_f = vec![f64::NAN; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a, &mut par_f, &mut SupernodalContext::new(),
+                                 faer::Par::rayon(4)).unwrap();
+
+            for s in 0..sn.n_supernodes() {
+                let (q, h) = sn.supernode_dims(s);
+                let base = sn.val_ptr[s] as usize;
+                for c in 0..q {
+                    for r in c..h {
+                        let k = base + c * h + r;
+                        assert_eq!(seq[k], par_f[k],
+                                   "nblk {}: supernode {} entry ({}, {})", nblk, s, r, c);
+                    }
+                }
+            }
+
+            let mut ctx = SupernodalContext::new();
+            let (mut xs, mut xp) = (rhs.clone(), rhs.clone());
+            supernodal_solve(&sn, &seq, &mut xs, &mut ctx);
+            supernodal_solve(&sn, &par_f, &mut xp, &mut ctx);
+            assert_eq!(xs, xp, "nblk {}: solutions differ", nblk);
+            let resid = rel_resid(&dense, n, &xp, &rhs);
+            assert!(resid < 1e-10, "nblk {}: resid {}", nblk, resid);
         }
     }
 
@@ -2136,7 +2467,7 @@ mod tests {
         let sn = SupernodalSymbolic::new(&asym, None, &SupernodalParams::default()).unwrap();
         let mut factor = vec![0.0f64; sn.factor_val_count()];
         assert_eq!(
-            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new()),
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq),
             Err(SupernodalError::NotPositiveDefinite),
         );
     }
