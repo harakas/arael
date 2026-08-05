@@ -142,9 +142,48 @@ dissection plus the symbolic over 28,800 blocks), linear solve 2982.1 ->
 -> 665.2, or 1.53x; what dilutes it inside that phase is the panel
 seeding, the sub-gate panels and the single-RHS triangular solve.
 
-So tier 1 has taken what the dense kernels have to give. The next
-threading win is not in the factorization: it is the analysis at large
-sizes, and the Schur reduction on the problems that reduce.
+### Where the 1.36x actually goes (4800 poses, instrumented)
+
+One factorization, phase by phase, and the update phase split into the
+GEMM calls themselves and the packing and scattering around them:
+
+| phase | 1 thread | 4 threads | |
+|---|---:|---:|---:|
+| seed (tile scatter) | 26.7 ms | 27.5 | 1.0x |
+| update GEMMs | 570.1 ms | 363.6 | 1.57x |
+| update pack + scatter | 157.0 ms | 165.6 | 1.0x |
+| diagonal Cholesky | 62.9 ms | 39.5 | 1.59x |
+| panel trsm | 165.5 ms | 130.1 | 1.27x |
+
+The GEMM line is the whole story, and it is not a kernel problem. There
+are **94,425 update GEMMs in one factorization, and 237 of them pass the
+gate** -- 0.25% of the calls, 57% of the GEMM time. Those 237 go from
+~325 ms to 118.7, which is **2.74x, matching the microbenchmark**. The
+other 94,188 stay sequential and cost ~245 ms whatever the thread count.
+
+Two hypotheses were tested and refused. Lowering the gate does nothing:
+sweeping it from 2e7 down to 2e5 at 4800 poses moves the iteration
+between 811 and 868 ms, all noise, because those calls do not scale
+however they are dispatched. And it is not memory bandwidth: a 795x1233x1233
+GEMM streamed from a 2 GB working set scales 3.02x, identical to the same
+call on cache-resident data (43.35 vs 42.78 ms sequential).
+
+So the sequential residue inside the factorization is 245 ms of small
+GEMMs, 157 of packing and scatter and 27 of seeding -- 43% of the 985 ms.
+Amdahl caps the whole factorization near 2.3x however many threads it
+gets, and 1.37x at four threads is consistent with that.
+
+**This changes the verdict on tier 2.** The 94,188 small updates are
+exactly what coarse subtree parallelism addresses -- different threads
+running different panels' small work concurrently, where threading inside
+one such call can never pay. The figure-8's tree measures work/span 2.4x
+and coarse-P=4 2.1x, so tier 2 is no longer pgo-only: on a large
+whole-Hessian problem it targets the 43% that tier 1 structurally cannot
+reach. It remains useless on a reduced Schur system, which is a chain.
+
+The other sequential blocks, unchanged by any of this: the analysis (a
+third of a 4800-pose solve) and the Schur reduction on problems that
+reduce.
 
 **Why the S-curve is flat.** Its factorization is a smaller share of the
 iteration than the model assumed -- the Schur reduction that *forms* the
@@ -194,7 +233,9 @@ Cheap to build, cheap to revert, and it is where the measured work is.
 
 **B. Coarse subtree parallelism.** Cut the tree so each thread owns one
 subtree, run the top sequentially. Few big chunks, which is the
-requested shape. Subtrees are self-contained (a panel reads only its own
+requested shape. *Promoted after the 4800-pose instrumentation above: it
+is the only option that reaches the 94,188 small updates, which are 43%
+of the factorization and structurally out of tier 1's reach.* Subtrees are self-contained (a panel reads only its own
 descendants), so the parallel writes are provably disjoint -- but
 `factor` is one `&mut [T]`, so handing N disjoint panel ranges to N
 threads needs raw pointers and an invariant argument. Also needs
@@ -261,7 +302,12 @@ pgo garage, at 1/2/4 threads, interleaved. Accept if 4 threads beats 1
 by >1.8x on slam and bal and does not regress pgo by more than the
 noise band.
 
-### Tier 2 -- coarse subtree parallelism (optional, pgo-shaped problems)
+### Tier 2 -- coarse subtree parallelism
+
+Worth building after all, on the 4800-pose evidence: tier 1 reaches 237
+of 94,425 update GEMMs, and the rest is what a subtree split parallelises.
+Expect it to help large whole-Hessian problems (figure-8, pgo) and do
+nothing for a reduced Schur system.
 
 1. Symbolic: after the postorder, compute subtree work and cut at
    `total/P` to get the chunk list plus the sequential top. Store it on
@@ -281,9 +327,10 @@ noise band.
    inside its chunk's ranges, and a test that a two-thread run over a
    known tree is bit-identical to the sequential one.
 
-Benchmarks: pgo garage and sphere2500 at 1/2/4 threads. Accept only if
-garage beats 3x at 4 threads; below that the machinery is not worth it,
-and the honest outcome is to stop after tier 1.
+Benchmarks: the figure-8 at 2400 and 4800 poses, plus pgo garage and
+sphere2500, at 1/2/4 threads. The figure-8 is the one that matters now --
+accept if 4 threads beats 1 by 1.8x there (tier 1 alone gives 1.36x, and
+the Amdahl cap with the small updates parallelised is about 2.3x).
 
 ## Risks
 
