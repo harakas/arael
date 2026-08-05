@@ -3,13 +3,24 @@
 Research and staged plan. Written 2026-08-05, against the supernodal
 route as it stands in `arael-faer/src/supernodal.rs`.
 
-The short version: **the original roadmap had the order backwards.**
-`BLOCK.md`'s tail says "etree-level scheduling, then switch `Par` into
-the dense kernels". Measured on the trees we actually factor, tree
-parallelism is capped at 1.1-3.3x and is worth *nothing* on the shapes
-where the factorization is most expensive, while the dense kernels
-carry 87-100% of the work there and scale ~3x at four threads. Dense
-kernels first, tree second, and the second one may never be worth it.
+**Outcome, at four threads on the figure-8: 2.2-2.5x.** Both tiers were
+built. The gated dense kernels (tier 1) gave 1.36x; subtree parallelism
+(tier 2) took it the rest of the way.
+
+The two predictions in this document scored very differently, which is
+the lesson worth keeping. The **tree model was accurate**: it put coarse
+P=4 at 2.1x on the 1200-pose figure-8, and the built thing measured
+2.21x. The **kernel model was not**: isolated GEMMs scale ~3x at the
+sizes the panels suggested, so tier 1 was predicted at ~2.5x and
+delivered 1.36x -- because only 237 of 94,425 update GEMMs are large
+enough to be worth threading, which no amount of benchmarking a single
+call could have shown.
+
+So `BLOCK.md`'s tail ("etree-level scheduling, then switch `Par` into
+the dense kernels") had the *ordering* right and this document's first
+draft had it backwards. Tier 1 is still worth having -- it is the only
+thing that touches the huge panels at the top of the tree, which are a
+chain and cannot be split -- but it is the smaller half.
 
 ## Where the solver stands
 
@@ -173,13 +184,17 @@ GEMMs, 157 of packing and scatter and 27 of seeding -- 43% of the 985 ms.
 Amdahl caps the whole factorization near 2.3x however many threads it
 gets, and 1.37x at four threads is consistent with that.
 
-**This changes the verdict on tier 2.** The 94,188 small updates are
-exactly what coarse subtree parallelism addresses -- different threads
-running different panels' small work concurrently, where threading inside
-one such call can never pay. The figure-8's tree measures work/span 2.4x
-and coarse-P=4 2.1x, so tier 2 is no longer pgo-only: on a large
-whole-Hessian problem it targets the 43% that tier 1 structurally cannot
-reach. It remains useless on a reduced Schur system, which is a chain.
+**This changed the verdict on tier 2, and the change was right.** The
+94,188 small updates are exactly what coarse subtree parallelism
+addresses -- different threads running different panels' small work
+concurrently, where threading inside one such call can never pay. Built
+below: 2.21x and 2.49x on the figure-8, against tier 1's 1.36x. It
+remains useless on a reduced Schur system, which is a chain.
+
+The Amdahl estimate above (a cap near 2.3x) was for tier 1's decomposition
+only, where the small GEMMs and the data movement are irreducibly
+sequential. Tier 2 moves both onto other threads, which is why it passes
+that figure.
 
 The other sequential blocks, unchanged by any of this: the analysis (a
 third of a 4800-pose solve) and the Schur reduction on problems that
@@ -223,6 +238,14 @@ So tier 1 covers slam and bundle adjustment, tier 2 covers pose graphs
 and nothing else. Given the target applications, tier 1 is the whole
 feature and tier 2 is optional.
 
+**Every line of that paragraph is wrong**, and it is kept because the
+reason is instructive: it multiplies a per-call scaling factor by a share
+of *flops*, when what decides the outcome is the share of flops sitting
+in calls large enough to thread. On the figure-8 that is 57% of GEMM time
+in 0.25% of the calls, and the panels below it are untouchable by tier 1
+however much work they hold. Measured: tier 1 gave 1.36x there and 1.00x
+on the reduced S-curve, tier 2 gave 2.21x, and pgo remains unmeasured.
+
 ## Options considered
 
 **A. Par into the dense kernels, size-gated.** Thread the 18 kernel
@@ -233,9 +256,10 @@ Cheap to build, cheap to revert, and it is where the measured work is.
 
 **B. Coarse subtree parallelism.** Cut the tree so each thread owns one
 subtree, run the top sequentially. Few big chunks, which is the
-requested shape. *Promoted after the 4800-pose instrumentation above: it
-is the only option that reaches the 94,188 small updates, which are 43%
-of the factorization and structurally out of tier 1's reach.* Subtrees are self-contained (a panel reads only its own
+requested shape. *Promoted after the 4800-pose instrumentation above -- the only option
+that reaches the 94,188 small updates, 43% of the factorization and
+structurally out of tier 1's reach. Built; it is the larger of the two
+wins.* Subtrees are self-contained (a panel reads only its own
 descendants), so the parallel writes are provably disjoint -- but
 `factor` is one `&mut [T]`, so handing N disjoint panel ranges to N
 threads needs raw pointers and an invariant argument. Also needs
@@ -269,7 +293,7 @@ entirely separate work. Out of scope here, worth its own study.
 
 ## Plan
 
-### Tier 1 -- Par into the dense kernels [DONE]
+### Tier 1 -- Par into the dense kernels [DONE 2026-08-05]
 
 1. `SupernodalParams` gains `par: faer::Par` (default `Par::Seq`), or
    `supernodal_factorize` takes it as an argument. The argument is
@@ -302,35 +326,61 @@ pgo garage, at 1/2/4 threads, interleaved. Accept if 4 threads beats 1
 by >1.8x on slam and bal and does not regress pgo by more than the
 noise band.
 
-### Tier 2 -- coarse subtree parallelism
+### Tier 2 -- coarse subtree parallelism [DONE 2026-08-05]
 
-Worth building after all, on the 4800-pose evidence: tier 1 reaches 237
-of 94,425 update GEMMs, and the rest is what a subtree split parallelises.
-Expect it to help large whole-Hessian problems (figure-8, pgo) and do
-nothing for a reduced Schur system.
+Each worker owns whole subtrees and factors their panels with sequential
+kernels; the top is factored afterwards with tier 1's threaded ones. It
+beat its accept criterion (1.8x) comfortably.
 
-1. Symbolic: after the postorder, compute subtree work and cut at
-   `total/P` to get the chunk list plus the sequential top. Store it on
-   `SupernodalSymbolic` (it depends on P, so either store the subtree
-   work and cut at factorize time, or recompute the cut when P changes).
-2. `SupernodalContext` becomes per-thread: one scratch set per worker,
-   allocated once and reused. Note this multiplies scratch memory by P
-   -- `max_update` is the largest buffer, so document the cost.
-3. Parallel section: each worker takes chunks from the list and runs the
-   existing per-supernode body over its subtree, writing only panels in
-   its own subtree. Then a barrier, then the top sequentially with tier
-   1's kernels.
-4. Safety: `factor` is handed to workers as a raw pointer with a
-   documented invariant -- panel ranges are disjoint by construction
-   (`val_ptr[s]..val_ptr[s+1]`), and a subtree's descendants are inside
-   the subtree. Add a debug-only assertion that each worker's writes stay
-   inside its chunk's ranges, and a test that a two-thread run over a
-   known tree is bit-identical to the sequential one.
+| figure-8 | 1 thread | 2 | 4 | tier 1 alone | tier 1+2 |
+|---|---:|---:|---:|---:|---:|
+| 1200 poses, full-iter | 329.0 ms | 206.6 | 149.1 | 1.38x | **2.21x** |
+| 4800 poses, full-iter | 1090.1 ms | 647.1 | 437.2 | 1.36x | **2.49x** |
 
-Benchmarks: the figure-8 at 2400 and 4800 poses, plus pgo garage and
-sphere2500, at 1/2/4 threads. The figure-8 is the one that matters now --
-accept if 4 threads beats 1 by 1.8x there (tier 1 alone gives 1.36x, and
-the Amdahl cap with the small updates parallelised is about 2.3x).
+Total solve at 4800: 5066 -> 3038 ms. Costs identical at every thread
+count, as they must be.
+
+**Soundness.** Every supernode that contributes to `s` is a descendant of
+`s` in the supernodal etree, so a subtree is a self-contained unit: a
+worker reads and writes only panels inside its own chunk, and panels of
+different supernodes are disjoint ranges of the factor buffer
+(`val_ptr` partitions it). Rust cannot express that through `&mut`, so
+the buffer is passed as a raw pointer with the invariant carried in a
+comment -- and the property itself has a test
+(`contributors_are_descendants`) rather than being assumed.
+
+**Two things this cost, both worth remembering.**
+
+*The cut walks the tree backwards.* Ownership flows from a chunk root
+down to its descendants, and a parent's index is above its children's in
+elimination order. A forward walk assigns only a root's immediate
+children and leaves the rest of every subtree unfactored -- the panels
+keep whatever the buffer held, and the solve returns NaN on the first
+iteration. Caught in a benchmark run, not by the suite, because every
+test problem was too small to split. There is now a `debug_assert` that
+chunks plus top account for every supernode, and a test on a tree that
+does split, factoring from a NaN-filled buffer so an untouched panel
+cannot pass as zero.
+
+*Do not compare factor buffers whole.* The parallel factor differed from
+the sequential one in 1747 of 226237 entries, and every one of them was
+in a diagonal block's strictly upper triangle -- storage the update
+scatter fills from scratch without masking, by design, and the factor
+never reads. Sequential reuses one scratch buffer across panels, each
+worker has its own, so that padding differs legitimately. Compare the
+entries the factorization reads, and the solutions.
+
+**When the cut declines.** It refuses when fewer than two chunks come out
+or the chunks hold under 15% of the work, and returns to the sequential
+path. That covers a reduced Schur system (a chain -- no chunk exists) and
+any problem whose root separator dominates: on dense-ish random matrices
+the top holds over 85% of the work from about 600 blocks up, so the tests
+need sparse structures to exercise the parallel path at all.
+
+**Not measured yet:** pgo at 1/2/4 threads, and whether the 15% guard is
+the right threshold. pgo's tree has the most width of any problem here
+(work/span 4.0) and its panels are all below tier 1's gate, so it is the
+case tier 2 exists for and the one with no numbers.
 
 ## Risks
 
