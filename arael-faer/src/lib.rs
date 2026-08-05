@@ -18,6 +18,12 @@
 //!   factor of each diagonal block. No fill and no factor to store, at the
 //!   price of an inexact solution. The operator is a closure, so it can be a
 //!   matrix that was never formed.
+//! - **Supernodal block Cholesky** ([`supernodal`]) -- factorize a block-CSC
+//!   matrix in block form under a fill-reducing ordering. The elimination tree
+//!   is built over the blocks, columns with the same pattern are amalgamated
+//!   into one dense panel, and each update between panels is one GEMM. Where
+//!   the envelope route needs a narrow envelope and no ordering, this needs an
+//!   ordering and handles any pattern.
 //! - **Envelope Cholesky** ([`envelope`]) -- factorize a block-CSC matrix in
 //!   natural order directly in block form, fill confined to each column's
 //!   envelope. A trajectory's Hessian, and its reduced pose system, keep a
@@ -143,6 +149,40 @@
 //! pattern. `arael::simple_lm::EnvelopeMode` does that for the reduced Schur
 //! system; `SparseFaer::with_narrow_band` takes the whole Hessian and warns
 //! when its band is too wide to pay.
+//!
+//! # supernodal -- supernodal block Cholesky
+//!
+//! Factor `L L^T = A` for a symmetric positive-definite block-CSC matrix, in
+//! block form, under a block-level ordering. The elimination tree is built
+//! over the blocks rather than the scalars; block columns sharing a pattern
+//! are amalgamated into supernodes, each held as one dense column-major panel;
+//! and every update between two supernodes is packed into a scratch buffer,
+//! spent as one GEMM, and scattered back. The permutation is baked into the
+//! scatter map, so the matrix is never permuted and no scalar copy of it is
+//! ever built.
+//!
+//! * [`SupernodalSymbolic::new`](supernodal::SupernodalSymbolic::new) --
+//!   analyse once: elimination tree, supernodes, panel patterns and the
+//!   scatter map. The ordering is a block permutation, `None` keeping the
+//!   natural one
+//! * [`supernodal_factorize`](supernodal::supernodal_factorize) -- numeric:
+//!   `L L^T = A` into a factor buffer, left-looking over the descendant graph
+//! * [`supernodal_solve`](supernodal::supernodal_solve) -- solve `A x = rhs`
+//!   from the factor
+//! * [`SupernodalParams`](supernodal::SupernodalParams) -- amalgamation table,
+//!   update-batching ratio, postordering;
+//!   [`memory_lean`](supernodal::SupernodalParams::memory_lean) trades a
+//!   little speed for a smaller factor
+//! * [`amd_block_order`](supernodal::amd_block_order) -- AMD over the block
+//!   adjacency, blocks kept whole
+//! * [`SupernodalError`](supernodal::SupernodalError) -- not positive
+//!   definite, or the factor overflowed the index type
+//!
+//! Consecutive small updates into one target panel are batched: packed
+//! zero-padded into a joint operand pair and spent as a single larger GEMM,
+//! accepted while the padding stays under the params' ratio.
+//! `arael::simple_lm::BlockSupernodalMode` selects this route in arael, where
+//! it is the default on a sequential solve.
 
 pub use faer;
 

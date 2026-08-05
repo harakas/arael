@@ -42,7 +42,9 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
   - **Eigen SimplicialLLT** and **CHOLMOD** -- optional C++ backends via FFI (`--features eigen`, `--features cholmod`)
   - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
-- **Schur marginalization** -- mutually uncoupled parameter blocks are eliminated before the factorization and recovered by back-substitution. The sparse backend detects them and applies it when it is faster; `SchurPolicy` overrides. `SchurSolve::Iterative` then solves the reduced system by preconditioned conjugate gradients instead of factorizing it, for problems where the factorization dominates
+- **Block supernodal Cholesky** -- the sparse backend factorizes the Hessian in block form by default, one dense panel per supernode, not flattened to scalar CSC
+- **Schur marginalization** -- landmark-like blocks eliminated before the factorization and recovered by back-substitution, taken automatically when the backend prices it faster
+- **Conjugate gradients** -- the reduced system solved iteratively rather than factorized, preconditioned per block: no fill, no factor to store, an inexact step. A second, implicit form skips building the reduced system altogether, working straight off the Hessian to save its memory
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
 - **Precomputed rotations** -- every rotation param caches its rotation matrix and the matrix's Jacobian once per linearization; constraints that differentiate through a rotation read them as constants instead of rebuilding them per observation
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
@@ -481,7 +483,7 @@ match the root's precision: on an `#[arael(root, f32)]` model they take
 
 | Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
 |---|---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `FaerOrdering` override it |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `FaerOrdering` / `BlockSupernodalMode` override it |
 | `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 | `Band::new(kd)` | `solve_band[_f32]` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
@@ -1008,6 +1010,7 @@ arael-faer/         faer extensions (block CSC + Schur complement), staged for u
     schur.rs        Schur-complement reduction and back-substitution
     cg.rs           Preconditioned conjugate gradients on a symmetric block matrix
     envelope.rs     Envelope (profile) Cholesky in natural order
+    supernodal.rs   Supernodal block Cholesky under a block ordering
     nd.rs           Nested-dissection fill-reducing ordering
 
 arael-sym/          Symbolic math library

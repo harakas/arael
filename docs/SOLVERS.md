@@ -20,7 +20,7 @@ parameter vector.
 
 | Backend (`solve_with(&mut ..., &cfg)`) | Free function | When |
 |---|---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after; the factorization itself runs in block form (the supernodal block route below) |
 | `Dense` | `solve_dense[_f32]` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small. The free `solve[_f32]` picks by itself: dense for <= 6 params, SparseFaer otherwise |
 | `Band::new(kd)` | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
@@ -127,6 +127,52 @@ Under `Never` a named set is not wasted: it becomes the factorization's
 ordering instead ("marginalized parameters first"), which is the same
 elimination performed inside the factorization rather than before it.
 `with_ordering` controls that directly -- see `FaerOrdering`.
+
+**The block supernodal Cholesky.** `SparseFaer` factorizes in block form
+by default: the model's blocks are kept whole, the elimination tree is
+built over them, and each supernode is one dense panel that the update
+pairs reach through BLAS3. The alternative is flattening the block
+Hessian to a scalar CSC matrix and handing it to faer, which is what
+happens when the block route does not apply.
+
+Nothing has to be set. It takes the seats the scalar route would
+otherwise hold -- the whole Hessian, and a reduced Schur system that the
+envelope route declined -- and the envelope and iterative routes keep
+their precedence. A model with no block structure (hand-built problems,
+`TripletBlock`) has nothing to factor in block form and takes the scalar
+route.
+
+It measured at parity or ahead of the scalar route on every benchmark,
+per iteration and in peak memory, and its symbolic analysis is the
+cheaper of the two -- which is what shows up in the first iteration.
+The tables are in the benchmark READMEs -- [pgo](../benchmarks/pgo/README.md),
+[bal](../benchmarks/bal/README.md), [slam](../benchmarks/slam/README.md).
+
+```rust,ignore
+BlockSupernodalMode::Auto    // default: the block route on a sequential solve
+BlockSupernodalMode::Always  // also when threaded
+BlockSupernodalMode::Never   // always faer's scalar Cholesky
+```
+
+`Auto` leaves threaded solves (`num_threads > 1`) to the scalar route,
+whose dense kernels use those threads; the block route is sequential for
+now, so on a threaded solve it would give up more than it gains. Note
+that this makes the factorization -- and with it the last ulp of the
+answer -- depend on the thread count.
+
+Two further knobs, both for memory:
+
+```rust,ignore
+SparseFaer::new()
+    .with_block_supernodal_batching(None)          // off; default is Some(1.5)
+    .with_block_supernodal_memory_lean(true)       // smaller factor, a little slower
+```
+
+Batching packs consecutive small updates into one GEMM, which is worth
+4-5% per iteration and costs nothing in memory. The memory-lean
+amalgamation relaxes fewer supernodes together, trading a few percent of
+speed for a smaller factor. `SchurPlan::block_supernodal` reports which
+route ran.
 
 **Manage the parameter vector yourself.** The generated methods own the
 serialize -> solve -> deserialize round trip. Drop to the free `solve_*`
@@ -562,6 +608,13 @@ it does not silently pretend. `num_threads: 0` resolves to
 `rayon::current_num_threads()`, so it honours `RAYON_NUM_THREADS` or whatever
 `ThreadPoolBuilder` the application installed; the pool is shared with the rest of
 the process.
+
+Asking for threads also changes which factorization runs: the block supernodal
+route is sequential, so `BlockSupernodalMode::Auto` hands a threaded solve to
+faer's scalar route, whose dense kernels use the threads. Two different
+factorizations means results that agree to the last ulp rather than bit for
+bit, so a solve pinned to one route (`Always` or `Never`) is the one to compare
+across thread counts.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.

@@ -55,12 +55,16 @@
 //!     Supernodal module is GPL-licensed, so the resulting binary is subject
 //!     to the GPL (the `cholmod` feature binds only the LGPL Simplicial module)
 //!   - LAPACK band -- optional dpbsv/spbsv backend
-//! - **Schur marginalization** -- mutually uncoupled parameter blocks are
-//!   eliminated before the factorization and recovered by back-substitution.
-//!   The sparse backend detects them and applies it when it is faster;
-//!   `SchurPolicy` overrides. [`SchurSolve::Iterative`](simple_lm::SchurSolve)
-//!   then solves the reduced system by preconditioned conjugate gradients
-//!   instead of factorizing it, for problems where the factorization dominates
+//! - **Block supernodal Cholesky** -- the sparse backend factorizes the
+//!   Hessian in block form by default, one dense panel per supernode, not
+//!   flattened to scalar CSC
+//! - **Schur marginalization** -- landmark-like blocks eliminated before the
+//!   factorization and recovered by back-substitution, taken automatically
+//!   when the backend prices it faster
+//! - **Conjugate gradients** -- the reduced system solved iteratively rather
+//!   than factorized, preconditioned per block: no fill, no factor to store,
+//!   an inexact step. A second, implicit form skips building the reduced
+//!   system altogether, working straight off the Hessian to save its memory
 //! - **Indexed sparse assembly** -- precomputed position lists for
 //!   zero-overhead hessian assembly after first iteration
 //! - **Precomputed rotations** -- every rotation param caches its rotation
