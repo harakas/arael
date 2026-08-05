@@ -570,7 +570,7 @@ column above, with a second row of panels drawn from the `peak MB`
 column; after re-running the benchmark, update its `PANELS` and
 `MEM_PANELS` tables from the results and re-run it.
 
-## Covariance recovery (2026-07-26, Apple M4 Pro, single core)
+## Covariance recovery (2026-08-05, Apple M4 Pro, single core)
 
 Parameter covariance at the solution, `Sigma = 2 H^-1`, for poses (6-DOF) and
 landmarks (3-DOF):
@@ -591,27 +591,27 @@ Pose (6-DOF):
 
 | method | 1 | 2 | 8 | 32 | all (300) |
 |--------|--:|--:|--:|--:|--:|
-| arael PerQuery | 124.6 (41) | 128.7 (39) | 151.4 (34) | 240.5 (21) | 1236.8 (5) |
-| arael AllMarginals | - | - | - | - | 476.3 (11) |
-| Ceres SPARSE_QR | 4035.0 (2) | 4043.1 (2) | 4122.4 (2) | 4371.7 (2) | 7031.4 (1) |
-| GTSAM Marginals | 195.9 (26) | 1324.0 (4) | 2033.9 (3) | 4908.1 (2) | 37411.5 (1) |
-| g2o computeMarginals | 2644.1 (2) | 2609.4 (2) | 3372.0 (2) | 4156.8 (2) | 4066.1 (2) |
+| arael PerQuery | 77.3 (65) | 80.4 (63) | 96.8 (52) | 161.4 (31) | 877.0 (6) |
+| arael AllMarginals | - | - | - | - | 215.8 (23) |
+| Ceres SPARSE_QR | 4013.2 (2) | 4018.9 (2) | 4086.5 (2) | 4311.8 (2) | 6967.7 (1) |
+| GTSAM Marginals | 191.7 (26) | 1286.4 (4) | 1976.9 (3) | 4767.9 (2) | 36438.6 (1) |
+| g2o computeMarginals | 2639.6 (2) | 2606.6 (2) | 3303.9 (2) | 4194.5 (2) | 4073.9 (2) |
 
 Landmark (3-DOF). `AllMarginals` is the same bulk pass (poses and landmarks together):
 
 | method | 1 | 2 | 8 | 32 | all (1200) |
 |--------|--:|--:|--:|--:|--:|
-| arael PerQuery | 124.4 (41) | 125.9 (40) | 139.8 (36) | 193.5 (26) | 2812.9 (2) |
-| arael AllMarginals | - | - | - | - | 476.3 (11) |
-| Ceres SPARSE_QR | 4054.7 (2) | 4051.4 (2) | 4109.0 (2) | 4272.1 (2) | * |
-| GTSAM Marginals | 465.9 (11) | 658.1 (8) | 2093.0 (3) | 4948.9 (2) | * |
+| arael PerQuery | 77.4 (65) | 79.2 (64) | 89.7 (56) | 130.5 (39) | 2104.0 (3) |
+| arael AllMarginals | - | - | - | - | 215.8 (23) |
+| Ceres SPARSE_QR | 4009.4 (2) | 4022.4 (2) | 4062.3 (2) | 4234.4 (2) | * |
+| GTSAM Marginals | 457.7 (11) | 641.3 (8) | 2032.6 (3) | 4849.1 (2) | * |
 
 A single marginal and the whole set, poses and landmarks, one bar per
 system (each cell on its own axis):
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/cov-dark.svg">
-  <img alt="2x2 bar charts of covariance-recovery time: poses (top) and landmarks (bottom), a single marginal (left) and all of them (right), comparing arael against Ceres, GTSAM and g2o" src="../charts/v0.8.0/cov-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/cov-dark.svg">
+  <img alt="2x2 bar charts of covariance-recovery time: poses (top) and landmarks (bottom), a single marginal (left) and all of them (right), comparing arael against Ceres, GTSAM and g2o" src="../charts/v0.8.2/cov-light.svg">
 </picture>
 
 `SLAM_COV=1 cargo run --release --bin slam-bench` reproduces this
