@@ -17,7 +17,7 @@ cholmod = ["arael/cholmod", "eigen"]
 cholmod-gpl = ["arael/cholmod-gpl", "cholmod"]
 
 [dependencies]
-arael = { path = "../.." }
+arael = { path = "../..", features = ["rayon"] }
 bench-harness = { path = "../harness", features = ["factrs"] }
 arael-faer = { path = "../../arael-faer" }
 tiny-solver = "0.18.0"

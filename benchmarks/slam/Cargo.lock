@@ -576,7 +576,9 @@ dependencies = [
  "num-traits",
  "private-gemm-x86",
  "pulp 0.22.3",
+ "rayon",
  "reborrow",
+ "spindle",
 ]
 
 [[package]]
@@ -834,6 +836,7 @@ dependencies = [
  "paste",
  "pulp 0.22.3",
  "raw-cpuid",
+ "rayon",
  "seq-macro",
  "sysctl",
 ]
@@ -870,6 +873,7 @@ dependencies = [
  "num-traits",
  "paste",
  "raw-cpuid",
+ "rayon",
  "seq-macro",
 ]
 
