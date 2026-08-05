@@ -166,7 +166,10 @@
 //!   scatter map. The ordering is a block permutation, `None` keeping the
 //!   natural one
 //! * [`supernodal_factorize`](supernodal::supernodal_factorize) -- numeric:
-//!   `L L^T = A` into a factor buffer, left-looking over the descendant graph
+//!   `L L^T = A` into a factor buffer, left-looking over the descendant
+//!   graph. Its `Par` runs independent subtrees on separate threads and
+//!   hands the pool to the dense kernels of the panels too big to chunk;
+//!   the result is bit-identical at any thread count
 //! * [`supernodal_solve`](supernodal::supernodal_solve) -- solve `A x = rhs`
 //!   from the factor
 //! * [`SupernodalParams`](supernodal::SupernodalParams) -- amalgamation table,

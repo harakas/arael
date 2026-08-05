@@ -718,22 +718,14 @@ nothing.
 
 ### Tail, in this order and no earlier
 
-- **Threads** (was stage 5): a fringe deployment for the target
-  applications; do at the very end. First the cheap tier (pass the
-  solver's `Par` into the dense kernels -- until then, multithreaded
-  users should prefer the scalar faer route, which does), then
-  etree-level tasking if demand exists.
-
-  Revisit with it: `BlockSupernodalMode::Auto` takes the supernodal
-  only on a sequential solve, so `num_threads` selects the route and
-  with it the last ulp of the answer. `tests/threading.rs` pins the
-  scalar route to keep testing what it means to test -- one
-  factorization at two thread counts -- and nothing covers `Auto`
-  under threads. Once the supernodal takes `Par`, `Auto` can stop
-  branching on thread count and bit-identity across `num_threads`
-  comes back on the default route; the test should go back to the
-  default and gain the case it lost. The two routes currently agree to
-  4.6e-16 relative on that chain.
+- **Threads** (was stage 5) [DONE 2026-08-05]: independent subtrees on
+  separate threads, plus the caller's `Par` in the dense kernels of the
+  panels too big to chunk, size-gated. Figure-8 slam 2.2x at 1200 poses
+  and 2.5x at 4800 on four threads; bundle adjustment 1.5x; a pose graph
+  unchanged. `BlockSupernodalMode::Auto` no longer branches on the thread
+  count and the answer is bit-identical at any of them. The study, the
+  measurements and what the predictions got wrong are in
+  [THREADS.md](THREADS.md).
 - **P5, f32 factor + refinement**: only after threads, if ever -- the
   memory saving is real but pays with quality changes that would need
   their own validation campaign.

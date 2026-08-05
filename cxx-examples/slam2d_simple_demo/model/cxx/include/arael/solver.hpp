@@ -238,8 +238,8 @@ enum class EnvelopeMode : uint32_t {
 /// When the block supernodal Cholesky factorizes instead of faer's
 /// scalar one (mirrors arael's BlockSupernodalMode), in the seats the
 /// scalar route otherwise holds: the whole Hessian, and a reduced
-/// Schur system the envelope route declined. Auto takes it on a
-/// sequential solve and leaves threaded solves to the scalar route.
+/// Schur system the envelope route declined. Auto takes it wherever
+/// the model has block structure, at any thread count.
 enum class BlockSupernodalMode : uint32_t {
     Auto = 0,
     Always = 1,

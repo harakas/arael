@@ -187,7 +187,7 @@ never permuted and no scalar copy of it is ever built.
 | | |
 |---|---|
 | `SupernodalSymbolic::new(a, order, params)` | analyse once: elimination tree, supernodes, panel patterns and the scatter map. `order` is a block permutation (`None` keeps the natural one) |
-| `supernodal_factorize(sym, a, factor, ctx)` | numeric: `L L^T = A` into a factor buffer, left-looking over the descendant graph |
+| `supernodal_factorize(sym, a, factor, ctx, par)` | numeric: `L L^T = A` into a factor buffer, left-looking over the descendant graph. `par` runs independent subtrees on separate threads and hands the pool to the dense kernels of the panels too big to chunk; the result is bit-identical at any thread count |
 | `supernodal_solve(sym, factor, rhs, ctx)` | solve `A x = rhs` in place from the factor |
 | `SupernodalContext` | the workspace the factorization and solve reuse across calls; grows once |
 | `SupernodalParams` | amalgamation table, update-batching ratio, postordering. `memory_lean()` trades a little speed for a smaller factor |

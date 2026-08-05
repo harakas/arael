@@ -217,8 +217,8 @@ class BlockSupernodalMode(enum.IntEnum):
     """When the block supernodal Cholesky factorizes instead of faer's
     scalar one (matches the Rust enum), in the seats the scalar route
     otherwise holds: the whole Hessian, and a reduced Schur system the
-    envelope route declined. AUTO takes it on a sequential solve and
-    leaves threaded solves to the scalar route."""
+    envelope route declined. AUTO takes it wherever the model has block
+    structure, at any thread count."""
     AUTO = 0
     ALWAYS = 1
     NEVER = 2

@@ -158,11 +158,15 @@ BlockSupernodalMode::Never   // always faer's scalar Cholesky
 receive `num_threads`, gated on size: a panel update is threaded only
 where the work covers the pool, because faer's threaded kernels lose
 badly below that -- measured 0.32x on four threads for a 150x120x100
-matmul. So a problem of small panels (a pose graph) is untouched by
-threads, and one with big ones gains: Ladybug-372's reduced system runs
-1.43x on four threads, the 1200-pose figure-8 1.35x. The kernels split
-their output rather than their reduction, so the answer is bit-identical
-at every thread count.
+matmul. Independent subtrees of the elimination tree go to separate
+threads as whole chunks, which is where most of the gain is: only a
+fraction of the update GEMMs are large enough for the pool, and the rest
+are parallel by living on different threads rather than inside one.
+Measured at four threads: the 1200-pose figure-8 2.2x, at 4800 poses
+2.5x, Ladybug-372's reduced system 1.5x (its tree is a near-chain, so
+there is little to chunk), a pose graph unchanged. The kernels split
+their output rather than their reduction and each chunk is
+self-contained, so the answer is bit-identical at every thread count.
 
 Two further knobs, both for memory:
 
@@ -613,12 +617,14 @@ it does not silently pretend. `num_threads: 0` resolves to
 `ThreadPoolBuilder` the application installed; the pool is shared with the rest of
 the process.
 
-Threads reach the block supernodal route's dense kernels, size-gated, so
-the factorization is the same one at every thread count and the answer is
-bit-identical. What threads do not reach: assembly, the Schur reduction,
+Threads reach the block supernodal route two ways: independent subtrees
+of the elimination tree run on separate threads, and the dense kernels of
+the panels too big to chunk take the pool, size-gated. The factorization
+is the same one at every thread count and the answer is bit-identical.
+What threads do not reach: assembly, the Schur reduction, the analysis
 and the triangular solve -- on a landmark SLAM problem the reduction is
 the larger half of an iteration, which is why the 900-pose S-curve gains
-nothing from four threads while bundle adjustment gains 1.43x.
+nothing while the figure-8, which does not reduce, gains 2.2x.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.
