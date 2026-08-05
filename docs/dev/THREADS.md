@@ -377,10 +377,29 @@ any problem whose root separator dominates: on dense-ish random matrices
 the top holds over 85% of the work from about 600 blocks up, so the tests
 need sparse structures to exercise the parallel path at all.
 
-**Not measured yet:** pgo at 1/2/4 threads, and whether the 15% guard is
-the right threshold. pgo's tree has the most width of any problem here
-(work/span 4.0) and its panels are all below tier 1's gate, so it is the
-case tier 2 exists for and the one with no numbers.
+**pgo, the case tier 2 was built for** (four threads, full-iter):
+
+| dataset | 1 thread | 4 threads | speedup | peak 1t | peak 4t |
+|---|---:|---:|---:|---:|---:|
+| parking garage | 3.67 ms | 2.87 | 1.28x | 26.3 MB | 25.2 |
+| sphere2500 | 15.76 ms | 11.66 | 1.35x | 36.7 MB | 45.3 |
+| city10000 | 9.33 ms | 5.38 | 1.73x | 34.1 MB | 35.9 |
+
+Every panel here is below tier 1's gate, so all of this is tier 2. The
+gains are smaller than the tree bound (garage's coarse-P=4 was 3.3x)
+because the factorization is a minority of a pose-graph iteration:
+garage's 4-iteration solve spends 6.7 ms in assembly against 8.2 in the
+linear solve, and that linear solve is what goes 8.2 -> 4.8, or 1.71x.
+sphere2500's peak grows 23% -- four workers' scratch, the documented cost
+of the parallel path.
+
+**Measure one dataset per invocation.** Sweeping garage, sphere2500 and
+city10000 in a single loop produced flat numbers at every thread count,
+and the same runs one dataset at a time produced the table above. The
+batched form is what said "pgo gains nothing", which was wrong.
+
+**Not measured yet:** whether the 15% par-work guard is the right
+threshold.
 
 ## Risks
 
