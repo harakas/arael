@@ -727,7 +727,23 @@ pub fn run_f32(p: &Problem) -> RunOut { bench_harness::arael::run::<PathF>(p) }
 
 // ----------------------------------------------------------- covariance
 
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::{CovMode, CovOptions, CovOrdering, Covariance};
+
+// SLAM_COV_ORDERING=auto|amd|nd|natural orders the covariance factorization.
+// `auto` (the default) is arael's own rule. A typo is an error.
+fn cov_opts() -> CovOptions {
+    let ordering = match std::env::var("SLAM_COV_ORDERING").as_deref() {
+        Err(_) | Ok("auto") => CovOrdering::Auto,
+        Ok("amd") => CovOrdering::Amd,
+        Ok("nd") => CovOrdering::NestedDissection,
+        Ok("natural") => CovOrdering::Natural,
+        Ok(other) => panic!(
+            "SLAM_COV_ORDERING: expected auto, amd, nd or natural, got {:?}",
+            other
+        ),
+    };
+    CovOptions::auto().with_ordering(ordering)
+}
 
 /// One covariance-scaling run: `(N, median_ms, reps)` per query count, for poses
 /// and landmarks, plus the AllMarginals bulk cost and a validation std dev.
@@ -760,16 +776,17 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let (np, nl) = (path.poses.len(), path.landmarks.len());
     let budget = Duration::from_secs_f64(budget_s);
     let cap_s = cell_cap_s();
+    let opts = cov_opts();
 
     // Validation: middle-pose std dev (a shared value-check anchor).
     let mid_pose = np / 2;
-    let sd_mid_pose = path.assemble_covariance(CovMode::PerQuery).unwrap().std_dev(&path.poses[mid_pose]).unwrap();
+    let sd_mid_pose = path.assemble_covariance_with(CovMode::PerQuery, &opts).unwrap().std_dev(&path.poses[mid_pose]).unwrap();
 
     // PerQuery poses: 1, 2, 8, 32, all.
     let perquery_pose = scale_counts(query_counts(np, true), cap_s, |n| {
         let idx = spread(0, np, n);
         median_ms(budget, cap, || {
-            let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+            let cov = path.assemble_covariance_with(CovMode::PerQuery, &opts).unwrap();
             for &i in &idx {
                 black_box(cov.marginal_cov(&path.poses[i]).unwrap());
             }
@@ -784,7 +801,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let perquery_lm = scale_counts(query_counts(nl, true), cap_s, |n| {
         let idx = spread(0, nl, n);
         median_ms(budget, cap, || {
-            let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+            let cov = path.assemble_covariance_with(CovMode::PerQuery, &opts).unwrap();
             for &i in &idx {
                 black_box(cov.marginal_cov(&path.landmarks[lm_refs[i]]).unwrap());
             }
@@ -793,7 +810,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
 
     // AllMarginals: bulk selected inverse -- every pose and landmark at once.
     let (allmarg_ms, allmarg_reps) = median_ms(budget, cap, || {
-        black_box(path.assemble_covariance(CovMode::AllMarginals).unwrap());
+        black_box(path.assemble_covariance_with(CovMode::AllMarginals, &opts).unwrap());
     });
 
     CovScaling {

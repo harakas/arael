@@ -917,6 +917,58 @@ impl SupernodalSymbolic {
 /// pose-graph benchmarks it matches scalar AMD's fill while ordering a
 /// graph 3-6x smaller. Returns the block elimination order
 /// [`SupernodalSymbolic::new`] takes.
+/// Nested dissection of the block graph, as an elimination order.
+pub fn nd_block_order(a: &SymbolicSparseBlockColMat<SparseIndex>) -> Vec<usize> {
+    crate::nd::order_graph(&crate::nd::Graph::of_blocks(a), crate::nd::NdParams::default())
+}
+
+/// Which of several candidate orderings factors cheapest, and the symbolic
+/// that priced it. See [`cheapest_block_order`].
+pub struct BlockOrderChoice {
+    /// The winning elimination order.
+    pub order: Vec<usize>,
+    /// Its symbolic factorization -- factorize through this rather than
+    /// building it again.
+    pub symbolic: SupernodalSymbolic,
+    /// Which candidate won, as an index into the ones handed in.
+    pub winner: usize,
+    /// What each candidate would have cost, in flops. `INFINITY` for one whose
+    /// symbolic factorization failed. Same order as the candidates.
+    pub flops: Vec<f64>,
+}
+
+/// The candidate ordering whose factor takes the fewest flops.
+///
+/// Earlier candidates win ties, so hand in the preferred ordering first.
+/// `None` when no candidate produced a symbolic factorization at all.
+///
+/// This is the one place that decides between orderings by price, so a solve
+/// and a covariance over the same matrix cannot reach different answers.
+pub fn cheapest_block_order(
+    a: &SymbolicSparseBlockColMat<SparseIndex>,
+    params: &SupernodalParams,
+    candidates: Vec<Vec<usize>>,
+) -> Option<BlockOrderChoice> {
+    let mut flops = vec![f64::INFINITY; candidates.len()];
+    let mut best: Option<(usize, SupernodalSymbolic)> = None;
+    for (i, order) in candidates.iter().enumerate() {
+        let Ok(s) = SupernodalSymbolic::new(a, Some(order), params) else {
+            continue;
+        };
+        flops[i] = s.flops();
+        let better = match &best {
+            None => true,
+            Some((b, _)) => flops[i] < flops[*b],
+        };
+        if better {
+            best = Some((i, s));
+        }
+    }
+    let (winner, symbolic) = best?;
+    let mut candidates = candidates;
+    Some(BlockOrderChoice { order: std::mem::take(&mut candidates[winner]), symbolic, winner, flops })
+}
+
 pub fn amd_block_order(a: &SymbolicSparseBlockColMat<SparseIndex>) -> Vec<usize> {
     let nblk = a.nblk_cols();
     let (_, _, bcp, bri, _) = a.parts();
@@ -1670,8 +1722,30 @@ pub fn supernodal_solve<T: SchurReal>(
     rhs: &mut [T],
     ctx: &mut SupernodalContext<T>,
 ) {
+    supernodal_solve_multi(sym, factor, rhs, 1, ctx);
+}
+
+/// Solve `A X = RHS` in place for `k` right-hand sides at once. `rhs` is
+/// column-major `n x k`. The permutation is applied on entry and undone on
+/// exit; `rhs` stays in the matrix's own ordering.
+///
+/// Each supernode panel is read once for all `k` columns and its kernels are
+/// matrix-matrix rather than matrix-vector, so this costs far less than `k`
+/// separate solves. Recovering an entity's covariance block wants exactly
+/// that: one column per degree of freedom, same factor.
+pub fn supernodal_solve_multi<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    rhs: &mut [T],
+    k: usize,
+    ctx: &mut SupernodalContext<T>,
+) {
     assert_eq!(factor.len(), sym.factor_val_count());
-    assert_eq!(rhs.len(), sym.n);
+    assert_eq!(rhs.len(), sym.n * k);
+    if k == 0 {
+        return;
+    }
+    let n = sym.n;
     let max_below = (0..sym.ns)
         .map(|s| {
             let (q, h) = sym.supernode_dims(s);
@@ -1679,28 +1753,35 @@ pub fn supernodal_solve<T: SchurReal>(
         })
         .max()
         .unwrap_or(0);
-    ctx.x.resize(sym.n, T::ZERO);
-    ctx.tmp.resize(max_below, T::ZERO);
+    // x and tmp are column-major with leading dimensions n and max_below: a
+    // column's rows stay contiguous, so a row range is one strided submatrix.
+    ctx.x.resize(n * k, T::ZERO);
+    ctx.tmp.resize(max_below * k, T::ZERO);
     let (x, tmp) = (&mut ctx.x, &mut ctx.tmp);
 
-    // Into elimination order.
-    for k in 0..sym.nblk {
-        let ob = sym.order[k] as usize;
-        let w = (sym.sc_start[k + 1] - sym.sc_start[k]) as usize;
+    // Into elimination order, every column.
+    for b in 0..sym.nblk {
+        let ob = sym.order[b] as usize;
+        let w = (sym.sc_start[b + 1] - sym.sc_start[b]) as usize;
         let src = sym.old_start[ob] as usize;
-        let dst = sym.sc_start[k] as usize;
-        x[dst..dst + w].clone_from_slice(&rhs[src..src + w]);
+        let dst = sym.sc_start[b] as usize;
+        for c in 0..k {
+            x[c * n + dst..c * n + dst + w]
+                .clone_from_slice(&rhs[c * n + src..c * n + src + w]);
+        }
     }
 
-    // Forward sweep: L y = x.
+    // Forward sweep: L Y = X.
     for s in 0..sym.ns {
         let (q, h) = sym.supernode_dims(s);
         let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
         let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
         let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+        let xp = x.as_mut_ptr();
         {
+            // SAFETY: rows c0..c0+q of each of the k columns, which are n apart.
             let x_top =
-                faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
+                unsafe { faer::MatMut::from_raw_parts_mut(xp.add(c0), q, k, 1, n as isize) };
             faer::linalg::triangular_solve::solve_lower_triangular_in_place(
                 l11,
                 x_top,
@@ -1708,17 +1789,22 @@ pub fn supernodal_solve<T: SchurReal>(
             );
         }
         if h > q {
+            let m = h - q;
             let bot = unsafe {
-                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), h - q, q, 1, h as isize)
+                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize)
             };
             // A contiguous pattern (one scalar run below the supernode,
             // the common banded/trajectory case) subtracts straight into
             // the x segment; scattered patterns go through tmp.
-            let m = h - q;
             if let Some(seg) = contiguous_below(sym, s, m) {
-                let (lo, hi) = x.split_at_mut(seg);
-                let x_top = faer::col::ColRef::from_slice(&lo[c0..c0 + q]).as_mat();
-                let dst = faer::col::ColMut::from_slice_mut(&mut hi[..m]).as_mat_mut();
+                debug_assert!(c0 + q <= seg, "below-rows overlap the supernode's own columns");
+                // SAFETY: within a column [c0, c0+q) and [seg, seg+m) are
+                // disjoint (c0 + q <= seg) and the columns are n apart, so the
+                // read and write views never alias.
+                let x_top =
+                    unsafe { faer::MatRef::from_raw_parts(xp.add(c0), q, k, 1, n as isize) };
+                let dst =
+                    unsafe { faer::MatMut::from_raw_parts_mut(xp.add(seg), m, k, 1, n as isize) };
                 faer::linalg::matmul::matmul(
                     dst,
                     faer::Accum::Add,
@@ -1728,9 +1814,11 @@ pub fn supernodal_solve<T: SchurReal>(
                     faer::Par::Seq,
                 );
             } else {
-                let x_top = faer::col::ColRef::from_slice(&x[c0..c0 + q]).as_mat();
+                // SAFETY: x_top only reads; tmp is a separate allocation.
+                let x_top =
+                    unsafe { faer::MatRef::from_raw_parts(xp.add(c0), q, k, 1, n as isize) };
                 let t = unsafe {
-                    faer::MatMut::from_raw_parts_mut(tmp.as_mut_ptr(), m, 1, 1, m as isize)
+                    faer::MatMut::from_raw_parts_mut(tmp.as_mut_ptr(), m, k, 1, m as isize)
                 };
                 faer::linalg::matmul::matmul(
                     t,
@@ -1740,19 +1828,21 @@ pub fn supernodal_solve<T: SchurReal>(
                     one::<T>(),
                     faer::Par::Seq,
                 );
-                for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
+                for (e, &blk) in sym.supernode_pattern(s).iter().enumerate() {
                     let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
-                    let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
-                    let dst = sym.sc_start[k as usize] as usize;
-                    for r in 0..w {
-                        x[dst + r] = x[dst + r] - tmp[dr + r];
+                    let w = (sym.sc_start[blk as usize + 1] - sym.sc_start[blk as usize]) as usize;
+                    let dst = sym.sc_start[blk as usize] as usize;
+                    for c in 0..k {
+                        for r in 0..w {
+                            x[c * n + dst + r] = x[c * n + dst + r] - tmp[c * m + dr + r];
+                        }
                     }
                 }
             }
         }
     }
 
-    // Backward sweep: L^T x = y.
+    // Backward sweep: L^T X = Y.
     for s in (0..sym.ns).rev() {
         let (q, h) = sym.supernode_dims(s);
         let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
@@ -1764,10 +1854,13 @@ pub fn supernodal_solve<T: SchurReal>(
                 faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize)
             };
             if let Some(seg) = contiguous_below(sym, s, m) {
-                let (lo, hi) = x.split_at_mut(seg);
-                let xseg = faer::col::ColRef::from_slice(&hi[..m]).as_mat();
+                debug_assert!(c0 + q <= seg, "below-rows overlap the supernode's own columns");
+                let xp = x.as_mut_ptr();
+                // SAFETY: disjoint row ranges within each column, as above.
+                let xseg =
+                    unsafe { faer::MatRef::from_raw_parts(xp.add(seg), m, k, 1, n as isize) };
                 let x_top =
-                    faer::col::ColMut::from_slice_mut(&mut lo[c0..c0 + q]).as_mat_mut();
+                    unsafe { faer::MatMut::from_raw_parts_mut(xp.add(c0), q, k, 1, n as isize) };
                 faer::linalg::matmul::matmul(
                     x_top,
                     faer::Accum::Add,
@@ -1777,17 +1870,21 @@ pub fn supernodal_solve<T: SchurReal>(
                     faer::Par::Seq,
                 );
             } else {
-                for (e, &k) in sym.supernode_pattern(s).iter().enumerate() {
+                for (e, &blk) in sym.supernode_pattern(s).iter().enumerate() {
                     let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
-                    let w = (sym.sc_start[k as usize + 1] - sym.sc_start[k as usize]) as usize;
-                    let src = sym.sc_start[k as usize] as usize;
-                    tmp[dr..dr + w].clone_from_slice(&x[src..src + w]);
+                    let w = (sym.sc_start[blk as usize + 1] - sym.sc_start[blk as usize]) as usize;
+                    let src = sym.sc_start[blk as usize] as usize;
+                    for c in 0..k {
+                        tmp[c * m + dr..c * m + dr + w]
+                            .clone_from_slice(&x[c * n + src..c * n + src + w]);
+                    }
                 }
-                let t = unsafe {
-                    faer::MatRef::from_raw_parts(tmp.as_ptr(), m, 1, 1, m as isize)
+                let t =
+                    unsafe { faer::MatRef::from_raw_parts(tmp.as_ptr(), m, k, 1, m as isize) };
+                // SAFETY: tmp is a separate allocation from x.
+                let x_top = unsafe {
+                    faer::MatMut::from_raw_parts_mut(x.as_mut_ptr().add(c0), q, k, 1, n as isize)
                 };
-                let x_top =
-                    faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
                 faer::linalg::matmul::matmul(
                     x_top,
                     faer::Accum::Add,
@@ -1798,7 +1895,10 @@ pub fn supernodal_solve<T: SchurReal>(
                 );
             }
         }
-        let x_top = faer::col::ColMut::from_slice_mut(&mut x[c0..c0 + q]).as_mat_mut();
+        // SAFETY: rows c0..c0+q of each of the k columns.
+        let x_top = unsafe {
+            faer::MatMut::from_raw_parts_mut(x.as_mut_ptr().add(c0), q, k, 1, n as isize)
+        };
         faer::linalg::triangular_solve::solve_upper_triangular_in_place(
             l11.transpose(),
             x_top,
@@ -1807,12 +1907,15 @@ pub fn supernodal_solve<T: SchurReal>(
     }
 
     // Back to the matrix's ordering.
-    for k in 0..sym.nblk {
-        let ob = sym.order[k] as usize;
-        let w = (sym.sc_start[k + 1] - sym.sc_start[k]) as usize;
+    for b in 0..sym.nblk {
+        let ob = sym.order[b] as usize;
+        let w = (sym.sc_start[b + 1] - sym.sc_start[b]) as usize;
         let dst = sym.old_start[ob] as usize;
-        let src = sym.sc_start[k] as usize;
-        rhs[dst..dst + w].clone_from_slice(&x[src..src + w]);
+        let src = sym.sc_start[b] as usize;
+        for c in 0..k {
+            rhs[c * n + dst..c * n + dst + w]
+                .clone_from_slice(&x[c * n + src..c * n + src + w]);
+        }
     }
 }
 
@@ -2368,6 +2471,46 @@ mod tests {
                 supernodal_solve(&sn, &factor, &mut x, &mut ctx);
                 let resid = rel_resid(&dense, n, &x, &rhs);
                 assert!(resid < 1e-10, "resid {} nblk {}", resid, nblk);
+            }
+        }
+    }
+
+    /// A batched solve is k separate solves, to the last bit where the
+    /// arithmetic is the same order and to round-off where it is not.
+    ///
+    /// The scattered-pattern branch stages through `tmp`, whose leading
+    /// dimension is the supernode's own row count -- get that wrong and
+    /// column c reads column c-1's staging area, which only shows up at
+    /// k > 1 and only on a matrix whose patterns are not contiguous.
+    #[test]
+    fn a_batched_solve_matches_separate_ones() {
+        let mut ctx = SupernodalContext::new();
+        for (nblk, blk, extra, seed) in [(12usize, 4usize, 2usize, 7u64), (60, 3, 3, 8), (40, 6, 1, 9)] {
+            let (a, _, _) = random_spd(nblk, blk, extra, seed);
+            let n = a.symbolic().ncols();
+            let sn =
+                SupernodalSymbolic::new(a.symbolic(), None, &SupernodalParams::default()).unwrap();
+            let mut factor = vec![0.0f64; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, faer::Par::Seq).unwrap();
+
+            for k in [1usize, 2, 3, 6] {
+                // Column-major n x k, each column a distinct right-hand side.
+                let mut rng = Lcg(seed ^ (k as u64) << 32);
+                let batched_in: Vec<f64> =
+                    (0..n * k).map(|_| (rng.next() % 2000) as f64 / 1000.0 - 1.0).collect();
+
+                let mut batched = batched_in.clone();
+                supernodal_solve_multi(&sn, &factor, &mut batched, k, &mut ctx);
+
+                for c in 0..k {
+                    let mut one = batched_in[c * n..(c + 1) * n].to_vec();
+                    supernodal_solve(&sn, &factor, &mut one, &mut ctx);
+                    for i in 0..n {
+                        let (b, s) = (batched[c * n + i], one[i]);
+                        assert!((b - s).abs() <= 1e-12 * (1.0 + s.abs()),
+                            "nblk {nblk} k {k} col {c} row {i}: batched {b} vs separate {s}");
+                    }
+                }
             }
         }
     }

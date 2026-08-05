@@ -88,6 +88,41 @@ The [loc benchmark](../benchmarks/loc/README.md) recovers the last pose (the
 localization query) in constant time as the trajectory grows, where the general
 modes and the other libraries scale with it.
 
+## How it factorizes
+
+`assemble_covariance_with(mode, &opts)` spells out what
+`assemble_covariance(mode)` leaves to the defaults. The covariance is the same
+either way; `CovOptions` decides what producing it costs.
+
+```rust
+use arael::covariance::{CovMode, CovOptions, CovOrdering, Covariance};
+
+let opts = CovOptions::auto().with_ordering(CovOrdering::NestedDissection);
+let cov = model.assemble_covariance_with(CovMode::PerQuery, &opts)?;
+```
+
+**`ordering`** picks the elimination order. `Auto` (the default) prices minimum
+degree against nested dissection over the model's block graph and keeps
+whichever factors in fewer flops -- the same determination the solver makes for
+a solve. `Amd` and `Natural` force the choice; `NestedDissection` forces
+dissection, which is what a trajectory that revisits wants (a loop closure, a
+figure-8 crossing), since poses far apart in the ordering are coupled there and
+minimum degree has no separator to find.
+
+Ordering over the block graph rather than `H`'s scalar columns is the same
+coupling with the entity sizes divided out: a 6-DOF pose against a 3-DOF
+landmark is one edge there and 18 scalar ones in `H`.
+
+**`block_supernodal`** factorizes in block form with arael's supernodal
+Cholesky instead of faer's scalar one, which also skips the scalar triplets and
+the scalar CSC. `AllMarginals` ignores it and stays on the scalar factor: its
+selected inverse reads faer's supernode panels. `CovAssembly::took_block_route`
+reports which route an assembly actually took.
+
+A model with no block structure, or whose entities are all one scalar wide,
+declines both -- there is nothing to divide out, and the scalar path is the
+better answer.
+
 ## Block types
 
 - **`marginal_cov`** -- the entity's covariance with every *other* parameter

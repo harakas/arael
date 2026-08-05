@@ -2,7 +2,8 @@
 // scaled by `isig` has Gauss-Newton Hessian H = 2 isig^2 I, so the covariance
 // Sigma = 2 H^-1 = (1/isig^2) I -- an analytic value to check against.
 
-use arael::covariance::{CovError, CovMode, Covariance};
+use arael::covariance::{CovError, CovMode, CovOptions, CovOrdering, Covariance};
+use arael::simple_lm::BlockSupernodalMode;
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 
@@ -457,4 +458,198 @@ fn tridiagonal_multiblock_query_is_unsupported() {
         Some(CovError::UnsupportedQuery { op: "marginal_cov" }));
     assert_eq!(band.std_dev(&c).err(),
         Some(CovError::UnsupportedQuery { op: "std_dev" }));
+}
+
+// --- 3-DOF chain. The models above are 1- and 2-DOF; a block ordering has
+// nothing to divide out at one scalar per block, so this is the model that
+// exercises CovOrdering::Auto's block path.
+
+#[arael::model]
+#[arael(constraint(hb, {
+    [n3.x * n3.prior_isig, n3.y * n3.prior_isig, n3.z * n3.prior_isig]
+}))]
+struct N3 {
+    x: Param<f64>,
+    y: Param<f64>,
+    z: Param<f64>,
+    prior_isig: f64,
+    hb: SelfBlock<N3>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    [(a.x - b.x) * tie3.isig, (a.y - b.y) * tie3.isig, (a.z - b.z) * tie3.isig]
+}))]
+struct Tie3 {
+    #[arael(ref = root.nodes)]
+    a: Ref<N3>,
+    #[arael(ref = root.nodes)]
+    b: Ref<N3>,
+    isig: f64,
+    hb: CrossBlock<N3, N3>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct Chain3 {
+    nodes: refs::Vec<N3>,
+    ties: std::vec::Vec<Tie3>,
+}
+
+fn chain3(n: usize) -> Chain3 {
+    let mut c = Chain3 { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
+    for _ in 0..n {
+        c.nodes.push(N3 {
+            x: Param::new(0.0), y: Param::new(0.0), z: Param::new(0.0),
+            prior_isig: 1.0, hb: SelfBlock::new(),
+        });
+    }
+    for i in 0..n - 1 {
+        c.ties.push(Tie3 {
+            a: c.nodes.ref_at(i), b: c.nodes.ref_at(i + 1), isig: 1.0, hb: CrossBlock::new(),
+        });
+    }
+    c
+}
+
+#[test]
+fn block_factorization_matches_the_scalar_one() {
+    // The block supernodal Cholesky and faer's scalar one factor the same H.
+    // Every query has to come back the same, whichever produced the factor.
+    let n = 40;
+    let mut c = chain3(n);
+    let block = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto()).unwrap();
+    let scalar = c
+        .assemble_covariance_with(
+            CovMode::PerQuery,
+            &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Never),
+        )
+        .unwrap();
+    assert!(block.took_block_route(), "3-DOF blocks should take the block route");
+    assert!(!scalar.took_block_route(), "Never must stay on the scalar factor");
+
+    for i in 0..n {
+        let b = block.marginal_cov(&c.nodes[i]).unwrap();
+        let s = scalar.marginal_cov(&c.nodes[i]).unwrap();
+        for r in 0..3 {
+            for k in 0..3 {
+                assert!((b[(r, k)] - s[(r, k)]).abs() < 1e-10,
+                    "marginal node {i} [{r},{k}]: block {} vs scalar {}", b[(r, k)], s[(r, k)]);
+            }
+        }
+        // conditional_cov reads H itself -- out of the block matrix on one
+        // route and out of the scalar CSC on the other.
+        let bc = block.conditional_cov(&c.nodes[i]).unwrap();
+        let sc = scalar.conditional_cov(&c.nodes[i]).unwrap();
+        for r in 0..3 {
+            for k in 0..3 {
+                assert!((bc[(r, k)] - sc[(r, k)]).abs() < 1e-10,
+                    "conditional node {i} [{r},{k}]: block {} vs scalar {}", bc[(r, k)], sc[(r, k)]);
+            }
+        }
+    }
+
+    // A coupled pair and a distant one: in and out of the factor's pattern.
+    for (a, b_) in [(5usize, 6usize), (0, 39)] {
+        let x = block.cross_cov(&c.nodes[a], &c.nodes[b_]).unwrap()[(0, 0)];
+        let y = scalar.cross_cov(&c.nodes[a], &c.nodes[b_]).unwrap()[(0, 0)];
+        assert!((x - y).abs() < 1e-10, "cross {a}-{b_}: block {x} vs scalar {y}");
+    }
+
+    // std_dev goes through the same solve.
+    let bs = block.std_dev(&c.nodes[7]).unwrap();
+    let ss = scalar.std_dev(&c.nodes[7]).unwrap();
+    for (x, y) in bs.iter().zip(&ss) {
+        assert!((x - y).abs() < 1e-10, "std_dev: block {x} vs scalar {y}");
+    }
+}
+
+#[test]
+fn all_marginals_declines_the_block_route() {
+    // The selected inverse reads faer's supernode panels, so AllMarginals
+    // stays on the scalar factor however loudly it is asked otherwise.
+    let mut c = chain3(8);
+    let a = c
+        .assemble_covariance_with(
+            CovMode::AllMarginals,
+            &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Always),
+        )
+        .unwrap();
+    assert!(!a.took_block_route());
+    // And it still answers correctly.
+    let s = c
+        .assemble_covariance_with(
+            CovMode::PerQuery,
+            &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Never),
+        )
+        .unwrap();
+    for i in 0..8 {
+        let x = a.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)];
+        let y = s.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)];
+        assert!((x - y).abs() < 1e-10, "node {i}: {x} vs {y}");
+    }
+}
+
+#[test]
+fn one_scalar_per_block_declines_the_block_route() {
+    // A 1-DOF chain: the block partition is the scalar one, so there is
+    // nothing for the block route to divide out.
+    let mut c = path_chain(8);
+    let a = c
+        .assemble_covariance_with(
+            CovMode::PerQuery,
+            &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Always),
+        )
+        .unwrap();
+    assert!(!a.took_block_route());
+}
+
+#[test]
+fn ordering_does_not_change_the_covariance() {
+    // The ordering decides how much fill the factor carries, never the answer.
+    let n = 40;
+    let mut c = chain3(n);
+    for mode in [CovMode::PerQuery, CovMode::AllMarginals] {
+        let auto = c.assemble_covariance_with(mode, &CovOptions::auto()).unwrap();
+        let amd = c
+            .assemble_covariance_with(mode, &CovOptions::auto().with_ordering(CovOrdering::Amd))
+            .unwrap();
+        let nat = c
+            .assemble_covariance_with(mode, &CovOptions::auto().with_ordering(CovOrdering::Natural))
+            .unwrap();
+        let nd = c
+            .assemble_covariance_with(
+                mode,
+                &CovOptions::auto().with_ordering(CovOrdering::NestedDissection),
+            )
+            .unwrap();
+
+        for i in 0..n {
+            let a = auto.marginal_cov(&c.nodes[i]).unwrap();
+            for (label, other) in [("amd", &amd), ("natural", &nat), ("nd", &nd)] {
+                let b = other.marginal_cov(&c.nodes[i]).unwrap();
+                for r in 0..3 {
+                    for k in 0..3 {
+                        assert!((a[(r, k)] - b[(r, k)]).abs() < 1e-10,
+                            "{mode:?} {label} node {i} [{r},{k}]: {} vs {}", a[(r, k)], b[(r, k)]);
+                    }
+                }
+            }
+        }
+
+        // Neighbours are coupled, so this cross block is inside the factor's
+        // pattern -- the selected inverse reads it there rather than solving.
+        let a = auto.cross_cov(&c.nodes[5], &c.nodes[6]).unwrap()[(0, 0)];
+        let b = nat.cross_cov(&c.nodes[5], &c.nodes[6]).unwrap()[(0, 0)];
+        assert!(a.abs() > 1e-6, "{mode:?}: neighbours should be correlated");
+        assert!((a - b).abs() < 1e-10, "{mode:?}: cross {a} vs {b}");
+    }
+
+    // The plain entry point is the Auto path.
+    let plain = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let auto = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto()).unwrap();
+    assert_eq!(
+        plain.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)],
+        auto.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)],
+    );
 }

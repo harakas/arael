@@ -40,7 +40,7 @@
 //! entity's own `H_ee` block (`O(dof^3)`, no factor solve).
 
 use crate::model::Model;
-use crate::simple_lm::{CooMatrix, CscMatrix, LmProblem, RootProblem};
+use crate::simple_lm::{BlockSupernodalMode, CooMatrix, CscMatrix, LmProblem, RootProblem};
 use crate::utils::Float;
 use faer::sparse::linalg::cholesky as fchol;
 use nalgebra::DMatrix;
@@ -105,6 +105,74 @@ pub enum CovMode {
     TriDiagonal,
 }
 
+/// Elimination ordering for a covariance assembly. Ordering does not change
+/// the covariance, only what it costs to compute: it decides how much fill the
+/// factor carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CovOrdering {
+    /// Minimum degree over the model's BLOCK graph when the model has one,
+    /// over `H`'s scalar columns when it does not. The default.
+    ///
+    /// The block graph is the same coupling with the entity sizes divided
+    /// out: a 6-DOF pose against a 3-DOF landmark is one edge there and 18
+    /// scalar ones in `H`, so minimum degree walks a much smaller graph for
+    /// the same answer.
+    #[default]
+    Auto,
+    /// Minimum degree over `H`'s scalar columns, whatever structure the model
+    /// has.
+    Amd,
+    /// Nested dissection over the model's block graph
+    /// ([`arael_faer::nd`]).
+    ///
+    /// For a trajectory that revisits -- a loop closure, a figure-8 crossing
+    /// -- where poses far apart in the ordering are coupled. That leaves a
+    /// separator structure dissection exploits and minimum degree does not.
+    /// Needs a block structure; without one this falls back to scalar AMD.
+    NestedDissection,
+    /// Natural order, no permutation. For a model already in a good order,
+    /// and for checking what the ordering is worth.
+    Natural,
+}
+
+/// How to assemble a covariance. A covariance is built from the model, not
+/// from a solve, so this is separate from the solver's
+/// [`SparseFaerOptions`](crate::simple_lm::SparseFaerOptions) -- the fields
+/// that struct carries about damping, marginalization and iterative solves
+/// have no meaning here.
+#[derive(Debug, Clone, Default)]
+pub struct CovOptions {
+    /// Elimination ordering -- see [`CovOrdering`].
+    pub ordering: CovOrdering,
+    /// Factorize in block form with arael's supernodal Cholesky instead of
+    /// faer's scalar one -- see [`BlockSupernodalMode`].
+    ///
+    /// [`CovMode::AllMarginals`] ignores this and stays on the scalar factor:
+    /// its selected inverse reads faer's supernode panels. Ask for the block
+    /// route there and [`CovAssembly::took_block_route`] reports `false`.
+    pub block_supernodal: BlockSupernodalMode,
+}
+
+impl CovOptions {
+    /// The defaults: ordering and factorization picked from the model's
+    /// structure.
+    pub fn auto() -> Self {
+        Self::default()
+    }
+
+    /// Set the elimination ordering.
+    pub fn with_ordering(mut self, ordering: CovOrdering) -> Self {
+        self.ordering = ordering;
+        self
+    }
+
+    /// Set when the block supernodal Cholesky factorizes.
+    pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
+        self.block_supernodal = mode;
+        self
+    }
+}
+
 /// A covariance prepared at the solution. Build it with
 /// [`Covariance::assemble_covariance`], then query per-entity blocks. An owned
 /// value: querying does not borrow the problem, so
@@ -123,6 +191,17 @@ enum Backend {
         l_vals: Vec<f64>,
         h: CscMatrix<f64>,
         sel: Option<SelInv>,
+    },
+    // arael's block supernodal Cholesky over the model's entity partition. No
+    // scalar CSC and no scalar symbolic: the block H serves conditional_cov
+    // directly. PerQuery only -- the selected inverse reads faer's supernode
+    // panels, so AllMarginals stays on Factored.
+    BlockFactored {
+        sn: arael_faer::supernodal::SupernodalSymbolic,
+        factor: Vec<f64>,
+        hb: arael_faer::bsc::SparseBlockColMat<arael_faer::SparseIndex, f64>,
+        // supernodal_solve wants scratch, and the queries take &self.
+        ctx: std::cell::RefCell<arael_faer::supernodal::SupernodalContext<f64>>,
     },
     // Block-tridiagonal forward/backward Schur blocks. The diagonal blocks serve
     // conditional_cov, so no CSC is kept.
@@ -194,6 +273,16 @@ impl CovAssembly {
         self.n
     }
 
+    /// Whether this assembly factorized in block form
+    /// ([`CovOptions::block_supernodal`]). `false` when the model has no block
+    /// structure to use, when its blocks are one scalar wide, or for
+    /// [`CovMode::AllMarginals`] and [`CovMode::TriDiagonal`], which take
+    /// other routes -- so a caller who asked for the block route can check
+    /// whether it got it.
+    pub fn took_block_route(&self) -> bool {
+        matches!(self.backend, Backend::BlockFactored { .. })
+    }
+
     /// Scalar parameter indices covered by a model (an entity's contiguous
     /// live-parameter ranges, or every element's for a collection).
     fn indices<M: Model + ?Sized>(m: &M) -> Vec<usize> {
@@ -219,7 +308,9 @@ impl CovAssembly {
     pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> Result<DMatrix<f64>, CovError> {
         let idx = Self::indices(m);
         match &self.backend {
-            Backend::Factored { .. } => Ok(self.factored_block(&idx, &idx)),
+            Backend::Factored { .. } | Backend::BlockFactored { .. } => {
+                Ok(self.factored_block(&idx, &idx))
+            }
             Backend::Band(b) => match b.block_index(&idx) {
                 Some(bi) => b.marginal(bi),
                 None => Err(CovError::UnsupportedQuery { op: "marginal_cov" }),
@@ -247,6 +338,16 @@ impl CovAssembly {
                 }
                 hb
             }
+            // Same H_ee, read out of the block matrix instead of a CSC.
+            Backend::BlockFactored { hb, .. } => {
+                let mut hbm = DMatrix::zeros(k, k);
+                for (r, &i) in idx.iter().enumerate() {
+                    for (c, &j) in idx.iter().enumerate() {
+                        hbm[(r, c)] = block_get_sym(hb, i, j);
+                    }
+                }
+                hbm
+            }
             // The entity's own diagonal block is exactly H_ee.
             Backend::Band(b) => match b.block_index(&idx) {
                 Some(bi) => b.diag[bi].clone(),
@@ -265,7 +366,9 @@ impl CovAssembly {
     pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Result<Vec<f64>, CovError> {
         let idx = Self::indices(m);
         let block = match &self.backend {
-            Backend::Factored { .. } => self.factored_block(&idx, &idx),
+            Backend::Factored { .. } | Backend::BlockFactored { .. } => {
+                self.factored_block(&idx, &idx)
+            }
             Backend::Band(b) => match b.block_index(&idx) {
                 Some(bi) => b.marginal(bi)?,
                 None => return Err(CovError::UnsupportedQuery { op: "std_dev" }),
@@ -284,7 +387,9 @@ impl CovAssembly {
         let ia = Self::indices(a);
         let ib = Self::indices(b);
         match &self.backend {
-            Backend::Factored { .. } => Ok(self.factored_block(&ia, &ib)),
+            Backend::Factored { .. } | Backend::BlockFactored { .. } => {
+                Ok(self.factored_block(&ia, &ib))
+            }
             Backend::Band(_) => Err(CovError::UnsupportedQuery { op: "cross_cov" }),
         }
     }
@@ -293,8 +398,32 @@ impl CovAssembly {
     // selected-inverse hit needs no solve; a miss (out-of-pattern cross block)
     // falls through to a column solve.
     fn factored_block(&self, rows: &[usize], cols: &[usize]) -> DMatrix<f64> {
+        // One batched solve for the whole query: the factor is read once for
+        // all its columns. There is no selected inverse on this route
+        // (AllMarginals stays on the scalar factor), so every query solves.
+        if let Backend::BlockFactored { sn, factor, ctx, .. } = &self.backend {
+            let k = cols.len();
+            let mut e = vec![0.0_f64; self.n * k]; // column-major n x k
+            for (c, &j) in cols.iter().enumerate() {
+                e[c * self.n + j] = 1.0;
+            }
+            arael_faer::supernodal::supernodal_solve_multi(
+                sn,
+                factor,
+                &mut e,
+                k,
+                &mut ctx.borrow_mut(),
+            );
+            let mut m = DMatrix::zeros(rows.len(), k);
+            for c in 0..k {
+                for (r, &i) in rows.iter().enumerate() {
+                    m[(r, c)] = 2.0 * e[c * self.n + i];
+                }
+            }
+            return m;
+        }
         let Backend::Factored { symbolic, l_vals, sel, .. } = &self.backend else {
-            // INVARIANT: every call site is inside a `Backend::Factored` arm.
+            // INVARIANT: every call site is inside a factored arm.
             unreachable!("factored_block on a band backend")
         };
         if let Some(s) = sel {
@@ -524,6 +653,220 @@ fn solve_cols(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usiz
     llt.solve_in_place_with_conj(faer::Conj::No, rhs, faer::Par::Seq, stack);
 }
 
+// The block graph over the model's entity partition. `None` when there is no
+// block structure to work with (a hand-built problem), or when the blocks are
+// one scalar wide and there is nothing to divide out -- the block graph is
+// then the scalar graph and building it would only add cost.
+fn block_graph(
+    spans: &[(u32, u32)],
+    cells: &[(u32, u32)],
+    n: usize,
+) -> Option<(Vec<usize>, arael_faer::bsc::SymbolicSparseBlockColMat<arael_faer::SparseIndex>)> {
+    if spans.is_empty() || cells.is_empty() {
+        return None;
+    }
+    let part = crate::simple_lm::block_partition_from_spans(spans, n);
+    if part.len() - 1 >= n {
+        return None;
+    }
+    let part_idx: Vec<arael_faer::SparseIndex> = part.iter().map(|&p| p as _).collect();
+    let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+        part_idx.clone(),
+        part_idx,
+        cells.len(),
+        |k| (cells[k].0 as usize, cells[k].1 as usize),
+    );
+    Some((part, hsym))
+}
+
+// The block elimination order `ordering` asks for, and the symbolic that
+// prices it -- the caller factorizes through that symbolic rather than
+// rebuilding it. `Natural` gets no order.
+//
+// Auto prices minimum degree against nested dissection by the flops each
+// factor would take and keeps the cheaper, the determination the solver makes
+// for a solve: minimum degree wins on a chain, dissection on a trajectory that
+// revisits, where poses far apart in the ordering are coupled.
+fn block_order(
+    ordering: CovOrdering,
+    hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<arael_faer::SparseIndex>,
+    params: &arael_faer::supernodal::SupernodalParams,
+) -> (Option<Vec<usize>>, Option<arael_faer::supernodal::SupernodalSymbolic>) {
+    use arael_faer::supernodal as sn;
+    let build = |o: Option<&[usize]>| sn::SupernodalSymbolic::new(hsym, o, params).ok();
+    match ordering {
+        CovOrdering::Amd => {
+            let o = sn::amd_block_order(hsym);
+            let s = build(Some(&o));
+            (Some(o), s)
+        }
+        CovOrdering::NestedDissection => {
+            let o = sn::nd_block_order(hsym);
+            let s = build(Some(&o));
+            (Some(o), s)
+        }
+        CovOrdering::Natural => (None, build(None)),
+        // Minimum degree first, so it keeps a tie: it is the cheaper of the
+        // two to build.
+        CovOrdering::Auto => {
+            let candidates = vec![sn::amd_block_order(hsym), sn::nd_block_order(hsym)];
+            match sn::cheapest_block_order(hsym, params, candidates) {
+                Some(c) => (Some(c.order), Some(c.symbolic)),
+                None => (Some(sn::amd_block_order(hsym)), None),
+            }
+        }
+    }
+}
+
+// A block ordering as a scalar permutation faer can take. `None` leaves the
+// caller on its own scalar ordering.
+//
+// Returned as (forward, inverse) in faer's convention: forward[k] is the
+// column eliminated k-th, inverse[i] where column i ended up.
+fn block_perm(
+    ordering: CovOrdering,
+    spans: &[(u32, u32)],
+    cells: &[(u32, u32)],
+    n: usize,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (part, hsym) = block_graph(spans, cells, n)?;
+    let (order, _) =
+        block_order(ordering, &hsym, &arael_faer::supernodal::SupernodalParams::default());
+    let order = order?;
+
+    // Block order -> scalar order: each block contributes its own columns, in
+    // their natural order, at the position the block landed in.
+    let mut forward: Vec<usize> = Vec::with_capacity(n);
+    for &b in &order {
+        forward.extend(part[b]..part[b + 1]);
+    }
+    debug_assert_eq!(forward.len(), n, "the block partition did not cover every column");
+    let mut inverse = vec![0usize; n];
+    for (k, &c) in forward.iter().enumerate() {
+        inverse[c] = k;
+    }
+    Some((forward, inverse))
+}
+
+// Assemble and factorize in block form. `Ok(None)` when the model's blocks
+// turn out to be one scalar wide, where the block route has nothing to divide
+// out and the scalar one is the better answer.
+fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
+    m: &mut M,
+    params: &[T],
+    grad: &mut [T],
+    spans: &[(u32, u32)],
+    cells: &[(u32, u32)],
+    n: usize,
+    opts: &CovOptions,
+) -> Result<Option<CovAssembly>, CovError> {
+    use arael_faer::supernodal as sn;
+
+    let Some((_, hsym)) = block_graph(spans, cells, n) else {
+        return Ok(None);
+    };
+
+    // One value slot per scalar entry the block traversal emits, in that
+    // traversal's order -- what the indexed assembly writes through.
+    let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
+    let mut positions = Vec::new();
+    LmProblem::bind_hessian_positions(
+        m,
+        &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+            resolver.resolve_tile(i as usize, j as usize)
+        }),
+        &mut positions,
+    );
+
+    // Assemble at the model's precision, then carry the values to f64: a
+    // covariance is computed in f64 whatever the model is.
+    let mut vals_t = vec![T::zero(); hsym.val_count()];
+    m.calc_grad_hessian_sparse_indexed(params, grad, &mut vals_t, &positions);
+    let vals: Vec<f64> = vals_t.iter().map(|&x| x.to_f64().unwrap_or(f64::NAN)).collect();
+
+    let params = sn::SupernodalParams::default();
+    let (_, symbolic) = block_order(opts.ordering, &hsym, &params);
+    let symbolic = symbolic.ok_or(CovError::NotPositiveDefinite)?;
+
+    let hb = arael_faer::bsc::SparseBlockColMat::new(hsym, vals);
+    let mut factor = vec![0.0_f64; symbolic.factor_val_count()];
+    let mut ctx = sn::SupernodalContext::new();
+    sn::supernodal_factorize(&symbolic, &hb, &mut factor, &mut ctx, faer::Par::Seq)
+        .map_err(|_| CovError::NotPositiveDefinite)?;
+
+    Ok(Some(CovAssembly {
+        n,
+        backend: Backend::BlockFactored { sn: symbolic, factor, hb, ctx: std::cell::RefCell::new(ctx) },
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{block_perm, CovOrdering};
+
+    #[test]
+    fn block_perm_is_a_permutation_that_keeps_blocks_whole() {
+        // Four 3-wide blocks in a chain: diagonal cells plus 0-1, 1-2, 2-3.
+        let spans = [(0u32, 3u32), (3, 3), (6, 3), (9, 3)];
+        let cells = [(0u32, 0u32), (3, 3), (6, 6), (9, 9), (0, 3), (3, 6), (6, 9)];
+        let (fwd, inv) = block_perm(CovOrdering::Auto, &spans, &cells, 12).expect("3-wide blocks divide out");
+
+        assert_eq!(fwd.len(), 12);
+        let mut seen = vec![false; 12];
+        for (k, &c) in fwd.iter().enumerate() {
+            assert!(!seen[c], "column {c} appears twice");
+            seen[c] = true;
+            assert_eq!(inv[c], k, "inverse disagrees at column {c}");
+        }
+
+        // A block is eliminated whole: its columns stay consecutive and in
+        // their own order, whatever position the block landed in.
+        for k in (0..12).step_by(3) {
+            assert_eq!(fwd[k] % 3, 0, "block does not start on a boundary at {k}");
+            assert_eq!(fwd[k + 1], fwd[k] + 1);
+            assert_eq!(fwd[k + 2], fwd[k] + 2);
+        }
+    }
+
+    #[test]
+    fn one_scalar_per_block_declines() {
+        // The block graph is then the scalar graph: nothing to divide out, and
+        // building it would only add to what scalar AMD already costs.
+        let spans = [(0u32, 1u32), (1, 1), (2, 1)];
+        let cells = [(0u32, 0u32), (1, 1), (2, 2), (0, 1)];
+        assert!(block_perm(CovOrdering::Auto, &spans, &cells, 3).is_none());
+    }
+
+    #[test]
+    fn no_block_structure_declines() {
+        assert!(block_perm(CovOrdering::Auto, &[], &[(0, 0)], 4).is_none());
+        assert!(block_perm(CovOrdering::Auto, &[(0, 4)], &[], 4).is_none());
+    }
+}
+
+// Symmetric scalar lookup into a block matrix holding the upper triangle:
+// H[i,j] from the block that covers (i, j), zero when that block is absent.
+fn block_get_sym(
+    hb: &arael_faer::bsc::SparseBlockColMat<arael_faer::SparseIndex, f64>,
+    i: usize,
+    j: usize,
+) -> f64 {
+    let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+    let sym = hb.symbolic();
+    let part = sym.col_part();
+    // Which block owns a scalar column: the partition is ascending, so the
+    // block is the last boundary at or below it.
+    let blk_of = |c: usize| match part.binary_search(&(c as arael_faer::SparseIndex)) {
+        Ok(b) => b,
+        Err(b) => b - 1,
+    };
+    let (br, bc) = (blk_of(lo), blk_of(hi));
+    match hb.get_block(br, bc) {
+        Some(m) => m[(lo - part[br] as usize, hi - part[bc] as usize)],
+        None => 0.0,
+    }
+}
+
 // Upper-triangle CSC symmetric lookup: H[i,j] with H stored for i <= j.
 impl CscMatrix<f64> {
     fn get_sym(&self, i: usize, j: usize) -> f64 {
@@ -613,6 +956,18 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
     /// `mode`. The dense inverse is never formed. `Err` if `H` is singular, or
     /// (for [`CovMode::TriDiagonal`]) not block-tridiagonal.
     fn assemble_covariance(&mut self, mode: CovMode) -> Result<CovAssembly, CovError> {
+        self.assemble_covariance_with(mode, &CovOptions::auto())
+    }
+
+    /// [`assemble_covariance`](Self::assemble_covariance) with the assembly
+    /// spelled out instead of left to the defaults -- see [`CovOptions`].
+    /// The covariance is the same either way; the options decide what it
+    /// costs to produce.
+    fn assemble_covariance_with(
+        &mut self,
+        mode: CovMode,
+        opts: &CovOptions,
+    ) -> Result<CovAssembly, CovError> {
         let mut params: Vec<T> = Vec::new();
         self.serialize(&mut params);
         let n = params.len();
@@ -636,6 +991,28 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
                 .map_err(|_| CovError::NotTriDiagonal)?;
             let bd = build_band(&band, kd, n, &spans)?;
             return Ok(CovAssembly { n, backend: Backend::Band(bd) });
+        }
+
+        // The model's block structure, when it has one. Both the block route
+        // and Auto's block ordering are built on it.
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        self.collect_param_blocks(&mut spans);
+        let mut cells: Vec<(u32, u32)> = Vec::new();
+        LmProblem::collect_hessian_cells(self, &mut cells);
+        let blocked = !spans.is_empty() && !cells.is_empty();
+
+        // The block route: assemble straight into block form, order over the
+        // block graph, factorize with the block supernodal Cholesky. No COO,
+        // no scalar CSC, no scalar symbolic. AllMarginals is excluded because
+        // its selected inverse reads faer's supernode panels.
+        let want_block = match opts.block_supernodal {
+            BlockSupernodalMode::Auto | BlockSupernodalMode::Always => true,
+            BlockSupernodalMode::Never => false,
+        };
+        if want_block && blocked && mode == CovMode::PerQuery {
+            if let Some(a) = block_assemble(self, &params, &mut grad, &spans, &cells, n, opts)? {
+                return Ok(a);
+            }
         }
 
         let mut coo = CooMatrix::new(n);
@@ -663,10 +1040,26 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             chol_params.supernodal_flop_ratio_threshold =
                 faer::sparse::linalg::SupernodalThreshold::FORCE_SUPERNODAL;
         }
+        // Auto orders over the model's block graph when there is one. The
+        // permutation has to outlive the symbolic factorization that borrows it.
+        let block_perm = match opts.ordering {
+            CovOrdering::Auto | CovOrdering::NestedDissection => {
+                block_perm(opts.ordering, &spans, &cells, n)
+            }
+            CovOrdering::Amd | CovOrdering::Natural => None,
+        };
+        let ordering = match (&block_perm, opts.ordering) {
+            (Some((fwd, inv)), _) => fchol::SymmetricOrdering::Custom(
+                faer::perm::PermRef::new_checked(fwd, inv, n),
+            ),
+            (None, CovOrdering::Natural) => fchol::SymmetricOrdering::Identity,
+            // Auto with no block structure to use falls through to scalar AMD.
+            (None, _) => fchol::SymmetricOrdering::Amd,
+        };
         let symbolic = fchol::factorize_symbolic_cholesky(
             sym_ref,
             faer::Side::Upper,
-            fchol::SymmetricOrdering::Amd,
+            ordering,
             chol_params,
         )
         .map_err(|_| CovError::NotPositiveDefinite)?;

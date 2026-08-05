@@ -5427,30 +5427,31 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 }
                 let amd = arael_faer::supernodal::amd_block_order(&hsym);
                 let sn_params = arael_faer::supernodal::SupernodalParams::default();
-                let price = |order: &[usize]| -> f64 {
-                    arael_faer::supernodal::SupernodalSymbolic::new(
-                        &hsym,
-                        Some(order),
-                        &sn_params,
-                    )
-                    .map(|s| s.flops())
-                    .unwrap_or(f64::INFINITY)
+                // Detected-first leads, so it keeps a tie, as it always has.
+                let choice = arael_faer::supernodal::cheapest_block_order(
+                    &hsym,
+                    &sn_params,
+                    vec![det_first, amd],
+                );
+                let (f_det, f_amd) = match &choice {
+                    Some(c) => (c.flops[0], c.flops[1]),
+                    None => (f64::INFINITY, f64::INFINITY),
                 };
-                let (f_det, f_amd) = (price(&det_first), price(&amd));
                 if vb {
                     info!(
                         "block supernodal: whole-system ordering -- detected-first {:.2e} \
                          flops, block-AMD {:.2e}: {}",
                         f_det,
                         f_amd,
-                        if f_det <= f_amd {
-                            "detected marginalizable blocks first"
-                        } else {
-                            "block-AMD"
+                        match choice.as_ref().map(|c| c.winner) {
+                            Some(0) => "detected marginalizable blocks first",
+                            _ => "block-AMD",
                         },
                     );
                 }
-                Some(if f_det <= f_amd { det_first } else { amd })
+                // No candidate produced a symbolic at all: leave the order
+                // unset and let the factorization below report the failure.
+                choice.map(|c| c.order)
             }
             _ => Some(arael_faer::supernodal::amd_block_order(&hsym)),
         };

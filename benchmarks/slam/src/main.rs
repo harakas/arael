@@ -372,9 +372,18 @@ use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 fn cov_benchmark(scene: &Scene) {
     let budget: f64 = std::env::var("COV_BUDGET_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
     let cap: usize = std::env::var("COV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-    let ceres = std::path::Path::new("cpp/build/ceres_slam").exists();
-    let gtsam = std::path::Path::new("cpp/build/gtsam_slam").exists();
-    let g2o = std::path::Path::new("cpp/build/g2o_slam").exists();
+    // SLAM_SYSTEMS selects rows here as it does in the solve table, so a run
+    // that only wants arael's numbers does not spend the per-cell cap on the
+    // comparison systems. Unset runs everything.
+    let filter = std::env::var("SLAM_SYSTEMS").ok();
+    let wanted = |row: &str| match &filter {
+        Some(f) => f.split(',').any(|s| row.contains(s.trim())),
+        None => true,
+    };
+    let built = |bin: &str| std::path::Path::new(&format!("cpp/build/{bin}")).exists();
+    let ceres = wanted("ceres") && built("ceres_slam");
+    let gtsam = wanted("gtsam") && built("gtsam_slam");
+    let g2o = wanted("g2o") && built("g2o_slam");
     let scene_path = "/tmp/slam_scene.txt";
     scene::write_scene(scene, scene_path);
 
@@ -382,10 +391,13 @@ fn cov_benchmark(scene: &Scene) {
     println!("\ncovariance scaling: 6-DOF pose + 3-DOF landmark marginals.");
     println!("arael, Ceres and GTSAM build cold (factor + query); g2o reuses its solve factor (warm).");
     println!("cells: median ms (reps); budget {budget}s [COV_BUDGET_S]; - not covered; * over the {cap_s:.0}s cap [COV_CELL_CAP_S].");
-    for (ok, name) in [(ceres, "ceres_slam"), (gtsam, "gtsam_slam"), (g2o, "g2o_slam")] {
-        if !ok {
-            eprintln!("WARNING: cpp/build/{name} missing; skipping it");
+    for (row, bin) in [("ceres", "ceres_slam"), ("gtsam", "gtsam_slam"), ("g2o", "g2o_slam")] {
+        if wanted(row) && !built(bin) {
+            eprintln!("WARNING: cpp/build/{bin} missing; skipping it");
         }
+    }
+    if let Some(f) = &filter {
+        eprintln!("SLAM_SYSTEMS={f} -- partial run, the cross-system std-dev check covers only what ran");
     }
 
     let ar = arael_runner::cov_bench(scene, budget, cap);
