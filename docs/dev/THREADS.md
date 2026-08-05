@@ -124,6 +124,28 @@ Bundle adjustment and the figure-8 gain; the pose graph is untouched
 (its panels are all below the gate, which is the gate working); the
 S-curve gains nothing, which the kernel numbers did not predict.
 
+Scaled up on the figure-8 (whole H under ND), full-iter, best of two
+reps -- the speedup does not grow with the problem, and eight threads is
+worse than four at both sizes:
+
+| poses | params | 1 thr | 2 | 4 | 8 | best |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1200 | 21,600 | 314.5 ms | 249.0 | 228.0 | -- | 1.38x |
+| 2400 | 43,200 | 600.1 ms | 525.8 | 470.0 | 514.7 | 1.28x |
+| 4800 | 86,400 | 1099.9 ms | 910.2 | 807.2 | 880.9 | 1.36x |
+
+The phase breakdown at 4800 says why. Over a 3-iteration solve:
+assembly 198.4 -> 201.3 ms (sequential), analysis 1670.9 -> 1795.8
+(sequential, and a third of the whole solve at this size -- nested
+dissection plus the symbolic over 28,800 blocks), linear solve 2982.1 ->
+2158.3 (1.38x). The marginal iteration's linear solve alone goes 1015.4
+-> 665.2, or 1.53x; what dilutes it inside that phase is the panel
+seeding, the sub-gate panels and the single-RHS triangular solve.
+
+So tier 1 has taken what the dense kernels have to give. The next
+threading win is not in the factorization: it is the analysis at large
+sizes, and the Schur reduction on the problems that reduce.
+
 **Why the S-curve is flat.** Its factorization is a smaller share of the
 iteration than the model assumed -- the Schur reduction that *forms* the
 1122-wide S is the larger half, and it is sequential. Amdahl, not a
