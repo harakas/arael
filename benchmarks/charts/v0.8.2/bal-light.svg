@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="494" viewBox="0 0 980 494" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="979" height="493" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<text x="18" y="30" font-size="15" font-weight="600" fill="#0b0b0b">Bundle adjustment (BAL): per-iteration cost and one-time setup</text>
+<text x="962" y="30" font-size="11.5" text-anchor="end" fill="#85847c">arael 0.8.2</text>
+<text x="18" y="48" font-size="11.5" fill="#5f5e58">Solid: one complete iteration. Faded: the setup, paid once. Apple M4 Pro, single thread. Lower is better.</text>
+<text x="18" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">Ladybug-49 -- 23,769 params</text>
+<line x1="154.0" y1="78" x2="154.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="154.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="236.7" y1="78" x2="236.7" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="236.7" y="226" font-size="10" text-anchor="middle" fill="#85847c">20</text>
+<line x1="319.3" y1="78" x2="319.3" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="319.3" y="226" font-size="10" text-anchor="middle" fill="#85847c">40</text>
+<line x1="402.0" y1="78" x2="402.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="402.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">60 ms</text>
+<text x="146" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 Schur</text>
+<path d="M154,81.5 L186.05066666666667,81.5 Q189.05066666666667,81.5 189.05066666666667,84.5 L189.05066666666667,90.5 Q189.05066666666667,93.5 186.05066666666667,93.5 L154,93.5 Z" fill="#2a78d6"/>
+<path d="M191.05066666666667,81.5 L200.07866666666666,81.5 Q203.07866666666666,81.5 203.07866666666666,84.5 L203.07866666666666,90.5 Q203.07866666666666,93.5 200.07866666666666,93.5 L191.05066666666667,93.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="209.1" y="91.0" font-size="10.5" font-weight="600" fill="#0b0b0b">8.5 + 2.9</text>
+<text x="146" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 Schur</text>
+<path d="M154,100.5 L194.06933333333333,100.5 Q197.06933333333333,100.5 197.06933333333333,103.5 L197.06933333333333,109.5 Q197.06933333333333,112.5 194.06933333333333,112.5 L154,112.5 Z" fill="#2a78d6"/>
+<path d="M199.06933333333333,100.5 L211.404,100.5 Q214.404,100.5 214.404,103.5 L214.404,109.5 Q214.404,112.5 211.404,112.5 L199.06933333333333,112.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="220.4" y="110.0" font-size="10.5" font-weight="600" fill="#0b0b0b">10.4 + 3.7</text>
+<text x="146" y="129.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 sparse</text>
+<path d="M154,119.5 L200.6,119.5 Q203.6,119.5 203.6,122.5 L203.6,128.5 Q203.6,131.5 200.6,131.5 L154,131.5 Z" fill="#2a78d6"/>
+<path d="M205.6,119.5 L275.4293333333333,119.5 Q278.4293333333333,119.5 278.4293333333333,122.5 L278.4293333333333,128.5 Q278.4293333333333,131.5 275.4293333333333,131.5 L205.6,131.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="284.4" y="129.0" font-size="10.5" font-weight="600" fill="#0b0b0b">12.0 + 17.6</text>
+<text x="146" y="148.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 sparse</text>
+<path d="M154,138.5 L214.736,138.5 Q217.736,138.5 217.736,141.5 L217.736,147.5 Q217.736,150.5 214.736,150.5 L154,150.5 Z" fill="#2a78d6"/>
+<path d="M219.736,138.5 L300.27066666666667,138.5 Q303.27066666666667,138.5 303.27066666666667,141.5 L303.27066666666667,147.5 Q303.27066666666667,150.5 300.27066666666667,150.5 L219.736,150.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="309.3" y="148.0" font-size="10.5" font-weight="600" fill="#0b0b0b">15.4 + 20.2</text>
+<text x="146" y="167.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres dense_schur</text>
+<path d="M154,157.5 L233.17066666666665,157.5 Q236.17066666666665,157.5 236.17066666666665,160.5 L236.17066666666665,166.5 Q236.17066666666665,169.5 233.17066666666665,169.5 L154,169.5 Z" fill="#8f8e86"/>
+<path d="M238.17066666666665,157.5 L316.88666666666666,157.5 Q319.88666666666666,157.5 319.88666666666666,160.5 L319.88666666666666,166.5 Q319.88666666666666,169.5 316.88666666666666,169.5 L238.17066666666665,169.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="325.9" y="167.0" font-size="10.5" fill="#0b0b0b">19.9 + 19.8</text>
+<text x="146" y="186.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (Schur)</text>
+<path d="M154,176.5 L234.576,176.5 Q237.576,176.5 237.576,179.5 L237.576,185.5 Q237.576,188.5 234.576,188.5 L154,188.5 Z" fill="#8f8e86"/>
+<path d="M239.576,176.5 L297.1293333333333,176.5 Q300.1293333333333,176.5 300.1293333333333,179.5 L300.1293333333333,185.5 Q300.1293333333333,188.5 297.1293333333333,188.5 L239.576,188.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="306.1" y="186.0" font-size="10.5" fill="#0b0b0b">20.2 + 14.6</text>
+<text x="146" y="205.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres sparse_schur</text>
+<path d="M154,195.5 L235.40266666666668,195.5 Q238.40266666666668,195.5 238.40266666666668,198.5 L238.40266666666668,204.5 Q238.40266666666668,207.5 235.40266666666668,207.5 L154,207.5 Z" fill="#8f8e86"/>
+<path d="M240.40266666666668,195.5 L362.56,195.5 Q365.56,195.5 365.56,198.5 L365.56,204.5 Q365.56,207.5 362.56,207.5 L240.40266666666668,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="371.6" y="205.0" font-size="10.5" fill="#0b0b0b">20.4 + 30.3</text>
+<text x="498" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">Ladybug-138 -- 60,876 params</text>
+<line x1="634.0" y1="78" x2="634.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="634.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="696.0" y1="78" x2="696.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="696.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">50</text>
+<line x1="758.0" y1="78" x2="758.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="758.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">100</text>
+<line x1="820.0" y1="78" x2="820.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="820.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">150</text>
+<line x1="882.0" y1="78" x2="882.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>
+<text x="882.0" y="226" font-size="10" text-anchor="middle" fill="#85847c">200 ms</text>
+<text x="626" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 Schur</text>
+<path d="M634,81.5 L665.9804,81.5 Q668.9804,81.5 668.9804,84.5 L668.9804,90.5 Q668.9804,93.5 665.9804,93.5 L634,93.5 Z" fill="#2a78d6"/>
+<path d="M670.9804,81.5 L680.6036,81.5 Q683.6036,81.5 683.6036,84.5 L683.6036,90.5 Q683.6036,93.5 680.6036,93.5 L670.9804,93.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="689.6" y="91.0" font-size="10.5" font-weight="600" fill="#0b0b0b">28.2 + 10.2</text>
+<text x="626" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 Schur</text>
+<path d="M634,100.5 L681.0588,100.5 Q684.0588,100.5 684.0588,103.5 L684.0588,109.5 Q684.0588,112.5 681.0588,112.5 L634,112.5 Z" fill="#2a78d6"/>
+<path d="M686.0588,100.5 L699.9352,100.5 Q702.9352,100.5 702.9352,103.5 L702.9352,109.5 Q702.9352,112.5 699.9352,112.5 L686.0588,112.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="708.9" y="110.0" font-size="10.5" font-weight="600" fill="#0b0b0b">40.4 + 13.6</text>
+<text x="626" y="129.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 sparse</text>
+<path d="M634,119.5 L681.1332,119.5 Q684.1332,119.5 684.1332,122.5 L684.1332,128.5 Q684.1332,131.5 681.1332,131.5 L634,131.5 Z" fill="#2a78d6"/>
+<path d="M686.1332,119.5 L748.0224000000001,119.5 Q751.0224000000001,119.5 751.0224000000001,122.5 L751.0224000000001,128.5 Q751.0224000000001,131.5 748.0224000000001,131.5 L686.1332,131.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="757.0" y="129.0" font-size="10.5" font-weight="600" fill="#0b0b0b">40.4 + 52.3</text>
+<text x="626" y="148.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 sparse</text>
+<path d="M634,138.5 L698.0219999999999,138.5 Q701.0219999999999,138.5 701.0219999999999,141.5 L701.0219999999999,147.5 Q701.0219999999999,150.5 698.0219999999999,150.5 L634,150.5 Z" fill="#2a78d6"/>
+<path d="M703.0219999999999,138.5 L780.7087999999999,138.5 Q783.7087999999999,138.5 783.7087999999999,141.5 L783.7087999999999,147.5 Q783.7087999999999,150.5 780.7087999999999,150.5 L703.0219999999999,150.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="789.7" y="148.0" font-size="10.5" font-weight="600" fill="#0b0b0b">54.0 + 65.1</text>
+<text x="626" y="167.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (Schur)</text>
+<path d="M634,157.5 L715.2208,157.5 Q718.2208,157.5 718.2208,160.5 L718.2208,166.5 Q718.2208,169.5 715.2208,169.5 L634,169.5 Z" fill="#8f8e86"/>
+<path d="M720.2208,157.5 L786.7848,157.5 Q789.7848,157.5 789.7848,160.5 L789.7848,166.5 Q789.7848,169.5 786.7848,169.5 L720.2208,169.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="795.8" y="167.0" font-size="10.5" fill="#0b0b0b">67.9 + 56.1</text>
+<text x="626" y="186.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres sparse_schur</text>
+<path d="M634,176.5 L718.9532,176.5 Q721.9532,176.5 721.9532,179.5 L721.9532,185.5 Q721.9532,188.5 718.9532,188.5 L634,188.5 Z" fill="#8f8e86"/>
+<path d="M723.9532,176.5 L844.5316,176.5 Q847.5316,176.5 847.5316,179.5 L847.5316,185.5 Q847.5316,188.5 844.5316,188.5 L723.9532,188.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="853.5" y="186.0" font-size="10.5" fill="#0b0b0b">70.9 + 99.7</text>
+<text x="626" y="205.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres dense_schur</text>
+<path d="M634,195.5 L725.9716,195.5 Q728.9716,195.5 728.9716,198.5 L728.9716,204.5 Q728.9716,207.5 725.9716,207.5 L634,207.5 Z" fill="#8f8e86"/>
+<path d="M730.9716,195.5 L809.1171999999999,195.5 Q812.1171999999999,195.5 812.1171999999999,198.5 L812.1171999999999,204.5 Q812.1171999999999,207.5 809.1171999999999,207.5 L730.9716,207.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="818.1" y="205.0" font-size="10.5" fill="#0b0b0b">76.6 + 65.4</text>
+<text x="18" y="263" font-size="12.5" font-weight="600" fill="#0b0b0b">Ladybug-372 -- 145,617 params</text>
+<line x1="154.0" y1="271" x2="154.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="154.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="216.0" y1="271" x2="216.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="216.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">200</text>
+<line x1="278.0" y1="271" x2="278.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="278.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">400</text>
+<line x1="340.0" y1="271" x2="340.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="340.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">600</text>
+<line x1="402.0" y1="271" x2="402.0" y2="407" stroke="#e1e0d9" stroke-width="1"/>
+<text x="402.0" y="419" font-size="10" text-anchor="middle" fill="#85847c">800 ms</text>
+<text x="146" y="284.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 Schur</text>
+<path d="M154,274.5 L187.4033,274.5 Q190.4033,274.5 190.4033,277.5 L190.4033,283.5 Q190.4033,286.5 187.4033,286.5 L154,286.5 Z" fill="#2a78d6"/>
+<path d="M192.4033,274.5 L203.0991,274.5 Q206.0991,274.5 206.0991,277.5 L206.0991,283.5 Q206.0991,286.5 203.0991,286.5 L192.4033,286.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="212.1" y="284.0" font-size="10.5" font-weight="600" fill="#0b0b0b">117.4 + 44.2</text>
+<text x="146" y="303.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 sparse</text>
+<path d="M154,293.5 L194.1458,293.5 Q197.1458,293.5 197.1458,296.5 L197.1458,302.5 Q197.1458,305.5 194.1458,305.5 L154,305.5 Z" fill="#2a78d6"/>
+<path d="M199.1458,293.5 L237.58350000000002,293.5 Q240.58350000000002,293.5 240.58350000000002,296.5 L240.58350000000002,302.5 Q240.58350000000002,305.5 237.58350000000002,305.5 L199.1458,305.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="246.6" y="303.0" font-size="10.5" font-weight="600" fill="#0b0b0b">139.2 + 133.7</text>
+<text x="146" y="322.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 Schur</text>
+<path d="M154,312.5 L210.01160000000002,312.5 Q213.01160000000002,312.5 213.01160000000002,315.5 L213.01160000000002,321.5 Q213.01160000000002,324.5 210.01160000000002,324.5 L154,324.5 Z" fill="#2a78d6"/>
+<path d="M215.01160000000002,312.5 L229.7002,312.5 Q232.7002,312.5 232.7002,315.5 L232.7002,321.5 Q232.7002,324.5 229.7002,324.5 L215.01160000000002,324.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="238.7" y="322.0" font-size="10.5" font-weight="600" fill="#0b0b0b">190.4 + 57.1</text>
+<text x="146" y="341.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 sparse</text>
+<path d="M154,331.5 L217.0486,331.5 Q220.0486,331.5 220.0486,334.5 L220.0486,340.5 Q220.0486,343.5 217.0486,343.5 L154,343.5 Z" fill="#2a78d6"/>
+<path d="M222.0486,331.5 L269.4918,331.5 Q272.4918,331.5 272.4918,334.5 L272.4918,340.5 Q272.4918,343.5 269.4918,343.5 L222.0486,343.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="278.5" y="341.0" font-size="10.5" font-weight="600" fill="#0b0b0b">213.1 + 162.7</text>
+<text x="146" y="360.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres sparse_schur</text>
+<path d="M154,350.5 L231.3086,350.5 Q234.3086,350.5 234.3086,353.5 L234.3086,359.5 Q234.3086,362.5 231.3086,362.5 L154,362.5 Z" fill="#8f8e86"/>
+<path d="M236.3086,350.5 L325.5336,350.5 Q328.5336,350.5 328.5336,353.5 L328.5336,359.5 Q328.5336,362.5 325.5336,362.5 L236.3086,362.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="334.5" y="360.0" font-size="10.5" fill="#0b0b0b">259.1 + 297.5</text>
+<text x="146" y="379.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (Schur)</text>
+<path d="M154,369.5 L237.00330000000002,369.5 Q240.00330000000002,369.5 240.00330000000002,372.5 L240.00330000000002,378.5 Q240.00330000000002,381.5 237.00330000000002,381.5 L154,381.5 Z" fill="#8f8e86"/>
+<path d="M242.00330000000002,369.5 L285.43510000000003,369.5 Q288.43510000000003,369.5 288.43510000000003,372.5 L288.43510000000003,378.5 Q288.43510000000003,381.5 285.43510000000003,381.5 L242.00330000000002,381.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="294.4" y="379.0" font-size="10.5" fill="#0b0b0b">277.4 + 149.8</text>
+<text x="146" y="398.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres dense_schur</text>
+<path d="M154,388.5 L293.3458,388.5 Q296.3458,388.5 296.3458,391.5 L296.3458,397.5 Q296.3458,400.5 293.3458,400.5 L154,400.5 Z" fill="#8f8e86"/>
+<path d="M298.3458,388.5 L356.422,388.5 Q359.422,388.5 359.422,391.5 L359.422,397.5 Q359.422,400.5 356.422,400.5 L298.3458,400.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="365.4" y="398.0" font-size="10.5" fill="#0b0b0b">459.2 + 197.0</text>
+<text x="498" y="263" font-size="12.5" font-weight="600" fill="#0b0b0b">Ladybug-1723-clean -- 484,842 params (exploratory)</text>
+<line x1="634.0" y1="271" x2="634.0" y2="388" stroke="#e1e0d9" stroke-width="1"/>
+<text x="634.0" y="400" font-size="10" text-anchor="middle" fill="#85847c">0</text>
+<line x1="716.7" y1="271" x2="716.7" y2="388" stroke="#e1e0d9" stroke-width="1"/>
+<text x="716.7" y="400" font-size="10" text-anchor="middle" fill="#85847c">1500</text>
+<line x1="799.3" y1="271" x2="799.3" y2="388" stroke="#e1e0d9" stroke-width="1"/>
+<text x="799.3" y="400" font-size="10" text-anchor="middle" fill="#85847c">3000</text>
+<line x1="882.0" y1="271" x2="882.0" y2="388" stroke="#e1e0d9" stroke-width="1"/>
+<text x="882.0" y="400" font-size="10" text-anchor="middle" fill="#85847c">4500 ms</text>
+<text x="626" y="284.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 Schur</text>
+<path d="M634,274.5 L688.9041422222223,274.5 Q691.9041422222223,274.5 691.9041422222223,277.5 L691.9041422222223,283.5 Q691.9041422222223,286.5 688.9041422222223,286.5 L634,286.5 Z" fill="#2a78d6"/>
+<path d="M693.9041422222223,274.5 L706.8571555555557,274.5 Q709.8571555555557,274.5 709.8571555555557,277.5 L709.8571555555557,283.5 Q709.8571555555557,286.5 706.8571555555557,286.5 L693.9041422222223,286.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="715.9" y="284.0" font-size="10.5" font-weight="600" fill="#0b0b0b">1051 + 289</text>
+<text x="626" y="303.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f32 sparse</text>
+<path d="M634,293.5 L725.4461155555556,293.5 Q728.4461155555556,293.5 728.4461155555556,296.5 L728.4461155555556,302.5 Q728.4461155555556,305.5 725.4461155555556,305.5 L634,305.5 Z" fill="#2a78d6"/>
+<path d="M730.4461155555556,293.5 L777.8590044444445,293.5 Q780.8590044444445,293.5 780.8590044444445,296.5 L780.8590044444445,302.5 Q780.8590044444445,305.5 777.8590044444445,305.5 L730.4461155555556,305.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="786.9" y="303.0" font-size="10.5" font-weight="600" fill="#0b0b0b">1714 + 915</text>
+<text x="626" y="322.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 Schur</text>
+<path d="M634,312.5 L728.3510222222222,312.5 Q731.3510222222222,312.5 731.3510222222222,315.5 L731.3510222222222,321.5 Q731.3510222222222,324.5 728.3510222222222,324.5 L634,324.5 Z" fill="#2a78d6"/>
+<path d="M733.3510222222222,312.5 L749.1957155555556,312.5 Q752.1957155555556,312.5 752.1957155555556,315.5 L752.1957155555556,321.5 Q752.1957155555556,324.5 749.1957155555556,324.5 L733.3510222222222,324.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="758.2" y="322.0" font-size="10.5" font-weight="600" fill="#0b0b0b">1766 + 342</text>
+<text x="626" y="341.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael f64 sparse</text>
+<path d="M634,331.5 L784.75008,331.5 Q787.75008,331.5 787.75008,334.5 L787.75008,340.5 Q787.75008,343.5 784.75008,343.5 L634,343.5 Z" fill="#2a78d6"/>
+<path d="M789.75008,331.5 L834.6669866666667,331.5 Q837.6669866666667,331.5 837.6669866666667,334.5 L837.6669866666667,340.5 Q837.6669866666667,343.5 834.6669866666667,343.5 L789.75008,343.5 Z" fill="#2a78d6" fill-opacity="0.38"/>
+<text x="843.7" y="341.0" font-size="10.5" font-weight="600" fill="#0b0b0b">2790 + 869</text>
+<text x="626" y="360.0" font-size="11.5" text-anchor="end" fill="#5f5e58">g2o (Schur)</text>
+<path d="M634,350.5 L758.63568,350.5 Q761.63568,350.5 761.63568,353.5 L761.63568,359.5 Q761.63568,362.5 758.63568,362.5 L634,362.5 Z" fill="#8f8e86"/>
+<path d="M763.63568,350.5 L795.0250133333333,350.5 Q798.0250133333333,350.5 798.0250133333333,353.5 L798.0250133333333,359.5 Q798.0250133333333,362.5 795.0250133333333,362.5 L763.63568,362.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="804.0" y="360.0" font-size="10.5" fill="#0b0b0b">2316 + 624</text>
+<text x="626" y="379.0" font-size="11.5" text-anchor="end" fill="#5f5e58">Ceres sparse_schur</text>
+<path d="M634,369.5 L793.136888888889,369.5 Q796.136888888889,369.5 796.136888888889,372.5 L796.136888888889,378.5 Q796.136888888889,381.5 793.136888888889,381.5 L634,381.5 Z" fill="#8f8e86"/>
+<path d="M798.136888888889,369.5 L865.36608,369.5 Q868.36608,369.5 868.36608,372.5 L868.36608,378.5 Q868.36608,381.5 865.36608,381.5 L798.136888888889,381.5 Z" fill="#8f8e86" fill-opacity="0.38"/>
+<text x="874.4" y="379.0" font-size="10.5" fill="#0b0b0b">2942 + 1274</text>
+<text x="18" y="442" font-size="10.5" fill="#85847c">Setup is assembly, ordering and symbolic factorization: done once, reused by every later iteration.</text>
+<text x="18" y="456" font-size="10.5" fill="#85847c">Not plotted: the CG rows -- arael Schur-CG and CG-implicit, Ceres iterative_schur, g2o PCG. Their inexact steps vary in size, so they report no full-iter; the bal README reads them on total ms.</text>
+<text x="18" y="470" font-size="10.5" fill="#85847c">Ladybug-1723-clean is exploratory: no system reaches the shared tolerances there, and its f32 rows stop well above the plateau the f64 rows reach, so their iterations are not doing the same work.</text>
+</svg>

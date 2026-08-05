@@ -3,8 +3,10 @@
 #
 # One cell per results table, each bar decomposed into one complete solver
 # iteration (solid) plus the one-time setup paid during the first iteration
-# (faded). Every row of every table gets a bar: BAL is a comparison of linear
-# solvers, so arael's two routes and Ceres's three are the point, not noise.
+# (faded). Every row with a full-iter gets a bar: BAL is a comparison of linear
+# solvers, so arael's direct routes and Ceres's two are the point, not noise.
+# The inexact rows -- arael schur-cg and schur-cg-implicit, Ceres
+# iterative_schur, g2o pcg -- report no full-iter and are not plotted.
 # Update the data from the bal README tables after re-running, then:
 #
 #   python3 make_bal_chart.py
@@ -17,64 +19,43 @@
 # cancelled); first-iter is that same iteration plus the setup paid once.
 # Rows: arael first, then the rest, each group by full-iter ascending.
 PANELS = [
+    # The first three panels: 2026-08-05, min of 32 rounds at Ladybug-49, 8 at
+    # 138, 4 at 372.
     ("Ladybug-49 -- 23,769 params", 1, (60.0, 20.0), [
-        ("arael f32 Schur-CG", 8.78, 11.21, "arael"),
-        ("arael f32 Schur", 8.83, 12.05, "arael"),
-        ("arael f64 Schur-CG", 10.91, 13.30, "arael"),
-        ("arael f64 Schur", 11.28, 14.94, "arael"),
-        ("arael f32 sparse", 17.15, 28.53, "arael"),
-        ("arael f32 CG-implicit", 19.96, 14.77, "arael"),
-        ("arael f64 sparse", 21.18, 38.26, "arael"),
-        ("arael f64 CG-implicit", 23.92, 17.21, "arael"),
-        ("g2o (PCG)", 19.09, 33.09, "other"),
-        ("Ceres dense_schur", 20.17, 39.45, "other"),
-        ("g2o (Schur)", 20.42, 34.68, "other"),
-        ("Ceres sparse_schur", 20.54, 50.74, "other"),
-        ("Ceres iterative_schur", 31.46, 36.35, "other"),
+        ("arael f32 Schur", 8.48, 11.39, "arael"),
+        ("arael f64 Schur", 10.42, 14.13, "arael"),
+        ("arael f32 sparse", 12.00, 29.62, "arael"),
+        ("arael f64 sparse", 15.42, 35.63, "arael"),
+        ("Ceres dense_schur", 19.88, 39.65, "other"),
+        ("g2o (Schur)", 20.22, 34.87, "other"),
+        ("Ceres sparse_schur", 20.42, 50.70, "other"),
     ]),
     ("Ladybug-138 -- 60,876 params", 1, (200.0, 50.0), [
-        ("arael f32 Schur-CG", 26.34, 33.52, "arael"),
-        ("arael f32 Schur", 29.93, 42.56, "arael"),
-        ("arael f64 Schur-CG", 35.93, 45.01, "arael"),
-        ("arael f64 Schur", 42.11, 58.23, "arael"),
-        ("arael f32 CG-implicit", 47.87, 41.41, "arael"),
-        ("arael f64 CG-implicit", 55.54, 50.50, "arael"),
-        ("arael f32 sparse", 56.58, 138.88, "arael"),
-        ("arael f64 sparse", 64.46, 180.17, "arael"),
-        ("Ceres iterative_schur", 54.80, 115.86, "other"),
-        ("g2o (PCG)", 63.25, 112.00, "other"),
-        ("g2o (Schur)", 68.16, 124.64, "other"),
-        ("Ceres sparse_schur", 69.52, 171.63, "other"),
-        ("Ceres dense_schur", 75.76, 142.62, "other"),
+        ("arael f32 Schur", 28.21, 38.39, "arael"),
+        ("arael f64 Schur", 40.37, 53.98, "arael"),
+        ("arael f32 sparse", 40.43, 92.76, "arael"),
+        ("arael f64 sparse", 54.05, 119.12, "arael"),
+        ("g2o (Schur)", 67.92, 124.02, "other"),
+        ("Ceres sparse_schur", 70.93, 170.59, "other"),
+        ("Ceres dense_schur", 76.59, 142.03, "other"),
     ]),
     ("Ladybug-372 -- 145,617 params", 1, (800.0, 200.0), [
-        ("arael f32 Schur-CG", 79.95, 86.72, "arael"),
-        ("arael f64 Schur-CG", 111.85, 132.10, "arael"),
-        ("arael f32 Schur", 124.83, 183.53, "arael"),
-        ("arael f32 CG-implicit", 157.77, 95.19, "arael"),
-        ("arael f64 CG-implicit", 189.46, 133.20, "arael"),
-        ("arael f32 sparse", 189.62, 445.06, "arael"),
-        ("arael f64 Schur", 199.48, 285.08, "arael"),
-        ("arael f64 sparse", 254.49, 549.38, "arael"),
-        ("Ceres iterative_schur", 143.31, 319.66, "other"),
-        ("g2o (PCG)", 165.75, 291.85, "other"),
-        ("Ceres sparse_schur", 263.21, 565.99, "other"),
-        ("g2o (Schur)", 275.80, 428.74, "other"),
-        ("Ceres dense_schur", 478.41, 668.33, "other"),
+        ("arael f32 Schur", 117.43, 161.61, "arael"),
+        ("arael f32 sparse", 139.18, 272.85, "arael"),
+        ("arael f64 Schur", 190.36, 247.42, "arael"),
+        ("arael f64 sparse", 213.06, 375.78, "arael"),
+        ("Ceres sparse_schur", 259.06, 556.56, "other"),
+        ("g2o (Schur)", 277.43, 427.21, "other"),
+        ("Ceres dense_schur", 459.18, 656.20, "other"),
     ]),
-    # Exploratory: no system meets the shared tolerances here, and the f32 rows
-    # stop far above the plateau the f64 rows reach -- see the panel footnote.
+    # 2026-08-01, one round. Exploratory: no system meets the shared tolerances
+    # here, and the f32 rows stop far above the plateau the f64 rows reach --
+    # see the panel footnote.
     ("Ladybug-1723-clean -- 484,842 params (exploratory)", 0, (4500.0, 1500.0), [
-        ("arael f32 CG-implicit", 216.70, 316.40, "arael"),
-        ("arael f32 Schur-CG", 227.33, 322.21, "arael"),
-        ("arael f64 CG-implicit", 268.00, 418.77, "arael"),
-        ("arael f64 Schur-CG", 309.68, 461.86, "arael"),
         ("arael f32 Schur", 1050.68, 1340.15, "arael"),
         ("arael f32 sparse", 1713.74, 2628.49, "arael"),
         ("arael f64 Schur", 1766.45, 2108.39, "arael"),
         ("arael f64 sparse", 2789.82, 3659.28, "arael"),
-        ("Ceres iterative_schur", 405.56, 1196.43, "other"),
-        ("g2o (PCG)", 567.24, 1041.88, "other"),
         ("g2o (Schur)", 2315.97, 2939.97, "other"),
         ("Ceres sparse_schur", 2942.00, 4216.32, "other"),
     ]),
@@ -86,9 +67,9 @@ SUBTITLE = ("Solid: one complete iteration. Faded: the setup, paid once. "
 FOOT = [
     ("Setup is assembly, ordering and symbolic factorization: done once, "
      "reused by every later iteration."),
-    ("The CG rows -- arael Schur-CG and CG-implicit, Ceres iterative_schur, "
-     "g2o PCG -- take inexact steps, a different unit of work from the "
-     "factorizations. The implicit ones never form the reduced system."),
+    ("Not plotted: the CG rows -- arael Schur-CG and CG-implicit, Ceres "
+     "iterative_schur, g2o PCG. Their inexact steps vary in size, so they "
+     "report no full-iter; the bal README reads them on total ms."),
     ("Ladybug-1723-clean is exploratory: no system reaches the shared "
      "tolerances there, and its f32 rows stop well above the plateau the f64 "
      "rows reach, so their iterations are not doing the same work."),
@@ -124,7 +105,7 @@ BAR_H = 12
 PITCH = 19
 PANEL_TITLE_H = 20
 AXIS_H = 20
-GRID_ROWS = 13  # tallest panel; sets each grid row's height so axes align
+GRID_ROWS = max(len(p[3]) for p in PANELS)  # sets the row height so axes align
 GRID_ROW_H = PANEL_TITLE_H + GRID_ROWS * PITCH + AXIS_H
 HEADER_H = 58
 
