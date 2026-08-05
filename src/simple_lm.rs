@@ -4197,18 +4197,19 @@ pub enum EnvelopeMode {
 ///
 /// Measured at or ahead of the scalar route on every benchmark, with a
 /// 2-10x cheaper symbolic phase and 17-35% less peak memory (see
-/// docs/dev/BLOCK.md). The one place the scalar route still wins is a
-/// multi-threaded solve: its dense kernels use [`LmConfig::num_threads`]
-/// while the supernodal factorization is sequential -- which is what
-/// [`Auto`](Self::Auto) guards on.
+/// docs/dev/BLOCK.md). Its dense kernels take
+/// [`LmConfig::num_threads`] on the panels large enough to pay for the
+/// pool, so there is no thread count at which the scalar route is the
+/// better default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BlockSupernodalMode {
-    /// The supernodal route when the solve is sequential (`num_threads`
-    /// is 1, the default); the scalar route when threaded. The default.
+    /// The supernodal route wherever the model has block structure. The
+    /// default, and at present the same choice as [`Always`](Self::Always) --
+    /// it stays a separate variant because it is the one that may learn to
+    /// decline on some future shape, where `Always` never will.
     #[default]
     Auto,
-    /// The supernodal route whenever the model has block structure, threads
-    /// or not (the factorization itself stays sequential).
+    /// The supernodal route whenever the model has block structure.
     Always,
     /// Always the scalar route.
     Never,
@@ -4965,14 +4966,13 @@ impl<T> SparseFaer<T> {
     /// matrix (1.0-1.3x per attempt), with a 2-10x cheaper symbolic phase;
     /// see docs/dev/BLOCK.md and [`BlockSupernodalMode`].
     ///
-    /// Default [`BlockSupernodalMode::Auto`]: the supernodal route on a
-    /// sequential solve, the scalar route when
-    /// [`num_threads`](LmConfig::num_threads) asks for parallelism (faer's
-    /// dense kernels use it; the supernodal factorization is sequential).
-    /// Routes that never factorize (iterative Schur) and the envelope
-    /// routes, when they engage, keep precedence in every mode. Models
-    /// without block structure (hand-built problems, TripletBlock) always
-    /// take the scalar route.
+    /// Default [`BlockSupernodalMode::Auto`]: the supernodal route wherever
+    /// the scalar one would run, at any thread count -- its dense kernels
+    /// take [`num_threads`](LmConfig::num_threads) on the panels big enough
+    /// to pay for it. Routes that never factorize (iterative Schur) and the
+    /// envelope routes, when they engage, keep precedence in every mode.
+    /// Models without block structure (hand-built problems, TripletBlock)
+    /// always take the scalar route.
     pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
         self.block_supernodal = mode;
         self
@@ -4981,11 +4981,7 @@ impl<T> SparseFaer<T> {
     /// Whether this solve takes the supernodal block route where the scalar
     /// factorization would otherwise run.
     fn sn_take(&self) -> bool {
-        match self.block_supernodal {
-            BlockSupernodalMode::Always => true,
-            BlockSupernodalMode::Never => false,
-            BlockSupernodalMode::Auto => matches!(self.par, faer::Par::Seq),
-        }
+        !matches!(self.block_supernodal, BlockSupernodalMode::Never)
     }
 
     /// The supernodal route's parameter base: the default table, or the
@@ -6690,7 +6686,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
                 if arael_faer::supernodal::supernodal_factorize(
-                    sn, h, &mut self.sn_factor, &mut self.sn_ctx,
+                    sn, h, &mut self.sn_factor, &mut self.sn_ctx, self.par,
                 )
                 .is_err()
                 {
@@ -6803,7 +6799,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let sn = self.sn_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
             if arael_faer::supernodal::supernodal_factorize(
-                sn, s, &mut self.sn_factor, &mut self.sn_ctx,
+                sn, s, &mut self.sn_factor, &mut self.sn_ctx, self.par,
             )
             .is_err()
             {

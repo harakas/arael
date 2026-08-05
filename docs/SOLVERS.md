@@ -154,11 +154,15 @@ BlockSupernodalMode::Always  // also when threaded
 BlockSupernodalMode::Never   // always faer's scalar Cholesky
 ```
 
-`Auto` leaves threaded solves (`num_threads > 1`) to the scalar route,
-whose dense kernels use those threads; the block route is sequential for
-now, so on a threaded solve it would give up more than it gains. Note
-that this makes the factorization -- and with it the last ulp of the
-answer -- depend on the thread count.
+`Auto` takes the block route at any thread count. Its dense kernels
+receive `num_threads`, gated on size: a panel update is threaded only
+where the work covers the pool, because faer's threaded kernels lose
+badly below that -- measured 0.32x on four threads for a 150x120x100
+matmul. So a problem of small panels (a pose graph) is untouched by
+threads, and one with big ones gains: Ladybug-372's reduced system runs
+1.43x on four threads, the 1200-pose figure-8 1.35x. The kernels split
+their output rather than their reduction, so the answer is bit-identical
+at every thread count.
 
 Two further knobs, both for memory:
 
@@ -609,12 +613,12 @@ it does not silently pretend. `num_threads: 0` resolves to
 `ThreadPoolBuilder` the application installed; the pool is shared with the rest of
 the process.
 
-Asking for threads also changes which factorization runs: the block supernodal
-route is sequential, so `BlockSupernodalMode::Auto` hands a threaded solve to
-faer's scalar route, whose dense kernels use the threads. Two different
-factorizations means results that agree to the last ulp rather than bit for
-bit, so a solve pinned to one route (`Always` or `Never`) is the one to compare
-across thread counts.
+Threads reach the block supernodal route's dense kernels, size-gated, so
+the factorization is the same one at every thread count and the answer is
+bit-identical. What threads do not reach: assembly, the Schur reduction,
+and the triangular solve -- on a landmark SLAM problem the reduction is
+the larger half of an iteration, which is why the 900-pose S-curve gains
+nothing from four threads while bundle adjustment gains 1.43x.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.

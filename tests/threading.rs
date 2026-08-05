@@ -2,17 +2,15 @@
 // faer's rayon pool. Everything else -- assembly, the Schur reduction, every
 // other backend -- stays sequential.
 //
-// The route is pinned to faer's scalar Cholesky throughout. What these tests
-// are about is one factorization run at two thread counts; the default
-// (BlockSupernodalMode::Auto) takes the block supernodal only when sequential,
-// so leaving the route to it would compare two different factorizations
-// instead, and they agree only to the last ulp.
+// The default route throughout: BlockSupernodalMode::Auto takes the block
+// supernodal at any thread count, and its dense kernels are the thing the
+// threads go into. Bit-identity across thread counts is therefore a property
+// of one factorization, not a coincidence between two -- faer's kernels split
+// their output, never their reduction.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{
-    lm_solve, BlockSupernodalMode, LmConfig, LmResult, RootProblem, SparseFaer,
-};
+use arael::simple_lm::{LmConfig, LmProblem, LmResult};
 use arael::vect::vect2d;
 
 #[arael::model]
@@ -61,22 +59,18 @@ fn build_chain(n: usize) -> Chain {
     c
 }
 
-/// One 60-point chain solved on faer's scalar Cholesky at `num_threads`.
-fn solve_scalar(num_threads: usize) -> LmResult<f64> {
+/// One 60-point chain solved by the default sparse backend at `num_threads`.
+fn solve(num_threads: usize) -> LmResult<f64> {
     let cfg = LmConfig::<f64> { max_iters: 200, num_threads, ..Default::default() };
-    let mut chain = build_chain(60);
-    let mut params = Vec::new();
-    RootProblem::serialize(&mut chain, &mut params);
-    let mut solver = SparseFaer::new().with_block_supernodal(BlockSupernodalMode::Never);
-    lm_solve(&params, &mut solver, &mut chain, &cfg).unwrap()
+    build_chain(60).solve_sparse(&cfg).unwrap()
 }
 
 /// Threads must not change the answer. The factorization is exact either way, so
 /// the two solves take the same steps and land on the same parameters.
 #[test]
 fn threads_do_not_change_the_answer() {
-    let seq = solve_scalar(1);
-    let par = solve_scalar(4);
+    let seq = solve(1);
+    let par = solve(4);
 
     assert_eq!(seq.status, par.status);
     assert_eq!(seq.iterations, par.iterations, "same steps");
@@ -88,8 +82,8 @@ fn threads_do_not_change_the_answer() {
 /// 0 means "every core", and must also not change the answer.
 #[test]
 fn zero_threads_means_all_cores() {
-    let seq = solve_scalar(1);
-    let all = solve_scalar(0);
+    let seq = solve(1);
+    let all = solve(0);
     assert_eq!(seq.end_cost, all.end_cost);
     assert_eq!(seq.x, all.x);
 }

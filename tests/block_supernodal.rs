@@ -248,24 +248,29 @@ fn auto_default_takes_the_supernodal_route() {
     );
 }
 
-/// Auto yields to the scalar route when the solve is threaded: faer's
-/// dense kernels use the threads, the supernodal factorization cannot
-/// yet. (Meaningful only with the rayon feature -- without it
-/// num_threads collapses to sequential and Auto stays supernodal.)
+/// Auto takes the supernodal route at any thread count, and the threaded
+/// run agrees with the sequential one to the bit: the dense kernels split
+/// their output, not their reduction. (Meaningful only with the rayon
+/// feature -- without it num_threads collapses to sequential.)
 #[cfg(feature = "rayon")]
 #[test]
-fn auto_yields_to_the_scalar_route_when_threaded() {
-    let cfg = LmConfig { max_iters: 60, num_threads: 2, ..Default::default() };
-    let mut w = build(0.1, 2);
-    let mut params = Vec::new();
-    RootProblem::serialize(&mut w, &mut params);
-    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
-    let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
-    assert!(r.end_cost < 1e-12, "end_cost {}", r.end_cost);
-    assert!(
-        !solver.plan().expect("a plan").block_supernodal,
-        "Auto must take the scalar route when num_threads > 1",
-    );
+fn threads_do_not_change_the_supernodal_route_or_its_answer() {
+    let solve = |num_threads| {
+        let cfg = LmConfig { max_iters: 60, num_threads, ..Default::default() };
+        let mut w = build(0.1, 2);
+        let mut params = Vec::new();
+        RootProblem::serialize(&mut w, &mut params);
+        let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
+        let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
+        let took = solver.plan().expect("a plan").block_supernodal;
+        (r.end_cost, r.x, took)
+    };
+    let (c1, x1, took1) = solve(1);
+    let (c4, x4, took4) = solve(4);
+    assert!(took1 && took4, "Auto takes the supernodal route at any thread count");
+    assert!(c1 < 1e-12, "end_cost {}", c1);
+    assert_eq!(c1, c4, "same cost, to the bit");
+    assert_eq!(x1, x4, "same parameters, to the bit");
 }
 
 /// A DECLINED reduction (Auto weighed it and said no) must still land on
