@@ -952,6 +952,33 @@ fn minus_one<T: SchurReal>() -> T {
 }
 
 
+/// Work thresholds above which a dense kernel is handed the caller's
+/// `Par`, and below which it runs sequentially whatever the caller
+/// asked for.
+///
+/// Threading a small kernel is not merely useless, it is expensive:
+/// measured on 8 cores, a 150x120x100 `matmul` runs at 0.32x on four
+/// threads and 0.22x on eight, and a 200x48 triangular solve at 0.15x.
+/// faer leaves the smallest calls sequential by itself, so the loss
+/// sits in a band above that and below the size where the work covers
+/// the pool. These thresholds clear the band: each is the first
+/// measured size whose four-thread speedup exceeds 1.3x, and the gains
+/// above them run 1.5-3x.
+///
+/// They are the shape of the machine as much as of the problem -- a
+/// different core count moves them. They are deliberately conservative:
+/// a missed gain costs a fraction of one panel, a wrong parallel call
+/// costs three times that panel.
+const PAR_MIN_MATMUL: usize = 20_000_000; // m * n * k
+const PAR_MIN_TRSM: usize = 150_000_000; // rows * q * q
+const PAR_MIN_LLT: usize = 500_000_000; // q^3
+
+/// The caller's `Par` when the call is big enough to pay for it.
+#[inline]
+fn gate(work: usize, min: usize, par: faer::Par) -> faer::Par {
+    if work >= min { par } else { faer::Par::Seq }
+}
+
 /// One descendant's contribution to the current panel: a triangular
 /// GEMM for the mid-by-mid lower half plus a rectangular one into
 /// packed scratch (the mid part's upper triangle lands in the diagonal
@@ -968,6 +995,7 @@ fn apply_pair<T: SchurReal>(
     runs: &mut Vec<(u32, u32, u32)>,
     h: usize,
     col0: u32,
+    par: faer::Par,
 ) {
     let d = sym.desc_idx[pi] as usize;
     let (start, mid) = sym.desc_split[pi];
@@ -1026,7 +1054,7 @@ fn apply_pair<T: SchurReal>(
                 b_v.transpose(),
                 faer::linalg::matmul::triangular::BlockStructure::Rectangular,
                 minus_one::<T>(),
-                faer::Par::Seq,
+                gate(kw * kw * dq, PAR_MIN_MATMUL, par),
             );
             if m > kw {
                 let a_bot = unsafe {
@@ -1053,7 +1081,7 @@ fn apply_pair<T: SchurReal>(
                     a_bot,
                     b_v.transpose(),
                     minus_one::<T>(),
-                    faer::Par::Seq,
+                    gate((m - kw) * kw * dq, PAR_MIN_MATMUL, par),
                 );
             }
             return;
@@ -1072,7 +1100,7 @@ fn apply_pair<T: SchurReal>(
         b_v.transpose(),
         faer::linalg::matmul::triangular::BlockStructure::Rectangular,
         one::<T>(),
-        faer::Par::Seq,
+        gate(kw * kw * dq, PAR_MIN_MATMUL, par),
     );
     if m > kw {
         let a_bot = unsafe {
@@ -1087,7 +1115,7 @@ fn apply_pair<T: SchurReal>(
             a_bot,
             b_v.transpose(),
             one::<T>(),
-            faer::Par::Seq,
+            gate((m - kw) * kw * dq, PAR_MIN_MATMUL, par),
         );
     }
 
@@ -1138,6 +1166,7 @@ fn apply_bucket<T: SchurReal>(
     b_cat: &mut [T],
     h: usize,
     col0: u32,
+    par: faer::Par,
 ) {
     let span = sym.bucket_span[b];
     let (row_lo, col_lo) = (span[0] as usize, span[2] as usize);
@@ -1200,7 +1229,7 @@ fn apply_bucket<T: SchurReal>(
         a_v,
         b_v.transpose(),
         minus_one::<T>(),
-        faer::Par::Seq,
+        gate(rs * cs * kk, PAR_MIN_MATMUL, par),
     );
 }
 
@@ -1251,6 +1280,7 @@ pub fn supernodal_factorize<T: SchurReal>(
     a: &SparseBlockColMat<SparseIndex, T>,
     factor: &mut [T],
     ctx: &mut SupernodalContext<T>,
+    par: faer::Par,
 ) -> Result<(), SupernodalError> {
     assert_eq!(factor.len(), sym.factor_val_count());
     let asym = a.symbolic();
@@ -1262,7 +1292,7 @@ pub fn supernodal_factorize<T: SchurReal>(
     ctx.b_cat.resize(sym.max_b_cat, T::ZERO);
     let chol_req = faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
         sym.max_ncols,
-        faer::Par::Seq,
+        gate(sym.max_ncols.pow(3), PAR_MIN_LLT, par),
         faer::Spec::default(),
     )
     .unaligned_bytes_required();
@@ -1324,17 +1354,18 @@ pub fn supernodal_factorize<T: SchurReal>(
         // them.
         if sym.bucket_end.is_empty() {
             for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
-                apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0);
+                apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0, par);
             }
         } else {
             let mut p0 = sym.desc_ptr[s];
             for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
                 let p1 = sym.bucket_end[b as usize];
                 if p1 - p0 == 1 {
-                    apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0);
+                    apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0, par);
                 } else {
                     apply_bucket(
                         sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0,
+                        par,
                     );
                 }
                 p0 = p1;
@@ -1349,7 +1380,7 @@ pub fn supernodal_factorize<T: SchurReal>(
         faer::linalg::cholesky::llt::factor::cholesky_in_place(
             top,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-            faer::Par::Seq,
+            gate(q * q * q, PAR_MIN_LLT, par),
             stack,
             faer::Spec::default(),
         )
@@ -1363,7 +1394,7 @@ pub fn supernodal_factorize<T: SchurReal>(
             faer::linalg::triangular_solve::solve_lower_triangular_in_place(
                 l11,
                 bot.transpose_mut(),
-                faer::Par::Seq,
+                gate((h - q) * q * q, PAR_MIN_TRSM, par),
             );
         }
     }
