@@ -53,6 +53,7 @@ SIGS = [
     ("path_pose_pair_cur", [ctypes.c_void_p], ctypes.c_uint32),
     ("path_pose_pair_set_cur", [ctypes.c_void_p, ctypes.c_uint32], None),
     ("path_assemble_covariance", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
+    ("path_assemble_covariance_with", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
     ("path_cov_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("path_cov_free", [ctypes.c_void_p], None),
     ("path_landmark_marginal_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),

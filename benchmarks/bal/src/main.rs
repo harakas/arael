@@ -585,19 +585,30 @@ fn run_g2o(path: &str, ds: &Dataset, row: &G2oRow) -> Result<Ext, String> {
 use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
 
 fn cov_benchmark(selected: &[&Bench], bench_dir: &std::path::Path) {
-    let ceres = std::path::Path::new("cpp/build/ceres_bal").exists();
-    let g2o = std::path::Path::new("cpp/build/g2o_bal").exists();
+    // BAL_SYSTEMS selects rows here as it does in the solve table, so a run
+    // that only wants arael's numbers does not spend the per-cell cap on the
+    // comparison systems. Unset runs everything.
+    let filter = std::env::var("BAL_SYSTEMS").ok();
+    let wanted = |row: &str| match &filter {
+        Some(f) => f.split(',').any(|s| row.contains(s.trim())),
+        None => true,
+    };
+    let ceres = wanted("ceres") && std::path::Path::new("cpp/build/ceres_bal").exists();
+    let g2o = wanted("g2o") && std::path::Path::new("cpp/build/g2o_bal").exists();
     let budget = std::env::var("COV_BUDGET_S").unwrap_or_else(|_| "5".into());
     let cap_s = bench_harness::cov::cell_cap_s();
     println!("\ncovariance scaling: 6-DOF camera pose + 3-DOF point marginals.");
     println!("gauge = cameras 0,1 fixed; intrinsics fixed (known calibration).");
     println!("arael and Ceres build cold (assemble + factor + query); g2o reuses its solve factor (warm).");
     println!("cells: median ms (reps); budget {budget}s [COV_BUDGET_S]; - not covered; * over the {cap_s:.0}s cap [COV_CELL_CAP_S].");
-    if !ceres {
+    if wanted("ceres") && !ceres {
         eprintln!("WARNING: cpp/build/ceres_bal missing; skipping Ceres");
     }
-    if !g2o {
+    if wanted("g2o") && !g2o {
         eprintln!("WARNING: cpp/build/g2o_bal missing; skipping g2o");
+    }
+    if let Some(f) = &filter {
+        eprintln!("BAL_SYSTEMS={f} -- partial run, the cross-system std-dev check covers only what ran");
     }
 
     for b in selected {

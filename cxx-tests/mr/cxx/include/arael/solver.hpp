@@ -432,6 +432,31 @@ enum class CovMode : uint32_t {
     TriDiagonal = 2,
 };
 
+/// Elimination ordering for a covariance assembly (mirrors arael's
+/// CovOrdering). It decides what the covariance costs, never what it is.
+enum class CovOrdering : uint32_t {
+    /// Price minimum degree against nested dissection over the model's block
+    /// graph and keep the cheaper factor. The default.
+    Auto = 0,
+    /// Minimum degree, whatever structure the model has.
+    Amd = 1,
+    /// Nested dissection. For a trajectory that revisits -- a loop closure, a
+    /// figure-8 crossing -- where poses far apart in the ordering are coupled.
+    NestedDissection = 2,
+    /// Natural order, no permutation.
+    Natural = 3,
+};
+
+/// How to assemble a covariance (mirrors arael's CovOptions).
+struct CovOptions {
+    /// Elimination ordering.
+    CovOrdering ordering = CovOrdering::Auto;
+    /// Factorize in block form with arael's supernodal Cholesky instead of
+    /// faer's scalar one. AllMarginals ignores this and stays on the scalar
+    /// factor: its selected inverse reads faer's supernode panels.
+    BlockSupernodalMode block_supernodal = BlockSupernodalMode::Auto;
+};
+
 /// A failed covariance operation; message points at last_error().
 struct CovError {
     const char* message;

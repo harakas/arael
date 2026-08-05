@@ -7,7 +7,7 @@ pub mod decay {
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use arael::covariance::{CovAssembly, CovMode, Covariance};
+use arael::covariance::{CovAssembly, CovMode, CovOptions, CovOrdering, Covariance};
 use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
@@ -1203,6 +1203,17 @@ pub unsafe extern "C" fn decay_cov_free(c: *mut DecayCov) {
 /// decay_last_error), -2 (panic).
 #[no_mangle]
 pub unsafe extern "C" fn decay_assemble_covariance(h: *mut DecayHandle, mode: u32, out: *mut *mut DecayCov) -> i32 {
+    decay_assemble_covariance_with(h, mode, 0, 0, out)
+}
+
+/// decay_assemble_covariance with the assembly spelled out.
+/// ordering: 0 = Auto, 1 = Amd, 2 = NestedDissection, 3 = Natural.
+/// block_supernodal: 0 = Auto, 1 = Always, 2 = Never.
+#[no_mangle]
+pub unsafe extern "C" fn decay_assemble_covariance_with(
+    h: *mut DecayHandle, mode: u32, ordering: u32, block_supernodal: u32,
+    out: *mut *mut DecayCov,
+) -> i32 {
     let hh = &mut *h;
     *out = std::ptr::null_mut();
     let m = match mode {
@@ -1210,7 +1221,20 @@ pub unsafe extern "C" fn decay_assemble_covariance(h: *mut DecayHandle, mode: u3
         2 => CovMode::TriDiagonal,
         _ => CovMode::AllMarginals,
     };
-    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {
+    let opts = CovOptions {
+        ordering: match ordering {
+            1 => CovOrdering::Amd,
+            2 => CovOrdering::NestedDissection,
+            3 => CovOrdering::Natural,
+            _ => CovOrdering::Auto,
+        },
+        block_supernodal: match block_supernodal {
+            1 => arael::simple_lm::BlockSupernodalMode::Always,
+            2 => arael::simple_lm::BlockSupernodalMode::Never,
+            _ => arael::simple_lm::BlockSupernodalMode::Auto,
+        },
+    };
+    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance_with(m, &opts))) {
         Ok(Ok(c)) => {
             *out = Box::into_raw(Box::new(DecayCov {
                 cov: c,
@@ -1484,7 +1508,7 @@ pub mod line {
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use arael::covariance::{CovAssembly, CovMode, Covariance};
+use arael::covariance::{CovAssembly, CovMode, CovOptions, CovOrdering, Covariance};
 use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
@@ -2680,6 +2704,17 @@ pub unsafe extern "C" fn line_cov_free(c: *mut LineCov) {
 /// line_last_error), -2 (panic).
 #[no_mangle]
 pub unsafe extern "C" fn line_assemble_covariance(h: *mut LineHandle, mode: u32, out: *mut *mut LineCov) -> i32 {
+    line_assemble_covariance_with(h, mode, 0, 0, out)
+}
+
+/// line_assemble_covariance with the assembly spelled out.
+/// ordering: 0 = Auto, 1 = Amd, 2 = NestedDissection, 3 = Natural.
+/// block_supernodal: 0 = Auto, 1 = Always, 2 = Never.
+#[no_mangle]
+pub unsafe extern "C" fn line_assemble_covariance_with(
+    h: *mut LineHandle, mode: u32, ordering: u32, block_supernodal: u32,
+    out: *mut *mut LineCov,
+) -> i32 {
     let hh = &mut *h;
     *out = std::ptr::null_mut();
     let m = match mode {
@@ -2687,7 +2722,20 @@ pub unsafe extern "C" fn line_assemble_covariance(h: *mut LineHandle, mode: u32,
         2 => CovMode::TriDiagonal,
         _ => CovMode::AllMarginals,
     };
-    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {
+    let opts = CovOptions {
+        ordering: match ordering {
+            1 => CovOrdering::Amd,
+            2 => CovOrdering::NestedDissection,
+            3 => CovOrdering::Natural,
+            _ => CovOrdering::Auto,
+        },
+        block_supernodal: match block_supernodal {
+            1 => arael::simple_lm::BlockSupernodalMode::Always,
+            2 => arael::simple_lm::BlockSupernodalMode::Never,
+            _ => arael::simple_lm::BlockSupernodalMode::Auto,
+        },
+    };
+    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance_with(m, &opts))) {
         Ok(Ok(c)) => {
             *out = Box::into_raw(Box::new(LineCov {
                 cov: c,

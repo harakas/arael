@@ -11,10 +11,11 @@ import os
 from . import _graph_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
-                           DiagonalFault, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
-                           ReducedOrdering, SchurPlan, SchurPolicy,
-                           SchurSolve, SolveFailure, SolveFailureKind)
+                           CovOrdering, DiagonalFault, EnvelopeMode,
+                           FaerOrdering, LmPreset, LmStatus, LmStep,
+                           LmTiming, LogLevel, ReducedOrdering, SchurPlan,
+                           SchurPolicy, SchurSolve, SolveFailure,
+                           SolveFailureKind)
 
 LmIter = _f.LmIter
 
@@ -670,10 +671,18 @@ class Graph:
             _f.graph_solve_band(self._p, kd, ctypes.byref(cfg),
                                     ctypes.byref(r)), r)
 
-    def assemble_covariance(self, mode=CovMode.ALL_MARGINALS):
+    def assemble_covariance(self, mode=CovMode.ALL_MARGINALS,
+                            ordering=CovOrdering.AUTO,
+                            block_supernodal=BlockSupernodalMode.AUTO):
+        """Prepare the covariance at the current (solved) parameters.
+
+        `ordering` and `block_supernodal` decide what producing it costs,
+        never what it is. ALL_MARGINALS ignores `block_supernodal` and stays
+        on the scalar factor."""
         c = ctypes.c_void_p()
-        code = _f.graph_assemble_covariance(self._p, int(mode),
-                                                ctypes.byref(c))
+        code = _f.graph_assemble_covariance_with(
+            self._p, int(mode), int(ordering), int(block_supernodal),
+            ctypes.byref(c))
         if code != 0:
             raise AraelError(code, _err(self._p))
         return Covariance(c)

@@ -579,6 +579,10 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
     sig(&mut py, &format!("{root_sn}_assemble_covariance"),
         &["ctypes.c_void_p", "ctypes.c_uint32",
           "ctypes.POINTER(ctypes.c_void_p)"], "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_assemble_covariance_with"),
+        &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.c_uint32",
+          "ctypes.c_uint32", "ctypes.POINTER(ctypes.c_void_p)"],
+        "ctypes.c_int32");
     sig(&mut py, &format!("{root_sn}_cov_error"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_cov_free"), &["ctypes.c_void_p"],
@@ -948,10 +952,18 @@ class Covariance:
             _f.{root_sn}_solve_band(self._p, kd, ctypes.byref(cfg),
                                     ctypes.byref(r)), r)
 
-    def assemble_covariance(self, mode=CovMode.ALL_MARGINALS):
+    def assemble_covariance(self, mode=CovMode.ALL_MARGINALS,
+                            ordering=CovOrdering.AUTO,
+                            block_supernodal=BlockSupernodalMode.AUTO):
+        \"\"\"Prepare the covariance at the current (solved) parameters.
+
+        `ordering` and `block_supernodal` decide what producing it costs,
+        never what it is. ALL_MARGINALS ignores `block_supernodal` and stays
+        on the scalar factor.\"\"\"
         c = ctypes.c_void_p()
-        code = _f.{root_sn}_assemble_covariance(self._p, int(mode),
-                                                ctypes.byref(c))
+        code = _f.{root_sn}_assemble_covariance_with(
+            self._p, int(mode), int(ordering), int(block_supernodal),
+            ctypes.byref(c))
         if code != 0:
             raise AraelError(code, _err(self._p))
         return Covariance(c)
@@ -1018,10 +1030,11 @@ import os
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
-                           DiagonalFault, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
-                           ReducedOrdering, SchurPlan, SchurPolicy,
-                           SchurSolve, SolveFailure, SolveFailureKind)
+                           CovOrdering, DiagonalFault, EnvelopeMode,
+                           FaerOrdering, LmPreset, LmStatus, LmStep,
+                           LmTiming, LogLevel, ReducedOrdering, SchurPlan,
+                           SchurPolicy, SchurSolve, SolveFailure,
+                           SolveFailureKind)
 
 LmIter = _f.LmIter
 

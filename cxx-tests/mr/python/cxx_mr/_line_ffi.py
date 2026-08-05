@@ -20,6 +20,7 @@ SIGS = [
     ("line_ob_y", [ctypes.c_void_p], ctypes.c_double),
     ("line_ob_set_y", [ctypes.c_void_p, ctypes.c_double], None),
     ("line_assemble_covariance", [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
+    ("line_assemble_covariance_with", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
     ("line_cov_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("line_cov_free", [ctypes.c_void_p], None),
     ("line_new", [], ctypes.c_void_p),

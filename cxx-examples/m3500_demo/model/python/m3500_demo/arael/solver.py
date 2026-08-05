@@ -96,6 +96,20 @@ class CovMode(enum.IntEnum):
     TRI_DIAGONAL = 2
 
 
+class CovOrdering(enum.IntEnum):
+    """Elimination ordering for a covariance assembly. It decides what the
+    covariance costs, never what it is.
+
+    AUTO prices minimum degree against nested dissection over the model's
+    block graph and keeps the cheaper factor. NESTED_DISSECTION is what a
+    trajectory that revisits wants -- a loop closure, a figure-8 crossing --
+    where poses far apart in the ordering are coupled."""
+    AUTO = 0
+    AMD = 1
+    NESTED_DISSECTION = 2
+    NATURAL = 3
+
+
 class LogLevel(enum.IntEnum):
     """Severity threshold for arael's diagnostics (matches the Rust
     log::Level): a level admits everything at or below itself."""

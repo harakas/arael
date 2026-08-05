@@ -55,6 +55,8 @@ using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
 using arael::CovMode;
+using arael::CovOrdering;
+using arael::CovOptions;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -96,6 +98,7 @@ double line_ob_y(const Ob*);
 void line_ob_set_y(Ob*, double);
 struct LineCov;
 int32_t line_assemble_covariance(Line*, uint32_t, LineCov**);
+int32_t line_assemble_covariance_with(Line*, uint32_t, uint32_t, uint32_t, LineCov**);
 const char* line_cov_error(const LineCov*);
 void line_cov_free(LineCov*);
 double line_k(const Line*);
@@ -385,8 +388,16 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
+        return assemble_covariance(mode, CovOptions{});
+    }
+    /// The same, with the assembly spelled out instead of left to the
+    /// defaults. The covariance is the same either way; the options decide
+    /// what producing it costs.
+    result<Covariance, CovError> assemble_covariance(CovMode mode, const CovOptions& opts) {
         ffi::LineCov* c = nullptr;
-        int32_t code = ffi::line_assemble_covariance(h_, uint32_t(mode), &c);
+        int32_t code = ffi::line_assemble_covariance_with(
+            h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({last_error()});

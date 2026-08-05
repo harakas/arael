@@ -55,6 +55,8 @@ using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
 using arael::CovMode;
+using arael::CovOrdering;
+using arael::CovOptions;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -195,6 +197,7 @@ uint32_t path_pose_pair_cur(const PosePair*);
 void path_pose_pair_set_cur(PosePair*, uint32_t);
 struct PathCov;
 int32_t path_assemble_covariance(Path*, uint32_t, PathCov**);
+int32_t path_assemble_covariance_with(Path*, uint32_t, uint32_t, uint32_t, PathCov**);
 const char* path_cov_error(const PathCov*);
 void path_cov_free(PathCov*);
 int32_t path_pose_marginal_cov(PathCov*, const Pose*, double*, uint32_t);
@@ -1022,8 +1025,16 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
+        return assemble_covariance(mode, CovOptions{});
+    }
+    /// The same, with the assembly spelled out instead of left to the
+    /// defaults. The covariance is the same either way; the options decide
+    /// what producing it costs.
+    result<Covariance, CovError> assemble_covariance(CovMode mode, const CovOptions& opts) {
         ffi::PathCov* c = nullptr;
-        int32_t code = ffi::path_assemble_covariance(h_, uint32_t(mode), &c);
+        int32_t code = ffi::path_assemble_covariance_with(
+            h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({last_error()});

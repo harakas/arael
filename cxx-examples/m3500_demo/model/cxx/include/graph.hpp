@@ -55,6 +55,8 @@ using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
 using arael::CovMode;
+using arael::CovOrdering;
+using arael::CovOptions;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -135,6 +137,7 @@ double graph_prior_th(const Prior*);
 void graph_prior_set_th(Prior*, double);
 struct GraphCov;
 int32_t graph_assemble_covariance(Graph*, uint32_t, GraphCov**);
+int32_t graph_assemble_covariance_with(Graph*, uint32_t, uint32_t, uint32_t, GraphCov**);
 const char* graph_cov_error(const GraphCov*);
 void graph_cov_free(GraphCov*);
 int32_t graph_pose2_marginal_cov(GraphCov*, const Pose2*, double*, uint32_t);
@@ -616,8 +619,16 @@ public:
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
+        return assemble_covariance(mode, CovOptions{});
+    }
+    /// The same, with the assembly spelled out instead of left to the
+    /// defaults. The covariance is the same either way; the options decide
+    /// what producing it costs.
+    result<Covariance, CovError> assemble_covariance(CovMode mode, const CovOptions& opts) {
         ffi::GraphCov* c = nullptr;
-        int32_t code = ffi::graph_assemble_covariance(h_, uint32_t(mode), &c);
+        int32_t code = ffi::graph_assemble_covariance_with(
+            h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
         if (code == -2) throw PanicError(last_error());
         if (code != 0)
             return result<Covariance, CovError>::err({last_error()});
