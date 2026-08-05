@@ -645,9 +645,14 @@ what produced it.
 
 | env | effect |
 |-----|--------|
-| `SLAM_POSES` | scene size (60 default; 120, 300) |
+| `SLAM_POSES` | scene size (60 default; the tables use 60, 120, 300, 900, and 600/1200 for the loop-closing runs) |
+| `SLAM_SPAN` | cap every landmark's visibility span, making the reduced system narrow-banded |
 | `SLAM_TRAJECTORY` | `scurve` (default, open ends), `loop` (closed circle, landmark visibility wraps across the seam) or `eight` (figure-8, both passes through the crossing share landmarks) |
-| `SLAM_ENVELOPE` | `always` (default), `auto` or `never` -- how the reduced Schur system is factored. The tables are the envelope route, pinned rather than left to arael's `auto` gate |
+| `SLAM_ENVELOPE` | `auto` (default, arael's own gate), `always` or `never` -- how the reduced Schur system is factored |
+| `SLAM_SCHUR` | `auto` (default), `force` or `never` -- whether the landmarks are marginalized |
+| `SLAM_ORDERING` | `auto` (default), `amd`, `nd`, `natural` or `marginalize-first` -- elimination ordering of whichever system is factorized |
+| `SLAM_CG_TOL`, `SLAM_CG_MAXITER`, `SLAM_CG_RESTART` | the `arael CG` rows' inner solve; tolerance defaults to 1e-4 |
+| `BENCH_THREADS` | cores to pin to, and `num_threads` for the solve (1 default; 0 is every core) |
 | `SLAM_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
