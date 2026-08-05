@@ -48,16 +48,16 @@ PANELS = [
         ("g2o (Schur)", 277.43, 427.21, "other"),
         ("Ceres dense_schur", 459.18, 656.20, "other"),
     ]),
-    # 2026-08-01, one round. Exploratory: no system meets the shared tolerances
+    # 2026-08-05, one round. Exploratory: no system meets the shared tolerances
     # here, and the f32 rows stop far above the plateau the f64 rows reach --
     # see the panel footnote.
     ("Ladybug-1723-clean -- 484,842 params (exploratory)", 0, (4500.0, 1500.0), [
-        ("arael f32 Schur", 1050.68, 1340.15, "arael"),
-        ("arael f32 sparse", 1713.74, 2628.49, "arael"),
-        ("arael f64 Schur", 1766.45, 2108.39, "arael"),
-        ("arael f64 sparse", 2789.82, 3659.28, "arael"),
-        ("g2o (Schur)", 2315.97, 2939.97, "other"),
-        ("Ceres sparse_schur", 2942.00, 4216.32, "other"),
+        ("arael f32 Schur", 995.23, 1156.64, "arael"),
+        ("arael f32 sparse", 1456.89, 1912.53, "arael"),
+        ("arael f64 Schur", 1714.16, 1926.34, "arael"),
+        ("arael f64 sparse", 2499.98, 2989.51, "arael"),
+        ("g2o (Schur)", 2291.90, 2926.35, "other"),
+        ("Ceres sparse_schur", 2913.95, 4136.18, "other"),
     ]),
 ]
 

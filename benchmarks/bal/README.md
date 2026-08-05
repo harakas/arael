@@ -197,7 +197,7 @@ second.
 
 All thirteen rows validate on all three datasets.
 
-### Ladybug-1723-clean (485k parameters, exploratory: `BAL_ONLY=1723-clean`, measured 2026-08-01, one round)
+### Ladybug-1723-clean (485k parameters, exploratory: `BAL_ONLY=1723-clean`, measured 2026-08-05, one round)
 
 The raw Ladybug-1723 carries observations no solver can use: 199 points behind
 the camera and fourteen on the optical centre (`pc.z` down to 3.65e-9), where
@@ -216,18 +216,18 @@ different, arbitrary stopping point.
 
 | system                                | total ms |   iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB |   final cost |
 |---------------------------------------|---------:|--------:|--------:|----------:|----------:|------------:|--------:|-------------:|
-| arael LM f64 sparse                   | 76321.53 |  18(27) | 2826.72 |   2789.82 |     1.579 |     3659.28 |  1502.8 |  771218.8250 |
-| arael LM f32 sparse\*\*               | 45521.10 |  18(26) | 1750.81 |   1713.74 |     0.970 |     2628.49 |   961.3 | 4534761.2853 |
-| arael LM f64 schur                    | 47450.49 |  18(27) | 1757.43 |   1766.45 |     1.000 |     2108.39 |  1110.1 |  771218.8250 |
-| arael LM f32 schur\*\*                | 27373.35 |  18(26) | 1052.82 |   1050.68 |     0.595 |     1340.15 |   664.3 | 4535532.0263 |
-| arael LM f64 schur-cg\*               |  9441.27 |  23(32) |  295.04 |         - |         - |      461.86 |   574.3 |  765600.3135 |
-| arael LM f32 schur-cg\* \*\*          |  6107.99 |  21(29) |  210.62 |         - |         - |      322.21 |   358.6 | 4326124.2911 |
-| arael LM f64 schur-cg-implicit\*      |  8160.53 |  23(32) |  255.02 |         - |         - |      418.77 |   500.4 |  765600.3135 |
-| arael LM f32 schur-cg-implicit\* \*\* |  5843.01 |  22(30) |  194.77 |         - |         - |      316.40 |   321.8 | 4322293.6387 |
-| ceres sparse_schur                    | 75537.61 |  18(26) | 2905.29 |   2942.00 |     1.665 |     4216.32 |  1244.1 |  765439.5587 |
-| ceres iterative_schur\*               |  9111.55 |  19(25) |  364.46 |         - |         - |     1196.43 |   618.4 |  769150.2812 |
-| g2o LM (schur)                        | 349919.36 | 92(142) | 2464.22 |   2315.97 |     1.311 |     2939.97 |  1539.8 |  779611.7031 |
-| g2o LM (pcg)\*                        | 179618.46 | 100(158) | 1136.83 |         - |         - |     1041.88 |   789.8 |  771546.7358 |
+| arael LM f64 sparse                   | 68248.15 |  18(27) | 2527.71 |   2499.98 |     1.458 |     2989.51 |  1112.0 |  771218.8250 |
+| arael LM f32 sparse\*\*               | 37925.28 |  18(26) | 1458.66 |   1456.89 |     0.850 |     1912.53 |   634.8 | 4531292.2083 |
+| arael LM f64 schur                    | 45868.72 |  18(27) | 1698.84 |   1714.16 |     1.000 |     1926.34 |   893.1 |  771218.8250 |
+| arael LM f32 schur\*\*                | 25577.70 |  18(26) |  983.76 |    995.23 |     0.581 |     1156.64 |   518.4 | 4536012.8722 |
+| arael LM f64 schur-cg\*               |  9260.09 |  23(32) |  289.38 |         - |         - |      442.97 |   574.4 |  765600.3135 |
+| arael LM f32 schur-cg\* \*\*          |  6014.43 |  21(29) |  207.39 |         - |         - |      318.45 |   358.6 | 4326124.2911 |
+| arael LM f64 schur-cg-implicit\*      |  8069.51 |  23(32) |  252.17 |         - |         - |      401.94 |   500.5 |  765600.3135 |
+| arael LM f32 schur-cg-implicit\* \*\* |  5805.08 |  22(30) |  193.50 |         - |         - |      317.03 |   321.7 | 4322293.6387 |
+| ceres sparse_schur                    | 75066.71 |  18(26) | 2887.18 |   2913.95 |     1.700 |     4136.18 |  1244.1 |  765439.5587 |
+| ceres iterative_schur\*               |  9469.64 |  19(25) |  378.79 |         - |         - |     1192.84 |   618.5 |  769150.2812 |
+| g2o LM (schur)                        | 349872.09 | 92(142) | 2463.89 |   2291.90 |     1.337 |     2926.35 |  1539.8 |  779611.7031 |
+| g2o LM (pcg)\*                        | 174911.85 | 100(158) | 1107.04 |         - |         - |     1009.76 |   789.9 |  771546.7358 |
 
 6/12 at the common optimum, anchored by two external systems. The six that miss
 are the four f32 rows (below) and both g2o rows, whose camera centres land
@@ -238,22 +238,22 @@ apart in geometry. g2o `schur` also stops 1.9% above the plateau, outside the
 Conjugate gradients is the whole story at this size. The ratios below are in
 ms/iter, the column the inexact rows are read on, taken on both sides.
 
-Arael's `schur-cg` iterates 6.0x cheaper than its own factorized Schur route
-(295 vs 1757 ms) and `schur-cg-implicit`, which never forms the reduced camera
-system at all, 6.9x cheaper (255 ms) on under half the memory (500 vs 1110 MB).
-Both reach a lower cost than either direct route. The crossover is visible
-across the suite -- against arael's factorized Schur route, `schur-cg` costs
-the same at Ladybug-49, 1.1x less at 138, 1.8x less at 372 and 6.0x less here;
+Arael's `schur-cg` iterates 5.9x cheaper than its own factorized Schur route
+(289 vs 1699 ms) and `schur-cg-implicit`, which never forms the reduced camera
+system at all, 6.7x cheaper (252 ms) on 500 MB against 893. Both reach a lower
+cost than either direct route. The crossover is visible across the suite --
+against arael's factorized Schur route, `schur-cg` costs the same at
+Ladybug-49, 1.1x less at 138, 1.8x less at 372 and 5.9x less here;
 `schur-cg-implicit` is 2.3x more expensive at 49 and only overtakes at 372.
 Forming the reduced system is worth it until it isn't, and the implicit route
 is for when it isn't.
 
 Ceres's `iterative_schur` shows the same crossover from the other side: 2.6x
 more expensive than arael's factorized Schur route at Ladybug-49, 2.3x at 138,
-then 1.4x cheaper at 372 and 4.8x cheaper here -- but 1.2x more expensive than
-arael's own CG route on this dataset, and 1.4x more than the implicit one.
+then 1.4x cheaper at 372 and 4.5x cheaper here -- but 1.3x more expensive than
+arael's own CG route on this dataset, and 1.5x more than the implicit one.
 
-The factorized Schur route still beats the full sparse solve (1766 vs 2790 ms),
+The factorized Schur route still beats the full sparse solve (1714 vs 2500 ms),
 on the largest reduced system in the suite -- 15,498 parameters. That holds only
 under nested dissection; see the section below.
 
@@ -304,8 +304,8 @@ ratio the policy decides on from 1.21 to 0.55, which is the difference between
 declining the reduction and taking it.
 
 With that ordering the Schur route has the cheaper iteration on every dataset in
-the suite, including the 1723-clean exploratory one (1766 ms against the full
-system's 2790). `schur_stats` reports S's size, density, fill and the split
+the suite, including the 1723-clean exploratory one (1714 ms against the full
+system's 2500). `schur_stats` reports S's size, density, fill and the split
 between forming it and factorizing it, per dataset.
 
 ## Covariance recovery (2026-07-26, Apple M4 Pro, single core)
