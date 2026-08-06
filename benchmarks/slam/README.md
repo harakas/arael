@@ -399,21 +399,22 @@ runs the 60-pose problem (240 landmarks, 5,370 observations, 1,080
 parameters) with the full field, C++ systems included:
 `SLAM_POSES=60 ROUNDS=16 cargo run --release` (min of 16 rounds).
 
-| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64          |    28.15 |   3(3) |    9.38 |      8.63 |     1.000 |       10.88 |     8.9 |  3062.0482 |
-| arael LM f32          |    20.63 |   3(3) |    6.88 |      6.23 |     0.721 |        8.14 |     7.8 |  3062.0482 |
-| factrs LM             |   132.19 |   3(3) |   44.06 |     37.33 |     4.324 |       57.60 |    25.2 |  3062.0482 |
-| ceres sparse_cholesky |    95.02 |   3(3) |   31.67 |     29.29 |     3.393 |       42.62 |    15.4 |  3062.0482 |
-| ceres sparse_schur    |    87.46 |   3(3) |   29.15 |     25.11 |     2.909 |       44.62 |    15.1 |  3062.0482 |
-| ceres iterative_schur\* |  91.46 |   6(6) |   15.24 |         - |         - |       23.57 |    11.5 |  3067.3849 |
-| symforce LM f64       |    92.54 |   3(3) |   30.85 |     17.23 |     1.996 |       57.34 |    29.0 |  3062.0482 |
-| symforce LM f32       |   100.18 |   4(4) |   25.05 |     17.08 |     1.979 |       50.28 |    25.9 |  3062.0500 |
-| g2o LM                |    66.03 |   3(3) |   22.01 |     17.75 |     2.056 |       30.75 |    15.7 |  3062.0482 |
-| gtsam LM              |   156.92 |   3(3) |   52.31 |     49.08 |     5.685 |       55.16 |    47.8 |  3062.0482 |
+| system                  | total ms | iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-------------------------|---------:|------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64            |    26.33 |  3(3) |    8.78 |      8.00 |     1.000 |       10.37 |     8.9 |  3062.0483 |
+| arael LM f32            |    19.90 |  3(3) |    6.63 |      5.95 |     0.744 |        7.98 |     8.2 |  3062.0483 |
+| arael CG f64\*          |    49.60 |  5(5) |    9.92 |         - |         - |        8.87 |     8.2 |  3062.0484 |
+| arael CG f32\*          |    49.60 |  5(5) |    9.92 |         - |         - |        7.23 |     7.2 |  3062.0486 |
+| factrs LM               |   125.18 |  3(3) |   41.73 |     35.55 |     4.442 |       54.72 |    23.4 |  3062.0482 |
+| ceres sparse_cholesky   |    92.84 |  3(3) |   30.95 |     28.49 |     3.560 |       41.71 |    15.4 |  3062.0482 |
+| ceres sparse_schur      |    85.41 |  3(3) |   28.47 |     24.59 |     3.073 |       43.33 |    15.1 |  3062.0482 |
+| ceres iterative_schur\* |    89.52 |  6(6) |   14.92 |         - |         - |       22.88 |    11.5 |  3067.3849 |
+| symforce LM f64         |    86.48 |  3(3) |   28.83 |     17.09 |     2.135 |       51.75 |    29.1 |  3062.0482 |
+| symforce LM f32         |    96.12 |  4(4) |   24.03 |     16.62 |     2.077 |       46.70 |    25.9 |  3062.0500 |
+| g2o LM                  |    62.91 |  3(3) |   20.97 |     16.85 |     2.106 |       29.49 |    15.2 |  3062.0482 |
+| gtsam LM                |   138.48 |  3(3) |   46.16 |     43.01 |     5.374 |       48.91 |    47.8 |  3062.0482 |
 
-9/10 at the common optimum (\* the inexact `iterative_schur`, as on the
-desktop).
+11/12 at the common optimum (\* the iterative rows, as on the desktop).
 
 **Raspberry Pi Zero W** -- ARM1176JZF-S @ ~1 GHz, ARMv6, no NEON,
 in-order, 512 MB -- is too small to compile natively, so it runs a
