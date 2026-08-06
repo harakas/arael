@@ -34,7 +34,7 @@ pub struct CommandContext {
     pub saved_cursor: CursorState,
     pub status_error: Option<String>,
     /// When a constraint was rejected with a blocker analysis, the
-    /// user-facing names ("C<n>", "d<n>", "CL0H") of the conflicting
+    /// user-facing names (`C<n>`, `d<n>`, "CL0H") of the conflicting
     /// existing constraints. Consumed by the GUI to flash those
     /// constraints briefly. Cleared on the next successful action.
     pub status_blocker_names: Option<Vec<String>>,
@@ -254,7 +254,7 @@ fn dim_endpoint_pos_from_sketch(sketch: &Sketch, ep: &DimensionEndpoint) -> vect
 /// constraint is refused. Carries the human-readable message plus,
 /// for DOF-rejection, the user-facing names of the existing
 /// constraints the blocker analysis identified as conflicting
-/// ("C<n>" / "d<n>" / "CL0H") so the GUI can flash them via the
+/// (`C<n>` / `d<n>` / "CL0H") so the GUI can flash them via the
 /// existing `find_constraint_by_name` / dimension-name resolvers.
 pub struct Rejection {
     pub message: String,

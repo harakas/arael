@@ -5,7 +5,6 @@
 //! it evaluates the expression and derivatives numerically, accumulating
 //! into a TripletBlock.
 
-use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael_sym::E;
 use arael::model::TripletBlock;  // used in compute() parameter
@@ -118,6 +117,7 @@ pub fn expand_derived(expr: &E, bag: &SymbolBag) -> E {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arael::simple_lm::RootProblem; // Sketch::serialize
     use arael::vect::vect2d;
     use crate::Sketch;
 

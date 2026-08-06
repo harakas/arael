@@ -2,7 +2,6 @@
 //! indices and symbolic expressions. Used for parametric equations in
 //! dimensions.
 
-use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael_sym::E;
 use crate::Sketch;
@@ -236,6 +235,7 @@ impl SymbolBag {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arael::simple_lm::RootProblem; // Sketch::serialize
     use arael::vect::vect2d;
 
     #[test]

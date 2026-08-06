@@ -155,7 +155,7 @@ pub fn constraint_id_name(sketch: &Sketch, id: ConstraintId) -> Option<String> {
 
 /// Look up a constraint by its auto-assigned name.
 ///
-/// Numeric names "C<n>" scan every Vec-stored constraint that has a
+/// Numeric names `C<n>` scan every Vec-stored constraint that has a
 /// ConstraintId variant and return the first match. Synthetic flag
 /// names like "CL0H" / "CL3V" parse the entity reference and validate
 /// the flag is currently set on that line.

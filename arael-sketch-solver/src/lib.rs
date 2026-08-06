@@ -263,13 +263,13 @@ fn default_min_length() -> f64 { 0.0001 }
 fn default_next_constraint_id() -> u32 { 1 }
 
 /// Format a synthetic constraint name for a flag-style constraint on a
-/// named entity. Pattern: "C<entity><flag>", e.g. "CL0H", "CL3V".
+/// named entity. Pattern: `C<entity><flag>`, e.g. "CL0H", "CL3V".
 pub fn format_flag_name(entity_name: &str, flag: char) -> String {
     format!("C{}{}", entity_name, flag)
 }
 
 /// Parse a synthetic constraint name into its entity-name + flag-char
-/// components. Returns None for names that don't match "C<entity>F"
+/// components. Returns None for names that don't match `C<entity>F`
 /// where the first char is 'C' and the final char is an uppercase
 /// ASCII flag tag ('H' or 'V' today).
 pub fn parse_flag_name(token: &str) -> Option<(String, char)> {
@@ -547,7 +547,7 @@ impl Sketch {
     }
 
     /// Walk every Vec-stored constraint in canonical order and assign a
-    /// numeric id (C<nid>) to any constraint whose nid is still the 0
+    /// numeric id (`C<nid>`) to any constraint whose nid is still the 0
     /// sentinel. Call at the tail of every mutating action and after
     /// loading a sketch so freshly-deserialised sketches pick up names.
     pub fn assign_constraint_names(&mut self) {
