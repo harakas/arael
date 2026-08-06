@@ -440,6 +440,37 @@ pub struct CovScaling {
 // marginals are 6-DOF poses; points are 3-DOF. PerQuery times the full cold cost
 // (assemble H + factor + query N marginals) each rep; AllMarginals is the bulk
 // selected inverse over the whole factor (every camera and point at once).
+// BAL_COV_ORDERING=auto|amd|nd|natural orders the covariance factorization and
+// BAL_COV_SUPERNODAL=auto|always|never picks block or scalar form. A typo is an
+// error.
+//
+// Minimum degree by default, not arael's `auto`: a BAL block graph is mostly
+// 3-DOF points -- 47423 of them at Ladybug-372 -- and minimum degree wins the
+// pricing on all three datasets. `auto` prices dissection against it anyway,
+// which costs a second symbolic analysis and buys nothing here.
+fn cov_opts() -> arael::covariance::CovOptions {
+    use arael::covariance::{CovOptions, CovOrdering};
+    use arael::simple_lm::BlockSupernodalMode;
+    let ordering = match std::env::var("BAL_COV_ORDERING").as_deref() {
+        Err(_) | Ok("amd") => CovOrdering::Amd,
+        Ok("auto") => CovOrdering::Auto,
+        Ok("nd") => CovOrdering::NestedDissection,
+        Ok("natural") => CovOrdering::Natural,
+        Ok(other) => {
+            panic!("BAL_COV_ORDERING: expected auto, amd, nd or natural, got {:?}", other)
+        }
+    };
+    let supernodal = match std::env::var("BAL_COV_SUPERNODAL").as_deref() {
+        Err(_) | Ok("auto") => BlockSupernodalMode::Auto,
+        Ok("always") => BlockSupernodalMode::Always,
+        Ok("never") => BlockSupernodalMode::Never,
+        Ok(other) => {
+            panic!("BAL_COV_SUPERNODAL: expected auto, always or never, got {:?}", other)
+        }
+    };
+    CovOptions::auto().with_ordering(ordering).with_block_supernodal(supernodal)
+}
+
 pub fn cov_bench(problem: &Problem) -> CovScaling {
     use arael::covariance::{CovMode, Covariance};
     use bench_harness::cov::{query_counts, scale_counts, spread};
@@ -447,6 +478,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     use std::hint::black_box;
     use std::time::Duration;
 
+    let opts = cov_opts();
     let mut scene = build_f64(&problem.ds);
     // Known calibration: intrinsics are near-unconstrained when a camera's points
     // cluster near the image center, so holding them constant keeps H positive
@@ -475,8 +507,19 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     let cap_s = bench_harness::cov::cell_cap_s();
 
     // Validation: camera 2's 6-DOF pose std dev (translation, then rotation).
+    // The same assembly reports the route it took, so a run says which ordering
+    // its numbers came from.
     let sd_cam2 = {
-        let cov = scene.assemble_covariance(CovMode::PerQuery).expect("gauge-fixed H is PD");
+        let cov = scene.assemble_covariance_with(CovMode::PerQuery, &opts).expect("gauge-fixed H is PD");
+        let plan = cov.plan();
+        let flops = match plan.candidate_flops {
+            Some((amd, nd)) => format!(", priced amd {:.3e} vs nd {:.3e}", amd, nd),
+            None => String::new(),
+        };
+        println!(
+            "  cov route: {:?} ordering, {} symbolic(s) built, block route {}{}",
+            plan.ordering, plan.symbolics_built, cov.took_block_route(), flops
+        );
         let m = cov.marginal_cov(&scene.cameras[2]).unwrap();
         std::array::from_fn(|d| m[(d, d)].sqrt())
     };
@@ -485,7 +528,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     let perquery_cam = scale_counts(query_counts(free, true), cap_s, |n| {
         let idx = spread(2, free, n);
         median_ms(budget, cap, || {
-            let cov = scene.assemble_covariance(CovMode::PerQuery).unwrap();
+            let cov = scene.assemble_covariance_with(CovMode::PerQuery, &opts).unwrap();
             for &i in &idx {
                 black_box(cov.marginal_cov(&scene.cameras[i]).unwrap());
             }
@@ -497,7 +540,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     let perquery_point = scale_counts(query_counts(npt, true), cap_s, |n| {
         let idx = spread(0, npt, n);
         median_ms(budget, cap, || {
-            let cov = scene.assemble_covariance(CovMode::PerQuery).unwrap();
+            let cov = scene.assemble_covariance_with(CovMode::PerQuery, &opts).unwrap();
             for &i in &idx {
                 black_box(cov.marginal_cov(&scene.points[i]).unwrap());
             }
@@ -506,7 +549,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
 
     // AllMarginals: bulk selected inverse -- every camera and point at once.
     let (allmarg_ms, allmarg_reps) = median_ms(budget, cap, || {
-        black_box(scene.assemble_covariance(CovMode::AllMarginals).unwrap());
+        black_box(scene.assemble_covariance_with(CovMode::AllMarginals, &opts).unwrap());
     });
 
     CovScaling { perquery_cam, perquery_point, allmarg_ms, allmarg_reps, sd_cam2 }

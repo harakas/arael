@@ -308,7 +308,7 @@ the suite, including the 1723-clean exploratory one (1714 ms against the full
 system's 2500). `schur_stats` reports S's size, density, fill and the split
 between forming it and factorizing it, per dataset.
 
-## Covariance recovery (2026-07-26, Apple M4 Pro, single core)
+## Covariance recovery (2026-08-06, Apple M4 Pro, single core)
 
 Parameter covariance at the solution, `Sigma = 2 H^-1`, recovered without
 inverting `H`. Intrinsics are held (known calibration), so a camera marginal is
@@ -321,16 +321,20 @@ and the cost of scaling from one marginal to all of them:
   AND point marginal at once, at a cost that does not grow with how many you read.
 - **Ceres** (`SPARSE_QR`) and **g2o** (`computeMarginals`) recover the same
   marginals for comparison. arael and Ceres build cold (assemble + factor +
-  query); g2o reuses the factor from the solve it just ran (warm). arael and
-  Ceres agree to the printed four decimals on all three datasets, and g2o
-  agrees on Ladybug-49 and 138. On Ladybug-372 g2o's are 10-15% smaller across
-  the components: it recovers them from its own solved state, which on that
-  dataset stops 0.5% higher in cost (226586 against 225431).
+  query); g2o reuses the factor from the solve it just ran (warm). On
+  Ladybug-372 g2o's std devs come out smaller across every component: it
+  recovers them from its own solved state, which on that dataset stops 0.5%
+  higher in cost (226586 against 225431).
 
 BAL is rank-deficient at the solution (weakly triangulated point depths), which
 Ceres's QR does not invert without a small anchoring prior on the points; arael
 and g2o (Cholesky) factor through it and need none. g2o marginalizes the points,
 so it recovers camera poses only.
+
+arael orders by minimum degree here (`BAL_COV_ORDERING=amd`, the default in this
+benchmark). A BAL block graph is mostly 3-DOF points -- 47423 of them at
+Ladybug-372 -- and minimum degree wins the flop pricing on all three datasets,
+so `auto` would build a second symbolic analysis to reach the same answer.
 
 Time to recover N marginals from the solved state, median ms (reps). `all` is
 every free camera / every point; `-` a count a method does not cover; `*` a cell
@@ -341,20 +345,20 @@ Camera pose (6-DOF):
 | method | 1 | 2 | 8 | 32 | all |
 |--------|--:|--:|--:|--:|--:|
 | **Ladybug-49** (all=47) | | | | | |
-| arael PerQuery | 40.6 (123) | 42.8 (117) | 55.5 (91) | 106.3 (48) | 137.9 (37) |
-| arael AllMarginals | - | - | - | - | 69.6 (72) |
-| Ceres SPARSE_QR | 266.8 (19) | 268.8 (19) | 285.4 (18) | 344.8 (15) | 384.3 (14) |
-| g2o computeMarginals | 12.3 (200) | 12.3 (200) | 18.6 (200) | 20.8 (200) | 21.4 (200) |
+| arael PerQuery | 25.7 (195) | 28.0 (179) | 41.3 (121) | 94.4 (53) | 127.1 (40) |
+| arael AllMarginals | - | - | - | - | 74.6 (67) |
+| Ceres SPARSE_QR | 277.7 (18) | 280.6 (18) | 297.2 (17) | 358.1 (14) | 397.5 (13) |
+| g2o computeMarginals | 12.3 (200) | 12.3 (200) | 18.7 (200) | 20.8 (200) | 21.4 (200) |
 | **Ladybug-138** (all=136) | | | | | |
-| arael PerQuery | 178.7 (28) | 184.2 (28) | 221.1 (23) | 366.8 (14) | 994.4 (6) |
-| arael AllMarginals | - | - | - | - | 321.5 (16) |
-| Ceres SPARSE_QR | 1716.6 (3) | 1723.7 (3) | 1777.6 (3) | 1988.6 (3) | 2862.8 (2) |
-| g2o computeMarginals | 16.9 (200) | 53.6 (94) | 277.5 (18) | 290.1 (18) | 291.0 (18) |
+| arael PerQuery | 87.0 (58) | 93.4 (54) | 130.8 (39) | 278.0 (18) | 918.3 (6) |
+| arael AllMarginals | - | - | - | - | 338.7 (15) |
+| Ceres SPARSE_QR | 1744.8 (3) | 1751.8 (3) | 1804.3 (3) | 2016.2 (3) | 2919.5 (2) |
+| g2o computeMarginals | 17.1 (200) | 55.2 (91) | 287.0 (18) | 307.9 (17) | 289.8 (18) |
 | **Ladybug-372** (all=370) | | | | | |
-| arael PerQuery | 499.0 (11) | 516.8 (10) | 614.5 (9) | 1002.8 (5) | 6474.5 (1) |
-| arael AllMarginals | - | - | - | - | 1434.1 (4) |
-| Ceres SPARSE_QR | 15049.6 (1) | 14808.8 (1) | 15002.7 (1) | 15684.7 (1) | * |
-| g2o computeMarginals | 347.8 (15) | 3636.2 (2) | 3589.9 (2) | 8154.0 (1) | 6989.9 (1) |
+| arael PerQuery | 258.0 (20) | 274.2 (19) | 373.1 (14) | 767.1 (7) | 6321.6 (1) |
+| arael AllMarginals | - | - | - | - | 1468.3 (4) |
+| Ceres SPARSE_QR | 15203.0 (1) | 14840.1 (1) | 14972.7 (1) | 15671.0 (1) | * |
+| g2o computeMarginals | 344.0 (16) | 3485.8 (2) | 3553.1 (2) | 7212.0 (1) | 6915.6 (1) |
 
 Point (3-DOF). `AllMarginals` is the same bulk pass as above (it returns cameras
 and points together):
@@ -362,17 +366,17 @@ and points together):
 | method | 1 | 2 | 8 | 32 | all |
 |--------|--:|--:|--:|--:|--:|
 | **Ladybug-49** (all=7776) | | | | | |
-| arael PerQuery | 40.4 (124) | 41.9 (120) | 49.8 (101) | 82.6 (61) | 10531.3 (1) |
-| arael AllMarginals | - | - | - | - | 69.6 (72) |
-| Ceres SPARSE_QR | 268.6 (19) | 270.8 (19) | 281.6 (18) | 330.4 (16) | 15689.2 (1) |
+| arael PerQuery | 25.3 (198) | 26.9 (186) | 35.8 (139) | 70.5 (71) | 11051.7 (1) |
+| arael AllMarginals | - | - | - | - | 74.6 (67) |
+| Ceres SPARSE_QR | 279.1 (18) | 281.7 (18) | 293.8 (18) | 343.0 (15) | 16049.7 (1) |
 | **Ladybug-138** (all=19878) | | | | | |
-| arael PerQuery | 175.4 (29) | 179.1 (28) | 202.5 (25) | 295.5 (17) | * |
-| arael AllMarginals | - | - | - | - | 321.5 (16) |
-| Ceres SPARSE_QR | 1718.3 (3) | 1727.0 (3) | 1762.6 (3) | 1916.0 (3) | * |
+| arael PerQuery | 85.2 (59) | 89.4 (56) | 113.2 (45) | 207.1 (25) | * |
+| arael AllMarginals | - | - | - | - | 338.7 (15) |
+| Ceres SPARSE_QR | 1741.3 (3) | 1748.0 (3) | 1785.5 (3) | 1940.5 (3) | * |
 | **Ladybug-372** (all=47423) | | | | | |
-| arael PerQuery | 496.6 (11) | 504.7 (10) | 566.9 (9) | 807.6 (7) | * |
-| arael AllMarginals | - | - | - | - | 1434.1 (4) |
-| Ceres SPARSE_QR | 14760.6 (1) | 14808.0 (1) | 14916.3 (1) | 16147.2 (1) | * |
+| arael PerQuery | 251.2 (20) | 261.8 (20) | 324.8 (16) | 575.6 (9) | * |
+| arael AllMarginals | - | - | - | - | 1468.3 (4) |
+| Ceres SPARSE_QR | 14789.5 (1) | 14775.4 (1) | 14905.3 (1) | 15376.9 (1) | * |
 
 `BAL_COV=1 cargo run --release` reproduces this (`COV_BUDGET_S` the per-cell
 budget, `COV_CELL_CAP_S` the cap).
@@ -397,6 +401,8 @@ produced it.
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `BAL_ONLY` | substring; runs only the matching datasets (`1723-clean` reaches the exploratory one; `1723` also matches the raw file, which f32 cannot solve) |
 | `BAL_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S` sets the per-cell budget) |
+| `BAL_COV_ORDERING` | covariance elimination ordering: `amd` (default here), `auto`, `nd`, `natural` |
+| `BAL_COV_SUPERNODAL` | covariance factorization form: `auto` (default), `always`, `never` |
 | `BAL_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `ARAEL_LAMBDA0`, `G2O_LAMBDA_INIT`, `CERES_RADIUS0` | initial damping, per system |
 | `BAL_LAMBDAS` | comma-separated damping values: sweep them instead of running the benchmark (below) |
