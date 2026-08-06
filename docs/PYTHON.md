@@ -119,7 +119,11 @@ surface reference); the differences are Python idiom:
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`
   a list. The view owns its assembly (freed on garbage collection,
   `free()` to force it); reassembling never disturbs older views.
-  Entity arguments must come from the live model.
+  Entity arguments must come from the live model. The keyword arguments
+  `ordering` (`CovOrdering`) and `block_supernodal` spell out the
+  assembly: `CovOrdering.AUTO` builds a symbolic factorization per
+  candidate ordering to choose between them; naming the ordering skips
+  that work.
 
 Idiom notes: where C++ has `front()`/`back()`/`empty()` on views,
 Python spells them `view[0]` / `view[-1]` / `len(view)`; where C++

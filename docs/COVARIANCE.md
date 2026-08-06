@@ -92,7 +92,7 @@ modes and the other libraries scale with it.
 
 `assemble_covariance_with(mode, &opts)` spells out what
 `assemble_covariance(mode)` leaves to the defaults. The covariance is the same
-either way; `CovOptions` decides what producing it costs.
+either way; `CovOptions` changes only what it costs to produce.
 
 ```rust
 use arael::covariance::{CovMode, CovOptions, CovOrdering, Covariance};
@@ -108,6 +108,13 @@ a solve. `Amd` and `Natural` force the choice; `NestedDissection` forces
 dissection, which is what a trajectory that revisits wants (a loop closure, a
 figure-8 crossing), since poses far apart in the ordering are coupled there and
 minimum degree has no separator to find.
+
+Pricing is not free: it builds a symbolic analysis per candidate and discards
+the loser. Where minimum degree wins regardless, naming `Amd` skips that and
+halves the setup. A block graph of many small blocks is the case -- a bundle
+adjustment with tens of thousands of 3-DOF points, where minimum degree wins
+every Ladybug dataset. A trajectory that revisits is the opposite case, and
+there the comparison pays for itself.
 
 Ordering over the block graph rather than `H`'s scalar columns is the same
 coupling with the entity sizes divided out: a 6-DOF pose against a 3-DOF

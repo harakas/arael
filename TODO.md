@@ -1,5 +1,21 @@
 # TODO
 
+- **arael: price `CovOrdering::Auto` without building both symbolics.** Auto
+  picks between minimum degree and nested dissection by building a full
+  `SupernodalSymbolic` per candidate and reading `flops()` off it, then keeps
+  one. On a BAL shape minimum degree wins every dataset and the discarded
+  dissection candidate costs more than the whole winning path: at Ladybug-49 a
+  single camera marginal is 56.7 ms under Auto against 28.1 ms under `Amd`.
+  Column counts over the elimination tree would price the candidates far
+  cheaper, but they are NOT equivalent -- they count the scalar factorization,
+  while `flops()` counts the supernodal work including the zeros inside relaxed
+  panels, and that padding differs between the two orderings. Adopting the
+  cheap proxy needs evidence it still picks the same winner on both a BAL shape
+  and a revisiting trajectory (slam's figure-8, where dissection wins and the
+  pricing pays for itself). Not done for 0.8.2: benchmarks/bal names `Amd`
+  outright instead, which sidesteps the pricing without changing the library
+  default.
+
 - **arael: gate `EnvelopeMode::Auto`** -- DONE (2026-07-30). Auto prices the
   envelope against the ordered sparse factor of the same reduced system and
   takes it below `ENVELOPE_FLOP_MARGIN`. Cheap shape statistics of the envelope

@@ -1505,6 +1505,15 @@
 //! inverse up front -- many or all marginals), and `TriDiagonal` (a band
 //! forward/backward pass for a localization pose chain, no factorization).
 //!
+//! [`assemble_covariance_with`](covariance::Covariance) takes a
+//! [`CovOptions`](covariance::CovOptions) alongside the mode: the elimination
+//! ordering ([`CovOrdering`](covariance::CovOrdering)), and whether the block
+//! supernodal Cholesky factorizes. [`CovOrdering::Auto`](covariance::CovOrdering)
+//! builds a symbolic factorization per candidate ordering to choose between
+//! them; naming the ordering skips that work.
+//! [`CovAssembly::plan`](covariance::CovAssembly::plan) reports what an
+//! assembly picked.
+//!
 //! `H` must be non-singular: an unfixed gauge returns
 //! [`NotPositiveDefinite`](covariance::CovError) -- anchor a pose or add a prior.
 //! Full reference: `docs/COVARIANCE.md`.

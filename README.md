@@ -584,6 +584,12 @@ unfixed gauge (free-gauge SLAM, a similarity-free bundle problem) returns
 | **`AllMarginals`** | also runs a selected inverse up front (block Takahashi over a supernodal factor), so every marginal and cross block is a lookup | many / all marginals |
 | **`TriDiagonal`** | forward/backward Schur pass over a block-tridiagonal `H` (localization: a pose chain, fixed map, no loop closures) -- no factorization; the last pose is free | band-structured localization |
 
+`assemble_covariance_with` takes a `CovOptions` alongside the mode: the
+elimination `ordering`, and whether the block supernodal Cholesky factorizes.
+`CovOrdering::Auto` builds a symbolic factorization per candidate ordering to
+choose between them; naming the ordering skips that work. `CovAssembly::plan`
+reports what an assembly picked.
+
 `marginal_cov` folds in the uncertainty of the variables an entity couples to;
 `conditional_cov` holds every other parameter fixed (`2 H_ee^-1`, never larger);
 `std_dev` is the marginal diagonal's square root. The `slam`, `loc` and `bal`

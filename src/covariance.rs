@@ -110,17 +110,25 @@ pub enum CovMode {
 /// factor carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CovOrdering {
-    /// Minimum degree over the model's BLOCK graph when the model has one,
-    /// over `H`'s scalar columns when it does not. The default.
+    /// Prices minimum degree against nested dissection over the model's block
+    /// graph and keeps whichever factors in fewer flops. The default.
     ///
     /// The block graph is the same coupling with the entity sizes divided
     /// out: a 6-DOF pose against a 3-DOF landmark is one edge there and 18
-    /// scalar ones in `H`, so minimum degree walks a much smaller graph for
-    /// the same answer.
+    /// scalar ones in `H`, so an ordering walks a much smaller graph for the
+    /// same answer.
+    ///
+    /// Pricing costs a symbolic analysis per candidate, and the losing one is
+    /// paid for either way. That is worth it where dissection can win -- a
+    /// trajectory that revisits -- and wasted where minimum degree always
+    /// does: on a block graph of many small blocks, such as a bundle
+    /// adjustment carrying tens of thousands of 3-DOF points, name
+    /// [`Amd`](Self::Amd) and skip the comparison.
     #[default]
     Auto,
-    /// Minimum degree over `H`'s scalar columns, whatever structure the model
-    /// has.
+    /// Minimum degree, no comparison. Over the model's block graph on the
+    /// block route, over `H`'s scalar columns on the scalar one
+    /// ([`CovMode::AllMarginals`], or a model with no block structure).
     Amd,
     /// Nested dissection over the model's block graph
     /// ([`arael_faer::nd`]).
@@ -181,6 +189,22 @@ impl CovOptions {
 pub struct CovAssembly {
     n: usize,
     backend: Backend,
+    plan: CovPlan,
+}
+
+/// What a covariance assembly decided. Read with [`CovAssembly::plan`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CovPlan {
+    /// The ordering that produced the factor. [`CovOrdering::Auto`] resolves
+    /// to the candidate it kept, so this never reads `Auto`.
+    pub ordering: CovOrdering,
+    /// Factor flops down each candidate, `(amd, nested dissection)`, when
+    /// `Auto` priced them. `None` when the ordering was named outright, or
+    /// when there is no block graph to order over.
+    pub candidate_flops: Option<(f64, f64)>,
+    /// Symbolic analyses built to reach the factor, the priced candidates
+    /// included. `Auto` builds one per candidate and keeps one.
+    pub symbolics_built: usize,
 }
 
 enum Backend {
@@ -281,6 +305,11 @@ impl CovAssembly {
     /// whether it got it.
     pub fn took_block_route(&self) -> bool {
         matches!(self.backend, Backend::BlockFactored { .. })
+    }
+
+    /// What the assembly decided -- see [`CovPlan`].
+    pub fn plan(&self) -> &CovPlan {
+        &self.plan
     }
 
     /// Scalar parameter indices covered by a model (an entity's contiguous
@@ -687,32 +716,67 @@ fn block_graph(
 // factor would take and keeps the cheaper, the determination the solver makes
 // for a solve: minimum degree wins on a chain, dissection on a trajectory that
 // revisits, where poses far apart in the ordering are coupled.
+struct BlockOrdering {
+    order: Option<Vec<usize>>,
+    symbolic: Option<arael_faer::supernodal::SupernodalSymbolic>,
+    plan: CovPlan,
+}
+
 fn block_order(
     ordering: CovOrdering,
     hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<arael_faer::SparseIndex>,
     params: &arael_faer::supernodal::SupernodalParams,
-) -> (Option<Vec<usize>>, Option<arael_faer::supernodal::SupernodalSymbolic>) {
+) -> BlockOrdering {
     use arael_faer::supernodal as sn;
     let build = |o: Option<&[usize]>| sn::SupernodalSymbolic::new(hsym, o, params).ok();
+    let named = |ordering, order: Option<Vec<usize>>, symbolic| BlockOrdering {
+        order,
+        symbolic,
+        plan: CovPlan { ordering, candidate_flops: None, symbolics_built: 1 },
+    };
     match ordering {
         CovOrdering::Amd => {
             let o = sn::amd_block_order(hsym);
             let s = build(Some(&o));
-            (Some(o), s)
+            named(CovOrdering::Amd, Some(o), s)
         }
         CovOrdering::NestedDissection => {
             let o = sn::nd_block_order(hsym);
             let s = build(Some(&o));
-            (Some(o), s)
+            named(CovOrdering::NestedDissection, Some(o), s)
         }
-        CovOrdering::Natural => (None, build(None)),
+        CovOrdering::Natural => named(CovOrdering::Natural, None, build(None)),
         // Minimum degree first, so it keeps a tie: it is the cheaper of the
         // two to build.
         CovOrdering::Auto => {
             let candidates = vec![sn::amd_block_order(hsym), sn::nd_block_order(hsym)];
+            let n_candidates = candidates.len();
             match sn::cheapest_block_order(hsym, params, candidates) {
-                Some(c) => (Some(c.order), Some(c.symbolic)),
-                None => (Some(sn::amd_block_order(hsym)), None),
+                Some(c) => {
+                    let kept = if c.winner == 0 {
+                        CovOrdering::Amd
+                    } else {
+                        CovOrdering::NestedDissection
+                    };
+                    BlockOrdering {
+                        order: Some(c.order),
+                        symbolic: Some(c.symbolic),
+                        plan: CovPlan {
+                            ordering: kept,
+                            candidate_flops: Some((c.flops[0], c.flops[1])),
+                            symbolics_built: n_candidates,
+                        },
+                    }
+                }
+                None => BlockOrdering {
+                    order: Some(sn::amd_block_order(hsym)),
+                    symbolic: None,
+                    plan: CovPlan {
+                        ordering: CovOrdering::Amd,
+                        candidate_flops: None,
+                        symbolics_built: n_candidates,
+                    },
+                },
             }
         }
     }
@@ -728,11 +792,25 @@ fn block_perm(
     spans: &[(u32, u32)],
     cells: &[(u32, u32)],
     n: usize,
-) -> Option<(Vec<usize>, Vec<usize>)> {
+) -> Option<(Vec<usize>, Vec<usize>, CovPlan)> {
+    use arael_faer::supernodal as sn;
     let (part, hsym) = block_graph(spans, cells, n)?;
-    let (order, _) =
-        block_order(ordering, &hsym, &arael_faer::supernodal::SupernodalParams::default());
-    let order = order?;
+    // The scalar factorization runs its own symbolic analysis over whatever
+    // permutation comes back, so a named ordering builds none here. Auto has to
+    // price its candidates, and that costs a symbolic each.
+    let named = |ordering| CovPlan { ordering, candidate_flops: None, symbolics_built: 0 };
+    let (order, plan) = match ordering {
+        CovOrdering::Amd => (sn::amd_block_order(&hsym), named(CovOrdering::Amd)),
+        CovOrdering::NestedDissection => {
+            (sn::nd_block_order(&hsym), named(CovOrdering::NestedDissection))
+        }
+        CovOrdering::Natural => return None,
+        CovOrdering::Auto => {
+            let chosen = block_order(ordering, &hsym, &sn::SupernodalParams::default());
+            let plan = chosen.plan;
+            (chosen.order?, plan)
+        }
+    };
 
     // Block order -> scalar order: each block contributes its own columns, in
     // their natural order, at the position the block landed in.
@@ -745,7 +823,7 @@ fn block_perm(
     for (k, &c) in forward.iter().enumerate() {
         inverse[c] = k;
     }
-    Some((forward, inverse))
+    Some((forward, inverse, plan))
 }
 
 // Assemble and factorize in block form. `Ok(None)` when the model's blocks
@@ -785,8 +863,9 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     let vals: Vec<f64> = vals_t.iter().map(|&x| x.to_f64().unwrap_or(f64::NAN)).collect();
 
     let params = sn::SupernodalParams::default();
-    let (_, symbolic) = block_order(opts.ordering, &hsym, &params);
-    let symbolic = symbolic.ok_or(CovError::NotPositiveDefinite)?;
+    let chosen = block_order(opts.ordering, &hsym, &params);
+    let plan = chosen.plan;
+    let symbolic = chosen.symbolic.ok_or(CovError::NotPositiveDefinite)?;
 
     let hb = arael_faer::bsc::SparseBlockColMat::new(hsym, vals);
     let mut factor = vec![0.0_f64; symbolic.factor_val_count()];
@@ -797,6 +876,7 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     Ok(Some(CovAssembly {
         n,
         backend: Backend::BlockFactored { sn: symbolic, factor, hb, ctx: std::cell::RefCell::new(ctx) },
+        plan,
     }))
 }
 
@@ -804,12 +884,42 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
 mod tests {
     use super::{block_perm, CovOrdering};
 
+    // The scalar route factorizes through faer's own symbolic analysis, so a
+    // permutation is all block_perm owes it. Building a block symbolic here
+    // and dropping it doubled a covariance assembly's setup.
+    #[test]
+    fn a_named_ordering_builds_no_symbolic_for_the_scalar_route() {
+        let spans = [(0u32, 3u32), (3, 3), (6, 3), (9, 3)];
+        let cells = [(0u32, 0u32), (3, 3), (6, 6), (9, 9), (0, 3), (3, 6), (6, 9)];
+        for ordering in [CovOrdering::Amd, CovOrdering::NestedDissection] {
+            let (_, _, plan) =
+                block_perm(ordering, &spans, &cells, 12).expect("3-wide blocks divide out");
+            assert_eq!(plan.symbolics_built, 0, "{ordering:?} built a symbolic to be discarded");
+            assert_eq!(plan.ordering, ordering);
+            assert_eq!(plan.candidate_flops, None, "{ordering:?} priced candidates it never had");
+        }
+    }
+
+    // Auto has no cheaper way to choose than building each candidate, so it
+    // pays a symbolic per candidate and reports what they cost.
+    #[test]
+    fn auto_prices_both_candidates_and_reports_them() {
+        let spans = [(0u32, 3u32), (3, 3), (6, 3), (9, 3)];
+        let cells = [(0u32, 0u32), (3, 3), (6, 6), (9, 9), (0, 3), (3, 6), (6, 9)];
+        let (_, _, plan) =
+            block_perm(CovOrdering::Auto, &spans, &cells, 12).expect("3-wide blocks divide out");
+        assert_eq!(plan.symbolics_built, 2);
+        assert!(matches!(plan.ordering, CovOrdering::Amd | CovOrdering::NestedDissection));
+        let (amd, nd) = plan.candidate_flops.expect("Auto priced its candidates");
+        assert!(amd.is_finite() && nd.is_finite(), "candidate flops: amd {amd}, nd {nd}");
+    }
+
     #[test]
     fn block_perm_is_a_permutation_that_keeps_blocks_whole() {
         // Four 3-wide blocks in a chain: diagonal cells plus 0-1, 1-2, 2-3.
         let spans = [(0u32, 3u32), (3, 3), (6, 3), (9, 3)];
         let cells = [(0u32, 0u32), (3, 3), (6, 6), (9, 9), (0, 3), (3, 6), (6, 9)];
-        let (fwd, inv) = block_perm(CovOrdering::Auto, &spans, &cells, 12).expect("3-wide blocks divide out");
+        let (fwd, inv, _) = block_perm(CovOrdering::Auto, &spans, &cells, 12).expect("3-wide blocks divide out");
 
         assert_eq!(fwd.len(), 12);
         let mut seen = vec![false; 12];
@@ -990,7 +1100,8 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             self.calc_grad_hessian_band(&params, &mut grad, &mut band, kd)
                 .map_err(|_| CovError::NotTriDiagonal)?;
             let bd = build_band(&band, kd, n, &spans)?;
-            return Ok(CovAssembly { n, backend: Backend::Band(bd) });
+            // The band route factorizes nothing, so no ordering is chosen.
+            return Ok(CovAssembly { n, backend: Backend::Band(bd), plan: CovPlan::default() });
         }
 
         // The model's block structure, when it has one. Both the block route
@@ -1049,12 +1160,22 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             CovOrdering::Amd | CovOrdering::Natural => None,
         };
         let ordering = match (&block_perm, opts.ordering) {
-            (Some((fwd, inv)), _) => fchol::SymmetricOrdering::Custom(
+            (Some((fwd, inv, _)), _) => fchol::SymmetricOrdering::Custom(
                 faer::perm::PermRef::new_checked(fwd, inv, n),
             ),
             (None, CovOrdering::Natural) => fchol::SymmetricOrdering::Identity,
             // Auto with no block structure to use falls through to scalar AMD.
             (None, _) => fchol::SymmetricOrdering::Amd,
+        };
+        // faer runs its own symbolic analysis over the permutation, so the
+        // block symbolics the pricing built are all discarded here.
+        let plan = match (&block_perm, opts.ordering) {
+            (Some((_, _, p)), _) => p.clone(),
+            (None, o) => CovPlan {
+                ordering: if o == CovOrdering::Natural { o } else { CovOrdering::Amd },
+                candidate_flops: None,
+                symbolics_built: 0,
+            },
         };
         let symbolic = fchol::factorize_symbolic_cholesky(
             sym_ref,
@@ -1087,7 +1208,7 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             None
         };
 
-        Ok(CovAssembly { n, backend: Backend::Factored { symbolic, l_vals, h, sel } })
+        Ok(CovAssembly { n, backend: Backend::Factored { symbolic, l_vals, h, sel }, plan })
     }
 }
 

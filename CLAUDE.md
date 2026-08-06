@@ -25,5 +25,5 @@
  * Use Edit/Write tools to change files so I can see the diff of what you are doing. Unless procedural, try to avoid using python for doing edits.
  * When writing documentation do not narrate our jorney to the solution, minor things that were there before, or speculative opinions, guesses. Concentrate on the API proper and be direct and brief. Write simple english, avoid jargon.
  * Use codegen-units = 1 compile setting when benchmarking rust.
- * When adding/changing main API make sure the cxx/python export also gets the same API when relevant.
+ * When adding/changing main API make sure the cxx/python export also gets the same API when relevant -- and update docs/CXX.md and docs/PYTHON.md with it.
  * When encountering missing API/functionality that would simplify implementation, add the API instead of doing hacky workarounds.

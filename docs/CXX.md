@@ -228,6 +228,10 @@ views are named by their container's nature: `PathPosesDeque`,
   it, and every `assemble_covariance` call is independent -- older
   views keep answering from their own assembly. Entity arguments must
   come from the live model; `last_error()` carries the failure text.
+  `assemble_covariance(CovMode, const CovOptions&)` spells out the
+  assembly instead: `ordering` (`CovOrdering`) and `block_supernodal`.
+  `CovOrdering::Auto` builds a symbolic factorization per candidate
+  ordering to choose between them; naming the ordering skips that work.
 - **Solves**: `solve_dense` / `solve_sparse` / `solve_band(kd)` --
   band Cholesky for banded Hessians, `kd` the half-bandwidth in
   scalar parameters. `cost()` on the root evaluates the total cost at
