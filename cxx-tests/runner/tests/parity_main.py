@@ -103,6 +103,13 @@ m0 = cov.marginal(f.items[0])
 pi("cov_item0_ok", 1 if isinstance(m0, float) else 0)
 p("cov_item0", m0)
 
+# The assembly reports what it decided.
+pl = cov.plan()
+pi("cov_plan_ordering", int(pl.ordering))
+pi("cov_plan_symbolics", pl.symbolics_built)
+pi("cov_plan_block_route", 1 if pl.block_route else 0)
+pi("cov_plan_has_flops", 1 if pl.candidate_flops is not None else 0)
+
 # Assemblies are owned and independent: an older view keeps answering
 # from its own assembly after a new one is made.
 cov2 = f.assemble_covariance(fit.CovMode.TRI_DIAGONAL)

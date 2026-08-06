@@ -58,6 +58,8 @@ using arael::PanicError;
 using arael::CovMode;
 using arael::CovOrdering;
 using arael::CovOptions;
+using arael::CovPlan;
+using arael::CovCandidateFlops;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -226,6 +228,7 @@ struct FitCov;
 int32_t fit_assemble_covariance(Fit*, uint32_t, FitCov**);
 int32_t fit_assemble_covariance_with(Fit*, uint32_t, uint32_t, uint32_t, FitCov**);
 const char* fit_cov_error(const FitCov*);
+void fit_cov_plan(const FitCov*, CovPlan*);
 void fit_cov_free(FitCov*);
 int32_t fit_n_marginal_cov(FitCov*, const N*, double*, uint32_t);
 int32_t fit_n_conditional_cov(FitCov*, const N*, double*, uint32_t);
@@ -646,6 +649,13 @@ public:
         : c_(c), guard_(c, ffi::fit_cov_free) {}
     /// Error text of the last failed query on this assembly.
     const char* last_error() const { return ffi::fit_cov_error(c_); }
+    /// What the assembly decided -- the ordering it kept, what the
+    /// candidates priced at, and how many symbolics it built.
+    CovPlan plan() const {
+        CovPlan p;
+        ffi::fit_cov_plan(c_, &p);
+        return p;
+    }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const N& e, double* out, uint32_t cap) {

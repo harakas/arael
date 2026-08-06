@@ -23,6 +23,7 @@ SIGS = [
     ("line_assemble_covariance_with", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
     ("line_cov_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("line_cov_free", [ctypes.c_void_p], None),
+    ("line_cov_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.CovPlan)], None),
     ("line_new", [], ctypes.c_void_p),
     ("line_free", [ctypes.c_void_p], None),
     ("line_last_error", [ctypes.c_void_p], ctypes.c_char_p),

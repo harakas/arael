@@ -57,6 +57,8 @@ using arael::PanicError;
 using arael::CovMode;
 using arael::CovOrdering;
 using arael::CovOptions;
+using arael::CovPlan;
+using arael::CovCandidateFlops;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -104,6 +106,7 @@ struct DecayCov;
 int32_t decay_assemble_covariance(Decay*, uint32_t, DecayCov**);
 int32_t decay_assemble_covariance_with(Decay*, uint32_t, uint32_t, uint32_t, DecayCov**);
 const char* decay_cov_error(const DecayCov*);
+void decay_cov_plan(const DecayCov*, CovPlan*);
 void decay_cov_free(DecayCov*);
 int32_t decay_cell_marginal_cov(DecayCov*, const Cell*, double*, uint32_t);
 int32_t decay_cell_conditional_cov(DecayCov*, const Cell*, double*, uint32_t);
@@ -253,6 +256,13 @@ public:
         : c_(c), guard_(c, ffi::decay_cov_free) {}
     /// Error text of the last failed query on this assembly.
     const char* last_error() const { return ffi::decay_cov_error(c_); }
+    /// What the assembly decided -- the ordering it kept, what the
+    /// candidates priced at, and how many symbolics it built.
+    CovPlan plan() const {
+        CovPlan p;
+        ffi::decay_cov_plan(c_, &p);
+        return p;
+    }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Cell& e, double* out, uint32_t cap) {

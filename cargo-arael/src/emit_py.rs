@@ -587,6 +587,8 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
         "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_cov_free"), &["ctypes.c_void_p"],
         "None");
+    sig(&mut py, &format!("{root_sn}_cov_plan"),
+        &["ctypes.c_void_p", "ctypes.POINTER(_solver.CovPlan)"], "None");
     let cov_entities: Vec<(&String, &Type)> = surfaced.iter()
         .filter(|(_, t)| t.role == "entity" && t.param_count > 0)
         .map(|(tn, t)| (*tn, *t))
@@ -702,6 +704,13 @@ class Covariance:
 
     def __init__(self, h):
         self._h = h
+
+    def plan(self):
+        \"\"\"What the assembly decided -- the ordering it kept, what the
+        candidates priced at, and how many symbolics it built.\"\"\"
+        p = CovPlan()
+        _f.{root_sn}_cov_plan(self._h, ctypes.byref(p))
+        return p
 
     def free(self):
         if self._h:
@@ -1030,7 +1039,7 @@ import os
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
-                           CovOrdering, DiagonalFault, EnvelopeMode,
+                           CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,

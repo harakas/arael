@@ -102,6 +102,12 @@ int main() {
         auto m = cov->marginal(fit.items()[0]);
         pi("cov_item0_ok", m.is_ok() ? 1 : 0);
         p("cov_item0", m.value());
+        // The assembly reports what it decided.
+        auto pl = cov->plan();
+        pi("cov_plan_ordering", long(pl.ordering));
+        pi("cov_plan_symbolics", long(pl.symbolics_built));
+        pi("cov_plan_block_route", pl.block_route ? 1 : 0);
+        pi("cov_plan_has_flops", pl.candidate_flops.has_value() ? 1 : 0);
     }
 
     // Assemblies are owned and independent: an older view keeps

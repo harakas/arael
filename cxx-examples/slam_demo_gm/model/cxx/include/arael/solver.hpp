@@ -457,6 +457,26 @@ struct CovOptions {
     BlockSupernodalMode block_supernodal = BlockSupernodalMode::Auto;
 };
 
+/// Factor flops down each candidate ordering (mirrors arael's CovPlan).
+struct CovCandidateFlops {
+    double amd;
+    double nd;
+};
+
+/// What a covariance assembly decided (mirrors arael's CovPlan).
+struct CovPlan {
+    /// The ordering that produced the factor. CovOrdering::Auto resolves to
+    /// the candidate it kept, so this never reads Auto.
+    CovOrdering ordering;
+    /// What each candidate priced at, when Auto priced them.
+    option<CovCandidateFlops> candidate_flops;
+    /// Symbolic analyses built to reach the factor. Auto builds one per
+    /// candidate and keeps one.
+    uint32_t symbolics_built;
+    /// Whether the block supernodal route ran.
+    bool block_route;
+};
+
 /// A failed covariance operation; message points at last_error().
 struct CovError {
     const char* message;

@@ -27,6 +27,7 @@ SIGS = [
     ("decay_assemble_covariance_with", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
     ("decay_cov_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("decay_cov_free", [ctypes.c_void_p], None),
+    ("decay_cov_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.CovPlan)], None),
     ("decay_cell_marginal_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),
     ("decay_cell_conditional_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),
     ("decay_cell_std_dev", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),

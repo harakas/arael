@@ -11,7 +11,7 @@ import os
 from . import _graph_ffi as _f
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
-                           CovOrdering, DiagonalFault, EnvelopeMode,
+                           CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
@@ -458,6 +458,13 @@ class Covariance:
 
     def __init__(self, h):
         self._h = h
+
+    def plan(self):
+        """What the assembly decided -- the ordering it kept, what the
+        candidates priced at, and how many symbolics it built."""
+        p = CovPlan()
+        _f.graph_cov_plan(self._h, ctypes.byref(p))
+        return p
 
     def free(self):
         if self._h:

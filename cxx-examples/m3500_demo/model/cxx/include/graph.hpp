@@ -57,6 +57,8 @@ using arael::PanicError;
 using arael::CovMode;
 using arael::CovOrdering;
 using arael::CovOptions;
+using arael::CovPlan;
+using arael::CovCandidateFlops;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -139,6 +141,7 @@ struct GraphCov;
 int32_t graph_assemble_covariance(Graph*, uint32_t, GraphCov**);
 int32_t graph_assemble_covariance_with(Graph*, uint32_t, uint32_t, uint32_t, GraphCov**);
 const char* graph_cov_error(const GraphCov*);
+void graph_cov_plan(const GraphCov*, CovPlan*);
 void graph_cov_free(GraphCov*);
 int32_t graph_pose2_marginal_cov(GraphCov*, const Pose2*, double*, uint32_t);
 int32_t graph_pose2_conditional_cov(GraphCov*, const Pose2*, double*, uint32_t);
@@ -351,6 +354,13 @@ public:
         : c_(c), guard_(c, ffi::graph_cov_free) {}
     /// Error text of the last failed query on this assembly.
     const char* last_error() const { return ffi::graph_cov_error(c_); }
+    /// What the assembly decided -- the ordering it kept, what the
+    /// candidates priced at, and how many symbolics it built.
+    CovPlan plan() const {
+        CovPlan p;
+        ffi::graph_cov_plan(c_, &p);
+        return p;
+    }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Pose2& e, double* out, uint32_t cap) {

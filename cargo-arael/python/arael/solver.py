@@ -294,6 +294,14 @@ class _OptI32(ctypes.Structure):
     _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_int32)]
 
 
+class _CandidateFlops(ctypes.Structure):
+    _fields_ = [("amd", ctypes.c_double), ("nd", ctypes.c_double)]
+
+
+class _OptCandidateFlops(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", _CandidateFlops)]
+
+
 class _RouteFlops(ctypes.Structure):
     _fields_ = [("reduced", ctypes.c_double), ("full", ctypes.c_double)]
 
@@ -340,6 +348,26 @@ class SchurPlan(ctypes.Structure):
     cg_iterations = _plan_opt("_cg_iterations", int)
     flop_ratio = _plan_opt("_flop_ratio", float)
     ordering = _plan_opt("_ordering", ReducedOrdering)
+
+
+class CovPlan(ctypes.Structure):
+    """What a covariance assembly decided (mirror of the Rust CovPlan):
+    the `ordering` it kept, what the candidates priced at, how many
+    symbolic analyses it built, and whether the block supernodal route
+    ran. `candidate_flops` is an (amd, nd) pair, or None when the
+    ordering was named outright."""
+    _fields_ = [
+        ("_ordering", ctypes.c_uint32),
+        ("_candidate_flops", _OptCandidateFlops),
+        ("symbolics_built", ctypes.c_uint32),
+        ("block_route", ctypes.c_bool),
+    ]
+
+    candidate_flops = _plan_opt("_candidate_flops", lambda v: (v.amd, v.nd))
+
+    @property
+    def ordering(self):
+        return CovOrdering(self._ordering)
 
 
 class LmTiming(ctypes.Structure):

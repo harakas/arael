@@ -46,6 +46,7 @@ SIGS = [
     ("graph_assemble_covariance_with", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
     ("graph_cov_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("graph_cov_free", [ctypes.c_void_p], None),
+    ("graph_cov_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.CovPlan)], None),
     ("graph_pose2_marginal_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),
     ("graph_pose2_conditional_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),
     ("graph_pose2_std_dev", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),

@@ -232,6 +232,9 @@ views are named by their container's nature: `PathPosesDeque`,
   assembly instead: `ordering` (`CovOrdering`) and `block_supernodal`.
   `CovOrdering::Auto` builds a symbolic factorization per candidate
   ordering to choose between them; naming the ordering skips that work.
+  `cov->plan()` returns a `CovPlan` saying which ordering the assembly
+  kept, what the candidates priced at, how many symbolics it built and
+  whether the block route ran.
 - **Solves**: `solve_dense` / `solve_sparse` / `solve_band(kd)` --
   band Cholesky for banded Hessians, `kd` the half-bandwidth in
   scalar parameters. `cost()` on the root evaluates the total cost at

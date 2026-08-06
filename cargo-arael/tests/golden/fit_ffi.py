@@ -92,6 +92,7 @@ SIGS = [
     ("fit_assemble_covariance_with", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int32),
     ("fit_cov_error", [ctypes.c_void_p], ctypes.c_char_p),
     ("fit_cov_free", [ctypes.c_void_p], None),
+    ("fit_cov_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.CovPlan)], None),
     ("fit_n_marginal_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),
     ("fit_n_conditional_cov", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),
     ("fit_n_std_dev", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32], ctypes.c_int32),

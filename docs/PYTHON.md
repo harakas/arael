@@ -123,7 +123,10 @@ surface reference); the differences are Python idiom:
   `ordering` (`CovOrdering`) and `block_supernodal` spell out the
   assembly: `CovOrdering.AUTO` builds a symbolic factorization per
   candidate ordering to choose between them; naming the ordering skips
-  that work.
+  that work. `cov.plan()` returns a `CovPlan` saying which ordering the
+  assembly kept, what the candidates priced at (`candidate_flops`, an
+  `(amd, nd)` pair or None), how many symbolics it built and whether the
+  block route ran.
 
 Idiom notes: where C++ has `front()`/`back()`/`empty()` on views,
 Python spells them `view[0]` / `view[-1]` / `len(view)`; where C++

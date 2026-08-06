@@ -1202,6 +1202,32 @@ pub struct COptRouteFlops {{
     pub v: CRouteFlops,
 }}
 
+#[repr(C)]
+pub struct CCandidateFlops {{
+    pub amd: f64,
+    pub nd: f64,
+}}
+
+#[repr(C)]
+pub struct COptCandidateFlops {{
+    pub has: bool,
+    pub v: CCandidateFlops,
+}}
+
+/// Mirror of arael's CovPlan: what a covariance assembly decided.
+#[repr(C)]
+pub struct CCovPlan {{
+    /// CovOrdering: 0 Auto, 1 Amd, 2 NestedDissection, 3 Natural. Auto
+    /// resolves to the candidate it kept, so this never reads 0.
+    pub ordering: u32,
+    /// Factor flops down each candidate when Auto priced them.
+    pub candidate_flops: COptCandidateFlops,
+    /// Symbolic analyses built to reach the factor.
+    pub symbolics_built: u32,
+    /// Whether the block supernodal route ran.
+    pub block_route: bool,
+}}
+
 /// Mirror of arael's SchurPlan: what the sparse backend decided.
 /// Field order is C ABI and follows the Rust struct.
 #[repr(C)]
@@ -1899,6 +1925,32 @@ fn cov_text(c: &mut {root}Cov, msg: &str) {{
 #[no_mangle]
 pub unsafe extern \"C\" fn {root_sn}_cov_error(c: *const {root}Cov) -> *const c_char {{
     (&*c).text.as_ptr()
+}}
+
+/// What the assembly decided. Always succeeds -- every assembly has a plan.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_cov_plan(c: *const {root}Cov, out: *mut CCovPlan) {{
+    let p = (&*c).cov.plan();
+    *out = CCovPlan {{
+        ordering: match p.ordering {{
+            arael::covariance::CovOrdering::Auto => 0,
+            arael::covariance::CovOrdering::Amd => 1,
+            arael::covariance::CovOrdering::NestedDissection => 2,
+            arael::covariance::CovOrdering::Natural => 3,
+        }},
+        candidate_flops: match p.candidate_flops {{
+            Some((amd, nd)) => COptCandidateFlops {{
+                has: true,
+                v: CCandidateFlops {{ amd, nd }},
+            }},
+            None => COptCandidateFlops {{
+                has: false,
+                v: CCandidateFlops {{ amd: 0.0, nd: 0.0 }},
+            }},
+        }},
+        symbolics_built: p.symbolics_built as u32,
+        block_route: (&*c).cov.took_block_route(),
+    }};
 }}
 
 /// Release an assembly. Null is fine.

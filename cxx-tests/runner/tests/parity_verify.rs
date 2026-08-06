@@ -142,6 +142,29 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cov_ok"), 1.0);
         assert_eq!(g("cov_item0_ok"), 1.0);
         assert_eq!(g("cov_item0"), m[(0, 0)]);
+
+        // The plan crosses as data, not as struct layout: the skin must
+        // report the same decisions Rust made on the same assembly.
+        use arael::covariance::CovOrdering;
+        let plan = cov.plan();
+        let ordering = match plan.ordering {
+            CovOrdering::Auto => 0.0,
+            CovOrdering::Amd => 1.0,
+            CovOrdering::NestedDissection => 2.0,
+            CovOrdering::Natural => 3.0,
+        };
+        assert_eq!(g("cov_plan_ordering"), ordering, "plan ordering");
+        assert_eq!(g("cov_plan_symbolics"), plan.symbolics_built as f64, "symbolics built");
+        assert_eq!(
+            g("cov_plan_block_route"),
+            if cov.took_block_route() { 1.0 } else { 0.0 },
+            "block route"
+        );
+        assert_eq!(
+            g("cov_plan_has_flops"),
+            if plan.candidate_flops.is_some() { 1.0 } else { 0.0 },
+            "candidate flops present"
+        );
     }
 
     // Owned, independent assemblies.

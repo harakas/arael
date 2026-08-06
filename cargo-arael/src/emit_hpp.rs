@@ -544,6 +544,7 @@ public:
      int32_t {root_sn}_assemble_covariance({root}*, uint32_t, {root}Cov**);\n\
      int32_t {root_sn}_assemble_covariance_with({root}*, uint32_t, uint32_t, uint32_t, {root}Cov**);\n\
      const char* {root_sn}_cov_error(const {root}Cov*);\n\
+     void {root_sn}_cov_plan(const {root}Cov*, CovPlan*);\n\
      void {root_sn}_cov_free({root}Cov*);\n"));
         for (tn, t) in &surfaced {
             if t.role != "entity" || t.param_count == 0 {
@@ -622,6 +623,13 @@ public:
         : c_(c), guard_(c, ffi::{root_sn}_cov_free) {{}}
     /// Error text of the last failed query on this assembly.
     const char* last_error() const {{ return ffi::{root_sn}_cov_error(c_); }}
+    /// What the assembly decided -- the ordering it kept, what the
+    /// candidates priced at, and how many symbolics it built.
+    CovPlan plan() const {{
+        CovPlan p;
+        ffi::{root_sn}_cov_plan(c_, &p);
+        return p;
+    }}
 {methods}private:
     /// A caught Rust panic (-2) throws; other codes pass through.
     int32_t ck_(int32_t n) const {{
@@ -832,6 +840,8 @@ using arael::PanicError;
 using arael::CovMode;
 using arael::CovOrdering;
 using arael::CovOptions;
+using arael::CovPlan;
+using arael::CovCandidateFlops;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at

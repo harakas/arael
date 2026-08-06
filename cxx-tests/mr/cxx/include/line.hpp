@@ -57,6 +57,8 @@ using arael::PanicError;
 using arael::CovMode;
 using arael::CovOrdering;
 using arael::CovOptions;
+using arael::CovPlan;
+using arael::CovCandidateFlops;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -100,6 +102,7 @@ struct LineCov;
 int32_t line_assemble_covariance(Line*, uint32_t, LineCov**);
 int32_t line_assemble_covariance_with(Line*, uint32_t, uint32_t, uint32_t, LineCov**);
 const char* line_cov_error(const LineCov*);
+void line_cov_plan(const LineCov*, CovPlan*);
 void line_cov_free(LineCov*);
 double line_k(const Line*);
 void line_set_k(Line*, double);
@@ -239,6 +242,13 @@ public:
         : c_(c), guard_(c, ffi::line_cov_free) {}
     /// Error text of the last failed query on this assembly.
     const char* last_error() const { return ffi::line_cov_error(c_); }
+    /// What the assembly decided -- the ordering it kept, what the
+    /// candidates priced at, and how many symbolics it built.
+    CovPlan plan() const {
+        CovPlan p;
+        ffi::line_cov_plan(c_, &p);
+        return p;
+    }
 private:
     /// A caught Rust panic (-2) throws; other codes pass through.
     int32_t ck_(int32_t n) const {

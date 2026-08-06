@@ -58,6 +58,8 @@ using arael::PanicError;
 using arael::CovMode;
 using arael::CovOrdering;
 using arael::CovOptions;
+using arael::CovPlan;
+using arael::CovCandidateFlops;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
@@ -226,6 +228,7 @@ struct PathCov;
 int32_t path_assemble_covariance(Path*, uint32_t, PathCov**);
 int32_t path_assemble_covariance_with(Path*, uint32_t, uint32_t, uint32_t, PathCov**);
 const char* path_cov_error(const PathCov*);
+void path_cov_plan(const PathCov*, CovPlan*);
 void path_cov_free(PathCov*);
 int32_t path_point_landmark_marginal_cov(PathCov*, const PointLandmark*, double*, uint32_t);
 int32_t path_point_landmark_conditional_cov(PathCov*, const PointLandmark*, double*, uint32_t);
@@ -756,6 +759,13 @@ public:
         : c_(c), guard_(c, ffi::path_cov_free) {}
     /// Error text of the last failed query on this assembly.
     const char* last_error() const { return ffi::path_cov_error(c_); }
+    /// What the assembly decided -- the ordering it kept, what the
+    /// candidates priced at, and how many symbolics it built.
+    CovPlan plan() const {
+        CovPlan p;
+        ffi::path_cov_plan(c_, &p);
+        return p;
+    }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const PointLandmark& e, double* out, uint32_t cap) {
