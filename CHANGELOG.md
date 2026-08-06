@@ -3,6 +3,82 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.8.2 - 2026-08-06
+
+### Added
+
+- **Block supernodal Cholesky**, and it is the default.
+  `BlockSupernodalMode { Auto, Always, Never }` with `with_block_supernodal` on
+  the solver and the options. `Auto` factorizes in block form wherever the
+  scalar route would -- the whole Hessian, and a reduced Schur system the
+  envelope declined. Models without block structure keep the scalar route, and
+  the envelope and iterative routes keep precedence in every mode.
+- **The supernodal factorization takes threads.** Dense kernels run behind a
+  work threshold, and independent subtrees are chunked across workers -- each
+  owns whole subtrees and runs their panels sequentially, then the top is
+  factored with the threaded kernels.
+- **`CovOptions`** carries the two decisions a covariance assembly makes:
+  `ordering` (`CovOrdering`) and `block_supernodal`. `assemble_covariance_with`
+  takes it; `assemble_covariance` keeps its signature and the defaults. Neither
+  changes the covariance, only what producing it costs.
+- **`CovAssembly::plan`** reports what an assembly picked -- the ordering it
+  kept, the flops of each candidate `CovOrdering::Auto` priced, and how many
+  symbolic analyses it built -- the way `SchurPlan` reports a solve's route.
+  `took_block_route` says whether the block route ran.
+- **The whole-Hessian supernodal route picks its elimination ordering.** A
+  marginalize set named by `with_marginalize` or the model's `marginalize(..)`
+  attribute is eliminated first; otherwise, under `FaerOrdering::Auto`, a
+  detected set is priced against block-AMD by building both symbolics and
+  taking the fewer flops.
+- **C++ and Python** gained the block supernodal mode with its batching and
+  amalgamation knobs, `SchurPlan`'s block flag, and the covariance ordering and
+  factorization options.
+
+### Breaking
+
+- **`arael_faer::supernodal_factorize` takes a `faer::Par`.** It hands it to
+  the update GEMMs, the panel triangular solve and the diagonal Cholesky, each
+  behind its own work threshold.
+- **The default factorization route changed**, so results can differ from 0.8.1
+  in the last ulp. Bit-identity holds per route: pinned to `Never` or `Always`,
+  one and four threads match exactly.
+
+### Fixed
+
+- `SchurPolicy::Auto` priced the reduction against the whole system under AMD
+  alone, so a trajectory that revisits -- a loop closure, a figure-8 crossing --
+  was compared against the worse of the two orderings and the reduction won a
+  comparison it should have lost. It now analyses both, prices against the
+  cheaper, and hands the winning ordering to the route that runs.
+- A declined reduction (`SchurPolicy::Auto` weighing the reduction and saying
+  no) fell through to the scalar route, bypassing `BlockSupernodalMode::Auto`.
+- `EnvelopeMode::Auto` priced the envelope against faer's scalar symbolic,
+  which stopped being the competitor once a declined envelope went to the block
+  supernodal. It builds a `SupernodalSymbolic` in the same natural order and
+  compares against that, handing the symbolic on rather than letting the route
+  rebuild it.
+- `nd::order_graph` recursed once per cut with no balance guarantee and
+  overflowed the stack on a 47.8k-block bundle-adjustment problem.
+- A covariance assembly built symbolic analyses it discarded: `block_perm`
+  returns a permutation for the scalar factorization, which runs its own
+  symbolic analysis over it, so a named ordering built a full
+  `SupernodalSymbolic` and dropped it unread and `CovOrdering::Auto` built two.
+  Named orderings now take the order alone.
+
+### Performance
+
+- The supernodal default measured at or ahead of the scalar route on every
+  benchmark, with a 2-10x cheaper symbolic phase and 17-35% less peak memory.
+  Pose-graph iterations are 5.5-19% cheaper on it, their peak memory 8-27%.
+- Threading reaches the supernodal factorization: at four threads, figure-8
+  landmark SLAM is 2.2x at 1200 poses and 2.5x at 4800, bundle adjustment 1.5x.
+  A pose graph is unchanged -- its panels sit below the work threshold.
+- Pricing the whole route under nested dissection turns a revisiting trajectory
+  around: the 1200-pose figure-8 iterates 4.0x cheaper on half the peak memory.
+- A covariance assembly is about twice as cheap to build on a bundle problem,
+  and a revisiting trajectory recovers a pose marginal 2.2x cheaper and every
+  marginal 3.2x cheaper by ordering the factor by dissection.
+
 ## 0.8.1 - 2026-08-01
 
 ### Added
