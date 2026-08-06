@@ -130,6 +130,12 @@ A model with no block structure, or whose entities are all one scalar wide,
 declines both -- there is nothing to divide out, and the scalar path is the
 better answer.
 
+`CovAssembly::plan` returns a `CovPlan` recording what the assembly settled on:
+the `ordering` it kept (`Auto` resolves to the candidate that won, so this never
+reads `Auto`), the `candidate_flops` it priced them at, and `symbolics_built`.
+Reach for it when a covariance costs more than expected -- it says whether the
+pricing ran and what it bought.
+
 ## Block types
 
 - **`marginal_cov`** -- the entity's covariance with every *other* parameter
