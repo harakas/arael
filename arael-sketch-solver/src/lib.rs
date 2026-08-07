@@ -288,11 +288,15 @@ fn default_min_length() -> f64 { 0.0001 }
 #[serde(transparent)]
 pub struct SketchCell {
     sketch: Sketch,
+    /// Generation the derived state was last rebuilt at. Not serialized: a
+    /// sketch that arrives by load or undo has no derived state at all.
+    #[serde(skip)]
+    prepared_gen: Option<u64>,
 }
 
 impl SketchCell {
     pub fn new(sketch: Sketch) -> Self {
-        SketchCell { sketch }
+        SketchCell { sketch, prepared_gen: None }
     }
 
     /// Read access. Prefer the deref -- this is for where inference needs it.
@@ -315,6 +319,18 @@ impl SketchCell {
         f(&mut self.sketch)
     }
 
+    /// Solve. Structure-preserving by nature -- it moves parameters and the
+    /// dimension values that read off them, and adds nothing -- so it does not
+    /// bump the generation, and the derived state is rebuilt only when the
+    /// structure has actually moved. Solving repeatedly is what a drag does.
+    pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
+        if self.prepared_gen != Some(self.sketch.structure_gen) {
+            self.sketch.prepare_derived();
+            self.prepared_gen = Some(self.sketch.structure_gen);
+        }
+        self.mutate_values(|s| s.solve_prepared())
+    }
+
     /// Take the sketch out, discarding the cell.
     pub fn into_inner(self) -> Sketch {
         self.sketch
@@ -330,7 +346,7 @@ impl std::ops::Deref for SketchCell {
 
 impl From<Sketch> for SketchCell {
     fn from(sketch: Sketch) -> Self {
-        SketchCell { sketch }
+        SketchCell { sketch, prepared_gen: None }
     }
 }
 
@@ -2866,13 +2882,43 @@ impl Sketch {
     /// 100% constraint strength) to avoid ill-conditioning from the large
     /// constraint/drift sigma ratio.
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
-        use arael::simple_lm::LmProblem;
+        self.prepare_derived();
+        self.solve_prepared()
+    }
+
+    /// Rebuild the state derived from the sketch's STRUCTURE: the expression
+    /// constraints, the symbol bag they resolve against, and the tangent /
+    /// perpendicular / line-direction flags.
+    ///
+    /// [`solve`](Self::solve) runs this every time, which is what a `Sketch`
+    /// held on its own needs -- its fields are public, so nothing can know
+    /// whether the structure moved. [`SketchCell`] does know, and skips it
+    /// when it has not.
+    ///
+    /// The flag passes read geometry only to initialize a `dir_sign` that is
+    /// `NaN`, and are written never to recompute one -- following the
+    /// perturbations would let a constraint flip -- so they are already
+    /// idempotent on values.
+    pub fn prepare_derived(&mut self) {
         // Rebuild expression constraints from dimensions with expr_str
         // (needed after load/undo since expr_constraints is not serialized)
         self.rebuild_expr_constraints();
         self.update_tangent_flags();
         self.update_perpendicular_flags();
         self.update_line_dir_flags();
+        if !self.expr_constraints.is_empty() {
+            let bag = SymbolBag::build(self);
+            for ec in &mut self.expr_constraints {
+                ec.resolve(&bag);
+            }
+            self.symbol_bag = Some(bag);
+        }
+    }
+
+    /// Solve without refreshing the derived state first. Only correct when the
+    /// caller knows it is current -- [`SketchCell::solve`] does.
+    pub fn solve_prepared(&mut self) -> arael::simple_lm::LmResult<f64> {
+        use arael::simple_lm::LmProblem;
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize(&mut params64);
@@ -2886,15 +2932,6 @@ impl Sketch {
                 timing: None,
                 solver: None,
             };
-        }
-
-        // Build symbol bag and resolve expression constraints
-        if !self.expr_constraints.is_empty() {
-            let bag = SymbolBag::build(self);
-            for ec in &mut self.expr_constraints {
-                ec.resolve(&bag);
-            }
-            self.symbol_bag = Some(bag);
         }
 
         // Compute starting cost to decide strategy

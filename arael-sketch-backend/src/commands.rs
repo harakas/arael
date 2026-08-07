@@ -4130,7 +4130,7 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddUserParam { name: name.to_string(), expr_str: expr.to_string() });
     }
     ctx.sketch.get_mut().update_expr_dim_values();
-    let new_cost = ctx.sketch.get_mut().solve().end_cost;
+    let new_cost = ctx.sketch.solve().end_cost;
     ctx.last_cost = new_cost;
     // Reject if cost increased significantly
     if new_cost > old_cost + 1e-3
@@ -4430,7 +4430,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let auto_anchors = ctx.sketch.get_mut().add_drag_auto_anchors();
 
     // Solve (drag)
-    ctx.sketch.get_mut().solve();
+    ctx.sketch.solve();
 
     // Roll back auto-anchors before the drag apparatus so the pop()s
     // below hit the drag-apparatus entries, not the auto-anchor ones.
@@ -4469,7 +4469,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     // Solve (relax)
-    ctx.sketch.get_mut().solve();
+    ctx.sketch.solve();
 
     // Check cost
     let new_cost = {
@@ -5201,7 +5201,7 @@ fn cmd_undo(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok("Nothing to undo");
         }
     }
-    ctx.sketch.get_mut().solve();
+    ctx.sketch.solve();
     ok(format!("Undone {} step(s)", n))
 }
 
@@ -5216,7 +5216,7 @@ fn cmd_redo(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok("Nothing to redo");
         }
     }
-    ctx.sketch.get_mut().solve();
+    ctx.sketch.solve();
     ok(format!("Redone {} step(s)", n))
 }
 
@@ -7505,7 +7505,7 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
             ctx.sketch.get_mut().concentric.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
             if ctx.sketch.concentric.len() < before {
                 ctx.sketch.get_mut().cleanup_helper_points();
-                ctx.sketch.get_mut().solve();
+                ctx.sketch.solve();
                 ctx.sketch.get_mut().cached_dof = None;
                 return ok(format!("Removed {} constraint", ctype));
             }
@@ -7534,7 +7534,7 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
             };
             if removed {
                 ctx.sketch.get_mut().cleanup_helper_points();
-                ctx.sketch.get_mut().solve();
+                ctx.sketch.solve();
                 ctx.sketch.get_mut().cached_dof = None;
                 return ok(format!("Removed {} constraint", ctype));
             }
@@ -7569,7 +7569,7 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
                         ctx.sketch.get_mut().point_on_line.retain(|c| !(c.point == p && c.line == line));
                         if ctx.sketch.point_on_line.len() < before {
                             ctx.sketch.get_mut().cleanup_helper_points();
-                            ctx.sketch.get_mut().solve();
+                            ctx.sketch.solve();
                             ctx.sketch.get_mut().cached_dof = None;
                             return ok(format!("Removed {} constraint", ctype));
                         }
@@ -7579,7 +7579,7 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
                         ctx.sketch.get_mut().point_on_arc.retain(|c| !(c.point == p && c.arc == arc));
                         if ctx.sketch.point_on_arc.len() < before {
                             ctx.sketch.get_mut().cleanup_helper_points();
-                            ctx.sketch.get_mut().solve();
+                            ctx.sketch.solve();
                             ctx.sketch.get_mut().cached_dof = None;
                             return ok(format!("Removed {} constraint", ctype));
                         }
@@ -7897,7 +7897,7 @@ fn cmd_set_derived(ctx: &mut CommandContext, args: &str) -> CommandResult {
         name: dim.name.clone(), expr_str: dim.expr_str, broken: dim.broken, derived: true,
         range: dim.range,
     });
-    ctx.sketch.get_mut().solve();
+    ctx.sketch.solve();
     ctx.sketch.get_mut().update_expr_dim_values();
     ok(format!("{} is now derived (reference only)", name))
 }
@@ -7938,7 +7938,7 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
         d.text_along = dim.text_along;
         d.name = dim.name.clone();
     }
-    ctx.sketch.get_mut().solve();
+    ctx.sketch.solve();
     if let Some(expr) = new_expr {
         ok(format!("{} is now driven (constraining) = {}", name, expr))
     } else {
@@ -11217,7 +11217,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5");
         run_ok(&mut ctx, "radius A0 5*scale");
         // Check that expr_constraints were created
-        ctx.sketch.get_mut().solve();
+        ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Expression dimension should create expr_constraint, got none. dims: {:?}",
             ctx.sketch.dimensions.iter().map(|d| (&d.name, &d.expr_str, d.value)).collect::<Vec<_>>());
@@ -11240,7 +11240,7 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert_eq!(ctx.sketch.dimensions[0].expr_str.as_deref(), Some("5*scale"));
         // Solve and check expr constraints are built
-        let result = ctx.sketch.get_mut().solve();
+        let result = ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Should have expr_constraints after solve");
         // Check radius is actually constrained to 5
@@ -11260,7 +11260,7 @@ mod tests {
         run_ok(&mut ctx, "radius A0 5");
         run_ok(&mut ctx, "param scale 3");
         run_ok(&mut ctx, "radius A0 2*scale");
-        ctx.sketch.get_mut().solve();
+        ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Updated expression should create expr_constraint");
         let r = ctx.sketch.arcs.refs().next().unwrap();
@@ -11592,7 +11592,7 @@ mod tests {
         assert!(out.contains("Set") || out.contains("sweep"), "Should succeed: {}", out);
         assert!(ctx.sketch.arcs.refs().next().map(|r| ctx.sketch.arcs[r].constraints.has_target_sweep).unwrap_or(false));
         // Solve and check sweep is close to 180 degrees
-        ctx.sketch.get_mut().solve();
+        ctx.sketch.solve();
         let r = ctx.sketch.arcs.refs().next().unwrap();
         let sweep = (ctx.sketch.arcs[r].end_angle.value - ctx.sketch.arcs[r].start_angle.value).abs().to_degrees();
         assert!((sweep - 180.0).abs() < 1.0, "Sweep should be ~180, got {}", sweep);
@@ -11976,7 +11976,7 @@ mod tests {
             "backing DistanceConcentric must survive");
         // Solve must still hold the circles concentric (the dim's own
         // residual enforces it).
-        ctx.sketch.get_mut().solve();
+        ctx.sketch.solve();
         let ca = ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()].center.value;
         let cb = ctx.sketch.arcs[ctx.sketch.arcs.refs().nth(1).unwrap()].center.value;
         assert!((ca.x - cb.x).abs() < 0.01 && (ca.y - cb.y).abs() < 0.01,

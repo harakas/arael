@@ -1547,19 +1547,25 @@ impl EditorApp {
                 let ref1 = self.sketch.points[drag_pt].pos.value;
                 let pos1 = clamp(vect2d::new(mouse_pos.x + self.drag_offset.x,
                                               mouse_pos.y + self.drag_offset.y), ref1);
-                self.sketch.get_mut().points[drag_pt].pos = self.drag_helper_param(pos1);
+                // Moving the drag helper is a value change: the entities,
+                // constraints and dimensions all stand still for the whole
+                // drag, so the derived state stays valid and is not rebuilt.
+                let p1 = self.drag_helper_param(pos1);
+                self.sketch.mutate_values(|s| s.points[drag_pt].pos = p1);
                 if let Some(drag_pt2) = self.drag_point2 {
                     let ref2 = self.sketch.points[drag_pt2].pos.value;
                     let pos2 = clamp(vect2d::new(mouse_pos.x + self.drag_offset2.x,
                                                   mouse_pos.y + self.drag_offset2.y), ref2);
-                    self.sketch.get_mut().points[drag_pt2].pos = self.drag_helper_param(pos2);
+                    let p2 = self.drag_helper_param(pos2);
+                    self.sketch.mutate_values(|s| s.points[drag_pt2].pos = p2);
                 }
             } else {
                 let ref_pos = self.sketch.points[drag_pt].pos.value;
                 let pos = clamp(effective_pos, ref_pos);
-                self.sketch.get_mut().points[drag_pt].pos = self.drag_helper_param(pos);
+                let p = self.drag_helper_param(pos);
+                self.sketch.mutate_values(|s| s.points[drag_pt].pos = p);
             }
-            let result = self.sketch.get_mut().solve();
+            let result = self.sketch.solve();
             self.last_cost = result.end_cost;
 
             // If cost is good, save a clean snapshot (without drag apparatus)
@@ -1667,7 +1673,7 @@ impl EditorApp {
 
             // Remove drag apparatus and re-solve
             self.remove_drag_apparatus(drag_pt);
-            let result = self.sketch.get_mut().solve();
+            let result = self.sketch.solve();
             self.last_cost = result.end_cost;
 
             // If cost is much worse than pre-drag, revert to pre-drag state
@@ -1675,7 +1681,7 @@ impl EditorApp {
                 && let Some(snap) = self.drag_saved_snapshot.take()
                     && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
                         self.sketch = restored.into();
-                        let result = self.sketch.get_mut().solve();
+                        let result = self.sketch.solve();
                         self.last_cost = result.end_cost;
                     }
             self.drag_saved_snapshot = None;
@@ -2122,7 +2128,7 @@ impl EditorApp {
         self.begin_group();
         self.exec(action);
         self.sketch.get_mut().update_expr_dim_values();
-        let new_cost = self.sketch.get_mut().solve().end_cost;
+        let new_cost = self.sketch.solve().end_cost;
         self.last_cost = new_cost;
         if new_cost > old_cost + 1e-3
             && let Some(ref snap) = snapshot
