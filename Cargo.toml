@@ -59,3 +59,11 @@ trybuild = "1"
 [[bench]]
 name = "benchmarks"
 harness = false
+
+# Model code generation runs inside these crates at compile time, so a dev
+# build otherwise expands every model through unoptimized macro code. Building
+# them optimized leaves the debug build itself unoptimized.
+[profile.dev.package.arael-macros]
+opt-level = 3
+[profile.dev.package.arael-sym]
+opt-level = 3
