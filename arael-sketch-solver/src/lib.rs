@@ -257,9 +257,83 @@ pub struct Sketch {
     #[arael(skip)]
     #[serde(skip)]
     pub cached_dof: Option<usize>,
+    /// Bumped by every structural mutation (see `SketchCell::get_mut`).
+    /// A cache records the generation it was built at and rebuilds when the
+    /// two differ, so one signal serves every cache independently.
+    #[arael(skip)]
+    #[serde(skip)]
+    structure_gen: u64,
 }
 
 fn default_min_length() -> f64 { 0.0001 }
+
+/// Owns a [`Sketch`] and gates mutable access to it.
+///
+/// Reading is unrestricted -- the cell derefs to the sketch, so `cell.points`
+/// and `cell.lines[r]` read as before. Mutating goes one of two ways:
+///
+/// - [`get_mut`](Self::get_mut) hands out `&mut Sketch` and bumps the
+///   structural generation, so every cache rebuilds. This is the default and
+///   it is always correct.
+/// - [`mutate_values`](Self::mutate_values) does not bump it, for a mutation
+///   that changes parameter VALUES only. Dragging is the case: a point moves
+///   every frame while the entities, constraints and dimensions stand still,
+///   and rebuilding the symbol bag and expression constraints per frame is
+///   most of what a drag costs.
+///
+/// The closure form is deliberate. A promise made after the fact drifts from
+/// the code it describes as soon as someone adds a line to the block; here the
+/// promise and the body it covers cannot be separated.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SketchCell {
+    sketch: Sketch,
+}
+
+impl SketchCell {
+    pub fn new(sketch: Sketch) -> Self {
+        SketchCell { sketch }
+    }
+
+    /// Read access. Prefer the deref -- this is for where inference needs it.
+    pub fn get(&self) -> &Sketch {
+        &self.sketch
+    }
+
+    /// Mutable access for a change that may alter the structure: entities,
+    /// constraints, dimensions, expressions, or any `optimize` flag. Bumps the
+    /// structural generation.
+    pub fn get_mut(&mut self) -> &mut Sketch {
+        self.sketch.structure_gen = self.sketch.structure_gen.wrapping_add(1);
+        &mut self.sketch
+    }
+
+    /// Mutable access for a change that alters parameter VALUES only, leaving
+    /// every cache valid. Anything structural inside the closure is a bug --
+    /// the caches will not notice it.
+    pub fn mutate_values<R>(&mut self, f: impl FnOnce(&mut Sketch) -> R) -> R {
+        f(&mut self.sketch)
+    }
+
+    /// Take the sketch out, discarding the cell.
+    pub fn into_inner(self) -> Sketch {
+        self.sketch
+    }
+}
+
+impl std::ops::Deref for SketchCell {
+    type Target = Sketch;
+    fn deref(&self) -> &Sketch {
+        &self.sketch
+    }
+}
+
+impl From<Sketch> for SketchCell {
+    fn from(sketch: Sketch) -> Self {
+        SketchCell { sketch }
+    }
+}
+
 fn default_next_constraint_id() -> u32 { 1 }
 
 /// Format a synthetic constraint name for a flag-style constraint on a
@@ -543,7 +617,14 @@ impl Sketch {
             symbol_bag: None,
             expr_hb: TripletBlock::new(),
             cached_dof: None,
+            structure_gen: 0,
         }
+    }
+
+    /// The current structural generation. A cache stores this alongside what
+    /// it built and rebuilds when the two no longer match.
+    pub fn structure_gen(&self) -> u64 {
+        self.structure_gen
     }
 
     /// Walk every Vec-stored constraint in canonical order and assign a

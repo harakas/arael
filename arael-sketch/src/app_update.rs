@@ -395,7 +395,7 @@ impl eframe::App for EditorApp {
             ui.horizontal(|ui| {
                 if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked()
                     && let Some((restored, cur)) = self.history.undo() {
-                        self.sketch = restored;
+                        self.sketch = restored.into();
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
@@ -404,7 +404,7 @@ impl eframe::App for EditorApp {
                     }
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked()
                     && let Some((restored, cur)) = self.history.redo() {
-                        self.sketch = restored;
+                        self.sketch = restored.into();
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
@@ -1115,7 +1115,7 @@ impl eframe::App for EditorApp {
             let shift = ui.input(|i| i.modifiers.shift);
             if ctrl && shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
                 if let Some((restored, cur)) = self.history.redo() {
-                    self.sketch = restored;
+                    self.sketch = restored.into();
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
@@ -1124,7 +1124,7 @@ impl eframe::App for EditorApp {
                 }
             } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z))
                 && let Some((restored, cur)) = self.history.undo() {
-                    self.sketch = restored;
+                    self.sketch = restored.into();
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
@@ -1315,13 +1315,13 @@ impl eframe::App for EditorApp {
                                             // Dot product with axis direction gives sign
                                             let proj = dx * axis_angle.cos() + dy * axis_angle.sin();
                                             let sign = if proj >= 0.0 { 1.0 } else { -1.0 };
-                                            self.sketch.dimensions[dim_idx].offset = vect2d::new(sign, 0.0);
+                                            self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(sign, 0.0);
                                         } else {
                                             // Circle: free angle
                                             let abs_angle = (mouse_sketch.y - a.center.value.y)
                                                 .atan2(mouse_sketch.x - a.center.value.x);
                                             let rel_angle = abs_angle - a.start_angle.value;
-                                            self.sketch.dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0);
+                                            self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0);
                                         }
                                     }
                                 } else if let DimensionKind::ArcSweep(r) = kind {
@@ -1335,8 +1335,8 @@ impl eframe::App for EditorApp {
                                     let sweep = a.end_angle.value - sa;
                                     let delta = rad2rad(mouse_angle - sa);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, offset_y);
-                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, offset_y);
+                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
                                 } else if let DimensionKind::Angle(a, b, sup) = kind {
                                     // Drag existing: lock to 2 opposing sectors (same supplement)
                                     let la = &self.sketch.lines[a];
@@ -1352,8 +1352,8 @@ impl eframe::App for EditorApp {
                                     let (_ix, start, sweep) = self.angle_dim_sector(a, b, sup, new_offset);
                                     let delta = rad2rad(mouse_angle - start);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.dimensions[dim_idx].offset = new_offset;
-                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                    self.sketch.get_mut().dimensions[dim_idx].offset = new_offset;
+                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
                                 } else if let DimensionKind::LineAngle(r) = kind {
                                     let p1 = self.sketch.lines[r].p1.value;
                                     let line_angle = {
@@ -1366,8 +1366,8 @@ impl eframe::App for EditorApp {
                                     let sweep = line_angle;
                                     let delta = rad2rad(mouse_angle);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
-                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
+                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
                                 } else if let DimensionKind::ArcRotation(r) = kind {
                                     let a = &self.sketch.arcs[r];
                                     let center = a.center.value;
@@ -1378,8 +1378,8 @@ impl eframe::App for EditorApp {
                                     let sweep = rotation;
                                     let delta = rad2rad(mouse_angle);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
-                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
+                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
                                 } else if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
                                     let horizontal = matches!(kind, DimensionKind::HDistance(..));
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -1403,8 +1403,8 @@ impl eframe::App for EditorApp {
                                     let qmx = (q1.x + q2.x) / 2.0;
                                     let qmy = (q1.y + q2.y) / 2.0;
                                     let along = ((mouse_sketch.x - qmx) * ddx + (mouse_sketch.y - qmy) * ddy) / (dlen * dlen);
-                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, offset_val);
-                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, offset_val);
+                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
                                 } else if let DimensionKind::ConcentricDistance(a_ref, _b_ref) = kind {
                                     // 2D text anchor in world coords relative
                                     // to the shared center. The leader rotates
@@ -1413,7 +1413,7 @@ impl eframe::App for EditorApp {
                                     // the outer arrow tip to the text when the
                                     // anchor sits past the outer radius.
                                     let center = self.sketch.arcs[a_ref].center.value;
-                                    self.sketch.dimensions[dim_idx].offset =
+                                    self.sketch.get_mut().dimensions[dim_idx].offset =
                                         vect2d::new(mouse_sketch.x - center.x,
                                                     mouse_sketch.y - center.y);
                                 } else {
@@ -1432,8 +1432,8 @@ impl eframe::App for EditorApp {
                                     let rel_y = mouse_sketch.y - my;
                                     let perp = rel_x * nx + rel_y * ny;
                                     let along = (rel_x * ux + rel_y * uy) / len;
-                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, perp);
-                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, perp);
+                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
                                 }
                             }
                             ctx.request_repaint();
@@ -1707,7 +1707,7 @@ impl eframe::App for EditorApp {
                             }
                             // Auto-coincident for edge (point on circle)
                             if let Some((_, s)) = snap {
-                                let helper = self.sketch.add_helper_point(edge);
+                                let helper = self.sketch.get_mut().add_helper_point(edge);
                                 self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
                                 self.apply_snap_coincident_point(s, helper);
                             }
@@ -1750,7 +1750,7 @@ impl eframe::App for EditorApp {
                                 }
                                 // Auto-coincident for mid (point on arc) - needs helper point
                                 if let Some(s) = snap_target {
-                                    let helper = self.sketch.add_helper_point(pos);
+                                    let helper = self.sketch.get_mut().add_helper_point(pos);
                                     self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
                                     self.apply_snap_coincident_point(s, helper);
                                 }
@@ -2982,7 +2982,7 @@ impl EditorApp {
                         kind, value: measured, expr: None, derived: false, range: Some(rb),
                     });
                     if self.sketch.dimensions.len() > n_dims_before
-                        && let Some(d) = self.sketch.dimensions.last_mut() {
+                        && let Some(d) = self.sketch.get_mut().dimensions.last_mut() {
                             d.offset = self.dim_offset;
                             d.text_along = self.dim_text_along;
                         }
@@ -3006,7 +3006,7 @@ impl EditorApp {
                         let value = input.parse::<f64>().unwrap();
                         self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None, range: None });
                         success = true;
-                    } else if let Err(e) = self.sketch.validate_expr(&input) {
+                    } else if let Err(e) = self.sketch.get_mut().validate_expr(&input) {
                         self.status_error = Some(format!("Expression error: {}", e));
                         self.dim_edit_index = Some(edit_idx); // restore
                     } else {
@@ -3045,13 +3045,13 @@ impl EditorApp {
                         }
                         self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived, range: None });
                         if self.sketch.dimensions.len() > n_dims_before
-                            && let Some(d) = self.sketch.dimensions.last_mut() {
+                            && let Some(d) = self.sketch.get_mut().dimensions.last_mut() {
                                 d.offset = self.dim_offset;
                                 d.text_along = self.dim_text_along;
                             }
                         success = true;
                     } else {
-                        if let Err(e) = self.sketch.validate_expr(&input) {
+                        if let Err(e) = self.sketch.get_mut().validate_expr(&input) {
                             self.status_error = Some(format!("Expression error: {}", e));
                         } else {
                             let n_dims_before = self.sketch.dimensions.len();
@@ -3073,7 +3073,7 @@ impl EditorApp {
                                 kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived, range: None,
                             });
                             if self.sketch.dimensions.len() > n_dims_before
-                                && let Some(d) = self.sketch.dimensions.last_mut() {
+                                && let Some(d) = self.sketch.get_mut().dimensions.last_mut() {
                                     d.offset = self.dim_offset;
                                     d.text_along = self.dim_text_along;
                                 }

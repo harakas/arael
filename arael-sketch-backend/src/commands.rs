@@ -23,7 +23,7 @@ pub const DRAG_PULL_WEIGHT: f64 = 1.0;
 // ---------------------------------------------------------------------------
 
 pub struct CommandContext {
-    pub sketch: Sketch,
+    pub sketch: SketchCell,
     pub history: History,
     pub selection: Vec<Selection>,
     pub session_vars: HashMap<String, f64>,
@@ -68,7 +68,7 @@ impl CommandContext {
         let sketch = Sketch::new();
         let history = History::new(&sketch);
         CommandContext {
-            sketch, history,
+            sketch: sketch.into(), history,
             selection: Vec::new(),
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
@@ -95,7 +95,7 @@ impl CommandContext {
     pub fn with_sketch(sketch: Sketch) -> Self {
         let history = History::new(&sketch);
         CommandContext {
-            sketch, history,
+            sketch: sketch.into(), history,
             selection: Vec::new(),
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
@@ -328,7 +328,7 @@ pub fn validate_and_apply_constraint(
     // Cost rejection
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
-            && let Ok(restored) = bincode::deserialize(snap) {
+            && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
                 *sketch = restored;
                 let hint = dimension_rejection_hint(sketch, action);
                 return Err(Rejection::msg(format!(
@@ -349,7 +349,7 @@ pub fn validate_and_apply_constraint(
         if let Some((which, val)) = bad {
             let name = a.name.clone();
             if let Some(ref snap) = snapshot
-                && let Ok(restored) = bincode::deserialize(snap) {
+                && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
                     *sketch = restored;
                     return Err(Rejection::msg(format!(
                         "Constraint rejected: {} got negative {} ({:.4}). This is likely a solver bug -- please report it.",
@@ -364,7 +364,7 @@ pub fn validate_and_apply_constraint(
         if new_dof >= old_dof
             && let Some(ref snap) = snapshot {
                 let (blocker_hint, blocker_names) = blocker_hint_for_rejection(sketch, snap);
-                if let Ok(restored) = bincode::deserialize(snap) {
+                if let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
                     *sketch = restored;
                     return Err(Rejection {
                         message: format!(
@@ -720,7 +720,7 @@ impl CommandContext {
 
         if action.is_constraint_action() {
             match validate_and_apply_constraint(
-                &mut self.sketch, &action, self.skip_dof_check)
+                self.sketch.get_mut(), &action, self.skip_dof_check)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -734,8 +734,8 @@ impl CommandContext {
                 }
             }
         } else {
-            action.apply(&mut self.sketch);
-            self.sketch.dedup_constraints();
+            action.apply(self.sketch.get_mut());
+            self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, CursorState { pos: self.cursor, tangent: self.cursor_tangent });
         }
     }
@@ -1452,7 +1452,7 @@ fn append_dof_tail(ctx: &mut CommandContext, input: &str, results: &mut Vec<Comm
             OBSERVATIONAL.contains(&head)
         });
     if all_observational { return; }
-    let Ok(dof) = ctx.sketch.dof() else { return };
+    let Ok(dof) = ctx.sketch.get_mut().dof() else { return };
     results.push(CommandResult {
         output: format!("DOF: {}", dof),
         is_error: false,
@@ -1623,8 +1623,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "cost" => {
             use arael::simple_lm::LmProblem;
             let mut params = Vec::new();
-            ctx.sketch.serialize(&mut params);
-            let cost = ctx.sketch.calc_cost(&params);
+            ctx.sketch.get_mut().serialize(&mut params);
+            let cost = ctx.sketch.get_mut().calc_cost(&params);
             ok(format!("Cost: {:.6}", cost))
         }
         "undo" => cmd_undo(ctx, args_str),
@@ -1641,7 +1641,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "set_derived" => cmd_set_derived(ctx, args_str),
         "set_driven" => cmd_set_driven(ctx, args_str),
         "freeze" => cmd_freeze(ctx, args_str),
-        "clear" => { ctx.sketch = Sketch::new(); ctx.history = crate::history::History::new(&ctx.sketch); ok("Cleared") },
+        "clear" => { ctx.sketch = Sketch::new().into(); ctx.history = crate::history::History::new(&ctx.sketch); ok("Cleared") },
         "let" => cmd_let(ctx, args_str),
         "save" => cmd_save(ctx, args_str),
         "load" => cmd_load(ctx, args_str),
@@ -1938,21 +1938,21 @@ fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<Strin
     for (action, desc) in candidates {
         let old_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize(&mut params);
-            ctx.sketch.calc_cost(&params)
+            ctx.sketch.get_mut().serialize(&mut params);
+            ctx.sketch.get_mut().calc_cost(&params)
         };
         // Push constraint directly (no solve)
-        action.apply_without_solve(&mut ctx.sketch);
+        action.apply_without_solve(ctx.sketch.get_mut());
         let new_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize(&mut params);
-            ctx.sketch.calc_cost(&params)
+            ctx.sketch.get_mut().serialize(&mut params);
+            ctx.sketch.get_mut().calc_cost(&params)
         };
         if new_cost <= old_cost + cost_threshold {
             applied.push(desc);
         } else {
             // Pop the constraint we just pushed
-            pop_tangent(&mut ctx.sketch, &action);
+            pop_tangent(ctx.sketch.get_mut(), &action);
         }
     }
     applied
@@ -2030,19 +2030,19 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
     for (action, desc) in candidates {
         let old_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize(&mut params);
-            ctx.sketch.calc_cost(&params)
+            ctx.sketch.get_mut().serialize(&mut params);
+            ctx.sketch.get_mut().calc_cost(&params)
         };
-        action.apply_without_solve(&mut ctx.sketch);
+        action.apply_without_solve(ctx.sketch.get_mut());
         let new_cost = {
             let mut params = Vec::new();
-            ctx.sketch.serialize(&mut params);
-            ctx.sketch.calc_cost(&params)
+            ctx.sketch.get_mut().serialize(&mut params);
+            ctx.sketch.get_mut().calc_cost(&params)
         };
         if new_cost <= old_cost + cost_threshold {
             applied.push(desc);
         } else {
-            pop_tangent(&mut ctx.sketch, &action);
+            pop_tangent(ctx.sketch.get_mut(), &action);
         }
     }
     applied
@@ -2104,8 +2104,8 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let p2 = points[i + 1];
         ctx.exec(Action::AddLine { p1, p2 });
         let line_ref = ctx.sketch.lines.refs().last().unwrap();
-        if quiet { ctx.sketch.lines[line_ref].quiet = true; }
-        if constr { ctx.sketch.lines[line_ref].construction = true; ctx.sketch.lines[line_ref].style = LineStyle::DashDot; }
+        if quiet { ctx.sketch.get_mut().lines[line_ref].quiet = true; }
+        if constr { ctx.sketch.get_mut().lines[line_ref].construction = true; ctx.sketch.get_mut().lines[line_ref].style = LineStyle::DashDot; }
         let name = ctx.sketch.lines[line_ref].name.clone();
         ctx.session_names.insert("_".into(), name.clone());
         // For multi-segment, also set _0, _1, _2, ... for multi-assignment
@@ -2393,8 +2393,8 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2445,8 +2445,8 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2500,8 +2500,8 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2554,8 +2554,8 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2624,8 +2624,8 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -2715,8 +2715,8 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -2780,8 +2780,8 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2845,8 +2845,8 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -3054,8 +3054,8 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut applied = Vec::new();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
@@ -3131,8 +3131,8 @@ fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut applied_list = Vec::new();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
@@ -3402,7 +3402,7 @@ pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
 
     if let Some(snap) = snapshot
         && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
-        ctx.sketch = restored;
+        ctx.sketch = restored.into();
     }
     // Roll history back: drop any entries the inner command pushed
     // past the original cursor and reset the cursor itself.
@@ -3414,7 +3414,7 @@ pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
     ctx.status_error = status_err_before;
     ctx.status_blocker_names = blockers_before;
     ctx.last_cost = last_cost_before;
-    ctx.sketch.cached_dof = dof_before;
+    ctx.sketch.get_mut().cached_dof = dof_before;
 
     DryRunOutcome {
         accepted: err.is_none(),
@@ -4113,8 +4113,8 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let snapshot = bincode::serialize(&ctx.sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
-        ctx.sketch.serialize(&mut params);
-        ctx.sketch.calc_cost(&params)
+        ctx.sketch.get_mut().serialize(&mut params);
+        ctx.sketch.get_mut().calc_cost(&params)
     };
     // Check if param exists -> update
     let is_update = ctx.sketch.user_params.iter().any(|p| p.name == name);
@@ -4129,14 +4129,14 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         ctx.exec(Action::AddUserParam { name: name.to_string(), expr_str: expr.to_string() });
     }
-    ctx.sketch.update_expr_dim_values();
-    let new_cost = ctx.sketch.solve().end_cost;
+    ctx.sketch.get_mut().update_expr_dim_values();
+    let new_cost = ctx.sketch.get_mut().solve().end_cost;
     ctx.last_cost = new_cost;
     // Reject if cost increased significantly
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
-            && let Ok(restored) = bincode::deserialize(snap) {
-                ctx.sketch = restored;
+            && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+                ctx.sketch = restored.into();
                 return err("Parameter change rejected: could not satisfy all constraints");
             }
     let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
@@ -4205,17 +4205,17 @@ fn cmd_quiet(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if name.starts_with('P') {
             let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let q = explicit.unwrap_or(!ctx.sketch.points[r].quiet);
-            ctx.sketch.points[r].quiet = q;
+            ctx.sketch.get_mut().points[r].quiet = q;
             msgs.push(format!("{}: quiet={}", name, q));
         } else if name.starts_with('L') {
             let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let q = explicit.unwrap_or(!ctx.sketch.lines[r].quiet);
-            ctx.sketch.lines[r].quiet = q;
+            ctx.sketch.get_mut().lines[r].quiet = q;
             msgs.push(format!("{}: quiet={}", name, q));
         } else if is_arc_name(name) {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let q = explicit.unwrap_or(!ctx.sketch.arcs[r].quiet);
-            ctx.sketch.arcs[r].quiet = q;
+            ctx.sketch.get_mut().arcs[r].quiet = q;
             msgs.push(format!("{}: quiet={}", name, q));
         } else {
             return err(format!("Unknown entity '{}'", name));
@@ -4236,14 +4236,14 @@ fn cmd_constr(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if name.starts_with('L') {
             let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let c = explicit.unwrap_or(!ctx.sketch.lines[r].construction);
-            ctx.sketch.lines[r].construction = c;
-            ctx.sketch.lines[r].style = if c { LineStyle::DashDot } else { LineStyle::Solid };
+            ctx.sketch.get_mut().lines[r].construction = c;
+            ctx.sketch.get_mut().lines[r].style = if c { LineStyle::DashDot } else { LineStyle::Solid };
             msgs.push(format!("{}: constr={}", name, c));
         } else if is_arc_name(name) {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let c = explicit.unwrap_or(!ctx.sketch.arcs[r].construction);
-            ctx.sketch.arcs[r].construction = c;
-            ctx.sketch.arcs[r].style = if c { LineStyle::DashDot } else { LineStyle::Solid };
+            ctx.sketch.get_mut().arcs[r].construction = c;
+            ctx.sketch.get_mut().arcs[r].style = if c { LineStyle::DashDot } else { LineStyle::Solid };
             msgs.push(format!("{}: constr={}", name, c));
         } else {
             return err(format!("constr applies to lines and arcs, not '{}'", name));
@@ -4319,8 +4319,8 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let snapshot = bincode::serialize(&ctx.sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
-        ctx.sketch.serialize(&mut params);
-        ctx.sketch.calc_cost(&params)
+        ctx.sketch.get_mut().serialize(&mut params);
+        ctx.sketch.get_mut().calc_cost(&params)
     };
 
     // Create drag apparatus: helper point + coincident constraint. In soft
@@ -4329,10 +4329,10 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // helper tracks the cursor; in --drag-raw mode the helper is fixed
     // and the drag hard-pins.
     let drag_pt = if ctx.drag_raw {
-        ctx.sketch.add_point_fixed(target_pos)
+        ctx.sketch.get_mut().add_point_fixed(target_pos)
     } else {
-        let r = ctx.sketch.add_helper_point(target_pos);
-        ctx.sketch.points[r].drag_pull = DRAG_PULL_WEIGHT;
+        let r = ctx.sketch.get_mut().add_helper_point(target_pos);
+        ctx.sketch.get_mut().points[r].drag_pull = DRAG_PULL_WEIGHT;
         r
     };
 
@@ -4342,17 +4342,17 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     match &target {
         DragTarget::Point(r) => {
-            ctx.sketch.coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::LineP1(r) => {
-            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::LineP2(r) => {
-            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
@@ -4360,36 +4360,36 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let offset = vect2d::new(target_pos.x - current_pos.x, target_pos.y - current_pos.y);
             let p1_target = vect2d::new(ctx.sketch.lines[*r].p1.value.x + offset.x, ctx.sketch.lines[*r].p1.value.y + offset.y);
             let p2_target = vect2d::new(ctx.sketch.lines[*r].p2.value.x + offset.x, ctx.sketch.lines[*r].p2.value.y + offset.y);
-            ctx.sketch.points[drag_pt].pos = if ctx.drag_raw { Param::fixed(p1_target) } else { Param::new(p1_target) };
-            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().points[drag_pt].pos = if ctx.drag_raw { Param::fixed(p1_target) } else { Param::new(p1_target) };
+            ctx.sketch.get_mut().coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
             let dp2 = if ctx.drag_raw {
-                ctx.sketch.add_point_fixed(p2_target)
+                ctx.sketch.get_mut().add_point_fixed(p2_target)
             } else {
-                let r = ctx.sketch.add_helper_point(p2_target);
-                ctx.sketch.points[r].drag_pull = DRAG_PULL_WEIGHT;
+                let r = ctx.sketch.get_mut().add_helper_point(p2_target);
+                ctx.sketch.get_mut().points[r].drag_pull = DRAG_PULL_WEIGHT;
                 r
             };
-            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = Some(dp2);
             saved_arc_locks = None;
         }
         DragTarget::ArcCenter(r) => {
-            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcStart(r) => {
-            ctx.sketch.coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcEnd(r) => {
-            ctx.sketch.coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcBody(r) => {
-            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             // Lock radius and sweep
             let a = &ctx.sketch.arcs[*r];
             let locks = (
@@ -4398,7 +4398,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 a.constraints.has_target_sweep, a.constraints.target_sweep, a.constraints.sweep_sign,
                 a.start_angle.optimize, a.end_angle.optimize,
             );
-            let a = &mut ctx.sketch.arcs[*r];
+            let a = &mut ctx.sketch.get_mut().arcs[*r];
             a.constraints.has_target_radius = true;
             a.constraints.target_radius = a.radius.value;
             if a.is_ellipse {
@@ -4427,36 +4427,36 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // Stabilizes long-chain drags where the length residual's
     // Jacobian is rank-deficient at perpendicular segment poses --
     // see Sketch::add_drag_auto_anchors for the full rationale.
-    let auto_anchors = ctx.sketch.add_drag_auto_anchors();
+    let auto_anchors = ctx.sketch.get_mut().add_drag_auto_anchors();
 
     // Solve (drag)
-    ctx.sketch.solve();
+    ctx.sketch.get_mut().solve();
 
     // Roll back auto-anchors before the drag apparatus so the pop()s
     // below hit the drag-apparatus entries, not the auto-anchor ones.
-    ctx.sketch.remove_drag_auto_anchors(auto_anchors);
+    ctx.sketch.get_mut().remove_drag_auto_anchors(auto_anchors);
 
     // Remove apparatus
     match &target {
-        DragTarget::Point(_) => { ctx.sketch.coincident_pp.pop(); }
-        DragTarget::LineP1(_) => { ctx.sketch.coincident_lp1.pop(); }
-        DragTarget::LineP2(_) => { ctx.sketch.coincident_lp2.pop(); }
+        DragTarget::Point(_) => { ctx.sketch.get_mut().coincident_pp.pop(); }
+        DragTarget::LineP1(_) => { ctx.sketch.get_mut().coincident_lp1.pop(); }
+        DragTarget::LineP2(_) => { ctx.sketch.get_mut().coincident_lp2.pop(); }
         DragTarget::LineBody(_) => {
-            ctx.sketch.coincident_lp1.pop();
-            ctx.sketch.coincident_lp2.pop();
-            if let Some(dp2) = drag_pt2 { ctx.sketch.points.remove(dp2); }
+            ctx.sketch.get_mut().coincident_lp1.pop();
+            ctx.sketch.get_mut().coincident_lp2.pop();
+            if let Some(dp2) = drag_pt2 { ctx.sketch.get_mut().points.remove(dp2); }
         }
         DragTarget::ArcCenter(_) | DragTarget::ArcBody(_) => {
-            ctx.sketch.coincident_arc_center.pop();
+            ctx.sketch.get_mut().coincident_arc_center.pop();
         }
-        DragTarget::ArcStart(_) => { ctx.sketch.coincident_arc_start.pop(); }
-        DragTarget::ArcEnd(_) => { ctx.sketch.coincident_arc_end.pop(); }
+        DragTarget::ArcStart(_) => { ctx.sketch.get_mut().coincident_arc_start.pop(); }
+        DragTarget::ArcEnd(_) => { ctx.sketch.get_mut().coincident_arc_end.pop(); }
     }
-    ctx.sketch.points.remove(drag_pt);
+    ctx.sketch.get_mut().points.remove(drag_pt);
 
     // Restore arc locks
     if let (DragTarget::ArcBody(r), Some(locks)) = (&target, saved_arc_locks) {
-        let a = &mut ctx.sketch.arcs[*r];
+        let a = &mut ctx.sketch.get_mut().arcs[*r];
         a.constraints.has_target_radius = locks.0;
         a.constraints.target_radius = locks.1;
         a.constraints.has_target_radius_b = locks.2;
@@ -4469,18 +4469,18 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     // Solve (relax)
-    ctx.sketch.solve();
+    ctx.sketch.get_mut().solve();
 
     // Check cost
     let new_cost = {
         let mut params = Vec::new();
-        ctx.sketch.serialize(&mut params);
-        ctx.sketch.calc_cost(&params)
+        ctx.sketch.get_mut().serialize(&mut params);
+        ctx.sketch.get_mut().calc_cost(&params)
     };
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
-            && let Ok(restored) = bincode::deserialize(snap) {
-                ctx.sketch = restored;
+            && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+                ctx.sketch = restored.into();
                 return err("Drag failed: could not satisfy constraints");
             }
 
@@ -5194,14 +5194,14 @@ fn cmd_undo(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let n: usize = args.trim().parse().unwrap_or(1);
     for _ in 0..n {
         if let Some((s, c)) = ctx.history.undo() {
-            ctx.sketch = s;
+            ctx.sketch = s.into();
             ctx.cursor = c.pos;
             ctx.cursor_tangent = c.tangent;
         } else {
             return ok("Nothing to undo");
         }
     }
-    ctx.sketch.solve();
+    ctx.sketch.get_mut().solve();
     ok(format!("Undone {} step(s)", n))
 }
 
@@ -5209,14 +5209,14 @@ fn cmd_redo(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let n: usize = args.trim().parse().unwrap_or(1);
     for _ in 0..n {
         if let Some((s, c)) = ctx.history.redo() {
-            ctx.sketch = s;
+            ctx.sketch = s.into();
             ctx.cursor = c.pos;
             ctx.cursor_tangent = c.tangent;
         } else {
             return ok("Nothing to redo");
         }
     }
-    ctx.sketch.solve();
+    ctx.sketch.get_mut().solve();
     ok(format!("Redone {} step(s)", n))
 }
 
@@ -5315,8 +5315,8 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
-    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.arcs[arc_ref].construction = true; ctx.sketch.arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
+    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -5682,10 +5682,10 @@ fn apply_one_fillet(
     let removed = crate::ids::constraint_id_name(&ctx.sketch, coincident_id);
     ctx.exec(Action::DeleteConstraint { id: coincident_id });
 
-    if is_p1_a { ctx.sketch.lines[line_a].p1.value = t_a; }
-    else { ctx.sketch.lines[line_a].p2.value = t_a; }
-    if is_p1_b { ctx.sketch.lines[line_b].p1.value = t_b; }
-    else { ctx.sketch.lines[line_b].p2.value = t_b; }
+    if is_p1_a { ctx.sketch.get_mut().lines[line_a].p1.value = t_a; }
+    else { ctx.sketch.get_mut().lines[line_a].p2.value = t_a; }
+    if is_p1_b { ctx.sketch.get_mut().lines[line_b].p1.value = t_b; }
+    else { ctx.sketch.get_mut().lines[line_b].p2.value = t_b; }
 
     ctx.exec(Action::AddArc { start: t_a, end: t_b, mid });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
@@ -5928,10 +5928,10 @@ fn apply_one_chamfer(
     let removed = crate::ids::constraint_id_name(&ctx.sketch, coincident_id);
     ctx.exec(Action::DeleteConstraint { id: coincident_id });
 
-    if is_p1_a { ctx.sketch.lines[line_a].p1.value = t_a; }
-    else { ctx.sketch.lines[line_a].p2.value = t_a; }
-    if is_p1_b { ctx.sketch.lines[line_b].p1.value = t_b; }
-    else { ctx.sketch.lines[line_b].p2.value = t_b; }
+    if is_p1_a { ctx.sketch.get_mut().lines[line_a].p1.value = t_a; }
+    else { ctx.sketch.get_mut().lines[line_a].p2.value = t_a; }
+    if is_p1_b { ctx.sketch.get_mut().lines[line_b].p1.value = t_b; }
+    else { ctx.sketch.get_mut().lines[line_b].p2.value = t_b; }
 
     ctx.exec(Action::AddPoint { pos: corner });
     let point_ref = ctx.sketch.points.refs().last().unwrap();
@@ -6101,7 +6101,7 @@ fn resolve_as_point(ctx: &mut CommandContext, name: &str) -> Result<Ref<Point>, 
         return Ok(hp);
     }
     let pos = resolve_endpoint_pos(&ctx.sketch, name)?;
-    let hp = ctx.sketch.add_helper_point(pos);
+    let hp = ctx.sketch.get_mut().add_helper_point(pos);
     match ep {
         EndpointRef::Point(_) => unreachable!(),
         EndpointRef::LineP1(l) => {
@@ -7502,11 +7502,11 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
             let before = ctx.sketch.concentric.len();
-            ctx.sketch.concentric.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
+            ctx.sketch.get_mut().concentric.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
             if ctx.sketch.concentric.len() < before {
-                ctx.sketch.cleanup_helper_points();
-                ctx.sketch.solve();
-                ctx.sketch.cached_dof = None;
+                ctx.sketch.get_mut().cleanup_helper_points();
+                ctx.sketch.get_mut().solve();
+                ctx.sketch.get_mut().cached_dof = None;
                 return ok(format!("Removed {} constraint", ctype));
             }
             return err("Constraint not found".to_string());
@@ -7516,26 +7516,26 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let ep = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let removed = match ep {
                 EndpointRef::Point(p) => {
-                    ctx.sketch.points[p].constraints.has_fix_x = false;
-                    ctx.sketch.points[p].constraints.has_fix_y = false;
+                    ctx.sketch.get_mut().points[p].constraints.has_fix_x = false;
+                    ctx.sketch.get_mut().points[p].constraints.has_fix_y = false;
                     true
                 }
                 EndpointRef::LineP1(l) => {
                     let val = ctx.sketch.lines[l].p1.value;
-                    ctx.sketch.lines[l].p1 = arael::model::Param::new(val);
+                    ctx.sketch.get_mut().lines[l].p1 = arael::model::Param::new(val);
                     true
                 }
                 EndpointRef::LineP2(l) => {
                     let val = ctx.sketch.lines[l].p2.value;
-                    ctx.sketch.lines[l].p2 = arael::model::Param::new(val);
+                    ctx.sketch.get_mut().lines[l].p2 = arael::model::Param::new(val);
                     true
                 }
                 _ => false,
             };
             if removed {
-                ctx.sketch.cleanup_helper_points();
-                ctx.sketch.solve();
-                ctx.sketch.cached_dof = None;
+                ctx.sketch.get_mut().cleanup_helper_points();
+                ctx.sketch.get_mut().solve();
+                ctx.sketch.get_mut().cached_dof = None;
                 return ok(format!("Removed {} constraint", ctype));
             }
             return err("Constraint not found".to_string());
@@ -7566,21 +7566,21 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
                     if target.starts_with('L') || target.starts_with('l') {
                         let line = match resolve_line(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                         let before = ctx.sketch.point_on_line.len();
-                        ctx.sketch.point_on_line.retain(|c| !(c.point == p && c.line == line));
+                        ctx.sketch.get_mut().point_on_line.retain(|c| !(c.point == p && c.line == line));
                         if ctx.sketch.point_on_line.len() < before {
-                            ctx.sketch.cleanup_helper_points();
-                            ctx.sketch.solve();
-                            ctx.sketch.cached_dof = None;
+                            ctx.sketch.get_mut().cleanup_helper_points();
+                            ctx.sketch.get_mut().solve();
+                            ctx.sketch.get_mut().cached_dof = None;
                             return ok(format!("Removed {} constraint", ctype));
                         }
                     } else if is_arc_name(target) || target.starts_with('a') {
                         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                         let before = ctx.sketch.point_on_arc.len();
-                        ctx.sketch.point_on_arc.retain(|c| !(c.point == p && c.arc == arc));
+                        ctx.sketch.get_mut().point_on_arc.retain(|c| !(c.point == p && c.arc == arc));
                         if ctx.sketch.point_on_arc.len() < before {
-                            ctx.sketch.cleanup_helper_points();
-                            ctx.sketch.solve();
-                            ctx.sketch.cached_dof = None;
+                            ctx.sketch.get_mut().cleanup_helper_points();
+                            ctx.sketch.get_mut().solve();
+                            ctx.sketch.get_mut().cached_dof = None;
                             return ok(format!("Removed {} constraint", ctype));
                         }
                     }
@@ -7717,7 +7717,7 @@ fn cmd_goto(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return err(format!("Group {} does not exist (max {})", target_group, groups.len()));
     };
     if let Some((s, c)) = ctx.history.goto(target_pos) {
-        ctx.sketch = s;
+        ctx.sketch = s.into();
         ctx.cursor = c.pos;
         ctx.cursor_tangent = c.tangent;
     }
@@ -7792,7 +7792,7 @@ fn cmd_load(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 sketch.assign_constraint_names();
                 sketch.solve();
                 ctx.history = crate::history::History::new(&sketch);
-                ctx.sketch = sketch;
+                ctx.sketch = sketch.into();
                 ok(format!("Loaded {}", path))
             }
             Err(e) => err(format!("Parse error: {}", e)),
@@ -7855,17 +7855,17 @@ fn cmd_dim_pos(ctx: &mut CommandContext, args: &str) -> CommandResult {
     match field {
         "offset" => {
             if is_relative {
-                ctx.sketch.dimensions[idx].offset.y += val;
+                ctx.sketch.get_mut().dimensions[idx].offset.y += val;
             } else {
-                ctx.sketch.dimensions[idx].offset.y = val;
+                ctx.sketch.get_mut().dimensions[idx].offset.y = val;
             }
             ok(format!("{} offset = {:.4}", dim_name, ctx.sketch.dimensions[idx].offset.y))
         }
         "along" => {
             if is_relative {
-                ctx.sketch.dimensions[idx].text_along += val;
+                ctx.sketch.get_mut().dimensions[idx].text_along += val;
             } else {
-                ctx.sketch.dimensions[idx].text_along = val;
+                ctx.sketch.get_mut().dimensions[idx].text_along = val;
             }
             ok(format!("{} along = {:.4}", dim_name, ctx.sketch.dimensions[idx].text_along))
         }
@@ -7892,13 +7892,13 @@ fn cmd_set_derived(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let dim = ctx.sketch.dimensions[idx].clone();
     ctx.exec(Action::RemoveDimension { index: idx });
     // Re-create as derived (no constraint)
-    ctx.sketch.dimensions.push(Dimension {
+    ctx.sketch.get_mut().dimensions.push(Dimension {
         kind: dim.kind, value: dim.value, offset: dim.offset, text_along: dim.text_along,
         name: dim.name.clone(), expr_str: dim.expr_str, broken: dim.broken, derived: true,
         range: dim.range,
     });
-    ctx.sketch.solve();
-    ctx.sketch.update_expr_dim_values();
+    ctx.sketch.get_mut().solve();
+    ctx.sketch.get_mut().update_expr_dim_values();
     ok(format!("{} is now derived (reference only)", name))
 }
 
@@ -7927,18 +7927,18 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     // Remove derived dim and re-add as driven
     let dim = ctx.sketch.dimensions[idx].clone();
-    ctx.sketch.dimensions.remove(idx);
+    ctx.sketch.get_mut().dimensions.remove(idx);
     ctx.begin_group();
     ctx.exec(Action::AddDimension {
         kind: dim.kind, value: new_value, expr: new_expr.clone(), derived: false, range: None,
     });
     // Restore visual properties
-    if let Some(d) = ctx.sketch.dimensions.last_mut() {
+    if let Some(d) = ctx.sketch.get_mut().dimensions.last_mut() {
         d.offset = dim.offset;
         d.text_along = dim.text_along;
         d.name = dim.name.clone();
     }
-    ctx.sketch.solve();
+    ctx.sketch.get_mut().solve();
     if let Some(expr) = new_expr {
         ok(format!("{} is now driven (constraining) = {}", name, expr))
     } else {
@@ -7990,7 +7990,7 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     // scales are folded into `D`. Eigenvectors back-transformed to
     // raw parameter space. `raw` shows the un-preconditioned Hessian
     // for residual-design debugging.
-    let result = match ctx.sketch.compute_dof_eigenvalues_opt(true, !raw) {
+    let result = match ctx.sketch.get_mut().compute_dof_eigenvalues_opt(true, !raw) {
         Ok(r) => r,
         Err(e) => return err(e),
     };
@@ -8028,11 +8028,11 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext, raw: bool) -> CommandResult {
 
 fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     use arael_sketch_solver::SymbolBag;
-    ctx.sketch.prepare_expr_constraints();
+    ctx.sketch.get_mut().prepare_expr_constraints();
     let saved_drift = ctx.sketch.drift_isigma;
-    ctx.sketch.drift_isigma = 0.0;
+    ctx.sketch.get_mut().drift_isigma = 0.0;
     let mut params = Vec::new();
-    ctx.sketch.serialize(&mut params);
+    ctx.sketch.get_mut().serialize(&mut params);
     let n = params.len();
     let bag = SymbolBag::build(&ctx.sketch);
     let mut idx_to_name: Vec<String> = vec![String::new(); n];
@@ -8041,9 +8041,9 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
         if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
     }
     let t0 = web_time::Instant::now();
-    let jacobian = ctx.sketch.calc_jacobian(&params);
+    let jacobian = ctx.sketch.get_mut().calc_jacobian(&params);
     let t_build = t0.elapsed();
-    ctx.sketch.drift_isigma = saved_drift;
+    ctx.sketch.get_mut().drift_isigma = saved_drift;
     let m = jacobian.num_residuals();
     if m == 0 || n == 0 {
         return ok(format!("Jacobian: {} residuals x {} params (empty)", m, n));
@@ -8157,14 +8157,14 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
 
 fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
     use arael_sketch_solver::SymbolBag;
-    ctx.sketch.prepare_expr_constraints();
+    ctx.sketch.get_mut().prepare_expr_constraints();
     let saved_drift = ctx.sketch.drift_isigma;
-    ctx.sketch.drift_isigma = 0.0;
+    ctx.sketch.get_mut().drift_isigma = 0.0;
     let mut params = Vec::new();
-    ctx.sketch.serialize(&mut params);
+    ctx.sketch.get_mut().serialize(&mut params);
     let n = params.len();
     if n == 0 {
-        ctx.sketch.drift_isigma = saved_drift;
+        ctx.sketch.get_mut().drift_isigma = saved_drift;
         return ok("No params".to_string());
     }
     let bag = SymbolBag::build(&ctx.sketch);
@@ -8173,9 +8173,9 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
         let i = idx as usize;
         if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
     }
-    let jacobian = ctx.sketch.calc_jacobian(&params);
+    let jacobian = ctx.sketch.get_mut().calc_jacobian(&params);
     let labels = ctx.sketch.constraint_labels();
-    ctx.sketch.drift_isigma = saved_drift;
+    ctx.sketch.get_mut().drift_isigma = saved_drift;
     let mut lines = vec![format!("Jacobian: {} rows x {} cols", jacobian.num_residuals(), n)];
     for (i, row) in jacobian.rows.iter().enumerate() {
         let entries: Vec<String> = row.entries.iter()
@@ -8236,7 +8236,7 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     let analyze = arg == "analyze";
-    let result = match ctx.sketch.compute_dof(analyze) {
+    let result = match ctx.sketch.get_mut().compute_dof(analyze) {
         Ok(r) => r,
         Err(e) => return err(e),
     };
@@ -9555,11 +9555,11 @@ mod tests {
     fn test_xangle_derived() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "xangle L0 derived");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before); // derived does not constrain
     }
 
@@ -9567,11 +9567,11 @@ mod tests {
     fn test_hdistance_derived() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "hdistance L0.p1 L0.p2 derived");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before);
     }
 
@@ -9579,11 +9579,11 @@ mod tests {
     fn test_vdistance_derived() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "vdistance L0.p1 L0.p2 derived");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before);
     }
 
@@ -9591,11 +9591,11 @@ mod tests {
     fn test_length_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "length L0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived); // constraining, not derived
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1); // DOF decreased
         assert!(near(line_len(&ctx, "L0"), (5.0f64 * 5.0 + 3.0 * 3.0).sqrt()));
     }
@@ -9604,11 +9604,11 @@ mod tests {
     fn test_radius_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "radius A0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9616,11 +9616,11 @@ mod tests {
     fn test_hdistance_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "hdistance L0.p1 L0.p2 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9628,11 +9628,11 @@ mod tests {
     fn test_xangle_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "xangle L0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9640,11 +9640,11 @@ mod tests {
     fn test_vdistance_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "vdistance L0.p1 L0.p2 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9652,11 +9652,11 @@ mod tests {
     fn test_sweep_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_arc 0,0 5,0 0,5");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "sweep A0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9664,11 +9664,11 @@ mod tests {
     fn test_angle_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,4");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9676,11 +9676,11 @@ mod tests {
     fn test_distance_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 8,3 12,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "distance L0.p2 L1.p1 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9688,11 +9688,11 @@ mod tests {
     fn test_distance_pl_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_point 0,3; add_line 0,0 5,0");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "distance P0 L0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9728,12 +9728,12 @@ mod tests {
     fn test_axis_distance_dof() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "hdistance L0.p1 L0.p2 4");
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
         run_ok(&mut ctx, "vdistance L0.p1 L0.p2 2");
-        let dof_after2 = ctx.sketch.dof().unwrap();
+        let dof_after2 = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after2, dof_after - 1);
     }
 
@@ -11217,7 +11217,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5");
         run_ok(&mut ctx, "radius A0 5*scale");
         // Check that expr_constraints were created
-        ctx.sketch.solve();
+        ctx.sketch.get_mut().solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Expression dimension should create expr_constraint, got none. dims: {:?}",
             ctx.sketch.dimensions.iter().map(|d| (&d.name, &d.expr_str, d.value)).collect::<Vec<_>>());
@@ -11240,7 +11240,7 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert_eq!(ctx.sketch.dimensions[0].expr_str.as_deref(), Some("5*scale"));
         // Solve and check expr constraints are built
-        let result = ctx.sketch.solve();
+        let result = ctx.sketch.get_mut().solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Should have expr_constraints after solve");
         // Check radius is actually constrained to 5
@@ -11260,7 +11260,7 @@ mod tests {
         run_ok(&mut ctx, "radius A0 5");
         run_ok(&mut ctx, "param scale 3");
         run_ok(&mut ctx, "radius A0 2*scale");
-        ctx.sketch.solve();
+        ctx.sketch.get_mut().solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Updated expression should create expr_constraint");
         let r = ctx.sketch.arcs.refs().next().unwrap();
@@ -11592,7 +11592,7 @@ mod tests {
         assert!(out.contains("Set") || out.contains("sweep"), "Should succeed: {}", out);
         assert!(ctx.sketch.arcs.refs().next().map(|r| ctx.sketch.arcs[r].constraints.has_target_sweep).unwrap_or(false));
         // Solve and check sweep is close to 180 degrees
-        ctx.sketch.solve();
+        ctx.sketch.get_mut().solve();
         let r = ctx.sketch.arcs.refs().next().unwrap();
         let sweep = (ctx.sketch.arcs[r].end_angle.value - ctx.sketch.arcs[r].start_angle.value).abs().to_degrees();
         assert!((sweep - 180.0).abs() < 1.0, "Sweep should be ~180, got {}", sweep);
@@ -11976,7 +11976,7 @@ mod tests {
             "backing DistanceConcentric must survive");
         // Solve must still hold the circles concentric (the dim's own
         // residual enforces it).
-        ctx.sketch.solve();
+        ctx.sketch.get_mut().solve();
         let ca = ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()].center.value;
         let cb = ctx.sketch.arcs[ctx.sketch.arcs.refs().nth(1).unwrap()].center.value;
         assert!((ca.x - cb.x).abs() < 0.01 && (ca.y - cb.y).abs() < 0.01,
@@ -12006,12 +12006,12 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
-        let dof_with = ctx.sketch.dof().unwrap();
+        let dof_with = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "delete L0 horizontal");
-        let dof_without = ctx.sketch.dof().unwrap();
+        let dof_without = ctx.sketch.get_mut().dof().unwrap();
         assert!(dof_without > dof_with, "DOF should increase after removing constraint: {} vs {}", dof_without, dof_with);
         run_ok(&mut ctx, "undo");
-        let dof_undone = ctx.sketch.dof().unwrap();
+        let dof_undone = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_undone, dof_with, "DOF should restore after undo: {} vs {}", dof_undone, dof_with);
     }
 
@@ -12020,9 +12020,9 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "parallel L0 L1");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "delete L0 L1 parallel");
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before + 1, "removing parallel should increase DOF by 1: {} -> {}", dof_before, dof_after);
     }
 
@@ -12081,7 +12081,7 @@ mod tests {
         // 4 points = 3 lines, 2 coincidents
         // 3*4 params - 2*2 coincident = 8 DOF
         run_ok(&mut ctx, "add_line 0,0 1,0 2,1 3,0");
-        let dof = ctx.sketch.dof().unwrap();
+        let dof = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof, 8, "3 connected lines should have 8 DOF, got {}", dof);
     }
 
@@ -12165,19 +12165,19 @@ mod tests {
     fn test_angle_driven_closest() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         // "driven closest" — driven is before sector keyword
         run_ok(&mut ctx, "angle L0 L1 driven closest");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        assert!(ctx.sketch.dof().unwrap() < dof_before);
+        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
     }
 
     #[test]
     fn test_angle_driven_supplement() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven supplement");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
@@ -12186,7 +12186,7 @@ mod tests {
         } else {
             panic!("expected angle dimension");
         }
-        assert!(ctx.sketch.dof().unwrap() < dof_before);
+        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
     }
 
     #[test]
@@ -12194,7 +12194,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         // Lines at ~120 degrees so acute picks supplement
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 -2,4");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven acute");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
@@ -12203,7 +12203,7 @@ mod tests {
         } else {
             panic!("expected angle dimension");
         }
-        assert!(ctx.sketch.dof().unwrap() < dof_before);
+        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
     }
 
     #[test]
@@ -12211,7 +12211,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         // Lines at ~45 degrees, so obtuse picks supplement (135)
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven obtuse");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
@@ -12220,19 +12220,19 @@ mod tests {
         } else {
             panic!("expected angle dimension");
         }
-        assert!(ctx.sketch.dof().unwrap() < dof_before);
+        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
     }
 
     #[test]
     fn test_angle_closest_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         // Reverse order: sector keyword before driven
         run_ok(&mut ctx, "angle L0 L1 closest driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        assert!(ctx.sketch.dof().unwrap() < dof_before);
+        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
     }
 
     #[test]
@@ -12502,12 +12502,12 @@ mod tests {
     #[test]
     fn test_add_rect_driven() {
         let mut ctx = CommandContext::new();
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "add_rect 0,0 5,3 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 2);
         assert!(!ctx.sketch.dimensions[0].derived);
         assert!(!ctx.sketch.dimensions[1].derived);
-        assert!(ctx.sketch.dof().unwrap() < dof_before + 8); // 4 lines = +8 DOF, constraints + dims reduce
+        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before + 8); // 4 lines = +8 DOF, constraints + dims reduce
     }
 
     #[test]
@@ -12953,7 +12953,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse 0,0 5 3 0");
         // DOF: center(2) + rx(1) + ry(1) + rotation(1) = 5
-        assert_eq!(ctx.sketch.dof().unwrap(), 5);
+        assert_eq!(ctx.sketch.get_mut().dof().unwrap(), 5);
     }
 
     #[test]
@@ -13099,9 +13099,9 @@ mod tests {
     fn test_symmetry_aa_command() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 4,1 2");
-        let dof_before = ctx.sketch.dof().unwrap();
+        let dof_before = ctx.sketch.get_mut().dof().unwrap();
         run_ok(&mut ctx, "symmetry A0 L0 A1");
-        let dof_after = ctx.sketch.dof().unwrap();
+        let dof_after = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_after, dof_before - 3, "arc symmetry should remove 3 DOF: {} -> {}", dof_before, dof_after);
         assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
     }
@@ -13767,13 +13767,13 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "length L0 3 to 6");
-        let dof_inside = ctx.sketch.dof().unwrap();
+        let dof_inside = ctx.sketch.get_mut().dof().unwrap();
         // Push onto the lower bound: barrier would be active there.
         run_ok(&mut ctx, "length L0 1 to 6");
-        let dof_at_lower = ctx.sketch.dof().unwrap();
+        let dof_at_lower = ctx.sketch.get_mut().dof().unwrap();
         // Push onto the upper bound.
         run_ok(&mut ctx, "length L0 3 to 4");
-        let dof_at_upper = ctx.sketch.dof().unwrap();
+        let dof_at_upper = ctx.sketch.get_mut().dof().unwrap();
         assert_eq!(dof_inside, dof_at_lower,
             "DOF must be stable; inside={}, at lower={}", dof_inside, dof_at_lower);
         assert_eq!(dof_inside, dof_at_upper,

@@ -104,7 +104,7 @@ use arael_sketch_backend::DRAG_PULL_WEIGHT;
 const DRAG_MAX_LAG_PX: f32 = 100.0;
 
 pub struct EditorApp {
-    pub sketch: Sketch,
+    pub sketch: SketchCell,
     // View transform
     pub offset: egui::Vec2,  // pan offset in screen pixels
     pub scale: f32,          // pixels per sketch unit
@@ -368,7 +368,7 @@ impl EditorApp {
         let history = History::new(&sketch);
 
         EditorApp {
-            sketch,
+            sketch: sketch.into(),
             offset: egui::Vec2::new(400.0, 300.0),
             scale: 80.0,
             tool: Tool::Select,
@@ -1085,25 +1085,25 @@ impl EditorApp {
         let l_c = &self.sketch.lines[line].constraints;
         if horizontal && l_c.horizontal { return false; }
         if !horizontal && l_c.vertical { return false; }
-        let Ok(old_dof) = self.sketch.dof() else { return true; };
+        let Ok(old_dof) = self.sketch.get_mut().dof() else { return true; };
         let saved_cached = self.sketch.cached_dof;
         if horizontal {
             let dx = self.sketch.lines[line].p2.value.x - self.sketch.lines[line].p1.value.x;
-            self.sketch.lines[line].constraints.h_dir_sign = if dx >= 0.0 { 1.0 } else { -1.0 };
-            self.sketch.lines[line].constraints.horizontal = true;
+            self.sketch.get_mut().lines[line].constraints.h_dir_sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+            self.sketch.get_mut().lines[line].constraints.horizontal = true;
         } else {
             let dy = self.sketch.lines[line].p2.value.y - self.sketch.lines[line].p1.value.y;
-            self.sketch.lines[line].constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
-            self.sketch.lines[line].constraints.vertical = true;
+            self.sketch.get_mut().lines[line].constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+            self.sketch.get_mut().lines[line].constraints.vertical = true;
         }
-        self.sketch.cached_dof = None;
-        let new_dof = self.sketch.dof().unwrap_or(old_dof);
+        self.sketch.get_mut().cached_dof = None;
+        let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
         if horizontal {
-            self.sketch.lines[line].constraints.horizontal = false;
+            self.sketch.get_mut().lines[line].constraints.horizontal = false;
         } else {
-            self.sketch.lines[line].constraints.vertical = false;
+            self.sketch.get_mut().lines[line].constraints.vertical = false;
         }
-        self.sketch.cached_dof = saved_cached;
+        self.sketch.get_mut().cached_dof = saved_cached;
         new_dof < old_dof
     }
 
@@ -1113,15 +1113,15 @@ impl EditorApp {
     /// collinear hint gating at drag-start.
     fn collinear_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
         if self.has_collinear_conflict(a, b) { return false; }
-        let Ok(old_dof) = self.sketch.dof() else { return true; };
+        let Ok(old_dof) = self.sketch.get_mut().dof() else { return true; };
         let saved_cached = self.sketch.cached_dof;
-        self.sketch.collinear.push(Collinear {
+        self.sketch.get_mut().collinear.push(Collinear {
             a, b, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
         });
-        self.sketch.cached_dof = None;
-        let new_dof = self.sketch.dof().unwrap_or(old_dof);
-        self.sketch.collinear.pop();
-        self.sketch.cached_dof = saved_cached;
+        self.sketch.get_mut().cached_dof = None;
+        let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
+        self.sketch.get_mut().collinear.pop();
+        self.sketch.get_mut().cached_dof = saved_cached;
         new_dof < old_dof
     }
 
@@ -1155,7 +1155,7 @@ impl EditorApp {
                 return false;
             }
         }
-        let old_dof = match self.sketch.dof() { Ok(d) => d, Err(_) => return false };
+        let old_dof = match self.sketch.get_mut().dof() { Ok(d) => d, Err(_) => return false };
         let saved_cached = self.sketch.cached_dof;
 
         let la = &self.sketch.lines[a];
@@ -1166,13 +1166,13 @@ impl EditorApp {
         let dy2 = lb.p2.value.y - lb.p1.value.y;
         let cross = dx1 * dy2 - dy1 * dx2;
         let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
-        self.sketch.perpendicular.push(Perpendicular {
+        self.sketch.get_mut().perpendicular.push(Perpendicular {
             a, b, dir_sign, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
         });
-        self.sketch.cached_dof = None;
-        let new_dof = self.sketch.dof().unwrap_or(old_dof);
-        self.sketch.perpendicular.pop();
-        self.sketch.cached_dof = saved_cached;
+        self.sketch.get_mut().cached_dof = None;
+        let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
+        self.sketch.get_mut().perpendicular.pop();
+        self.sketch.get_mut().cached_dof = saved_cached;
 
         let result = new_dof < old_dof;
         if !result {
@@ -1191,10 +1191,10 @@ impl EditorApp {
     /// reproduces the old hard-pin behaviour.
     fn add_drag_helper(&mut self, pos: vect2d) -> Ref<Point> {
         if self.drag_raw {
-            self.sketch.add_point_fixed(pos)
+            self.sketch.get_mut().add_point_fixed(pos)
         } else {
-            let r = self.sketch.add_helper_point(pos);
-            self.sketch.points[r].drag_pull = DRAG_PULL_WEIGHT;
+            let r = self.sketch.get_mut().add_helper_point(pos);
+            self.sketch.get_mut().points[r].drag_pull = DRAG_PULL_WEIGHT;
             r
         }
     }
@@ -1241,60 +1241,66 @@ impl EditorApp {
         // Add coincident constraint between drag point and the grabbed target
         match target {
             GrabTarget::Point(r) => {
-                self.sketch.coincident_pp.push(CoincidentPP {
+                self.sketch.get_mut().coincident_pp.push(CoincidentPP {
                     a: drag_pt, b: r, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::LineP1(r) => {
-                self.sketch.coincident_lp1.push(CoincidentLP1 {
+                self.sketch.get_mut().coincident_lp1.push(CoincidentLP1 {
                     line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::LineP2(r) => {
-                self.sketch.coincident_lp2.push(CoincidentLP2 {
+                self.sketch.get_mut().coincident_lp2.push(CoincidentLP2 {
                     line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcCenter(r) => {
-                self.sketch.coincident_arc_center.push(CoincidentArcCenter {
+                self.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter {
                     point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcStart(r) => {
-                self.sketch.coincident_arc_start.push(CoincidentArcStart {
+                self.sketch.get_mut().coincident_arc_start.push(CoincidentArcStart {
                     point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcEnd(r) => {
-                self.sketch.coincident_arc_end.push(CoincidentArcEnd {
+                self.sketch.get_mut().coincident_arc_end.push(CoincidentArcEnd {
                     point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::LineDrag(r) => {
-                let l = &self.sketch.lines[r];
-                self.drag_offset = vect2d::new(l.p1.value.x - mouse_pos.x, l.p1.value.y - mouse_pos.y);
-                self.drag_offset2 = vect2d::new(l.p2.value.x - mouse_pos.x, l.p2.value.y - mouse_pos.y);
+                let (p1v, p2v) = {
+                    let l = &self.sketch.lines[r];
+                    (l.p1.value, l.p2.value)
+                };
+                self.drag_offset = vect2d::new(p1v.x - mouse_pos.x, p1v.y - mouse_pos.y);
+                self.drag_offset2 = vect2d::new(p2v.x - mouse_pos.x, p2v.y - mouse_pos.y);
                 // First drag point at p1
-                self.sketch.points[drag_pt].pos = self.drag_helper_param(l.p1.value);
-                self.sketch.coincident_lp1.push(CoincidentLP1 {
+                let pos1 = self.drag_helper_param(p1v);
+                self.sketch.get_mut().points[drag_pt].pos = pos1;
+                self.sketch.get_mut().coincident_lp1.push(CoincidentLP1 {
                     line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
                 // Second drag point at p2
-                let drag_pt2 = self.add_drag_helper(l.p2.value);
+                let drag_pt2 = self.add_drag_helper(p2v);
                 self.drag_point2 = Some(drag_pt2);
-                self.sketch.coincident_lp2.push(CoincidentLP2 {
+                self.sketch.get_mut().coincident_lp2.push(CoincidentLP2 {
                     line: r, point: drag_pt2, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcDrag(r) => {
-                let a = &self.sketch.arcs[r];
-                self.drag_offset = vect2d::new(a.center.value.x - mouse_pos.x, a.center.value.y - mouse_pos.y);
+                let centre = self.sketch.arcs[r].center.value;
+                self.drag_offset = vect2d::new(centre.x - mouse_pos.x, centre.y - mouse_pos.y);
                 // Drag point at center
-                self.sketch.points[drag_pt].pos = self.drag_helper_param(a.center.value);
-                self.sketch.coincident_arc_center.push(CoincidentArcCenter {
+                let pos_c = self.drag_helper_param(centre);
+                self.sketch.get_mut().points[drag_pt].pos = pos_c;
+                self.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter {
                     point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
                 // Lock radius and sweep to prevent shape change
+                let a = &self.sketch.arcs[r];
                 self.drag_saved_arc_locks = Some(SavedArcLocks {
                     had_radius: a.constraints.has_target_radius,
                     old_radius: a.constraints.target_radius,
@@ -1307,7 +1313,7 @@ impl EditorApp {
                     start_optimize: a.start_angle.optimize,
                     end_optimize: a.end_angle.optimize,
                 });
-                let a = &mut self.sketch.arcs[r];
+                let a = &mut self.sketch.get_mut().arcs[r];
                 a.constraints.has_target_radius = true;
                 a.constraints.target_radius = a.radius.value;
                 if a.is_ellipse {
@@ -1330,7 +1336,7 @@ impl EditorApp {
         // Auto-anchor hack stabilises chain-style drags; rolled back
         // at end_drag (and from clone snapshots in update_drag).
         // See Sketch::add_drag_auto_anchors for the full rationale.
-        self.drag_auto_anchors = Some(self.sketch.add_drag_auto_anchors());
+        self.drag_auto_anchors = Some(self.sketch.get_mut().add_drag_auto_anchors());
     }
 
     // Update drag position and re-solve.
@@ -1541,19 +1547,19 @@ impl EditorApp {
                 let ref1 = self.sketch.points[drag_pt].pos.value;
                 let pos1 = clamp(vect2d::new(mouse_pos.x + self.drag_offset.x,
                                               mouse_pos.y + self.drag_offset.y), ref1);
-                self.sketch.points[drag_pt].pos = self.drag_helper_param(pos1);
+                self.sketch.get_mut().points[drag_pt].pos = self.drag_helper_param(pos1);
                 if let Some(drag_pt2) = self.drag_point2 {
                     let ref2 = self.sketch.points[drag_pt2].pos.value;
                     let pos2 = clamp(vect2d::new(mouse_pos.x + self.drag_offset2.x,
                                                   mouse_pos.y + self.drag_offset2.y), ref2);
-                    self.sketch.points[drag_pt2].pos = self.drag_helper_param(pos2);
+                    self.sketch.get_mut().points[drag_pt2].pos = self.drag_helper_param(pos2);
                 }
             } else {
                 let ref_pos = self.sketch.points[drag_pt].pos.value;
                 let pos = clamp(effective_pos, ref_pos);
-                self.sketch.points[drag_pt].pos = self.drag_helper_param(pos);
+                self.sketch.get_mut().points[drag_pt].pos = self.drag_helper_param(pos);
             }
-            let result = self.sketch.solve();
+            let result = self.sketch.get_mut().solve();
             self.last_cost = result.end_cost;
 
             // If cost is good, save a clean snapshot (without drag apparatus)
@@ -1609,23 +1615,23 @@ impl EditorApp {
     // Remove the drag apparatus (temp point + constraint) from the sketch.
     fn remove_drag_apparatus(&mut self, drag_pt: arael::refs::Ref<Point>) {
         match self.grab {
-            Some(GrabTarget::Point(_)) => { self.sketch.coincident_pp.pop(); }
-            Some(GrabTarget::LineP1(_)) => { self.sketch.coincident_lp1.pop(); }
-            Some(GrabTarget::LineP2(_)) => { self.sketch.coincident_lp2.pop(); }
-            Some(GrabTarget::ArcCenter(_)) => { self.sketch.coincident_arc_center.pop(); }
-            Some(GrabTarget::ArcStart(_)) => { self.sketch.coincident_arc_start.pop(); }
-            Some(GrabTarget::ArcEnd(_)) => { self.sketch.coincident_arc_end.pop(); }
+            Some(GrabTarget::Point(_)) => { self.sketch.get_mut().coincident_pp.pop(); }
+            Some(GrabTarget::LineP1(_)) => { self.sketch.get_mut().coincident_lp1.pop(); }
+            Some(GrabTarget::LineP2(_)) => { self.sketch.get_mut().coincident_lp2.pop(); }
+            Some(GrabTarget::ArcCenter(_)) => { self.sketch.get_mut().coincident_arc_center.pop(); }
+            Some(GrabTarget::ArcStart(_)) => { self.sketch.get_mut().coincident_arc_start.pop(); }
+            Some(GrabTarget::ArcEnd(_)) => { self.sketch.get_mut().coincident_arc_end.pop(); }
             Some(GrabTarget::LineDrag(_)) => {
-                self.sketch.coincident_lp1.pop();
-                self.sketch.coincident_lp2.pop();
+                self.sketch.get_mut().coincident_lp1.pop();
+                self.sketch.get_mut().coincident_lp2.pop();
                 if let Some(dp2) = self.drag_point2.take() {
-                    self.sketch.points.remove(dp2);
+                    self.sketch.get_mut().points.remove(dp2);
                 }
             }
             Some(GrabTarget::ArcDrag(r)) => {
-                self.sketch.coincident_arc_center.pop();
+                self.sketch.get_mut().coincident_arc_center.pop();
                 if let Some(saved) = self.drag_saved_arc_locks.take() {
-                    let a = &mut self.sketch.arcs[r];
+                    let a = &mut self.sketch.get_mut().arcs[r];
                     a.constraints.has_target_radius = saved.had_radius;
                     a.constraints.target_radius = saved.old_radius;
                     a.constraints.has_target_radius_b = saved.had_radius_b;
@@ -1640,7 +1646,7 @@ impl EditorApp {
             }
             None => {}
         }
-        self.sketch.points.remove(drag_pt);
+        self.sketch.get_mut().points.remove(drag_pt);
     }
 
 
@@ -1653,7 +1659,7 @@ impl EditorApp {
         // Roll back the auto-anchor hack before remove_drag_apparatus
         // so the apparatus pop()s hit the right vec entries.
         if let Some(state) = self.drag_auto_anchors.take() {
-            self.sketch.remove_drag_auto_anchors(state);
+            self.sketch.get_mut().remove_drag_auto_anchors(state);
         }
         if let Some(drag_pt) = self.drag_point.take() {
             let _drag_pos = self.sketch.points[drag_pt].pos.value;
@@ -1661,15 +1667,15 @@ impl EditorApp {
 
             // Remove drag apparatus and re-solve
             self.remove_drag_apparatus(drag_pt);
-            let result = self.sketch.solve();
+            let result = self.sketch.get_mut().solve();
             self.last_cost = result.end_cost;
 
             // If cost is much worse than pre-drag, revert to pre-drag state
             if self.last_cost > self.drag_saved_cost + 1e-3
                 && let Some(snap) = self.drag_saved_snapshot.take()
                     && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
-                        self.sketch = restored;
-                        let result = self.sketch.solve();
+                        self.sketch = restored.into();
+                        let result = self.sketch.get_mut().solve();
                         self.last_cost = result.end_cost;
                     }
             self.drag_saved_snapshot = None;
@@ -1846,7 +1852,7 @@ impl EditorApp {
                 sketch.assign_constraint_names();
                 let result = sketch.solve();
                 self.last_cost = result.end_cost;
-                self.sketch = sketch;
+                self.sketch = sketch.into();
                 self.selection.clear();
                 self.history = History::new(&self.sketch);
                 self.line_draw = None;
@@ -1864,8 +1870,8 @@ impl EditorApp {
     /// Recompute cached cost from the current sketch state.
     pub fn update_cost(&mut self) {
         let mut params = Vec::new();
-        self.sketch.serialize(&mut params);
-        self.last_cost = self.sketch.calc_cost(&params);
+        self.sketch.get_mut().serialize(&mut params);
+        self.last_cost = self.sketch.get_mut().calc_cost(&params);
     }
 
     /// Check if background DOF computation finished, update display.
@@ -1881,7 +1887,7 @@ impl EditorApp {
             // produced by the rect tool a moment earlier.
             if self.sketch.cached_dof.is_none() {
                 self.dof_display = Some(dof);
-                self.sketch.cached_dof = Some(dof);
+                self.sketch.get_mut().cached_dof = Some(dof);
             }
         }
     }
@@ -1917,7 +1923,7 @@ impl EditorApp {
         let empty_sketch = Sketch::new();
         let empty_history = arael_sketch_backend::history::History::new(&empty_sketch);
         let mut ctx = arael_sketch_backend::commands::CommandContext {
-            sketch: std::mem::replace(&mut self.sketch, empty_sketch),
+            sketch: std::mem::replace(&mut self.sketch, empty_sketch.into()),
             history: std::mem::replace(&mut self.history, empty_history),
             selection: std::mem::take(&mut self.selection),
             session_vars: std::mem::take(&mut self.session_vars),
@@ -2021,7 +2027,7 @@ impl EditorApp {
         let empty_sketch = Sketch::new();
         let empty_history = arael_sketch_backend::history::History::new(&empty_sketch);
         let mut ctx = arael_sketch_backend::commands::CommandContext {
-            sketch: std::mem::replace(&mut self.sketch, empty_sketch),
+            sketch: std::mem::replace(&mut self.sketch, empty_sketch.into()),
             history: std::mem::replace(&mut self.history, empty_history),
             selection: std::mem::take(&mut self.selection),
             session_vars: std::mem::take(&mut self.session_vars),
@@ -2081,7 +2087,7 @@ impl EditorApp {
 
         if action.is_constraint_action() {
             match arael_sketch_backend::commands::validate_and_apply_constraint(
-                &mut self.sketch, &action, false)
+                self.sketch.get_mut(), &action, false)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -2095,8 +2101,8 @@ impl EditorApp {
                 }
             }
         } else {
-            created = action.apply(&mut self.sketch);
-            self.sketch.dedup_constraints();
+            created = action.apply(self.sketch.get_mut());
+            self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
         }
         self.compute_dof_async();
@@ -2110,18 +2116,18 @@ impl EditorApp {
         let snapshot = bincode::serialize(&self.sketch).ok();
         let old_cost = {
             let mut params = Vec::new();
-            self.sketch.serialize(&mut params);
-            self.sketch.calc_cost(&params)
+            self.sketch.get_mut().serialize(&mut params);
+            self.sketch.get_mut().calc_cost(&params)
         };
         self.begin_group();
         self.exec(action);
-        self.sketch.update_expr_dim_values();
-        let new_cost = self.sketch.solve().end_cost;
+        self.sketch.get_mut().update_expr_dim_values();
+        let new_cost = self.sketch.get_mut().solve().end_cost;
         self.last_cost = new_cost;
         if new_cost > old_cost + 1e-3
             && let Some(ref snap) = snapshot
-                && let Ok(restored) = bincode::deserialize(snap) {
-                    self.sketch = restored;
+                && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+                    self.sketch = restored.into();
                     self.status_error = Some("Parameter change rejected: could not satisfy all constraints".into());
                 }
     }
@@ -3162,7 +3168,7 @@ impl EditorApp {
 
         // Restore pre-fillet state so the reapply is deterministic.
         if let Ok(s) = bincode::deserialize::<Sketch>(&pre_snapshot) {
-            self.sketch = s;
+            self.sketch = s.into();
         }
         self.history.actions.truncate(history_cursor_before);
         self.history.snapshots.truncate(history_cursor_before);
@@ -3254,7 +3260,7 @@ impl EditorApp {
     pub fn cancel_pending_fillet(&mut self) {
         let Some(p) = self.fillet_pending.take() else { return; };
         if let Ok(s) = bincode::deserialize::<Sketch>(&p.pre_snapshot) {
-            self.sketch = s;
+            self.sketch = s.into();
         }
         self.history.actions.truncate(p.history_cursor_before);
         self.history.snapshots.truncate(p.history_cursor_before);
@@ -3547,7 +3553,7 @@ impl EditorApp {
         }
 
         // General case: create a helper point and constrain both selections to it
-        let helper = self.sketch.add_helper_point(pos);
+        let helper = self.sketch.get_mut().add_helper_point(pos);
         if let Some(action) = Self::coincident_action_to_point(s0, helper) {
             self.exec(action);
         }
@@ -3694,8 +3700,8 @@ impl EditorApp {
                 let others: Vec<_> = sel.iter().enumerate()
                     .filter(|&(i, _)| i != li).map(|(_, s)| s).collect();
                 if others.len() == 2 {
-                    let a = to_point(&mut self.sketch, others[0]);
-                    let c = to_point(&mut self.sketch, others[1]);
+                    let a = to_point(self.sketch.get_mut(), others[0]);
+                    let c = to_point(self.sketch.get_mut(), others[1]);
                     if let (Some(a), Some(c)) = (a, c) {
                         self.exec(Action::ApplySymmetryPP { a, line, c });
                     }
@@ -4367,7 +4373,7 @@ impl EditorApp {
             _ => {
                 // Point, LineP1/P2, ArcCenter/Start/End: create helper + bridge + coincident
                 let hp_pos = pos;
-                let hp = self.sketch.add_helper_point(hp_pos);
+                let hp = self.sketch.get_mut().add_helper_point(hp_pos);
                 match which {
                     ArcPoint::Center => self.exec(Action::ApplyCoincidentArcCenter { point: hp, arc }),
                     ArcPoint::Start => self.exec(Action::ApplyCoincidentArcStart { point: hp, arc }),
@@ -5089,7 +5095,7 @@ fn main() -> eframe::Result {
     };
 
     if verbose {
-        app.sketch.verbose = true;
+        app.sketch.get_mut().verbose = true;
     }
     if echo_stdout {
         app.echo_stdout = true;
