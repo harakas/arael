@@ -292,11 +292,16 @@ pub struct SketchCell {
     /// sketch that arrives by load or undo has no derived state at all.
     #[serde(skip)]
     prepared_gen: Option<u64>,
+    /// A warm solving context and the generation it was built for. Holding it
+    /// across solves reuses the ordering and symbolic factorization; the
+    /// generation is what says the structure it learned still stands.
+    #[serde(skip)]
+    session: Option<(u64, arael::simple_lm::LmSession<f64, arael::simple_lm::SparseFaer<f64>>)>,
 }
 
 impl SketchCell {
     pub fn new(sketch: Sketch) -> Self {
-        SketchCell { sketch, prepared_gen: None }
+        SketchCell { sketch, prepared_gen: None, session: None }
     }
 
     /// Read access. Prefer the deref -- this is for where inference needs it.
@@ -324,11 +329,21 @@ impl SketchCell {
     /// bump the generation, and the derived state is rebuilt only when the
     /// structure has actually moved. Solving repeatedly is what a drag does.
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
-        if self.prepared_gen != Some(self.sketch.structure_gen) {
+        let cur = self.sketch.structure_gen;
+        if self.prepared_gen != Some(cur) {
             self.sketch.prepare_derived();
-            self.prepared_gen = Some(self.sketch.structure_gen);
+            self.prepared_gen = Some(cur);
         }
-        self.mutate_values(|s| s.solve_prepared())
+        // A session that learned a different structure is not reusable.
+        if self.session.as_ref().map(|(g, _)| *g) != Some(cur) {
+            self.session = Some((
+                cur,
+                arael::simple_lm::LmSession::new(arael::simple_lm::SparseFaer::new()),
+            ));
+        }
+        let SketchCell { sketch, session, .. } = self;
+        let sess = session.as_mut().map(|(_, s)| s);
+        sketch.solve_prepared_with(sess)
     }
 
     /// Take the sketch out, discarding the cell.
@@ -346,7 +361,7 @@ impl std::ops::Deref for SketchCell {
 
 impl From<Sketch> for SketchCell {
     fn from(sketch: Sketch) -> Self {
-        SketchCell { sketch, prepared_gen: None }
+        SketchCell { sketch, prepared_gen: None, session: None }
     }
 }
 
@@ -2918,6 +2933,21 @@ impl Sketch {
     /// Solve without refreshing the derived state first. Only correct when the
     /// caller knows it is current -- [`SketchCell::solve`] does.
     pub fn solve_prepared(&mut self) -> arael::simple_lm::LmResult<f64> {
+        self.solve_prepared_with(None)
+    }
+
+    /// The same, through a warm [`LmSession`](arael::simple_lm::LmSession)
+    /// when one is supplied: the sparsity pattern, ordering and symbolic
+    /// factorization are reused instead of rebuilt. The session must have been
+    /// built for THIS structure -- [`SketchCell::solve`] keys one on the
+    /// structural generation, which is what makes that safe.
+    ///
+    /// The graduated stages share it: they scale the residuals, which changes
+    /// values and not the pattern.
+    pub fn solve_prepared_with(
+        &mut self,
+        mut session: Option<&mut arael::simple_lm::LmSession<f64, arael::simple_lm::SparseFaer<f64>>>,
+    ) -> arael::simple_lm::LmResult<f64> {
         use arael::simple_lm::LmProblem;
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
@@ -2988,8 +3018,12 @@ impl Sketch {
                 ..Default::default()
             };
             let stage_result = if n >= 64 {
-                arael::simple_lm::solve_sparse(&params, self, &config)
+                match session.as_deref_mut() {
+                    Some(sess) => sess.solve_x0(&params, self, &config),
+                    None => arael::simple_lm::solve_sparse(&params, self, &config),
+                }
             } else {
+                // The dense route analyses nothing, so a session buys nothing.
                 arael::simple_lm::solve(&params, self, &config)
             };
             match stage_result {

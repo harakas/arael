@@ -2195,3 +2195,80 @@ fn test_list_constraints_includes_names() {
     assert!(lines.iter().any(|l| l.starts_with("C1: parallel ")),
         "expected C1: parallel ..., got {:?}", lines);
 }
+
+// A session reuses the pattern, ordering and symbolic factorization across
+// solves. None of that carries a parameter value, so a warm solve must land on
+// exactly the same numbers a cold one does -- not merely close.
+#[test]
+fn warm_session_matches_cold_bit_for_bit() {
+    use arael::simple_lm::{LmProblem, RootProblem};
+    let build = || {
+        let mut s = Sketch::new();
+        let mut prev: Option<arael::refs::Ref<Line>> = None;
+        for i in 0..40 {
+            let x = i as f64;
+            let l = s.add_line(vect2d::new(x, 0.0), vect2d::new(x + 1.0, 0.2));
+            if let Some(p) = prev {
+                s.coincident_ll21.push(CoincidentLL21 {
+                    a: p, b: l, nid: 0, cid: 0,
+                    hb: arael::model::CrossBlock::new(),
+                });
+            }
+            s.lines[l].constraints.has_length = true;
+            s.lines[l].constraints.length = 1.0;
+            prev = Some(l);
+        }
+        s
+    };
+
+    // Cold: a fresh solve every frame, no session.
+    let mut cold = build();
+    for k in 0..6 {
+        let r = cold.lines.last_ref().unwrap();
+        cold.lines[r].p2.value.y += 0.01 * (k + 1) as f64;
+        cold.solve();
+    }
+    let mut cold_params = Vec::new();
+    cold.serialize(&mut cold_params);
+
+    // Warm: the same frames through a cell, which keeps one session alive
+    // because nothing structural happens.
+    let mut warm = SketchCell::new(build());
+    for k in 0..6 {
+        let r = warm.lines.last_ref().unwrap();
+        warm.mutate_values(|s| s.lines[r].p2.value.y += 0.01 * (k + 1) as f64);
+        warm.solve();
+    }
+    let mut warm_params = Vec::new();
+    warm.mutate_values(|s| s.serialize(&mut warm_params));
+
+    assert_eq!(cold_params.len(), warm_params.len());
+    for (i, (c, w)) in cold_params.iter().zip(&warm_params).enumerate() {
+        assert_eq!(c.to_bits(), w.to_bits(), "param {i}: cold {c} warm {w}");
+    }
+}
+
+// A structural change must retire the session: the pattern it learned no
+// longer describes the problem.
+#[test]
+fn structural_change_retires_the_session() {
+    let mut cell = SketchCell::new(Sketch::new());
+    let l0 = cell.get_mut().add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    cell.get_mut().lines[l0].constraints.has_length = true;
+    cell.get_mut().lines[l0].constraints.length = 5.0;
+    cell.solve();
+    let before = cell.structure_gen();
+
+    // Adding a line is structural, so the generation moves and the next solve
+    // runs cold rather than through a stale pattern.
+    let l1 = cell.get_mut().add_line(vect2d::new(3.0, 0.0), vect2d::new(6.0, 1.0));
+    cell.get_mut().lines[l1].constraints.has_length = true;
+    cell.get_mut().lines[l1].constraints.length = 4.0;
+    assert!(cell.structure_gen() > before, "adding a line must move the generation");
+    let r = cell.solve();
+    assert!(r.end_cost < 1e-6, "solve after a structural change: cost {}", r.end_cost);
+
+    let len = |a: vect2d, b: vect2d| ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    let d1 = len(cell.lines[l1].p1.value, cell.lines[l1].p2.value);
+    assert!((d1 - 4.0).abs() < 1e-4, "second line length {d1}");
+}
