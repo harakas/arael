@@ -26,6 +26,12 @@ parking-garage). arael is compared against:
   its rows back -- the harness runs and validates it exactly as it does
   the others.
 
+[apex-solver](https://crates.io/crates/apex-solver) 1.4.0 was evaluated
+and excluded: its SE3 between-factor Jacobian does not match finite
+differences of its own residual, and its LM accepts cost-increasing
+steps, so on the weighted 3D problems it terminates away from the
+optimum and its numbers are not comparable.
+
 ## Datasets
 
 Vendored in `datasets/` (see `datasets/README.md` for provenance and
