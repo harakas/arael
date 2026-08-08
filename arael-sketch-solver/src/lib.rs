@@ -342,7 +342,7 @@ impl SketchCell {
             ));
         }
         let SketchCell { sketch, session, .. } = self;
-        let sess = session.as_mut().map(|(_, s)| s);
+        let (_, sess) = session.as_mut().expect("just ensured above");
         sketch.solve_prepared_with(sess)
     }
 
@@ -2933,7 +2933,12 @@ impl Sketch {
     /// Solve without refreshing the derived state first. Only correct when the
     /// caller knows it is current -- [`SketchCell::solve`] does.
     pub fn solve_prepared(&mut self) -> arael::simple_lm::LmResult<f64> {
-        self.solve_prepared_with(None)
+        // A session that lives just for this call. The graduated stages are
+        // three solves of one structure -- it cannot change between them --
+        // so they share the analysis instead of each paying for it. Building
+        // one is free: nothing is analyzed until the first solve.
+        let mut session = arael::simple_lm::LmSession::new(arael::simple_lm::SparseFaer::new());
+        self.solve_prepared_with(&mut session)
     }
 
     /// The same, through a warm [`LmSession`](arael::simple_lm::LmSession)
@@ -2946,7 +2951,7 @@ impl Sketch {
     /// values and not the pattern.
     pub fn solve_prepared_with(
         &mut self,
-        mut session: Option<&mut arael::simple_lm::LmSession<f64, arael::simple_lm::SparseFaer<f64>>>,
+        session: &mut arael::simple_lm::LmSession<f64, arael::simple_lm::SparseFaer<f64>>,
     ) -> arael::simple_lm::LmResult<f64> {
         use arael::simple_lm::LmProblem;
 
@@ -3017,13 +3022,13 @@ impl Sketch {
                 verbose: self.verbose,
                 ..Default::default()
             };
-            let stage_result = if n >= 64 {
-                match session.as_deref_mut() {
-                    Some(sess) => sess.solve_x0(&params, self, &config),
-                    None => arael::simple_lm::solve_sparse(&params, self, &config),
-                }
+            // The session follows the BACKEND, not a size threshold of our
+            // own: simple_lm::solve is dense only at 6 parameters or fewer and
+            // is the same sparse backend above that, so anything larger has an
+            // analysis worth keeping.
+            let stage_result = if n > 6 {
+                session.solve_x0(&params, self, &config)
             } else {
-                // The dense route analyses nothing, so a session buys nothing.
                 arael::simple_lm::solve(&params, self, &config)
             };
             match stage_result {
