@@ -44,6 +44,35 @@ use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
 
 const TIMING_DEBUG: bool = false;
 
+use std::time::Instant;
+
+struct Timer {
+    start: Instant,
+    checkpoint: Instant,
+}
+
+impl Timer {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            start: now,
+            checkpoint: now,
+        }
+    }
+
+    fn lap(&mut self) -> std::time::Duration {
+        let now = Instant::now();
+        let dur = now.duration_since(self.checkpoint);
+        self.checkpoint = now;
+        dur
+    }
+
+    fn total(&self) -> std::time::Duration {
+        let now = Instant::now();
+        now.duration_since(self.start)
+    }
+}
+
 /// Solve tracing, on for the life of the process.
 ///
 /// Global because it belongs to the session and not to the sketch: clear,
@@ -2968,7 +2997,12 @@ impl Sketch {
         &mut self,
         session: &mut arael::simple_lm::LmSession<f64, arael::simple_lm::SparseFaer<f64>>,
     ) -> arael::simple_lm::LmResult<f64> {
+        // The clock is only read under verbose: querying it per solve is
+        // waste, and std Instant panics on wasm32-unknown-unknown.
+        let mut timer = verbose().then(Timer::new);
         use arael::simple_lm::LmProblem;
+
+        let t_prel = timer.as_mut().map(Timer::lap);
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize(&mut params64);
@@ -2993,10 +3027,23 @@ impl Sketch {
         // close to the solution, then ramp up to full strength.
         let full_isigma = self.constraint_isigma;
         let graduated = start_cost > n as f64 * 1e-3;
-        let stages: &[f64] = if graduated {
-            &[0.01, 0.1, 1.0]
+        // (gradiation, cost_threshold)
+        // Per-parameter cost at which a full-strength stage is converged.
+        // The number has units: at drift_isigma 1e-3 a per-parameter cost of
+        // 1e-8 is every entity within ~0.1 units of where it sat, and at
+        // constraint_isigma 1e3 constraint violations near 1e-7 units. The
+        // early stages loosen it by strength^2 -- cost scales with the square
+        // of the residual weight, so each stage's threshold means the same
+        // geometric accuracy.
+        let base_cost = 1e-8;
+        let stages: &[(f64, f64)] = if graduated {
+            &[
+              (0.01, n as f64 * base_cost * 1e4),
+              (0.1, n as f64 * base_cost * 1e2),
+              (1.0, n as f64 * base_cost * 1e0)
+            ]
         } else {
-            &[1.0]
+            &[(1.0, n as f64 * base_cost)]
         };
 
         let mut total_iters = 0usize;
@@ -3015,25 +3062,30 @@ impl Sketch {
             solver: None,
         };
 
-        for &scale in stages {
+        let t_prep = timer.as_mut().map(Timer::lap);
+
+        for (scale, cost_threshold) in stages {
             self.constraint_isigma = full_isigma * scale;
 
             let mut params = std::vec::Vec::new();
             self.serialize(&mut params);
-            let cost = self.calc_cost(&params);
 
-            let lambda = if cost > 1.0 {
-                (cost * 1e-6).clamp(1e-4, 1.0)
-            } else {
-                1e-6
-            };
+            // Start at the ladder's floor and let rejections raise lambda.
+            // Pre-damping by distance from the solution was the old behavior,
+            // and it over-damped exactly the solves that needed full
+            // Gauss-Newton steps: a rejection costs one factorization, a high
+            // starting lambda costs a dozen iterations of walking it back down.
+            let lambda = 1e-6;
 
             let config = arael::simple_lm::LmConfig::<f64> {
                 initial_lambda: lambda,
-                abs_precision: 1e-6,
-                rel_precision: 1e-4,
-                cost_threshold: n as f64 * 1e-6,
-                min_iters: if cost > (n as f64 * 1e-4) { 32 } else { 8 },
+                //abs_precision: 1e-6,
+                //rel_precision: 1e-4,
+                abs_precision: 0.0,
+                rel_precision: 0.0,
+                cost_threshold: *cost_threshold,
+                min_iters: 1,
+                //gradient_tolerance: Some(1e-6),
                 verbose: verbose(),
                 ..Default::default()
             };
@@ -3077,11 +3129,22 @@ impl Sketch {
             }
         }
 
+        let t_solve = timer.as_mut().map(Timer::lap);
+
         self.constraint_isigma = full_isigma;
         self.normalise_ellipse_rotations();
         self.update_expr_dim_values();
         result.iterations = total_iters;
         result.accepted_iterations = total_accepted;
+        let t_finish = timer.as_mut().map(Timer::lap);
+        if let Some(t) = &timer {
+            println!(
+                "solve end, total {:?}, final cost {}, iters {} ({} accepted): prel={:?}, prep={:?}, solve={:?}, finish={:?}",
+                t.total(), result.end_cost, result.iterations,
+                result.accepted_iterations,
+                t_prel.unwrap_or_default(), t_prep.unwrap_or_default(),
+                t_solve.unwrap_or_default(), t_finish.unwrap_or_default());
+        }
         result
     }
 

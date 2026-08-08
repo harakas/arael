@@ -1561,6 +1561,11 @@ fn test_symmetry_pp_diagonal() {
     let p0 = sketch.add_point(vect2d::new(1.0, 3.0));
     let p1 = sketch.add_point(vect2d::new(3.5, 1.5));
     let mirror = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 5.0));
+    // Hold the mirror: symmetry only says the line bisects the pair, which
+    // infinitely many lines do. Left free the solve moves it and satisfies the
+    // constraint elsewhere, and reflection across y=x is not what was asked.
+    sketch.lines[mirror].p1.optimize = false;
+    sketch.lines[mirror].p2.optimize = false;
     sketch.symmetry_pp.push(SymmetryPP {
         a: p0, c: p1, line: mirror, nid: 0, cid: 0,
         hb_ac: arael::model::CrossBlock::new(),
