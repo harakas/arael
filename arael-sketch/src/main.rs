@@ -1921,7 +1921,9 @@ impl EditorApp {
 
     #[cfg(target_arch = "wasm32")]
     pub fn compute_dof_async(&mut self) {
-        self.dof_display = self.sketch.dof().ok();
+        // Reading the DOF fills a cache and changes no structure, so it must
+        // not retire the derived state or the warm session.
+        self.dof_display = self.sketch.mutate_values(|s| s.dof().ok());
     }
 
     /// Create a CommandContext view of this app's state, run commands, sync back.
