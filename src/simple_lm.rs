@@ -2774,6 +2774,18 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report() });
             }
+            // Already at or below the target. The in-loop test only runs on an
+            // ACCEPTED step, so a solve that starts met never reaches it: every
+            // step is a rejection at that point, and it runs until the damping
+            // ladder gives up. Checked here, before the first attempt, and not
+            // gated on min_iters -- there is nothing for those iterations to
+            // improve.
+            if start_cost <= config.cost_threshold {
+                if let Some(s) = solve_start { timing.total = s.elapsed(); }
+                return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
+                    accepted_iterations: 0, status: LmStatus::CostThreshold, final_lambda: lambda,
+                    timing: gather.then_some(timing), solver: solver.report() });
+            }
         }
 
         // Constant across every retry at this linearization point, so it is

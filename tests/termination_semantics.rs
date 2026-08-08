@@ -975,3 +975,30 @@ fn a_backend_that_does_no_analysis_reports_none() {
     // ...and assembly still accounts for every outer iteration.
     assert_eq!(t.assembly_count, t.steps.iter().filter(|s| s.inner == 0).count());
 }
+
+// A solve that starts at or below cost_threshold has nothing to improve, and
+// must say so before the first attempt. The in-loop threshold test only runs
+// on an ACCEPTED step, which such a solve never produces: every step is a
+// rejection, so it used to run until the damping ladder gave up -- eleven
+// factorizations to discover it was already finished.
+#[test]
+fn a_solve_that_starts_below_the_threshold_stops_before_iterating() {
+    let mut c = build_chain();
+    // Converge properly first, so the next solve starts at the optimum.
+    c.solve_dense(&LmConfig { max_iters: 500, ..Default::default() }).unwrap();
+    let settled = c.solve_dense(&LmConfig { max_iters: 500, ..Default::default() }).unwrap();
+    assert!(settled.end_cost < 1e-6, "did not settle: {}", settled.end_cost);
+
+    // Ask again with a threshold the starting cost already meets.
+    let r = c.solve_dense(&LmConfig {
+        max_iters: 500,
+        min_iters: 8,
+        cost_threshold: settled.end_cost * 10.0 + 1e-12,
+        ..Default::default()
+    }).unwrap();
+
+    assert_eq!(r.iterations, 0, "iterated {} times on an already-met target", r.iterations);
+    assert_eq!(r.accepted_iterations, 0);
+    assert!(matches!(r.status, LmStatus::CostThreshold), "status {:?}", r.status);
+    assert_eq!(r.start_cost, r.end_cost);
+}
