@@ -481,7 +481,7 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> (String, 
         Some(r) => r,
         None => return (String::new(), Vec::new()),
     };
-    if sketch.verbose {
+    if arael_sketch_solver::verbose() {
         let s = &report.stats;
         eprintln!("[BLOCKER] candidates={} existing_constraints {}->{} (prune {:.3}ms) existing_rows={} rej_check={:.3}ms total={:.3}ms",
             s.candidate_rows, s.existing_before_prune, s.existing_after_prune,

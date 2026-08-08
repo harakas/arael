@@ -5101,7 +5101,7 @@ fn main() -> eframe::Result {
     };
 
     if verbose {
-        app.sketch.get_mut().verbose = true;
+        arael_sketch_solver::set_verbose(true);
     }
     if echo_stdout {
         app.echo_stdout = true;

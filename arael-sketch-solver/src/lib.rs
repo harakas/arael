@@ -43,6 +43,24 @@ use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
 
 const TIMING_DEBUG: bool = false;
+
+/// Solve tracing, on for the life of the process.
+///
+/// Global because it belongs to the session and not to the sketch: clear,
+/// undo, redo and load all replace the sketch whole, so a flag living on it
+/// is lost by whichever of them runs next. Threading it through every call
+/// that might print was the alternative, and it swamped the signatures.
+static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn solve tracing on or off.
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether solve tracing is on.
+pub fn verbose() -> bool {
+    VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
+}
 use arael::vect::vect2d;
 use arael::refs::{Ref, Arena};
 
@@ -99,8 +117,6 @@ pub struct Sketch {
     /// arc radius, and tangent projection.
     #[serde(default = "default_min_length")]
     pub min_length: f64,
-    #[serde(default)]
-    pub verbose: bool,
     // Auto-naming counters
     pub next_point_id: u32,
     pub next_line_id: u32,
@@ -524,7 +540,6 @@ impl Sketch {
             drift_isigma: 1.0 / drift_sigma,
             constraint_isigma: 1000.0, // tight constraints
             min_length: 0.0001,
-            verbose: false,
             next_point_id: 0,
             next_line_id: 0,
             next_arc_id: 0,
@@ -3019,7 +3034,7 @@ impl Sketch {
                 rel_precision: 1e-4,
                 cost_threshold: n as f64 * 1e-6,
                 min_iters: if cost > (n as f64 * 1e-4) { 32 } else { 8 },
-                verbose: self.verbose,
+                verbose: verbose(),
                 ..Default::default()
             };
             // The session follows the BACKEND, not a size threshold of our
