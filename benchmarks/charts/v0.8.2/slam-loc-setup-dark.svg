@@ -81,5 +81,5 @@
 <text x="707.0" y="205.0" font-size="10.5" fill="#ffffff">13.74 + 2.56</text>
 <text x="18" y="249" font-size="10.5" fill="#908f88">Setup is assembly, ordering and symbolic factorization: done once, reused by every later iteration. arael's band solver has almost none to do.</text>
 <text x="18" y="263" font-size="10.5" fill="#908f88">Every bar reaches its problem's common optimum, cross-validated against all systems.</text>
-<text x="18" y="277" font-size="10.5" fill="#908f88">arael factorizes the whole SLAM system under nested dissection -- on this scene it prices the Schur reduction and declines it -- and solves the localization panel with its band solver.</text>
+<text x="18" y="277" font-size="10.5" fill="#908f88">arael factorizes the whole SLAM system under nested dissection and solves the localization panel with its band solver.</text>
 </svg>

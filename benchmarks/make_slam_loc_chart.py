@@ -164,9 +164,8 @@ CHARTS = {
 FOOT = [
     ("Every bar reaches its problem's common optimum, cross-validated "
      "against all systems."),
-    ("arael factorizes the whole SLAM system under nested dissection -- on "
-     "this scene it prices the Schur reduction and declines it -- and solves "
-     "the localization panel with its band solver."),
+    ("arael factorizes the whole SLAM system under nested dissection and "
+     "solves the localization panel with its band solver."),
 ]
 
 THEMES = {
