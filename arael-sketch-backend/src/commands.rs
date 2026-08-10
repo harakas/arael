@@ -4344,7 +4344,6 @@ fn cmd_constr(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    use arael::model::{Param, CrossBlock};
     use arael::simple_lm::LmProblem;
 
     let tokens: Vec<&str> = args.split_whitespace().collect();
@@ -4354,16 +4353,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let entity_spec = tokens[0];
 
     // Resolve current position of the drag target
-    enum DragTarget {
-        Point(arael::refs::Ref<Point>),
-        LineP1(arael::refs::Ref<Line>),
-        LineP2(arael::refs::Ref<Line>),
-        LineBody(arael::refs::Ref<Line>),
-        ArcCenter(arael::refs::Ref<arael_sketch_solver::Arc>),
-        ArcStart(arael::refs::Ref<arael_sketch_solver::Arc>),
-        ArcEnd(arael::refs::Ref<arael_sketch_solver::Arc>),
-        ArcBody(arael::refs::Ref<arael_sketch_solver::Arc>),
-    }
+    use arael_sketch_solver::DragTarget;
 
     let (target, current_pos) = if let Some((ent, field)) = entity_spec.split_once('.') {
         if ent.starts_with('L') {
@@ -4414,150 +4404,26 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.sketch.get_mut().calc_cost(&params)
     };
 
-    // Create drag apparatus: helper point + coincident constraint. In soft
-    // mode (default) the helper is optimizable and carries the drag-pull
-    // attractor residual so hard constraints stay satisfied while the
-    // helper tracks the cursor; in --drag-raw mode the helper is fixed
-    // and the drag hard-pins.
-    let drag_pt = if ctx.drag_raw {
-        ctx.sketch.get_mut().add_point_fixed(target_pos)
-    } else {
-        let r = ctx.sketch.get_mut().add_helper_point(target_pos);
-        ctx.sketch.get_mut().points[r].drag_pull = DRAG_PULL_WEIGHT;
-        r
-    };
-
-    // For body drags, we need a second point or to drag center
-    let drag_pt2: Option<arael::refs::Ref<Point>>;
-    let saved_arc_locks: Option<(bool, f64, bool, f64, bool, f64, f64, bool, bool)>;
-
-    match &target {
-        DragTarget::Point(r) => {
-            ctx.sketch.get_mut().coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = None;
-            saved_arc_locks = None;
-        }
-        DragTarget::LineP1(r) => {
-            ctx.sketch.get_mut().coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = None;
-            saved_arc_locks = None;
-        }
-        DragTarget::LineP2(r) => {
-            ctx.sketch.get_mut().coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = None;
-            saved_arc_locks = None;
-        }
+    // Helper positions per target; LineBody moves both endpoints by
+    // the cursor delta.
+    let (hpos, hpos2) = match &target {
         DragTarget::LineBody(r) => {
             let offset = vect2d::new(target_pos.x - current_pos.x, target_pos.y - current_pos.y);
-            let p1_target = vect2d::new(ctx.sketch.lines[*r].p1.value.x + offset.x, ctx.sketch.lines[*r].p1.value.y + offset.y);
-            let p2_target = vect2d::new(ctx.sketch.lines[*r].p2.value.x + offset.x, ctx.sketch.lines[*r].p2.value.y + offset.y);
-            ctx.sketch.get_mut().points[drag_pt].pos = if ctx.drag_raw { Param::fixed(p1_target) } else { Param::new(p1_target) };
-            ctx.sketch.get_mut().coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
-            let dp2 = if ctx.drag_raw {
-                ctx.sketch.get_mut().add_point_fixed(p2_target)
-            } else {
-                let r = ctx.sketch.get_mut().add_helper_point(p2_target);
-                ctx.sketch.get_mut().points[r].drag_pull = DRAG_PULL_WEIGHT;
-                r
-            };
-            ctx.sketch.get_mut().coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = Some(dp2);
-            saved_arc_locks = None;
+            let l = &ctx.sketch.lines[*r];
+            (
+                vect2d::new(l.p1.value.x + offset.x, l.p1.value.y + offset.y),
+                Some(vect2d::new(l.p2.value.x + offset.x, l.p2.value.y + offset.y)),
+            )
         }
-        DragTarget::ArcCenter(r) => {
-            ctx.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = None;
-            saved_arc_locks = None;
-        }
-        DragTarget::ArcStart(r) => {
-            ctx.sketch.get_mut().coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = None;
-            saved_arc_locks = None;
-        }
-        DragTarget::ArcEnd(r) => {
-            ctx.sketch.get_mut().coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-            drag_pt2 = None;
-            saved_arc_locks = None;
-        }
-        DragTarget::ArcBody(r) => {
-            ctx.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-            // Lock radius and sweep
-            let a = &ctx.sketch.arcs[*r];
-            let locks = (
-                a.constraints.has_target_radius, a.constraints.target_radius,
-                a.constraints.has_target_radius_b, a.constraints.target_radius_b,
-                a.constraints.has_target_sweep, a.constraints.target_sweep, a.constraints.sweep_sign,
-                a.start_angle.optimize, a.end_angle.optimize,
-            );
-            let a = &mut ctx.sketch.get_mut().arcs[*r];
-            a.constraints.has_target_radius = true;
-            a.constraints.target_radius = a.radius.value;
-            if a.is_ellipse {
-                a.constraints.has_target_radius_b = true;
-                a.constraints.target_radius_b = a.radius_b.value;
-                a.rotation.optimize = false;
-            }
-            a.constraints.has_target_sweep = true;
-            // target_sweep is always the positive sweep magnitude; the
-            // sweep_sign field carries the direction. The residual is
-            // (end - start - sweep_sign*target_sweep)*radius, and for a
-            // CW arc (end < start) using a signed delta here mismatches
-            // sweep_sign and pushes the solver to shrink radius to 0
-            // to zero out the residual.
-            a.constraints.target_sweep = (a.end_angle.value - a.start_angle.value).abs();
-            a.constraints.sweep_sign = if a.ccw { 1.0 } else { -1.0 };
-            a.start_angle.optimize = false;
-            a.end_angle.optimize = false;
-            drag_pt2 = None;
-            saved_arc_locks = Some(locks);
-        }
-    }
-
-    // Auto-anchor hack: drop a hidden helper Point + coincident on
-    // every free Line/Arc endpoint for the duration of the solve.
-    // Stabilizes long-chain drags where the length residual's
-    // Jacobian is rank-deficient at perpendicular segment poses --
-    // see Sketch::add_drag_auto_anchors for the full rationale.
-    let auto_anchors = ctx.sketch.get_mut().add_drag_auto_anchors();
+        _ => (target_pos, None),
+    };
+    let pull = if ctx.drag_raw { None } else { Some(DRAG_PULL_WEIGHT) };
+    let apparatus = ctx.sketch.get_mut().install_drag(target, hpos, hpos2, pull);
 
     // Solve (drag)
     ctx.sketch.solve();
 
-    // Roll back auto-anchors before the drag apparatus so the pop()s
-    // below hit the drag-apparatus entries, not the auto-anchor ones.
-    ctx.sketch.get_mut().remove_drag_auto_anchors(auto_anchors);
-
-    // Remove apparatus
-    match &target {
-        DragTarget::Point(_) => { ctx.sketch.get_mut().coincident_pp.pop(); }
-        DragTarget::LineP1(_) => { ctx.sketch.get_mut().coincident_lp1.pop(); }
-        DragTarget::LineP2(_) => { ctx.sketch.get_mut().coincident_lp2.pop(); }
-        DragTarget::LineBody(_) => {
-            ctx.sketch.get_mut().coincident_lp1.pop();
-            ctx.sketch.get_mut().coincident_lp2.pop();
-            if let Some(dp2) = drag_pt2 { ctx.sketch.get_mut().points.remove(dp2); }
-        }
-        DragTarget::ArcCenter(_) | DragTarget::ArcBody(_) => {
-            ctx.sketch.get_mut().coincident_arc_center.pop();
-        }
-        DragTarget::ArcStart(_) => { ctx.sketch.get_mut().coincident_arc_start.pop(); }
-        DragTarget::ArcEnd(_) => { ctx.sketch.get_mut().coincident_arc_end.pop(); }
-    }
-    ctx.sketch.get_mut().points.remove(drag_pt);
-
-    // Restore arc locks
-    if let (DragTarget::ArcBody(r), Some(locks)) = (&target, saved_arc_locks) {
-        let a = &mut ctx.sketch.get_mut().arcs[*r];
-        a.constraints.has_target_radius = locks.0;
-        a.constraints.target_radius = locks.1;
-        a.constraints.has_target_radius_b = locks.2;
-        a.constraints.target_radius_b = locks.3;
-        a.constraints.has_target_sweep = locks.4;
-        a.constraints.target_sweep = locks.5;
-        a.constraints.sweep_sign = locks.6;
-        a.start_angle.optimize = locks.7;
-        a.end_angle.optimize = locks.8;
-    }
+    ctx.sketch.get_mut().remove_drag(apparatus);
 
     // Solve (relax)
     ctx.sketch.solve();

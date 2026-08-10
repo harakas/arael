@@ -38,6 +38,8 @@ pub mod expr_constraint;
 pub use expr_constraint::ExpressionConstraint;
 pub mod blocker;
 pub use blocker::{BlockerReport, analyze as analyze_blockers};
+pub mod drag;
+pub use drag::{DragApparatus, DragTarget};
 pub mod probe;
 pub mod registry;
 pub use arael::rank::RankResult;
