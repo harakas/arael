@@ -867,3 +867,16 @@ a `TripletBlock` on the Model (conventionally named `hb`). The
 [runtime_fit_demo](../examples/runtime_fit_demo.rs) walks through the
 full pattern: symbolic parse → compile-time differentiation of the
 parsed expression → use inside the `extended_compute` body.
+
+## Numeric rank and null space (`arael::rank`)
+
+`Jacobian::numeric_rank(&RankOptions)` computes the numeric rank of the
+column-normalised Jacobian and returns a `RankResult`: `rank`,
+`nullity` (the model's free directions -- DOF), and an orthonormal
+null-space basis. Small problems use a dense SVD; large ones use sparse
+shift-inverted subspace iteration, with the rank decision taken from
+the Jacobian's own singular values either way. `RankResult::reduces_rank`
+tests whether a candidate constraint row would remove a free direction
+without recomputing the rank, and `numeric_rank_warm` re-evaluates
+cheaply after value-only parameter changes. Non-finite Jacobian entries
+return an error instead of a NaN spectrum.

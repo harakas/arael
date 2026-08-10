@@ -2217,6 +2217,7 @@ pub mod unitvec;
 pub mod simple_lm;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;
+pub mod rank;
 /// Pinhole camera model (`camera<T>`, `cameraf` / `camerad`) and
 /// geometric utilities.
 pub mod geometry;
