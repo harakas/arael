@@ -184,6 +184,7 @@ pub enum Action {
         range: Option<RangeBound>,
     },
     RemoveDimension { index: usize },
+    MoveDimension { index: usize, offset: arael::vect::vect2d, text_along: f64 },
     AddUserParam { name: String, expr_str: String },
     UpdateUserParam { index: usize, name: String, expr_str: String },
     RemoveUserParam { index: usize },
@@ -272,6 +273,7 @@ impl Action {
             }
             Action::UpdateDimension { .. } => "Update dimension".into(),
             Action::RemoveDimension { .. } => "Remove dimension".into(),
+            Action::MoveDimension { .. } => "Move dimension".into(),
             Action::AddUserParam { name, .. } => format!("Add param {}", name),
             Action::UpdateUserParam { name, .. } => format!("Update param {}", name),
             Action::RemoveUserParam { .. } => "Remove param".into(),
@@ -1447,6 +1449,12 @@ impl Action {
                     }
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
+            }
+            Action::MoveDimension { index, offset, text_along } => {
+                if let Some(dim) = sketch.dimensions.get_mut(*index) {
+                    dim.offset = *offset;
+                    dim.text_along = *text_along;
+                }
             }
             Action::RemoveDimension { index } => {
                 if *index < sketch.dimensions.len() {

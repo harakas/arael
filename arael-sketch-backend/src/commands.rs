@@ -2012,11 +2012,18 @@ fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<Strin
             ctx.sketch.get_mut().serialize(&mut params);
             ctx.sketch.get_mut().calc_cost(&params)
         };
+        // Pop the probe either way; an accepted candidate is
+        // re-applied through exec so it lands in history (it used to
+        // be invisible to undo).
+        pop_tangent(ctx.sketch.get_mut(), &action);
         if new_cost <= old_cost + cost_threshold {
-            applied.push(desc);
-        } else {
-            // Pop the constraint we just pushed
-            pop_tangent(ctx.sketch.get_mut(), &action);
+            let saved = ctx.skip_dof_check;
+            ctx.skip_dof_check = true;
+            ctx.exec(action);
+            ctx.skip_dof_check = saved;
+            if ctx.status_error.take().is_none() {
+                applied.push(desc);
+            }
         }
     }
     applied
@@ -2103,10 +2110,17 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
             ctx.sketch.get_mut().serialize(&mut params);
             ctx.sketch.get_mut().calc_cost(&params)
         };
+        // See auto_tangent_line: probe popped, accepted candidates
+        // re-applied through exec for history coverage.
+        pop_tangent(ctx.sketch.get_mut(), &action);
         if new_cost <= old_cost + cost_threshold {
-            applied.push(desc);
-        } else {
-            pop_tangent(ctx.sketch.get_mut(), &action);
+            let saved = ctx.skip_dof_check;
+            ctx.skip_dof_check = true;
+            ctx.exec(action);
+            ctx.skip_dof_check = saved;
+            if ctx.status_error.take().is_none() {
+                applied.push(desc);
+            }
         }
     }
     applied
@@ -4559,6 +4573,18 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 ctx.sketch = restored.into();
                 return err("Drag failed: could not satisfy constraints");
             }
+
+    // Record the drag in history the way the GUI does -- as a full
+    // state snapshot -- so undo reverts the drag instead of eating
+    // the previous action.
+    ctx.begin_group();
+    if let Ok(snap) = bincode::serialize(&ctx.sketch) {
+        ctx.history.push(
+            Action::Drag { snapshot: snap },
+            &ctx.sketch,
+            CursorState { pos: ctx.cursor, tangent: ctx.cursor_tangent },
+        );
+    }
 
     // Report new position
     let new_pos = match &target {
@@ -7588,47 +7614,25 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
             } else { None }
         }
         "concentric" if tokens.len() >= 3 => {
-            // Concentric not in ConstraintId -- handle directly
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = ctx.sketch.concentric.len();
-            ctx.sketch.get_mut().concentric.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            if ctx.sketch.concentric.len() < before {
-                ctx.sketch.get_mut().cleanup_helper_points();
-                ctx.sketch.solve();
-                ctx.sketch.get_mut().cached_dof = None;
-                return ok(format!("Removed {} constraint", ctype));
-            }
-            return err("Constraint not found".to_string());
+            find_ab!(sketch.concentric, a, b).map(ConstraintId::Concentric)
         }
         "lock" => {
-            // Lock not in ConstraintId -- handle directly
+            // Locks are entity flags, not a ConstraintId: route through
+            // the unlock actions so undo restores them.
             let ep = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            let removed = match ep {
-                EndpointRef::Point(p) => {
-                    ctx.sketch.get_mut().points[p].constraints.has_fix_x = false;
-                    ctx.sketch.get_mut().points[p].constraints.has_fix_y = false;
-                    true
-                }
-                EndpointRef::LineP1(l) => {
-                    let val = ctx.sketch.lines[l].p1.value;
-                    ctx.sketch.get_mut().lines[l].p1 = arael::model::Param::new(val);
-                    true
-                }
-                EndpointRef::LineP2(l) => {
-                    let val = ctx.sketch.lines[l].p2.value;
-                    ctx.sketch.get_mut().lines[l].p2 = arael::model::Param::new(val);
-                    true
-                }
-                _ => false,
+            let action = match ep {
+                EndpointRef::Point(p) => Some(Action::UnlockPoint { point: p }),
+                EndpointRef::LineP1(l) => Some(Action::UnlockLineP1 { line: l }),
+                EndpointRef::LineP2(l) => Some(Action::UnlockLineP2 { line: l }),
+                EndpointRef::ArcCenter(a) => Some(Action::UnlockArcCenter { arc: a }),
+                _ => None,
             };
-            if removed {
-                ctx.sketch.get_mut().cleanup_helper_points();
-                ctx.sketch.solve();
-                ctx.sketch.get_mut().cached_dof = None;
-                return ok(format!("Removed {} constraint", ctype));
-            }
-            return err("Constraint not found".to_string());
+            let Some(action) = action else { return err("Constraint not found".to_string()); };
+            ctx.begin_group();
+            ctx.exec(action);
+            return ok(format!("Removed {} constraint", ctype));
         }
         "equal_radius" if tokens.len() >= 3 => {
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -7650,32 +7654,26 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let arc = match resolve_arc(sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                 find_point_on_arc_id(sketch, ep, arc)
             } else { None };
-            // Arc endpoints use helper points -- fall back to direct removal if not found
+            // Arc endpoints use helper points -- fall back to the
+            // helper's own point_on entry if the direct lookup missed.
             if found.is_none()
                 && let Some(p) = resolve_endpoint_as_point(&ctx.sketch, ep) {
                     if target.starts_with('L') || target.starts_with('l') {
                         let line = match resolve_line(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
-                        let before = ctx.sketch.point_on_line.len();
-                        ctx.sketch.get_mut().point_on_line.retain(|c| !(c.point == p && c.line == line));
-                        if ctx.sketch.point_on_line.len() < before {
-                            ctx.sketch.get_mut().cleanup_helper_points();
-                            ctx.sketch.solve();
-                            ctx.sketch.get_mut().cached_dof = None;
-                            return ok(format!("Removed {} constraint", ctype));
-                        }
+                        ctx.sketch.point_on_line.iter()
+                            .position(|c| c.point == p && c.line == line)
+                            .map(|i| ConstraintId::Coincident(crate::ids::CoincidentKind::PointOnLine, i))
                     } else if is_arc_name(target) || target.starts_with('a') {
                         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
-                        let before = ctx.sketch.point_on_arc.len();
-                        ctx.sketch.get_mut().point_on_arc.retain(|c| !(c.point == p && c.arc == arc));
-                        if ctx.sketch.point_on_arc.len() < before {
-                            ctx.sketch.get_mut().cleanup_helper_points();
-                            ctx.sketch.solve();
-                            ctx.sketch.get_mut().cached_dof = None;
-                            return ok(format!("Removed {} constraint", ctype));
-                        }
+                        ctx.sketch.point_on_arc.iter()
+                            .position(|c| c.point == p && c.arc == arc)
+                            .map(|i| ConstraintId::Coincident(crate::ids::CoincidentKind::PointOnArc, i))
+                    } else {
+                        None
                     }
+                } else {
+                    found
                 }
-            found
         }
         "symmetry" if tokens.len() >= 4 => {
             // Try arc-arc symmetry first
@@ -7942,21 +7940,19 @@ fn cmd_dim_pos(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let is_relative = val_str.starts_with('@');
     let val_str = val_str.strip_prefix('@').unwrap_or(val_str);
     let val = match eval_expr(&ctx.sketch, val_str) { Ok(v) => v, Err(e) => return err(e) };
+    let mut offset = ctx.sketch.dimensions[idx].offset;
+    let mut text_along = ctx.sketch.dimensions[idx].text_along;
     match field {
         "offset" => {
-            if is_relative {
-                ctx.sketch.get_mut().dimensions[idx].offset.y += val;
-            } else {
-                ctx.sketch.get_mut().dimensions[idx].offset.y = val;
-            }
+            offset.y = if is_relative { offset.y + val } else { val };
+            ctx.begin_group();
+            ctx.exec(Action::MoveDimension { index: idx, offset, text_along });
             ok(format!("{} offset = {:.4}", dim_name, ctx.sketch.dimensions[idx].offset.y))
         }
         "along" => {
-            if is_relative {
-                ctx.sketch.get_mut().dimensions[idx].text_along += val;
-            } else {
-                ctx.sketch.get_mut().dimensions[idx].text_along = val;
-            }
+            text_along = if is_relative { text_along + val } else { val };
+            ctx.begin_group();
+            ctx.exec(Action::MoveDimension { index: idx, offset, text_along });
             ok(format!("{} along = {:.4}", dim_name, ctx.sketch.dimensions[idx].text_along))
         }
         _ => err(format!("Unknown field '{}'. Use: offset, along", field)),
@@ -10223,6 +10219,40 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_history_covers_drag_dim_pos_and_relational_delete() {
+        // drag: undo restores the pre-drag position instead of
+        // undoing the previous action (drag was absent from history).
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect");
+        run_ok(&mut ctx, "drag L0.p2 5,5");
+        run_ok(&mut ctx, "undo");
+        assert_eq!(ctx.sketch.lines.refs().count(), 1, "undo of drag deleted the line");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(near(ctx.sketch.lines[r].p2.value.x, 1.0));
+
+        // dim_pos: placement is undoable.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect");
+        run_ok(&mut ctx, "length L0 1");
+        let before = ctx.sketch.dimensions[0].offset.y;
+        run_ok(&mut ctx, "dim_pos d0 offset 3");
+        assert!(near(ctx.sketch.dimensions[0].offset.y, 3.0));
+        run_ok(&mut ctx, "undo");
+        assert!(near(ctx.sketch.dimensions[0].offset.y, before), "undo must revert the placement");
+
+        // relational delete: one undoable step through DeleteConstraint.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2");
+        run_ok(&mut ctx, "add_circle 5,5 1 noconnect");
+        run_ok(&mut ctx, "concentric A0 A1");
+        assert_eq!(ctx.sketch.concentric.len(), 1);
+        run_ok(&mut ctx, "delete A0 A1 concentric");
+        assert!(ctx.sketch.concentric.is_empty());
+        run_ok(&mut ctx, "undo");
+        assert_eq!(ctx.sketch.concentric.len(), 1, "undo must restore the deleted constraint");
+    }
 
     #[test]
     fn test_flags_survive_undo_redo() {
