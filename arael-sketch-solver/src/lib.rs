@@ -38,6 +38,8 @@ pub mod expr_constraint;
 pub use expr_constraint::ExpressionConstraint;
 pub mod blocker;
 pub use blocker::{BlockerReport, analyze as analyze_blockers};
+pub mod probe;
+pub use arael::rank::RankResult;
 
 use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
@@ -2529,10 +2531,10 @@ impl Sketch {
     /// the condition number and destroys rank-detection precision at
     /// high constraint scales (observed: scale=10000 misreports DOF).
     ///
-    /// Uses nalgebra SVD for n<32, faer SVD for n>=32.
-    pub fn compute_dof(&mut self, analyze: bool) -> Result<DofResult, String> {
-        let mut timer = Timer::new();
-
+    /// Build the Jacobian the DOF machinery ranks: derived state
+    /// prepared, drift disabled during assembly, range barrier rows
+    /// stripped.
+    fn dof_jacobian(&mut self) -> (arael::model::Jacobian<f64>, usize) {
         self.prepare_expr_constraints();
         self.update_tangent_flags();
         self.update_perpendicular_flags();
@@ -2544,8 +2546,49 @@ impl Sketch {
         let mut params = Vec::new();
         self.serialize(&mut params);
         let n = params.len();
+        let mut jacobian = self.calc_jacobian(&params);
+        self.drift_isigma = saved_drift;
+        // Strip one-sided barrier rows (range dimensions, tagged
+        // label = "range") before rank detection. Their Jacobian row
+        // is zero inside the feasible band and non-zero outside, so
+        // including them would make the reported DOF swing by one as
+        // the user drags the geometry across a bound -- e.g. a rect
+        // with interval width 1..999 would show DOF 2 at width 1 and
+        // DOF 3 at width 2. The geometric DOF of the sketch is the
+        // same either way; bounds are inequality constraints that
+        // shouldn't count.
+        jacobian.rows.retain(|r| r.label != "range");
+        (jacobian, n)
+    }
+
+    /// Rank analysis of the current sketch: DOF (`nullity`) plus the
+    /// null-space basis that answers candidate-row probes (see the
+    /// probe module). The result is tied to the current parameter
+    /// layout and geometry -- structural edits invalidate it, value
+    /// drift degrades it gracefully. Updates the cached DOF.
+    pub fn rank_analysis(&mut self) -> Result<arael::rank::RankResult, String> {
+        let mut timer = Timer::new();
+        let (jacobian, n) = self.dof_jacobian();
+        let t_jac = timer.lap();
+        let opts = arael::rank::RankOptions {
+            null_hint: self.cached_dof,
+            ..Default::default()
+        };
+        let rr = jacobian.numeric_rank(&opts).map_err(|e| e.to_string())?;
+        self.cached_dof = Some(rr.nullity);
+        if timer.on() {
+            eprintln!("[RANK] m={} n={} method={:?} jacobian={:?} rank={:?} dof={}",
+                jacobian.num_residuals(), n, rr.method, t_jac, timer.lap(), rr.nullity);
+        }
+        Ok(rr)
+    }
+
+    /// Uses nalgebra SVD for n<32, faer SVD for n>=32.
+    pub fn compute_dof(&mut self, analyze: bool) -> Result<DofResult, String> {
+        let mut timer = Timer::new();
+
+        let (jacobian, n) = self.dof_jacobian();
         if n == 0 {
-            self.drift_isigma = saved_drift;
             return Ok(DofResult { dof: 0, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() });
         }
 
@@ -2562,20 +2605,7 @@ impl Sketch {
         };
 
         let t_prep = timer.lap();
-        let mut jacobian = self.calc_jacobian(&params);
-        self.drift_isigma = saved_drift;
-        // Strip one-sided barrier rows (range dimensions, tagged
-        // label = "range") before rank detection. Their Jacobian row
-        // is zero inside the feasible band and non-zero outside, so
-        // including them would make the reported DOF swing by one as
-        // the user drags the geometry across a bound -- e.g. a rect
-        // with interval width 1..999 would show DOF 2 at width 1 and
-        // DOF 3 at width 2. The geometric DOF of the sketch is the
-        // same either way; bounds are inequality constraints that
-        // shouldn't count.
-        jacobian.rows.retain(|r| r.label != "range");
         let m = jacobian.num_residuals();
-        let t_jac = timer.lap();
 
         if m == 0 {
             // No residuals: every parameter is free.
@@ -2690,8 +2720,8 @@ impl Sketch {
         };
         if timer.on() {
             let t_rank = timer.lap();
-            eprintln!("[DOF] m={} n={} analyze={} method={} prep={:?} jacobian={:?} rank={:?} total={:?} dof={}",
-                m, n, analyze, method, t_prep, t_jac, t_rank, timer.total(), result.dof);
+            eprintln!("[DOF] m={} n={} analyze={} method={} prep+jac={:?} rank={:?} total={:?} dof={}",
+                m, n, analyze, method, t_prep, t_rank, timer.total(), result.dof);
         }
         self.cached_dof = Some(result.dof);
         Ok(result)
