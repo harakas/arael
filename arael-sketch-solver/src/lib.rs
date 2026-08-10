@@ -42,34 +42,48 @@ pub use blocker::{BlockerReport, analyze as analyze_blockers};
 use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
 
-const TIMING_DEBUG: bool = false;
-
-use std::time::Instant;
-
-struct Timer {
-    start: Instant,
-    checkpoint: Instant,
+/// Wall-clock lap timer for verbose tracing. The clock is polled only
+/// when verbose() was on at creation: otherwise every method is a no-op
+/// returning `Duration::ZERO` and `on()` is false. Uses web_time, so
+/// polling is safe under wasm as well.
+pub struct Timer {
+    start: Option<web_time::Instant>,
+    checkpoint: Option<web_time::Instant>,
 }
 
 impl Timer {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            start: now,
-            checkpoint: now,
+    pub fn new() -> Self {
+        let now = verbose().then(web_time::Instant::now);
+        Self { start: now, checkpoint: now }
+    }
+
+    /// True when the timer is live; gate trace prints on this.
+    pub fn on(&self) -> bool {
+        self.start.is_some()
+    }
+
+    /// Time since the previous lap (or creation).
+    pub fn lap(&mut self) -> std::time::Duration {
+        match self.checkpoint.as_mut() {
+            Some(cp) => {
+                let now = web_time::Instant::now();
+                let dur = now.duration_since(*cp);
+                *cp = now;
+                dur
+            }
+            None => std::time::Duration::ZERO,
         }
     }
 
-    fn lap(&mut self) -> std::time::Duration {
-        let now = Instant::now();
-        let dur = now.duration_since(self.checkpoint);
-        self.checkpoint = now;
-        dur
+    /// Time since creation.
+    pub fn total(&self) -> std::time::Duration {
+        self.start.map(|s| s.elapsed()).unwrap_or(std::time::Duration::ZERO)
     }
+}
 
-    fn total(&self) -> std::time::Duration {
-        let now = Instant::now();
-        now.duration_since(self.start)
+impl Default for Timer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2349,7 +2363,7 @@ impl Sketch {
 
     fn compute_dof_eigenvalues_opt_inner(&mut self, analyze: bool, preconditioned: bool) -> Result<DofResult, String> {
         use arael::simple_lm::LmProblem;
-        let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let mut timer = Timer::new();
 
         self.update_tangent_flags();
         self.update_perpendicular_flags();
@@ -2378,12 +2392,12 @@ impl Sketch {
             Vec::new()
         };
 
-        let t_hessian = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let t_prep = timer.lap();
         let mut grad = vec![0.0f64; n];
         let mut hessian = vec![0.0f64; n * n];
         self.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
         self.drift_isigma = saved_drift;
-        let t_hessian = t_hessian.map(|t| t.elapsed());
+        let t_hessian = timer.lap();
 
         // Symmetric Jacobi preconditioning: scale by `sqrt(diag(H))`
         // which equals the Jacobian's column L2 norms. Preserves
@@ -2404,7 +2418,6 @@ impl Sketch {
         }
 
         // Determine rank via spectral gap in the lower portion of the spectrum.
-        let t_eigen = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
         let rank_from_evs = |evs: &[f64]| -> usize {
             let mut sorted: Vec<f64> = evs.iter().map(|v| v.abs()).collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -2496,12 +2509,10 @@ impl Sketch {
                 Err(e) => return Err(Self::hessian_error_msg(n, &hessian, &format!("{:?}", e))),
             }
         };
-        if TIMING_DEBUG {
-            let t_h = t_hessian.unwrap().as_secs_f64() * 1000.0;
-            let t_e = t_eigen.unwrap().elapsed().as_secs_f64() * 1000.0;
-            let t_t = t_total.unwrap().elapsed().as_secs_f64() * 1000.0;
-            eprintln!("[DOF-EIG] n={} analyze={} method={} hessian={:.3}ms eigen={:.3}ms total={:.3}ms dof={}",
-                n, analyze, method, t_h, t_e, t_t, result.dof);
+        if timer.on() {
+            let t_eigen = timer.lap();
+            eprintln!("[DOF-EIG] n={} analyze={} method={} prep={:?} hessian={:?} eigen={:?} total={:?} dof={}",
+                n, analyze, method, t_prep, t_hessian, t_eigen, timer.total(), result.dof);
         }
         Ok(result)
     }
@@ -2520,7 +2531,7 @@ impl Sketch {
     ///
     /// Uses nalgebra SVD for n<32, faer SVD for n>=32.
     pub fn compute_dof(&mut self, analyze: bool) -> Result<DofResult, String> {
-        let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let mut timer = Timer::new();
 
         self.prepare_expr_constraints();
         self.update_tangent_flags();
@@ -2550,7 +2561,7 @@ impl Sketch {
             Vec::new()
         };
 
-        let t_jac = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let t_prep = timer.lap();
         let mut jacobian = self.calc_jacobian(&params);
         self.drift_isigma = saved_drift;
         // Strip one-sided barrier rows (range dimensions, tagged
@@ -2564,7 +2575,7 @@ impl Sketch {
         // shouldn't count.
         jacobian.rows.retain(|r| r.label != "range");
         let m = jacobian.num_residuals();
-        let t_jac = t_jac.map(|t| t.elapsed());
+        let t_jac = timer.lap();
 
         if m == 0 {
             // No residuals: every parameter is free.
@@ -2583,7 +2594,6 @@ impl Sketch {
         }
 
 
-        let t_svd = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
         // Determine rank from the singular value spectrum of the
         // current-params Jacobian. The gap algorithm mirrors the old
         // eigenvalue version but operates on sigma directly: a sharp
@@ -2615,40 +2625,8 @@ impl Sketch {
         // that's left for future work. The blocker analysis uses
         // this same current-params Jacobian so its row-span check
         // agrees with the DOF check that triggered it.
-        let rank_from_svs = |svs: &[f64]| -> usize {
-            let mut sorted: Vec<f64> = svs.iter().map(|v| v.abs()).collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let max_sv = sorted.last().copied().unwrap_or(0.0);
-            let upper_bound = max_sv * 0.01;
-            // Floor near-zero sigmas at `max_sv * 1e-20` so they
-            // participate in the gap search instead of being skipped.
-            // No plausible real sigma lives below `max_sv * 1e-15`, so a
-            // floor at `1e-20` leaves 5 orders of magnitude of headroom
-            // above the floor for real rank sigmas to remain resolvable
-            // while letting the zero-to-first-real gap compete on its
-            // own merits. Multiple adjacent zeros collapse to ratio ~1
-            // against each other (both pulled to the same floor),
-            // leaving only the last-zero -> first-real transition as a
-            // huge-gap candidate -- which is exactly what identifies the
-            // rank cut.
-            let floor = max_sv * 1e-20;
-            let mut best_gap = 0.0f64;
-            let mut best_cut = 0;
-            for i in 0..sorted.len().saturating_sub(1) {
-                let lo = sorted[i].max(floor);
-                let hi = sorted[i + 1].max(floor);
-                if lo > upper_bound { break; }
-                let gap = hi / lo;
-                if gap > best_gap {
-                    best_gap = gap;
-                    best_cut = i + 1;
-                }
-            }
-            if best_gap < 1e3 {
-                best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
-            }
-            svs.len() - best_cut
-        };
+        // The gap decision itself lives in arael::rank::rank_cut; both
+        // the fast path (numeric_rank) and the analyze path below use it.
         // Column-normalise the Jacobian before running rank detection.
         // Per-parameter scale differences (angular columns with
         // `radius * isigma` entries vs length columns with `isigma`
@@ -2659,8 +2637,31 @@ impl Sketch {
         // (rank) but has a spectrum bounded by the row-space geometry,
         // where the gap algorithm is robust. Raw SVD remains available
         // via `dof singular raw` for residual-design debugging.
-        let rank = rank_from_svs(&jacobian.singular_values_column_normalised());
-        let dof = n.saturating_sub(rank);
+        let (dof, method) = if analyze {
+            // Diagnostic path: full dense spectrum, since the caller
+            // wants every eigenvalue/eigenvector anyway.
+            let mut sorted: Vec<f64> = jacobian.singular_values_column_normalised();
+            if sorted.iter().any(|v| !v.is_finite()) {
+                return Err("non-finite singular values (degenerate geometry?)".into());
+            }
+            sorted.sort_by(|a: &f64, b| a.partial_cmp(b).unwrap());
+            let (cut, _) = arael::rank::rank_cut(&sorted);
+            let rank = sorted.len() - cut;
+            (n.saturating_sub(rank), "dense svd".to_string())
+        } else {
+            let opts = arael::rank::RankOptions {
+                null_hint: self.cached_dof,
+                ..Default::default()
+            };
+            let rr = jacobian.numeric_rank(&opts).map_err(|e| e.to_string())?;
+            let method = match rr.method {
+                arael::rank::RankMethod::Dense => "dense svd".to_string(),
+                arael::rank::RankMethod::Iterative { block, grew } => {
+                    format!("subspace iteration (block={} grew={})", block, grew)
+                }
+            };
+            (rr.nullity, method)
+        };
 
         let result = if analyze {
             let svd = jacobian.svd();
@@ -2687,14 +2688,10 @@ impl Sketch {
         } else {
             DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() }
         };
-        let method = if n < 32 { "Jacobian::svd (nalgebra)" } else { "Jacobian::svd (faer)" };
-
-        if TIMING_DEBUG {
-            let t_j = t_jac.unwrap().as_secs_f64() * 1000.0;
-            let t_s = t_svd.unwrap().elapsed().as_secs_f64() * 1000.0;
-            let t_t = t_total.unwrap().elapsed().as_secs_f64() * 1000.0;
-            eprintln!("[DOF] m={} n={} analyze={} method={} jacobian={:.3}ms svd={:.3}ms total={:.3}ms dof={}",
-                m, n, analyze, method, t_j, t_s, t_t, result.dof);
+        if timer.on() {
+            let t_rank = timer.lap();
+            eprintln!("[DOF] m={} n={} analyze={} method={} prep={:?} jacobian={:?} rank={:?} total={:?} dof={}",
+                m, n, analyze, method, t_prep, t_jac, t_rank, timer.total(), result.dof);
         }
         self.cached_dof = Some(result.dof);
         Ok(result)
@@ -2997,12 +2994,10 @@ impl Sketch {
         &mut self,
         session: &mut arael::simple_lm::LmSession<f64, arael::simple_lm::SparseFaer<f64>>,
     ) -> arael::simple_lm::LmResult<f64> {
-        // The clock is only read under verbose: querying it per solve is
-        // waste, and std Instant panics on wasm32-unknown-unknown.
-        let mut timer = verbose().then(Timer::new);
+        let mut timer = Timer::new();
         use arael::simple_lm::LmProblem;
 
-        let t_prel = timer.as_mut().map(Timer::lap);
+        let t_prel = timer.lap();
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize(&mut params64);
@@ -3062,7 +3057,7 @@ impl Sketch {
             solver: None,
         };
 
-        let t_prep = timer.as_mut().map(Timer::lap);
+        let t_prep = timer.lap();
 
         for (scale, cost_threshold) in stages {
             self.constraint_isigma = full_isigma * scale;
@@ -3129,21 +3124,19 @@ impl Sketch {
             }
         }
 
-        let t_solve = timer.as_mut().map(Timer::lap);
+        let t_solve = timer.lap();
 
         self.constraint_isigma = full_isigma;
         self.normalise_ellipse_rotations();
         self.update_expr_dim_values();
         result.iterations = total_iters;
         result.accepted_iterations = total_accepted;
-        let t_finish = timer.as_mut().map(Timer::lap);
-        if let Some(t) = &timer {
+        let t_finish = timer.lap();
+        if timer.on() {
             println!(
                 "solve end, total {:?}, final cost {}, iters {} ({} accepted): prel={:?}, prep={:?}, solve={:?}, finish={:?}",
-                t.total(), result.end_cost, result.iterations,
-                result.accepted_iterations,
-                t_prel.unwrap_or_default(), t_prep.unwrap_or_default(),
-                t_solve.unwrap_or_default(), t_finish.unwrap_or_default());
+                timer.total(), result.end_cost, result.iterations,
+                result.accepted_iterations, t_prel, t_prep, t_solve, t_finish);
         }
         result
     }
@@ -3238,6 +3231,15 @@ mod jacobian_tests {
     use super::*;
     use arael::simple_lm::LmProblem;
     use arael::vect::vect2d;
+
+    #[test]
+    fn timer_is_inert_when_verbose_off() {
+        assert!(!verbose());
+        let mut t = Timer::new();
+        assert!(!t.on());
+        assert_eq!(t.lap(), std::time::Duration::ZERO);
+        assert_eq!(t.total(), std::time::Duration::ZERO);
+    }
 
     /// Build a sketch with lines, coincident constraint, and an expression
     /// dimension, then validate Jacobian against Hessian and cost.

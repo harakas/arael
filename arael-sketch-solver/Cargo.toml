@@ -15,7 +15,7 @@ arael = { version = "0.8.3", path = ".." }
 arael-sym = { version = "0.8.3", path = "../arael-sym" }
 serde = { version = "1", features = ["derive"] }
 nalgebra = "0.33"
-faer = { version = "0.24", default-features = false, features = ["std"] }
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 web-time = "1"
 
 [dev-dependencies]
