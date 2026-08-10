@@ -2169,8 +2169,8 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let Some(line_ref) = ctx.exec(Action::AddLine { p1, p2 }).line() else {
             return err("Internal: creation action added no entity");
         };
-        if quiet { ctx.sketch.get_mut().lines[line_ref].quiet = true; }
-        if constr { ctx.sketch.get_mut().lines[line_ref].construction = true; ctx.sketch.get_mut().lines[line_ref].style = LineStyle::DashDot; }
+        if quiet { ctx.exec(Action::SetQuietLine { line: line_ref, on: true }); }
+        if constr { ctx.exec(Action::SetConstructionLine { line: line_ref, on: true }); }
         let name = ctx.sketch.lines[line_ref].name.clone();
         ctx.session_names.insert("_".into(), name.clone());
         // For multi-segment, also set _0, _1, _2, ... for multi-assignment
@@ -2460,8 +2460,8 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2513,8 +2513,8 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2569,8 +2569,8 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2624,8 +2624,8 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2695,8 +2695,8 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -2787,8 +2787,8 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -2853,8 +2853,8 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2919,8 +2919,8 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -3129,8 +3129,8 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
@@ -3207,8 +3207,8 @@ fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
@@ -4276,22 +4276,23 @@ fn cmd_quiet(ctx: &mut CommandContext, args: &str) -> CommandResult {
         else if tokens.last() == Some(&"off") { Some(false) }
         else { None };
     let names = if explicit.is_some() { &tokens[..tokens.len()-1] } else { &tokens[..] };
+    ctx.begin_group();
     let mut msgs = Vec::new();
     for name in names {
         if name.starts_with('P') {
             let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let q = explicit.unwrap_or(!ctx.sketch.points[r].quiet);
-            ctx.sketch.get_mut().points[r].quiet = q;
+            ctx.exec(Action::SetQuietPoint { point: r, on: q });
             msgs.push(format!("{}: quiet={}", name, q));
         } else if name.starts_with('L') {
             let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let q = explicit.unwrap_or(!ctx.sketch.lines[r].quiet);
-            ctx.sketch.get_mut().lines[r].quiet = q;
+            ctx.exec(Action::SetQuietLine { line: r, on: q });
             msgs.push(format!("{}: quiet={}", name, q));
         } else if is_arc_name(name) {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let q = explicit.unwrap_or(!ctx.sketch.arcs[r].quiet);
-            ctx.sketch.get_mut().arcs[r].quiet = q;
+            ctx.exec(Action::SetQuietArc { arc: r, on: q });
             msgs.push(format!("{}: quiet={}", name, q));
         } else {
             return err(format!("Unknown entity '{}'", name));
@@ -4307,20 +4308,19 @@ fn cmd_constr(ctx: &mut CommandContext, args: &str) -> CommandResult {
         else if tokens.last() == Some(&"off") { Some(false) }
         else { None };
     let names = if explicit.is_some() { &tokens[..tokens.len()-1] } else { &tokens[..] };
+    ctx.begin_group();
     let mut msgs = Vec::new();
     for name in names {
         if name.starts_with('L') {
             let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let c = explicit.unwrap_or(!ctx.sketch.lines[r].construction);
-            ctx.sketch.get_mut().lines[r].construction = c;
-            ctx.sketch.get_mut().lines[r].style = if c { LineStyle::DashDot } else { LineStyle::Solid };
-            msgs.push(format!("{}: constr={}", name, c));
+            ctx.exec(Action::SetConstructionLine { line: r, on: c });
+            msgs.push(format!("{}: construction={}", name, c));
         } else if is_arc_name(name) {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             let c = explicit.unwrap_or(!ctx.sketch.arcs[r].construction);
-            ctx.sketch.get_mut().arcs[r].construction = c;
-            ctx.sketch.get_mut().arcs[r].style = if c { LineStyle::DashDot } else { LineStyle::Solid };
-            msgs.push(format!("{}: constr={}", name, c));
+            ctx.exec(Action::SetConstructionArc { arc: r, on: c });
+            msgs.push(format!("{}: construction={}", name, c));
         } else {
             return err(format!("constr applies to lines and arcs, not '{}'", name));
         }
@@ -5398,8 +5398,8 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let Some(arc_ref) = ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm }).arc() else {
         return err("Internal: creation action added no entity");
     };
-    if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
-    if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
+    if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
+    if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor {
         ctx.cursor = Some(p2);
@@ -10223,6 +10223,31 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_flags_survive_undo_redo() {
+        // quiet/constr used to mutate the sketch after the history
+        // snapshot (or outside history entirely): undo+redo lost the
+        // flag, and undo after the standalone commands undid the
+        // wrong action.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect constr");
+        run_ok(&mut ctx, "undo");
+        assert_eq!(ctx.sketch.lines.refs().count(), 0);
+        run_ok(&mut ctx, "redo");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(ctx.sketch.lines[r].construction, "constr flag lost across undo+redo");
+
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect");
+        run_ok(&mut ctx, "quiet L0 on");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(ctx.sketch.lines[r].quiet);
+        run_ok(&mut ctx, "undo");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(!ctx.sketch.lines[r].quiet, "undo must revert the quiet flag, not the line");
+        assert_eq!(ctx.sketch.lines.refs().count(), 1, "undo of quiet must not delete the line");
+    }
 
     #[test]
     fn test_created_identity_after_slot_reuse() {

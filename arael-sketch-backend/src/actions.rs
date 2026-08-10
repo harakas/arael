@@ -158,6 +158,11 @@ pub enum Action {
     ToggleConstructionArc { arc: Ref<Arc> },
     SetStyleLine { line: Ref<Line>, style: LineStyle },
     SetStyleArc { arc: Ref<Arc>, style: LineStyle },
+    SetQuietPoint { point: Ref<Point>, on: bool },
+    SetQuietLine { line: Ref<Line>, on: bool },
+    SetQuietArc { arc: Ref<Arc>, on: bool },
+    SetConstructionLine { line: Ref<Line>, on: bool },
+    SetConstructionArc { arc: Ref<Arc>, on: bool },
     DeleteArc { arc: Ref<Arc> },
     AddDimension {
         kind: DimensionKind,
@@ -244,6 +249,8 @@ impl Action {
             Action::DeleteArc { .. } => "Delete arc".into(),
             Action::ToggleConstructionLine { .. } | Action::ToggleConstructionArc { .. } => "Toggle construction".into(),
             Action::SetStyleLine { .. } | Action::SetStyleArc { .. } => "Set style".into(),
+            Action::SetQuietPoint { .. } | Action::SetQuietLine { .. } | Action::SetQuietArc { .. } => "Set quiet".into(),
+            Action::SetConstructionLine { .. } | Action::SetConstructionArc { .. } => "Set construction".into(),
             Action::AddDimension { kind, expr, .. } => {
                 let kind_str = match kind {
                     DimensionKind::LineLength(_) => "length",
@@ -1039,6 +1046,25 @@ impl Action {
             }
             Action::SetStyleArc { arc, style } => {
                 sketch.arcs[*arc].style = *style;
+            }
+            Action::SetQuietPoint { point, on } => {
+                sketch.points[*point].quiet = *on;
+            }
+            Action::SetQuietLine { line, on } => {
+                sketch.lines[*line].quiet = *on;
+            }
+            Action::SetQuietArc { arc, on } => {
+                sketch.arcs[*arc].quiet = *on;
+            }
+            Action::SetConstructionLine { line, on } => {
+                let l = &mut sketch.lines[*line];
+                l.construction = *on;
+                l.style = if *on { LineStyle::DashDot } else { LineStyle::Solid };
+            }
+            Action::SetConstructionArc { arc, on } => {
+                let a = &mut sketch.arcs[*arc];
+                a.construction = *on;
+                a.style = if *on { LineStyle::DashDot } else { LineStyle::Solid };
             }
             Action::DeleteArc { arc } => {
                 sketch.delete_arc(*arc);
