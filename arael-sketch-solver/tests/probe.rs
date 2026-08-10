@@ -161,6 +161,42 @@ fn span_test_matches_push_and_recompute() {
     ));
 }
 
+// The GUI's background DOF worker computes the rank analysis on a
+// bincode round-tripped copy of the sketch; the returned basis must
+// answer probe rows built from the live sketch's Params. That holds
+// because serialization order is deterministic over identical
+// structure, so both assign identical parameter indices.
+#[test]
+fn rank_from_serialized_copy_answers_live_probes() {
+    let (mut s, a, b) = two_lines();
+    s.lines[a].constraints.horizontal = true;
+    s.lines[a].constraints.h_dir_sign = 1.0;
+
+    // Freshen the live sketch's parameter indices, as a solve would.
+    let mut params = Vec::new();
+    s.serialize(&mut params);
+
+    let bytes = bincode::serialize(&s).unwrap();
+    let mut copy: Sketch = bincode::deserialize(&bytes).unwrap();
+    let from_copy = copy.rank_analysis().unwrap();
+    let live = s.rank_analysis().unwrap();
+
+    assert_eq!(from_copy.nullity, live.nullity);
+    for rows in [
+        vec![probe::horizontal_row(&s.lines[a])],
+        vec![probe::vertical_row(&s.lines[a])],
+        vec![probe::perpendicular_row(&s.lines[a], &s.lines[b])],
+        probe::collinear_rows(&s.lines[a], &s.lines[b]).to_vec(),
+    ] {
+        for row in &rows {
+            assert_eq!(from_copy.reduces_rank(row), live.reduces_rank(row));
+        }
+    }
+    // And the expected verdicts themselves.
+    assert!(!from_copy.reduces_rank(&probe::horizontal_row(&s.lines[a])));
+    assert!(from_copy.reduces_rank(&probe::vertical_row(&s.lines[a])));
+}
+
 #[test]
 fn fixed_endpoints_suppress_the_hint() {
     let mut s = Sketch::new();

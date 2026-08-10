@@ -396,6 +396,7 @@ impl eframe::App for EditorApp {
                 if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked()
                     && let Some((restored, cur)) = self.history.undo() {
                         self.sketch = restored.into();
+                        self.bg_rank = None;
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
@@ -405,6 +406,7 @@ impl eframe::App for EditorApp {
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked()
                     && let Some((restored, cur)) = self.history.redo() {
                         self.sketch = restored.into();
+                        self.bg_rank = None;
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
@@ -1116,6 +1118,7 @@ impl eframe::App for EditorApp {
             if ctrl && shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
                 if let Some((restored, cur)) = self.history.redo() {
                     self.sketch = restored.into();
+                        self.bg_rank = None;
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
@@ -1125,6 +1128,7 @@ impl eframe::App for EditorApp {
             } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z))
                 && let Some((restored, cur)) = self.history.undo() {
                     self.sketch = restored.into();
+                        self.bg_rank = None;
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();

@@ -294,12 +294,19 @@ pub struct EditorApp {
     drag_auto_anchors: Option<arael_sketch_solver::DragAutoAnchorState>,
 
     // DOF (degrees of freedom) computed in background thread.
+    /// Rank analysis of the sketch as of the tagged structure
+    /// generation, delivered by the DOF worker. start_drag reuses it
+    /// when the generation still matches, so mouse-down pays nothing.
+    /// Cleared wherever the sketch is wholesale replaced (undo, redo,
+    /// load, command batches) because deserialization resets the
+    /// generation counter and stale entries could collide.
+    pub bg_rank: Option<(u64, arael_sketch_solver::RankResult)>,
     // Single worker thread reads latest sketch data from dof_input,
     // computes DOF, writes result to dof_output. Intermediate requests
     // are overwritten -- only the newest sketch state is computed.
     pub dof_display: Option<usize>,    // None = computing or unknown
-    dof_input: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
-    dof_output: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
+    dof_input: std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<u8>)>>>,
+    dof_output: std::sync::Arc<std::sync::Mutex<Option<(u64, arael_sketch_solver::RankResult)>>>,
 
     // MCP server channel (None when --mcp not used)
     #[cfg(not(target_arch = "wasm32"))]
@@ -440,6 +447,7 @@ impl EditorApp {
             flash_names: Vec::new(),
             flash_start: None,
             drag_rank: None,
+            bg_rank: None,
             box_select_start: None,
             drag_perp_already: Vec::new(),
             drag_hv_hint: None,
@@ -473,13 +481,17 @@ impl Default for EditorApp {
             std::thread::spawn(move || {
                 loop {
                     let data = input.lock().unwrap().take();
-                    if let Some(data) = data {
+                    if let Some((sgen, data)) = data {
                         if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
-                            let dof = match sketch.compute_dof(false) {
-                                Ok(r) => r.dof,
+                            // The copy is bit-identical, so its serialize
+                            // assigns the same parameter indices the live
+                            // sketch carries -- the returned basis answers
+                            // rows built from the live Params.
+                            let rr = match sketch.rank_analysis() {
+                                Ok(rr) => rr,
                                 Err(_) => { continue; }
                             };
-                            *output.lock().unwrap() = Some(dof);
+                            *output.lock().unwrap() = Some((sgen, rr));
                         }
                     } else {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1184,7 +1196,13 @@ impl EditorApp {
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
             // One rank analysis of the apparatus-free sketch; every
             // probe this gesture is a row test against its null basis.
-            self.drag_rank = self.sketch.get_mut().rank_analysis().ok();
+            // The background worker usually has it ready from the last
+            // action; recompute synchronously only when it does not.
+            let sgen = self.sketch.structure_gen();
+            self.drag_rank = match &self.bg_rank {
+                Some((g, rr)) if *g == sgen => Some(rr.clone()),
+                _ => self.sketch.get_mut().rank_analysis().ok(),
+            };
             if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
                 if !self.perp_would_reduce_dof(line, host) {
                     self.drag_perp_already.push((line.index(), host.index()));
@@ -1834,6 +1852,7 @@ impl EditorApp {
                 let result = sketch.solve();
                 self.last_cost = result.end_cost;
                 self.sketch = sketch.into();
+                self.bg_rank = None;
                 self.selection.clear();
                 self.history = History::new(&self.sketch);
                 self.line_draw = None;
@@ -1857,7 +1876,7 @@ impl EditorApp {
 
     /// Check if background DOF computation finished, update display.
     pub fn poll_dof(&mut self) {
-        if let Some(dof) = self.dof_output.lock().unwrap().take() {
+        if let Some((sgen, rr)) = self.dof_output.lock().unwrap().take() {
             // Worker results reflect whatever sketch state was in
             // dof_input when the worker picked it up. If the main
             // thread has since computed a definitive DOF inline (e.g.
@@ -1867,8 +1886,13 @@ impl EditorApp {
             // post-AddLine DOF=16 clobber the post-Horizontal DOF=4
             // produced by the rect tool a moment earlier.
             if self.sketch.cached_dof.is_none() {
-                self.dof_display = Some(dof);
-                self.sketch.get_mut().cached_dof = Some(dof);
+                self.dof_display = Some(rr.nullity);
+                // Cache write only -- must not retire the derived
+                // state or the warm session.
+                self.sketch.mutate_values(|s| s.cached_dof = Some(rr.nullity));
+            }
+            if sgen == self.sketch.structure_gen() {
+                self.bg_rank = Some((sgen, rr));
             }
         }
     }
@@ -1884,21 +1908,33 @@ impl EditorApp {
         // and overwrite the correct cached value for the loaded
         // script.
         *self.dof_output.lock().unwrap() = None;
+        let sgen = self.sketch.structure_gen();
         if let Some(d) = self.sketch.cached_dof {
             self.dof_display = Some(d);
-            return;
+            // The display is settled, but the worker still runs when
+            // the stored rank analysis is not for this generation --
+            // its basis is what start_drag reuses.
+            if matches!(&self.bg_rank, Some((g, _)) if *g == sgen) {
+                return;
+            }
+        } else {
+            self.dof_display = None;
         }
-        self.dof_display = None;
         if let Ok(data) = bincode::serialize(&self.sketch) {
-            *self.dof_input.lock().unwrap() = Some(data);
+            *self.dof_input.lock().unwrap() = Some((sgen, data));
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     pub fn compute_dof_async(&mut self) {
-        // Reading the DOF fills a cache and changes no structure, so it must
-        // not retire the derived state or the warm session.
-        self.dof_display = self.sketch.mutate_values(|s| s.dof().ok());
+        // Synchronous on wasm. Rank analysis fills a cache and changes
+        // no structure, so it must not retire the derived state or the
+        // warm session; storing the result makes the next drag start
+        // free, the same as the native background path.
+        let sgen = self.sketch.structure_gen();
+        let rr = self.sketch.mutate_values(|s| s.rank_analysis().ok());
+        self.dof_display = rr.as_ref().map(|r| r.nullity);
+        self.bg_rank = rr.map(|r| (sgen, r));
     }
 
     /// Create a CommandContext view of this app's state, run commands, sync back.
@@ -1932,6 +1968,7 @@ impl EditorApp {
         let results = arael_sketch_backend::commands::execute(&mut ctx, input);
         // Sync back
         self.sketch = ctx.sketch;
+        self.bg_rank = None;
         self.history = ctx.history;
         self.selection = ctx.selection;
         self.session_vars = ctx.session_vars;
@@ -2035,6 +2072,7 @@ impl EditorApp {
         };
         let results = arael_sketch_backend::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
+        self.bg_rank = None;
         self.history = ctx.history;
         self.selection = ctx.selection;
         self.session_vars = ctx.session_vars;
