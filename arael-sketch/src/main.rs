@@ -1647,6 +1647,39 @@ impl EditorApp {
     }
 
 
+    /// Abort an active drag without committing anything: restore the
+    /// pre-drag snapshot (taken at start_drag before the drag
+    /// apparatus existed), drop all drag state, push no history entry.
+    /// Undo, delete, load, Escape or a tool switch arriving
+    /// mid-gesture must come through here first -- running them
+    /// against the live apparatus panics on the missing drag helper
+    /// or tears real constraints out of the restored sketch.
+    pub fn cancel_drag(&mut self) {
+        if self.grab.is_none() && self.drag_point.is_none() {
+            return;
+        }
+        self.drag_snap_preview = None;
+        self.drag_rank = None;
+        self.drag_perp_already.clear();
+        self.drag_collinear_already.clear();
+        self.drag_perp_snap = None;
+        self.drag_hv_hint = None;
+        self.drag_collinear_hint = None;
+        // The snapshot predates the auto-anchors and the apparatus;
+        // restoring it removes them, so the tokens are just dropped.
+        self.drag_auto_anchors = None;
+        self.drag_point = None;
+        self.grab = None;
+        if let Some(snap) = self.drag_saved_snapshot.take()
+            && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+                self.sketch = restored.into();
+                self.bg_rank = None;
+                let result = self.sketch.solve();
+                self.last_cost = result.end_cost;
+        }
+        self.compute_dof_async();
+    }
+
     // End drag: remove temporary point and constraint, auto-snap, record action.
     // If the final cost is much worse than pre-drag, revert to pre-drag state.
     fn end_drag(&mut self, hit_threshold: f64) {
@@ -1939,6 +1972,9 @@ impl EditorApp {
 
     /// Create a CommandContext view of this app's state, run commands, sync back.
     pub fn run_commands(&mut self, input: &str) -> Vec<arael_sketch_backend::commands::CommandResult> {
+        // Commands can undo, clear or load; none of that may run
+        // against a live drag apparatus (MCP can arrive mid-gesture).
+        self.cancel_drag();
         let empty_sketch = Sketch::new();
         let empty_history = arael_sketch_backend::history::History::new(&empty_sketch);
         let mut ctx = arael_sketch_backend::commands::CommandContext {
@@ -2044,6 +2080,8 @@ impl EditorApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn run_commands_with_blocked(&mut self, input: &str, blocked: Vec<&'static str>) -> Vec<arael_sketch_backend::commands::CommandResult> {
+        // See run_commands: never run commands against a live drag.
+        self.cancel_drag();
         let empty_sketch = Sketch::new();
         let empty_history = arael_sketch_backend::history::History::new(&empty_sketch);
         let mut ctx = arael_sketch_backend::commands::CommandContext {

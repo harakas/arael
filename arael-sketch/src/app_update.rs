@@ -135,6 +135,13 @@ impl eframe::App for EditorApp {
         // Poll background DOF computation
         self.poll_dof();
 
+        // A tool switch mid-drag (keyboard shortcut or toolbar click)
+        // leaves the Select arm before the drag can end; the apparatus
+        // would stay in the sketch forever. Cancel the gesture first.
+        if self.grab.is_some() && !matches!(self.tool, crate::tools::Tool::Select) {
+            self.cancel_drag();
+        }
+
         // Keep repainting while a constraint-conflict flash is active
         // (3 flashes at 3 Hz = 1 s total). Without continuous repaint
         // the canvas would freeze between input events.
@@ -169,6 +176,7 @@ impl eframe::App for EditorApp {
         // Check for pending file load from async dialog
         let pending_json = self.pending_load.lock().unwrap().take();
         if let Some(json) = pending_json {
+            self.cancel_drag();
             self.load_from_json(&json);
         }
 
@@ -1090,11 +1098,12 @@ impl eframe::App for EditorApp {
                 self.dim_edit_index = None;
                 self.status_error = None;
                 self.tool = Tool::Select;
+                self.cancel_drag();
             }
 
             // Delete selected entities/constraints with Backspace/Delete
             // (skip when editing dimension text — Backspace edits the text field)
-            if !ctx.wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+            if self.grab.is_none() && !ctx.wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
                 let sel = self.selection.clone();
                 if !sel.is_empty() {
                     self.begin_group();
@@ -1115,7 +1124,10 @@ impl eframe::App for EditorApp {
             // Undo/redo keyboard shortcuts
             let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
             let shift = ui.input(|i| i.modifiers.shift);
-            if ctrl && shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
+            if self.grab.is_some() && ctrl && ui.input(|i| i.key_pressed(egui::Key::Z)) {
+                // Undo/redo mid-drag would restore a sketch without the
+                // drag apparatus and panic on the next drag frame.
+            } else if ctrl && shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
                 if let Some((restored, cur)) = self.history.redo() {
                     self.sketch = restored.into();
                         self.bg_rank = None;
