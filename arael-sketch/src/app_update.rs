@@ -1471,6 +1471,15 @@ impl eframe::App for EditorApp {
                         if self.grab.is_some() {
                             self.end_drag(hit_threshold);
                         }
+                        // A label drag mutated placement live; commit it
+                        // as one undoable MoveDimension.
+                        if let Some(did) = self.drag_dimension
+                            && let Some(i) = self.sketch.dimension_index_by_did(did) {
+                                let offset = self.sketch.dimensions[i].offset;
+                                let text_along = self.sketch.dimensions[i].text_along;
+                                self.begin_group();
+                                self.exec(Action::MoveDimension { did, offset, text_along });
+                        }
                         self.drag_dimension = None;
                         // Box-select completion: compute the rect in
                         // sketch coords and add every entity that sits
@@ -3003,9 +3012,10 @@ impl EditorApp {
                         kind, value: measured, expr: None, derived: false, range: Some(rb),
                     });
                     if self.sketch.dimensions.len() > n_dims_before
-                        && let Some(d) = self.sketch.get_mut().dimensions.last_mut() {
-                            d.offset = self.dim_offset;
-                            d.text_along = self.dim_text_along;
+                        && let Some(did) = self.sketch.dimensions.last().map(|d| d.did) {
+                            self.exec(Action::MoveDimension {
+                                did, offset: self.dim_offset, text_along: self.dim_text_along,
+                            });
                         }
                     success = true;
                 }
@@ -3070,9 +3080,10 @@ impl EditorApp {
                         }
                         self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived, range: None });
                         if self.sketch.dimensions.len() > n_dims_before
-                            && let Some(d) = self.sketch.get_mut().dimensions.last_mut() {
-                                d.offset = self.dim_offset;
-                                d.text_along = self.dim_text_along;
+                            && let Some(did) = self.sketch.dimensions.last().map(|d| d.did) {
+                                self.exec(Action::MoveDimension {
+                                    did, offset: self.dim_offset, text_along: self.dim_text_along,
+                                });
                             }
                         success = true;
                     } else {
@@ -3098,9 +3109,10 @@ impl EditorApp {
                                 kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived, range: None,
                             });
                             if self.sketch.dimensions.len() > n_dims_before
-                                && let Some(d) = self.sketch.get_mut().dimensions.last_mut() {
-                                    d.offset = self.dim_offset;
-                                    d.text_along = self.dim_text_along;
+                                && let Some(did) = self.sketch.dimensions.last().map(|d| d.did) {
+                                    self.exec(Action::MoveDimension {
+                                        did, offset: self.dim_offset, text_along: self.dim_text_along,
+                                    });
                                 }
                             success = true;
                         }
