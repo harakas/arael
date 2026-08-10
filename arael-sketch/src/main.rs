@@ -237,12 +237,11 @@ pub struct EditorApp {
     pub flash_start: Option<web_time::Instant>,
     /// Short-lived cache of failed `perp_would_reduce_dof` checks.
     /// On a big sketch a full DOF recompute can be tens of ms, too
-    /// much for 60 Hz drag preview. Once we've determined that a
-    /// perpendicular between a given `(line, host)` pair wouldn't
-    /// reduce DOF, skip re-checking for ~1 second so the drag
-    /// remains responsive even if the user keeps hovering near the
-    /// same perpendicular anchor.
-    pub drag_perp_fail_cache: Option<(u32, u32, web_time::Instant)>,
+    /// Rank analysis taken at drag start, before the drag apparatus
+    /// is installed -- the same sketch the release-time DOF check will
+    /// see. The auto-constraint probes test candidate rows against
+    /// its null basis (microseconds) instead of recomputing DOF.
+    pub drag_rank: Option<arael_sketch_solver::RankResult>,
     /// Classical box-select: when the user starts dragging on empty
     /// canvas (nothing grabbable at the press origin), we enter
     /// box-select mode. The start position is the press-origin in
@@ -253,9 +252,7 @@ pub struct EditorApp {
     /// perpendicular at drag-start. During drag the geometry is briefly
     /// off-axis so a rank-based re-check would spuriously report the
     /// perp as DOF-reducing; suppressing these pairs for the whole drag
-    /// avoids phantom perp hints. Checked once per drag, reused every
-    /// frame -- also saves the per-frame DOF recompute that caused the
-    /// drag to feel choppy.
+    /// avoids phantom perp hints.
     pub drag_perp_already: Vec<(u32, u32)>,
     /// Auto-horizontal / auto-vertical hint during line-endpoint drag.
     /// `(line, true)` means "snap the dragged line to horizontal on
@@ -282,10 +279,9 @@ pub struct EditorApp {
     /// count as a "connection".
     pub drag_line_endpoint_connected: bool,
     /// Pairs (line, host) already collinear at drag-start. Used the
-    /// same way as drag_perp_already: skip the hint / DOF probe for
-    /// the duration of the drag when the line is structurally already
-    /// collinear with the host, avoiding phantom hints and the
-    /// per-frame rank recompute.
+    /// same way as drag_perp_already: skip the hint for the duration
+    /// of the drag when the line is structurally already collinear
+    /// with the host, avoiding phantom hints.
     pub drag_collinear_already: Vec<(u32, u32)>,
     /// Auto-collinear hint during line-endpoint drag.
     pub drag_collinear_hint: Option<(Ref<Line>, Ref<Line>)>,
@@ -443,7 +439,7 @@ impl EditorApp {
             status_error: None,
             flash_names: Vec::new(),
             flash_start: None,
-            drag_perp_fail_cache: None,
+            drag_rank: None,
             box_select_start: None,
             drag_perp_already: Vec::new(),
             drag_hv_hint: None,
@@ -1081,80 +1077,53 @@ impl EditorApp {
     /// fall back to a single rank check. Used by auto-H/V snap gating
     /// at drag-start so a line that's already axis-locked (directly or
     /// via implicit chains) doesn't flash a redundant hint.
-    fn hv_would_reduce_dof(&mut self, line: Ref<Line>, horizontal: bool) -> bool {
+    fn hv_would_reduce_dof(&self, line: Ref<Line>, horizontal: bool) -> bool {
         let l_c = &self.sketch.lines[line].constraints;
         if horizontal && l_c.horizontal { return false; }
         if !horizontal && l_c.vertical { return false; }
+        // No rank analysis (degenerate geometry): show the hint, the
+        // release-time check stays exact.
+        let Some(rank) = &self.drag_rank else { return true; };
         let timer = Timer::new();
-        let Ok(old_dof) = self.sketch.get_mut().dof() else { return true; };
-        let saved_cached = self.sketch.cached_dof;
-        if horizontal {
-            let dx = self.sketch.lines[line].p2.value.x - self.sketch.lines[line].p1.value.x;
-            self.sketch.get_mut().lines[line].constraints.h_dir_sign = if dx >= 0.0 { 1.0 } else { -1.0 };
-            self.sketch.get_mut().lines[line].constraints.horizontal = true;
-        } else {
-            let dy = self.sketch.lines[line].p2.value.y - self.sketch.lines[line].p1.value.y;
-            self.sketch.get_mut().lines[line].constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
-            self.sketch.get_mut().lines[line].constraints.vertical = true;
-        }
-        self.sketch.get_mut().cached_dof = None;
-        let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
-        if horizontal {
-            self.sketch.get_mut().lines[line].constraints.horizontal = false;
-        } else {
-            self.sketch.get_mut().lines[line].constraints.vertical = false;
-        }
-        self.sketch.get_mut().cached_dof = saved_cached;
+        let l = &self.sketch.lines[line];
+        let row = if horizontal { probe::horizontal_row(l) } else { probe::vertical_row(l) };
+        let reduce = rank.reduces_rank(&row);
         if timer.on() {
             eprintln!("[probe] hv({}) {}: {:?} reduce={}",
-                if horizontal { "h" } else { "v" },
-                self.sketch.lines[line].name, timer.total(), new_dof < old_dof);
+                if horizontal { "h" } else { "v" }, l.name, timer.total(), reduce);
         }
-        new_dof < old_dof
+        reduce
     }
 
     /// True when adding Collinear(a, b) would reduce sketch DOF.
     /// Same pattern as perp_would_reduce_dof: temporarily push the
     /// constraint, recompute DOF, compare, restore. Used by auto-
     /// collinear hint gating at drag-start.
-    fn collinear_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
+    fn collinear_would_reduce_dof(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
         if self.has_collinear_conflict(a, b) { return false; }
+        let Some(rank) = &self.drag_rank else { return true; };
         let timer = Timer::new();
-        let Ok(old_dof) = self.sketch.get_mut().dof() else { return true; };
-        let saved_cached = self.sketch.cached_dof;
-        self.sketch.get_mut().collinear.push(Collinear {
-            a, b, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
-        });
-        self.sketch.get_mut().cached_dof = None;
-        let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
-        self.sketch.get_mut().collinear.pop();
-        self.sketch.get_mut().cached_dof = saved_cached;
+        let rows = probe::collinear_rows(&self.sketch.lines[a], &self.sketch.lines[b]);
+        let reduce = probe::any_reduces_rank(rank, &rows);
         if timer.on() {
             eprintln!("[probe] collinear {} {}: {:?} reduce={}",
                 self.sketch.lines[a].name, self.sketch.lines[b].name,
-                timer.total(), new_dof < old_dof);
+                timer.total(), reduce);
         }
-        new_dof < old_dof
+        reduce
     }
 
-    fn perp_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
+    fn perp_would_reduce_dof(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
         let key = (a.index(), b.index());
-        if let Some((ka, kb, at)) = self.drag_perp_fail_cache
-            && (ka, kb) == key
-            && at.elapsed() < std::time::Duration::from_secs(1) {
-            return false;
-        }
         // Fast path: if one line is horizontal and the other vertical
         // (or vice versa), perpendicularity is already implied by the
-        // H/V flags -- no need to run a full jacobian-rank check.
-        // During drag the geometry is briefly off-axis so the rank
-        // query can wrongly report a DOF reduction; the flags are
-        // unambiguous. Suppresses the spurious perp hint on rect
-        // corners and avoids the tens-of-ms DOF recompute per frame.
+        // H/V flags -- no need for a rank test. During drag the
+        // geometry is briefly off-axis so a rank query can wrongly
+        // report a DOF reduction; the flags are unambiguous.
+        // Suppresses the spurious perp hint on rect corners.
         let la_c = &self.sketch.lines[a].constraints;
         let lb_c = &self.sketch.lines[b].constraints;
         if (la_c.horizontal && lb_c.vertical) || (la_c.vertical && lb_c.horizontal) {
-            self.drag_perp_fail_cache = Some((key.0, key.1, web_time::Instant::now()));
             return false;
         }
         // Pre-drag snapshot: pairs that were already perpendicular
@@ -1167,38 +1136,16 @@ impl EditorApp {
                 return false;
             }
         }
+        let Some(rank) = &self.drag_rank else { return false; };
         let timer = Timer::new();
-        let old_dof = match self.sketch.get_mut().dof() { Ok(d) => d, Err(_) => return false };
-        let saved_cached = self.sketch.cached_dof;
-
-        let la = &self.sketch.lines[a];
-        let lb = &self.sketch.lines[b];
-        let dx1 = la.p2.value.x - la.p1.value.x;
-        let dy1 = la.p2.value.y - la.p1.value.y;
-        let dx2 = lb.p2.value.x - lb.p1.value.x;
-        let dy2 = lb.p2.value.y - lb.p1.value.y;
-        let cross = dx1 * dy2 - dy1 * dx2;
-        let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
-        self.sketch.get_mut().perpendicular.push(Perpendicular {
-            a, b, dir_sign, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
-        });
-        self.sketch.get_mut().cached_dof = None;
-        let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
-        self.sketch.get_mut().perpendicular.pop();
-        self.sketch.get_mut().cached_dof = saved_cached;
-
-        let result = new_dof < old_dof;
+        let row = probe::perpendicular_row(&self.sketch.lines[a], &self.sketch.lines[b]);
+        let reduce = rank.reduces_rank(&row);
         if timer.on() {
             eprintln!("[probe] perp {} {}: {:?} reduce={}",
                 self.sketch.lines[a].name, self.sketch.lines[b].name,
-                timer.total(), result);
+                timer.total(), reduce);
         }
-        if !result {
-            self.drag_perp_fail_cache = Some((key.0, key.1, web_time::Instant::now()));
-        } else {
-            self.drag_perp_fail_cache = None;
-        }
-        result
+        reduce
     }
 
     /// Add a drag helper point using the mode-appropriate Param.
@@ -1235,6 +1182,9 @@ impl EditorApp {
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let timer = Timer::new();
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
+            // One rank analysis of the apparatus-free sketch; every
+            // probe this gesture is a row test against its null basis.
+            self.drag_rank = self.sketch.get_mut().rank_analysis().ok();
             if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
                 if !self.perp_would_reduce_dof(line, host) {
                     self.drag_perp_already.push((line.index(), host.index()));
@@ -1252,7 +1202,7 @@ impl EditorApp {
             // coincident registers as a connection).
             self.drag_line_endpoint_connected = self.line_endpoint_has_connection(line, is_p1);
             if timer.on() {
-                eprintln!("[probe] start_drag {} probes total: {:?}",
+                eprintln!("[probe] start_drag {} rank + probes total: {:?}",
                     self.sketch.lines[line].name, timer.total());
             }
         }
@@ -1684,7 +1634,9 @@ impl EditorApp {
     fn end_drag(&mut self, hit_threshold: f64) {
         self.begin_group();
         self.drag_snap_preview = None;
+        self.drag_rank = None;
         self.drag_perp_already.clear();
+        self.drag_collinear_already.clear();
         // Roll back the auto-anchor hack before remove_drag_apparatus
         // so the apparatus pop()s hit the right vec entries.
         if let Some(state) = self.drag_auto_anchors.take() {
