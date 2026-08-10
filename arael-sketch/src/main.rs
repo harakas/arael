@@ -12,7 +12,7 @@ mod app_update;
 use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use eframe::egui;
-use arael::model::{Param, CrossBlock};
+use arael::model::CrossBlock;
 use arael::simple_lm::LmProblem;
 use arael::utils::rad2deg;
 use arael::vect::vect2d;
@@ -24,18 +24,6 @@ use tools::*;
 use arael_sketch_backend::{Action, History};
 use arael_sketch_backend::geometry::*;
 
-pub struct SavedArcLocks {
-    pub had_radius: bool,
-    pub old_radius: f64,
-    pub had_radius_b: bool,
-    pub old_radius_b: f64,
-    pub rotation_optimize: bool,
-    pub had_sweep: bool,
-    pub old_sweep: f64,
-    pub old_sweep_sign: f64,
-    pub start_optimize: bool,
-    pub end_optimize: bool,
-}
 // drawing module methods are accessed through impl blocks on EditorApp
 
 /// Entities involved in a constraint, for highlighting.
@@ -126,11 +114,11 @@ pub struct EditorApp {
 
     // Drag state
     pub grab: Option<GrabTarget>,
-    pub drag_point: Option<Ref<Point>>,  // temporary drag point
-    pub drag_point2: Option<Ref<Point>>, // second drag point (line body drag)
+    /// The installed drag apparatus (solver-owned helpers, bridge,
+    /// locks and anchors) for the active gesture.
+    pub drag_apparatus: Option<arael_sketch_solver::DragApparatus>,
     pub drag_offset: vect2d,             // offset from mouse to drag point
     pub drag_offset2: vect2d,            // offset for second drag point
-    pub drag_saved_arc_locks: Option<SavedArcLocks>,
     pub drag_dimension: Option<u32>,   // did of dimension being label-dragged
     /// Live midpoint snap during endpoint drag: (snap position in sketch
     /// coords, snap target). Populated every `update_drag`, cleared by
@@ -288,10 +276,6 @@ pub struct EditorApp {
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
-    /// State token for the auto-anchor hack (helper Points on every
-    /// free chain endpoint), pushed at start_drag and rolled back at
-    /// end_drag. See Sketch::add_drag_auto_anchors for the rationale.
-    drag_auto_anchors: Option<arael_sketch_solver::DragAutoAnchorState>,
 
     // DOF (degrees of freedom) computed in background thread.
     /// Rank analysis of the sketch as of the tagged structure
@@ -383,11 +367,9 @@ impl EditorApp {
             selection: Vec::new(),
             hovered: None,
             grab: None,
-            drag_point: None,
-            drag_point2: None,
+            drag_apparatus: None,
             drag_offset: vect2d::new(0.0, 0.0),
             drag_offset2: vect2d::new(0.0, 0.0),
-            drag_saved_arc_locks: None,
             drag_dimension: None,
             drag_snap_preview: None,
             drag_perp_snap: None,
@@ -459,7 +441,6 @@ impl EditorApp {
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
-            drag_auto_anchors: None,
             dof_display: None,
             dof_input: std::sync::Arc::new(std::sync::Mutex::new(None)),
             dof_output: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1060,14 +1041,6 @@ impl EditorApp {
         None
     }
 
-    /// Build the drag helper's Param. In soft-drag mode (default), the
-    /// helper is an optimizable Point so the Point drift residual pulls
-    /// it toward `pos` but hard constraints can overrule; the user sees
-    /// the sketch's relaxed state. `--drag-raw` returns a fixed Param
-    /// that pins the helper exactly at `pos` (legacy hard-pin drag).
-    fn drag_helper_param(&self, pos: vect2d) -> Param<vect2d> {
-        if self.drag_raw { Param::fixed(pos) } else { Param::new(pos) }
-    }
 
     /// Test whether adding a perpendicular constraint between `a`
     /// and `b` would reduce DOF. Used by drag preview to suppress
@@ -1160,21 +1133,6 @@ impl EditorApp {
         reduce
     }
 
-    /// Add a drag helper point using the mode-appropriate Param.
-    ///
-    /// Soft drag uses an optimizable helper point with `drag_pull > 0`
-    /// so the dedicated attractor residual tracks the cursor while hard
-    /// constraints stay satisfied. Raw drag uses `Param::fixed`, which
-    /// reproduces the old hard-pin behaviour.
-    fn add_drag_helper(&mut self, pos: vect2d) -> Ref<Point> {
-        if self.drag_raw {
-            self.sketch.get_mut().add_point_fixed(pos)
-        } else {
-            let r = self.sketch.get_mut().add_helper_point(pos);
-            self.sketch.get_mut().points[r].drag_pull = DRAG_PULL_WEIGHT;
-            r
-        }
-    }
 
     // Start dragging: create a temporary drag helper point and coincident constraint
     fn start_drag(&mut self, target: GrabTarget, mouse_pos: vect2d) {
@@ -1225,115 +1183,37 @@ impl EditorApp {
             }
         }
 
-        // Create a drag helper point at mouse position
-        let drag_pt = self.add_drag_helper(mouse_pos);
-        self.drag_point = Some(drag_pt);
-
-        // Add coincident constraint between drag point and the grabbed target
-        match target {
-            GrabTarget::Point(r) => {
-                self.sketch.get_mut().coincident_pp.push(CoincidentPP {
-                    a: drag_pt, b: r, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-            }
-            GrabTarget::LineP1(r) => {
-                self.sketch.get_mut().coincident_lp1.push(CoincidentLP1 {
-                    line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-            }
-            GrabTarget::LineP2(r) => {
-                self.sketch.get_mut().coincident_lp2.push(CoincidentLP2 {
-                    line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-            }
-            GrabTarget::ArcCenter(r) => {
-                self.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter {
-                    point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-            }
-            GrabTarget::ArcStart(r) => {
-                self.sketch.get_mut().coincident_arc_start.push(CoincidentArcStart {
-                    point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-            }
-            GrabTarget::ArcEnd(r) => {
-                self.sketch.get_mut().coincident_arc_end.push(CoincidentArcEnd {
-                    point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-            }
+        // Install the drag apparatus (helpers, bridge coincidence,
+        // ArcBody locks, chain auto-anchors) through the solver API.
+        let pull = if self.drag_raw { None } else { Some(DRAG_PULL_WEIGHT) };
+        let (drag_target, pos, pos2) = match target {
+            GrabTarget::Point(r) => (DragTarget::Point(r), mouse_pos, None),
+            GrabTarget::LineP1(r) => (DragTarget::LineP1(r), mouse_pos, None),
+            GrabTarget::LineP2(r) => (DragTarget::LineP2(r), mouse_pos, None),
+            GrabTarget::ArcCenter(r) => (DragTarget::ArcCenter(r), mouse_pos, None),
+            GrabTarget::ArcStart(r) => (DragTarget::ArcStart(r), mouse_pos, None),
+            GrabTarget::ArcEnd(r) => (DragTarget::ArcEnd(r), mouse_pos, None),
             GrabTarget::LineDrag(r) => {
-                let (p1v, p2v) = {
-                    let l = &self.sketch.lines[r];
-                    (l.p1.value, l.p2.value)
-                };
+                let p1v = self.sketch.lines[r].p1.value;
+                let p2v = self.sketch.lines[r].p2.value;
                 self.drag_offset = vect2d::new(p1v.x - mouse_pos.x, p1v.y - mouse_pos.y);
                 self.drag_offset2 = vect2d::new(p2v.x - mouse_pos.x, p2v.y - mouse_pos.y);
-                // First drag point at p1
-                let pos1 = self.drag_helper_param(p1v);
-                self.sketch.get_mut().points[drag_pt].pos = pos1;
-                self.sketch.get_mut().coincident_lp1.push(CoincidentLP1 {
-                    line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-                // Second drag point at p2
-                let drag_pt2 = self.add_drag_helper(p2v);
-                self.drag_point2 = Some(drag_pt2);
-                self.sketch.get_mut().coincident_lp2.push(CoincidentLP2 {
-                    line: r, point: drag_pt2, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
+                (DragTarget::LineBody(r), p1v, Some(p2v))
             }
             GrabTarget::ArcDrag(r) => {
                 let centre = self.sketch.arcs[r].center.value;
                 self.drag_offset = vect2d::new(centre.x - mouse_pos.x, centre.y - mouse_pos.y);
-                // Drag point at center
-                let pos_c = self.drag_helper_param(centre);
-                self.sketch.get_mut().points[drag_pt].pos = pos_c;
-                self.sketch.get_mut().coincident_arc_center.push(CoincidentArcCenter {
-                    point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
-                });
-                // Lock radius and sweep to prevent shape change
-                let a = &self.sketch.arcs[r];
-                self.drag_saved_arc_locks = Some(SavedArcLocks {
-                    had_radius: a.constraints.has_target_radius,
-                    old_radius: a.constraints.target_radius,
-                    had_radius_b: a.constraints.has_target_radius_b,
-                    old_radius_b: a.constraints.target_radius_b,
-                    rotation_optimize: a.rotation.optimize,
-                    had_sweep: a.constraints.has_target_sweep,
-                    old_sweep: a.constraints.target_sweep,
-                    old_sweep_sign: a.constraints.sweep_sign,
-                    start_optimize: a.start_angle.optimize,
-                    end_optimize: a.end_angle.optimize,
-                });
-                let a = &mut self.sketch.get_mut().arcs[r];
-                a.constraints.has_target_radius = true;
-                a.constraints.target_radius = a.radius.value;
-                if a.is_ellipse {
-                    a.constraints.has_target_radius_b = true;
-                    a.constraints.target_radius_b = a.radius_b.value;
-                    a.rotation.optimize = false;
-                }
-                a.constraints.has_target_sweep = true;
-                // target_sweep is the positive sweep magnitude; sweep_sign
-                // carries the direction. Signed delta here would mismatch
-                // sweep_sign on CW arcs and force radius to 0 to zero the
-                // residual.
-                a.constraints.target_sweep = (a.end_angle.value - a.start_angle.value).abs();
-                a.constraints.sweep_sign = if a.ccw { 1.0 } else { -1.0 };
-                a.start_angle.optimize = false;
-                a.end_angle.optimize = false;
+                (DragTarget::ArcBody(r), centre, None)
             }
-        }
+        };
+        self.drag_apparatus = Some(self.sketch.get_mut().install_drag(drag_target, pos, pos2, pull));
         self.grab = Some(target);
-        // Auto-anchor hack stabilises chain-style drags; rolled back
-        // at end_drag (and from clone snapshots in update_drag).
-        // See Sketch::add_drag_auto_anchors for the full rationale.
-        self.drag_auto_anchors = Some(self.sketch.get_mut().add_drag_auto_anchors());
     }
 
     // Update drag position and re-solve.
     // Track the best (lowest cost) clean state seen during the drag.
     fn update_drag(&mut self, mouse_pos: vect2d, hit_threshold: f64) {
-        if let Some(drag_pt) = self.drag_point {
+        if let Some(drag_pt) = self.drag_apparatus.as_ref().map(|a| a.helper) {
             let is_body_drag = matches!(self.grab, Some(GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_)));
             // Live snap preview for point-like drags: if the cursor is
             // within snap range of another entity (excluding the dragged
@@ -1541,20 +1421,17 @@ impl EditorApp {
                 // Moving the drag helper is a value change: the entities,
                 // constraints and dimensions all stand still for the whole
                 // drag, so the derived state stays valid and is not rebuilt.
-                let p1 = self.drag_helper_param(pos1);
-                self.sketch.mutate_values(|s| s.points[drag_pt].pos = p1);
-                if let Some(drag_pt2) = self.drag_point2 {
+                self.sketch.mutate_values(|s| s.move_drag_helper(drag_pt, pos1));
+                if let Some(drag_pt2) = self.drag_apparatus.as_ref().and_then(|a| a.helper2) {
                     let ref2 = self.sketch.points[drag_pt2].pos.value;
                     let pos2 = clamp(vect2d::new(mouse_pos.x + self.drag_offset2.x,
                                                   mouse_pos.y + self.drag_offset2.y), ref2);
-                    let p2 = self.drag_helper_param(pos2);
-                    self.sketch.mutate_values(|s| s.points[drag_pt2].pos = p2);
+                    self.sketch.mutate_values(|s| s.move_drag_helper(drag_pt2, pos2));
                 }
             } else {
                 let ref_pos = self.sketch.points[drag_pt].pos.value;
                 let pos = clamp(effective_pos, ref_pos);
-                let p = self.drag_helper_param(pos);
-                self.sketch.mutate_values(|s| s.points[drag_pt].pos = p);
+                self.sketch.mutate_values(|s| s.move_drag_helper(drag_pt, pos));
             }
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
@@ -1563,88 +1440,19 @@ impl EditorApp {
             if self.last_cost < self.drag_saved_cost + 1e-3
                 && let Ok(snap) = bincode::serialize(&self.sketch)
                     && let Ok(mut clean) = bincode::deserialize::<Sketch>(&snap) {
-                        // Auto-anchors are present in the live sketch
-                        // (and therefore in the serialized clone).
-                        // Roll them back from the clone first so the
-                        // drag-apparatus pop()s below hit the right
-                        // vec entries.
-                        if let Some(state) = self.drag_auto_anchors.clone() {
-                            clean.remove_drag_auto_anchors(state);
+                        // One call takes the anchors, the bridge
+                        // constraints, the helpers and the arc locks
+                        // out of the clone -- refs survive the bincode
+                        // round trip.
+                        if let Some(app) = &self.drag_apparatus {
+                            clean.remove_drag(app);
                         }
-                        // Remove drag constraint from clone
-                        match self.grab {
-                            Some(GrabTarget::Point(_)) => { clean.coincident_pp.pop(); }
-                            Some(GrabTarget::LineP1(_)) => { clean.coincident_lp1.pop(); }
-                            Some(GrabTarget::LineP2(_)) => { clean.coincident_lp2.pop(); }
-                            Some(GrabTarget::ArcCenter(_)) => { clean.coincident_arc_center.pop(); }
-                            Some(GrabTarget::ArcStart(_)) => { clean.coincident_arc_start.pop(); }
-                            Some(GrabTarget::ArcEnd(_)) => { clean.coincident_arc_end.pop(); }
-                            Some(GrabTarget::LineDrag(_)) => {
-                                clean.coincident_lp1.pop();
-                                clean.coincident_lp2.pop();
-                                if let Some(dp2) = self.drag_point2 { clean.points.remove(dp2); }
-                            }
-                            Some(GrabTarget::ArcDrag(r)) => {
-                                clean.coincident_arc_center.pop();
-                                if let Some(ref saved) = self.drag_saved_arc_locks {
-                                    let a = &mut clean.arcs[r];
-                                    a.constraints.has_target_radius = saved.had_radius;
-                                    a.constraints.target_radius = saved.old_radius;
-                                    a.constraints.has_target_radius_b = saved.had_radius_b;
-                                    a.constraints.target_radius_b = saved.old_radius_b;
-                                    a.rotation.optimize = saved.rotation_optimize;
-                                    a.constraints.has_target_sweep = saved.had_sweep;
-                                    a.constraints.target_sweep = saved.old_sweep;
-                                    a.constraints.sweep_sign = saved.old_sweep_sign;
-                                    a.start_angle.optimize = saved.start_optimize;
-                                    a.end_angle.optimize = saved.end_optimize;
-                                }
-                            }
-                            None => {}
-                        }
-                        clean.points.remove(drag_pt);
                         self.drag_saved_cost = self.last_cost;
                         self.drag_saved_snapshot = bincode::serialize(&clean).ok();
                     }
         }
     }
 
-    // Remove the drag apparatus (temp point + constraint) from the sketch.
-    fn remove_drag_apparatus(&mut self, drag_pt: arael::refs::Ref<Point>) {
-        match self.grab {
-            Some(GrabTarget::Point(_)) => { self.sketch.get_mut().coincident_pp.pop(); }
-            Some(GrabTarget::LineP1(_)) => { self.sketch.get_mut().coincident_lp1.pop(); }
-            Some(GrabTarget::LineP2(_)) => { self.sketch.get_mut().coincident_lp2.pop(); }
-            Some(GrabTarget::ArcCenter(_)) => { self.sketch.get_mut().coincident_arc_center.pop(); }
-            Some(GrabTarget::ArcStart(_)) => { self.sketch.get_mut().coincident_arc_start.pop(); }
-            Some(GrabTarget::ArcEnd(_)) => { self.sketch.get_mut().coincident_arc_end.pop(); }
-            Some(GrabTarget::LineDrag(_)) => {
-                self.sketch.get_mut().coincident_lp1.pop();
-                self.sketch.get_mut().coincident_lp2.pop();
-                if let Some(dp2) = self.drag_point2.take() {
-                    self.sketch.get_mut().points.remove(dp2);
-                }
-            }
-            Some(GrabTarget::ArcDrag(r)) => {
-                self.sketch.get_mut().coincident_arc_center.pop();
-                if let Some(saved) = self.drag_saved_arc_locks.take() {
-                    let a = &mut self.sketch.get_mut().arcs[r];
-                    a.constraints.has_target_radius = saved.had_radius;
-                    a.constraints.target_radius = saved.old_radius;
-                    a.constraints.has_target_radius_b = saved.had_radius_b;
-                    a.constraints.target_radius_b = saved.old_radius_b;
-                    a.rotation.optimize = saved.rotation_optimize;
-                    a.constraints.has_target_sweep = saved.had_sweep;
-                    a.constraints.target_sweep = saved.old_sweep;
-                    a.constraints.sweep_sign = saved.old_sweep_sign;
-                    a.start_angle.optimize = saved.start_optimize;
-                    a.end_angle.optimize = saved.end_optimize;
-                }
-            }
-            None => {}
-        }
-        self.sketch.get_mut().points.remove(drag_pt);
-    }
 
 
     /// Abort an active drag without committing anything: restore the
@@ -1655,7 +1463,7 @@ impl EditorApp {
     /// against the live apparatus panics on the missing drag helper
     /// or tears real constraints out of the restored sketch.
     pub fn cancel_drag(&mut self) {
-        if self.grab.is_none() && self.drag_point.is_none() {
+        if self.grab.is_none() && self.drag_apparatus.is_none() {
             return;
         }
         self.drag_snap_preview = None;
@@ -1665,10 +1473,9 @@ impl EditorApp {
         self.drag_perp_snap = None;
         self.drag_hv_hint = None;
         self.drag_collinear_hint = None;
-        // The snapshot predates the auto-anchors and the apparatus;
-        // restoring it removes them, so the tokens are just dropped.
-        self.drag_auto_anchors = None;
-        self.drag_point = None;
+        // The snapshot predates the apparatus; restoring it removes
+        // everything the gesture added, so the token is just dropped.
+        self.drag_apparatus = None;
         self.grab = None;
         if let Some(snap) = self.drag_saved_snapshot.take()
             && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
@@ -1688,17 +1495,11 @@ impl EditorApp {
         self.drag_rank = None;
         self.drag_perp_already.clear();
         self.drag_collinear_already.clear();
-        // Roll back the auto-anchor hack before remove_drag_apparatus
-        // so the apparatus pop()s hit the right vec entries.
-        if let Some(state) = self.drag_auto_anchors.take() {
-            self.sketch.get_mut().remove_drag_auto_anchors(state);
-        }
-        if let Some(drag_pt) = self.drag_point.take() {
-            let _drag_pos = self.sketch.points[drag_pt].pos.value;
+        if let Some(app) = self.drag_apparatus.take() {
             let grab = self.grab;
 
-            // Remove drag apparatus and re-solve
-            self.remove_drag_apparatus(drag_pt);
+            // Remove drag apparatus (anchors included) and re-solve
+            self.sketch.get_mut().remove_drag(&app);
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
 
@@ -4230,7 +4031,7 @@ impl EditorApp {
 
         // Standalone points (skip helpers)
         for r in self.sketch.points.refs() {
-            if self.drag_point == Some(r) { continue; }
+            if self.drag_apparatus.as_ref().is_some_and(|a| a.helper == r || a.helper2 == Some(r)) { continue; }
             let p = &self.sketch.points[r];
             if p.helper { continue; }
             let d = ((p.pos.value.x - sketch_pos.x).powi(2)

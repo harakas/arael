@@ -4423,7 +4423,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // Solve (drag)
     ctx.sketch.solve();
 
-    ctx.sketch.get_mut().remove_drag(apparatus);
+    ctx.sketch.get_mut().remove_drag(&apparatus);
 
     // Solve (relax)
     ctx.sketch.solve();

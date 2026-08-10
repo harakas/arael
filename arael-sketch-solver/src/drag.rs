@@ -57,7 +57,7 @@ pub struct DragApparatus {
     /// The p2-side helper of a LineBody drag.
     pub helper2: Option<Ref<Point>>,
     arc_locks: Option<(Ref<Arc>, ArcLocks)>,
-    anchors: Option<DragAutoAnchorState>,
+    anchors: DragAutoAnchorState,
 }
 
 impl Sketch {
@@ -164,20 +164,19 @@ impl Sketch {
                 a.end_angle.optimize = false;
             }
         }
-        // Chain auto-anchors last: their rollback is length-based and
-        // must run first on removal, before the vec contents change.
-        let anchors = Some(self.add_drag_auto_anchors());
+        // Chain auto-anchors last; removal takes them down first.
+        let anchors = self.add_drag_auto_anchors();
         DragApparatus { target, helper, helper2, arc_locks, anchors }
     }
 
-    /// Remove the apparatus: anchors first (their rollback is
-    /// length-sensitive), then every constraint referencing the
-    /// helpers -- by identity, via the registry -- then the helpers
-    /// themselves and the arc shape locks.
-    pub fn remove_drag(&mut self, mut apparatus: DragApparatus) {
-        if let Some(state) = apparatus.anchors.take() {
-            self.remove_drag_auto_anchors(state);
-        }
+    /// Remove the apparatus: anchors first, then every constraint
+    /// referencing the helpers -- by identity, via the registry --
+    /// then the helpers themselves and the arc shape locks. Borrows
+    /// the token: the same apparatus can be removed from a
+    /// bincode-identical clone of the sketch (refs survive the round
+    /// trip), which the GUI's best-cost snapshot path relies on.
+    pub fn remove_drag(&mut self, apparatus: &DragApparatus) {
+        self.remove_drag_auto_anchors(&apparatus.anchors);
         let h1 = apparatus.helper;
         let h2 = apparatus.helper2;
         self.for_each_constraint_collection(|_, _, coll| {
@@ -185,9 +184,12 @@ impl Sketch {
                 !c.references_point(h1) && !h2.is_some_and(|h| c.references_point(h))
             });
         });
-        self.points.remove(h1);
-        if let Some(h) = h2 {
-            self.points.remove(h);
+        if self.points.get(h1).is_some() {
+            self.points.remove(h1);
+        }
+        if let Some(h) = h2
+            && self.points.get(h).is_some() {
+                self.points.remove(h);
         }
         if let Some((r, locks)) = apparatus.arc_locks {
             if let Some(a) = self.arcs.get_mut(r) {

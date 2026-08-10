@@ -130,10 +130,6 @@ include!("constraints.rs");
 #[derive(Clone)]
 pub struct DragAutoAnchorState {
     helper_points: std::vec::Vec<arael::refs::Ref<Point>>,
-    coincident_lp1_len: usize,
-    coincident_lp2_len: usize,
-    coincident_arc_start_len: usize,
-    coincident_arc_end_len: usize,
 }
 
 /// Result of DOF (degrees of freedom) analysis.
@@ -2587,10 +2583,6 @@ impl Sketch {
 
         let mut state = DragAutoAnchorState {
             helper_points: std::vec::Vec::new(),
-            coincident_lp1_len: self.coincident_lp1.len(),
-            coincident_lp2_len: self.coincident_lp2.len(),
-            coincident_arc_start_len: self.coincident_arc_start.len(),
-            coincident_arc_end_len: self.coincident_arc_end.len(),
         };
 
         // Build sets of joined endpoints by walking every coincident_*
@@ -2676,13 +2668,18 @@ impl Sketch {
     }
 
     /// Roll back the auto-anchors set up by `add_drag_auto_anchors`.
-    pub fn remove_drag_auto_anchors(&mut self, state: DragAutoAnchorState) {
-        self.coincident_lp1.truncate(state.coincident_lp1_len);
-        self.coincident_lp2.truncate(state.coincident_lp2_len);
-        self.coincident_arc_start.truncate(state.coincident_arc_start_len);
-        self.coincident_arc_end.truncate(state.coincident_arc_end_len);
-        for p in state.helper_points {
-            self.points.remove(p);
+    pub fn remove_drag_auto_anchors(&mut self, state: &DragAutoAnchorState) {
+        // By identity, not truncate-to-length: anything else pushed or
+        // removed during the gesture cannot desync the rollback, and
+        // the same state can roll back a deserialized clone.
+        for p in &state.helper_points {
+            let p = *p;
+            self.for_each_constraint_collection(|_, _, coll| {
+                coll.retain_constraints(&mut |c| !c.references_point(p));
+            });
+            if self.points.get(p).is_some() {
+                self.points.remove(p);
+            }
         }
     }
 
