@@ -7975,22 +7975,10 @@ fn cmd_set_derived(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if ctx.sketch.dimensions[idx].derived {
         return ok(format!("{} is already derived", name));
     }
-    // Remove the underlying constraint
+    let did = ctx.sketch.dimensions[idx].did;
     ctx.begin_group();
-    // Use RemoveDimension logic to remove constraint, then re-add as derived
-    let dim = ctx.sketch.dimensions[idx].clone();
-    ctx.exec(Action::RemoveDimension { did: ctx.sketch.dimensions[idx].did });
-    // Re-create as derived (no constraint)
-    ctx.sketch.get_mut().dimensions.push(Dimension {
-        did: 0, // minted by assign_dimension_ids
-        kind: dim.kind, value: dim.value, offset: dim.offset, text_along: dim.text_along,
-        name: dim.name.clone(), expr_str: dim.expr_str, broken: dim.broken, derived: true,
-        range: dim.range,
-    });
-    ctx.sketch.get_mut().assign_dimension_ids();
-    ctx.sketch.solve();
-    ctx.sketch.get_mut().update_expr_dim_values();
-    ok(format!("{} is now derived (reference only)", name))
+    ctx.exec(Action::ConvertDimension { did, derived: true, value: None });
+    ok_or_status(ctx, format!("{} is now derived (reference only)", name))
 }
 
 fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -8014,27 +8002,22 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
             (v, Some(val_str.to_string()))
         }
     } else {
-        (ctx.sketch.dimensions[idx].value, ctx.sketch.dimensions[idx].expr_str.clone())
+        (ctx.sketch.dimensions[idx].value, None)
     };
-    // Remove derived dim and re-add as driven
-    let dim = ctx.sketch.dimensions[idx].clone();
-    ctx.sketch.get_mut().dimensions.remove(idx);
+    let did = ctx.sketch.dimensions[idx].did;
     ctx.begin_group();
-    ctx.exec(Action::AddDimension {
-        kind: dim.kind, value: new_value, expr: new_expr.clone(), derived: false, range: None,
-    });
-    // Restore visual properties
-    if let Some(d) = ctx.sketch.get_mut().dimensions.last_mut() {
-        d.offset = dim.offset;
-        d.text_along = dim.text_along;
-        d.name = dim.name.clone();
+    ctx.exec(Action::ConvertDimension { did, derived: false, value: Some(new_value) });
+    if ctx.status_error.is_none()
+        && let Some(expr) = &new_expr {
+            ctx.exec(Action::UpdateDimension {
+                did, value: new_value, expr: Some(expr.clone()), range: None,
+            });
     }
-    ctx.sketch.solve();
-    if let Some(expr) = new_expr {
-        ok(format!("{} is now driven (constraining) = {}", name, expr))
-    } else {
-        ok(format!("{} is now driven (constraining) = {:.4}", name, new_value))
-    }
+    let msg = match &new_expr {
+        Some(expr) => format!("{} is now driven (constraining) = {}", name, expr),
+        None => format!("{} is now driven (constraining) = {:.4}", name, new_value),
+    };
+    ok_or_status(ctx, msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -10224,6 +10207,37 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_convert_dimension_preserves_identity() {
+        // set_derived/set_driven used to delete and recreate the
+        // dimension, churning its did and losing placement on the
+        // driven path. ConvertDimension flips it in place.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 3,0 noconnect");
+        run_ok(&mut ctx, "length L0 3");
+        let did = ctx.sketch.dimensions[0].did;
+        run_ok(&mut ctx, "dim_pos d0 offset 2");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(ctx.sketch.lines[r].constraints.has_length);
+
+        run_ok(&mut ctx, "set_derived d0");
+        let d = &ctx.sketch.dimensions[0];
+        assert_eq!((d.did, d.name.as_str(), d.derived), (did, "d0", true));
+        assert!(near(d.offset.y, 2.0), "placement must survive");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(!ctx.sketch.lines[r].constraints.has_length, "backing constraint must be gone");
+
+        run_ok(&mut ctx, "set_driven d0 4");
+        let d = &ctx.sketch.dimensions[0];
+        assert_eq!((d.did, d.derived), (did, false));
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(ctx.sketch.lines[r].constraints.has_length);
+        assert!(near(line_len(&ctx, "L0"), 4.0));
+
+        run_ok(&mut ctx, "undo");
+        assert!(ctx.sketch.dimensions[0].derived, "undo reverts the conversion");
+    }
 
     #[test]
     fn test_dimension_identity_survives_removal() {

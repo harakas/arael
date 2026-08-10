@@ -184,6 +184,10 @@ pub enum Action {
         range: Option<RangeBound>,
     },
     RemoveDimension { did: u32 },
+    /// Switch a dimension between driving and derived (reference) in
+    /// place: name, did and placement survive, only the backing
+    /// constraint comes or goes.
+    ConvertDimension { did: u32, derived: bool, value: Option<f64> },
     MoveDimension { did: u32, offset: arael::vect::vect2d, text_along: f64 },
     AddUserParam { name: String, expr_str: String },
     UpdateUserParam { index: usize, name: String, expr_str: String },
@@ -274,6 +278,8 @@ impl Action {
             Action::UpdateDimension { .. } => "Update dimension".into(),
             Action::RemoveDimension { .. } => "Remove dimension".into(),
             Action::MoveDimension { .. } => "Move dimension".into(),
+            Action::ConvertDimension { derived: true, .. } => "Set dimension derived".into(),
+            Action::ConvertDimension { derived: false, .. } => "Set dimension driven".into(),
             Action::AddUserParam { name, .. } => format!("Add param {}", name),
             Action::UpdateUserParam { name, .. } => format!("Update param {}", name),
             Action::RemoveUserParam { .. } => "Remove param".into(),
@@ -507,6 +513,146 @@ fn remove_distance_pl(sketch: &mut Sketch, pt: &DimensionEndpoint, line: Ref<Lin
         ArcStart(ar) => { sketch.distance_arc_start_l.retain(|c| !(c.arc == *ar && c.line == line)); }
         ArcEnd(ar) => { sketch.distance_arc_end_l.retain(|c| !(c.arc == *ar && c.line == line)); }
     }
+}
+
+/// Install the numeric equality constraint backing a driving
+/// dimension. Returns false when the kind's validation rejects the
+/// geometry (missing arcs, non-parallel lines) -- the caller must not
+/// create the dimension then.
+fn push_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind, value: &f64) -> bool {
+    match kind {
+        DimensionKind::LineLength(line) => {
+            sketch.lines[*line].constraints.has_length = true;
+            sketch.lines[*line].constraints.length = *value;
+        }
+        DimensionKind::PointPointDistance(a, b) => {
+            push_distance(sketch, a, b, *value);
+        }
+        DimensionKind::PointLineDistance(pt, line) => {
+            let pt_pos = dim_endpoint_pos_sketch(sketch, pt);
+            let signed = compute_signed_pl(sketch, pt_pos, *line, *value);
+            push_distance_pl(sketch, pt, *line, signed);
+        }
+        DimensionKind::ArcRadius(arc) => {
+            sketch.arcs[*arc].constraints.has_target_radius = true;
+            sketch.arcs[*arc].constraints.target_radius = *value;
+        }
+        DimensionKind::ArcRadiusB(arc) => {
+            sketch.arcs[*arc].constraints.has_target_radius_b = true;
+            sketch.arcs[*arc].constraints.target_radius_b = *value;
+        }
+        DimensionKind::ArcSweep(arc) => {
+            sketch.arcs[*arc].constraints.sweep_sign = if sketch.arcs[*arc].ccw { 1.0 } else { -1.0 };
+            sketch.arcs[*arc].constraints.has_target_sweep = true;
+            sketch.arcs[*arc].constraints.target_sweep = deg2rad(*value);
+        }
+        DimensionKind::ArcRotation(arc) => {
+            // Normalise user input into (-pi, pi] so repeated
+            // `xangle EA0 200` edits don't accumulate value
+            // drift across save/load and undo/redo cycles.
+            let target = arael::utils::rad2rad(deg2rad(*value));
+            sketch.arcs[*arc].constraints.has_target_rotation = true;
+            sketch.arcs[*arc].constraints.target_rotation = target;
+        }
+        DimensionKind::Angle(a, b, supplement) => {
+            // value is in degrees, constraint uses radians.
+            // Compute target angle closest to current atan2 value
+            // so the solver doesn't have to cross a discontinuity.
+            let la = &sketch.lines[*a];
+            let lb = &sketch.lines[*b];
+            let dx1 = la.p2.value.x - la.p1.value.x;
+            let dy1 = la.p2.value.y - la.p1.value.y;
+            let dx2 = lb.p2.value.x - lb.p1.value.x;
+            let dy2 = lb.p2.value.y - lb.p1.value.y;
+            let current = (dx1 * dy2 - dy1 * dx2).atan2(dx1 * dx2 + dy1 * dy2);
+            let mut target = deg2rad(*value);
+            if *supplement { target = std::f64::consts::PI - target; }
+            // Match sign to current atan2
+            if current < 0.0 { target = -target; }
+            sketch.angle.push(AngleConstraint {
+                a: *a, b: *b, angle: target, nid: 0, cid: 0, hb: CrossBlock::new(),
+            });
+        }
+        DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
+            let horizontal = matches!(kind, DimensionKind::HDistance(..));
+            let pa_pos = dim_endpoint_pos_sketch(sketch, a);
+            let pb_pos = dim_endpoint_pos_sketch(sketch, b);
+            let current = if horizontal { pa_pos.x - pb_pos.x } else { pa_pos.y - pb_pos.y };
+            let signed = if current >= 0.0 { *value } else { -*value };
+            push_axis_distance(sketch, a, b, signed, horizontal);
+        }
+        DimensionKind::LineAngle(line) => {
+            let target = deg2rad(*value);
+            sketch.lines[*line].constraints.has_angle = true;
+            sketch.lines[*line].constraints.target_angle = target;
+        }
+        DimensionKind::ConcentricDistance(a, b) => {
+            // Validate: both arcs exist and are circular.
+            // `DistanceConcentric`'s residual is
+            // self-contained (it enforces center-coincidence
+            // itself), so we no longer require a paired
+            // `Concentric` -- the caller (cmd_distance / GUI
+            // tool) still emits `ApplyConcentric` up front
+            // for list-output visibility, but the action
+            // doesn't depend on it.
+            let valid_arcs = sketch.arcs.get(*a).is_some()
+                && sketch.arcs.get(*b).is_some()
+                && !sketch.arcs[*a].is_ellipse
+                && !sketch.arcs[*b].is_ellipse;
+            if !valid_arcs {
+                return false;
+            }
+            let init_diff = sketch.arcs[*b].radius.value
+                          - sketch.arcs[*a].radius.value;
+            let sign = if init_diff >= 0.0 { 1.0 } else { -1.0 };
+            sketch.distance_concentric.push(DistanceConcentric {
+                a: *a, b: *b,
+                sign,
+                distance: value.abs(),
+                nid: 0, cid: 0,
+                hb: CrossBlock::new(),
+            });
+        }
+        DimensionKind::LineLineDistance(a, b) => {
+            // Validate: both lines exist and are currently
+            // geometrically parallel. The dim's residual is a
+            // point-to-line perpendicular distance; if the
+            // lines ever rotate off-parallel its meaning
+            // decays, but we don't enforce the pairing here --
+            // the caller (cmd_distance / GUI) emits Parallel
+            // explicitly when it matters. Keeping the action
+            //'s guard purely geometric means the dim works
+            // the instant you ask for it, without caring
+            // whether parallelism is currently expressed via
+            // an explicit Parallel, twin H/V flags, or a
+            // chain of other constraints.
+            let valid_lines = sketch.lines.get(*a).is_some()
+                && sketch.lines.get(*b).is_some();
+            let parallel_present = if !valid_lines { false }
+            else {
+                let la_line = &sketch.lines[*a];
+                let lb_line = &sketch.lines[*b];
+                let ax = la_line.p2.value.x - la_line.p1.value.x;
+                let ay = la_line.p2.value.y - la_line.p1.value.y;
+                let bx = lb_line.p2.value.x - lb_line.p1.value.x;
+                let by = lb_line.p2.value.y - lb_line.p1.value.y;
+                let alen = (ax * ax + ay * ay).sqrt();
+                let blen = (bx * bx + by * by).sqrt();
+                if alen < 1e-12 || blen < 1e-12 { false }
+                else { (ax * by - ay * bx).abs() / (alen * blen) < 1e-6 }
+            };
+            if !valid_lines || !parallel_present {
+                return false;
+            }
+            // Reuse the point-to-line distance constraint:
+            // anchor line B's p1 to line A at the target gap.
+            let pt = DimensionEndpoint::LineP1(*b);
+            let pt_pos = dim_endpoint_pos_sketch(sketch, &pt);
+            let signed = compute_signed_pl(sketch, pt_pos, *a, *value);
+            push_distance_pl(sketch, &pt, *a, signed);
+        }
+    }
+    true
 }
 
 /// Remove the underlying numeric equality constraint installed for a
@@ -1111,139 +1257,9 @@ impl Action {
                 let name = format!("d{}", sketch.next_dimension_id);
                 sketch.next_dimension_id += 1;
                 // Apply the numeric constraint (skip for derived dims)
-                if !derived { match kind {
-                    DimensionKind::LineLength(line) => {
-                        sketch.lines[*line].constraints.has_length = true;
-                        sketch.lines[*line].constraints.length = *value;
-                    }
-                    DimensionKind::PointPointDistance(a, b) => {
-                        push_distance(sketch, a, b, *value);
-                    }
-                    DimensionKind::PointLineDistance(pt, line) => {
-                        let pt_pos = dim_endpoint_pos_sketch(sketch, pt);
-                        let signed = compute_signed_pl(sketch, pt_pos, *line, *value);
-                        push_distance_pl(sketch, pt, *line, signed);
-                    }
-                    DimensionKind::ArcRadius(arc) => {
-                        sketch.arcs[*arc].constraints.has_target_radius = true;
-                        sketch.arcs[*arc].constraints.target_radius = *value;
-                    }
-                    DimensionKind::ArcRadiusB(arc) => {
-                        sketch.arcs[*arc].constraints.has_target_radius_b = true;
-                        sketch.arcs[*arc].constraints.target_radius_b = *value;
-                    }
-                    DimensionKind::ArcSweep(arc) => {
-                        sketch.arcs[*arc].constraints.sweep_sign = if sketch.arcs[*arc].ccw { 1.0 } else { -1.0 };
-                        sketch.arcs[*arc].constraints.has_target_sweep = true;
-                        sketch.arcs[*arc].constraints.target_sweep = deg2rad(*value);
-                    }
-                    DimensionKind::ArcRotation(arc) => {
-                        // Normalise user input into (-pi, pi] so repeated
-                        // `xangle EA0 200` edits don't accumulate value
-                        // drift across save/load and undo/redo cycles.
-                        let target = arael::utils::rad2rad(deg2rad(*value));
-                        sketch.arcs[*arc].constraints.has_target_rotation = true;
-                        sketch.arcs[*arc].constraints.target_rotation = target;
-                    }
-                    DimensionKind::Angle(a, b, supplement) => {
-                        // value is in degrees, constraint uses radians.
-                        // Compute target angle closest to current atan2 value
-                        // so the solver doesn't have to cross a discontinuity.
-                        let la = &sketch.lines[*a];
-                        let lb = &sketch.lines[*b];
-                        let dx1 = la.p2.value.x - la.p1.value.x;
-                        let dy1 = la.p2.value.y - la.p1.value.y;
-                        let dx2 = lb.p2.value.x - lb.p1.value.x;
-                        let dy2 = lb.p2.value.y - lb.p1.value.y;
-                        let current = (dx1 * dy2 - dy1 * dx2).atan2(dx1 * dx2 + dy1 * dy2);
-                        let mut target = deg2rad(*value);
-                        if *supplement { target = std::f64::consts::PI - target; }
-                        // Match sign to current atan2
-                        if current < 0.0 { target = -target; }
-                        sketch.angle.push(AngleConstraint {
-                            a: *a, b: *b, angle: target, nid: 0, cid: 0, hb: CrossBlock::new(),
-                        });
-                    }
-                    DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
-                        let horizontal = matches!(kind, DimensionKind::HDistance(..));
-                        let pa_pos = dim_endpoint_pos_sketch(sketch, a);
-                        let pb_pos = dim_endpoint_pos_sketch(sketch, b);
-                        let current = if horizontal { pa_pos.x - pb_pos.x } else { pa_pos.y - pb_pos.y };
-                        let signed = if current >= 0.0 { *value } else { -*value };
-                        push_axis_distance(sketch, a, b, signed, horizontal);
-                    }
-                    DimensionKind::LineAngle(line) => {
-                        let target = deg2rad(*value);
-                        sketch.lines[*line].constraints.has_angle = true;
-                        sketch.lines[*line].constraints.target_angle = target;
-                    }
-                    DimensionKind::ConcentricDistance(a, b) => {
-                        // Validate: both arcs exist and are circular.
-                        // `DistanceConcentric`'s residual is
-                        // self-contained (it enforces center-coincidence
-                        // itself), so we no longer require a paired
-                        // `Concentric` -- the caller (cmd_distance / GUI
-                        // tool) still emits `ApplyConcentric` up front
-                        // for list-output visibility, but the action
-                        // doesn't depend on it.
-                        let valid_arcs = sketch.arcs.get(*a).is_some()
-                            && sketch.arcs.get(*b).is_some()
-                            && !sketch.arcs[*a].is_ellipse
-                            && !sketch.arcs[*b].is_ellipse;
-                        if !valid_arcs {
-                            return (false, created);
-                        }
-                        let init_diff = sketch.arcs[*b].radius.value
-                                      - sketch.arcs[*a].radius.value;
-                        let sign = if init_diff >= 0.0 { 1.0 } else { -1.0 };
-                        sketch.distance_concentric.push(DistanceConcentric {
-                            a: *a, b: *b,
-                            sign,
-                            distance: value.abs(),
-                            nid: 0, cid: 0,
-                            hb: CrossBlock::new(),
-                        });
-                    }
-                    DimensionKind::LineLineDistance(a, b) => {
-                        // Validate: both lines exist and are currently
-                        // geometrically parallel. The dim's residual is a
-                        // point-to-line perpendicular distance; if the
-                        // lines ever rotate off-parallel its meaning
-                        // decays, but we don't enforce the pairing here --
-                        // the caller (cmd_distance / GUI) emits Parallel
-                        // explicitly when it matters. Keeping the action
-                        //'s guard purely geometric means the dim works
-                        // the instant you ask for it, without caring
-                        // whether parallelism is currently expressed via
-                        // an explicit Parallel, twin H/V flags, or a
-                        // chain of other constraints.
-                        let valid_lines = sketch.lines.get(*a).is_some()
-                            && sketch.lines.get(*b).is_some();
-                        let parallel_present = if !valid_lines { false }
-                        else {
-                            let la_line = &sketch.lines[*a];
-                            let lb_line = &sketch.lines[*b];
-                            let ax = la_line.p2.value.x - la_line.p1.value.x;
-                            let ay = la_line.p2.value.y - la_line.p1.value.y;
-                            let bx = lb_line.p2.value.x - lb_line.p1.value.x;
-                            let by = lb_line.p2.value.y - lb_line.p1.value.y;
-                            let alen = (ax * ax + ay * ay).sqrt();
-                            let blen = (bx * bx + by * by).sqrt();
-                            if alen < 1e-12 || blen < 1e-12 { false }
-                            else { (ax * by - ay * bx).abs() / (alen * blen) < 1e-6 }
-                        };
-                        if !valid_lines || !parallel_present {
-                            return (false, created);
-                        }
-                        // Reuse the point-to-line distance constraint:
-                        // anchor line B's p1 to line A at the target gap.
-                        let pt = DimensionEndpoint::LineP1(*b);
-                        let pt_pos = dim_endpoint_pos_sketch(sketch, &pt);
-                        let signed = compute_signed_pl(sketch, pt_pos, *a, *value);
-                        push_distance_pl(sketch, &pt, *a, signed);
-                    }
+                if !derived && !push_numeric_dim_constraint(sketch, kind, value) {
+                    return (false, created);
                 }
-                } // end if !derived
                 sketch.dimensions.push(Dimension {
                     did: 0, // minted by assign_dimension_ids
                     kind: *kind, value: *value,
@@ -1451,6 +1467,40 @@ impl Action {
                     }
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
+            }
+            Action::ConvertDimension { did, derived, value } => {
+                let Some(index) = sketch.dimension_index_by_did(*did) else { return (false, created); };
+                if sketch.dimensions[index].derived == *derived { return (false, created); }
+                let kind = sketch.dimensions[index].kind;
+                let is_expr = sketch.dimensions[index].expr_str.is_some();
+                if *derived {
+                    // Driving -> derived: the backing equality goes.
+                    // Expression residuals are rebuilt from the flags on
+                    // the next solve, so the flag flip covers them; a
+                    // range cannot be derived and is dropped.
+                    if !is_expr && sketch.dimensions[index].range.is_none() {
+                        remove_numeric_dim_constraint(sketch, &kind);
+                    }
+                    let dim = &mut sketch.dimensions[index];
+                    dim.derived = true;
+                    dim.range = None;
+                } else {
+                    // Derived -> driving at the given (or measured) value.
+                    {
+                        let dim = &mut sketch.dimensions[index];
+                        dim.derived = false;
+                        if let Some(v) = value {
+                            dim.value = canonicalise_dim_value(&kind, *v);
+                        }
+                    }
+                    let v = sketch.dimensions[index].value;
+                    if !is_expr && !push_numeric_dim_constraint(sketch, &kind, &v) {
+                        // Geometry rejected the constraint: stay derived.
+                        sketch.dimensions[index].derived = true;
+                        return (false, created);
+                    }
+                }
+                return (is_expr, created);
             }
             Action::MoveDimension { did, offset, text_along } => {
                 if let Some(dim) = sketch.dimension_index_by_did(*did)

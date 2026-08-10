@@ -3015,14 +3015,17 @@ impl EditorApp {
                     .and_then(|d| self.sketch.dimension_index_by_did(d).map(|i| (d, i))) {
                     // Editing existing: update in place (preserves name)
                     if self.dim_derived != self.sketch.dimensions[edit_idx].derived {
-                        // Toggle derived status
-                        let name = self.sketch.dimensions[edit_idx].name.clone();
-                        if self.dim_derived {
-                            self.run_commands(&format!("set_derived {}", name));
+                        // Toggle derived status in place.
+                        let value = if self.dim_derived {
+                            None
+                        } else if is_numeric {
+                            Some(input.parse::<f64>().unwrap())
                         } else {
-                            let val = if is_numeric { input.parse::<f64>().unwrap() } else { self.sketch.dimensions[edit_idx].value };
-                            self.run_commands(&format!("set_driven {} {}", name, val));
-                        }
+                            Some(self.sketch.dimensions[edit_idx].value)
+                        };
+                        self.exec(Action::ConvertDimension {
+                            did: edit_did, derived: self.dim_derived, value,
+                        });
                         success = true;
                     } else if is_numeric {
                         let value = input.parse::<f64>().unwrap();
