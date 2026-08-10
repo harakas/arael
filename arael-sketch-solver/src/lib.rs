@@ -39,7 +39,9 @@ pub use expr_constraint::ExpressionConstraint;
 pub mod blocker;
 pub use blocker::{BlockerReport, analyze as analyze_blockers};
 pub mod probe;
+pub mod registry;
 pub use arael::rank::RankResult;
+pub use registry::{CollectionMeta, ConstraintArenas, ConstraintCollection, SketchConstraint};
 
 use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
@@ -723,66 +725,20 @@ impl Sketch {
     /// sentinel. Call at the tail of every mutating action and after
     /// loading a sketch so freshly-deserialised sketches pick up names.
     pub fn assign_constraint_names(&mut self) {
-        macro_rules! assign {
-            ($($field:ident),* $(,)?) => {
-                $(
-                    for c in self.$field.iter_mut() {
-                        if c.nid == 0 {
-                            c.nid = self.next_constraint_id;
-                            self.next_constraint_id += 1;
-                        }
-                    }
-                )*
-            };
-        }
-        assign!(
-            coincident_pp,
-            coincident_lp1, coincident_lp2,
-            coincident_ll11, coincident_ll12, coincident_ll21, coincident_ll22,
-            distance_pp, hdistance_pp, vdistance_pp,
-            point_on_line,
-            midpoint, midpoint_lp1, midpoint_lp2,
-            midpoint_arc_start, midpoint_arc_end,
-            midpoint_arc_point,
-            midpoint_lp1_arc, midpoint_lp2_arc,
-            midpoint_arc_start_arc, midpoint_arc_end_arc,
-            point_on_arc,
-            parallel, perpendicular, collinear,
-            equal_length, angle,
-            tangent_la, concentric, equal_radius, tangent_aa,
-            symmetry_ll, symmetry_pp, symmetry_aa,
-            distance_pl, distance_lp1l, distance_lp2l,
-            distance_arc_center_l, distance_arc_start_l, distance_arc_end_l,
-            line_p1_on_line, line_p2_on_line,
-            coincident_arc_center, coincident_arc_start, coincident_arc_end,
-            coincident_lp1_arc_center, coincident_lp2_arc_center,
-            coincident_lp1_arc_start, coincident_lp2_arc_start,
-            coincident_lp1_arc_end, coincident_lp2_arc_end,
-            coincident_arc_center_start, coincident_arc_center_end,
-            coincident_arc_start_center, coincident_arc_end_center,
-            coincident_arc_start_start, coincident_arc_start_end,
-            coincident_arc_end_start, coincident_arc_end_end,
-            line_p1_on_arc, line_p2_on_arc,
-            distance_ll11, distance_ll12, distance_ll21, distance_ll22,
-            distance_lp1, distance_lp2,
-            distance_arc_center_p, distance_arc_start_p, distance_arc_end_p,
-            distance_arc_center_l1, distance_arc_center_l2,
-            distance_arc_start_l1, distance_arc_start_l2,
-            distance_arc_end_l1, distance_arc_end_l2,
-            distance_aa_ce_ce, distance_aa_ce_s, distance_aa_ce_e,
-            distance_aa_s_ce, distance_aa_s_s, distance_aa_s_e,
-            distance_aa_e_ce, distance_aa_e_s, distance_aa_e_e,
-            distance_concentric,
-            axis_distance_ll11, axis_distance_ll12, axis_distance_ll21, axis_distance_ll22,
-            axis_distance_lp1, axis_distance_lp2,
-            axis_distance_arc_center_p, axis_distance_arc_start_p, axis_distance_arc_end_p,
-            axis_distance_arc_center_l1, axis_distance_arc_center_l2,
-            axis_distance_arc_start_l1, axis_distance_arc_start_l2,
-            axis_distance_arc_end_l1, axis_distance_arc_end_l2,
-            axis_distance_aa_ce_ce, axis_distance_aa_ce_s, axis_distance_aa_ce_e,
-            axis_distance_aa_s_ce, axis_distance_aa_s_s, axis_distance_aa_s_e,
-            axis_distance_aa_e_ce, axis_distance_aa_e_s, axis_distance_aa_e_e,
-        );
+        // Registry order is field-declaration order, so numbering is
+        // stable and every collection participates -- constraint types
+        // once missing from the hand-kept list stayed at nid 0 forever.
+        let mut next = self.next_constraint_id;
+        self.for_each_constraint_collection(|_, _, coll| {
+            for i in 0..coll.len() {
+                let c = coll.item_mut(i);
+                if c.nid() == 0 {
+                    c.set_nid(next);
+                    next += 1;
+                }
+            }
+        });
+        self.next_constraint_id = next;
     }
 
     /// Add a free point at the given position.
@@ -937,100 +893,19 @@ impl Sketch {
     pub fn delete_point(&mut self, r: Ref<Point>) {
         self.dimensions.retain(|d| !d.kind.references_point(r));
         self.points.remove(r);
-        self.coincident_pp.retain(|c| c.a != r && c.b != r);
-        self.coincident_lp1.retain(|c| c.point != r);
-        self.coincident_lp2.retain(|c| c.point != r);
-        self.distance_pp.retain(|c| c.a != r && c.b != r);
-        self.hdistance_pp.retain(|c| c.a != r && c.b != r);
-        self.vdistance_pp.retain(|c| c.a != r && c.b != r);
-        self.point_on_line.retain(|c| c.point != r);
-        self.midpoint.retain(|c| c.point != r);
-        self.midpoint_arc_point.retain(|c| c.point != r);
-        self.point_on_arc.retain(|c| c.point != r);
-        self.distance_pl.retain(|c| c.point != r);
-        self.coincident_arc_center.retain(|c| c.point != r);
-        self.coincident_arc_start.retain(|c| c.point != r);
-        self.coincident_arc_end.retain(|c| c.point != r);
-        self.distance_lp1.retain(|c| c.point != r);
-        self.distance_lp2.retain(|c| c.point != r);
-        self.distance_arc_center_p.retain(|c| c.point != r);
-        self.distance_arc_start_p.retain(|c| c.point != r);
-        self.distance_arc_end_p.retain(|c| c.point != r);
-        self.symmetry_pp.retain(|c| c.a != r && c.c != r);
-        self.axis_distance_lp1.retain(|c| c.point != r);
-        self.axis_distance_lp2.retain(|c| c.point != r);
-        self.axis_distance_arc_center_p.retain(|c| c.point != r);
-        self.axis_distance_arc_start_p.retain(|c| c.point != r);
-        self.axis_distance_arc_end_p.retain(|c| c.point != r);
+        self.for_each_constraint_collection(|_, _, coll| {
+            coll.retain_constraints(&mut |c| !c.references_point(r));
+        });
+        self.cleanup_helper_points();
     }
 
     /// Remove a line and all constraints referencing it.
     pub fn delete_line(&mut self, r: Ref<Line>) {
         self.dimensions.retain(|d| !d.kind.references_line(r));
         self.lines.remove(r);
-        self.coincident_lp1.retain(|c| c.line != r);
-        self.coincident_lp2.retain(|c| c.line != r);
-        self.coincident_ll11.retain(|c| c.a != r && c.b != r);
-        self.coincident_ll12.retain(|c| c.a != r && c.b != r);
-        self.coincident_ll21.retain(|c| c.a != r && c.b != r);
-        self.coincident_ll22.retain(|c| c.a != r && c.b != r);
-        self.point_on_line.retain(|c| c.line != r);
-        self.midpoint.retain(|c| c.line != r);
-        self.midpoint_lp1.retain(|c| c.line != r && c.target != r);
-        self.midpoint_lp2.retain(|c| c.line != r && c.target != r);
-        self.midpoint_arc_start.retain(|c| c.line != r);
-        self.midpoint_arc_end.retain(|c| c.line != r);
-        self.midpoint_lp1_arc.retain(|c| c.line != r);
-        self.midpoint_lp2_arc.retain(|c| c.line != r);
-        self.parallel.retain(|c| c.a != r && c.b != r);
-        self.perpendicular.retain(|c| c.a != r && c.b != r);
-        self.collinear.retain(|c| c.a != r && c.b != r);
-        self.equal_length.retain(|c| c.a != r && c.b != r);
-        self.angle.retain(|c| c.a != r && c.b != r);
-        self.tangent_la.retain(|c| c.line != r);
-        self.symmetry_ll.retain(|c| c.a != r && c.b != r && c.c != r);
-        self.symmetry_pp.retain(|c| c.line != r);
-        self.symmetry_aa.retain(|c| c.line != r);
-        self.distance_pl.retain(|c| c.line != r);
-        self.distance_lp1l.retain(|c| c.a != r && c.b != r);
-        self.distance_lp2l.retain(|c| c.a != r && c.b != r);
-        self.distance_arc_center_l.retain(|c| c.line != r);
-        self.distance_arc_start_l.retain(|c| c.line != r);
-        self.distance_arc_end_l.retain(|c| c.line != r);
-        self.line_p1_on_line.retain(|c| c.a != r && c.b != r);
-        self.line_p2_on_line.retain(|c| c.a != r && c.b != r);
-        self.coincident_lp1_arc_center.retain(|c| c.line != r);
-        self.coincident_lp2_arc_center.retain(|c| c.line != r);
-        self.coincident_lp1_arc_start.retain(|c| c.line != r);
-        self.coincident_lp2_arc_start.retain(|c| c.line != r);
-        self.coincident_lp1_arc_end.retain(|c| c.line != r);
-        self.coincident_lp2_arc_end.retain(|c| c.line != r);
-        self.line_p1_on_arc.retain(|c| c.line != r);
-        self.line_p2_on_arc.retain(|c| c.line != r);
-        self.distance_ll11.retain(|c| c.a != r && c.b != r);
-        self.distance_ll12.retain(|c| c.a != r && c.b != r);
-        self.distance_ll21.retain(|c| c.a != r && c.b != r);
-        self.distance_ll22.retain(|c| c.a != r && c.b != r);
-        self.distance_lp1.retain(|c| c.line != r);
-        self.distance_lp2.retain(|c| c.line != r);
-        self.distance_arc_center_l1.retain(|c| c.line != r);
-        self.distance_arc_center_l2.retain(|c| c.line != r);
-        self.distance_arc_start_l1.retain(|c| c.line != r);
-        self.distance_arc_start_l2.retain(|c| c.line != r);
-        self.distance_arc_end_l1.retain(|c| c.line != r);
-        self.distance_arc_end_l2.retain(|c| c.line != r);
-        self.axis_distance_ll11.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_ll12.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_ll21.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_ll22.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_lp1.retain(|c| c.line != r);
-        self.axis_distance_lp2.retain(|c| c.line != r);
-        self.axis_distance_arc_center_l1.retain(|c| c.line != r);
-        self.axis_distance_arc_center_l2.retain(|c| c.line != r);
-        self.axis_distance_arc_start_l1.retain(|c| c.line != r);
-        self.axis_distance_arc_start_l2.retain(|c| c.line != r);
-        self.axis_distance_arc_end_l1.retain(|c| c.line != r);
-        self.axis_distance_arc_end_l2.retain(|c| c.line != r);
+        self.for_each_constraint_collection(|_, _, coll| {
+            coll.retain_constraints(&mut |c| !c.references_line(r));
+        });
         self.cleanup_helper_points();
     }
 
@@ -1038,78 +913,9 @@ impl Sketch {
     pub fn delete_arc(&mut self, r: Ref<Arc>) {
         self.dimensions.retain(|d| !d.kind.references_arc(r));
         self.arcs.remove(r);
-        self.point_on_arc.retain(|c| c.arc != r);
-        self.line_p1_on_arc.retain(|c| c.arc != r);
-        self.line_p2_on_arc.retain(|c| c.arc != r);
-        self.tangent_la.retain(|c| c.arc != r);
-        self.concentric.retain(|c| c.a != r && c.b != r);
-        self.equal_radius.retain(|c| c.a != r && c.b != r);
-        self.tangent_aa.retain(|c| c.a != r && c.b != r);
-        self.symmetry_aa.retain(|c| c.a != r && c.c != r);
-        self.midpoint_arc_start.retain(|c| c.arc != r);
-        self.midpoint_arc_end.retain(|c| c.arc != r);
-        self.midpoint_arc_point.retain(|c| c.arc != r);
-        self.midpoint_lp1_arc.retain(|c| c.arc != r);
-        self.midpoint_lp2_arc.retain(|c| c.arc != r);
-        self.midpoint_arc_start_arc.retain(|c| c.a != r && c.b != r);
-        self.midpoint_arc_end_arc.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_center.retain(|c| c.arc != r);
-        self.coincident_arc_start.retain(|c| c.arc != r);
-        self.coincident_arc_end.retain(|c| c.arc != r);
-        self.coincident_lp1_arc_center.retain(|c| c.arc != r);
-        self.coincident_lp2_arc_center.retain(|c| c.arc != r);
-        self.coincident_lp1_arc_start.retain(|c| c.arc != r);
-        self.coincident_lp2_arc_start.retain(|c| c.arc != r);
-        self.coincident_lp1_arc_end.retain(|c| c.arc != r);
-        self.coincident_lp2_arc_end.retain(|c| c.arc != r);
-        self.coincident_arc_center_start.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_center_end.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_start_center.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_end_center.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_start_start.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_start_end.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_end_start.retain(|c| c.a != r && c.b != r);
-        self.coincident_arc_end_end.retain(|c| c.a != r && c.b != r);
-        self.distance_arc_center_p.retain(|c| c.arc != r);
-        self.distance_arc_start_p.retain(|c| c.arc != r);
-        self.distance_arc_end_p.retain(|c| c.arc != r);
-        self.distance_arc_center_l.retain(|c| c.arc != r);
-        self.distance_arc_start_l.retain(|c| c.arc != r);
-        self.distance_arc_end_l.retain(|c| c.arc != r);
-        self.distance_arc_center_l1.retain(|c| c.arc != r);
-        self.distance_arc_center_l2.retain(|c| c.arc != r);
-        self.distance_arc_start_l1.retain(|c| c.arc != r);
-        self.distance_arc_start_l2.retain(|c| c.arc != r);
-        self.distance_arc_end_l1.retain(|c| c.arc != r);
-        self.distance_arc_end_l2.retain(|c| c.arc != r);
-        self.distance_aa_ce_ce.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_ce_s.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_ce_e.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_s_ce.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_s_s.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_s_e.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_e_ce.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_e_s.retain(|c| c.a != r && c.b != r);
-        self.distance_aa_e_e.retain(|c| c.a != r && c.b != r);
-        self.distance_concentric.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_arc_center_p.retain(|c| c.arc != r);
-        self.axis_distance_arc_start_p.retain(|c| c.arc != r);
-        self.axis_distance_arc_end_p.retain(|c| c.arc != r);
-        self.axis_distance_arc_center_l1.retain(|c| c.arc != r);
-        self.axis_distance_arc_center_l2.retain(|c| c.arc != r);
-        self.axis_distance_arc_start_l1.retain(|c| c.arc != r);
-        self.axis_distance_arc_start_l2.retain(|c| c.arc != r);
-        self.axis_distance_arc_end_l1.retain(|c| c.arc != r);
-        self.axis_distance_arc_end_l2.retain(|c| c.arc != r);
-        self.axis_distance_aa_ce_ce.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_ce_s.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_ce_e.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_s_ce.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_s_s.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_s_e.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_e_ce.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_e_s.retain(|c| c.a != r && c.b != r);
-        self.axis_distance_aa_e_e.retain(|c| c.a != r && c.b != r);
+        self.for_each_constraint_collection(|_, _, coll| {
+            coll.retain_constraints(&mut |c| !c.references_arc(r));
+        });
         self.cleanup_helper_points();
     }
 
@@ -1118,31 +924,26 @@ impl Sketch {
     /// gone) or has no purpose constraint. Cascades until stable.
     pub fn cleanup_helper_points(&mut self) {
         loop {
-            // Find which helpers have a bridge (know what they represent)
+            // Classify every helper-point reference: coincidence
+            // constraints are bridges (they say what the helper stands
+            // for), everything else referencing it is a purpose. The
+            // registry walk covers every collection, so a new
+            // constraint type participates automatically.
             let mut has_bridge: std::collections::HashSet<u32> = std::collections::HashSet::new();
-            for c in &self.coincident_lp1 { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_lp2 { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_arc_center { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_arc_start { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_arc_end { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_pp {
-                if self.points.get(c.a).is_some_and(|p| p.helper) { has_bridge.insert(c.a.index()); }
-                if self.points.get(c.b).is_some_and(|p| p.helper) { has_bridge.insert(c.b.index()); }
-            }
-
-            // Find which helpers have a purpose constraint
             let mut has_purpose: std::collections::HashSet<u32> = std::collections::HashSet::new();
-            let mut add_pt = |r: Ref<Point>| { has_purpose.insert(r.index()); };
-            for c in &self.distance_pp { add_pt(c.a); add_pt(c.b); }
-            for c in &self.hdistance_pp { add_pt(c.a); add_pt(c.b); }
-            for c in &self.vdistance_pp { add_pt(c.a); add_pt(c.b); }
-            for c in &self.point_on_line { add_pt(c.point); }
-            for c in &self.midpoint { add_pt(c.point); }
-            for c in &self.point_on_arc { add_pt(c.point); }
-            for c in &self.distance_pl { add_pt(c.point); }
-            for c in &self.distance_lp1 { add_pt(c.point); }
-            for c in &self.distance_lp2 { add_pt(c.point); }
-            for c in &self.symmetry_pp { add_pt(c.a); add_pt(c.c); }
+            self.for_each_constraint_collection_ref(|arenas, meta, coll| {
+                for i in 0..coll.len() {
+                    coll.item(i).each_point_ref(&mut |p| {
+                        if arenas.points.get(p).is_some_and(|pt| pt.helper) {
+                            if meta.coincidence {
+                                has_bridge.insert(p.index());
+                            } else {
+                                has_purpose.insert(p.index());
+                            }
+                        }
+                    });
+                }
+            });
 
             // Remove helpers that lost their bridge OR have no purpose
             let to_remove: std::vec::Vec<Ref<Point>> = self.points.refs()
@@ -1152,22 +953,10 @@ impl Sketch {
             if to_remove.is_empty() { break; }
 
             for r in &to_remove {
-                self.coincident_pp.retain(|c| c.a != *r && c.b != *r);
-                self.coincident_lp1.retain(|c| c.point != *r);
-                self.coincident_lp2.retain(|c| c.point != *r);
-                self.coincident_arc_center.retain(|c| c.point != *r);
-                self.coincident_arc_start.retain(|c| c.point != *r);
-                self.coincident_arc_end.retain(|c| c.point != *r);
-                self.symmetry_pp.retain(|c| c.a != *r && c.c != *r);
-                self.distance_pp.retain(|c| c.a != *r && c.b != *r);
-                self.hdistance_pp.retain(|c| c.a != *r && c.b != *r);
-                self.vdistance_pp.retain(|c| c.a != *r && c.b != *r);
-                self.point_on_line.retain(|c| c.point != *r);
-                self.midpoint.retain(|c| c.point != *r);
-                self.point_on_arc.retain(|c| c.point != *r);
-                self.distance_pl.retain(|c| c.point != *r);
-                self.distance_lp1.retain(|c| c.point != *r);
-                self.distance_lp2.retain(|c| c.point != *r);
+                let r = *r;
+                self.for_each_constraint_collection(|_, _, coll| {
+                    coll.retain_constraints(&mut |c| !c.references_point(r));
+                });
             }
             for r in to_remove { self.points.remove(r); }
         }
@@ -1419,34 +1208,16 @@ impl Sketch {
             }
         }
         if !merged.is_empty() {
-            // Rewrite all point refs in constraints
-            let remap = |r: &mut Ref<Point>| {
-                if let Some(canonical) = merged.get(r) { *r = *canonical; }
-            };
-            for c in &mut self.coincident_pp { remap(&mut c.a); remap(&mut c.b); }
-            for c in &mut self.coincident_lp1 { remap(&mut c.point); }
-            for c in &mut self.coincident_lp2 { remap(&mut c.point); }
-            for c in &mut self.distance_pp { remap(&mut c.a); remap(&mut c.b); }
-            for c in &mut self.hdistance_pp { remap(&mut c.a); remap(&mut c.b); }
-            for c in &mut self.vdistance_pp { remap(&mut c.a); remap(&mut c.b); }
-            for c in &mut self.point_on_line { remap(&mut c.point); }
-            for c in &mut self.midpoint { remap(&mut c.point); }
-            for c in &mut self.point_on_arc { remap(&mut c.point); }
-            for c in &mut self.distance_pl { remap(&mut c.point); }
-            for c in &mut self.coincident_arc_center { remap(&mut c.point); }
-            for c in &mut self.coincident_arc_start { remap(&mut c.point); }
-            for c in &mut self.coincident_arc_end { remap(&mut c.point); }
-            for c in &mut self.distance_arc_center_p { remap(&mut c.point); }
-            for c in &mut self.distance_arc_start_p { remap(&mut c.point); }
-            for c in &mut self.distance_arc_end_p { remap(&mut c.point); }
-            for c in &mut self.axis_distance_lp1 { remap(&mut c.point); }
-            for c in &mut self.axis_distance_lp2 { remap(&mut c.point); }
-            for c in &mut self.axis_distance_arc_center_p { remap(&mut c.point); }
-            for c in &mut self.axis_distance_arc_start_p { remap(&mut c.point); }
-            for c in &mut self.axis_distance_arc_end_p { remap(&mut c.point); }
-            for c in &mut self.symmetry_pp { remap(&mut c.a); remap(&mut c.c); }
-            for c in &mut self.distance_lp1 { remap(&mut c.point); }
-            for c in &mut self.distance_lp2 { remap(&mut c.point); }
+            // Rewrite all point refs in constraints -- every
+            // collection, via the registry (midpoint_arc_point was
+            // once missing here and kept a dangling ref).
+            self.for_each_constraint_collection(|_, _, coll| {
+                for i in 0..coll.len() {
+                    for (old, canonical) in &merged {
+                        coll.item_mut(i).remap_point(*old, *canonical);
+                    }
+                }
+            });
             // Remove merged points
             for old in merged.keys() { self.points.remove(*old); }
             // Dedup again after remapping
@@ -1574,65 +1345,14 @@ impl Sketch {
     /// Constraints whose `nid` is still 0 (never named) are omitted.
     pub fn constraint_nid_cid_pairs(&self) -> std::vec::Vec<(u32, u32)> {
         let mut out = std::vec::Vec::new();
-        macro_rules! collect {
-            ($($field:ident),* $(,)?) => {
-                $(
-                    for c in &self.$field {
-                        if c.nid != 0 {
-                            out.push((c.nid, c.cid));
-                        }
-                    }
-                )*
-            };
-        }
-        collect!(
-            coincident_pp,
-            coincident_lp1, coincident_lp2,
-            coincident_ll11, coincident_ll12, coincident_ll21, coincident_ll22,
-            distance_pp, hdistance_pp, vdistance_pp,
-            point_on_line,
-            midpoint, midpoint_lp1, midpoint_lp2,
-            midpoint_arc_start, midpoint_arc_end,
-            midpoint_arc_point,
-            midpoint_lp1_arc, midpoint_lp2_arc,
-            midpoint_arc_start_arc, midpoint_arc_end_arc,
-            point_on_arc,
-            parallel, perpendicular, collinear,
-            equal_length, angle,
-            tangent_la, concentric, equal_radius, tangent_aa,
-            symmetry_ll, symmetry_pp, symmetry_aa,
-            distance_pl, distance_lp1l, distance_lp2l,
-            distance_arc_center_l, distance_arc_start_l, distance_arc_end_l,
-            line_p1_on_line, line_p2_on_line,
-            coincident_arc_center, coincident_arc_start, coincident_arc_end,
-            coincident_lp1_arc_center, coincident_lp2_arc_center,
-            coincident_lp1_arc_start, coincident_lp2_arc_start,
-            coincident_lp1_arc_end, coincident_lp2_arc_end,
-            coincident_arc_center_start, coincident_arc_center_end,
-            coincident_arc_start_center, coincident_arc_end_center,
-            coincident_arc_start_start, coincident_arc_start_end,
-            coincident_arc_end_start, coincident_arc_end_end,
-            line_p1_on_arc, line_p2_on_arc,
-            distance_ll11, distance_ll12, distance_ll21, distance_ll22,
-            distance_lp1, distance_lp2,
-            distance_arc_center_p, distance_arc_start_p, distance_arc_end_p,
-            distance_arc_center_l1, distance_arc_center_l2,
-            distance_arc_start_l1, distance_arc_start_l2,
-            distance_arc_end_l1, distance_arc_end_l2,
-            distance_aa_ce_ce, distance_aa_ce_s, distance_aa_ce_e,
-            distance_aa_s_ce, distance_aa_s_s, distance_aa_s_e,
-            distance_aa_e_ce, distance_aa_e_s, distance_aa_e_e,
-            distance_concentric,
-            axis_distance_ll11, axis_distance_ll12, axis_distance_ll21, axis_distance_ll22,
-            axis_distance_lp1, axis_distance_lp2,
-            axis_distance_arc_center_p, axis_distance_arc_start_p, axis_distance_arc_end_p,
-            axis_distance_arc_center_l1, axis_distance_arc_center_l2,
-            axis_distance_arc_start_l1, axis_distance_arc_start_l2,
-            axis_distance_arc_end_l1, axis_distance_arc_end_l2,
-            axis_distance_aa_ce_ce, axis_distance_aa_ce_s, axis_distance_aa_ce_e,
-            axis_distance_aa_s_ce, axis_distance_aa_s_s, axis_distance_aa_s_e,
-            axis_distance_aa_e_ce, axis_distance_aa_e_s, axis_distance_aa_e_e,
-        );
+        self.for_each_constraint_collection_ref(|_, _, coll| {
+            for i in 0..coll.len() {
+                let c = coll.item(i);
+                if c.nid() != 0 {
+                    out.push((c.nid(), c.cid()));
+                }
+            }
+        });
         out
     }
 
@@ -1644,75 +1364,19 @@ impl Sketch {
         for r in self.points.refs() { let p = &self.points[r]; m.insert(p.cid, format!("point:{}", p.name)); }
         for r in self.lines.refs() { let l = &self.lines[r]; m.insert(l.cid, format!("line:{}", l.name)); }
         for r in self.arcs.refs() { let a = &self.arcs[r]; m.insert(a.cid, format!("arc:{}", a.name)); }
-        // Helper to get entity names
-        let pn = |r: Ref<Point>| self.points.get(r).map(|p| p.name.as_str()).unwrap_or("?").to_string();
-        let ln = |r: Ref<Line>| self.lines.get(r).map(|l| l.name.as_str()).unwrap_or("?").to_string();
-        let an = |r: Ref<Arc>| self.arcs.get(r).map(|a| a.name.as_str()).unwrap_or("?").to_string();
-        for c in &self.coincident_pp { m.insert(c.cid, format!("coinc_pp:{},{}", pn(c.a), pn(c.b))); }
-        for c in &self.coincident_lp1 { m.insert(c.cid, format!("coinc_lp1:{},{}", ln(c.line), pn(c.point))); }
-        for c in &self.coincident_lp2 { m.insert(c.cid, format!("coinc_lp2:{},{}", ln(c.line), pn(c.point))); }
-        for c in &self.coincident_ll11 { m.insert(c.cid, format!("coinc_ll11:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.coincident_ll12 { m.insert(c.cid, format!("coinc_ll12:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.coincident_ll21 { m.insert(c.cid, format!("coinc_ll21:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.coincident_ll22 { m.insert(c.cid, format!("coinc_ll22:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.distance_pp { m.insert(c.cid, format!("dist_pp:{},{}", pn(c.a), pn(c.b))); }
-        for c in &self.hdistance_pp { m.insert(c.cid, format!("hdist_pp:{},{}", pn(c.a), pn(c.b))); }
-        for c in &self.vdistance_pp { m.insert(c.cid, format!("vdist_pp:{},{}", pn(c.a), pn(c.b))); }
-        for c in &self.point_on_line { m.insert(c.cid, format!("on_line:{},{}", pn(c.point), ln(c.line))); }
-        for c in &self.midpoint { m.insert(c.cid, format!("midpoint:{},{}", pn(c.point), ln(c.line))); }
-        for c in &self.point_on_arc { m.insert(c.cid, format!("on_arc:{},{}", pn(c.point), an(c.arc))); }
-        for c in &self.parallel { m.insert(c.cid, format!("parallel:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.arc_line_parallel { m.insert(c.cid, format!("parallel:{},{}", an(c.arc), ln(c.line))); }
-        for c in &self.arc_arc_parallel { m.insert(c.cid, format!("parallel:{},{}", an(c.a), an(c.b))); }
-        for c in &self.perpendicular { m.insert(c.cid, format!("perp:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.collinear { m.insert(c.cid, format!("collinear:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.equal_length { m.insert(c.cid, format!("eq_len:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.angle { m.insert(c.cid, format!("angle:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.tangent_la { m.insert(c.cid, format!("tangent_la:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_lp2_arc_start { m.insert(c.cid, format!("coinc_lp2_as:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.tangent_aa { m.insert(c.cid, format!("tangent_aa:{},{}", an(c.a), an(c.b))); }
-        for c in &self.concentric { m.insert(c.cid, format!("concentric:{},{}", an(c.a), an(c.b))); }
-        for c in &self.equal_radius { m.insert(c.cid, format!("eq_radius:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_center { m.insert(c.cid, format!("coinc_arc_center:{},{}", pn(c.point), an(c.arc))); }
-        for c in &self.coincident_arc_start { m.insert(c.cid, format!("coinc_arc_start:{},{}", pn(c.point), an(c.arc))); }
-        for c in &self.coincident_arc_end { m.insert(c.cid, format!("coinc_arc_end:{},{}", pn(c.point), an(c.arc))); }
-        for c in &self.coincident_lp1_arc_center { m.insert(c.cid, format!("coinc_lp1_ac:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_lp2_arc_center { m.insert(c.cid, format!("coinc_lp2_ac:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_lp1_arc_start { m.insert(c.cid, format!("coinc_lp1_as:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_lp2_arc_start { m.insert(c.cid, format!("coinc_lp2_as:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_lp1_arc_end { m.insert(c.cid, format!("coinc_lp1_ae:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_lp2_arc_end { m.insert(c.cid, format!("coinc_lp2_ae:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.coincident_arc_center_start { m.insert(c.cid, format!("coinc_ac_as:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_center_end { m.insert(c.cid, format!("coinc_ac_ae:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_start_center { m.insert(c.cid, format!("coinc_as_ac:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_end_center { m.insert(c.cid, format!("coinc_ae_ac:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_start_start { m.insert(c.cid, format!("coinc_as_as:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_start_end { m.insert(c.cid, format!("coinc_as_ae:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_end_start { m.insert(c.cid, format!("coinc_ae_as:{},{}", an(c.a), an(c.b))); }
-        for c in &self.coincident_arc_end_end { m.insert(c.cid, format!("coinc_ae_ae:{},{}", an(c.a), an(c.b))); }
-        for c in &self.line_p1_on_line { m.insert(c.cid, format!("lp1_on_l:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.line_p2_on_line { m.insert(c.cid, format!("lp2_on_l:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.line_p1_on_arc { m.insert(c.cid, format!("lp1_on_a:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.line_p2_on_arc { m.insert(c.cid, format!("lp2_on_a:{},{}", ln(c.line), an(c.arc))); }
-        for c in &self.distance_pl { m.insert(c.cid, format!("dist_pl:{},{}", pn(c.point), ln(c.line))); }
-        for c in &self.distance_lp1l { m.insert(c.cid, format!("dist_lp1l:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.distance_lp2l { m.insert(c.cid, format!("dist_lp2l:{},{}", ln(c.a), ln(c.b))); }
-        for c in &self.distance_arc_center_l { m.insert(c.cid, format!("dist_ac_l:{},{}", an(c.arc), ln(c.line))); }
-        for c in &self.distance_arc_start_l { m.insert(c.cid, format!("dist_as_l:{},{}", an(c.arc), ln(c.line))); }
-        for c in &self.distance_arc_end_l { m.insert(c.cid, format!("dist_ae_l:{},{}", an(c.arc), ln(c.line))); }
-        for c in &self.distance_concentric { m.insert(c.cid, format!("dist_concentric:{},{}", an(c.a), an(c.b))); }
-        for c in &self.symmetry_ll { m.insert(c.cid, format!("sym_ll:{},{},{}", ln(c.a), ln(c.b), ln(c.c))); }
-        for c in &self.symmetry_pp { m.insert(c.cid, format!("sym_pp:{},{},{}", pn(c.a), ln(c.line), pn(c.c))); }
-        for c in &self.symmetry_aa { m.insert(c.cid, format!("sym_aa:{},{},{}", an(c.a), ln(c.line), an(c.c))); }
-        for ec in &self.expr_constraints { m.insert(ec.cid, format!("expr:{}", ec.description)); }
-        for (i, ec) in self.expr_constraints.iter().enumerate() {
-            // expr_constraints are assigned CIDs starting after all macro-generated ones
-            // but we don't have easy access to that base — approximate with description
-            let _ = i;
-            let label = format!("expr:{}", ec.description);
-            // We don't know the CID here — it would need to be tracked. Skip for now.
-            let _ = label;
-        }
+        self.for_each_constraint_collection_ref(|arenas, meta, coll| {
+            for i in 0..coll.len() {
+                let c = coll.item(i);
+                let mut names: std::vec::Vec<String> = std::vec::Vec::new();
+                c.each_point_ref(&mut |p| names.push(
+                    arenas.points.get(p).map(|e| e.name.clone()).unwrap_or_else(|| "?".into())));
+                c.each_line_ref(&mut |l| names.push(
+                    arenas.lines.get(l).map(|e| e.name.clone()).unwrap_or_else(|| "?".into())));
+                c.each_arc_ref(&mut |a| names.push(
+                    arenas.arcs.get(a).map(|e| e.name.clone()).unwrap_or_else(|| "?".into())));
+                m.insert(c.cid(), format!("{}:{}", meta.name, names.join(",")));
+            }
+        });
         m
     }
 
