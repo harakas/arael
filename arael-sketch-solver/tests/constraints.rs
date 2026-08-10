@@ -339,6 +339,7 @@ fn gap_abs(sketch: &Sketch, la: Ref<Line>, lb: Ref<Line>) -> f64 {
 fn test_range_min_activates_when_violated() {
     let (mut sketch, la, lb) = build_two_parallel(1.0);
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLineDistance(la, lb),
         value: 1.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -353,6 +354,7 @@ fn test_range_min_activates_when_violated() {
 fn test_range_min_inactive_when_feasible() {
     let (mut sketch, la, lb) = build_two_parallel(5.0);
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLineDistance(la, lb),
         value: 5.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -367,6 +369,7 @@ fn test_range_min_inactive_when_feasible() {
 fn test_range_max_activates_when_violated() {
     let (mut sketch, la, lb) = build_two_parallel(10.0);
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLineDistance(la, lb),
         value: 10.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -381,6 +384,7 @@ fn test_range_max_activates_when_violated() {
 fn test_range_between_clamps_into_band() {
     let (mut sketch, la, lb) = build_two_parallel(10.0);
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLineDistance(la, lb),
         value: 10.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -401,6 +405,7 @@ fn test_range_live_tracks_param() {
         name: "hi".into(), expr_str: "3".into(), value: 3.0, broken: false,
     });
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLineDistance(la, lb),
         value: 10.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -1043,6 +1048,7 @@ fn test_expr_dim_reference() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 10.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0), value: 10.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -1074,6 +1080,7 @@ fn test_expr_dim_arithmetic() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 5.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -1129,6 +1136,7 @@ fn test_bincode_roundtrip() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 5.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
@@ -1252,6 +1260,7 @@ fn test_expr_dim_angle_reference() {
         nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::Angle(l0, l1, true), value: 20.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d1".into(), expr_str: None, broken: false, derived: false,
@@ -1299,6 +1308,7 @@ fn test_update_dimension_preserves_name() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 10.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0),
         value: 10.0,
         offset: vect2d::new(0.0, 1.0),
@@ -1341,6 +1351,7 @@ fn test_update_dimension_numeric_to_expr() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 10.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0),
         value: 10.0,
         offset: vect2d::new(0.0, 1.0),
@@ -1391,6 +1402,7 @@ fn test_broken_expr_dim_detection() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 10.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0),
         value: 10.0,
         offset: vect2d::new(0.0, 1.0),
@@ -1436,6 +1448,7 @@ fn test_broken_expr_dim_no_cascade() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 10.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0),
         value: 10.0,
         offset: vect2d::new(0.0, 1.0),
@@ -1484,6 +1497,7 @@ fn test_circular_expr_dim_ref() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 10.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0),
         value: 10.0,
         offset: vect2d::new(0.0, 1.0),
@@ -1698,6 +1712,7 @@ fn test_user_param_in_dimension() {
     sketch.lines[l0].constraints.has_length = true;
     sketch.lines[l0].constraints.length = 5.0;
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: Some("gap".into()), broken: false, derived: false,
@@ -1803,6 +1818,7 @@ fn test_derived_length() {
     let mut sketch = Sketch::new();
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l),
         value: 0.0,
         offset: vect2d::new(0.0, 1.0),
@@ -1831,6 +1847,7 @@ fn test_derived_to_driven() {
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
     // Add as derived first
     sketch.dimensions.push(Dimension {
+            did: 0,
         kind: DimensionKind::LineLength(l),
         value: 5.0,
         offset: vect2d::new(0.0, 1.0),

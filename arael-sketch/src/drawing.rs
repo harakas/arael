@@ -2217,10 +2217,10 @@ impl EditorApp {
         let dim_sel_color = c.dimension_selected;
         let dim_broken_color = c.dimension_broken;
         let dim_hover_color = c.dimension_hover;
-        for (i, dim) in self.sketch.dimensions.iter().enumerate() {
-            let selected = self.selection.contains(&Selection::Dimension(i));
-            let dim_hovered = self.hovered == Some(Selection::Dimension(i));
-            let dim_editing = self.dim_edit_index == Some(i);
+        for dim in self.sketch.dimensions.iter() {
+            let selected = self.selection.contains(&Selection::Dimension(dim.did));
+            let dim_hovered = self.hovered == Some(Selection::Dimension(dim.did));
+            let dim_editing = self.dim_edit_did == Some(dim.did);
             // Skip dimensions of quiet entities unless selected/hovered/editing
             if !selected && !dim_hovered && !dim_editing {
                 let entity_quiet = match &dim.kind {

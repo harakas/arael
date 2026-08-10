@@ -177,14 +177,14 @@ pub enum Action {
         range: Option<RangeBound>,
     },
     UpdateDimension {
-        index: usize,
+        did: u32,
         value: f64,
         expr: Option<String>,
         #[serde(default)]
         range: Option<RangeBound>,
     },
-    RemoveDimension { index: usize },
-    MoveDimension { index: usize, offset: arael::vect::vect2d, text_along: f64 },
+    RemoveDimension { did: u32 },
+    MoveDimension { did: u32, offset: arael::vect::vect2d, text_along: f64 },
     AddUserParam { name: String, expr_str: String },
     UpdateUserParam { index: usize, name: String, expr_str: String },
     RemoveUserParam { index: usize },
@@ -1088,6 +1088,7 @@ impl Action {
                     let name = format!("d{}", sketch.next_dimension_id);
                     sketch.next_dimension_id += 1;
                     sketch.dimensions.push(Dimension {
+                        did: 0, // minted by assign_dimension_ids
                         kind: *kind, value: *value,
                         offset: vect2d::new(0.0, 1.0),
                         text_along: 0.0,
@@ -1244,6 +1245,7 @@ impl Action {
                 }
                 } // end if !derived
                 sketch.dimensions.push(Dimension {
+                    did: 0, // minted by assign_dimension_ids
                     kind: *kind, value: *value,
                     offset: vect2d::new(0.0, 1.0),
                     text_along: 0.0,
@@ -1253,12 +1255,12 @@ impl Action {
                     range: None,
                 });
             }
-            Action::UpdateDimension { index, value, expr, range } => {
-                if *index >= sketch.dimensions.len() { return (false, created); }
+            Action::UpdateDimension { did, value, expr, range } => {
+                let Some(index) = sketch.dimension_index_by_did(*did) else { return (false, created); };
                 // Same normalisation as AddDimension -- keeps the stored
                 // value and the effective target in canonical range when
                 // the user overwrites an xangle numeric dim.
-                let normed_value = sketch.dimensions.get(*index)
+                let normed_value = sketch.dimensions.get(index)
                     .map(|d| canonicalise_dim_value(&d.kind, *value))
                     .unwrap_or(*value);
                 let value = &normed_value;
@@ -1270,13 +1272,13 @@ impl Action {
                     // residual drives the parameter on its own. No-op
                     // when the dim was already range-typed (nothing
                     // was pushed) or derived.
-                    let was_numeric_non_derived = sketch.dimensions.get(*index)
+                    let was_numeric_non_derived = sketch.dimensions.get(index)
                         .is_some_and(|d| d.expr_str.is_none() && !d.derived && d.range.is_none());
                     if was_numeric_non_derived {
-                        let kind_copy = sketch.dimensions[*index].kind;
+                        let kind_copy = sketch.dimensions[index].kind;
                         remove_numeric_dim_constraint(sketch, &kind_copy);
                     }
-                    if let Some(dim) = sketch.dimensions.get_mut(*index) {
+                    if let Some(dim) = sketch.dimensions.get_mut(index) {
                         dim.range = Some(rb.clone());
                         dim.value = *value;
                         dim.expr_str = None;
@@ -1288,12 +1290,12 @@ impl Action {
                 // `range` marker so `rebuild_expr_constraints` stops
                 // synthesising the barrier residual. The numeric /
                 // expression constraint is (re)built below.
-                if let Some(dim) = sketch.dimensions.get_mut(*index) {
+                if let Some(dim) = sketch.dimensions.get_mut(index) {
                     dim.range = None;
                 }
                 // Remove old underlying constraint (only for numeric, non-derived dims)
                 {
-                    let dim = &sketch.dimensions[*index];
+                    let dim = &sketch.dimensions[index];
                     let dim_kind = dim.kind;
                     let is_numeric_non_derived = dim.expr_str.is_none() && !dim.derived;
                     if is_numeric_non_derived {
@@ -1357,7 +1359,7 @@ impl Action {
                     }
                 }
                 // Update dimension in place (keeps name, kind, offset, text_along)
-                let dim = &mut sketch.dimensions[*index];
+                let dim = &mut sketch.dimensions[index];
                 dim.value = *value;
                 dim.expr_str = expr.clone();
                 // Add new underlying constraint (only for numeric, non-derived dims)
@@ -1450,15 +1452,16 @@ impl Action {
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
             }
-            Action::MoveDimension { index, offset, text_along } => {
-                if let Some(dim) = sketch.dimensions.get_mut(*index) {
+            Action::MoveDimension { did, offset, text_along } => {
+                if let Some(dim) = sketch.dimension_index_by_did(*did)
+                    .and_then(|i| sketch.dimensions.get_mut(i)) {
                     dim.offset = *offset;
                     dim.text_along = *text_along;
                 }
             }
-            Action::RemoveDimension { index } => {
-                if *index < sketch.dimensions.len() {
-                    let dim = sketch.dimensions.remove(*index);
+            Action::RemoveDimension { did } => {
+                if let Some(index) = sketch.dimension_index_by_did(*did) {
+                    let dim = sketch.dimensions.remove(index);
                     // Expression dimension: remove the ExpressionConstraint
                     if dim.expr_str.is_some() {
                         let desc_prefix = format!("{} = ", dim.name);

@@ -131,7 +131,7 @@ pub struct EditorApp {
     pub drag_offset: vect2d,             // offset from mouse to drag point
     pub drag_offset2: vect2d,            // offset for second drag point
     pub drag_saved_arc_locks: Option<SavedArcLocks>,
-    pub drag_dimension: Option<usize>,   // index of dimension being dragged
+    pub drag_dimension: Option<u32>,   // did of dimension being label-dragged
     /// Live midpoint snap during endpoint drag: (snap position in sketch
     /// coords, snap target). Populated every `update_drag`, cleared by
     /// `end_drag`. Used so the preview render can show the midpoint
@@ -167,7 +167,7 @@ pub struct EditorApp {
     pub dim_placing: bool,          // true when positioning the dimension with mouse
     pub dim_offset: vect2d,         // current offset being placed
     pub dim_text_along: f64,        // text position along line during creation
-    pub dim_edit_index: Option<usize>, // index of dimension being edited (for double-click edit)
+    pub dim_edit_did: Option<u32>, // did of dimension being edited (for double-click edit)
     pub dim_select_all: bool,           // one-shot: select all text on next frame
     pub dim_derived: bool,              // checkbox state for derived (reference) dimensions
     pub dim_derived_prev: bool,         // previous frame's `dim_derived`, for edge-detect
@@ -402,7 +402,7 @@ impl EditorApp {
             dim_placing: false,
             dim_offset: vect2d::new(0.0, 1.0),
             dim_text_along: 0.0,
-            dim_edit_index: None,
+            dim_edit_did: None,
             dim_select_all: false,
             dim_derived: false,
             dim_derived_prev: false,
@@ -1011,7 +1011,7 @@ impl EditorApp {
         // Check both the text segment AND the dimension arrow line
         if self.show_dimensions {
         let screen_pos = self.to_screen(sketch_pos);
-        for (i, dim) in self.sketch.dimensions.iter().enumerate() {
+        for dim in self.sketch.dimensions.iter() {
             // Text segment
             let (ts, te) = self.dim_text_segment(dim);
             let dt = Self::screen_point_to_segment_dist(screen_pos, ts, te);
@@ -1033,7 +1033,7 @@ impl EditorApp {
                 Self::screen_point_to_segment_dist(screen_pos, sq1, sq2)
             };
             if dt < 15.0 || da < 8.0 {
-                return Some(Selection::Dimension(i));
+                return Some(Selection::Dimension(dim.did));
             }
         }
         }
@@ -1851,10 +1851,9 @@ impl EditorApp {
             Selection::ArcCenter(r) => Some(format!("{}.center", self.sketch.arcs[r].name)),
             Selection::ArcStart(r) => Some(format!("{}.start", self.sketch.arcs[r].name)),
             Selection::ArcEnd(r) => Some(format!("{}.end", self.sketch.arcs[r].name)),
-            Selection::Dimension(i) => {
-                if i < self.sketch.dimensions.len() {
-                    Some(self.sketch.dimensions[i].name.clone())
-                } else { None }
+            Selection::Dimension(did) => {
+                self.sketch.dimension_index_by_did(did)
+                    .map(|i| self.sketch.dimensions[i].name.clone())
             }
             Selection::Constraint(id) => self.constraint_name(id),
         }
@@ -3138,12 +3137,12 @@ impl EditorApp {
         self.reapply_fillets();
         // If reapply couldn't produce a primary dim (corner invalid),
         // bail and surface the error.
-        if self.primary_fillet_dim_index().is_none() {
+        if self.primary_fillet_dim_did().is_none() {
             self.cancel_pending_fillet();
             return;
         }
         self.dim_editing = true;
-        self.dim_edit_index = self.primary_fillet_dim_index();
+        self.dim_edit_did = self.primary_fillet_dim_did();
         self.dim_kind = None;
         self.dim_placing = false;
         self.dim_select_all = true;
@@ -3156,7 +3155,7 @@ impl EditorApp {
     /// Index of the radius dimension created by the first (primary)
     /// fillet in `fillet_pending`. None if reapply has never run or
     /// the primary fillet failed.
-    pub fn primary_fillet_dim_index(&self) -> Option<usize> {
+    pub fn primary_fillet_dim_did(&self) -> Option<u32> {
         // The primary fillet is the first entry in `corners`. After
         // reapply, its AddDimension is the oldest fillet-created dim;
         // scan by name prefix isn't reliable here, so find the first
@@ -3170,11 +3169,7 @@ impl EditorApp {
         let pre = bincode::deserialize::<Sketch>(&p.pre_snapshot).ok()?;
         let n_pre = pre.dimensions.len();
         // First dim added by fillet session (the primary's radius).
-        if self.sketch.dimensions.len() > n_pre {
-            Some(n_pre)
-        } else {
-            None
-        }
+        self.sketch.dimensions.get(n_pre).map(|d| d.did)
     }
 
     /// Current radius token for reapply: the user's dim_input if it
@@ -3308,8 +3303,8 @@ impl EditorApp {
             return;
         }
         self.reapply_fillets();
-        // dim_edit_index may have shifted if dims were re-numbered.
-        self.dim_edit_index = self.primary_fillet_dim_index();
+        // Re-resolve: the primary fillet dim's did after reapply.
+        self.dim_edit_did = self.primary_fillet_dim_did();
     }
 
     /// Restore the sketch and history to the state captured at
@@ -3327,7 +3322,7 @@ impl EditorApp {
         self.history.groups.truncate(p.history_cursor_before);
         self.history.cursor = p.history_cursor_before;
         self.dim_editing = false;
-        self.dim_edit_index = None;
+        self.dim_edit_did = None;
         self.dim_kind = None;
         self.dim_input.clear();
         self.status_error = None;
@@ -3376,11 +3371,10 @@ impl EditorApp {
             Selection::ArcStart(r) => format!("{}.s", self.sketch.arcs[r].name),
             Selection::ArcEnd(r) => format!("{}.e", self.sketch.arcs[r].name),
             Selection::Constraint(_) => "constraint".to_string(),
-            Selection::Dimension(i) => {
-                if i < self.sketch.dimensions.len() {
-                    self.sketch.dimensions[i].name.clone()
-                } else {
-                    "dim?".to_string()
+            Selection::Dimension(did) => {
+                match self.sketch.dimension_index_by_did(did) {
+                    Some(i) => self.sketch.dimensions[i].name.clone(),
+                    None => "dim?".to_string(),
                 }
             }
         }

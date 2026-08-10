@@ -130,6 +130,7 @@ mod tests {
         sketch.lines[l0].constraints.has_length = true;
         sketch.lines[l0].constraints.length = 10.0;
         sketch.dimensions.push(crate::Dimension {
+            did: 0,
             kind: crate::DimensionKind::LineLength(l0),
             value: 10.0,
             offset: vect2d::new(0.0, 1.0),

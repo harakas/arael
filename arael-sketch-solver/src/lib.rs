@@ -724,7 +724,27 @@ impl Sketch {
     /// numeric id (`C<nid>`) to any constraint whose nid is still the 0
     /// sentinel. Call at the tail of every mutating action and after
     /// loading a sketch so freshly-deserialised sketches pick up names.
+    /// Mint permanent ids for dimensions that lack one (did == 0):
+    /// max existing + 1 upward. Runs with constraint naming, so every
+    /// action and load fixup covers it.
+    pub fn assign_dimension_ids(&mut self) {
+        let mut next = self.dimensions.iter().map(|d| d.did).max().unwrap_or(0) + 1;
+        for d in &mut self.dimensions {
+            if d.did == 0 {
+                d.did = next;
+                next += 1;
+            }
+        }
+    }
+
+    /// Index of the dimension carrying this did, if it still exists.
+    pub fn dimension_index_by_did(&self, did: u32) -> Option<usize> {
+        if did == 0 { return None; }
+        self.dimensions.iter().position(|d| d.did == did)
+    }
+
     pub fn assign_constraint_names(&mut self) {
+        self.assign_dimension_ids();
         // Registry order is field-declaration order, so numbering is
         // stable and every collection participates -- constraint types
         // once missing from the hand-kept list stayed at nid 0 forever.
@@ -1970,6 +1990,7 @@ impl Sketch {
 
         // Build the measured property expression
         let dim = Dimension {
+            did: 0, // minted by assign_dimension_ids
             kind, value: 0.0, offset, text_along,
             name: name.clone(), expr_str: Some(expr_str.to_string()),
             broken: false,
@@ -2989,6 +3010,7 @@ mod jacobian_tests {
         sketch.lines[l0].constraints.has_length = true;
         sketch.lines[l0].constraints.length = 5.0;
         sketch.dimensions.push(Dimension {
+            did: 0,
             kind: DimensionKind::LineLength(l0),
             value: 5.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
             name: "d0".into(), expr_str: None, broken: false, derived: false,

@@ -177,6 +177,11 @@ pub enum RangeBound {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Dimension {
+    /// Permanent unique id: the stable handle for selection and the
+    /// dimension actions. Vec indices shift on every removal; the did
+    /// never changes. Minted by Sketch::assign_dimension_ids.
+    #[serde(default)]
+    pub did: u32,
     pub kind: DimensionKind,
     pub value: f64,
     pub offset: vect2d,      // visual offset (y = perpendicular distance)

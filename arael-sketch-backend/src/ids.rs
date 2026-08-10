@@ -18,7 +18,8 @@ pub enum Selection {
     ArcStart(Ref<Arc>),
     ArcEnd(Ref<Arc>),
     Constraint(ConstraintId),
-    Dimension(usize),
+    /// By permanent dimension id (Dimension::did), not Vec index.
+    Dimension(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]

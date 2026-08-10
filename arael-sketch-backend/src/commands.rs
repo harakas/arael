@@ -134,8 +134,9 @@ impl CommandContext {
 fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
     let (kind, requested) = match action {
         Action::AddDimension { kind, value, .. } => (Some(kind), Some(*value)),
-        Action::UpdateDimension { index, value, .. } => {
-            if let Some(dim) = sketch.dimensions.get(*index) {
+        Action::UpdateDimension { did, value, .. } => {
+            if let Some(dim) = sketch.dimension_index_by_did(*did)
+                .and_then(|i| sketch.dimensions.get(i)) {
                 (Some(&dim.kind), Some(*value))
             } else { (None, None) }
         }
@@ -291,7 +292,7 @@ fn prune_selection(ctx: &mut CommandContext) {
         | Selection::ArcCenter(r)
         | Selection::ArcStart(r)
         | Selection::ArcEnd(r) => sketch.arcs.get(r).is_some(),
-        Selection::Dimension(i) => i < sketch.dimensions.len(),
+        Selection::Dimension(did) => sketch.dimension_index_by_did(did).is_some(),
         Selection::Constraint(id) => match id {
             ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => {
                 sketch.lines.get(r).is_some()
@@ -3301,7 +3302,7 @@ fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // 2) Dimension: d<n>.
     if let Some(idx) = ctx.sketch.dimensions.iter().position(|d| d.name == name) {
         ctx.begin_group();
-        ctx.exec(Action::RemoveDimension { index: idx });
+        ctx.exec(Action::RemoveDimension { did: ctx.sketch.dimensions[idx].did });
         return ok(format!("Deleted dimension {}", name));
     }
 
@@ -3879,7 +3880,7 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: len, expr: None, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: len, expr: None, range: None,  });
             let label = if is_derived { "derived" } else { "driven" };
             return ok_or_status(ctx, format!("Updated {} {} length = ({:.4})", name, label, len));
         }
@@ -3910,7 +3911,7 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} length {} (current {:.4})", name, bound_desc, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -3928,7 +3929,7 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} length = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
@@ -3949,7 +3950,7 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: r, expr: None, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: r, expr: None, range: None,  });
             let label = if is_derived { "derived" } else { "driven" };
             return ok_or_status(ctx, format!("Updated {} {} radius = ({:.4})", label, name, r));
         }
@@ -3977,7 +3978,7 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} radius {} (current {:.4})", name, bound_desc, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -3995,7 +3996,7 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} radius = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
@@ -4019,7 +4020,7 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: r, expr: None, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: r, expr: None, range: None,  });
             let label = if is_derived { "derived" } else { "driven" };
             return ok_or_status(ctx, format!("Updated {} {} radius_b = ({:.4})", label, name, r));
         }
@@ -4050,7 +4051,7 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} radius_b {} (current {:.4})", name, bound_desc, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -4071,7 +4072,7 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} radius_b = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
@@ -4097,7 +4098,7 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: sweep_deg, expr: None, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: sweep_deg, expr: None, range: None,  });
             let label = if is_derived { "derived" } else { "driven" };
             return ok_or_status(ctx, format!("Updated {} {} sweep = ({:.4})", label, name, sweep_deg));
         }
@@ -4124,7 +4125,7 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} sweep {} (current {:.4})", name, bound_desc, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -4140,7 +4141,7 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} sweep = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
@@ -5164,7 +5165,7 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
             Selection::ArcStart(r) => format!("{}.start", ctx.sketch.arcs[*r].name),
             Selection::ArcEnd(r) => format!("{}.end", ctx.sketch.arcs[*r].name),
             Selection::Constraint(_) => "constraint".into(),
-            Selection::Dimension(i) => ctx.sketch.dimensions.get(*i).map(|d| d.name.clone()).unwrap_or("dim?".into()),
+            Selection::Dimension(did) => ctx.sketch.dimension_index_by_did(*did).and_then(|i| ctx.sketch.dimensions.get(i)).map(|d| d.name.clone()).unwrap_or("dim?".into()),
         }).collect();
         return ok(names.join(", "));
     }
@@ -6711,7 +6712,7 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr: None, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr: None, range: None,  });
             let label = if is_derived { "derived" } else { "driven" };
             return ok_or_status(ctx, format!("Updated {} {} angle = ({:.4})", label, name, val));
         }
@@ -6749,7 +6750,7 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} angle {}{} (current {:.4})", name, bound_desc, sector, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -6780,7 +6781,7 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value, expr, range: None,  });
         let sector = if supplement { "supplement" } else { "" };
         return ok_or_status(ctx, format!("Updated {} angle = {} {}", name, display, sector).trim_end().to_string());
     }
@@ -6914,7 +6915,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: dist, expr: None, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: dist, expr: None, range: None,  });
             let ulabel = if is_derived { "derived" } else { "driven" };
             return ok_or_status(ctx, format!("Updated {} {} distance = ({:.4})", name, ulabel, dist));
         }
@@ -7067,7 +7068,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr, range: None,  });
             return ok_or_status(ctx, format!("Updated {} line-line distance = {}", name, tokens[2]));
         }
         // When the pair is already parallel, the dim is unambiguously
@@ -7107,7 +7108,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr, range: None,  });
             return ok_or_status(ctx, format!("Updated {} concentric distance = {}", name, tokens[2]));
         }
         let already_concentric = ctx.sketch.concentric.iter().any(|c|
@@ -7129,7 +7130,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr, range: None,  });
             return ok_or_status(ctx, format!("Updated {} distance = {}", name, tokens[2]));
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
@@ -7145,7 +7146,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} distance = {}", name, tokens[2]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
@@ -7219,7 +7220,7 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} {} {} (current {:.4})", name, label, bound_desc, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -7241,7 +7242,7 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} {} = {}", name, label, tokens[2]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
@@ -7311,7 +7312,7 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: measured, expr: None, range: Some(rb) });
             return ok_or_status(ctx, format!("Updated {} xangle {} (current {:.4})", name, bound_desc, measured));
         }
         ctx.exec(Action::AddDimension {
@@ -7331,7 +7332,7 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
-        ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
+        ctx.exec(Action::UpdateDimension { did: ctx.sketch.dimensions[idx].did, value: val, expr, range: None,  });
         return ok_or_status(ctx, format!("Updated {} xangle = {}", name, tokens[1]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
@@ -7948,13 +7949,13 @@ fn cmd_dim_pos(ctx: &mut CommandContext, args: &str) -> CommandResult {
         "offset" => {
             offset.y = if is_relative { offset.y + val } else { val };
             ctx.begin_group();
-            ctx.exec(Action::MoveDimension { index: idx, offset, text_along });
+            ctx.exec(Action::MoveDimension { did: ctx.sketch.dimensions[idx].did, offset, text_along });
             ok(format!("{} offset = {:.4}", dim_name, ctx.sketch.dimensions[idx].offset.y))
         }
         "along" => {
             text_along = if is_relative { text_along + val } else { val };
             ctx.begin_group();
-            ctx.exec(Action::MoveDimension { index: idx, offset, text_along });
+            ctx.exec(Action::MoveDimension { did: ctx.sketch.dimensions[idx].did, offset, text_along });
             ok(format!("{} along = {:.4}", dim_name, ctx.sketch.dimensions[idx].text_along))
         }
         _ => err(format!("Unknown field '{}'. Use: offset, along", field)),
@@ -7978,13 +7979,15 @@ fn cmd_set_derived(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     // Use RemoveDimension logic to remove constraint, then re-add as derived
     let dim = ctx.sketch.dimensions[idx].clone();
-    ctx.exec(Action::RemoveDimension { index: idx });
+    ctx.exec(Action::RemoveDimension { did: ctx.sketch.dimensions[idx].did });
     // Re-create as derived (no constraint)
     ctx.sketch.get_mut().dimensions.push(Dimension {
+        did: 0, // minted by assign_dimension_ids
         kind: dim.kind, value: dim.value, offset: dim.offset, text_along: dim.text_along,
         name: dim.name.clone(), expr_str: dim.expr_str, broken: dim.broken, derived: true,
         range: dim.range,
     });
+    ctx.sketch.get_mut().assign_dimension_ids();
     ctx.sketch.solve();
     ctx.sketch.get_mut().update_expr_dim_values();
     ok(format!("{} is now derived (reference only)", name))
@@ -10221,6 +10224,33 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_dimension_identity_survives_removal() {
+        // Dimension actions used to carry Vec indices; removing one
+        // dimension shifted the rest and the next removal deleted the
+        // wrong one. Identity is the permanent did now.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect");
+        run_ok(&mut ctx, "add_line 0,1 2,1 noconnect");
+        run_ok(&mut ctx, "add_line 0,2 3,2 noconnect");
+        run_ok(&mut ctx, "length L0 1");
+        run_ok(&mut ctx, "length L1 2");
+        run_ok(&mut ctx, "length L2 3");
+        let did0 = ctx.sketch.dimensions[0].did;
+        let did2 = ctx.sketch.dimensions[2].did;
+        assert!(did0 != 0 && did2 != 0 && did0 != did2);
+        // Remove first and third the way the GUI multi-delete does.
+        ctx.begin_group();
+        ctx.exec(Action::RemoveDimension { did: did0 });
+        ctx.exec(Action::RemoveDimension { did: did2 });
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert_eq!(ctx.sketch.dimensions[0].name, "d1", "wrong dimension deleted");
+        // A did that no longer resolves is a no-op, never a
+        // wrong-target delete.
+        ctx.exec(Action::RemoveDimension { did: did2 });
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
 
     #[test]
     fn test_delete_by_name_is_nid_stable() {

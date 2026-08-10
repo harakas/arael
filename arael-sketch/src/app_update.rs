@@ -439,11 +439,14 @@ impl eframe::App for EditorApp {
                         Selection::ArcStart(r) => Some(format!("{}.s", self.sketch.arcs[r].name)),
                         Selection::ArcEnd(r) => Some(format!("{}.e", self.sketch.arcs[r].name)),
                         Selection::Constraint(id) => Some(self.describe_constraint(id)),
-                        Selection::Dimension(i) => {
-                            if i < self.sketch.dimensions.len() {
-                                let d = &self.sketch.dimensions[i];
-                                Some(format!("{} = {:.2}", d.name, d.value))
-                            } else { Some("dim?".to_string()) }
+                        Selection::Dimension(did) => {
+                            match self.sketch.dimension_index_by_did(did) {
+                                Some(i) => {
+                                    let d = &self.sketch.dimensions[i];
+                                    Some(format!("{} = {:.2}", d.name, d.value))
+                                }
+                                None => Some("dim?".to_string()),
+                            }
                         }
                     }
                 }).collect();
@@ -1095,7 +1098,7 @@ impl eframe::App for EditorApp {
                 self.dim_editing = false;
                 self.dim_kind = None;
                 self.dim_placing = false;
-                self.dim_edit_index = None;
+                self.dim_edit_did = None;
                 self.status_error = None;
                 self.tool = Tool::Select;
                 self.cancel_drag();
@@ -1113,7 +1116,7 @@ impl eframe::App for EditorApp {
                             Selection::Line(r) => { self.exec(Action::DeleteLine { line: r }); }
                             Selection::Arc(r) => { self.exec(Action::DeleteArc { arc: r }); }
                             Selection::Constraint(id) => { self.delete_constraint(id); }
-                            Selection::Dimension(i) => { self.exec(Action::RemoveDimension { index: i }); }
+                            Selection::Dimension(did) => { self.exec(Action::RemoveDimension { did }); }
                             _ => {} // endpoints aren't deletable on their own
                         }
                     }
@@ -1231,14 +1234,14 @@ impl eframe::App for EditorApp {
                     // Double-click on dimension to edit value
                     if response.double_clicked_by(egui::PointerButton::Primary) {
                         let mut edited = false;
-                        for (i, dim) in self.sketch.dimensions.iter().enumerate() {
+                        for dim in self.sketch.dimensions.iter() {
                             let (ts, te) = self.dim_text_segment(dim);
                             let d = Self::screen_point_to_segment_dist(mouse_screen, ts, te);
                             if d < 15.0 {
                                 self.dim_input = Self::dim_edit_string(dim);
                                 self.dim_kind = Some(dim.kind);
                                 self.dim_offset = dim.offset;
-                                self.dim_edit_index = Some(i);
+                                self.dim_edit_did = Some(dim.did);
                                 self.dim_editing = true;
                                 self.dim_select_all = true;
                                 self.dim_placing = false;
@@ -1247,7 +1250,7 @@ impl eframe::App for EditorApp {
                                 self.dim_input_backup.clear();
                                 self.tool = Tool::Dimension;
                                 self.selection.clear();
-                                self.selection.push(Selection::Dimension(i));
+                                self.selection.push(Selection::Dimension(dim.did));
                                 edited = true;
                                 break;
                             }
@@ -1306,9 +1309,9 @@ impl eframe::App for EditorApp {
                                 self.box_select_start = Some(p);
                             }
                         }
-                        if let Some(dim_idx) = self.drag_dimension {
+                        if let Some(drag_did) = self.drag_dimension {
                             // Update dimension offset and text_along from mouse
-                            if dim_idx < self.sketch.dimensions.len() {
+                            if let Some(dim_idx) = self.sketch.dimension_index_by_did(drag_did) {
                                 let kind = self.sketch.dimensions[dim_idx].kind;
                                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
                                 if is_radius {
@@ -2187,14 +2190,14 @@ impl eframe::App for EditorApp {
                     // Double-click on existing dimension to edit
                     if response.double_clicked_by(egui::PointerButton::Primary) {
                         // Check if clicking on a dimension
-                        for (i, dim) in self.sketch.dimensions.iter().enumerate() {
+                        for dim in self.sketch.dimensions.iter() {
                             let (ts, te) = self.dim_text_segment(dim);
                             let d = Self::screen_point_to_segment_dist(mouse_screen, ts, te);
                             if d < 15.0 {
                                 self.dim_input = Self::dim_edit_string(dim);
                                 self.dim_kind = Some(dim.kind);
                                 self.dim_offset = dim.offset;
-                                self.dim_edit_index = Some(i);
+                                self.dim_edit_did = Some(dim.did);
                                 self.dim_editing = true;
                                 self.dim_select_all = true;
                                 self.dim_placing = false;
@@ -2217,7 +2220,7 @@ impl eframe::App for EditorApp {
             self.draw_canvas(&painter, rect, mouse_screen);
 
             // Dimension preview while placing (not when editing an existing dimension)
-            if (self.dim_placing || (self.dim_editing && self.dim_edit_index.is_none())) && self.dim_kind.is_some() {
+            if (self.dim_placing || (self.dim_editing && self.dim_edit_did.is_none())) && self.dim_kind.is_some() {
                 let kind = self.dim_kind.unwrap();
                 let measured = self.measure_dimension(&kind);
                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
@@ -2840,11 +2843,12 @@ impl EditorApp {
     /// offset / text_along / measured value so `dim_text_segment`
     /// computes the same text position the preview is showing.
     fn dim_input_anchor_screen(&self) -> Option<egui::Pos2> {
-        let dim_ref = if let Some(idx) = self.dim_edit_index {
+        let dim_ref = if let Some(idx) = self.dim_edit_did.and_then(|d| self.sketch.dimension_index_by_did(d)) {
             self.sketch.dimensions.get(idx).cloned()
         } else if let Some(kind) = self.dim_kind {
             let value = self.measure_dimension(&kind);
             Some(arael_sketch_solver::Dimension {
+                did: 0,
                 kind,
                 value,
                 offset: self.dim_offset,
@@ -2882,7 +2886,7 @@ impl EditorApp {
         // non-destructive.
         if self.dim_derived && !self.dim_derived_prev {
             self.dim_input_backup = self.dim_input.clone();
-            let measured = if let Some(idx) = self.dim_edit_index {
+            let measured = if let Some(idx) = self.dim_edit_did.and_then(|d| self.sketch.dimension_index_by_did(d)) {
                 self.sketch.dimensions.get(idx).map(|d| d.value).unwrap_or(0.0)
             } else if let Some(kind) = self.dim_kind {
                 self.measure_dimension(&kind)
@@ -2931,7 +2935,7 @@ impl EditorApp {
             self.reapply_fillets();
             self.fillet_pending = None;
             self.dim_editing = false;
-            self.dim_edit_index = None;
+            self.dim_edit_did = None;
             self.dim_kind = None;
             self.selection.clear();
             return;
@@ -2963,13 +2967,14 @@ impl EditorApp {
                 let rb = range_result.unwrap().unwrap();
                 if self.dim_derived {
                     self.status_error = Some("Range dimensions are not compatible with `derived`".into());
-                } else if let Some(edit_idx) = self.dim_edit_index.take() {
+                } else if let Some(edit_did) = self.dim_edit_did.take() {
                     // Editing existing dim -> re-bind as range.
-                    let measured = self.sketch.dimensions.get(edit_idx)
+                    let measured = self.sketch.dimension_index_by_did(edit_did)
+                        .and_then(|i| self.sketch.dimensions.get(i))
                         .map(|d| d.value).unwrap_or(0.0);
                     self.begin_group();
                     self.exec(Action::UpdateDimension {
-                        index: edit_idx, value: measured, expr: None, range: Some(rb),
+                        did: edit_did, value: measured, expr: None, range: Some(rb),
                     });
                     success = true;
                 } else if let Some(kind) = self.dim_kind {
@@ -3006,7 +3011,8 @@ impl EditorApp {
                 }
             } else if is_numeric || is_expr || (input.is_empty() && self.dim_derived) {
                 self.begin_group();
-                if let Some(edit_idx) = self.dim_edit_index.take() {
+                if let Some((edit_did, edit_idx)) = self.dim_edit_did.take()
+                    .and_then(|d| self.sketch.dimension_index_by_did(d).map(|i| (d, i))) {
                     // Editing existing: update in place (preserves name)
                     if self.dim_derived != self.sketch.dimensions[edit_idx].derived {
                         // Toggle derived status
@@ -3020,14 +3026,14 @@ impl EditorApp {
                         success = true;
                     } else if is_numeric {
                         let value = input.parse::<f64>().unwrap();
-                        self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None, range: None });
+                        self.exec(Action::UpdateDimension { did: edit_did, value, expr: None, range: None });
                         success = true;
                     } else if let Err(e) = self.sketch.get_mut().validate_expr(&input) {
                         self.status_error = Some(format!("Expression error: {}", e));
-                        self.dim_edit_index = Some(edit_idx); // restore
+                        self.dim_edit_did = Some(edit_did); // restore
                     } else {
                         self.exec(Action::UpdateDimension {
-                            index: edit_idx, value: 0.0,
+                            did: edit_did, value: 0.0,
                             expr: Some(input.clone()), range: None,
                         });
                         success = true;
@@ -3103,7 +3109,7 @@ impl EditorApp {
             if success {
                 self.dim_editing = false;
                 self.dim_placing = false;
-                self.dim_edit_index = None;
+                self.dim_edit_did = None;
                 self.dim_kind = None;
                 self.selection.clear();
                 // Fillet-in-flight: the dim commit finalises the

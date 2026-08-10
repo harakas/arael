@@ -140,6 +140,7 @@ fn expression_backed_dimension_in_dim_map() {
         broken: false,
     });
     sketch.dimensions.push(Dimension {
+        did: 0,
         kind: DimensionKind::LineLength(l),
         value: 5.0,
         offset: vect2d::new(0.0, 1.0),
