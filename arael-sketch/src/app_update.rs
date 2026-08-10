@@ -1735,9 +1735,10 @@ impl eframe::App for EditorApp {
                             }
                             // Auto-coincident for edge (point on circle)
                             if let Some((_, s)) = snap {
-                                let helper = self.sketch.get_mut().add_helper_point(edge);
-                                self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
-                                self.apply_snap_coincident_point(s, helper);
+                                if let Some(helper) = self.exec(Action::AddHelperPoint { pos: edge }).point() {
+                                    self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
+                                    self.apply_snap_coincident_point(s, helper);
+                                }
                             }
                         } else {
                             // First click: center
@@ -1777,10 +1778,10 @@ impl eframe::App for EditorApp {
                                     self.apply_snap_coincident_arc(s, new_arc, end_ap, end);
                                 }
                                 // Auto-coincident for mid (point on arc) - needs helper point
-                                if let Some(s) = snap_target {
-                                    let helper = self.sketch.get_mut().add_helper_point(pos);
-                                    self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
-                                    self.apply_snap_coincident_point(s, helper);
+                                if let Some(s) = snap_target
+                                    && let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point() {
+                                        self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
+                                        self.apply_snap_coincident_point(s, helper);
                                 }
                             } else {
                                 // Second click: end point

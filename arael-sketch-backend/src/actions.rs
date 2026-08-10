@@ -75,6 +75,10 @@ use crate::geometry::circumscribed_arc;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     AddPoint { pos: vect2d },
+    /// A hidden junction point for composite gestures: two or more
+    /// constraints exec'd in the same group tie it down. Invisible to
+    /// the user like every helper.
+    AddHelperPoint { pos: vect2d },
     AddLine { p1: vect2d, p2: vect2d },
     ApplyHorizontal { lines: Vec<Ref<Line>> },
     ApplyVertical { lines: Vec<Ref<Line>> },
@@ -130,7 +134,9 @@ pub enum Action {
     ApplyEndpointOnArc { endpoint: DimensionEndpoint, arc: Ref<Arc> },
     ApplyCollinear { a: Ref<Line>, b: Ref<Line> },
     ApplySymmetryLL { a: Ref<Line>, b: Ref<Line>, c: Ref<Line> },
-    ApplySymmetryPP { a: Ref<Point>, line: Ref<Line>, c: Ref<Point> },
+    /// Endpoints, not points: helper bridges are created inside
+    /// apply(), like every dimension endpoint.
+    ApplySymmetryPP { a: DimensionEndpoint, line: Ref<Line>, c: DimensionEndpoint },
     ApplySymmetryAA { a: Ref<Arc>, line: Ref<Line>, c: Ref<Arc> },
     ApplyMidpoint { point: Ref<Point>, line: Ref<Line> },
     ApplyMidpointLP1 { line: Ref<Line>, target: Ref<Line> },
@@ -202,6 +208,7 @@ impl Action {
     pub fn describe(&self) -> String {
         match self {
             Action::AddPoint { .. } => "Add point".into(),
+            Action::AddHelperPoint { .. } => "Add helper point".into(),
             Action::AddLine { .. } => "Add line".into(),
             Action::AddCircle { .. } => "Add circle".into(),
             Action::AddEllipse { .. } => "Add ellipse".into(),
@@ -860,6 +867,7 @@ impl Action {
         let mut created = Created::Nothing;
         match self {
             Action::AddPoint { pos } => { created = Created::Point(sketch.add_point(*pos)); }
+            Action::AddHelperPoint { pos } => { created = Created::Point(sketch.add_helper_point(*pos)); }
             Action::AddLine { p1, p2 } => { created = Created::Line(sketch.add_line(*p1, *p2)); }
             Action::AddCircle { center, edge } => {
                 let r = ((edge.x - center.x).powi(2) + (edge.y - center.y).powi(2)).sqrt();
@@ -1093,8 +1101,10 @@ impl Action {
                 });
             }
             Action::ApplySymmetryPP { a, line, c } => {
+                let pa = resolve_dim_endpoint(sketch, a);
+                let pc = resolve_dim_endpoint(sketch, c);
                 sketch.symmetry_pp.push(SymmetryPP {
-                    a: *a, c: *c, line: *line, nid: 0, cid: 0,
+                    a: pa, c: pc, line: *line, nid: 0, cid: 0,
                     hb_ac: CrossBlock::new(), hb_al: CrossBlock::new(), hb_cl: CrossBlock::new(),
                 });
             }

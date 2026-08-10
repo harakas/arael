@@ -3406,8 +3406,9 @@ impl EditorApp {
             _ => {}
         }
 
-        // General case: create a helper point and constrain both selections to it
-        let helper = self.sketch.get_mut().add_helper_point(pos);
+        // General case: a helper junction point, both selections
+        // constrained to it -- all through actions, one undo group.
+        let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point() else { return; };
         if let Some(action) = Self::coincident_action_to_point(s0, helper) {
             self.exec(action);
         }
@@ -3509,41 +3510,17 @@ impl EditorApp {
                     return;
                 }
             }
-            // Point/endpoint - Line - Point/endpoint symmetry
+            // Point/endpoint - Line - Point/endpoint symmetry. The
+            // action takes endpoints; helper bridges are its business.
             let sel = self.selection.clone();
-            let to_point = |sketch: &mut Sketch, s: &Selection| -> Option<Ref<Point>> {
+            let to_ep = |s: &Selection| -> Option<DimensionEndpoint> {
                 match s {
-                    Selection::Point(r) => Some(*r),
-                    Selection::LineP1(r) => {
-                        let pos = sketch.lines[*r].p1.value;
-                        let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: hp, nid: 0, cid: 0, hb: CrossBlock::new() });
-                        Some(hp)
-                    }
-                    Selection::LineP2(r) => {
-                        let pos = sketch.lines[*r].p2.value;
-                        let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: hp, nid: 0, cid: 0, hb: CrossBlock::new() });
-                        Some(hp)
-                    }
-                    Selection::ArcCenter(r) => {
-                        let pos = sketch.arcs[*r].center.value;
-                        let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-                        Some(hp)
-                    }
-                    Selection::ArcStart(r) => {
-                        let pos = arael_sketch_backend::geometry::arc_start_pos(&sketch.arcs[*r]);
-                        let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-                        Some(hp)
-                    }
-                    Selection::ArcEnd(r) => {
-                        let pos = arael_sketch_backend::geometry::arc_end_pos(&sketch.arcs[*r]);
-                        let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
-                        Some(hp)
-                    }
+                    Selection::Point(r) => Some(DimensionEndpoint::Point(*r)),
+                    Selection::LineP1(r) => Some(DimensionEndpoint::LineP1(*r)),
+                    Selection::LineP2(r) => Some(DimensionEndpoint::LineP2(*r)),
+                    Selection::ArcCenter(r) => Some(DimensionEndpoint::ArcCenter(*r)),
+                    Selection::ArcStart(r) => Some(DimensionEndpoint::ArcStart(*r)),
+                    Selection::ArcEnd(r) => Some(DimensionEndpoint::ArcEnd(*r)),
                     _ => None,
                 }
             };
@@ -3553,12 +3530,9 @@ impl EditorApp {
                 let line = match sel[li] { Selection::Line(r) => r, _ => unreachable!() };
                 let others: Vec<_> = sel.iter().enumerate()
                     .filter(|&(i, _)| i != li).map(|(_, s)| s).collect();
-                if others.len() == 2 {
-                    let a = to_point(self.sketch.get_mut(), others[0]);
-                    let c = to_point(self.sketch.get_mut(), others[1]);
-                    if let (Some(a), Some(c)) = (a, c) {
+                if others.len() == 2
+                    && let (Some(a), Some(c)) = (to_ep(others[0]), to_ep(others[1])) {
                         self.exec(Action::ApplySymmetryPP { a, line, c });
-                    }
                 }
             }
         }
@@ -4226,8 +4200,7 @@ impl EditorApp {
             }
             _ => {
                 // Point, LineP1/P2, ArcCenter/Start/End: create helper + bridge + coincident
-                let hp_pos = pos;
-                let hp = self.sketch.get_mut().add_helper_point(hp_pos);
+                let Some(hp) = self.exec(Action::AddHelperPoint { pos }).point() else { return; };
                 match which {
                     ArcPoint::Center => self.exec(Action::ApplyCoincidentArcCenter { point: hp, arc }),
                     ArcPoint::Start => self.exec(Action::ApplyCoincidentArcStart { point: hp, arc }),

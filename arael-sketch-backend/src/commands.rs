@@ -6059,48 +6059,18 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 }
 
-/// Resolve a name to a `Ref<Point>`, creating a helper point + coincident if it's an endpoint ref.
-fn resolve_as_point(ctx: &mut CommandContext, name: &str) -> Result<Ref<Point>, String> {
-    // Try as a standalone point first
-    if let Ok(r) = resolve_point(&ctx.sketch, name) {
-        return Ok(r);
-    }
-    // Try as endpoint ref — reuse existing helper point or create one
-    let ep = resolve_endpoint_ref(&ctx.sketch, name)?;
-    // Check if a helper point already exists for this endpoint
-    let existing = match ep {
-        EndpointRef::Point(p) => Some(p),
-        EndpointRef::LineP1(l) => ctx.sketch.coincident_lp1.iter().find(|c| c.line == l).map(|c| c.point),
-        EndpointRef::LineP2(l) => ctx.sketch.coincident_lp2.iter().find(|c| c.line == l).map(|c| c.point),
-        EndpointRef::ArcCenter(a) => ctx.sketch.coincident_arc_center.iter().find(|c| c.arc == a).map(|c| c.point),
-        EndpointRef::ArcStart(a) => ctx.sketch.coincident_arc_start.iter().find(|c| c.arc == a).map(|c| c.point),
-        EndpointRef::ArcEnd(a) => ctx.sketch.coincident_arc_end.iter().find(|c| c.arc == a).map(|c| c.point),
-    };
-    if let Some(hp) = existing {
-        return Ok(hp);
-    }
-    let pos = resolve_endpoint_pos(&ctx.sketch, name)?;
-    let hp = ctx.sketch.get_mut().add_helper_point(pos);
+/// EndpointRef -> DimensionEndpoint, the actions' endpoint currency.
+fn to_dim_endpoint(ep: EndpointRef) -> DimensionEndpoint {
     match ep {
-        EndpointRef::Point(_) => unreachable!(),
-        EndpointRef::LineP1(l) => {
-            ctx.exec(Action::ApplyCoincidentLP1 { line: l, point: hp });
-        }
-        EndpointRef::LineP2(l) => {
-            ctx.exec(Action::ApplyCoincidentLP2 { line: l, point: hp });
-        }
-        EndpointRef::ArcCenter(a) => {
-            ctx.exec(Action::ApplyCoincidentArcCenter { point: hp, arc: a });
-        }
-        EndpointRef::ArcStart(a) => {
-            ctx.exec(Action::ApplyCoincidentArcStart { point: hp, arc: a });
-        }
-        EndpointRef::ArcEnd(a) => {
-            ctx.exec(Action::ApplyCoincidentArcEnd { point: hp, arc: a });
-        }
+        EndpointRef::Point(p) => DimensionEndpoint::Point(p),
+        EndpointRef::LineP1(l) => DimensionEndpoint::LineP1(l),
+        EndpointRef::LineP2(l) => DimensionEndpoint::LineP2(l),
+        EndpointRef::ArcCenter(a) => DimensionEndpoint::ArcCenter(a),
+        EndpointRef::ArcStart(a) => DimensionEndpoint::ArcStart(a),
+        EndpointRef::ArcEnd(a) => DimensionEndpoint::ArcEnd(a),
     }
-    Ok(hp)
 }
+
 
 fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
@@ -6129,12 +6099,12 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let third_is_pointlike = resolve_point(&ctx.sketch, tokens[2]).is_ok()
         || resolve_endpoint_ref(&ctx.sketch, tokens[2]).is_ok();
     if mid_is_line && first_is_pointlike && third_is_pointlike {
-        // Note: duplicate check is hard here because resolve_as_point creates helper points.
-        // We skip duplicate check for symmetry_pp — the solver handles redundancy gracefully.
+        // Duplicate check is skipped for symmetry_pp -- the solver
+        // handles redundancy gracefully.
         ctx.begin_group();
-        let a = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(e) => to_dim_endpoint(e), Err(e) => return err(e) };
         let line = resolve_line(&ctx.sketch, tokens[1]).unwrap();
-        let c = match resolve_as_point(ctx, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
+        let c = match resolve_endpoint_ref(&ctx.sketch, tokens[2]) { Ok(e) => to_dim_endpoint(e), Err(e) => return err(e) };
         ctx.exec(Action::ApplySymmetryPP { a, line, c });
         let nid = ctx.sketch.symmetry_pp.last().map(|c| c.nid).unwrap_or(0);
         let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied point symmetry");
@@ -6408,8 +6378,8 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 continue;
             }
             constrained_positions.push(entry.pos);
-            let a = match resolve_as_point(ctx, &entry.src_ep) { Ok(r) => r, Err(_) => continue };
-            let c = match resolve_as_point(ctx, &entry.dst_ep) { Ok(r) => r, Err(_) => continue };
+            let a = match resolve_endpoint_ref(&ctx.sketch, &entry.src_ep) { Ok(e) => to_dim_endpoint(e), Err(_) => continue };
+            let c = match resolve_endpoint_ref(&ctx.sketch, &entry.dst_ep) { Ok(e) => to_dim_endpoint(e), Err(_) => continue };
             let desc = format!("symmetry {} {} {}", entry.src_ep, after_about[0], entry.dst_ep);
             if let Err(e) = rect_exec(ctx, Action::ApplySymmetryPP { a, line: mirror_line, c }, strict, &desc, &mut applied, &mut warnings)
                 && strict { return err(e); }
@@ -6740,16 +6710,6 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let is_driven = !is_derived && tokens.last() == Some(&"driven");
     if is_derived || is_driven { tokens.pop(); }
 
-    fn to_dim_ep(ep: EndpointRef) -> DimensionEndpoint {
-        match ep {
-            EndpointRef::Point(p) => DimensionEndpoint::Point(p),
-            EndpointRef::LineP1(l) => DimensionEndpoint::LineP1(l),
-            EndpointRef::LineP2(l) => DimensionEndpoint::LineP2(l),
-            EndpointRef::ArcCenter(a) => DimensionEndpoint::ArcCenter(a),
-            EndpointRef::ArcStart(a) => DimensionEndpoint::ArcStart(a),
-            EndpointRef::ArcEnd(a) => DimensionEndpoint::ArcEnd(a),
-        }
-    }
 
     // "distance L0.p1 L1.p2 derived/driven" or "distance P0 L0 derived/driven" — measure-only, no value
     if tokens.len() == 2 && (is_derived || is_driven) {
@@ -6764,7 +6724,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let dy = l.p2.value.y - l.p1.value.y;
             let len = (dx * dx + dy * dy).sqrt();
             let dist = if len < 1e-12 { 0.0 } else { ((p.x - l.p1.value.x) * dy - (p.y - l.p1.value.y) * dx).abs() / len };
-            let kind = DimensionKind::PointLineDistance(to_dim_ep(ep), line);
+            let kind = DimensionKind::PointLineDistance(to_dim_endpoint(ep), line);
             ctx.begin_group();
             ctx.exec(Action::AddDimension { kind, value: dist, expr: None, derived: is_derived, range: None,  });
             let dim_name = last_dim_name(ctx);
@@ -6777,7 +6737,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
         let dx = pa.x - pb.x; let dy = pa.y - pb.y;
         let dist = (dx * dx + dy * dy).sqrt();
-        let kind = DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b));
+        let kind = DimensionKind::PointPointDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b));
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
@@ -6841,7 +6801,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let dy = l.p2.value.y - l.p1.value.y;
                 let len = (dx * dx + dy * dy).sqrt();
                 let measured = if len < 1e-12 { 0.0 } else { ((p.x - l.p1.value.x) * dy - (p.y - l.p1.value.y) * dx).abs() / len };
-                (DimensionKind::PointLineDistance(to_dim_ep(ep), line), measured, None, None)
+                (DimensionKind::PointLineDistance(to_dim_endpoint(ep), line), measured, None, None)
             }
             // Geometrically-concentric arcs -> ConcentricDistance. The
             // dimension enforces its own center-coincidence, so an
@@ -6871,7 +6831,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let pa = resolve_endpoint_pos(&ctx.sketch, tokens[0]).unwrap();
                 let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
                 let dx = pa.x - pb.x; let dy = pa.y - pb.y;
-                (DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)),
+                (DimensionKind::PointPointDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)),
                  (dx * dx + dy * dy).sqrt(), None, None)
             }
         };
@@ -6992,7 +6952,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if (tokens[0].starts_with('P') || tokens[0].contains('.')) && tokens[1].starts_with('L') && !tokens[1].contains('.') {
         let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let line = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-        let kind = DimensionKind::PointLineDistance(to_dim_ep(ep), line);
+        let kind = DimensionKind::PointLineDistance(to_dim_endpoint(ep), line);
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
@@ -7008,7 +6968,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // Point-point distance
     let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let ep_b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-    let kind = DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b));
+    let kind = DimensionKind::PointPointDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b));
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
@@ -7036,16 +6996,6 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
     let is_driven = !is_derived && tokens.last() == Some(&"driven");
     if is_derived || is_driven { tokens.pop(); }
 
-    fn to_dim_ep(ep: EndpointRef) -> DimensionEndpoint {
-        match ep {
-            EndpointRef::Point(p) => DimensionEndpoint::Point(p),
-            EndpointRef::LineP1(l) => DimensionEndpoint::LineP1(l),
-            EndpointRef::LineP2(l) => DimensionEndpoint::LineP2(l),
-            EndpointRef::ArcCenter(a) => DimensionEndpoint::ArcCenter(a),
-            EndpointRef::ArcStart(a) => DimensionEndpoint::ArcStart(a),
-            EndpointRef::ArcEnd(a) => DimensionEndpoint::ArcEnd(a),
-        }
-    }
 
     // "hdistance L0.p1 L1.p2 derived" — measure-only
     if tokens.len() == 2 && (is_derived || is_driven) {
@@ -7054,8 +7004,8 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
         let pa = resolve_endpoint_pos(&ctx.sketch, tokens[0]).unwrap();
         let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
         let measured = if horizontal { (pa.x - pb.x).abs() } else { (pa.y - pb.y).abs() };
-        let kind = if horizontal { DimensionKind::HDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) }
-                   else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
+        let kind = if horizontal { DimensionKind::HDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)) }
+                   else { DimensionKind::VDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)) };
         ctx.begin_group();
         ctx.exec(Action::AddDimension { kind, value: measured, expr: None, derived: is_derived, range: None,  });
         let dim_name = last_dim_name(ctx);
@@ -7076,8 +7026,8 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
         let pa = resolve_endpoint_pos(&ctx.sketch, tokens[0]).unwrap();
         let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
         let measured = if horizontal { (pa.x - pb.x).abs() } else { (pa.y - pb.y).abs() };
-        let kind = if horizontal { DimensionKind::HDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) }
-                   else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
+        let kind = if horizontal { DimensionKind::HDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)) }
+                   else { DimensionKind::VDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)) };
         let bound_desc = match &rb {
             RangeBound::Min(v) => format!(">= {}", v),
             RangeBound::Max(v) => format!("<= {}", v),
@@ -7103,8 +7053,8 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
     let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let ep_b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-    let kind = if horizontal { DimensionKind::HDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) }
-               else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
+    let kind = if horizontal { DimensionKind::HDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)) }
+               else { DimensionKind::VDistance(to_dim_endpoint(ep_a), to_dim_endpoint(ep_b)) };
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
