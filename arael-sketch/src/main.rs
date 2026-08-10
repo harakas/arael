@@ -4448,363 +4448,43 @@ impl EditorApp {
     /// `HelperBridge` has no user-visible constraint name since it's a
     /// synthetic grouping of coincident constraints.
     pub fn constraint_name(&self, id: ConstraintId) -> Option<String> {
-        use arael_sketch_solver::format_flag_name;
-        match id {
-            ConstraintId::Horizontal(r) => Some(format_flag_name(&self.sketch.lines[r].name, 'H')),
-            ConstraintId::Vertical(r) => Some(format_flag_name(&self.sketch.lines[r].name, 'V')),
-            ConstraintId::Parallel(i) => Some(format!("C{}", self.sketch.parallel[i].nid)),
-            ConstraintId::ArcLineParallel(i) => Some(format!("C{}", self.sketch.arc_line_parallel[i].nid)),
-            ConstraintId::ArcArcParallel(i) => Some(format!("C{}", self.sketch.arc_arc_parallel[i].nid)),
-            ConstraintId::Perpendicular(i) => Some(format!("C{}", self.sketch.perpendicular[i].nid)),
-            ConstraintId::EqualLength(i) => Some(format!("C{}", self.sketch.equal_length[i].nid)),
-            ConstraintId::EqualRadius(i) => Some(format!("C{}", self.sketch.equal_radius[i].nid)),
-            ConstraintId::Concentric(i) => Some(format!("C{}", self.sketch.concentric[i].nid)),
-            ConstraintId::TangentLA(i) => Some(format!("C{}", self.sketch.tangent_la[i].nid)),
-            ConstraintId::TangentAA(i) => Some(format!("C{}", self.sketch.tangent_aa[i].nid)),
-            ConstraintId::Collinear(i) => Some(format!("C{}", self.sketch.collinear[i].nid)),
-            ConstraintId::Symmetry(i) => Some(format!("C{}", self.sketch.symmetry_ll[i].nid)),
-            ConstraintId::SymmetryPP(i) => Some(format!("C{}", self.sketch.symmetry_pp[i].nid)),
-            ConstraintId::SymmetryAA(i) => Some(format!("C{}", self.sketch.symmetry_aa[i].nid)),
-            ConstraintId::Midpoint(kind, i) => {
-                let nid = match kind {
-                    MidpointKind::Point => self.sketch.midpoint[i].nid,
-                    MidpointKind::LP1 => self.sketch.midpoint_lp1[i].nid,
-                    MidpointKind::LP2 => self.sketch.midpoint_lp2[i].nid,
-                    MidpointKind::ArcStart => self.sketch.midpoint_arc_start[i].nid,
-                    MidpointKind::ArcEnd => self.sketch.midpoint_arc_end[i].nid,
-                    MidpointKind::ArcPoint => self.sketch.midpoint_arc_point[i].nid,
-                    MidpointKind::LP1Arc => self.sketch.midpoint_lp1_arc[i].nid,
-                    MidpointKind::LP2Arc => self.sketch.midpoint_lp2_arc[i].nid,
-                    MidpointKind::ArcStartArc => self.sketch.midpoint_arc_start_arc[i].nid,
-                    MidpointKind::ArcEndArc => self.sketch.midpoint_arc_end_arc[i].nid,
-                };
-                Some(format!("C{}", nid))
-            }
-            ConstraintId::Coincident(kind, i) => {
-                let nid = match kind {
-                    CoincidentKind::PP => self.sketch.coincident_pp[i].nid,
-                    CoincidentKind::LP1 => self.sketch.coincident_lp1[i].nid,
-                    CoincidentKind::LP2 => self.sketch.coincident_lp2[i].nid,
-                    CoincidentKind::LL11 => self.sketch.coincident_ll11[i].nid,
-                    CoincidentKind::LL12 => self.sketch.coincident_ll12[i].nid,
-                    CoincidentKind::LL21 => self.sketch.coincident_ll21[i].nid,
-                    CoincidentKind::LL22 => self.sketch.coincident_ll22[i].nid,
-                    CoincidentKind::PointOnLine => self.sketch.point_on_line[i].nid,
-                    CoincidentKind::PointOnArc => self.sketch.point_on_arc[i].nid,
-                    CoincidentKind::LP1OnLine => self.sketch.line_p1_on_line[i].nid,
-                    CoincidentKind::LP2OnLine => self.sketch.line_p2_on_line[i].nid,
-                    CoincidentKind::LP1OnArc => self.sketch.line_p1_on_arc[i].nid,
-                    CoincidentKind::LP2OnArc => self.sketch.line_p2_on_arc[i].nid,
-                    CoincidentKind::ArcCenter => self.sketch.coincident_arc_center[i].nid,
-                    CoincidentKind::ArcStart => self.sketch.coincident_arc_start[i].nid,
-                    CoincidentKind::ArcEnd => self.sketch.coincident_arc_end[i].nid,
-                    CoincidentKind::LP1ArcCenter => self.sketch.coincident_lp1_arc_center[i].nid,
-                    CoincidentKind::LP2ArcCenter => self.sketch.coincident_lp2_arc_center[i].nid,
-                    CoincidentKind::LP1ArcStart => self.sketch.coincident_lp1_arc_start[i].nid,
-                    CoincidentKind::LP2ArcStart => self.sketch.coincident_lp2_arc_start[i].nid,
-                    CoincidentKind::LP1ArcEnd => self.sketch.coincident_lp1_arc_end[i].nid,
-                    CoincidentKind::LP2ArcEnd => self.sketch.coincident_lp2_arc_end[i].nid,
-                    CoincidentKind::ArcCenterStart => self.sketch.coincident_arc_center_start[i].nid,
-                    CoincidentKind::ArcCenterEnd => self.sketch.coincident_arc_center_end[i].nid,
-                    CoincidentKind::ArcStartCenter => self.sketch.coincident_arc_start_center[i].nid,
-                    CoincidentKind::ArcEndCenter => self.sketch.coincident_arc_end_center[i].nid,
-                    CoincidentKind::ArcStartStart => self.sketch.coincident_arc_start_start[i].nid,
-                    CoincidentKind::ArcStartEnd => self.sketch.coincident_arc_start_end[i].nid,
-                    CoincidentKind::ArcEndStart => self.sketch.coincident_arc_end_start[i].nid,
-                    CoincidentKind::ArcEndEnd => self.sketch.coincident_arc_end_end[i].nid,
-                };
-                Some(format!("C{}", nid))
-            }
-            // A helper-point bridge is plumbing: a helper Pc<n>
-            // anchored to one real entity via CoincidentArc* / LP1 /
-            // LP2 / ... and attached to another via point_on_line /
-            // point_on_arc. The user-facing constraint is the
-            // "attach" relation, not the bridge itself -- so resolve
-            // to that C<nid> when available. Helper names (Pc<n>)
-            // must never leak out.
-            ConstraintId::HelperBridge(pt) => {
-                if let Some(c) = self.sketch.point_on_line.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                if let Some(c) = self.sketch.point_on_arc.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                // Fall back to the first anchoring coincidence.
-                if let Some(c) = self.sketch.coincident_pp.iter().find(|c| c.a == pt || c.b == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                if let Some(c) = self.sketch.coincident_lp1.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                if let Some(c) = self.sketch.coincident_lp2.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                if let Some(c) = self.sketch.coincident_arc_center.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                if let Some(c) = self.sketch.coincident_arc_start.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                if let Some(c) = self.sketch.coincident_arc_end.iter().find(|c| c.point == pt) {
-                    return Some(format!("C{}", c.nid));
-                }
-                None
-            }
-        }
+        arael_sketch_backend::ids::constraint_id_name(&self.sketch, id)
     }
 
+    /// Status-bar text for a constraint: "C7: parallel L0 L1", matching
+    /// the `list` / `info` output.
     pub fn describe_constraint(&self, id: ConstraintId) -> String {
-        // For most constraints, format as "C<nid>: <listing>" / "CL0H: <listing>"
-        // so the UI status bar matches `list` / `info <name>` output.
         if let Some(name) = self.constraint_name(id)
             && let Some(desc) = self.sketch.find_constraint_description(&name) {
             return format!("{}: {}", name, desc);
         }
-        let ln = |r: Ref<Line>| self.sketch.lines[r].name.clone();
-        let an = |r: Ref<Arc>| self.sketch.arcs[r].name.clone();
-        let pn = |r: Ref<Point>| self.sketch.points[r].name.clone();
         match id {
-            ConstraintId::Horizontal(r) => format!("H({})", ln(r)),
-            ConstraintId::Vertical(r) => format!("V({})", ln(r)),
-            ConstraintId::Parallel(i) => { let c = &self.sketch.parallel[i]; format!("Parallel({}, {})", ln(c.a), ln(c.b)) }
-            ConstraintId::ArcLineParallel(i) => { let c = &self.sketch.arc_line_parallel[i]; format!("Parallel({}, {})", an(c.arc), ln(c.line)) }
-            ConstraintId::ArcArcParallel(i) => { let c = &self.sketch.arc_arc_parallel[i]; format!("Parallel({}, {})", an(c.a), an(c.b)) }
-            ConstraintId::Perpendicular(i) => { let c = &self.sketch.perpendicular[i]; format!("Perp({}, {})", ln(c.a), ln(c.b)) }
-            ConstraintId::EqualLength(i) => { let c = &self.sketch.equal_length[i]; format!("Equal({}, {})", ln(c.a), ln(c.b)) }
-            ConstraintId::EqualRadius(i) => { let c = &self.sketch.equal_radius[i]; format!("EqualR({}, {})", an(c.a), an(c.b)) }
-            ConstraintId::Concentric(i) => { let c = &self.sketch.concentric[i]; format!("Concentric({}, {})", an(c.a), an(c.b)) }
-            ConstraintId::TangentLA(i) => { let c = &self.sketch.tangent_la[i]; format!("Tangent({}, {})", ln(c.line), an(c.arc)) }
-            ConstraintId::TangentAA(i) => { let c = &self.sketch.tangent_aa[i]; format!("Tangent({}, {})", an(c.a), an(c.b)) }
-            ConstraintId::Collinear(i) => { let c = &self.sketch.collinear[i]; format!("Collinear({}, {})", ln(c.a), ln(c.b)) }
-            ConstraintId::Symmetry(i) => { let c = &self.sketch.symmetry_ll[i]; format!("Symmetry({}, {}, {})", ln(c.a), ln(c.b), ln(c.c)) }
-            ConstraintId::SymmetryPP(i) => { let c = &self.sketch.symmetry_pp[i]; format!("Symmetry({}, {}, {})", self.sketch.point_display_name(c.a), ln(c.line), self.sketch.point_display_name(c.c)) }
-            ConstraintId::SymmetryAA(i) => { let c = &self.sketch.symmetry_aa[i]; format!("Symmetry({}, {}, {})", an(c.a), ln(c.line), an(c.c)) }
-            ConstraintId::Midpoint(kind, i) => {
-                let desc = match kind {
-                    MidpointKind::Point => { let c = &self.sketch.midpoint[i]; format!("{} @ mid({})", pn(c.point), ln(c.line)) }
-                    MidpointKind::LP1 => { let c = &self.sketch.midpoint_lp1[i]; format!("{}.p1 @ mid({})", ln(c.line), ln(c.target)) }
-                    MidpointKind::LP2 => { let c = &self.sketch.midpoint_lp2[i]; format!("{}.p2 @ mid({})", ln(c.line), ln(c.target)) }
-                    MidpointKind::ArcStart => { let c = &self.sketch.midpoint_arc_start[i]; format!("{}.s @ mid({})", an(c.arc), ln(c.line)) }
-                    MidpointKind::ArcEnd => { let c = &self.sketch.midpoint_arc_end[i]; format!("{}.e @ mid({})", an(c.arc), ln(c.line)) }
-                    MidpointKind::ArcPoint => { let c = &self.sketch.midpoint_arc_point[i]; format!("{} @ mid({})", pn(c.point), an(c.arc)) }
-                    MidpointKind::LP1Arc => { let c = &self.sketch.midpoint_lp1_arc[i]; format!("{}.p1 @ mid({})", ln(c.line), an(c.arc)) }
-                    MidpointKind::LP2Arc => { let c = &self.sketch.midpoint_lp2_arc[i]; format!("{}.p2 @ mid({})", ln(c.line), an(c.arc)) }
-                    MidpointKind::ArcStartArc => { let c = &self.sketch.midpoint_arc_start_arc[i]; format!("{}.s @ mid({})", an(c.a), an(c.b)) }
-                    MidpointKind::ArcEndArc => { let c = &self.sketch.midpoint_arc_end_arc[i]; format!("{}.e @ mid({})", an(c.a), an(c.b)) }
-                };
-                format!("Midpoint({})", desc)
-            }
-            ConstraintId::Coincident(kind, i) => {
-                let desc = match kind {
-                    CoincidentKind::PP => { let c = &self.sketch.coincident_pp[i]; format!("{} = {}", pn(c.a), pn(c.b)) }
-                    CoincidentKind::LP1 => { let c = &self.sketch.coincident_lp1[i]; format!("{}.p1 = {}", ln(c.line), pn(c.point)) }
-                    CoincidentKind::LP2 => { let c = &self.sketch.coincident_lp2[i]; format!("{}.p2 = {}", ln(c.line), pn(c.point)) }
-                    CoincidentKind::LL11 => { let c = &self.sketch.coincident_ll11[i]; format!("{}.p1 = {}.p1", ln(c.a), ln(c.b)) }
-                    CoincidentKind::LL12 => { let c = &self.sketch.coincident_ll12[i]; format!("{}.p1 = {}.p2", ln(c.a), ln(c.b)) }
-                    CoincidentKind::LL21 => { let c = &self.sketch.coincident_ll21[i]; format!("{}.p2 = {}.p1", ln(c.a), ln(c.b)) }
-                    CoincidentKind::LL22 => { let c = &self.sketch.coincident_ll22[i]; format!("{}.p2 = {}.p2", ln(c.a), ln(c.b)) }
-                    CoincidentKind::PointOnLine => { let c = &self.sketch.point_on_line[i]; format!("{} on {}", pn(c.point), ln(c.line)) }
-                    CoincidentKind::PointOnArc => { let c = &self.sketch.point_on_arc[i]; format!("{} on {}", pn(c.point), an(c.arc)) }
-                    CoincidentKind::LP1OnLine => { let c = &self.sketch.line_p1_on_line[i]; format!("{}.p1 on {}", ln(c.a), ln(c.b)) }
-                    CoincidentKind::LP2OnLine => { let c = &self.sketch.line_p2_on_line[i]; format!("{}.p2 on {}", ln(c.a), ln(c.b)) }
-                    CoincidentKind::LP1OnArc => { let c = &self.sketch.line_p1_on_arc[i]; format!("{}.p1 on {}", ln(c.line), an(c.arc)) }
-                    CoincidentKind::LP2OnArc => { let c = &self.sketch.line_p2_on_arc[i]; format!("{}.p2 on {}", ln(c.line), an(c.arc)) }
-                    CoincidentKind::ArcCenter => { let c = &self.sketch.coincident_arc_center[i]; format!("{} = {}.c", pn(c.point), an(c.arc)) }
-                    CoincidentKind::ArcStart => { let c = &self.sketch.coincident_arc_start[i]; format!("{} = {}.s", pn(c.point), an(c.arc)) }
-                    CoincidentKind::ArcEnd => { let c = &self.sketch.coincident_arc_end[i]; format!("{} = {}.e", pn(c.point), an(c.arc)) }
-                    CoincidentKind::LP1ArcCenter => { let c = &self.sketch.coincident_lp1_arc_center[i]; format!("{}.p1 = {}.c", ln(c.line), an(c.arc)) }
-                    CoincidentKind::LP2ArcCenter => { let c = &self.sketch.coincident_lp2_arc_center[i]; format!("{}.p2 = {}.c", ln(c.line), an(c.arc)) }
-                    CoincidentKind::LP1ArcStart => { let c = &self.sketch.coincident_lp1_arc_start[i]; format!("{}.p1 = {}.s", ln(c.line), an(c.arc)) }
-                    CoincidentKind::LP2ArcStart => { let c = &self.sketch.coincident_lp2_arc_start[i]; format!("{}.p2 = {}.s", ln(c.line), an(c.arc)) }
-                    CoincidentKind::LP1ArcEnd => { let c = &self.sketch.coincident_lp1_arc_end[i]; format!("{}.p1 = {}.e", ln(c.line), an(c.arc)) }
-                    CoincidentKind::LP2ArcEnd => { let c = &self.sketch.coincident_lp2_arc_end[i]; format!("{}.p2 = {}.e", ln(c.line), an(c.arc)) }
-                    CoincidentKind::ArcCenterStart => { let c = &self.sketch.coincident_arc_center_start[i]; format!("{}.c = {}.s", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcCenterEnd => { let c = &self.sketch.coincident_arc_center_end[i]; format!("{}.c = {}.e", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcStartCenter => { let c = &self.sketch.coincident_arc_start_center[i]; format!("{}.s = {}.c", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcEndCenter => { let c = &self.sketch.coincident_arc_end_center[i]; format!("{}.e = {}.c", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcStartStart => { let c = &self.sketch.coincident_arc_start_start[i]; format!("{}.s = {}.s", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcStartEnd => { let c = &self.sketch.coincident_arc_start_end[i]; format!("{}.s = {}.e", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcEndStart => { let c = &self.sketch.coincident_arc_end_start[i]; format!("{}.e = {}.s", an(c.a), an(c.b)) }
-                    CoincidentKind::ArcEndEnd => { let c = &self.sketch.coincident_arc_end_end[i]; format!("{}.e = {}.e", an(c.a), an(c.b)) }
-                };
-                format!("Coinc({})", desc)
-            }
-            // HelperBridge is resolved to the underlying point_on /
-            // coincidence constraint via `constraint_name` above, so
-            // this arm is only reached when the bridge has no
-            // resolvable sub-constraint (shouldn't happen in a
-            // well-formed sketch). Fall back to the generic label.
-            ConstraintId::HelperBridge(_) => "bridge".to_string(),
+            ConstraintId::HelperBridge(_) => "helper bridge".to_string(),
+            _ => self.constraint_name(id).unwrap_or_else(|| "constraint".to_string()),
         }
     }
 
-    // Get the line/arc/point refs involved in a constraint (for highlighting).
-    // Endpoint-specific fields (line_p1s, arc_starts, etc.) highlight just
-    // the endpoint, not the whole entity.
+    /// The entities a constraint references, for hover highlighting.
     pub fn constraint_entities(&self, id: ConstraintId) -> ConstraintEntities {
         let mut e = ConstraintEntities::default();
-        let lines = &mut e.lines;
-        let arcs = &mut e.arcs;
-        let points = &mut e.points;
         match id {
-            ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => { lines.push(r); }
-            ConstraintId::Parallel(i) => {
-                let c = &self.sketch.parallel[i];
-                lines.push(c.a); lines.push(c.b);
-            }
-            ConstraintId::ArcLineParallel(i) => {
-                let c = &self.sketch.arc_line_parallel[i];
-                arcs.push(c.arc); lines.push(c.line);
-            }
-            ConstraintId::ArcArcParallel(i) => {
-                let c = &self.sketch.arc_arc_parallel[i];
-                arcs.push(c.a); arcs.push(c.b);
-            }
-            ConstraintId::Perpendicular(i) => {
-                let c = &self.sketch.perpendicular[i];
-                lines.push(c.a); lines.push(c.b);
-            }
-            ConstraintId::EqualLength(i) => {
-                let c = &self.sketch.equal_length[i];
-                lines.push(c.a); lines.push(c.b);
-            }
-            ConstraintId::EqualRadius(i) => {
-                let c = &self.sketch.equal_radius[i];
-                arcs.push(c.a); arcs.push(c.b);
-            }
-            ConstraintId::Concentric(i) => {
-                let c = &self.sketch.concentric[i];
-                arcs.push(c.a); arcs.push(c.b);
-            }
-            ConstraintId::TangentLA(i) => {
-                let c = &self.sketch.tangent_la[i];
-                lines.push(c.line); arcs.push(c.arc);
-            }
-            ConstraintId::TangentAA(i) => {
-                let c = &self.sketch.tangent_aa[i];
-                arcs.push(c.a); arcs.push(c.b);
-            }
-            ConstraintId::Collinear(i) => {
-                let c = &self.sketch.collinear[i];
-                lines.push(c.a); lines.push(c.b);
-            }
-            ConstraintId::Symmetry(i) => {
-                let c = &self.sketch.symmetry_ll[i];
-                lines.push(c.a); lines.push(c.b); lines.push(c.c);
-            }
-            ConstraintId::SymmetryPP(i) => {
-                let c = &self.sketch.symmetry_pp[i];
-                lines.push(c.line);
-                // Resolve helper points to the specific endpoints they bridge to
-                for pt in [c.a, c.c] {
-                    if self.sketch.points.get(pt).is_some_and(|p| p.helper) {
-                        let mut found = false;
-                        for cc in &self.sketch.coincident_lp1 { if cc.point == pt { e.line_p1s.push(cc.line); found = true; break; } }
-                        if !found { for cc in &self.sketch.coincident_lp2 { if cc.point == pt { e.line_p2s.push(cc.line); found = true; break; } } }
-                        if !found { for cc in &self.sketch.coincident_arc_center { if cc.point == pt { e.arc_centers.push(cc.arc); found = true; break; } } }
-                        if !found { for cc in &self.sketch.coincident_arc_start { if cc.point == pt { e.arc_starts.push(cc.arc); found = true; break; } } }
-                        if !found { for cc in &self.sketch.coincident_arc_end { if cc.point == pt { e.arc_ends.push(cc.arc); found = true; break; } } }
-                        if !found { points.push(pt); }
-                    } else {
-                        points.push(pt);
+            ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => e.lines.push(r),
+            ConstraintId::HelperBridge(p) => e.points.push(p),
+            ConstraintId::Numbered(nid) => {
+                self.sketch.for_each_constraint_collection_ref(|_, _, coll| {
+                    for i in 0..coll.len() {
+                        let c = coll.item(i);
+                        if c.nid() != nid { continue; }
+                        c.each_point_ref(&mut |p| e.points.push(p));
+                        c.each_line_ref(&mut |l| e.lines.push(l));
+                        c.each_arc_ref(&mut |a| e.arcs.push(a));
                     }
-                }
-            }
-            ConstraintId::SymmetryAA(i) => {
-                let c = &self.sketch.symmetry_aa[i];
-                lines.push(c.line);
-                arcs.push(c.a);
-                arcs.push(c.c);
-            }
-            ConstraintId::Midpoint(kind, i) => {
-                match kind {
-                    MidpointKind::Point => { let c = &self.sketch.midpoint[i]; lines.push(c.line); }
-                    MidpointKind::LP1 => { let c = &self.sketch.midpoint_lp1[i]; lines.push(c.line); lines.push(c.target); }
-                    MidpointKind::LP2 => { let c = &self.sketch.midpoint_lp2[i]; lines.push(c.line); lines.push(c.target); }
-                    MidpointKind::ArcStart => { let c = &self.sketch.midpoint_arc_start[i]; arcs.push(c.arc); lines.push(c.line); }
-                    MidpointKind::ArcEnd => { let c = &self.sketch.midpoint_arc_end[i]; arcs.push(c.arc); lines.push(c.line); }
-                    MidpointKind::ArcPoint => { let c = &self.sketch.midpoint_arc_point[i]; arcs.push(c.arc); }
-                    MidpointKind::LP1Arc => { let c = &self.sketch.midpoint_lp1_arc[i]; lines.push(c.line); arcs.push(c.arc); }
-                    MidpointKind::LP2Arc => { let c = &self.sketch.midpoint_lp2_arc[i]; lines.push(c.line); arcs.push(c.arc); }
-                    MidpointKind::ArcStartArc => { let c = &self.sketch.midpoint_arc_start_arc[i]; arcs.push(c.a); arcs.push(c.b); }
-                    MidpointKind::ArcEndArc => { let c = &self.sketch.midpoint_arc_end_arc[i]; arcs.push(c.a); arcs.push(c.b); }
-                }
-            }
-            ConstraintId::Coincident(kind, i) => {
-                match kind {
-                    CoincidentKind::LP1 => { let c = &self.sketch.coincident_lp1[i]; lines.push(c.line); }
-                    CoincidentKind::LP2 => { let c = &self.sketch.coincident_lp2[i]; lines.push(c.line); }
-                    CoincidentKind::LL11 | CoincidentKind::LL12 | CoincidentKind::LL21 | CoincidentKind::LL22 => {
-                        let (a, b) = match kind {
-                            CoincidentKind::LL11 => { let c = &self.sketch.coincident_ll11[i]; (c.a, c.b) }
-                            CoincidentKind::LL12 => { let c = &self.sketch.coincident_ll12[i]; (c.a, c.b) }
-                            CoincidentKind::LL21 => { let c = &self.sketch.coincident_ll21[i]; (c.a, c.b) }
-                            CoincidentKind::LL22 => { let c = &self.sketch.coincident_ll22[i]; (c.a, c.b) }
-                            _ => unreachable!(),
-                        };
-                        lines.push(a); lines.push(b);
-                    }
-                    CoincidentKind::PointOnLine => { let c = &self.sketch.point_on_line[i]; lines.push(c.line); }
-                    CoincidentKind::PointOnArc => { let c = &self.sketch.point_on_arc[i]; arcs.push(c.arc); }
-                    CoincidentKind::LP1OnLine => { let c = &self.sketch.line_p1_on_line[i]; lines.push(c.a); lines.push(c.b); }
-                    CoincidentKind::LP2OnLine => { let c = &self.sketch.line_p2_on_line[i]; lines.push(c.a); lines.push(c.b); }
-                    CoincidentKind::LP1OnArc => { let c = &self.sketch.line_p1_on_arc[i]; lines.push(c.line); arcs.push(c.arc); }
-                    CoincidentKind::LP2OnArc => { let c = &self.sketch.line_p2_on_arc[i]; lines.push(c.line); arcs.push(c.arc); }
-                    CoincidentKind::ArcCenter => { let c = &self.sketch.coincident_arc_center[i]; arcs.push(c.arc); }
-                    CoincidentKind::ArcStart => { let c = &self.sketch.coincident_arc_start[i]; arcs.push(c.arc); }
-                    CoincidentKind::ArcEnd => { let c = &self.sketch.coincident_arc_end[i]; arcs.push(c.arc); }
-                    CoincidentKind::LP1ArcCenter | CoincidentKind::LP1ArcStart | CoincidentKind::LP1ArcEnd => {
-                        match kind {
-                            CoincidentKind::LP1ArcCenter => { let c = &self.sketch.coincident_lp1_arc_center[i]; lines.push(c.line); arcs.push(c.arc); }
-                            CoincidentKind::LP1ArcStart => { let c = &self.sketch.coincident_lp1_arc_start[i]; lines.push(c.line); arcs.push(c.arc); }
-                            CoincidentKind::LP1ArcEnd => { let c = &self.sketch.coincident_lp1_arc_end[i]; lines.push(c.line); arcs.push(c.arc); }
-                            _ => unreachable!(),
-                        }
-                    }
-                    CoincidentKind::LP2ArcCenter | CoincidentKind::LP2ArcStart | CoincidentKind::LP2ArcEnd => {
-                        match kind {
-                            CoincidentKind::LP2ArcCenter => { let c = &self.sketch.coincident_lp2_arc_center[i]; lines.push(c.line); arcs.push(c.arc); }
-                            CoincidentKind::LP2ArcStart => { let c = &self.sketch.coincident_lp2_arc_start[i]; lines.push(c.line); arcs.push(c.arc); }
-                            CoincidentKind::LP2ArcEnd => { let c = &self.sketch.coincident_lp2_arc_end[i]; lines.push(c.line); arcs.push(c.arc); }
-                            _ => unreachable!(),
-                        }
-                    }
-                    CoincidentKind::ArcCenterStart | CoincidentKind::ArcCenterEnd
-                    | CoincidentKind::ArcStartCenter | CoincidentKind::ArcEndCenter
-                    | CoincidentKind::ArcStartStart | CoincidentKind::ArcStartEnd
-                    | CoincidentKind::ArcEndStart | CoincidentKind::ArcEndEnd => {
-                        // These are all Arc-Arc; get both arcs
-                        let (a, b) = match kind {
-                            CoincidentKind::ArcCenterStart => { let c = &self.sketch.coincident_arc_center_start[i]; (c.a, c.b) }
-                            CoincidentKind::ArcCenterEnd => { let c = &self.sketch.coincident_arc_center_end[i]; (c.a, c.b) }
-                            CoincidentKind::ArcStartCenter => { let c = &self.sketch.coincident_arc_start_center[i]; (c.a, c.b) }
-                            CoincidentKind::ArcEndCenter => { let c = &self.sketch.coincident_arc_end_center[i]; (c.a, c.b) }
-                            CoincidentKind::ArcStartStart => { let c = &self.sketch.coincident_arc_start_start[i]; (c.a, c.b) }
-                            CoincidentKind::ArcStartEnd => { let c = &self.sketch.coincident_arc_start_end[i]; (c.a, c.b) }
-                            CoincidentKind::ArcEndStart => { let c = &self.sketch.coincident_arc_end_start[i]; (c.a, c.b) }
-                            CoincidentKind::ArcEndEnd => { let c = &self.sketch.coincident_arc_end_end[i]; (c.a, c.b) }
-                            _ => unreachable!(),
-                        };
-                        arcs.push(a); arcs.push(b);
-                    }
-                    CoincidentKind::PP => {} // point-point: no lines/arcs to highlight
-                }
-            }
-            ConstraintId::HelperBridge(pt) => {
-                // Find all lines/arcs connected through this helper point
-                for c in &self.sketch.coincident_lp1 { if c.point == pt { lines.push(c.line); } }
-                for c in &self.sketch.coincident_lp2 { if c.point == pt { lines.push(c.line); } }
-                for c in &self.sketch.point_on_line { if c.point == pt { lines.push(c.line); } }
-                for c in &self.sketch.point_on_arc { if c.point == pt { arcs.push(c.arc); } }
-                for c in &self.sketch.coincident_arc_center { if c.point == pt { arcs.push(c.arc); } }
-                for c in &self.sketch.coincident_arc_start { if c.point == pt { arcs.push(c.arc); } }
-                for c in &self.sketch.coincident_arc_end { if c.point == pt { arcs.push(c.arc); } }
+                });
             }
         }
         e
     }
 
-    // Delete a constraint by id
     fn delete_constraint(&mut self, id: ConstraintId) {
         self.begin_group();
         self.exec(Action::DeleteConstraint { id });

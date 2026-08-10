@@ -9,7 +9,7 @@ use arael_sketch_solver::*;
 // Re-export backend identity types so existing `crate::tools::*` imports
 // across main.rs/drawing.rs/app_update.rs continue to resolve after the
 // split into arael-sketch-backend.
-pub use arael_sketch_backend::ids::{ConstraintId, CoincidentKind, MidpointKind, Selection};
+pub use arael_sketch_backend::ids::{ConstraintId, Selection};
 // find_constraint_by_name is used via arael_sketch_backend::find_constraint_by_name in main.rs
 #[allow(unused_imports)]
 pub use arael_sketch_backend::ids::find_constraint_by_name;

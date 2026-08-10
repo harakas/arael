@@ -5478,26 +5478,26 @@ fn find_ll_coincident_partner(
     line: Ref<Line>,
     is_p1: bool,
 ) -> Option<(Ref<Line>, bool, crate::ids::ConstraintId)> {
-    use crate::ids::{ConstraintId, CoincidentKind};
+    use crate::ids::ConstraintId;
     // LL11: c.a.p1 = c.b.p1
-    for (i, c) in sketch.coincident_ll11.iter().enumerate() {
-        if c.a == line && is_p1 { return Some((c.b, true, ConstraintId::Coincident(CoincidentKind::LL11, i))); }
-        if c.b == line && is_p1 { return Some((c.a, true, ConstraintId::Coincident(CoincidentKind::LL11, i))); }
+    for c in sketch.coincident_ll11.iter() {
+        if c.a == line && is_p1 { return Some((c.b, true, ConstraintId::Numbered(c.nid))); }
+        if c.b == line && is_p1 { return Some((c.a, true, ConstraintId::Numbered(c.nid))); }
     }
     // LL12: c.a.p1 = c.b.p2
-    for (i, c) in sketch.coincident_ll12.iter().enumerate() {
-        if c.a == line && is_p1 { return Some((c.b, false, ConstraintId::Coincident(CoincidentKind::LL12, i))); }
-        if c.b == line && !is_p1 { return Some((c.a, true, ConstraintId::Coincident(CoincidentKind::LL12, i))); }
+    for c in sketch.coincident_ll12.iter() {
+        if c.a == line && is_p1 { return Some((c.b, false, ConstraintId::Numbered(c.nid))); }
+        if c.b == line && !is_p1 { return Some((c.a, true, ConstraintId::Numbered(c.nid))); }
     }
     // LL21: c.a.p2 = c.b.p1
-    for (i, c) in sketch.coincident_ll21.iter().enumerate() {
-        if c.a == line && !is_p1 { return Some((c.b, true, ConstraintId::Coincident(CoincidentKind::LL21, i))); }
-        if c.b == line && is_p1 { return Some((c.a, false, ConstraintId::Coincident(CoincidentKind::LL21, i))); }
+    for c in sketch.coincident_ll21.iter() {
+        if c.a == line && !is_p1 { return Some((c.b, true, ConstraintId::Numbered(c.nid))); }
+        if c.b == line && is_p1 { return Some((c.a, false, ConstraintId::Numbered(c.nid))); }
     }
     // LL22: c.a.p2 = c.b.p2
-    for (i, c) in sketch.coincident_ll22.iter().enumerate() {
-        if c.a == line && !is_p1 { return Some((c.b, false, ConstraintId::Coincident(CoincidentKind::LL22, i))); }
-        if c.b == line && !is_p1 { return Some((c.a, false, ConstraintId::Coincident(CoincidentKind::LL22, i))); }
+    for c in sketch.coincident_ll22.iter() {
+        if c.a == line && !is_p1 { return Some((c.b, false, ConstraintId::Numbered(c.nid))); }
+        if c.b == line && !is_p1 { return Some((c.a, false, ConstraintId::Numbered(c.nid))); }
     }
     None
 }
@@ -7465,11 +7465,13 @@ fn resolve_endpoint_as_point(sketch: &Sketch, ep: EndpointRef) -> Option<Ref<Poi
 }
 
 fn find_coincident_id(sketch: &Sketch, a: EndpointRef, b: EndpointRef) -> Option<crate::ids::ConstraintId> {
-    use crate::ids::{ConstraintId, CoincidentKind};
+    use crate::ids::ConstraintId;
     use EndpointRef::*;
+    // The middle macro argument is the legacy kind tag; identity is
+    // the nid now, the tag documents which collection is scanned.
     macro_rules! find_in {
         ($coll:expr, $kind:expr, $pred:expr) => {
-            $coll.iter().position($pred).map(|i| ConstraintId::Coincident($kind, i))
+            $coll.iter().find($pred).map(|c| ConstraintId::Numbered(c.nid))
         }
     }
     match (a, b) {
@@ -7504,49 +7506,49 @@ fn find_coincident_id(sketch: &Sketch, a: EndpointRef, b: EndpointRef) -> Option
 }
 
 fn find_point_on_line_id(sketch: &Sketch, ep: EndpointRef, line: Ref<Line>) -> Option<crate::ids::ConstraintId> {
-    use crate::ids::{ConstraintId, CoincidentKind};
+    use crate::ids::ConstraintId;
     match ep {
-        EndpointRef::Point(p) => sketch.point_on_line.iter().position(|c| c.point == p && c.line == line)
-            .map(|i| ConstraintId::Coincident(CoincidentKind::PointOnLine, i)),
-        EndpointRef::LineP1(l) => sketch.line_p1_on_line.iter().position(|c| c.a == l && c.b == line)
-            .map(|i| ConstraintId::Coincident(CoincidentKind::LP1OnLine, i)),
-        EndpointRef::LineP2(l) => sketch.line_p2_on_line.iter().position(|c| c.a == l && c.b == line)
-            .map(|i| ConstraintId::Coincident(CoincidentKind::LP2OnLine, i)),
+        EndpointRef::Point(p) => sketch.point_on_line.iter().find(|c| c.point == p && c.line == line)
+            .map(|c| ConstraintId::Numbered(c.nid)),
+        EndpointRef::LineP1(l) => sketch.line_p1_on_line.iter().find(|c| c.a == l && c.b == line)
+            .map(|c| ConstraintId::Numbered(c.nid)),
+        EndpointRef::LineP2(l) => sketch.line_p2_on_line.iter().find(|c| c.a == l && c.b == line)
+            .map(|c| ConstraintId::Numbered(c.nid)),
         _ => None,
     }
 }
 
 fn find_point_on_arc_id(sketch: &Sketch, ep: EndpointRef, arc: Ref<Arc>) -> Option<crate::ids::ConstraintId> {
-    use crate::ids::{ConstraintId, CoincidentKind};
+    use crate::ids::ConstraintId;
     match ep {
-        EndpointRef::Point(p) => sketch.point_on_arc.iter().position(|c| c.point == p && c.arc == arc)
-            .map(|i| ConstraintId::Coincident(CoincidentKind::PointOnArc, i)),
-        EndpointRef::LineP1(l) => sketch.line_p1_on_arc.iter().position(|c| c.line == l && c.arc == arc)
-            .map(|i| ConstraintId::Coincident(CoincidentKind::LP1OnArc, i)),
-        EndpointRef::LineP2(l) => sketch.line_p2_on_arc.iter().position(|c| c.line == l && c.arc == arc)
-            .map(|i| ConstraintId::Coincident(CoincidentKind::LP2OnArc, i)),
+        EndpointRef::Point(p) => sketch.point_on_arc.iter().find(|c| c.point == p && c.arc == arc)
+            .map(|c| ConstraintId::Numbered(c.nid)),
+        EndpointRef::LineP1(l) => sketch.line_p1_on_arc.iter().find(|c| c.line == l && c.arc == arc)
+            .map(|c| ConstraintId::Numbered(c.nid)),
+        EndpointRef::LineP2(l) => sketch.line_p2_on_arc.iter().find(|c| c.line == l && c.arc == arc)
+            .map(|c| ConstraintId::Numbered(c.nid)),
         _ => None,
     }
 }
 
 fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Option<crate::ids::ConstraintId> {
-    use crate::ids::{ConstraintId, MidpointKind};
+    use crate::ids::ConstraintId;
     if let Ok(line) = resolve_line(sketch, target_name) {
         match ep {
-            EndpointRef::Point(p) => sketch.midpoint.iter().position(|c| c.point == p && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::Point, i)),
-            EndpointRef::LineP1(l) => sketch.midpoint_lp1.iter().position(|c| c.line == l && c.target == line).map(|i| ConstraintId::Midpoint(MidpointKind::LP1, i)),
-            EndpointRef::LineP2(l) => sketch.midpoint_lp2.iter().position(|c| c.line == l && c.target == line).map(|i| ConstraintId::Midpoint(MidpointKind::LP2, i)),
-            EndpointRef::ArcStart(a) => sketch.midpoint_arc_start.iter().position(|c| c.arc == a && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::ArcStart, i)),
-            EndpointRef::ArcEnd(a) => sketch.midpoint_arc_end.iter().position(|c| c.arc == a && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::ArcEnd, i)),
+            EndpointRef::Point(p) => sketch.midpoint.iter().find(|c| c.point == p && c.line == line).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::LineP1(l) => sketch.midpoint_lp1.iter().find(|c| c.line == l && c.target == line).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::LineP2(l) => sketch.midpoint_lp2.iter().find(|c| c.line == l && c.target == line).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::ArcStart(a) => sketch.midpoint_arc_start.iter().find(|c| c.arc == a && c.line == line).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::ArcEnd(a) => sketch.midpoint_arc_end.iter().find(|c| c.arc == a && c.line == line).map(|c| ConstraintId::Numbered(c.nid)),
             _ => None,
         }
     } else if let Ok(arc) = resolve_arc(sketch, target_name) {
         match ep {
-            EndpointRef::Point(p) => sketch.midpoint_arc_point.iter().position(|c| c.point == p && c.arc == arc).map(|i| ConstraintId::Midpoint(MidpointKind::ArcPoint, i)),
-            EndpointRef::LineP1(l) => sketch.midpoint_lp1_arc.iter().position(|c| c.line == l && c.arc == arc).map(|i| ConstraintId::Midpoint(MidpointKind::LP1Arc, i)),
-            EndpointRef::LineP2(l) => sketch.midpoint_lp2_arc.iter().position(|c| c.line == l && c.arc == arc).map(|i| ConstraintId::Midpoint(MidpointKind::LP2Arc, i)),
-            EndpointRef::ArcStart(a) => sketch.midpoint_arc_start_arc.iter().position(|c| c.a == a && c.b == arc).map(|i| ConstraintId::Midpoint(MidpointKind::ArcStartArc, i)),
-            EndpointRef::ArcEnd(a) => sketch.midpoint_arc_end_arc.iter().position(|c| c.a == a && c.b == arc).map(|i| ConstraintId::Midpoint(MidpointKind::ArcEndArc, i)),
+            EndpointRef::Point(p) => sketch.midpoint_arc_point.iter().find(|c| c.point == p && c.arc == arc).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::LineP1(l) => sketch.midpoint_lp1_arc.iter().find(|c| c.line == l && c.arc == arc).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::LineP2(l) => sketch.midpoint_lp2_arc.iter().find(|c| c.line == l && c.arc == arc).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::ArcStart(a) => sketch.midpoint_arc_start_arc.iter().find(|c| c.a == a && c.b == arc).map(|c| ConstraintId::Numbered(c.nid)),
+            EndpointRef::ArcEnd(a) => sketch.midpoint_arc_end_arc.iter().find(|c| c.a == a && c.b == arc).map(|c| ConstraintId::Numbered(c.nid)),
             _ => None,
         }
     } else { None }
@@ -7585,38 +7587,38 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
         "parallel" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            find_ab!(sketch.parallel, a, b).map(ConstraintId::Parallel)
+            find_ab!(sketch.parallel, a, b).map(|i| ConstraintId::Numbered(sketch.parallel[i].nid))
         }
         "perpendicular" | "perp" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            find_ab!(sketch.perpendicular, a, b).map(ConstraintId::Perpendicular)
+            find_ab!(sketch.perpendicular, a, b).map(|i| ConstraintId::Numbered(sketch.perpendicular[i].nid))
         }
         "equal" | "equal_length" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            find_ab!(sketch.equal_length, a, b).map(ConstraintId::EqualLength)
+            find_ab!(sketch.equal_length, a, b).map(|i| ConstraintId::Numbered(sketch.equal_length[i].nid))
         }
         "collinear" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            find_ab!(sketch.collinear, a, b).map(ConstraintId::Collinear)
+            find_ab!(sketch.collinear, a, b).map(|i| ConstraintId::Numbered(sketch.collinear[i].nid))
         }
         "tangent" if tokens.len() >= 3 => {
             if tokens[0].starts_with('L') && is_arc_name(tokens[1]) {
                 let line = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let arc = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                sketch.tangent_la.iter().position(|c| c.line == line && c.arc == arc).map(ConstraintId::TangentLA)
+                sketch.tangent_la.iter().find(|c| c.line == line && c.arc == arc).map(|c| ConstraintId::Numbered(c.nid))
             } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
                 let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                find_ab!(sketch.tangent_aa, a, b).map(ConstraintId::TangentAA)
+                find_ab!(sketch.tangent_aa, a, b).map(|i| ConstraintId::Numbered(sketch.tangent_aa[i].nid))
             } else { None }
         }
         "concentric" if tokens.len() >= 3 => {
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            find_ab!(sketch.concentric, a, b).map(ConstraintId::Concentric)
+            find_ab!(sketch.concentric, a, b).map(|i| ConstraintId::Numbered(sketch.concentric[i].nid))
         }
         "lock" => {
             // Locks are entity flags, not a ConstraintId: route through
@@ -7637,7 +7639,7 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
         "equal_radius" if tokens.len() >= 3 => {
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            find_ab!(sketch.equal_radius, a, b).map(ConstraintId::EqualRadius)
+            find_ab!(sketch.equal_radius, a, b).map(|i| ConstraintId::Numbered(sketch.equal_radius[i].nid))
         }
         "coincident" if tokens.len() >= 3 => {
             let a = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -7662,12 +7664,12 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
                         let line = match resolve_line(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                         ctx.sketch.point_on_line.iter()
                             .position(|c| c.point == p && c.line == line)
-                            .map(|i| ConstraintId::Coincident(crate::ids::CoincidentKind::PointOnLine, i))
+                            .map(|i| ConstraintId::Numbered(ctx.sketch.point_on_line[i].nid))
                     } else if is_arc_name(target) || target.starts_with('a') {
                         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                         ctx.sketch.point_on_arc.iter()
                             .position(|c| c.point == p && c.arc == arc)
-                            .map(|i| ConstraintId::Coincident(crate::ids::CoincidentKind::PointOnArc, i))
+                            .map(|i| ConstraintId::Numbered(ctx.sketch.point_on_arc[i].nid))
                     } else {
                         None
                     }
@@ -7681,21 +7683,21 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 resolve_line(sketch, tokens[1]),
                 resolve_arc(sketch, tokens[2]))
             {
-                sketch.symmetry_aa.iter().position(|s| s.line == line && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
-                    .map(ConstraintId::SymmetryAA)
+                sketch.symmetry_aa.iter().find(|s| s.line == line && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
+                    .map(|s| ConstraintId::Numbered(s.nid))
             } else {
                 let ep_a = resolve_endpoint_ref(sketch, tokens[0]);
                 let ep_c = resolve_endpoint_ref(sketch, tokens[2]);
                 if let (Ok(EndpointRef::Point(a)), Ok(EndpointRef::Point(c))) = (ep_a, ep_c) {
                     let line = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                    sketch.symmetry_pp.iter().position(|s| (s.a == a && s.c == c && s.line == line) || (s.a == c && s.c == a && s.line == line))
-                        .map(ConstraintId::SymmetryPP)
+                    sketch.symmetry_pp.iter().find(|s| (s.a == a && s.c == c && s.line == line) || (s.a == c && s.c == a && s.line == line))
+                        .map(|s| ConstraintId::Numbered(s.nid))
                 } else {
                     let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                     let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
                     let c = match resolve_line(sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
-                    sketch.symmetry_ll.iter().position(|s| s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
-                        .map(ConstraintId::Symmetry)
+                    sketch.symmetry_ll.iter().find(|s| s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
+                        .map(|s| ConstraintId::Numbered(s.nid))
                 }
             }
         }
@@ -10219,6 +10221,43 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_delete_by_name_is_nid_stable() {
+        // ConstraintId used to carry a positional index resolved at
+        // parse time; any retain in between shifted it and the wrong
+        // constraint died. Identity is the nid now.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect");
+        run_ok(&mut ctx, "add_line 0,1 1,1 noconnect");
+        run_ok(&mut ctx, "add_line 0,2 1,2 noconnect");
+        run_ok(&mut ctx, "parallel L0 L1");
+        run_ok(&mut ctx, "parallel L1 L2");
+        assert_eq!(ctx.sketch.parallel.len(), 2);
+        let second_nid = ctx.sketch.parallel[1].nid;
+        run_ok(&mut ctx, "delete C1");
+        assert_eq!(ctx.sketch.parallel.len(), 1);
+        assert_eq!(ctx.sketch.parallel[0].nid, second_nid, "wrong constraint deleted");
+        run_ok(&mut ctx, "delete C2");
+        assert!(ctx.sketch.parallel.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_helper_bridge_not_addressable() {
+        // point_on with an arc endpoint mints a hidden bridge with the
+        // next C number; deleting it used to cascade the user's
+        // visible constraint away with the helper point.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0");
+        run_ok(&mut ctx, "add_circle 2,3 1");
+        run_ok(&mut ctx, "point_on A0.start L0");
+        assert_eq!(ctx.sketch.point_on_line.len(), 1);
+        run_err(&mut ctx, "delete C2");
+        assert_eq!(ctx.sketch.point_on_line.len(), 1, "bridge delete destroyed the user constraint");
+        // The visible constraint stays addressable.
+        run_ok(&mut ctx, "delete C1");
+        assert!(ctx.sketch.point_on_line.is_empty());
+    }
 
     #[test]
     fn test_history_covers_drag_dim_pos_and_relational_delete() {

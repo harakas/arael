@@ -1343,6 +1343,43 @@ impl Sketch {
     /// Must be called AFTER `calc_jacobian`/`solve`/`compute_dof` so
     /// the `cid` field is populated on every constraint instance.
     /// Constraints whose `nid` is still 0 (never named) are omitted.
+    /// Remove the constraint carrying this nid, from whichever
+    /// collection holds it. Returns whether one was removed. Nids are
+    /// unique and permanent, so this is the stable delete -- positional
+    /// indices go stale with every retain.
+    pub fn remove_constraint_by_nid(&mut self, nid: u32) -> bool {
+        if nid == 0 {
+            return false;
+        }
+        let mut removed = false;
+        self.for_each_constraint_collection(|_, _, coll| {
+            let before = coll.len();
+            coll.retain_constraints(&mut |c| c.nid() != nid);
+            removed |= coll.len() != before;
+        });
+        removed
+    }
+
+    /// Whether any collection holds a constraint with this nid.
+    pub fn has_constraint_nid(&self, nid: u32) -> bool {
+        if nid == 0 {
+            return false;
+        }
+        let mut found = false;
+        self.for_each_constraint_collection_ref(|_, _, coll| {
+            if found {
+                return;
+            }
+            for i in 0..coll.len() {
+                if coll.item(i).nid() == nid {
+                    found = true;
+                    return;
+                }
+            }
+        });
+        found
+    }
+
     pub fn constraint_nid_cid_pairs(&self) -> std::vec::Vec<(u32, u32)> {
         let mut out = std::vec::Vec::new();
         self.for_each_constraint_collection_ref(|_, _, coll| {

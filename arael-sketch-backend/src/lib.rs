@@ -16,7 +16,7 @@ pub mod commands;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp_server;
 
-pub use ids::{ConstraintId, CoincidentKind, MidpointKind, Selection, find_constraint_by_name};
+pub use ids::{ConstraintId, Selection, find_constraint_by_name};
 pub use actions::{Action, resolve_dim_endpoint};
 pub use history::{History, CursorState};
 pub use conflicts::check_constraint_conflict;

@@ -1568,98 +1568,36 @@ impl Action {
                 }
             }
             Action::DeleteConstraint { id } => {
-                use crate::ids::{ConstraintId, CoincidentKind, MidpointKind};
+                use crate::ids::ConstraintId;
                 match id {
-                    ConstraintId::Horizontal(r) => { sketch.lines[*r].constraints.horizontal = false; }
-                    ConstraintId::Vertical(r) => { sketch.lines[*r].constraints.vertical = false; }
-                    ConstraintId::Parallel(i) => {
-                        let (a, b) = {
-                            let p = &sketch.parallel[*i];
-                            (p.a, p.b)
-                        };
-                        sketch.parallel.remove(*i);
-                        // Cascade: any LineLineDistance dimension backed by
-                        // this Parallel constraint (and its underlying
-                        // DistancePL) goes too, matching the Concentric
-                        // cascade immediately below.
-                        let pt = DimensionEndpoint::LineP1(b);
-                        remove_distance_pl(sketch, &pt, a);
-                        let pt = DimensionEndpoint::LineP1(a);
-                        remove_distance_pl(sketch, &pt, b);
-                        sketch.dimensions.retain(|d| !d.kind.references_parallel_pair(a, b));
+                    ConstraintId::Horizontal(r) => {
+                        if let Some(l) = sketch.lines.get_mut(*r) { l.constraints.horizontal = false; }
                     }
-                    ConstraintId::Perpendicular(i) => { sketch.perpendicular.remove(*i); }
-                    ConstraintId::ArcLineParallel(i) => { sketch.arc_line_parallel.remove(*i); }
-                    ConstraintId::ArcArcParallel(i) => { sketch.arc_arc_parallel.remove(*i); }
-                    ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
-                    ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }
-                    ConstraintId::Concentric(i) => {
-                        sketch.concentric.remove(*i);
-                        // No cascade: `DistanceConcentric` is now
-                        // self-contained (its residual enforces
-                        // center-coincidence on its own), so the
-                        // concentric-distance dimension and its backing
-                        // constraint survive deletion of the paired
-                        // `Concentric`. The dim's residual keeps the
-                        // circles concentric as long as the dim exists.
+                    ConstraintId::Vertical(r) => {
+                        if let Some(l) = sketch.lines.get_mut(*r) { l.constraints.vertical = false; }
                     }
-                    ConstraintId::TangentLA(i) => { sketch.tangent_la.remove(*i); }
-                    ConstraintId::TangentAA(i) => { sketch.tangent_aa.remove(*i); }
-                    ConstraintId::Collinear(i) => { sketch.collinear.remove(*i); }
-                    ConstraintId::Symmetry(i) => { sketch.symmetry_ll.remove(*i); }
-                    ConstraintId::SymmetryPP(i) => { sketch.symmetry_pp.remove(*i); }
-                    ConstraintId::SymmetryAA(i) => { sketch.symmetry_aa.remove(*i); }
-                    ConstraintId::Midpoint(kind, i) => {
-                        match kind {
-                            MidpointKind::Point => { sketch.midpoint.remove(*i); }
-                            MidpointKind::LP1 => { sketch.midpoint_lp1.remove(*i); }
-                            MidpointKind::LP2 => { sketch.midpoint_lp2.remove(*i); }
-                            MidpointKind::ArcStart => { sketch.midpoint_arc_start.remove(*i); }
-                            MidpointKind::ArcEnd => { sketch.midpoint_arc_end.remove(*i); }
-                            MidpointKind::ArcPoint => { sketch.midpoint_arc_point.remove(*i); }
-                            MidpointKind::LP1Arc => { sketch.midpoint_lp1_arc.remove(*i); }
-                            MidpointKind::LP2Arc => { sketch.midpoint_lp2_arc.remove(*i); }
-                            MidpointKind::ArcStartArc => { sketch.midpoint_arc_start_arc.remove(*i); }
-                            MidpointKind::ArcEndArc => { sketch.midpoint_arc_end_arc.remove(*i); }
-                        }
-                    }
-                    ConstraintId::Coincident(kind, i) => {
-                        match kind {
-                            CoincidentKind::PP => { sketch.coincident_pp.remove(*i); }
-                            CoincidentKind::LP1 => { sketch.coincident_lp1.remove(*i); }
-                            CoincidentKind::LP2 => { sketch.coincident_lp2.remove(*i); }
-                            CoincidentKind::LL11 => { sketch.coincident_ll11.remove(*i); }
-                            CoincidentKind::LL12 => { sketch.coincident_ll12.remove(*i); }
-                            CoincidentKind::LL21 => { sketch.coincident_ll21.remove(*i); }
-                            CoincidentKind::LL22 => { sketch.coincident_ll22.remove(*i); }
-                            CoincidentKind::PointOnLine => { sketch.point_on_line.remove(*i); }
-                            CoincidentKind::PointOnArc => { sketch.point_on_arc.remove(*i); }
-                            CoincidentKind::LP1OnLine => { sketch.line_p1_on_line.remove(*i); }
-                            CoincidentKind::LP2OnLine => { sketch.line_p2_on_line.remove(*i); }
-                            CoincidentKind::LP1OnArc => { sketch.line_p1_on_arc.remove(*i); }
-                            CoincidentKind::LP2OnArc => { sketch.line_p2_on_arc.remove(*i); }
-                            CoincidentKind::ArcCenter => { sketch.coincident_arc_center.remove(*i); }
-                            CoincidentKind::ArcStart => { sketch.coincident_arc_start.remove(*i); }
-                            CoincidentKind::ArcEnd => { sketch.coincident_arc_end.remove(*i); }
-                            CoincidentKind::LP1ArcCenter => { sketch.coincident_lp1_arc_center.remove(*i); }
-                            CoincidentKind::LP2ArcCenter => { sketch.coincident_lp2_arc_center.remove(*i); }
-                            CoincidentKind::LP1ArcStart => { sketch.coincident_lp1_arc_start.remove(*i); }
-                            CoincidentKind::LP2ArcStart => { sketch.coincident_lp2_arc_start.remove(*i); }
-                            CoincidentKind::LP1ArcEnd => { sketch.coincident_lp1_arc_end.remove(*i); }
-                            CoincidentKind::LP2ArcEnd => { sketch.coincident_lp2_arc_end.remove(*i); }
-                            CoincidentKind::ArcCenterStart => { sketch.coincident_arc_center_start.remove(*i); }
-                            CoincidentKind::ArcCenterEnd => { sketch.coincident_arc_center_end.remove(*i); }
-                            CoincidentKind::ArcStartCenter => { sketch.coincident_arc_start_center.remove(*i); }
-                            CoincidentKind::ArcEndCenter => { sketch.coincident_arc_end_center.remove(*i); }
-                            CoincidentKind::ArcStartStart => { sketch.coincident_arc_start_start.remove(*i); }
-                            CoincidentKind::ArcStartEnd => { sketch.coincident_arc_start_end.remove(*i); }
-                            CoincidentKind::ArcEndStart => { sketch.coincident_arc_end_start.remove(*i); }
-                            CoincidentKind::ArcEndEnd => { sketch.coincident_arc_end_end.remove(*i); }
+                    ConstraintId::Numbered(nid) => {
+                        // Parallel carries a cascade: a LineLineDistance
+                        // dimension is backed by it (plus a DistancePL),
+                        // and goes with it.
+                        let parallel_pair = sketch.parallel.iter()
+                            .find(|c| c.nid == *nid).map(|c| (c.a, c.b));
+                        if sketch.remove_constraint_by_nid(*nid)
+                            && let Some((a, b)) = parallel_pair {
+                                let pt = DimensionEndpoint::LineP1(b);
+                                remove_distance_pl(sketch, &pt, a);
+                                let pt = DimensionEndpoint::LineP1(a);
+                                remove_distance_pl(sketch, &pt, b);
+                                sketch.dimensions.retain(|d| !d.kind.references_parallel_pair(a, b));
                         }
                         sketch.cleanup_helper_points();
                     }
                     ConstraintId::HelperBridge(pt) => {
-                        sketch.delete_point(*pt);
+                        // Only ever a helper; a stale or repurposed ref
+                        // must not delete a real point.
+                        if sketch.points.get(*pt).is_some_and(|p| p.helper) {
+                            sketch.delete_point(*pt);
+                        }
                     }
                 }
             }

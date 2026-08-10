@@ -1379,96 +1379,96 @@ impl EditorApp {
         }
 
         // Shared constraints
-        for (i, c) in self.sketch.parallel.iter().enumerate() {
-            let id = ConstraintId::Parallel(i);
+        for c in self.sketch.parallel.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Parallel, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Parallel, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.arc_line_parallel.iter().enumerate() {
-            let id = ConstraintId::ArcLineParallel(i);
+        for c in self.sketch.arc_line_parallel.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Parallel, id, &mut arc_marker_count);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Parallel, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.arc_arc_parallel.iter().enumerate() {
-            let id = ConstraintId::ArcArcParallel(i);
+        for c in self.sketch.arc_arc_parallel.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Parallel, id, &mut arc_marker_count);
             add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Parallel, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.perpendicular.iter().enumerate() {
-            let id = ConstraintId::Perpendicular(i);
+        for c in self.sketch.perpendicular.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Perpendicular, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Perpendicular, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.equal_length.iter().enumerate() {
-            let id = ConstraintId::EqualLength(i);
+        for c in self.sketch.equal_length.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Equal, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Equal, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.equal_radius.iter().enumerate() {
-            let id = ConstraintId::EqualRadius(i);
+        for c in self.sketch.equal_radius.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Equal, id, &mut arc_marker_count);
             add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Equal, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.collinear.iter().enumerate() {
-            let id = ConstraintId::Collinear(i);
+        for c in self.sketch.collinear.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Collinear, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Collinear, id, &mut line_marker_count);
         }
         // Midpoint constraints -- place marker on the target line
-        for (i, c) in self.sketch.midpoint.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::Point, i);
+        for c in self.sketch.midpoint.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_lp1.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::LP1, i);
+        for c in self.sketch.midpoint_lp1.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.target, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_lp2.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::LP2, i);
+        for c in self.sketch.midpoint_lp2.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.target, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_arc_start.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::ArcStart, i);
+        for c in self.sketch.midpoint_arc_start.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_arc_end.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::ArcEnd, i);
+        for c in self.sketch.midpoint_arc_end.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_arc_point.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::ArcPoint, i);
+        for c in self.sketch.midpoint_arc_point.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_lp1_arc.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::LP1Arc, i);
+        for c in self.sketch.midpoint_lp1_arc.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_lp2_arc.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::LP2Arc, i);
+        for c in self.sketch.midpoint_lp2_arc.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_arc_start_arc.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::ArcStartArc, i);
+        for c in self.sketch.midpoint_arc_start_arc.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.midpoint_arc_end_arc.iter().enumerate() {
-            let id = ConstraintId::Midpoint(MidpointKind::ArcEndArc, i);
+        for c in self.sketch.midpoint_arc_end_arc.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
         }
-        for (i, c) in self.sketch.symmetry_ll.iter().enumerate() {
-            let id = ConstraintId::Symmetry(i);
+        for c in self.sketch.symmetry_ll.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
         }
-        for (i, c) in self.sketch.symmetry_pp.iter().enumerate() {
-            let id = ConstraintId::SymmetryPP(i);
+        for c in self.sketch.symmetry_pp.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
             add_point_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id);
             add_point_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id);
         }
-        for (i, c) in self.sketch.symmetry_aa.iter().enumerate() {
-            let id = ConstraintId::SymmetryAA(i);
+        for c in self.sketch.symmetry_aa.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
             add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id, &mut arc_marker_count);
             add_arc_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id, &mut arc_marker_count);
@@ -1478,8 +1478,8 @@ impl EditorApp {
         // to the tangent direction so the glyph doesn't cover the
         // actual geometry.
         let marker_offset_px: f32 = 12.0;
-        for (i, c) in self.sketch.tangent_la.iter().enumerate() {
-            let id = ConstraintId::TangentLA(i);
+        for c in self.sketch.tangent_la.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             let l = &self.sketch.lines[c.line];
             let a = &self.sketch.arcs[c.arc];
             let dx = l.p2.value.x - l.p1.value.x;
@@ -1519,8 +1519,8 @@ impl EditorApp {
                 id,
             });
         }
-        for (i, c) in self.sketch.tangent_aa.iter().enumerate() {
-            let id = ConstraintId::TangentAA(i);
+        for c in self.sketch.tangent_aa.iter() {
+            let id = ConstraintId::Numbered(c.nid);
             let a = &self.sketch.arcs[c.a];
             let b = &self.sketch.arcs[c.b];
             let ca = a.center.value;
@@ -1595,32 +1595,32 @@ impl EditorApp {
             // the coincident sub-constraints tied to this helper is a
             // flash target.
             if !visible && self.flash_window_active() {
-                for (i, c) in self.sketch.coincident_lp1.iter().enumerate() {
-                    if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::LP1, i)) { visible = true; break; }
+                for c in self.sketch.coincident_lp1.iter() {
+                    if c.point == r && self.is_flash_target(ConstraintId::Numbered(c.nid)) { visible = true; break; }
                 }
                 if !visible {
-                    for (i, c) in self.sketch.coincident_lp2.iter().enumerate() {
-                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::LP2, i)) { visible = true; break; }
+                    for c in self.sketch.coincident_lp2.iter() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Numbered(c.nid)) { visible = true; break; }
                     }
                 }
                 if !visible {
-                    for (i, c) in self.sketch.coincident_pp.iter().enumerate() {
-                        if (c.a == r || c.b == r) && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::PP, i)) { visible = true; break; }
+                    for c in self.sketch.coincident_pp.iter() {
+                        if (c.a == r || c.b == r) && self.is_flash_target(ConstraintId::Numbered(c.nid)) { visible = true; break; }
                     }
                 }
                 if !visible {
-                    for (i, c) in self.sketch.coincident_arc_center.iter().enumerate() {
-                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::ArcCenter, i)) { visible = true; break; }
+                    for c in self.sketch.coincident_arc_center.iter() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Numbered(c.nid)) { visible = true; break; }
                     }
                 }
                 if !visible {
-                    for (i, c) in self.sketch.coincident_arc_start.iter().enumerate() {
-                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::ArcStart, i)) { visible = true; break; }
+                    for c in self.sketch.coincident_arc_start.iter() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Numbered(c.nid)) { visible = true; break; }
                     }
                 }
                 if !visible {
-                    for (i, c) in self.sketch.coincident_arc_end.iter().enumerate() {
-                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::ArcEnd, i)) { visible = true; break; }
+                    for c in self.sketch.coincident_arc_end.iter() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Numbered(c.nid)) { visible = true; break; }
                     }
                 }
             }
@@ -1657,17 +1657,17 @@ impl EditorApp {
 
         macro_rules! coinc {
             ($markers:expr, $coll:expr, $kind:expr, $pos_expr:expr, $vis_expr:expr) => {
-                for (i, c) in $coll.iter().enumerate() {
-                    let id = ConstraintId::Coincident($kind, i);
+                for c in $coll.iter() {
+                    let id = ConstraintId::Numbered(c.nid);
                     let pos = $pos_expr(c);
                     let vis = $vis_expr(c);
                     add_coinc_entry(&mut $markers, pos, id, vis);
                 }
             };
             ($markers:expr, $coll:expr, $kind:expr, $pos_expr:expr, $vis_expr:expr, skip_helper: $skip:expr) => {
-                for (i, c) in $coll.iter().enumerate() {
+                for c in $coll.iter() {
                     if $skip(c) { continue; }
-                    let id = ConstraintId::Coincident($kind, i);
+                    let id = ConstraintId::Numbered(c.nid);
                     let pos = $pos_expr(c);
                     let vis = $vis_expr(c);
                     add_coinc_entry(&mut $markers, pos, id, vis);
@@ -1758,11 +1758,11 @@ impl EditorApp {
             |c: &CoincidentLP2ArcEnd| lp2_sel(c.line) || ae_sel(c.arc));
         // Arc-Arc
         // Concentric: own ConstraintId
-        for (i, c) in self.sketch.concentric.iter().enumerate() {
+        for c in self.sketch.concentric.iter() {
             if !self.sketch.arcs.contains_ref(c.a) || !self.sketch.arcs.contains_ref(c.b) { continue; }
             let pos = self.to_screen(self.sketch.arcs[c.a].center.value);
             let vis = ac_sel(c.a) || ac_sel(c.b);
-            add_coinc_entry(&mut markers, pos, ConstraintId::Concentric(i), vis);
+            add_coinc_entry(&mut markers, pos, ConstraintId::Numbered(c.nid), vis);
         }
         coinc!(markers, self.sketch.coincident_arc_center_start, CoincidentKind::ArcCenterStart,
             |c: &CoincidentArcCenterStart| self.to_screen(self.sketch.arcs[c.a].center.value),
