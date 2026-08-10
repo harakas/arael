@@ -711,15 +711,15 @@ impl Action {
                 created = Created::Arc(sketch.add_arc(*center, r, 0.0, std::f64::consts::TAU, true));
             }
             Action::AddEllipse { center, rx, ry, rotation } => {
-                sketch.add_ellipse(*center, *rx, *ry, *rotation, true);
+                created = Created::Arc(sketch.add_ellipse(*center, *rx, *ry, *rotation, true));
             }
             Action::AddArc { start, end, mid, .. } => {
                 if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(*start, *end, *mid) {
-                    sketch.add_arc_with_dir(c, r, sa, ea, false, ccw);
+                    created = Created::Arc(sketch.add_arc_with_dir(c, r, sa, ea, false, ccw));
                 }
             }
             Action::AddEllipticArc { center, rx, ry, rotation, start, end, ccw } => {
-                sketch.add_elliptic_arc(*center, *rx, *ry, *rotation, *start, *end, *ccw);
+                created = Created::Arc(sketch.add_elliptic_arc(*center, *rx, *ry, *rotation, *start, *end, *ccw));
             }
             Action::ApplyHorizontal { lines } => {
                 for r in lines {

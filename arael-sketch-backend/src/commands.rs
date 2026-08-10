@@ -8,7 +8,7 @@ use arael::refs::Ref;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
-use crate::actions::Action;
+use crate::actions::{Action, Created};
 use crate::geometry::{arc_start_pos, arc_end_pos};
 use crate::history::{History, CursorState};
 use crate::ids::Selection;
@@ -767,7 +767,11 @@ fn format_blocker_report(
 impl CommandContext {
     /// Execute an action: apply to sketch and record in history.
     /// For constraint actions: validates by solving, checking cost, and optionally checking DOF.
-    pub fn exec(&mut self, action: Action) {
+    /// Run an action through validation and history. Returns what the
+    /// action created -- the ONLY correct identity of a new entity
+    /// (arena slots are reused, `refs().last()` names the wrong one
+    /// after any delete).
+    pub fn exec(&mut self, action: Action) -> Created {
         self.status_error = None;
         self.status_blocker_names = None;
 
@@ -786,10 +790,12 @@ impl CommandContext {
                     }
                 }
             }
+            Created::Nothing
         } else {
-            action.apply(self.sketch.get_mut());
+            let created = action.apply(self.sketch.get_mut());
             self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, CursorState { pos: self.cursor, tangent: self.cursor_tangent });
+            created
         }
     }
 }
@@ -2160,8 +2166,9 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     for i in 0..n_segments {
         let p1 = points[i];
         let p2 = points[i + 1];
-        ctx.exec(Action::AddLine { p1, p2 });
-        let line_ref = ctx.sketch.lines.refs().last().unwrap();
+        let Some(line_ref) = ctx.exec(Action::AddLine { p1, p2 }).line() else {
+            return err("Internal: creation action added no entity");
+        };
         if quiet { ctx.sketch.get_mut().lines[line_ref].quiet = true; }
         if constr { ctx.sketch.get_mut().lines[line_ref].construction = true; ctx.sketch.get_mut().lines[line_ref].style = LineStyle::DashDot; }
         let name = ctx.sketch.lines[line_ref].name.clone();
@@ -2259,8 +2266,9 @@ fn build_rect(
     for i in 0..4 {
         let p1 = corners[i];
         let p2 = corners[(i + 1) % 4];
-        ctx.exec(Action::AddLine { p1, p2 });
-        let r = ctx.sketch.lines.refs().last().unwrap();
+        let Some(r) = ctx.exec(Action::AddLine { p1, p2 }).line() else {
+            return err("Internal: creation action added no entity");
+        };
         let name = ctx.sketch.lines[r].name.clone();
         if !noconnect {
             auto_coincident_line(ctx, r);
@@ -2449,8 +2457,9 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
-    ctx.exec(Action::AddCircle { center, edge });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2501,8 +2510,9 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let r = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt() / 2.0;
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
-    ctx.exec(Action::AddCircle { center, edge });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2556,8 +2566,9 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
-    ctx.exec(Action::AddCircle { center, edge });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2610,8 +2621,9 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let rot = match eval_expr(&ctx.sketch, tokens[3]) { Ok(v) => v, Err(e) => return err(e) };
     let rot_rad = arael::utils::deg2rad(rot);
     ctx.begin_group();
-    ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2680,8 +2692,9 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     let ccw = !cw;
     ctx.begin_group();
-    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2771,8 +2784,9 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
         None => return err("Cannot compute elliptic arc from given points and radii"),
     };
     ctx.begin_group();
-    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2836,8 +2850,9 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let end = arael::utils::deg2rad(end_deg);
     let ccw = !cw;
     ctx.begin_group();
-    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -2901,8 +2916,9 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
         None => return err("Cannot fit elliptic arc (degenerate tangent configuration)"),
     };
     ctx.begin_group();
-    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -3110,8 +3126,9 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     let mut warnings = Vec::new();
     let mut applied = Vec::new();
-    ctx.exec(Action::AddCircle { center, edge });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -3187,8 +3204,9 @@ fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     let mut warnings = Vec::new();
     let mut applied_list = Vec::new();
-    ctx.exec(Action::AddCircle { center, edge });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -5377,8 +5395,9 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return err("Cannot create arc: the three points are collinear");
     }
     ctx.begin_group();
-    ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm }).arc() else {
+        return err("Internal: creation action added no entity");
+    };
     if quiet { ctx.sketch.get_mut().arcs[arc_ref].quiet = true; }
     if constr { ctx.sketch.get_mut().arcs[arc_ref].construction = true; ctx.sketch.get_mut().arcs[arc_ref].style = LineStyle::DashDot; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
@@ -5751,8 +5770,9 @@ fn apply_one_fillet(
     if is_p1_b { ctx.sketch.get_mut().lines[line_b].p1.value = t_b; }
     else { ctx.sketch.get_mut().lines[line_b].p2.value = t_b; }
 
-    ctx.exec(Action::AddArc { start: t_a, end: t_b, mid });
-    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let Some(arc_ref) = ctx.exec(Action::AddArc { start: t_a, end: t_b, mid }).arc() else {
+        return Err("Cannot fillet: degenerate corner geometry".into());
+    };
     let arc_name = ctx.sketch.arcs[arc_ref].name.clone();
 
     let arc_start = arc_start_pos(&ctx.sketch.arcs[arc_ref]);
@@ -5997,12 +6017,14 @@ fn apply_one_chamfer(
     if is_p1_b { ctx.sketch.get_mut().lines[line_b].p1.value = t_b; }
     else { ctx.sketch.get_mut().lines[line_b].p2.value = t_b; }
 
-    ctx.exec(Action::AddPoint { pos: corner });
-    let point_ref = ctx.sketch.points.refs().last().unwrap();
+    let Some(point_ref) = ctx.exec(Action::AddPoint { pos: corner }).point() else {
+        return Err("Internal: creation action added no entity".into());
+    };
     let point_name = ctx.sketch.points[point_ref].name.clone();
 
-    ctx.exec(Action::AddLine { p1: t_a, p2: t_b });
-    let new_line_ref = ctx.sketch.lines.refs().last().unwrap();
+    let Some(new_line_ref) = ctx.exec(Action::AddLine { p1: t_a, p2: t_b }).line() else {
+        return Err("Internal: creation action added no entity".into());
+    };
     let new_line_name = ctx.sketch.lines[new_line_ref].name.clone();
 
     let coincide_a = if is_p1_a {
@@ -6355,8 +6377,9 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let src_name = l.name.clone();
                 let mp1 = mirror_point_across(l.p1.value, mlp1, mlp2);
                 let mp2 = mirror_point_across(l.p2.value, mlp1, mlp2);
-                ctx.exec(Action::AddLine { p1: mp1, p2: mp2 });
-                let new_ref = ctx.sketch.lines.refs().last().unwrap();
+                let Some(new_ref) = ctx.exec(Action::AddLine { p1: mp1, p2: mp2 }).line() else {
+                    return err("Internal: creation action added no entity");
+                };
                 let new_name = ctx.sketch.lines[new_ref].name.clone();
                 line_map.push((*src_ref, new_ref));
                 msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
@@ -6366,8 +6389,9 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let p = &ctx.sketch.points[*src_ref];
                 let src_name = p.name.clone();
                 let mp = mirror_point_across(p.pos.value, mlp1, mlp2);
-                ctx.exec(Action::AddPoint { pos: mp });
-                let new_ref = ctx.sketch.points.refs().last().unwrap();
+                let Some(new_ref) = ctx.exec(Action::AddPoint { pos: mp }).point() else {
+                    return err("Internal: creation action added no entity");
+                };
                 let new_name = ctx.sketch.points[new_ref].name.clone();
                 point_map.push((*src_ref, new_ref));
                 msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
@@ -6378,9 +6402,9 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let src_name = a.name.clone();
                 let mc = mirror_point_across(a.center.value, mlp1, mlp2);
                 let r = a.radius.value;
-                if a.closed {
+                let created = if a.closed {
                     let edge = vect2d::new(mc.x + r, mc.y);
-                    ctx.exec(Action::AddCircle { center: mc, edge });
+                    ctx.exec(Action::AddCircle { center: mc, edge })
                 } else {
                     let ms = mirror_point_across(arc_start_pos(a), mlp1, mlp2);
                     let me = mirror_point_across(arc_end_pos(a), mlp1, mlp2);
@@ -6391,9 +6415,11 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                         a.center.value.y + r * mid_angle.sin(),
                     );
                     let mm = mirror_point_across(mid_pt, mlp1, mlp2);
-                    ctx.exec(Action::AddArc { start: ms, end: me, mid: mm });
-                }
-                let new_ref = ctx.sketch.arcs.refs().last().unwrap();
+                    ctx.exec(Action::AddArc { start: ms, end: me, mid: mm })
+                };
+                let Some(new_ref) = created.arc() else {
+                    return err("Cannot mirror arc: degenerate mirrored geometry");
+                };
                 let new_name = ctx.sketch.arcs[new_ref].name.clone();
                 arc_map.push((*src_ref, new_ref));
                 msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
@@ -10197,6 +10223,22 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_created_identity_after_slot_reuse() {
+        // The arena refills freed slots, so refs().last() after a
+        // delete named a pre-existing entity and flags landed on it.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 noconnect");
+        run_ok(&mut ctx, "add_line 2,0 3,0 noconnect");
+        run_ok(&mut ctx, "delete L0");
+        let out = run_ok(&mut ctx, "add_line 5,5 6,6 noconnect constr");
+        assert!(out.contains("Added L2"), "reported name: {}", out);
+        let new = resolve_line(&ctx.sketch, "L2").unwrap();
+        assert!(ctx.sketch.lines[new].construction);
+        let old = resolve_line(&ctx.sketch, "L1").unwrap();
+        assert!(!ctx.sketch.lines[old].construction, "flag leaked to the reused-slot neighbor");
+    }
 
     #[test]
     fn test_selection_pruned_after_delete() {
