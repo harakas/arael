@@ -274,12 +274,65 @@ impl From<String> for Rejection {
 /// Validate and apply a constraint action on a sketch.
 /// Returns Ok(new_cost) on success, Err(Rejection) on rejection.
 /// Handles snapshot/restore, cost checking, and DOF checking.
+/// Drop selection entries whose referents no longer exist: stale arena
+/// refs and out-of-range indices, left behind by deletes and sketch
+/// replacement. Constraint validity reuses constraint_id_name's
+/// collection mapping; the flag and helper variants hold raw refs and
+/// are checked against their arenas directly.
+fn prune_selection(ctx: &mut CommandContext) {
+    use crate::ids::ConstraintId;
+    let sketch = &ctx.sketch;
+    ctx.selection.retain(|s| match *s {
+        Selection::Point(r) => sketch.points.get(r).is_some(),
+        Selection::Line(r)
+        | Selection::LineP1(r)
+        | Selection::LineP2(r) => sketch.lines.get(r).is_some(),
+        Selection::Arc(r)
+        | Selection::ArcCenter(r)
+        | Selection::ArcStart(r)
+        | Selection::ArcEnd(r) => sketch.arcs.get(r).is_some(),
+        Selection::Dimension(i) => i < sketch.dimensions.len(),
+        Selection::Constraint(id) => match id {
+            ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => {
+                sketch.lines.get(r).is_some()
+            }
+            ConstraintId::HelperBridge(p) => sketch.points.get(p).is_some(),
+            other => crate::ids::constraint_id_name(sketch, other).is_some(),
+        },
+    });
+}
+
 pub fn validate_and_apply_constraint(
     sketch: &mut Sketch,
     action: &Action,
     skip_dof_check: bool,
 ) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
+
+    // A tangent on degenerate geometry (zero-length line, concentric
+    // arcs) has a 0/0 direction sign and a NaN Jacobian the solve
+    // cannot recover from -- reject before touching the sketch.
+    match action {
+        Action::ApplyTangentLA { line, .. } => {
+            if let Some(l) = sketch.lines.get(*line) {
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                if dx * dx + dy * dy <= 1e-24 {
+                    return Err(Rejection::msg("Cannot apply tangent: line has zero length"));
+                }
+            }
+        }
+        Action::ApplyTangentAA { a, b } => {
+            if let (Some(aa), Some(ab)) = (sketch.arcs.get(*a), sketch.arcs.get(*b)) {
+                let dx = aa.center.value.x - ab.center.value.x;
+                let dy = aa.center.value.y - ab.center.value.y;
+                if dx * dx + dy * dy <= 1e-24 {
+                    return Err(Rejection::msg("Cannot apply tangent: arcs are concentric"));
+                }
+            }
+        }
+        _ => {}
+    }
 
     let snapshot = bincode::serialize(sketch).ok();
     let old_cost = {
@@ -1406,6 +1459,11 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
         }
         let is_err = r.is_error;
         results.push(r);
+        // Commands that delete entities or replace the sketch (delete,
+        // clear, load, undo, redo, goto) leave the selection pointing
+        // at freed arena slots or shifted indices; any later read
+        // panics. Prune after every command.
+        prune_selection(ctx);
         if is_err { break; }
     }
     if results.is_empty() {
@@ -5312,6 +5370,12 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
+    // AddArc silently creates nothing for collinear points (no
+    // circumscribed circle exists); the unwrap below would then panic
+    // or name a pre-existing arc.
+    if crate::geometry::circumscribed_arc(p1, p2, pm).is_none() {
+        return err("Cannot create arc: the three points are collinear");
+    }
     ctx.begin_group();
     ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
@@ -10133,6 +10197,59 @@ mod tests {
     }
 
     // -- Selection --
+
+    #[test]
+    fn test_selection_pruned_after_delete() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,1");
+        run_ok(&mut ctx, "select L0");
+        run_ok(&mut ctx, "delete L0");
+        assert!(ctx.selection.is_empty());
+        // The stale-ref read that used to panic.
+        run_ok(&mut ctx, "list selection");
+    }
+
+    #[test]
+    fn test_selection_pruned_after_clear_and_undo() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,1");
+        run_ok(&mut ctx, "select L0");
+        run_ok(&mut ctx, "clear");
+        run_ok(&mut ctx, "list selection");
+        assert!(ctx.selection.is_empty());
+
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,1");
+        run_ok(&mut ctx, "select L0");
+        run_ok(&mut ctx, "undo");
+        run_ok(&mut ctx, "list selection");
+        assert!(ctx.selection.is_empty());
+    }
+
+    #[test]
+    fn test_add_arc_collinear_points_rejected() {
+        let mut ctx = CommandContext::new();
+        run_err(&mut ctx, "add_arc 0,0 2,0 1,0");
+        assert_eq!(ctx.sketch.arcs.refs().count(), 0);
+    }
+
+    #[test]
+    fn test_tangent_degenerate_geometry_rejected() {
+        // Zero-length line: the tangent sign is 0/0 and the solve
+        // never converges; must reject cleanly and fast.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 0,0 noconnect");
+        run_ok(&mut ctx, "add_circle 5,5 1");
+        let msg = run_err(&mut ctx, "tangent L0 A0");
+        assert!(msg.contains("zero length"), "{}", msg);
+
+        // Concentric arcs: tangent divides by center distance.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 2,2 1");
+        run_ok(&mut ctx, "add_circle 2,2 3");
+        let msg = run_err(&mut ctx, "tangent A0 A1");
+        assert!(msg.contains("concentric"), "{}", msg);
+    }
 
     #[test]
     fn test_select() {
