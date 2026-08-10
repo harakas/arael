@@ -365,6 +365,7 @@ impl Jacobian<f64> {
             .map_err(|_| RankError::Factorization)?;
         let llt = fchol::LltRef::new(&symbolic, &l_vals);
 
+
         let hint = opts.null_hint.or(warm.map(|w| w.nullity)).unwrap_or(opts.margin);
         let mut k = (hint + opts.margin).clamp(1, n);
         let mut grew = 0usize;
@@ -391,7 +392,7 @@ impl Jacobian<f64> {
                 let stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
                 let rhs = faer::mat::MatMut::from_column_major_slice_mut(&mut v, n, k);
                 llt.solve_in_place_with_conj(faer::Conj::No, rhs, faer::Par::Seq, stack);
-                orthonormalize(&mut v, n, k, &mut rng);
+                orthonormalize(&mut v, n, k);
             }
 
             // Decision in the J metric: singular values of B = Jn * V.
@@ -405,21 +406,21 @@ impl Jacobian<f64> {
                     }
                 }
             }
-            let bmat = nalgebra::DMatrix::from_column_slice(m, k, &b);
-            let bsvd = bmat.svd(false, true);
-            let mn = bsvd.singular_values.len();
+            // sigma(B) = sigma(R) and B's right singular vectors are
+            // R's: decompose the small R instead of the tall B.
+            let bmat = faer::mat::MatRef::from_column_major_slice(&b, m, k);
+            let bqr = bmat.qr();
+            let bsvd = bqr.thin_R().thin_svd().map_err(|_| RankError::Factorization)?;
+            let s = bsvd.S().column_vector();
+            let mn = s.nrows();
             let mut order: Vec<usize> = (0..mn).collect();
-            order.sort_by(|&a, &c| {
-                bsvd.singular_values[a]
-                    .partial_cmp(&bsvd.singular_values[c])
-                    .unwrap()
-            });
+            order.sort_by(|&a, &c| s[a].partial_cmp(&s[c]).unwrap());
             // When k > m the thin SVD reports only m singular values;
             // the remaining k - m directions of the block are
             // structurally zero and take part in the gap search.
             let pad = k - mn;
             let mut sorted: Vec<f64> = vec![0.0; pad];
-            sorted.extend(order.iter().map(|&i| bsvd.singular_values[i]));
+            sorted.extend(order.iter().map(|&i| s[i]));
             let (cut, gap) = rank_cut(&sorted);
 
             // Clean boundary: a real gap, the null cluster strictly
@@ -437,12 +438,12 @@ impl Jacobian<f64> {
                 // cluster, then (for k > m) an orthonormal completion of
                 // the subspace the thin SVD cannot represent -- those
                 // directions map to zero under B by construction.
-                let vt = bsvd.v_t.as_ref().expect("V^t requested");
+                let v_mat = bsvd.V();
                 let computed_zeros = nullity.saturating_sub(pad);
                 let mut w = vec![0.0f64; k * nullity];
                 for (c, &sv_i) in order[..computed_zeros].iter().enumerate() {
                     for col in 0..k {
-                        w[c * k + col] = vt[(sv_i, col)];
+                        w[c * k + col] = v_mat[(col, sv_i)];
                     }
                 }
                 for c in computed_zeros..nullity {
@@ -451,10 +452,10 @@ impl Jacobian<f64> {
                         for r in 0..mn {
                             let mut dot = 0.0f64;
                             for col in 0..k {
-                                dot += cand[col] * vt[(r, col)];
+                                dot += cand[col] * v_mat[(col, r)];
                             }
                             for col in 0..k {
-                                cand[col] -= dot * vt[(r, col)];
+                                cand[col] -= dot * v_mat[(col, r)];
                             }
                         }
                         for p in 0..c {
@@ -476,14 +477,15 @@ impl Jacobian<f64> {
                     }
                 }
                 let mut basis = vec![0.0f64; n * nullity];
-                for c in 0..nullity {
-                    for i in 0..n {
-                        let mut acc = 0.0f64;
-                        for col in 0..k {
-                            acc += v[col * n + i] * w[c * k + col];
-                        }
-                        basis[c * n + i] = acc;
-                    }
+                if nullity > 0 {
+                    faer::linalg::matmul::matmul(
+                        faer::mat::MatMut::from_column_major_slice_mut(&mut basis, n, nullity),
+                        faer::Accum::Replace,
+                        faer::mat::MatRef::from_column_major_slice(&v, n, k),
+                        faer::mat::MatRef::from_column_major_slice(&w, k, nullity),
+                        1.0,
+                        faer::Par::Seq,
+                    );
                 }
                 return Ok(RankResult {
                     rank,
@@ -511,28 +513,16 @@ fn xorshift(state: &mut u64) -> f64 {
     (x >> 11) as f64 / (1u64 << 53) as f64 - 0.5
 }
 
-/// Modified Gram-Schmidt over column-major `v` (n x k). Columns that
-/// collapse are re-randomized.
-fn orthonormalize(v: &mut [f64], n: usize, k: usize, rng: &mut u64) {
+/// Orthonormalize the columns of column-major `v` (n x k) in place via
+/// a Householder thin Q -- orthonormal even when the input columns are
+/// linearly dependent.
+fn orthonormalize(v: &mut [f64], n: usize, k: usize) {
+    let q = faer::mat::MatRef::from_column_major_slice(&*v, n, k)
+        .qr()
+        .compute_thin_Q();
     for c in 0..k {
-        let (head, tail) = v.split_at_mut(c * n);
-        let vc = &mut tail[..n];
-        for p in 0..c {
-            let vp = &head[p * n..(p + 1) * n];
-            let dot: f64 = vp.iter().zip(vc.iter()).map(|(a, b)| a * b).sum();
-            for i in 0..n {
-                vc[i] -= dot * vp[i];
-            }
-        }
-        let norm: f64 = vc.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if norm > 1e-300 {
-            for x in vc.iter_mut() {
-                *x /= norm;
-            }
-        } else {
-            for x in vc.iter_mut() {
-                *x = xorshift(rng);
-            }
+        for i in 0..n {
+            v[c * n + i] = q[(i, c)];
         }
     }
 }
