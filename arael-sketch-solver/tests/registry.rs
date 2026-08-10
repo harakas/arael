@@ -114,3 +114,25 @@ fn consolidation_remaps_midpoint_arc_point() {
         "midpoint_arc_point must be remapped to the surviving helper"
     );
 }
+
+// The DOF cache is keyed to the structure generation: a mutation
+// through the cell's mutable door invalidates it with no explicit
+// clear anywhere -- the historical bug was a forgotten clear serving
+// a stale DOF forever.
+#[test]
+fn cached_dof_is_keyed_to_the_structure_generation() {
+    let mut cell = arael_sketch_solver::SketchCell::new(Sketch::new());
+    cell.get_mut().add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 0.0));
+    let d = cell.dof().unwrap();
+    assert_eq!(cell.cached_dof(), Some(d));
+
+    // Raw structural change, deliberately without any cache clear.
+    cell.get_mut().add_line(vect2d::new(0.0, 1.0), vect2d::new(2.0, 1.0));
+    assert_eq!(cell.cached_dof(), None, "stale cache served across a structural change");
+    assert_eq!(cell.dof().unwrap(), d + 4);
+
+    // Value-only access does not invalidate.
+    let d2 = cell.dof().unwrap();
+    cell.mutate_values(|s| { let _ = s; });
+    assert_eq!(cell.cached_dof(), Some(d2));
+}

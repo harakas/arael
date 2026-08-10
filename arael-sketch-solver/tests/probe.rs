@@ -105,9 +105,9 @@ fn collinear_rows_match_the_macro() {
 
 // Old-style probe: push the trial mutation, recompute DOF, roll back.
 fn dof_of(s: &mut Sketch) -> usize {
-    s.cached_dof = None;
+    s.clear_cached_dof();
     let d = s.compute_dof(false).unwrap().dof;
-    s.cached_dof = None;
+    s.clear_cached_dof();
     d
 }
 

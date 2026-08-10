@@ -3042,7 +3042,7 @@ impl EditorApp {
                         let value = input.parse::<f64>().unwrap();
                         self.exec(Action::UpdateDimension { did: edit_did, value, expr: None, range: None });
                         success = true;
-                    } else if let Err(e) = self.sketch.get_mut().validate_expr(&input) {
+                    } else if let Err(e) = self.sketch.validate_expr(&input) {
                         self.status_error = Some(format!("Expression error: {}", e));
                         self.dim_edit_did = Some(edit_did); // restore
                     } else {
@@ -3088,7 +3088,7 @@ impl EditorApp {
                             }
                         success = true;
                     } else {
-                        if let Err(e) = self.sketch.get_mut().validate_expr(&input) {
+                        if let Err(e) = self.sketch.validate_expr(&input) {
                             self.status_error = Some(format!("Expression error: {}", e));
                         } else {
                             let n_dims_before = self.sketch.dimensions.len();

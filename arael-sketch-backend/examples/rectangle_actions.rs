@@ -70,7 +70,7 @@ fn main() {
         Action::LockLineP1 { line: bottom, pos: vect2d::new(0.0, 0.0) });
 
     sketch.solve();
-    println!("after build: dof={:?}", sketch.cached_dof);
+    println!("after build: dof={:?}", sketch.cached_dof());
     dump(&sketch, bottom, right, top, left, "built");
 
     // Undo the whole group (Ctrl+Z in the GUI would do the same).

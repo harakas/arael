@@ -9,11 +9,9 @@ mod tools;
 mod drawing;
 mod app_update;
 
-use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use eframe::egui;
 use arael::model::CrossBlock;
-use arael::simple_lm::LmProblem;
 use arael::utils::rad2deg;
 use arael::vect::vect2d;
 use arael::refs::Ref;
@@ -1702,9 +1700,7 @@ impl EditorApp {
 
     /// Recompute cached cost from the current sketch state.
     pub fn update_cost(&mut self) {
-        let mut params = Vec::new();
-        self.sketch.get_mut().serialize(&mut params);
-        self.last_cost = self.sketch.get_mut().calc_cost(&params);
+        self.last_cost = self.sketch.current_cost();
     }
 
     /// Check if background DOF computation finished, update display.
@@ -1718,11 +1714,11 @@ impl EditorApp {
             // blindly adopting the older worker result would let a
             // post-AddLine DOF=16 clobber the post-Horizontal DOF=4
             // produced by the rect tool a moment earlier.
-            if self.sketch.cached_dof.is_none() {
+            if self.sketch.cached_dof().is_none() {
                 self.dof_display = Some(rr.nullity);
                 // Cache write only -- must not retire the derived
                 // state or the warm session.
-                self.sketch.mutate_values(|s| s.cached_dof = Some(rr.nullity));
+                self.sketch.mutate_values(|s| s.set_cached_dof(rr.nullity));
             }
             if sgen == self.sketch.structure_gen() {
                 self.bg_rank = Some((sgen, rr));
@@ -1742,7 +1738,7 @@ impl EditorApp {
         // script.
         *self.dof_output.lock().unwrap() = None;
         let sgen = self.sketch.structure_gen();
-        if let Some(d) = self.sketch.cached_dof {
+        if let Some(d) = self.sketch.cached_dof() {
             self.dof_display = Some(d);
             // The display is settled, but the worker still runs when
             // the stored rank analysis is not for this generation --
@@ -1971,16 +1967,11 @@ impl EditorApp {
     /// Apply a user parameter change with solve and cost check.
     /// Rolls back if the change causes constraints to break.
     pub fn apply_param_change(&mut self, action: Action) {
-        use arael::simple_lm::LmProblem;
         let snapshot = bincode::serialize(&self.sketch).ok();
-        let old_cost = {
-            let mut params = Vec::new();
-            self.sketch.get_mut().serialize(&mut params);
-            self.sketch.get_mut().calc_cost(&params)
-        };
+        let old_cost = self.sketch.current_cost();
         self.begin_group();
         self.exec(action);
-        self.sketch.get_mut().update_expr_dim_values();
+        self.sketch.mutate_values(|s| s.update_expr_dim_values());
         let new_cost = self.sketch.solve().end_cost;
         self.last_cost = new_cost;
         if new_cost > old_cost + 1e-3

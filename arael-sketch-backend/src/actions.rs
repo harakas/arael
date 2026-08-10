@@ -863,7 +863,7 @@ impl Action {
     /// `update_expr_dim_values` should be called after solving, and what the
     /// action added.
     pub fn apply_without_solve(&self, sketch: &mut Sketch) -> (bool, Created) {
-        sketch.cached_dof = None;
+        sketch.clear_cached_dof();
         let mut created = Created::Nothing;
         match self {
             Action::AddPoint { pos } => { created = Created::Point(sketch.add_point(*pos)); }

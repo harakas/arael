@@ -1517,7 +1517,7 @@ fn append_dof_tail(ctx: &mut CommandContext, input: &str, results: &mut Vec<Comm
             OBSERVATIONAL.contains(&head)
         });
     if all_observational { return; }
-    let Ok(dof) = ctx.sketch.get_mut().dof() else { return };
+    let Ok(dof) = ctx.sketch.dof() else { return };
     results.push(CommandResult {
         output: format!("DOF: {}", dof),
         is_error: false,
@@ -1686,10 +1686,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "find" => cmd_find(ctx, args_str),
         "dof" => cmd_dof(ctx, args_str),
         "cost" => {
-            use arael::simple_lm::LmProblem;
-            let mut params = Vec::new();
-            ctx.sketch.get_mut().serialize(&mut params);
-            let cost = ctx.sketch.get_mut().calc_cost(&params);
+            let cost = ctx.sketch.current_cost();
             ok(format!("Cost: {:.6}", cost))
         }
         "undo" => cmd_undo(ctx, args_str),
@@ -1950,7 +1947,6 @@ fn nearly_tangent(d1: vect2d, d2: vect2d) -> bool {
 /// Checks if the line's endpoints are coincident with arc endpoints
 /// and the geometry is already tangent.
 fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<String> {
-    use arael::simple_lm::LmProblem;
     let snap_threshold = 1e-3;
     let cost_threshold = 1e-6;
     let l = &ctx.sketch.lines[line_ref];
@@ -2001,18 +1997,10 @@ fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<Strin
     // Stage 2: cost check — push constraint without solving, check cost, pop if bad
     let mut applied = Vec::new();
     for (action, desc) in candidates {
-        let old_cost = {
-            let mut params = Vec::new();
-            ctx.sketch.get_mut().serialize(&mut params);
-            ctx.sketch.get_mut().calc_cost(&params)
-        };
+        let old_cost = ctx.sketch.current_cost();
         // Push constraint directly (no solve)
         action.apply_without_solve(ctx.sketch.get_mut());
-        let new_cost = {
-            let mut params = Vec::new();
-            ctx.sketch.get_mut().serialize(&mut params);
-            ctx.sketch.get_mut().calc_cost(&params)
-        };
+        let new_cost = ctx.sketch.current_cost();
         // Pop the probe either way; an accepted candidate is
         // re-applied through exec so it lands in history (it used to
         // be invisible to undo).
@@ -2033,7 +2021,6 @@ fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<Strin
 /// Try to apply auto-tangent constraints for a newly created arc.
 /// Checks against lines and other arcs at shared endpoints.
 fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> {
-    use arael::simple_lm::LmProblem;
     let snap_threshold = 1e-3;
     let cost_threshold = 1e-6;
     let a = &ctx.sketch.arcs[arc_ref];
@@ -2100,17 +2087,9 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
     // Stage 2: cost check
     let mut applied = Vec::new();
     for (action, desc) in candidates {
-        let old_cost = {
-            let mut params = Vec::new();
-            ctx.sketch.get_mut().serialize(&mut params);
-            ctx.sketch.get_mut().calc_cost(&params)
-        };
+        let old_cost = ctx.sketch.current_cost();
         action.apply_without_solve(ctx.sketch.get_mut());
-        let new_cost = {
-            let mut params = Vec::new();
-            ctx.sketch.get_mut().serialize(&mut params);
-            ctx.sketch.get_mut().calc_cost(&params)
-        };
+        let new_cost = ctx.sketch.current_cost();
         // See auto_tangent_line: probe popped, accepted candidates
         // re-applied through exec for history coverage.
         pop_tangent(ctx.sketch.get_mut(), &action);
@@ -3484,7 +3463,7 @@ pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
     let status_err_before = ctx.status_error.take();
     let blockers_before = ctx.status_blocker_names.take();
     let last_cost_before = ctx.last_cost;
-    let dof_before = ctx.sketch.cached_dof;
+    let dof_before = ctx.sketch.cached_dof();
 
     let result = execute_one(ctx, input);
     let err = ctx.status_error.take().or_else(||
@@ -3505,7 +3484,11 @@ pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
     ctx.status_error = status_err_before;
     ctx.status_blocker_names = blockers_before;
     ctx.last_cost = last_cost_before;
-    ctx.sketch.get_mut().cached_dof = dof_before;
+    // Re-seed the cache at the restored sketch's generation; the
+    // value is still true for the restored state.
+    if let Some(d) = dof_before {
+        ctx.sketch.mutate_values(|s| s.set_cached_dof(d));
+    }
 
     DryRunOutcome {
         accepted: err.is_none(),
@@ -4195,18 +4178,13 @@ fn cmd_unlock(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    use arael::simple_lm::LmProblem;
     let tokens: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if tokens.len() != 2 { return err("Usage: param name value"); }
     let name = tokens[0].trim();
     let expr = tokens[1].trim();
     // Snapshot for rollback
     let snapshot = bincode::serialize(&ctx.sketch).ok();
-    let old_cost = {
-        let mut params = Vec::new();
-        ctx.sketch.get_mut().serialize(&mut params);
-        ctx.sketch.get_mut().calc_cost(&params)
-    };
+    let old_cost = ctx.sketch.current_cost();
     // Check if param exists -> update
     let is_update = ctx.sketch.user_params.iter().any(|p| p.name == name);
     if is_update {
@@ -4220,7 +4198,7 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         ctx.exec(Action::AddUserParam { name: name.to_string(), expr_str: expr.to_string() });
     }
-    ctx.sketch.get_mut().update_expr_dim_values();
+    ctx.sketch.mutate_values(|s| s.update_expr_dim_values());
     let new_cost = ctx.sketch.solve().end_cost;
     ctx.last_cost = new_cost;
     // Reject if cost increased significantly
@@ -4344,7 +4322,6 @@ fn cmd_constr(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    use arael::simple_lm::LmProblem;
 
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 2 {
@@ -4398,11 +4375,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     // Snapshot
     let snapshot = bincode::serialize(&ctx.sketch).ok();
-    let old_cost = {
-        let mut params = Vec::new();
-        ctx.sketch.get_mut().serialize(&mut params);
-        ctx.sketch.get_mut().calc_cost(&params)
-    };
+    let old_cost = ctx.sketch.current_cost();
 
     // Helper positions per target; LineBody moves both endpoints by
     // the cursor delta.
@@ -4429,11 +4402,7 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.sketch.solve();
 
     // Check cost
-    let new_cost = {
-        let mut params = Vec::new();
-        ctx.sketch.get_mut().serialize(&mut params);
-        ctx.sketch.get_mut().calc_cost(&params)
-    };
+    let new_cost = ctx.sketch.current_cost();
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
             && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
@@ -7922,7 +7891,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     let saved_drift = ctx.sketch.drift_isigma;
     ctx.sketch.get_mut().drift_isigma = 0.0;
     let mut params = Vec::new();
-    ctx.sketch.get_mut().serialize(&mut params);
+    ctx.sketch.mutate_values(|s| s.serialize(&mut params));
     let n = params.len();
     let bag = SymbolBag::build(&ctx.sketch);
     let mut idx_to_name: Vec<String> = vec![String::new(); n];
@@ -8051,7 +8020,7 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
     let saved_drift = ctx.sketch.drift_isigma;
     ctx.sketch.get_mut().drift_isigma = 0.0;
     let mut params = Vec::new();
-    ctx.sketch.get_mut().serialize(&mut params);
+    ctx.sketch.mutate_values(|s| s.serialize(&mut params));
     let n = params.len();
     if n == 0 {
         ctx.sketch.get_mut().drift_isigma = saved_drift;
@@ -9445,11 +9414,11 @@ mod tests {
     fn test_xangle_derived() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "xangle L0 derived");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before); // derived does not constrain
     }
 
@@ -9457,11 +9426,11 @@ mod tests {
     fn test_hdistance_derived() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "hdistance L0.p1 L0.p2 derived");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before);
     }
 
@@ -9469,11 +9438,11 @@ mod tests {
     fn test_vdistance_derived() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "vdistance L0.p1 L0.p2 derived");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before);
     }
 
@@ -9481,11 +9450,11 @@ mod tests {
     fn test_length_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "length L0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived); // constraining, not derived
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1); // DOF decreased
         assert!(near(line_len(&ctx, "L0"), (5.0f64 * 5.0 + 3.0 * 3.0).sqrt()));
     }
@@ -9494,11 +9463,11 @@ mod tests {
     fn test_radius_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "radius A0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9506,11 +9475,11 @@ mod tests {
     fn test_hdistance_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "hdistance L0.p1 L0.p2 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9518,11 +9487,11 @@ mod tests {
     fn test_xangle_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "xangle L0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9530,11 +9499,11 @@ mod tests {
     fn test_vdistance_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "vdistance L0.p1 L0.p2 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9542,11 +9511,11 @@ mod tests {
     fn test_sweep_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_arc 0,0 5,0 0,5");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "sweep A0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9554,11 +9523,11 @@ mod tests {
     fn test_angle_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,4");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9566,11 +9535,11 @@ mod tests {
     fn test_distance_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 8,3 12,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "distance L0.p2 L1.p1 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9578,11 +9547,11 @@ mod tests {
     fn test_distance_pl_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_point 0,3; add_line 0,0 5,0");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "distance P0 L0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
     }
 
@@ -9618,12 +9587,12 @@ mod tests {
     fn test_axis_distance_dof() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "hdistance L0.p1 L0.p2 4");
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 1);
         run_ok(&mut ctx, "vdistance L0.p1 L0.p2 2");
-        let dof_after2 = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after2 = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after2, dof_after - 1);
     }
 
@@ -12119,12 +12088,12 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
-        let dof_with = ctx.sketch.get_mut().dof().unwrap();
+        let dof_with = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "delete L0 horizontal");
-        let dof_without = ctx.sketch.get_mut().dof().unwrap();
+        let dof_without = ctx.sketch.dof().unwrap();
         assert!(dof_without > dof_with, "DOF should increase after removing constraint: {} vs {}", dof_without, dof_with);
         run_ok(&mut ctx, "undo");
-        let dof_undone = ctx.sketch.get_mut().dof().unwrap();
+        let dof_undone = ctx.sketch.dof().unwrap();
         assert_eq!(dof_undone, dof_with, "DOF should restore after undo: {} vs {}", dof_undone, dof_with);
     }
 
@@ -12133,9 +12102,9 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "parallel L0 L1");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "delete L0 L1 parallel");
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before + 1, "removing parallel should increase DOF by 1: {} -> {}", dof_before, dof_after);
     }
 
@@ -12194,7 +12163,7 @@ mod tests {
         // 4 points = 3 lines, 2 coincidents
         // 3*4 params - 2*2 coincident = 8 DOF
         run_ok(&mut ctx, "add_line 0,0 1,0 2,1 3,0");
-        let dof = ctx.sketch.get_mut().dof().unwrap();
+        let dof = ctx.sketch.dof().unwrap();
         assert_eq!(dof, 8, "3 connected lines should have 8 DOF, got {}", dof);
     }
 
@@ -12278,19 +12247,19 @@ mod tests {
     fn test_angle_driven_closest() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         // "driven closest" — driven is before sector keyword
         run_ok(&mut ctx, "angle L0 L1 driven closest");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
     }
 
     #[test]
     fn test_angle_driven_supplement() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven supplement");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
@@ -12299,7 +12268,7 @@ mod tests {
         } else {
             panic!("expected angle dimension");
         }
-        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
     }
 
     #[test]
@@ -12307,7 +12276,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         // Lines at ~120 degrees so acute picks supplement
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 -2,4");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven acute");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
@@ -12316,7 +12285,7 @@ mod tests {
         } else {
             panic!("expected angle dimension");
         }
-        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
     }
 
     #[test]
@@ -12324,7 +12293,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         // Lines at ~45 degrees, so obtuse picks supplement (135)
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "angle L0 L1 driven obtuse");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
@@ -12333,19 +12302,19 @@ mod tests {
         } else {
             panic!("expected angle dimension");
         }
-        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
     }
 
     #[test]
     fn test_angle_closest_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         // Reverse order: sector keyword before driven
         run_ok(&mut ctx, "angle L0 L1 closest driven");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
-        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
     }
 
     #[test]
@@ -12615,12 +12584,12 @@ mod tests {
     #[test]
     fn test_add_rect_driven() {
         let mut ctx = CommandContext::new();
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "add_rect 0,0 5,3 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 2);
         assert!(!ctx.sketch.dimensions[0].derived);
         assert!(!ctx.sketch.dimensions[1].derived);
-        assert!(ctx.sketch.get_mut().dof().unwrap() < dof_before + 8); // 4 lines = +8 DOF, constraints + dims reduce
+        assert!(ctx.sketch.dof().unwrap() < dof_before + 8); // 4 lines = +8 DOF, constraints + dims reduce
     }
 
     #[test]
@@ -13066,7 +13035,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse 0,0 5 3 0");
         // DOF: center(2) + rx(1) + ry(1) + rotation(1) = 5
-        assert_eq!(ctx.sketch.get_mut().dof().unwrap(), 5);
+        assert_eq!(ctx.sketch.dof().unwrap(), 5);
     }
 
     #[test]
@@ -13212,9 +13181,9 @@ mod tests {
     fn test_symmetry_aa_command() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 4,1 2");
-        let dof_before = ctx.sketch.get_mut().dof().unwrap();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "symmetry A0 L0 A1");
-        let dof_after = ctx.sketch.get_mut().dof().unwrap();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before - 3, "arc symmetry should remove 3 DOF: {} -> {}", dof_before, dof_after);
         assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
     }
@@ -13880,13 +13849,13 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "length L0 3 to 6");
-        let dof_inside = ctx.sketch.get_mut().dof().unwrap();
+        let dof_inside = ctx.sketch.dof().unwrap();
         // Push onto the lower bound: barrier would be active there.
         run_ok(&mut ctx, "length L0 1 to 6");
-        let dof_at_lower = ctx.sketch.get_mut().dof().unwrap();
+        let dof_at_lower = ctx.sketch.dof().unwrap();
         // Push onto the upper bound.
         run_ok(&mut ctx, "length L0 3 to 4");
-        let dof_at_upper = ctx.sketch.get_mut().dof().unwrap();
+        let dof_at_upper = ctx.sketch.dof().unwrap();
         assert_eq!(dof_inside, dof_at_lower,
             "DOF must be stable; inside={}, at lower={}", dof_inside, dof_at_lower);
         assert_eq!(dof_inside, dof_at_upper,

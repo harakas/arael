@@ -314,10 +314,14 @@ pub struct Sketch {
     // Shared TripletBlock for all expression constraints
     #[serde(skip)]
     pub expr_hb: TripletBlock<f64>,
-    // Cached DOF count — set by compute_dof(), cleared on structural mutation
+    /// DOF cache, keyed to the structure generation it was computed
+    /// at: a stale entry reads as absent through cached_dof(), so no
+    /// consumer has to remember to clear it. Value-only mutation paths
+    /// that change the instantaneous rank still clear explicitly
+    /// (clear_cached_dof) where they know better.
     #[arael(skip)]
     #[serde(skip)]
-    pub cached_dof: Option<usize>,
+    cached_dof: Option<(u64, usize)>,
     /// Bumped by every structural mutation (see `SketchCell::get_mut`).
     /// A cache records the generation it was built at and rebuilds when the
     /// two differ, so one signal serves every cache independently.
@@ -389,6 +393,29 @@ impl SketchCell {
     /// dimension values that read off them, and adds nothing -- so it does not
     /// bump the generation, and the derived state is rebuilt only when the
     /// structure has actually moved. Solving repeatedly is what a drag does.
+    /// Compute (or serve the cached) DOF. A query: runs through the
+    /// value-only door, so the derived state and warm session survive.
+    pub fn dof(&mut self) -> Result<usize, String> {
+        self.mutate_values(|s| s.dof())
+    }
+
+    /// Validate an expression against the current sketch. A query in
+    /// the gate's sense: it rebuilds only derived state.
+    pub fn validate_expr(&mut self, expr_str: &str) -> Result<(), String> {
+        self.mutate_values(|s| s.validate_expr(expr_str))
+    }
+
+    /// Serialize the parameters and evaluate the current cost --
+    /// read-only in the gate's sense.
+    pub fn current_cost(&mut self) -> f64 {
+        use arael::simple_lm::{LmProblem, RootProblem};
+        self.mutate_values(|s| {
+            let mut params = std::vec::Vec::new();
+            s.serialize(&mut params);
+            s.calc_cost(&params)
+        })
+    }
+
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
         let cur = self.sketch.structure_gen;
         if self.prepared_gen != Some(cur) {
@@ -716,6 +743,24 @@ impl Sketch {
     /// it built and rebuilds when the two no longer match.
     pub fn structure_gen(&self) -> u64 {
         self.structure_gen
+    }
+
+    /// The cached DOF, if one was computed at the current structure
+    /// generation.
+    pub fn cached_dof(&self) -> Option<usize> {
+        self.cached_dof
+            .and_then(|(g, d)| (g == self.structure_gen).then_some(d))
+    }
+
+    /// Store the DOF for the current structure generation.
+    pub fn set_cached_dof(&mut self, dof: usize) {
+        self.cached_dof = Some((self.structure_gen, dof));
+    }
+
+    /// Drop the cache: for mutations that change the instantaneous
+    /// rank without a structural change (the generation cannot tell).
+    pub fn clear_cached_dof(&mut self) {
+        self.cached_dof = None;
     }
 
     /// Walk every Vec-stored constraint in canonical order and assign a
@@ -2291,11 +2336,11 @@ impl Sketch {
         let (jacobian, n) = self.dof_jacobian();
         let t_jac = timer.lap();
         let opts = arael::rank::RankOptions {
-            null_hint: self.cached_dof,
+            null_hint: self.cached_dof(),
             ..Default::default()
         };
         let rr = jacobian.numeric_rank(&opts).map_err(|e| e.to_string())?;
-        self.cached_dof = Some(rr.nullity);
+        self.set_cached_dof(rr.nullity);
         if timer.on() {
             eprintln!("[RANK] m={} n={} method={:?} jacobian={:?} rank={:?} dof={}",
                 jacobian.num_residuals(), n, rr.method, t_jac, timer.lap(), rr.nullity);
@@ -2339,7 +2384,7 @@ impl Sketch {
                     v
                 }).collect(),
             };
-            self.cached_dof = Some(result.dof);
+            self.set_cached_dof(result.dof);
             return Ok(result);
         }
 
@@ -2400,7 +2445,7 @@ impl Sketch {
             (n.saturating_sub(rank), "dense svd".to_string())
         } else {
             let opts = arael::rank::RankOptions {
-                null_hint: self.cached_dof,
+                null_hint: self.cached_dof(),
                 ..Default::default()
             };
             let rr = jacobian.numeric_rank(&opts).map_err(|e| e.to_string())?;
@@ -2443,13 +2488,13 @@ impl Sketch {
             eprintln!("[DOF] m={} n={} analyze={} method={} prep+jac={:?} rank={:?} total={:?} dof={}",
                 m, n, analyze, method, t_prep, t_rank, timer.total(), result.dof);
         }
-        self.cached_dof = Some(result.dof);
+        self.set_cached_dof(result.dof);
         Ok(result)
     }
 
     /// Return cached DOF or compute it (count only, no eigenvector analysis).
     pub fn dof(&mut self) -> Result<usize, String> {
-        if let Some(d) = self.cached_dof { return Ok(d); }
+        if let Some(d) = self.cached_dof() { return Ok(d); }
         let result = self.compute_dof(false)?;
         Ok(result.dof)
     }
