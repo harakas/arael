@@ -1085,6 +1085,7 @@ impl EditorApp {
         let l_c = &self.sketch.lines[line].constraints;
         if horizontal && l_c.horizontal { return false; }
         if !horizontal && l_c.vertical { return false; }
+        let timer = Timer::new();
         let Ok(old_dof) = self.sketch.get_mut().dof() else { return true; };
         let saved_cached = self.sketch.cached_dof;
         if horizontal {
@@ -1104,6 +1105,11 @@ impl EditorApp {
             self.sketch.get_mut().lines[line].constraints.vertical = false;
         }
         self.sketch.get_mut().cached_dof = saved_cached;
+        if timer.on() {
+            eprintln!("[probe] hv({}) {}: {:?} reduce={}",
+                if horizontal { "h" } else { "v" },
+                self.sketch.lines[line].name, timer.total(), new_dof < old_dof);
+        }
         new_dof < old_dof
     }
 
@@ -1113,6 +1119,7 @@ impl EditorApp {
     /// collinear hint gating at drag-start.
     fn collinear_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
         if self.has_collinear_conflict(a, b) { return false; }
+        let timer = Timer::new();
         let Ok(old_dof) = self.sketch.get_mut().dof() else { return true; };
         let saved_cached = self.sketch.cached_dof;
         self.sketch.get_mut().collinear.push(Collinear {
@@ -1122,6 +1129,11 @@ impl EditorApp {
         let new_dof = self.sketch.get_mut().dof().unwrap_or(old_dof);
         self.sketch.get_mut().collinear.pop();
         self.sketch.get_mut().cached_dof = saved_cached;
+        if timer.on() {
+            eprintln!("[probe] collinear {} {}: {:?} reduce={}",
+                self.sketch.lines[a].name, self.sketch.lines[b].name,
+                timer.total(), new_dof < old_dof);
+        }
         new_dof < old_dof
     }
 
@@ -1155,6 +1167,7 @@ impl EditorApp {
                 return false;
             }
         }
+        let timer = Timer::new();
         let old_dof = match self.sketch.get_mut().dof() { Ok(d) => d, Err(_) => return false };
         let saved_cached = self.sketch.cached_dof;
 
@@ -1175,6 +1188,11 @@ impl EditorApp {
         self.sketch.get_mut().cached_dof = saved_cached;
 
         let result = new_dof < old_dof;
+        if timer.on() {
+            eprintln!("[probe] perp {} {}: {:?} reduce={}",
+                self.sketch.lines[a].name, self.sketch.lines[b].name,
+                timer.total(), result);
+        }
         if !result {
             self.drag_perp_fail_cache = Some((key.0, key.1, web_time::Instant::now()));
         } else {
@@ -1215,6 +1233,7 @@ impl EditorApp {
         self.drag_line_locked_v = false;
         self.drag_line_endpoint_connected = false;
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
+            let timer = Timer::new();
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
             if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
                 if !self.perp_would_reduce_dof(line, host) {
@@ -1232,6 +1251,10 @@ impl EditorApp {
             // its drag-helper coincident (otherwise the helper's own
             // coincident registers as a connection).
             self.drag_line_endpoint_connected = self.line_endpoint_has_connection(line, is_p1);
+            if timer.on() {
+                eprintln!("[probe] start_drag {} probes total: {:?}",
+                    self.sketch.lines[line].name, timer.total());
+            }
         }
 
         // Create a drag helper point at mouse position
