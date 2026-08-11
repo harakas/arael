@@ -835,6 +835,19 @@ fn last_dim_name(ctx: &CommandContext) -> String {
     ctx.sketch.dimensions.last().map(|d| d.name.clone()).unwrap_or_default()
 }
 
+/// Peel recognized trailing keywords off the token list, any order,
+/// any count. Returns one flag per `keys` entry, in order.
+fn peel_keywords<const N: usize>(tokens: &mut Vec<&str>, keys: [&str; N]) -> [bool; N] {
+    let mut flags = [false; N];
+    while let Some(&last) = tokens.last() {
+        match keys.iter().position(|&k| k == last) {
+            Some(i) => { flags[i] = true; tokens.pop(); }
+            None => break,
+        }
+    }
+    flags
+}
+
 /// Run one `driven`-keyword AddDimension and produce its message
 /// fragment honestly: the created dimension's name on success, the
 /// rejection reason otherwise. Reading last_dim_name without checking
@@ -2119,23 +2132,8 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
 
 fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut notangent = false;
-    let mut driven = false;
-    let mut quiet = false;
-    let mut constr = false;
-    loop {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, notangent, driven, quiet, constr] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "notangent", "driven", "quiet", "constr"]);
 
     // Parse all coordinate tokens
     let points: Vec<vect2d> = if tokens.len() >= 2 {
@@ -2162,7 +2160,7 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         vec![prev, p2]
     } else {
-        return err("Usage: add_line x1,y1 x2,y2 [x3,y3 ...] [noconnect] [nocursor] [driven]");
+        return err("Usage: add_line x1,y1 x2,y2 [x3,y3 ...] [noconnect] [notangent] [nocursor] [driven]");
     };
 
     ctx.begin_group();
@@ -2380,17 +2378,9 @@ struct RectKeywords {
 
 /// Parse trailing rect keywords. Returns error string on conflict.
 fn parse_rect_keywords(tokens: &mut Vec<&str>, allow_hv: bool) -> Result<RectKeywords, String> {
-    let mut kw = RectKeywords { noconnect: false, noconstraint: false, hv: false, driven: false, strict: false };
-    for _ in 0..5 {
-        match tokens.last().copied() {
-            Some("noconnect") => { kw.noconnect = true; tokens.pop(); }
-            Some("noconstraint") => { kw.noconstraint = true; tokens.pop(); }
-            Some("hv") => { kw.hv = true; tokens.pop(); }
-            Some("driven") => { kw.driven = true; tokens.pop(); }
-            Some("strict") => { kw.strict = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [noconnect, noconstraint, hv, driven, strict] = peel_keywords(tokens,
+        ["noconnect", "noconstraint", "hv", "driven", "strict"]);
+    let kw = RectKeywords { noconnect, noconstraint, hv, driven, strict };
     if kw.hv && !allow_hv {
         return Err("hv keyword is not supported for this command".into());
     }
@@ -2468,21 +2458,8 @@ fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut driven = false;
-    for _ in 0..3 {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, driven] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "driven"]);
     if tokens.len() != 2 {
         return err("Usage: add_circle cx,cy radius [noconnect] [nocursor] [driven]");
     }
@@ -2521,21 +2498,8 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut driven = false;
-    for _ in 0..3 {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, driven] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "driven"]);
     if tokens.len() != 2 {
         return err("Usage: add_circle2 p1 p2 [noconnect] [nocursor] [driven]");
     }
@@ -2572,21 +2536,8 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut driven = false;
-    for _ in 0..3 {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, driven] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "driven"]);
     if tokens.len() != 3 {
         return err("Usage: add_circle3 p1 p2 p3 [noconnect] [nocursor] [driven]");
     }
@@ -2626,21 +2577,8 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut driven = false;
-    for _ in 0..3 {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, driven] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "driven"]);
     if tokens.len() != 4 {
         return err("Usage: add_ellipse cx,cy rx ry rotation [noconnect] [nocursor] [driven]");
     }
@@ -2684,29 +2622,10 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut notangent = false;
-    let mut driven = false;
-    let mut large = false;
-    let mut cw = false;
-    loop {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            Some("large") => { large = true; tokens.pop(); }
-            Some("cw") => { cw = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, notangent, driven, large, cw] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "notangent", "driven", "large", "cw"]);
     if tokens.len() != 5 {
-        return err("Usage: add_earc p1 p2 rx ry rot_deg [large] [cw] [noconnect] [nocursor] [driven]");
+        return err("Usage: add_earc p1 p2 rx ry rot_deg [large] [cw] [noconnect] [notangent] [nocursor] [driven]");
     }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
@@ -2758,23 +2677,8 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut notangent = false;
-    let mut driven = false;
-    loop {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, notangent, driven] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "notangent", "driven"]);
     if tokens.len() != 5 {
         return err("Usage: add_earc3 p1 p2 pmid rx ry [noconnect] [notangent] [nocursor] [driven]");
     }
@@ -2853,27 +2757,10 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut notangent = false;
-    let mut driven = false;
-    let mut cw = false;
-    loop {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            Some("cw") => { cw = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, notangent, driven, cw] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "notangent", "driven", "cw"]);
     if tokens.len() != 6 {
-        return err("Usage: add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [nocursor] [driven]");
+        return err("Usage: add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [notangent] [nocursor] [driven]");
     }
     let center = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let rx = match eval_expr(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
@@ -2920,23 +2807,8 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut notangent = false;
-    let mut driven = false;
-    let mut quiet = false;
-    let mut constr = false;
-    loop {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, notangent, driven, quiet, constr] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "notangent", "driven", "quiet", "constr"]);
     // Syntax: add_earc_tangent p1 t1 p2 t2 [w]
     if tokens.len() < 4 || tokens.len() > 5 {
         return err("Usage: add_earc_tangent p1 t1 p2 t2 [w] [noconnect] [notangent] [nocursor] [quiet] [driven]");
@@ -3134,23 +3006,8 @@ fn line_line_intersect(p1: vect2d, d1: vect2d, p2: vect2d, d2: vect2d) -> Option
 
 fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut noconstraint = false;
-    let mut driven = false;
-    let mut strict = false;
-    for _ in 0..4 {
-        match tokens.last().copied() {
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("noconstraint") => { noconstraint = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            Some("strict") => { strict = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [noconnect, quiet, constr, noconstraint, driven, strict] = peel_keywords(&mut tokens,
+        ["noconnect", "quiet", "constr", "noconstraint", "driven", "strict"]);
     if noconstraint && (driven || strict) {
         return err("noconstraint conflicts with driven and strict");
     }
@@ -3212,23 +3069,8 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut noconstraint = false;
-    let mut driven = false;
-    let mut strict = false;
-    for _ in 0..4 {
-        match tokens.last().copied() {
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("noconstraint") => { noconstraint = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            Some("strict") => { strict = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [noconnect, quiet, constr, noconstraint, driven, strict] = peel_keywords(&mut tokens,
+        ["noconnect", "quiet", "constr", "noconstraint", "driven", "strict"]);
     if noconstraint && (driven || strict) {
         return err("noconstraint conflicts with driven and strict");
     }
@@ -5282,23 +5124,8 @@ fn cmd_zoom(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let mut nocursor = false;
-    let mut noconnect = false;
-    let mut quiet = false;
-    let mut constr = false;
-    let mut notangent = false;
-    let mut driven = false;
-    loop {
-        match tokens.last().copied() {
-            Some("nocursor") => { nocursor = true; tokens.pop(); }
-            Some("noconnect") => { noconnect = true; tokens.pop(); }
-            Some("quiet") => { quiet = true; tokens.pop(); }
-            Some("constr") => { constr = true; tokens.pop(); }
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("driven") => { driven = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [nocursor, noconnect, quiet, constr, notangent, driven] = peel_keywords(&mut tokens,
+        ["nocursor", "noconnect", "quiet", "constr", "notangent", "driven"]);
     if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym [noconnect] [notangent] [nocursor] [driven]"); }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
@@ -5483,16 +5310,7 @@ fn parse_radius_token(sketch: &Sketch, tok: &str) -> Result<(f64, Option<String>
 
 fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    // Trailing keyword options: notangent, noradius. Either order.
-    let mut notangent = false;
-    let mut noradius = false;
-    for _ in 0..2 {
-        match tokens.last().copied() {
-            Some("notangent") => { notangent = true; tokens.pop(); }
-            Some("noradius") => { noradius = true; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [notangent, noradius] = peel_keywords(&mut tokens, ["notangent", "noradius"]);
     if tokens.len() < 2 {
         return err("Usage: fillet <corner>... r [notangent] [noradius]  where each corner is Lx.pN or Lx Ly");
     }
@@ -6170,15 +5988,7 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     // Parse trailing keywords after the mirror line
     let mut after_about: Vec<&str> = tokens[about_pos + 1..].to_vec();
-    let mut noconstraint = false;
-    let mut strict = false;
-    for _ in 0..2 {
-        match after_about.last().copied() {
-            Some("noconstraint") => { noconstraint = true; after_about.pop(); }
-            Some("strict") => { strict = true; after_about.pop(); }
-            _ => break,
-        }
-    }
+    let [noconstraint, strict] = peel_keywords(&mut after_about, ["noconstraint", "strict"]);
     if noconstraint && strict {
         return err("noconstraint conflicts with strict");
     }
@@ -6524,22 +6334,15 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
 fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     // Peel optional trailing keywords in any order (driven/derived + sector)
-    let mut is_derived = false;
-    let mut is_driven = false;
     #[derive(Clone, Copy)]
     enum SectorMode { Default, Supplement, Closest, Acute, Obtuse }
-    let mut sector_mode = SectorMode::Default;
-    for _ in 0..2 {
-        match tokens.last().copied() {
-            Some("derived") => { is_derived = true; tokens.pop(); }
-            Some("driven") => { is_driven = true; tokens.pop(); }
-            Some("supplement") => { sector_mode = SectorMode::Supplement; tokens.pop(); }
-            Some("closest") => { sector_mode = SectorMode::Closest; tokens.pop(); }
-            Some("acute") => { sector_mode = SectorMode::Acute; tokens.pop(); }
-            Some("obtuse") => { sector_mode = SectorMode::Obtuse; tokens.pop(); }
-            _ => break,
-        }
-    }
+    let [is_derived, is_driven, supplement, closest, acute, obtuse] = peel_keywords(&mut tokens,
+        ["derived", "driven", "supplement", "closest", "acute", "obtuse"]);
+    let sector_mode = if supplement { SectorMode::Supplement }
+        else if closest { SectorMode::Closest }
+        else if acute { SectorMode::Acute }
+        else if obtuse { SectorMode::Obtuse }
+        else { SectorMode::Default };
 
     // Compute current angle between direction vectors (p1->p2)
     let compute_angle = |ctx: &CommandContext, a_ref, b_ref| -> (f64, f64) {
@@ -10328,6 +10131,18 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 4,0 noconnect; add_line 0,2 4,2 noconnect; parallel L0 L1");
         let out = run_ok(&mut ctx, "delete L0 L1 parallel");
         assert!(out.contains("C1"), "{}", out);
+    }
+
+    #[test]
+    fn test_all_trailing_keywords_are_peeled() {
+        // The circle family's hand-rolled peel loop capped at 3 of
+        // its 5 keywords, silently leaving the rest as arguments.
+        let mut ctx = CommandContext::new();
+        let out = run_ok(&mut ctx, "add_circle 2,2 1 nocursor noconnect quiet constr driven");
+        assert!(out.contains("[driven") && out.contains("[quiet]"), "{}", out);
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        assert!(ctx.sketch.arcs[r].construction, "constr keyword must be honored");
+        assert!(ctx.cursor.is_none(), "nocursor keyword must be honored");
     }
 
     #[test]

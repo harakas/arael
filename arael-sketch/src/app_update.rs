@@ -1081,7 +1081,10 @@ impl eframe::App for EditorApp {
                 self.show_command = true;
                 self.command_focus = true;
             }
-            } // !wants_keyboard_input
+            // Escape resets tool/selection/gestures -- gated on
+            // keyboard focus like every other shortcut, so typing in
+            // the command panel or an overlay never flips the tool
+            // (those fields handle their own Escape).
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 // Fillet-in-flight gets first crack: roll back the
                 // applied fillet before the generic Escape clears
@@ -1103,6 +1106,7 @@ impl eframe::App for EditorApp {
                 self.tool = Tool::Select;
                 self.cancel_drag();
             }
+            } // !wants_keyboard_input
 
             // Delete selected entities/constraints with Backspace/Delete
             // (skip when editing dimension text — Backspace edits the text field)
@@ -2961,6 +2965,21 @@ impl EditorApp {
             egui::TextEdit::store_state(ui.ctx(), response.id, state);
         }
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // Escape cancels the overlay edit only -- the tool and
+        // selection stay (the generic Escape handler is gated on
+        // keyboard focus and does not fire while typing here).
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.fillet_pending.is_some() {
+                self.cancel_pending_fillet();
+            } else {
+                self.dim_editing = false;
+                self.dim_kind = None;
+                self.dim_placing = false;
+                self.dim_edit_did = None;
+                self.dim_input.clear();
+            }
+            return;
+        }
         if enter_pressed && self.fillet_pending.is_some() {
             // Fillet commit: reapply already baked the current input
             // into the sketch, so Enter just finalises the session.

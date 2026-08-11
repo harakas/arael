@@ -347,7 +347,7 @@ Partial elliptic arcs (open ellipse segments). Three creation styles:
 
 **SVG endpoint-based** (inspired by SVG arc commands):
 ```
-add_earc p1 p2 rx ry rot_deg [large] [cw] [noconnect] [nocursor] [driven]
+add_earc p1 p2 rx ry rot_deg [large] [cw] [noconnect] [notangent] [nocursor] [driven]
 add_earc 0,0 5,0 3 1 0                   Small CCW arc from (0,0) to (5,0)
 add_earc 0,0 5,0 3 1 0 large             Large arc variant
 add_earc 0,0 5,0 3 1 0 cw                Clockwise arc
@@ -362,7 +362,7 @@ add_earc3 0,0 5,0 2,2 3 1                Arc passing near (2,2)
 
 **Center-based** (direct parameterization, angles in degrees):
 ```
-add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [nocursor] [driven]
+add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [notangent] [nocursor] [driven]
 add_earc_center 0,0 3 1 45 0 90          Quarter elliptic arc
 ```
 
