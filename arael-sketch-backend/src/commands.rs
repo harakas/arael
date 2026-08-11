@@ -310,31 +310,6 @@ pub fn validate_and_apply_constraint(
 ) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
 
-    // A tangent on degenerate geometry (zero-length line, concentric
-    // arcs) has a 0/0 direction sign and a NaN Jacobian the solve
-    // cannot recover from -- reject before touching the sketch.
-    match action {
-        Action::ApplyTangentLA { line, .. } => {
-            if let Some(l) = sketch.lines.get(*line) {
-                let dx = l.p2.value.x - l.p1.value.x;
-                let dy = l.p2.value.y - l.p1.value.y;
-                if dx * dx + dy * dy <= 1e-24 {
-                    return Err(Rejection::msg("Cannot apply tangent: line has zero length"));
-                }
-            }
-        }
-        Action::ApplyTangentAA { a, b } => {
-            if let (Some(aa), Some(ab)) = (sketch.arcs.get(*a), sketch.arcs.get(*b)) {
-                let dx = aa.center.value.x - ab.center.value.x;
-                let dy = aa.center.value.y - ab.center.value.y;
-                if dx * dx + dy * dy <= 1e-24 {
-                    return Err(Rejection::msg("Cannot apply tangent: arcs are concentric"));
-                }
-            }
-        }
-        _ => {}
-    }
-
     let snapshot = bincode::serialize(sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
@@ -776,6 +751,14 @@ impl CommandContext {
         self.status_error = None;
         self.status_blocker_names = None;
 
+        // Logical conflicts and degenerate geometry, for every action
+        // on every path. Not overridable with force -- a contradiction
+        // stays a contradiction.
+        if let Some(err) = crate::conflicts::validate_action(&self.sketch, &action) {
+            self.status_error = Some(err);
+            return Created::Nothing;
+        }
+
         if action.is_constraint_action() {
             match validate_and_apply_constraint(
                 self.sketch.get_mut(), &action, self.skip_dof_check)
@@ -850,6 +833,19 @@ fn err(msg: impl Into<String>) -> CommandResult {
 /// `d<N>` identifier.
 fn last_dim_name(ctx: &CommandContext) -> String {
     ctx.sketch.dimensions.last().map(|d| d.name.clone()).unwrap_or_default()
+}
+
+/// Run one `driven`-keyword AddDimension and produce its message
+/// fragment honestly: the created dimension's name on success, the
+/// rejection reason otherwise. Reading last_dim_name without checking
+/// for rejection would report the previous dimension as if it were
+/// the new one.
+fn driven_dim_fragment(ctx: &mut CommandContext, action: Action, label: &str, value: f64) -> String {
+    ctx.exec(action);
+    match ctx.status_error.take() {
+        Some(e) => format!(" [driven {} rejected: {}]", label, e),
+        None => format!(" [driven {} {}={:.4}]", last_dim_name(ctx), label, value),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,12 +1525,15 @@ fn append_dof_tail(ctx: &mut CommandContext, input: &str, results: &mut Vec<Comm
 fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let input = input.trim();
 
-    // Strip trailing "force" keyword — skips DOF check on constraint commands
-    let (input, force) = strip_force(input);
+    // Strip inline comments (# not inside quotes) first, then the
+    // trailing "force" keyword, so `horizontal L0 force # note`
+    // parses. `msg` is exempt from both: its text is verbatim.
+    let (input, force) = if input.starts_with("msg ") || input == "msg" {
+        (input, false)
+    } else {
+        strip_force(strip_inline_comment(input))
+    };
     ctx.skip_dof_check = force;
-
-    // Strip inline comments (# not inside quotes), except for msg command
-    let input = if input.trim_start().starts_with("msg ") { input } else { strip_inline_comment(input) };
     let input = input.trim();
 
     // Comments (entire line)
@@ -1797,8 +1796,12 @@ fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<St
     let saved = ctx.skip_dof_check;
     ctx.skip_dof_check = true; // auto-coincident is positional, don't DOF-check
     for (action, desc) in actions {
+        let watermark = ctx.sketch.next_constraint_id;
         ctx.exec(action);
-        connected.push(desc);
+        // A rejected auto-coincident is not reported as connected.
+        if ctx.status_error.take().is_some() { continue; }
+        let ids = constraint_names_since(ctx, watermark);
+        connected.push(if ids.is_empty() { desc } else { format!("{} ({})", desc, ids.join(" ")) });
     }
     ctx.skip_dof_check = saved;
     connected
@@ -1918,8 +1921,12 @@ fn auto_coincident_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>, center_only:
     let saved = ctx.skip_dof_check;
     ctx.skip_dof_check = true; // auto-coincident is positional, don't DOF-check
     for (action, desc) in actions {
+        let watermark = ctx.sketch.next_constraint_id;
         ctx.exec(action);
-        connected.push(desc);
+        // A rejected auto-coincident is not reported as connected.
+        if ctx.status_error.take().is_some() { continue; }
+        let ids = constraint_names_since(ctx, watermark);
+        connected.push(if ids.is_empty() { desc } else { format!("{} ({})", desc, ids.join(" ")) });
     }
     ctx.skip_dof_check = saved;
     connected
@@ -2008,10 +2015,12 @@ fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<Strin
         if new_cost <= old_cost + cost_threshold {
             let saved = ctx.skip_dof_check;
             ctx.skip_dof_check = true;
+            let watermark = ctx.sketch.next_constraint_id;
             ctx.exec(action);
             ctx.skip_dof_check = saved;
             if ctx.status_error.take().is_none() {
-                applied.push(desc);
+                let ids = constraint_names_since(ctx, watermark);
+                applied.push(if ids.is_empty() { desc } else { format!("{} ({})", desc, ids.join(" ")) });
             }
         }
     }
@@ -2096,10 +2105,12 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
         if new_cost <= old_cost + cost_threshold {
             let saved = ctx.skip_dof_check;
             ctx.skip_dof_check = true;
+            let watermark = ctx.sketch.next_constraint_id;
             ctx.exec(action);
             ctx.skip_dof_check = saved;
             if ctx.status_error.take().is_none() {
-                applied.push(desc);
+                let ids = constraint_names_since(ctx, watermark);
+                applied.push(if ids.is_empty() { desc } else { format!("{} ({})", desc, ids.join(" ")) });
             }
         }
     }
@@ -2161,7 +2172,7 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let p1 = points[i];
         let p2 = points[i + 1];
         let Some(line_ref) = ctx.exec(Action::AddLine { p1, p2 }).line() else {
-            return err("Internal: creation action added no entity");
+            return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
         };
         if quiet { ctx.exec(Action::SetQuietLine { line: line_ref, on: true }); }
         if constr { ctx.exec(Action::SetConstructionLine { line: line_ref, on: true }); }
@@ -2188,12 +2199,10 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let dx = p2.x - p1.x;
             let dy = p2.y - p1.y;
             let len = (dx * dx + dy * dy).sqrt();
-            ctx.exec(Action::AddDimension {
+            msg += &driven_dim_fragment(ctx, Action::AddDimension {
                 kind: DimensionKind::LineLength(line_ref),
                 value: len, expr: None, derived: false, range: None,
-            });
-            let dim_name = last_dim_name(ctx);
-            msg += &format!(" [driven {} length={:.4}]", dim_name, len);
+            }, "length", len);
         }
         msgs.push(msg);
     }
@@ -2226,7 +2235,29 @@ fn set_cursor_tangent_from_arc(ctx: &mut CommandContext, arc_ref: arael::refs::R
 /// Helper: execute a constraint/dimension action inside a compound command.
 /// On success, pushes `desc` to `applied`. On failure in strict mode, returns Err.
 /// In non-strict mode, collects warning and continues.
+/// `C<n>` names of constraints minted at or after `watermark` (the
+/// sketch's next_constraint_id captured before an exec).
+fn constraint_names_since(ctx: &CommandContext, watermark: u32) -> Vec<String> {
+    let mut nids: Vec<u32> = ctx.sketch.constraint_nid_cid_pairs().into_iter()
+        .map(|(nid, _)| nid).filter(|&n| n >= watermark).collect();
+    nids.sort_unstable();
+    nids.dedup();
+    nids.into_iter().map(|n| format!("C{}", n)).collect()
+}
+
 fn rect_exec(ctx: &mut CommandContext, action: Action, strict: bool, desc: &str, applied: &mut Vec<String>, warnings: &mut Vec<String>) -> Result<(), String> {
+    // Surface the id of what the action minted: flag constraints have
+    // synthetic names, dimensions their d-name, everything else a
+    // watermarked C<n>.
+    let flag_ids: Vec<String> = match &action {
+        Action::ApplyHorizontal { lines } => lines.iter()
+            .map(|r| arael_sketch_solver::format_flag_name(&ctx.sketch.lines[*r].name, 'H')).collect(),
+        Action::ApplyVertical { lines } => lines.iter()
+            .map(|r| arael_sketch_solver::format_flag_name(&ctx.sketch.lines[*r].name, 'V')).collect(),
+        _ => Vec::new(),
+    };
+    let is_dim = matches!(action, Action::AddDimension { .. });
+    let watermark = ctx.sketch.next_constraint_id;
     ctx.exec(action);
     if let Some(e) = ctx.status_error.take() {
         if strict {
@@ -2234,7 +2265,19 @@ fn rect_exec(ctx: &mut CommandContext, action: Action, strict: bool, desc: &str,
         }
         warnings.push(e);
     } else {
-        applied.push(desc.to_string());
+        let mut ids = flag_ids;
+        if is_dim {
+            // The backing constraint is addressed through the
+            // dimension, so only the d-name is surfaced.
+            ids.push(last_dim_name(ctx));
+        } else {
+            ids.extend(constraint_names_since(ctx, watermark));
+        }
+        if ids.is_empty() {
+            applied.push(desc.to_string());
+        } else {
+            applied.push(format!("{} ({})", desc, ids.join(" ")));
+        }
     }
     Ok(())
 }
@@ -2261,7 +2304,7 @@ fn build_rect(
         let p1 = corners[i];
         let p2 = corners[(i + 1) % 4];
         let Some(r) = ctx.exec(Action::AddLine { p1, p2 }).line() else {
-            return err("Internal: creation action added no entity");
+            return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
         };
         let name = ctx.sketch.lines[r].name.clone();
         if !noconnect {
@@ -2452,7 +2495,7 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2467,12 +2510,10 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension {
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: r, expr: None, derived: false, range: None,
-        });
-        let radius_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} radius={:.4}]", radius_dim, r);
+        }, "radius", r);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2505,7 +2546,7 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2520,12 +2561,10 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension {
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: r, expr: None, derived: false, range: None,
-        });
-        let radius_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} radius={:.4}]", radius_dim, r);
+        }, "radius", r);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2561,7 +2600,7 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2576,12 +2615,10 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension {
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: r, expr: None, derived: false, range: None,
-        });
-        let radius_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} radius={:.4}]", radius_dim, r);
+        }, "radius", r);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2616,7 +2653,7 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let rot_rad = arael::utils::deg2rad(rot);
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2632,15 +2669,14 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension {
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: rx, expr: None, derived: false, range: None,
-        });
-        ctx.exec(Action::AddDimension {
+        }, "rx", rx);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcRadiusB(arc_ref),
             value: ry, expr: None, derived: false, range: None,
-        });
-        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+        }, "ry", ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2687,7 +2723,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let ccw = !cw;
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2707,11 +2743,14 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
-        let rx_dim = last_dim_name(ctx);
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        let ry_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: rx, expr: None, derived: false, range: None,
+        }, "rx", rx);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadiusB(arc_ref),
+            value: ry, expr: None, derived: false, range: None,
+        }, "ry", ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2779,7 +2818,7 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2799,11 +2838,14 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
-        let rx_dim = last_dim_name(ctx);
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        let ry_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: rx, expr: None, derived: false, range: None,
+        }, "rx", rx);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadiusB(arc_ref),
+            value: ry, expr: None, derived: false, range: None,
+        }, "ry", ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2845,7 +2887,7 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let ccw = !cw;
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2863,11 +2905,14 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
-        let rx_dim = last_dim_name(ctx);
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        let ry_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: rx, expr: None, derived: false, range: None,
+        }, "rx", rx);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadiusB(arc_ref),
+            value: ry, expr: None, derived: false, range: None,
+        }, "ry", ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2911,7 +2956,7 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -2931,11 +2976,14 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if driven {
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
-        let rx_dim = last_dim_name(ctx);
-        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        let ry_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: rx, expr: None, derived: false, range: None,
+        }, "rx", rx);
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadiusB(arc_ref),
+            value: ry, expr: None, derived: false, range: None,
+        }, "ry", ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -3121,7 +3169,7 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut warnings = Vec::new();
     let mut applied = Vec::new();
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -3199,7 +3247,7 @@ fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut warnings = Vec::new();
     let mut applied_list = Vec::new();
     let Some(arc_ref) = ctx.exec(Action::AddCircle { center, edge }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -4674,20 +4722,27 @@ fn cmd_deselect(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.selection.clear();
         return ok("Selection cleared");
     }
-    // Deselect specific entities
+    // Deselect specific entities. An already-deselected entity is a
+    // no-op; a name that resolves to nothing is an error.
     for name in args.split_whitespace() {
         if name.starts_with('L') {
-            if let Ok(r) = resolve_line(&ctx.sketch, name) {
-                ctx.selection.retain(|s| !matches!(s, Selection::Line(l) if *l == r));
+            match resolve_line(&ctx.sketch, name) {
+                Ok(r) => ctx.selection.retain(|s| !matches!(s, Selection::Line(l) if *l == r)),
+                Err(e) => return err(e),
             }
         } else if is_arc_name(name) {
-            if let Ok(r) = resolve_arc(&ctx.sketch, name) {
-                ctx.selection.retain(|s| !matches!(s, Selection::Arc(a) if *a == r));
+            match resolve_arc(&ctx.sketch, name) {
+                Ok(r) => ctx.selection.retain(|s| !matches!(s, Selection::Arc(a) if *a == r)),
+                Err(e) => return err(e),
             }
-        } else if name.starts_with('P')
-            && let Ok(r) = resolve_point(&ctx.sketch, name) {
-                ctx.selection.retain(|s| !matches!(s, Selection::Point(p) if *p == r));
+        } else if name.starts_with('P') {
+            match resolve_point(&ctx.sketch, name) {
+                Ok(r) => ctx.selection.retain(|s| !matches!(s, Selection::Point(p) if *p == r)),
+                Err(e) => return err(e),
             }
+        } else {
+            return err(format!("Unknown entity: {}", name));
+        }
     }
     ok(format!("Selection: {} entities", ctx.selection.len()))
 }
@@ -4812,33 +4867,31 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let cstrs = constraints_for(&ctx.sketch, name);
         if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
         ok(s)
-    } else if name.starts_with('d') {
-        if let Some(d) = ctx.sketch.dimensions.iter().find(|d| d.name == name) {
-            let source = if let Some(rb) = &d.range {
-                format!("range={}", format_range_bound(rb))
-            } else if let Some(es) = &d.expr_str {
-                format!("expr={}", es)
-            } else {
-                "expr=(numeric)".to_string()
-            };
-            let flags = match (d.derived, d.broken) {
-                (true, true) => " derived broken",
-                (true, false) => " derived",
-                (false, true) => " broken",
-                (false, false) => "",
-            };
-            ok(format!("{}: value={:.4} {} offset={:.2} along={:.2}{}",
-                d.name, d.value, source, d.offset.y, d.text_along, flags))
+    } else if name.starts_with('d')
+        && let Some(d) = ctx.sketch.dimensions.iter().find(|d| d.name == name) {
+        let source = if let Some(rb) = &d.range {
+            format!("range={}", format_range_bound(rb))
+        } else if let Some(es) = &d.expr_str {
+            format!("expr={}", es)
         } else {
-            err(format!("Unknown dimension: {}", name))
-        }
+            "expr=(numeric)".to_string()
+        };
+        let flags = match (d.derived, d.broken) {
+            (true, true) => " derived broken",
+            (true, false) => " derived",
+            (false, true) => " broken",
+            (false, false) => "",
+        };
+        ok(format!("{}: value={:.4} {} offset={:.2} along={:.2}{}",
+            d.name, d.value, source, d.offset.y, d.text_along, flags))
+    } else if let Some(p) = ctx.sketch.user_params.iter().find(|p| p.name == name) {
+        // Checked after dimensions: a user param may start with 'd'.
+        ok(format!("{}: value={:.4} expr={}{}", p.name, p.value, p.expr_str,
+            if p.broken { " broken" } else { "" }))
+    } else if name.starts_with('d') && name[1..].bytes().all(|b| b.is_ascii_digit()) {
+        err(format!("Unknown dimension: {}", name))
     } else {
-        if let Some(p) = ctx.sketch.user_params.iter().find(|p| p.name == name) {
-            ok(format!("{}: value={:.4} expr={}{}", p.name, p.value, p.expr_str,
-                if p.broken { " broken" } else { "" }))
-        } else {
-            err(format!("Unknown entity: {}", name))
-        }
+        err(format!("Unknown entity: {}", name))
     }
 }
 
@@ -5139,7 +5192,7 @@ fn cmd_undo(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok("Nothing to undo");
         }
     }
-    ctx.sketch.solve();
+    // History::undo returns a solved sketch; no second solve.
     ok(format!("Undone {} step(s)", n))
 }
 
@@ -5154,7 +5207,7 @@ fn cmd_redo(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok("Nothing to redo");
         }
     }
-    ctx.sketch.solve();
+    // History::redo returns a solved sketch; no second solve.
     ok(format!("Redone {} step(s)", n))
 }
 
@@ -5250,15 +5303,9 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
-    // AddArc silently creates nothing for collinear points (no
-    // circumscribed circle exists); the unwrap below would then panic
-    // or name a pre-existing arc.
-    if crate::geometry::circumscribed_arc(p1, p2, pm).is_none() {
-        return err("Cannot create arc: the three points are collinear");
-    }
     ctx.begin_group();
     let Some(arc_ref) = ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm }).arc() else {
-        return err("Internal: creation action added no entity");
+        return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     if quiet { ctx.exec(Action::SetQuietArc { arc: arc_ref, on: true }); }
     if constr { ctx.exec(Action::SetConstructionArc { arc: arc_ref, on: true }); }
@@ -5283,20 +5330,16 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if driven {
         let radius = ctx.sketch.arcs[arc_ref].radius.value;
-        ctx.exec(Action::AddDimension {
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: radius, expr: None, derived: false, range: None,
-        });
-        let radius_dim = last_dim_name(ctx);
+        }, "radius", radius);
         let a = &ctx.sketch.arcs[arc_ref];
         let sweep = (a.end_angle.value - a.start_angle.value).abs().to_degrees();
-        ctx.exec(Action::AddDimension {
+        msg += &driven_dim_fragment(ctx, Action::AddDimension {
             kind: DimensionKind::ArcSweep(arc_ref),
             value: sweep, expr: None, derived: false, range: None,
-        });
-        let sweep_dim = last_dim_name(ctx);
-        msg += &format!(" [driven {} radius={:.4} {} sweep={:.4}]",
-            radius_dim, radius, sweep_dim, sweep);
+        }, "sweep", sweep);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -5677,18 +5720,20 @@ fn apply_one_fillet(
     ctx.skip_dof_check = saved_skip;
 
     if !notangent {
-        ctx.exec(Action::ApplyTangentLA { line: line_a, arc: arc_ref });
-        if ctx.status_error.is_none()
-            && let Some(c) = ctx.sketch.tangent_la.last() {
-            added.push(format!("C{}", c.nid));
+        // A rejected tangent is reported in the corner's output, not
+        // silently dropped.
+        for line in [line_a, line_b] {
+            ctx.exec(Action::ApplyTangentLA { line, arc: arc_ref });
+            match ctx.status_error.take() {
+                None => {
+                    if let Some(c) = ctx.sketch.tangent_la.last() {
+                        added.push(format!("C{}", c.nid));
+                    }
+                }
+                Some(e) => added.push(format!(
+                    "tangent {} skipped ({})", ctx.sketch.lines[line].name, e)),
+            }
         }
-        ctx.status_error = None;
-        ctx.exec(Action::ApplyTangentLA { line: line_b, arc: arc_ref });
-        if ctx.status_error.is_none()
-            && let Some(c) = ctx.sketch.tangent_la.last() {
-            added.push(format!("C{}", c.nid));
-        }
-        ctx.status_error = None;
     }
 
     let mut dim_name: Option<String> = None;
@@ -5697,10 +5742,10 @@ fn apply_one_fillet(
             kind: DimensionKind::ArcRadius(arc_ref),
             value: radius, expr: radius_expr, derived: false, range: None,
         });
-        if ctx.status_error.is_none() {
-            dim_name = Some(last_dim_name(ctx));
+        match ctx.status_error.take() {
+            None => dim_name = Some(last_dim_name(ctx)),
+            Some(e) => added.push(format!("radius dim skipped ({})", e)),
         }
-        ctx.status_error = None;
     }
 
     Ok(FilletOut { spec, arc_name, removed, dim_name, added })
@@ -5880,12 +5925,12 @@ fn apply_one_chamfer(
     else { ctx.sketch.get_mut().lines[line_b].p2.value = t_b; }
 
     let Some(point_ref) = ctx.exec(Action::AddPoint { pos: corner }).point() else {
-        return Err("Internal: creation action added no entity".into());
+        return Err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     let point_name = ctx.sketch.points[point_ref].name.clone();
 
     let Some(new_line_ref) = ctx.exec(Action::AddLine { p1: t_a, p2: t_b }).line() else {
-        return Err("Internal: creation action added no entity".into());
+        return Err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
     };
     let new_line_name = ctx.sketch.lines[new_line_ref].name.clone();
 
@@ -6210,7 +6255,7 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let mp1 = mirror_point_across(l.p1.value, mlp1, mlp2);
                 let mp2 = mirror_point_across(l.p2.value, mlp1, mlp2);
                 let Some(new_ref) = ctx.exec(Action::AddLine { p1: mp1, p2: mp2 }).line() else {
-                    return err("Internal: creation action added no entity");
+                    return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
                 };
                 let new_name = ctx.sketch.lines[new_ref].name.clone();
                 line_map.push((*src_ref, new_ref));
@@ -6222,7 +6267,7 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let src_name = p.name.clone();
                 let mp = mirror_point_across(p.pos.value, mlp1, mlp2);
                 let Some(new_ref) = ctx.exec(Action::AddPoint { pos: mp }).point() else {
-                    return err("Internal: creation action added no entity");
+                    return err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()));
                 };
                 let new_name = ctx.sketch.points[new_ref].name.clone();
                 point_map.push((*src_ref, new_ref));
@@ -6308,7 +6353,9 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         // Apply collected coincident actions
         for (action, desc) in coinc_actions {
-            let _ = rect_exec(ctx, action, strict, &desc, &mut applied, &mut warnings);
+            if let Err(e) = rect_exec(ctx, action, strict, &desc, &mut applied, &mut warnings) {
+                return err(e);
+            }
         }
 
         // Phase 3: Collect symmetry constraint info (snapshot positions before mutating)
@@ -6347,8 +6394,14 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 continue;
             }
             constrained_positions.push(entry.pos);
-            let a = match resolve_endpoint_ref(&ctx.sketch, &entry.src_ep) { Ok(e) => to_dim_endpoint(e), Err(_) => continue };
-            let c = match resolve_endpoint_ref(&ctx.sketch, &entry.dst_ep) { Ok(e) => to_dim_endpoint(e), Err(_) => continue };
+            let a = match resolve_endpoint_ref(&ctx.sketch, &entry.src_ep) {
+                Ok(e) => to_dim_endpoint(e),
+                Err(e) => { warnings.push(format!("symmetry {}: {}", entry.src_ep, e)); continue }
+            };
+            let c = match resolve_endpoint_ref(&ctx.sketch, &entry.dst_ep) {
+                Ok(e) => to_dim_endpoint(e),
+                Err(e) => { warnings.push(format!("symmetry {}: {}", entry.dst_ep, e)); continue }
+            };
             let desc = format!("symmetry {} {} {}", entry.src_ep, after_about[0], entry.dst_ep);
             if let Err(e) = rect_exec(ctx, Action::ApplySymmetryPP { a, line: mirror_line, c }, strict, &desc, &mut applied, &mut warnings)
                 && strict { return err(e); }
@@ -7169,16 +7222,14 @@ fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         let kind = DimensionKind::LineLength(*r);
         if find_existing_dimension(&ctx.sketch, &kind).is_some() {
-            skipped.push(format!("{} length", name));
+            skipped.push(format!("{} length (exists)", name));
             continue;
         }
         ctx.skip_dof_check = true;
         ctx.exec(Action::AddDimension { kind, value: len, expr: None, derived: false, range: None,  });
-        if ctx.status_error.is_some() {
-            ctx.status_error = None;
-            skipped.push(format!("{} length", name));
-        } else {
-            frozen.push(format!("{} length={:.4}", name, len));
+        match ctx.status_error.take() {
+            Some(e) => skipped.push(format!("{} length (rejected: {})", name, e)),
+            None => frozen.push(format!("{} {} length={:.4}", last_dim_name(ctx), name, len)),
         }
     }
 
@@ -7194,14 +7245,12 @@ fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if find_existing_dimension(&ctx.sketch, &kind).is_none() {
             ctx.skip_dof_check = true;
             ctx.exec(Action::AddDimension { kind, value: radius, expr: None, derived: false, range: None,  });
-            if ctx.status_error.is_some() {
-                ctx.status_error = None;
-                skipped.push(format!("{} radius", name));
-            } else {
-                frozen.push(format!("{} radius={:.4}", name, radius));
+            match ctx.status_error.take() {
+                Some(e) => skipped.push(format!("{} radius (rejected: {})", name, e)),
+                None => frozen.push(format!("{} {} radius={:.4}", last_dim_name(ctx), name, radius)),
             }
         } else {
-            skipped.push(format!("{} radius", name));
+            skipped.push(format!("{} radius (exists)", name));
         }
 
         // Sweep (only for non-closed arcs)
@@ -7210,14 +7259,12 @@ fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
             if find_existing_dimension(&ctx.sketch, &kind).is_none() {
                 ctx.skip_dof_check = true;
                 ctx.exec(Action::AddDimension { kind, value: sweep_deg, expr: None, derived: false, range: None,  });
-                if ctx.status_error.is_some() {
-                    ctx.status_error = None;
-                    skipped.push(format!("{} sweep", name));
-                } else {
-                    frozen.push(format!("{} sweep={:.4}", name, sweep_deg));
+                match ctx.status_error.take() {
+                    Some(e) => skipped.push(format!("{} sweep (rejected: {})", name, e)),
+                    None => frozen.push(format!("{} {} sweep={:.4}", last_dim_name(ctx), name, sweep_deg)),
                 }
             } else {
-                skipped.push(format!("{} sweep", name));
+                skipped.push(format!("{} sweep (exists)", name));
             }
         }
     }
@@ -7420,7 +7467,7 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let Some(action) = action else { return err("Constraint not found".to_string()); };
             ctx.begin_group();
             ctx.exec(action);
-            return ok(format!("Removed {} constraint", ctype));
+            return ok(format!("Removed lock on {}", tokens[0]));
         }
         "equal_radius" if tokens.len() >= 3 => {
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -7495,9 +7542,14 @@ fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
 
     if let Some(id) = id {
+        // Name it before the delete removes it.
+        let id_name = crate::ids::constraint_id_name(&ctx.sketch, id);
         ctx.begin_group();
         ctx.exec(Action::DeleteConstraint { id });
-        ok(format!("Removed {} constraint", ctype))
+        match id_name {
+            Some(n) => ok(format!("Removed {} constraint {}", ctype, n)),
+            None => ok(format!("Removed {} constraint", ctype)),
+        }
     } else {
         err("Constraint not found".to_string())
     }
@@ -8138,7 +8190,7 @@ fn classify_free_direction(parts: &[(String, f64)]) -> String {
             // radius, angle, etc.
             all_x = false;
             all_y = false;
-            has_non_xy = false;
+            has_non_xy = true;
         }
     }
 
@@ -8165,11 +8217,13 @@ fn classify_free_direction(parts: &[(String, f64)]) -> String {
         .filter(|(n, _)| n.ends_with(".y"))
         .map(|(_, v)| *v).collect();
 
-    if !x_vals.is_empty() && !y_vals.is_empty() && y_vals.iter().all(|v| v.abs() < 1e-6) {
+    if !has_non_xy && !x_vals.is_empty() && !y_vals.is_empty()
+        && y_vals.iter().all(|v| v.abs() < 1e-6) {
         // All Y near zero, only X moves
         return format!("translate X: {}", entity_str);
     }
-    if !x_vals.is_empty() && !y_vals.is_empty() && x_vals.iter().all(|v| v.abs() < 1e-6) {
+    if !has_non_xy && !x_vals.is_empty() && !y_vals.is_empty()
+        && x_vals.iter().all(|v| v.abs() < 1e-6) {
         return format!("translate Y: {}", entity_str);
     }
 
@@ -10201,10 +10255,17 @@ mod tests {
     #[test]
     fn test_tangent_degenerate_geometry_rejected() {
         // Zero-length line: the tangent sign is 0/0 and the solve
-        // never converges; must reject cleanly and fast.
+        // never converges; must reject cleanly and fast. Creation of
+        // such a line is rejected at the gate, but a solve can still
+        // collapse one -- force the state through the value door.
         let mut ctx = CommandContext::new();
-        run_ok(&mut ctx, "add_line 0,0 0,0 noconnect");
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
         run_ok(&mut ctx, "add_circle 5,5 1");
+        let l = ctx.sketch.lines.refs().next().unwrap();
+        ctx.sketch.mutate_values(|s| {
+            let p1 = s.lines[l].p1.value;
+            s.lines[l].p2.value = p1;
+        });
         let msg = run_err(&mut ctx, "tangent L0 A0");
         assert!(msg.contains("zero length"), "{}", msg);
 
@@ -10214,6 +10275,197 @@ mod tests {
         run_ok(&mut ctx, "add_circle 2,2 3");
         let msg = run_err(&mut ctx, "tangent A0 A1");
         assert!(msg.contains("concentric"), "{}", msg);
+    }
+
+    #[test]
+    fn test_delete_dim_removes_line_endpoint_arc_backing_constraint() {
+        // Line-endpoint x arc-point distance: the backing constraint
+        // lives in distance_arc_center_l1 and must die with the dim.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        run_ok(&mut ctx, "add_circle 6,3 1 noconnect");
+        run_ok(&mut ctx, "distance L0.p1 A0.center 6");
+        assert_eq!(ctx.sketch.distance_arc_center_l1.len(), 1);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        run_ok(&mut ctx, "delete d0");
+        assert_eq!(ctx.sketch.dimensions.len(), 0);
+        assert!(ctx.sketch.distance_arc_center_l1.is_empty(),
+            "backing constraint must be deleted with the dimension");
+    }
+
+    #[test]
+    fn test_redo_restores_post_group_cursor() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        run_ok(&mut ctx, "add_line 4,0 4,3 noconnect");
+        run_ok(&mut ctx, "add_line 4,3 0,3 noconnect");
+        run_ok(&mut ctx, "undo 2");
+        let c = ctx.cursor.unwrap();
+        assert!((c.x - 4.0).abs() < 1e-9 && c.y.abs() < 1e-9, "{:?}", (c.x, c.y));
+        // Redo of the middle group restores the cursor state that
+        // followed it (the pre-state of the next group).
+        run_ok(&mut ctx, "redo");
+        let c = ctx.cursor.unwrap();
+        assert!((c.x - 4.0).abs() < 1e-9 && (c.y - 3.0).abs() < 1e-9, "{:?}", (c.x, c.y));
+    }
+
+    #[test]
+    fn test_output_surfaces_ids() {
+        // Rect constraints carry their ids.
+        let mut ctx = CommandContext::new();
+        let out = run_ok(&mut ctx, "add_rect 0,0 4,3");
+        assert!(out.contains("(C"), "{}", out);
+        // Auto-coincident feedback names the constraint it added.
+        let out = run_ok(&mut ctx, "add_line 4,3 6,5");
+        assert!(out.contains("[connected:") && out.contains("(C"), "{}", out);
+        // Freeze names the dimension it created.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        let out = run_ok(&mut ctx, "freeze L0");
+        assert!(out.contains("d0"), "{}", out);
+        // Delete-relational names the removed constraint.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect; add_line 0,2 4,2 noconnect; parallel L0 L1");
+        let out = run_ok(&mut ctx, "delete L0 L1 parallel");
+        assert!(out.contains("C1"), "{}", out);
+    }
+
+    #[test]
+    fn test_deselect_unknown_entity_errors() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0; select L0");
+        let msg = run_err(&mut ctx, "deselect L99");
+        assert!(msg.contains("Unknown line"), "{}", msg);
+        let msg = run_err(&mut ctx, "deselect x9");
+        assert!(msg.contains("Unknown entity"), "{}", msg);
+        // Deselecting an existing but unselected entity stays a no-op.
+        run_ok(&mut ctx, "add_line 0,2 4,2; deselect L1");
+        assert_eq!(ctx.selection.len(), 1);
+    }
+
+    #[test]
+    fn test_driven_fragment_reports_rejection() {
+        // A rejected driven dimension must not report the previous
+        // dimension's name as if it were the new one.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        run_ok(&mut ctx, "length L0 4");
+        let line = ctx.sketch.lines.refs().next().unwrap();
+        let frag = driven_dim_fragment(&mut ctx, Action::AddDimension {
+            kind: DimensionKind::LineLength(line),
+            value: 4.0, expr: None, derived: false, range: None,
+        }, "length", 4.0);
+        assert!(frag.contains("rejected"), "{}", frag);
+        assert!(!frag.contains("d0 "), "{}", frag);
+
+        // The success path names the dimension actually created.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        let line = ctx.sketch.lines.refs().next().unwrap();
+        let frag = driven_dim_fragment(&mut ctx, Action::AddDimension {
+            kind: DimensionKind::LineLength(line),
+            value: 4.0, expr: None, derived: false, range: None,
+        }, "length", 4.0);
+        assert!(frag.contains("d0") && frag.contains("length=4.0000"), "{}", frag);
+    }
+
+    #[test]
+    fn test_info_reaches_user_params_starting_with_d() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0");
+        run_ok(&mut ctx, "param depth = 2.5");
+        let out = run_ok(&mut ctx, "info depth");
+        assert!(out.contains("depth") && out.contains("2.5"), "{}", out);
+        // Numeric d-names still report as dimensions.
+        let out = run_err(&mut ctx, "info d99");
+        assert!(out.contains("Unknown dimension"), "{}", out);
+    }
+
+    #[test]
+    fn test_force_strip_ordering() {
+        // A comment must not hide a trailing force keyword.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        run_ok(&mut ctx, "add_line 0,2 4,2 noconnect");
+        run_ok(&mut ctx, "length L0 4");
+        run_ok(&mut ctx, "length L1 4");
+        run_ok(&mut ctx, "equal L0 L1 force # redundant on purpose");
+        assert_eq!(ctx.sketch.equal_length.len(), 1);
+
+        // msg text is verbatim: no force stripping, no comment stripping.
+        let out = run_ok(&mut ctx, "msg use the force # not a comment");
+        assert_eq!(out, "use the force # not a comment");
+    }
+
+    #[test]
+    fn test_classify_direction_with_radius_is_not_rigid_motion() {
+        // A radius-grow direction moves two on-circle points diagonally
+        // and changes the radius: neither a rotation nor a translation.
+        let parts = vec![
+            ("P1.x".to_string(), 0.7), ("P1.y".to_string(), 0.7),
+            ("P2.x".to_string(), -0.7), ("P2.y".to_string(), 0.7),
+            ("A0.radius".to_string(), 1.0),
+        ];
+        let label = classify_free_direction(&parts);
+        assert!(!label.starts_with("rotate") && !label.starts_with("translate"), "{}", label);
+
+        // Radius plus one moving coordinate must not read as translate X.
+        let parts = vec![
+            ("A0.center.x".to_string(), 1.0),
+            ("A0.center.y".to_string(), 0.0),
+            ("A0.radius".to_string(), 1.0),
+        ];
+        let label = classify_free_direction(&parts);
+        assert!(!label.starts_with("translate"), "{}", label);
+
+        // Control: a genuine rotation still classifies as one.
+        let parts = vec![
+            ("P1.x".to_string(), 0.7), ("P1.y".to_string(), 0.7),
+            ("P2.x".to_string(), -0.7), ("P2.y".to_string(), 0.7),
+        ];
+        let label = classify_free_direction(&parts);
+        assert!(label.starts_with("rotate"), "{}", label);
+    }
+
+    #[test]
+    fn test_command_path_runs_conflict_checks() {
+        // Transitive H/V contradiction through a parallel link used to
+        // pass the command path (only the GUI ran the conflict checks)
+        // and collapse L1 to zero length.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 0,5 noconnect");
+        run_ok(&mut ctx, "add_line 2,0 2,5 noconnect");
+        run_ok(&mut ctx, "vertical L0");
+        run_ok(&mut ctx, "parallel L0 L1");
+        let msg = run_err(&mut ctx, "horizontal L1");
+        assert!(msg.contains("vertical"), "{}", msg);
+
+        // force overrides only the DOF check, never a contradiction.
+        let msg = run_err(&mut ctx, "horizontal L0 force");
+        assert!(msg.contains("vertical"), "{}", msg);
+    }
+
+    #[test]
+    fn test_collinear_transitivity_rejected() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        run_ok(&mut ctx, "add_line 5,0 9,0 noconnect");
+        run_ok(&mut ctx, "add_line 10,0 14,0 noconnect");
+        run_ok(&mut ctx, "collinear L0 L1");
+        run_ok(&mut ctx, "collinear L1 L2");
+        let msg = run_err(&mut ctx, "collinear L0 L2");
+        assert!(msg.contains("already collinear"), "{}", msg);
+    }
+
+    #[test]
+    fn test_degenerate_creation_rejected() {
+        let mut ctx = CommandContext::new();
+        let msg = run_err(&mut ctx, "add_line 1,1 1,1");
+        assert!(msg.contains("zero length"), "{}", msg);
+        let msg = run_err(&mut ctx, "add_circle 0,0 0");
+        assert!(msg.contains("zero radius"), "{}", msg);
+        assert_eq!(ctx.sketch.lines.refs().count(), 0);
+        assert_eq!(ctx.sketch.arcs.refs().count(), 0);
     }
 
     #[test]

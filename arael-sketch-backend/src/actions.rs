@@ -36,8 +36,8 @@
 //!    (`ApplyLineP1OnLine`, `ApplyMidpointLP1`, `ApplyMidpointLP1Arc`,
 //!    `ApplyLineP1OnArc`, ...). It also layers in auto-perpendicular
 //!    (`ApplyPerpendicular`) when the drawn line crosses a host line
-//!    at a right angle, gated by `has_perp_conflict` so a redundant
-//!    perp is never pushed. All of it goes into one `begin_group()`
+//!    at a right angle, gated by `conflicts::validate_action` so a
+//!    redundant perp is never pushed. All of it goes into one `begin_group()`
 //!    frame so a single Ctrl+Z undoes the line *and* its auto-snaps
 //!    *and* any auto-perpendiculars as one unit.
 //!

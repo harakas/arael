@@ -287,6 +287,9 @@ pub struct EditorApp {
     // computes DOF, writes result to dof_output. Intermediate requests
     // are overwritten -- only the newest sketch state is computed.
     pub dof_display: Option<usize>,    // None = computing or unknown
+    // The worker thread does not exist on wasm; compute_dof_async is
+    // synchronous there and never reads dof_input.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     dof_input: std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<u8>)>>>,
     dof_output: std::sync::Arc<std::sync::Mutex<Option<(u64, arael_sketch_solver::RankResult)>>>,
 
@@ -1290,7 +1293,8 @@ impl EditorApp {
                     if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = grab {
                         let is_p1 = matches!(grab, GrabTarget::LineP1(_));
                         if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
-                            if !self.has_perp_conflict(line, host) {
+                            if arael_sketch_backend::conflicts::validate_action(
+                                &self.sketch, &Action::ApplyPerpendicular { a: line, b: host }).is_none() {
                                 let opp = if is_p1 {
                                     self.sketch.lines[line].p2.value
                                 } else {
@@ -1553,8 +1557,9 @@ impl EditorApp {
                     let perp_compatible = matches!(snap_kind, None | Some(SnapTarget::Line(_)));
                     if perp_compatible {
                         if let Some((host, _)) = perp_hint {
-                            if !self.has_perp_conflict(line, host) {
-                                self.exec(Action::ApplyPerpendicular { a: line, b: host });
+                            let action = Action::ApplyPerpendicular { a: line, b: host };
+                            if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
+                                self.exec(action);
                             }
                         }
                     }
@@ -1565,7 +1570,7 @@ impl EditorApp {
                         && cl_line == line
                     {
                         let action = Action::ApplyCollinear { a: line, b: host };
-                        if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                        if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
                             self.exec(action);
                         }
                     }
@@ -1583,7 +1588,7 @@ impl EditorApp {
                         } else {
                             Action::ApplyVertical { lines: vec![line] }
                         };
-                        if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                        if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
                             self.exec(action);
                         }
                     }
@@ -1939,6 +1944,13 @@ impl EditorApp {
         let mut created = Created::Nothing;
         self.status_error = None;
         self.show_hints = false;
+
+        // Same gate as the command path: logical conflicts and
+        // degenerate geometry, before the DOF/cost machinery.
+        if let Some(err) = arael_sketch_backend::conflicts::validate_action(&self.sketch, &action) {
+            self.status_error = Some(err);
+            return created;
+        }
 
         if action.is_constraint_action() {
             match arael_sketch_backend::commands::validate_and_apply_constraint(
@@ -3127,12 +3139,7 @@ impl EditorApp {
             if let Selection::Line(r) = s { Some(*r) } else { None }
         }).collect();
         if !lines.is_empty() {
-            let action = Action::ApplyHorizontal { lines };
-            if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                self.status_error = Some(err);
-                return;
-            }
-            self.exec(action);
+            self.exec(Action::ApplyHorizontal { lines });
         }
     }
 
@@ -3142,12 +3149,7 @@ impl EditorApp {
             if let Selection::Line(r) = s { Some(*r) } else { None }
         }).collect();
         if !lines.is_empty() {
-            let action = Action::ApplyVertical { lines };
-            if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                self.status_error = Some(err);
-                return;
-            }
-            self.exec(action);
+            self.exec(Action::ApplyVertical { lines });
         }
     }
 
@@ -3280,12 +3282,7 @@ impl EditorApp {
             }
             // Line-to-line (default: a.p2 == b.p1)
             (Selection::Line(a), Selection::Line(b)) => {
-                let action = Action::ApplyCoincidentLL21 { a, b };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action);
+                self.exec(Action::ApplyCoincidentLL21 { a, b });
                 return;
             }
             _ => {}
@@ -3337,12 +3334,7 @@ impl EditorApp {
                 self.exec(Action::ApplyCoincidentArcEnd { point, arc }); return;
             }
             (Selection::ArcCenter(a), Selection::ArcCenter(b)) => {
-                let action = Action::ApplyConcentric { a, b };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action); return;
+                self.exec(Action::ApplyConcentric { a, b }); return;
             }
             // Line endpoint <-> Arc point (direct)
             (Selection::LineP1(line), Selection::ArcCenter(arc))
@@ -3437,10 +3429,6 @@ impl EditorApp {
             self.status_error = Some("Parallel: pick two lines, a line + an ellipse, or two ellipses (circular arcs have no orientation).".into());
             return;
         };
-        if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-            self.status_error = Some(err);
-            return;
-        }
         self.exec(action);
     }
 
@@ -3448,12 +3436,7 @@ impl EditorApp {
         self.begin_group();
         if self.selection.len() == 2
             && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
-                let action = Action::ApplyPerpendicular { a, b };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action);
+                self.exec(Action::ApplyPerpendicular { a, b });
             }
     }
 
@@ -3461,12 +3444,7 @@ impl EditorApp {
         self.begin_group();
         if self.selection.len() == 2
             && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
-                let action = Action::ApplyCollinear { a, b };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action);
+                self.exec(Action::ApplyCollinear { a, b });
             }
     }
 
@@ -3477,12 +3455,7 @@ impl EditorApp {
             if let (Selection::Line(a), Selection::Line(c), Selection::Line(b)) =
                 (self.selection[0], self.selection[1], self.selection[2])
             {
-                let action = Action::ApplySymmetryLL { a, b, c };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action);
+                self.exec(Action::ApplySymmetryLL { a, b, c });
                 return;
             }
             // Arc-Arc symmetry: find the line (mirror axis) and two arcs in any order
@@ -3559,10 +3532,6 @@ impl EditorApp {
             _ => None,
         };
         if let Some(action) = action {
-            if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                self.status_error = Some(err);
-                return;
-            }
             self.exec(action);
         }
     }
@@ -3708,12 +3677,7 @@ impl EditorApp {
                 self.exec(Action::ApplyTangentLA { line, arc });
             }
             (Selection::Arc(a), Selection::Arc(b)) => {
-                let action = Action::ApplyTangentAA { a, b };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action);
+                self.exec(Action::ApplyTangentAA { a, b });
             }
             _ => {}
         }
@@ -3724,20 +3688,10 @@ impl EditorApp {
         if self.selection.len() == 2 {
             match (self.selection[0], self.selection[1]) {
                 (Selection::Line(a), Selection::Line(b)) => {
-                    let action = Action::ApplyEqualLength { a, b };
-                    if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                        self.status_error = Some(err);
-                        return;
-                    }
-                    self.exec(action);
+                    self.exec(Action::ApplyEqualLength { a, b });
                 }
                 (Selection::Arc(a), Selection::Arc(b)) => {
-                    let action = Action::ApplyEqualRadius { a, b };
-                    if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                        self.status_error = Some(err);
-                        return;
-                    }
-                    self.exec(action);
+                    self.exec(Action::ApplyEqualRadius { a, b });
                 }
                 _ => {}
             }
@@ -3953,11 +3907,6 @@ impl EditorApp {
     // True if a Perpendicular constraint between `a` and `b` already
     // exists (either order), or a Parallel constraint between them would
     // make perpendicular a conflict. Used to skip auto-perp.
-    fn has_perp_conflict(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
-        self.sketch.perpendicular.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
-            || self.sketch.parallel.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
-    }
-
     fn find_snap_target_ex(&self, sketch_pos: vect2d, threshold: f64, exclude_line: Option<Ref<Line>>, exclude_arc: Option<Ref<Arc>>) -> Option<(vect2d, SnapTarget)> {
         self.find_snap_target_filter(sketch_pos, threshold, exclude_line, exclude_arc, |_| true)
     }

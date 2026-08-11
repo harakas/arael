@@ -1,6 +1,9 @@
-// Constraint conflict detection for the sketch editor.
-// Checks proposed actions against the current sketch state and returns
-// an error message if a conflict is detected.
+// Action validation for the sketch editor: logical constraint
+// conflicts (contradictions, duplicates, transitive redundancy) and
+// degenerate geometry (zero-length lines, collinear arc points, zero
+// radii). Runs for every action on every path (GUI, commands, MCP)
+// from `exec`, before the DOF/cost checks; a rejection here is not
+// overridable with `force`.
 
 use arael::refs::Ref;
 use arael_sketch_solver::*;
@@ -73,10 +76,16 @@ fn build_orientation_info(sketch: &Sketch) -> (
     let num_lines = sketch.lines.slot_count();
     let mut parent: Vec<usize> = (0..num_lines).collect();
 
-    // Union lines connected by Parallel constraints
+    // Union lines connected by Parallel constraints; Collinear implies
+    // parallel, so those pairs join the same groups.
     for p in &sketch.parallel {
         let a = p.a.index() as usize;
         let b = p.b.index() as usize;
+        uf_union(&mut parent, a, b);
+    }
+    for c in &sketch.collinear {
+        let a = c.a.index() as usize;
+        let b = c.b.index() as usize;
         uf_union(&mut parent, a, b);
     }
 
@@ -164,11 +173,42 @@ fn groups_are_perp_linked(
 }
 
 // ---------------------------------------------------------------------------
-// Main conflict checker
+// Main action validator
 // ---------------------------------------------------------------------------
 
-pub fn check_constraint_conflict(sketch: &Sketch, action: &Action) -> Option<String> {
+pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
     match action {
+        // ----- Degenerate geometry at creation -----
+        Action::AddLine { p1, p2 } => {
+            let dx = p2.x - p1.x;
+            let dy = p2.y - p1.y;
+            if dx * dx + dy * dy <= 1e-24 {
+                return Some("Cannot create line: zero length".into());
+            }
+        }
+        Action::AddArc { start, end, mid } => {
+            if crate::geometry::circumscribed_arc(*start, *end, *mid).is_none() {
+                return Some("Cannot create arc: the three points are collinear".into());
+            }
+        }
+        Action::AddCircle { center, edge } => {
+            let dx = edge.x - center.x;
+            let dy = edge.y - center.y;
+            if dx * dx + dy * dy <= 1e-24 {
+                return Some("Cannot create circle: zero radius".into());
+            }
+        }
+        Action::AddEllipse { rx, ry, .. } => {
+            if *rx <= 1e-12 || *ry <= 1e-12 {
+                return Some("Cannot create ellipse: zero radius".into());
+            }
+        }
+        Action::AddEllipticArc { rx, ry, .. } => {
+            if *rx <= 1e-12 || *ry <= 1e-12 {
+                return Some("Cannot create elliptic arc: zero radius".into());
+            }
+        }
+
         // ----- Self-referential checks -----
         Action::ApplyParallel { a, b } if a == b => {
             return Some(format!("Cannot constrain {} to itself", line_name(sketch, *a)));
@@ -205,6 +245,23 @@ pub fn check_constraint_conflict(sketch: &Sketch, action: &Action) -> Option<Str
         }
         Action::ApplySymmetryLL { a, b, c } if a == b || b == c || a == c => {
             return Some("Symmetry requires 3 distinct lines".into());
+        }
+        // Duplicate symmetry: same mirror, same sides in either order.
+        Action::ApplySymmetryLL { a, b, c } => {
+            if sketch.symmetry_ll.iter().any(|s| {
+                s.b == *b && ((s.a == *a && s.c == *c) || (s.a == *c && s.c == *a))
+            }) {
+                return Some(format!(
+                    "{} and {} are already symmetric about {}",
+                    line_name(sketch, *a), line_name(sketch, *c), line_name(sketch, *b)
+                ));
+            }
+        }
+        Action::ApplySymmetryPP { a, c, .. } if a == c => {
+            return Some("Symmetry requires two distinct points".into());
+        }
+        Action::ApplySymmetryAA { a, c, .. } if a == c => {
+            return Some("Symmetry requires two distinct arcs".into());
         }
 
         // ----- Direct H/V conflict -----
@@ -419,20 +476,78 @@ pub fn check_constraint_conflict(sketch: &Sketch, action: &Action) -> Option<Str
                     arc_name(sketch, *a), arc_name(sketch, *b)
                 ));
             }
+            // Concentric arcs have a 0/0 direction sign and a NaN
+            // Jacobian the solve cannot recover from.
+            if let (Some(aa), Some(ab)) = (sketch.arcs.get(*a), sketch.arcs.get(*b)) {
+                let dx = aa.center.value.x - ab.center.value.x;
+                let dy = aa.center.value.y - ab.center.value.y;
+                if dx * dx + dy * dy <= 1e-24 {
+                    return Some("Cannot apply tangent: arcs are concentric".into());
+                }
+            }
+        }
+
+        Action::ApplyTangentLA { line, .. } => {
+            // A zero-length line has no direction to be tangent along.
+            if let Some(l) = sketch.lines.get(*line) {
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                if dx * dx + dy * dy <= 1e-24 {
+                    return Some("Cannot apply tangent: line has zero length".into());
+                }
+            }
         }
 
         Action::ApplyCollinear { a, b } => {
+            let a_name = line_name(sketch, *a);
+            let b_name = line_name(sketch, *b);
             if pair_exists(&sketch.collinear, *a, *b, |p| (p.a, p.b)) {
-                return Some(format!(
-                    "{} and {} are already collinear",
-                    line_name(sketch, *a), line_name(sketch, *b)
-                ));
+                return Some(format!("{} and {} are already collinear", a_name, b_name));
             }
             // Conflict: perpendicular lines cannot be collinear
             if pair_exists(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
                 return Some(format!(
                     "{} and {} are perpendicular, cannot be collinear",
-                    line_name(sketch, *a), line_name(sketch, *b)
+                    a_name, b_name
+                ));
+            }
+
+            // Transitive: already collinear through a chain of
+            // collinear constraints. (A separate union-find over
+            // collinear pairs only -- parallel does not imply
+            // collinear, so the shared orientation groups cannot
+            // answer this.)
+            let num_lines = sketch.lines.slot_count();
+            let mut col_parent: Vec<usize> = (0..num_lines).collect();
+            for c in &sketch.collinear {
+                uf_union(&mut col_parent, c.a.index() as usize, c.b.index() as usize);
+            }
+            if uf_find(&mut col_parent, a.index() as usize)
+                == uf_find(&mut col_parent, b.index() as usize)
+            {
+                return Some(format!(
+                    "{} and {} are already collinear (transitively)", a_name, b_name
+                ));
+            }
+
+            // Orientation groups: collinear implies parallel, so the
+            // same contradictions apply as for Parallel.
+            let (mut parent, group_orient, _, _) = build_orientation_info(sketch);
+            let ra = uf_find(&mut parent, a.index() as usize);
+            let rb = uf_find(&mut parent, b.index() as usize);
+            let (oa, ob) = (group_orient[ra], group_orient[rb]);
+            if (oa == Orientation::Horizontal && ob == Orientation::Vertical)
+                || (oa == Orientation::Vertical && ob == Orientation::Horizontal)
+            {
+                return Some(format!(
+                    "Cannot make {} and {} collinear: one is horizontal and the other is vertical",
+                    a_name, b_name
+                ));
+            }
+            if ra != rb && groups_are_perp_linked(sketch, &mut parent, ra, rb) {
+                return Some(format!(
+                    "{} and {} are perpendicular (transitively), cannot be collinear",
+                    a_name, b_name
                 ));
             }
         }
@@ -476,7 +591,7 @@ mod tests {
     #[test]
     fn parallel_self() {
         let (s, l0, _) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l0 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -484,7 +599,7 @@ mod tests {
     #[test]
     fn perpendicular_self() {
         let (s, l0, _) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l0 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -492,7 +607,7 @@ mod tests {
     #[test]
     fn equal_length_self() {
         let (s, l0, _) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyEqualLength { a: l0, b: l0 });
+        let r = validate_action(&s, &Action::ApplyEqualLength { a: l0, b: l0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -500,7 +615,7 @@ mod tests {
     #[test]
     fn concentric_self() {
         let (s, a0, _) = two_arcs();
-        let r = check_constraint_conflict(&s, &Action::ApplyConcentric { a: a0, b: a0 });
+        let r = validate_action(&s, &Action::ApplyConcentric { a: a0, b: a0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -508,7 +623,7 @@ mod tests {
     #[test]
     fn equal_radius_self() {
         let (s, a0, _) = two_arcs();
-        let r = check_constraint_conflict(&s, &Action::ApplyEqualRadius { a: a0, b: a0 });
+        let r = validate_action(&s, &Action::ApplyEqualRadius { a: a0, b: a0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -516,7 +631,7 @@ mod tests {
     #[test]
     fn tangent_aa_self() {
         let (s, a0, _) = two_arcs();
-        let r = check_constraint_conflict(&s, &Action::ApplyTangentAA { a: a0, b: a0 });
+        let r = validate_action(&s, &Action::ApplyTangentAA { a: a0, b: a0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -524,7 +639,7 @@ mod tests {
     #[test]
     fn coincident_ll21_self() {
         let (s, l0, _) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyCoincidentLL21 { a: l0, b: l0 });
+        let r = validate_action(&s, &Action::ApplyCoincidentLL21 { a: l0, b: l0 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("to itself"));
     }
@@ -535,7 +650,7 @@ mod tests {
     fn horizontal_on_vertical_line() {
         let (mut s, l0, _) = two_lines();
         s.lines[l0].constraints.vertical = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l0] });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l0] });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already vertical"));
     }
@@ -544,7 +659,7 @@ mod tests {
     fn vertical_on_horizontal_line() {
         let (mut s, l0, _) = two_lines();
         s.lines[l0].constraints.horizontal = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyVertical { lines: vec![l0] });
+        let r = validate_action(&s, &Action::ApplyVertical { lines: vec![l0] });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already horizontal"));
     }
@@ -553,7 +668,7 @@ mod tests {
     fn horizontal_on_already_horizontal() {
         let (mut s, l0, _) = two_lines();
         s.lines[l0].constraints.horizontal = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l0] });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l0] });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already horizontal"));
     }
@@ -562,7 +677,7 @@ mod tests {
     fn vertical_on_already_vertical() {
         let (mut s, l0, _) = two_lines();
         s.lines[l0].constraints.vertical = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyVertical { lines: vec![l0] });
+        let r = validate_action(&s, &Action::ApplyVertical { lines: vec![l0] });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already vertical"));
     }
@@ -573,7 +688,7 @@ mod tests {
     fn duplicate_parallel() {
         let (mut s, l0, l1) = two_lines();
         s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already parallel"));
     }
@@ -582,7 +697,7 @@ mod tests {
     fn duplicate_parallel_reversed() {
         let (mut s, l0, l1) = two_lines();
         s.parallel.push(Parallel { a: l1, b: l0, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already parallel"));
     }
@@ -591,7 +706,7 @@ mod tests {
     fn duplicate_perpendicular() {
         let (mut s, l0, l1) = two_lines();
         s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already perpendicular"));
     }
@@ -600,7 +715,7 @@ mod tests {
     fn duplicate_equal_length() {
         let (mut s, l0, l1) = two_lines();
         s.equal_length.push(EqualLength { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyEqualLength { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyEqualLength { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already have equal length"));
     }
@@ -609,7 +724,7 @@ mod tests {
     fn duplicate_concentric() {
         let (mut s, a0, a1) = two_arcs();
         s.concentric.push(Concentric { a: a0, b: a1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyConcentric { a: a0, b: a1 });
+        let r = validate_action(&s, &Action::ApplyConcentric { a: a0, b: a1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already concentric"));
     }
@@ -618,7 +733,7 @@ mod tests {
     fn duplicate_equal_radius() {
         let (mut s, a0, a1) = two_arcs();
         s.equal_radius.push(EqualRadius { a: a0, b: a1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyEqualRadius { a: a0, b: a1 });
+        let r = validate_action(&s, &Action::ApplyEqualRadius { a: a0, b: a1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already have equal radius"));
     }
@@ -627,7 +742,7 @@ mod tests {
     fn duplicate_tangent_aa() {
         let (mut s, a0, a1) = two_arcs();
         s.tangent_aa.push(TangentAA { a: a0, b: a1, shared: SharedEndpoint::None, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyTangentAA { a: a0, b: a1 });
+        let r = validate_action(&s, &Action::ApplyTangentAA { a: a0, b: a1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already tangent"));
     }
@@ -638,7 +753,7 @@ mod tests {
     fn parallel_on_perpendicular_pair() {
         let (mut s, l0, l1) = two_lines();
         s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already perpendicular"));
     }
@@ -647,7 +762,7 @@ mod tests {
     fn perpendicular_on_parallel_pair() {
         let (mut s, l0, l1) = two_lines();
         s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already parallel"));
     }
@@ -661,7 +776,7 @@ mod tests {
         let (mut s, l0, l1) = two_lines();
         s.lines[l0].constraints.vertical = true;
         s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l1] });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l1] });
         assert!(r.is_some());
         assert!(r.unwrap().contains("vertical"));
     }
@@ -671,7 +786,7 @@ mod tests {
         let (mut s, l0, l1) = two_lines();
         s.lines[l0].constraints.horizontal = true;
         s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyVertical { lines: vec![l1] });
+        let r = validate_action(&s, &Action::ApplyVertical { lines: vec![l1] });
         assert!(r.is_some());
         assert!(r.unwrap().contains("horizontal"));
     }
@@ -685,7 +800,7 @@ mod tests {
         s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new() });
         // L1 should be implicitly vertical now. Make L2 parallel to L1.
         s.parallel.push(Parallel { a: l1, b: l2, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l2] });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l2] });
         assert!(r.is_some());
     }
 
@@ -696,7 +811,7 @@ mod tests {
         let (mut s, l0, l1) = two_lines();
         s.lines[l0].constraints.horizontal = true;
         s.lines[l1].constraints.vertical = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         let msg = r.unwrap();
         assert!(msg.contains("horizontal") || msg.contains("vertical"));
@@ -709,7 +824,7 @@ mod tests {
         let (mut s, l0, l1, l2) = three_lines();
         s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
         s.parallel.push(Parallel { a: l1, b: l2, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l2 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l2 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already parallel"));
     }
@@ -719,7 +834,7 @@ mod tests {
         // L0 parallel to L1. Making them perpendicular should conflict.
         let (mut s, l0, l1) = two_lines();
         s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("parallel"));
     }
@@ -730,7 +845,7 @@ mod tests {
         let (mut s, l0, l1) = two_lines();
         s.lines[l0].constraints.horizontal = true;
         s.lines[l1].constraints.horizontal = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("horizontal"));
     }
@@ -740,7 +855,7 @@ mod tests {
         let (mut s, l0, l1) = two_lines();
         s.lines[l0].constraints.vertical = true;
         s.lines[l1].constraints.vertical = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("vertical"));
     }
@@ -750,21 +865,21 @@ mod tests {
     #[test]
     fn valid_horizontal() {
         let (s, l0, _) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l0] });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l0] });
         assert!(r.is_none());
     }
 
     #[test]
     fn valid_parallel() {
         let (s, l0, l1) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_none());
     }
 
     #[test]
     fn valid_perpendicular() {
         let (s, l0, l1) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_none());
     }
 
@@ -774,28 +889,28 @@ mod tests {
         let (mut s, l0, l1) = two_lines();
         s.lines[l0].constraints.horizontal = true;
         s.lines[l1].constraints.vertical = true;
-        let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_none());
     }
 
     #[test]
     fn valid_equal_length() {
         let (s, l0, l1) = two_lines();
-        let r = check_constraint_conflict(&s, &Action::ApplyEqualLength { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyEqualLength { a: l0, b: l1 });
         assert!(r.is_none());
     }
 
     #[test]
     fn valid_concentric() {
         let (s, a0, a1) = two_arcs();
-        let r = check_constraint_conflict(&s, &Action::ApplyConcentric { a: a0, b: a1 });
+        let r = validate_action(&s, &Action::ApplyConcentric { a: a0, b: a1 });
         assert!(r.is_none());
     }
 
     #[test]
     fn non_constraint_action_no_conflict() {
         let s = Sketch::new();
-        let r = check_constraint_conflict(&s, &Action::AddLine {
+        let r = validate_action(&s, &Action::AddLine {
             p1: vect2d::new(0.0, 0.0),
             p2: vect2d::new(1.0, 1.0),
         });
@@ -809,7 +924,7 @@ mod tests {
         let (mut s, l0, l1, l2) = three_lines();
         s.lines[l0].constraints.horizontal = true;
         s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l2] });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l2] });
         assert!(r.is_none());
     }
 
@@ -818,8 +933,168 @@ mod tests {
         // L0 perp L1. Making them parallel should conflict.
         let (mut s, l0, l1) = two_lines();
         s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new() });
-        let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("perpendicular"));
+    }
+
+    // ---- Collinear transitivity and orientation ----
+
+    #[test]
+    fn collinear_transitive_chain_rejected() {
+        let (mut s, l0, l1, l2) = three_lines();
+        s.collinear.push(Collinear { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
+        s.collinear.push(Collinear { a: l1, b: l2, nid: 0, cid: 0, hb: CrossBlock::new() });
+        let r = validate_action(&s, &Action::ApplyCollinear { a: l0, b: l2 });
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("already collinear"));
+    }
+
+    #[test]
+    fn collinear_conflicting_orientations_rejected() {
+        let (mut s, l0, l1) = two_lines();
+        s.lines[l0].constraints.horizontal = true;
+        s.lines[l1].constraints.vertical = true;
+        let r = validate_action(&s, &Action::ApplyCollinear { a: l0, b: l1 });
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn collinear_on_perp_linked_groups_rejected() {
+        // L0 perp L1, L1 parallel L2: collinear L0 L2 would make two
+        // perpendicular groups parallel.
+        let (mut s, l0, l1, l2) = three_lines();
+        s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new() });
+        s.parallel.push(Parallel { a: l1, b: l2, nid: 0, cid: 0, hb: CrossBlock::new() });
+        let r = validate_action(&s, &Action::ApplyCollinear { a: l0, b: l2 });
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("perpendicular"));
+    }
+
+    #[test]
+    fn parallel_redundant_through_collinear() {
+        let (mut s, l0, l1) = two_lines();
+        s.collinear.push(Collinear { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
+        let r = validate_action(&s, &Action::ApplyParallel { a: l0, b: l1 });
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("already parallel"));
+    }
+
+    #[test]
+    fn horizontal_conflicts_through_collinear_group() {
+        // The W5 shape with a collinear link: vertical L0, collinear
+        // L0 L1, then horizontal L1 must be rejected.
+        let (mut s, l0, l1) = two_lines();
+        s.lines[l0].constraints.vertical = true;
+        s.collinear.push(Collinear { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
+        let r = validate_action(&s, &Action::ApplyHorizontal { lines: vec![l1] });
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn parallel_group_alone_does_not_block_collinear() {
+        // Parallel does not imply collinear: a parallel pair may still
+        // be made collinear.
+        let (mut s, l0, l1) = two_lines();
+        s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
+        let r = validate_action(&s, &Action::ApplyCollinear { a: l0, b: l1 });
+        assert!(r.is_none());
+    }
+
+    // ---- Symmetry duplicates ----
+
+    #[test]
+    fn symmetry_ll_duplicate_rejected_either_side_order() {
+        let (mut s, l0, l1, l2) = three_lines();
+        s.symmetry_ll.push(SymmetryLL {
+            a: l0, b: l1, c: l2, nid: 0, cid: 0,
+            hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
+        });
+        // Same order and swapped sides are both duplicates.
+        let r = validate_action(&s, &Action::ApplySymmetryLL { a: l0, b: l1, c: l2 });
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("already symmetric"));
+        let r = validate_action(&s, &Action::ApplySymmetryLL { a: l2, b: l1, c: l0 });
+        assert!(r.is_some());
+        // A different mirror is a different constraint.
+        let r = validate_action(&s, &Action::ApplySymmetryLL { a: l0, b: l2, c: l1 });
+        assert!(r.is_none());
+    }
+
+    // ---- Symmetry self-reference ----
+
+    #[test]
+    fn symmetry_pp_same_endpoint_rejected() {
+        let (s, l0, l1) = two_lines();
+        let ep = DimensionEndpoint::LineP1(l0);
+        let r = validate_action(&s, &Action::ApplySymmetryPP { a: ep, line: l1, c: ep });
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn symmetry_aa_same_arc_rejected() {
+        let (mut s, a0, _) = two_arcs();
+        let l = s.add_line(vect2d::new(0.0, -1.0), vect2d::new(4.0, -1.0));
+        let r = validate_action(&s, &Action::ApplySymmetryAA { a: a0, line: l, c: a0 });
+        assert!(r.is_some());
+    }
+
+    // ---- Degenerate creation ----
+
+    #[test]
+    fn zero_length_line_rejected() {
+        let s = Sketch::new();
+        let p = vect2d::new(1.0, 1.0);
+        assert!(validate_action(&s, &Action::AddLine { p1: p, p2: p }).is_some());
+        assert!(validate_action(&s, &Action::AddLine {
+            p1: vect2d::new(0.0, 0.0), p2: vect2d::new(1.0, 1.0),
+        }).is_none());
+    }
+
+    #[test]
+    fn collinear_arc_points_rejected() {
+        let s = Sketch::new();
+        let r = validate_action(&s, &Action::AddArc {
+            start: vect2d::new(0.0, 0.0),
+            end: vect2d::new(2.0, 0.0),
+            mid: vect2d::new(1.0, 0.0),
+        });
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn zero_radius_creation_rejected() {
+        let s = Sketch::new();
+        let c = vect2d::new(1.0, 1.0);
+        assert!(validate_action(&s, &Action::AddCircle { center: c, edge: c }).is_some());
+        assert!(validate_action(&s, &Action::AddEllipse {
+            center: c, rx: 0.0, ry: 1.0, rotation: 0.0,
+        }).is_some());
+        assert!(validate_action(&s, &Action::AddEllipticArc {
+            center: c, rx: 1.0, ry: 0.0, rotation: 0.0, start: 0.0, end: 1.0, ccw: true,
+        }).is_some());
+    }
+
+    // ---- Degenerate tangent geometry ----
+
+    #[test]
+    fn tangent_on_degenerate_geometry_rejected() {
+        // Zero-length line (a solve can collapse one).
+        let mut s = Sketch::new();
+        let l = s.add_line(vect2d::new(1.0, 1.0), vect2d::new(3.0, 1.0));
+        let a = s.add_arc(vect2d::new(5.0, 5.0), 1.0, 0.0, std::f64::consts::TAU, true);
+        let p1 = s.lines[l].p1.value;
+        s.lines[l].p2.value = p1;
+        let r = validate_action(&s, &Action::ApplyTangentLA { line: l, arc: a });
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("zero length"));
+
+        // Concentric arcs.
+        let mut s = Sketch::new();
+        let a0 = s.add_arc(vect2d::new(2.0, 2.0), 1.0, 0.0, std::f64::consts::TAU, true);
+        let a1 = s.add_arc(vect2d::new(2.0, 2.0), 3.0, 0.0, std::f64::consts::TAU, true);
+        let r = validate_action(&s, &Action::ApplyTangentAA { a: a0, b: a1 });
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("concentric"));
     }
 }

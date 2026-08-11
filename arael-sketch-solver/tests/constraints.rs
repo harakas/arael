@@ -2223,7 +2223,6 @@ fn test_list_constraints_includes_names() {
 // exactly the same numbers a cold one does -- not merely close.
 #[test]
 fn warm_session_matches_cold_bit_for_bit() {
-    use arael::simple_lm::{LmProblem, RootProblem};
     let build = || {
         let mut s = Sketch::new();
         let mut prev: Option<arael::refs::Ref<Line>> = None;

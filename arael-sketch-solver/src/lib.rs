@@ -548,7 +548,11 @@ fn find_distance_cid(
     use crate::dimensions::DimensionEndpoint::*;
     match (a, b) {
         (Point(pa), Point(pb)) =>
-            s.distance_pp.iter().find(|c| c.a == *pa && c.b == *pb).map(|c| c.cid),
+            // Exact order first; the reversed pair as a fallback so a
+            // swapped-operand constraint stays deletable.
+            s.distance_pp.iter().find(|c| c.a == *pa && c.b == *pb)
+                .or_else(|| s.distance_pp.iter().find(|c| c.a == *pb && c.b == *pa))
+                .map(|c| c.cid),
         (LineP1(la), LineP1(lb)) => s.distance_ll11.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
         (LineP1(la), LineP2(lb)) => s.distance_ll12.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
         (LineP2(la), LineP1(lb)) => s.distance_ll21.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
@@ -572,12 +576,18 @@ fn find_distance_cid(
         (ArcEnd(a), ArcCenter(b))    => s.distance_aa_e_ce.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
         (ArcEnd(a), ArcStart(b))     => s.distance_aa_e_s.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
         (ArcEnd(a), ArcEnd(b))       => s.distance_aa_e_e.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
-        (LineP1(_), ArcCenter(_)) | (ArcCenter(_), LineP1(_))
-        | (LineP2(_), ArcCenter(_)) | (ArcCenter(_), LineP2(_))
-        | (LineP1(_), ArcStart(_)) | (ArcStart(_), LineP1(_))
-        | (LineP2(_), ArcStart(_)) | (ArcStart(_), LineP2(_))
-        | (LineP1(_), ArcEnd(_)) | (ArcEnd(_), LineP1(_))
-        | (LineP2(_), ArcEnd(_)) | (ArcEnd(_), LineP2(_)) => None,
+        (ArcCenter(ar), LineP1(l)) | (LineP1(l), ArcCenter(ar)) =>
+            s.distance_arc_center_l1.iter().find(|c| c.arc == *ar && c.line == *l).map(|c| c.cid),
+        (ArcCenter(ar), LineP2(l)) | (LineP2(l), ArcCenter(ar)) =>
+            s.distance_arc_center_l2.iter().find(|c| c.arc == *ar && c.line == *l).map(|c| c.cid),
+        (ArcStart(ar), LineP1(l)) | (LineP1(l), ArcStart(ar)) =>
+            s.distance_arc_start_l1.iter().find(|c| c.arc == *ar && c.line == *l).map(|c| c.cid),
+        (ArcStart(ar), LineP2(l)) | (LineP2(l), ArcStart(ar)) =>
+            s.distance_arc_start_l2.iter().find(|c| c.arc == *ar && c.line == *l).map(|c| c.cid),
+        (ArcEnd(ar), LineP1(l)) | (LineP1(l), ArcEnd(ar)) =>
+            s.distance_arc_end_l1.iter().find(|c| c.arc == *ar && c.line == *l).map(|c| c.cid),
+        (ArcEnd(ar), LineP2(l)) | (LineP2(l), ArcEnd(ar)) =>
+            s.distance_arc_end_l2.iter().find(|c| c.arc == *ar && c.line == *l).map(|c| c.cid),
     }
 }
 
@@ -1026,208 +1036,50 @@ impl Sketch {
     }
 
     /// Remove duplicate constraints from all collections. Prints a warning if any are found.
+    /// Remove duplicate constraints, keyed by each type's
+    /// [`registry::DedupKey`]. Coincidence collections share one key
+    /// space, so the same endpoint pair expressed through different
+    /// collections is still a duplicate. Duplicates are bugs upstream
+    /// (the validation gate rejects them); removal here is the
+    /// backstop, and every removal is reported.
     pub fn dedup_constraints(&mut self) {
-        let mut total_removed = 0usize;
-        macro_rules! dedup_ab {
-            ($coll:expr, $name:expr, $container_a:expr, $container_b:expr) => {
-                let mut seen = std::collections::HashSet::new();
-                for c in $coll.iter() {
-                    if !seen.insert((c.a.index(), c.b.index())) {
-                        let na = $container_a.get(c.a).map(|e| e.name.as_str()).unwrap_or("?");
-                        let nb = $container_b.get(c.b).map(|e| e.name.as_str()).unwrap_or("?");
-                        eprintln!("BUG: duplicate {} constraint: a={}, b={}", $name, na, nb);
-                        eprintln!("{}", std::backtrace::Backtrace::force_capture());
-                        total_removed += 1;
-                    }
-                }
-                seen.clear();
-                $coll.retain(|c| seen.insert((c.a.index(), c.b.index())));
-            };
-        }
-        macro_rules! dedup_lp {
-            ($coll:expr, $name:expr) => {
-                let mut seen = std::collections::HashSet::new();
-                for c in $coll.iter() {
-                    if !seen.insert((c.line.index(), c.point.index())) {
-                        let nl = self.lines.get(c.line).map(|e| e.name.as_str()).unwrap_or("?");
-                        let np = self.points.get(c.point).map(|e| e.name.as_str()).unwrap_or("?");
-                        eprintln!("BUG: duplicate {} constraint: line={}, point={}", $name, nl, np);
-                        eprintln!("{}", std::backtrace::Backtrace::force_capture());
-                        total_removed += 1;
-                    }
-                }
-                seen.clear();
-                $coll.retain(|c| seen.insert((c.line.index(), c.point.index())));
-            };
-        }
-        macro_rules! dedup_la {
-            ($coll:expr, $name:expr) => {
-                let mut seen = std::collections::HashSet::new();
-                for c in $coll.iter() {
-                    if !seen.insert((c.line.index(), c.arc.index())) {
-                        let nl = self.lines.get(c.line).map(|e| e.name.as_str()).unwrap_or("?");
-                        let na = self.arcs.get(c.arc).map(|e| e.name.as_str()).unwrap_or("?");
-                        eprintln!("BUG: duplicate {} constraint: line={}, arc={}", $name, nl, na);
-                        eprintln!("{}", std::backtrace::Backtrace::force_capture());
-                        total_removed += 1;
-                    }
-                }
-                seen.clear();
-                $coll.retain(|c| seen.insert((c.line.index(), c.arc.index())));
-            };
-        }
-        macro_rules! dedup_pa {
-            ($coll:expr, $name:expr) => {
-                let mut seen = std::collections::HashSet::new();
-                for c in $coll.iter() {
-                    if !seen.insert((c.point.index(), c.arc.index())) {
-                        let np = self.points.get(c.point).map(|e| e.name.as_str()).unwrap_or("?");
-                        let na = self.arcs.get(c.arc).map(|e| e.name.as_str()).unwrap_or("?");
-                        eprintln!("BUG: duplicate {} constraint: point={}, arc={}", $name, np, na);
-                        eprintln!("{}", std::backtrace::Backtrace::force_capture());
-                        total_removed += 1;
-                    }
-                }
-                seen.clear();
-                $coll.retain(|c| seen.insert((c.point.index(), c.arc.index())));
-            };
-        }
-        macro_rules! dedup_pl {
-            ($coll:expr, $name:expr) => {
-                let mut seen = std::collections::HashSet::new();
-                for c in $coll.iter() {
-                    if !seen.insert((c.point.index(), c.line.index())) {
-                        let np = self.points.get(c.point).map(|e| e.name.as_str()).unwrap_or("?");
-                        let nl = self.lines.get(c.line).map(|e| e.name.as_str()).unwrap_or("?");
-                        eprintln!("BUG: duplicate {} constraint: point={}, line={}", $name, np, nl);
-                        eprintln!("{}", std::backtrace::Backtrace::force_capture());
-                        total_removed += 1;
-                    }
-                }
-                seen.clear();
-                $coll.retain(|c| seen.insert((c.point.index(), c.line.index())));
-            };
-        }
-        dedup_ab!(self.coincident_pp, "coincident_pp", self.points, self.points);
-        // PP is symmetric: (a,b) == (b,a)
+        use crate::registry::DedupKey;
+        // Pass 1: detect, with readable descriptions.
+        let mut dup_msgs: std::vec::Vec<String> = std::vec::Vec::new();
         {
-            let before = self.coincident_pp.len();
-            let mut seen = std::collections::HashSet::new();
-            self.coincident_pp.retain(|c| {
-                let (a, b) = (c.a.index().min(c.b.index()), c.a.index().max(c.b.index()));
-                seen.insert((a, b))
+            let this: &Sketch = self;
+            let mut coincide_seen = std::collections::HashSet::new();
+            this.for_each_constraint_collection_ref(|_, meta, coll| {
+                let mut local_seen = std::collections::HashSet::new();
+                for i in 0..coll.len() {
+                    let c = coll.item(i);
+                    let fresh = match c.dedup_key() {
+                        k @ DedupKey::Coincidence(..) => coincide_seen.insert(k),
+                        k => local_seen.insert(k),
+                    };
+                    if !fresh {
+                        dup_msgs.push(format!("{}: {}", meta.name, c.describe(this)));
+                    }
+                }
             });
-            let removed = before - self.coincident_pp.len();
-            if removed > 0 { eprintln!("BUG: removed {} cross-duplicate coincident_pp constraints", removed); total_removed += removed; }
         }
-        dedup_lp!(self.coincident_lp1, "coincident_lp1");
-        dedup_lp!(self.coincident_lp2, "coincident_lp2");
-        dedup_ab!(self.coincident_ll11, "coincident_ll11", self.lines, self.lines);
-        dedup_ab!(self.coincident_ll12, "coincident_ll12", self.lines, self.lines);
-        dedup_ab!(self.coincident_ll21, "coincident_ll21", self.lines, self.lines);
-        dedup_ab!(self.coincident_ll22, "coincident_ll22", self.lines, self.lines);
-        // Cross-Vec dedup for LL: ll11(a,b)==ll11(b,a), ll22(a,b)==ll22(b,a), ll12(a,b)==ll21(b,a)
-        {
-            let mut seen = std::collections::HashSet::new();
-            // Normalize: represent each endpoint pair as (min_id, max_id) where id encodes line+endpoint
-            let ep_id = |line: u32, is_p2: bool| -> u64 { (line as u64) << 1 | (is_p2 as u64) };
-            let mut add = |line_a: u32, p2_a: bool, line_b: u32, p2_b: bool| -> bool {
-                let a = ep_id(line_a, p2_a);
-                let b = ep_id(line_b, p2_b);
-                let key = (a.min(b), a.max(b));
-                seen.insert(key)
-            };
-            let before = self.coincident_ll11.len() + self.coincident_ll12.len()
-                + self.coincident_ll21.len() + self.coincident_ll22.len();
-            self.coincident_ll11.retain(|c| add(c.a.index(), false, c.b.index(), false));
-            self.coincident_ll12.retain(|c| add(c.a.index(), false, c.b.index(), true));
-            self.coincident_ll21.retain(|c| add(c.a.index(), true, c.b.index(), false));
-            self.coincident_ll22.retain(|c| add(c.a.index(), true, c.b.index(), true));
-            let after = self.coincident_ll11.len() + self.coincident_ll12.len()
-                + self.coincident_ll21.len() + self.coincident_ll22.len();
-            let removed = before - after;
-            if removed > 0 { eprintln!("BUG: removed {} cross-duplicate LL coincident constraints", removed); total_removed += removed; }
+        if dup_msgs.is_empty() {
+            return;
         }
-        dedup_ab!(self.distance_pp, "distance_pp", self.points, self.points);
-        dedup_ab!(self.hdistance_pp, "hdistance_pp", self.points, self.points);
-        dedup_ab!(self.vdistance_pp, "vdistance_pp", self.points, self.points);
-        dedup_pl!(self.point_on_line, "point_on_line");
-        dedup_pl!(self.midpoint, "midpoint");
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_lp1.retain(|c| seen.insert((c.line.index(), c.target.index())));
+        for m in &dup_msgs {
+            eprintln!("BUG: duplicate constraint removed: {}", m);
         }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_lp2.retain(|c| seen.insert((c.line.index(), c.target.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_arc_start.retain(|c| seen.insert((c.arc.index(), c.line.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_arc_end.retain(|c| seen.insert((c.arc.index(), c.line.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_arc_point.retain(|c| seen.insert((c.point.index(), c.arc.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_lp1_arc.retain(|c| seen.insert((c.line.index(), c.arc.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_lp2_arc.retain(|c| seen.insert((c.line.index(), c.arc.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_arc_start_arc.retain(|c| seen.insert((c.a.index(), c.b.index())));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.midpoint_arc_end_arc.retain(|c| seen.insert((c.a.index(), c.b.index())));
-        }
-        dedup_pa!(self.point_on_arc, "point_on_arc");
-        dedup_ab!(self.parallel, "parallel", self.lines, self.lines);
-        dedup_la!(self.arc_line_parallel, "arc_line_parallel");
-        dedup_ab!(self.arc_arc_parallel, "arc_arc_parallel", self.arcs, self.arcs);
-        dedup_ab!(self.perpendicular, "perpendicular", self.lines, self.lines);
-        dedup_ab!(self.collinear, "collinear", self.lines, self.lines);
-        {
-            let mut seen = std::collections::HashSet::new();
-            self.symmetry_ll.retain(|c| seen.insert((c.a.index(), c.b.index(), c.c.index())));
-        }
-        dedup_ab!(self.equal_length, "equal_length", self.lines, self.lines);
-        dedup_ab!(self.angle, "angle", self.lines, self.lines);
-        dedup_la!(self.tangent_la, "tangent_la");
-        dedup_la!(self.line_p1_on_arc, "line_p1_on_arc");
-        dedup_la!(self.line_p2_on_arc, "line_p2_on_arc");
-        dedup_ab!(self.concentric, "concentric", self.arcs, self.arcs);
-        dedup_ab!(self.equal_radius, "equal_radius", self.arcs, self.arcs);
-        dedup_ab!(self.tangent_aa, "tangent_aa", self.arcs, self.arcs);
-        dedup_pl!(self.distance_pl, "distance_pl");
-        dedup_ab!(self.line_p1_on_line, "line_p1_on_line", self.lines, self.lines);
-        dedup_ab!(self.line_p2_on_line, "line_p2_on_line", self.lines, self.lines);
-        dedup_pa!(self.coincident_arc_center, "coincident_arc_center");
-        dedup_pa!(self.coincident_arc_start, "coincident_arc_start");
-        dedup_pa!(self.coincident_arc_end, "coincident_arc_end");
-        dedup_la!(self.coincident_lp1_arc_center, "coincident_lp1_arc_center");
-        dedup_la!(self.coincident_lp2_arc_center, "coincident_lp2_arc_center");
-        dedup_la!(self.coincident_lp1_arc_start, "coincident_lp1_arc_start");
-        dedup_la!(self.coincident_lp2_arc_start, "coincident_lp2_arc_start");
-        dedup_la!(self.coincident_lp1_arc_end, "coincident_lp1_arc_end");
-        dedup_la!(self.coincident_lp2_arc_end, "coincident_lp2_arc_end");
-        dedup_ab!(self.coincident_arc_center_start, "coincident_arc_center_start", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_center_end, "coincident_arc_center_end", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_start_center, "coincident_arc_start_center", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_end_center, "coincident_arc_end_center", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_start_start, "coincident_arc_start_start", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_start_end, "coincident_arc_start_end", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_end_start, "coincident_arc_end_start", self.arcs, self.arcs);
-        dedup_ab!(self.coincident_arc_end_end, "coincident_arc_end_end", self.arcs, self.arcs);
-        let _ = total_removed;
+        eprintln!("{}", std::backtrace::Backtrace::force_capture());
+        // Pass 2: remove -- same keys, same order, so the first copy
+        // survives exactly as pass 1 reported.
+        let mut coincide_seen = std::collections::HashSet::new();
+        self.for_each_constraint_collection(|_, _, coll| {
+            let mut local_seen = std::collections::HashSet::new();
+            coll.retain_constraints(&mut |c| match c.dedup_key() {
+                k @ DedupKey::Coincidence(..) => coincide_seen.insert(k),
+                k => local_seen.insert(k),
+            });
+        });
     }
 
     /// Recompute tangent_la sign fields from current geometry.
@@ -1848,176 +1700,32 @@ impl Sketch {
             if a.constraints.has_target_sweep { out.push(format!("sweep {} = {:.2} deg", a.name, a.constraints.target_sweep.to_degrees())); }
             if !a.center.optimize { out.push(format!("lock {}.center", a.name)); }
         }
-        // Constraint vectors (use macros to reduce repetition)
-        macro_rules! list_cross {
-            ($vec:expr, $name:literal, $fa:ident, $fb:ident) => {
-                for c in &$vec {
-                    let na = &self.lines[c.$fa].name;
-                    let nb = &self.lines[c.$fb].name;
-                    out.push(format!("C{}: {} {} {}", c.nid, $name, na, nb));
+        // Constraint collections, via the registry: one describe()
+        // per type, one emission per constraint (the old hand walk
+        // listed the midpoint_lp/arc families twice, the second copy
+        // with swapped operands). Coincidence entries referencing a
+        // helper point are bridges -- internal wiring, suppressed.
+        // Sorted by nid: creation order, not collection order.
+        let mut items: std::vec::Vec<(u32, String)> = std::vec::Vec::new();
+        self.for_each_constraint_collection_ref(|arenas, meta, coll| {
+            for i in 0..coll.len() {
+                let c = coll.item(i);
+                if meta.coincidence {
+                    let mut bridges_helper = false;
+                    c.each_point_ref(&mut |r| {
+                        if arenas.points.get(r).is_some_and(|p| p.helper) {
+                            bridges_helper = true;
+                        }
+                    });
+                    if bridges_helper {
+                        continue;
+                    }
                 }
-            };
-        }
-        list_cross!(self.parallel, "parallel", a, b);
-        for c in &self.arc_line_parallel {
-            let na = &self.arcs[c.arc].name;
-            let nb = &self.lines[c.line].name;
-            out.push(format!("C{}: parallel {} {}", c.nid, na, nb));
-        }
-        for c in &self.arc_arc_parallel {
-            let na = &self.arcs[c.a].name;
-            let nb = &self.arcs[c.b].name;
-            out.push(format!("C{}: parallel {} {}", c.nid, na, nb));
-        }
-        list_cross!(self.perpendicular, "perpendicular", a, b);
-        list_cross!(self.collinear, "collinear", a, b);
-        list_cross!(self.equal_length, "equal", a, b);
-        // Coincident: suppress bridge constraints (helper point bridges)
-        for c in &self.coincident_pp {
-            if !self.points[c.a].helper && !self.points[c.b].helper {
-                out.push(format!("C{}: coincident {} {}", c.nid, self.points[c.a].name, self.points[c.b].name));
+                items.push((c.nid(), format!("C{}: {}", c.nid(), c.describe(self))));
             }
-        }
-        for c in &self.coincident_ll11 { out.push(format!("C{}: coincident {}.p1 {}.p1", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_ll12 { out.push(format!("C{}: coincident {}.p1 {}.p2", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_ll21 { out.push(format!("C{}: coincident {}.p2 {}.p1", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_ll22 { out.push(format!("C{}: coincident {}.p2 {}.p2", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_lp1 {
-            if !self.points[c.point].helper {
-                out.push(format!("C{}: coincident {}.p1 {}", c.nid, self.lines[c.line].name, self.points[c.point].name));
-            }
-        }
-        for c in &self.coincident_lp2 {
-            if !self.points[c.point].helper {
-                out.push(format!("C{}: coincident {}.p2 {}", c.nid, self.lines[c.line].name, self.points[c.point].name));
-            }
-        }
-        // Point-Arc coincident: suppress helper bridges
-        for c in &self.coincident_arc_center {
-            if !self.points[c.point].helper {
-                out.push(format!("C{}: coincident {} {}.center", c.nid, self.points[c.point].name, self.arcs[c.arc].name));
-            }
-        }
-        for c in &self.coincident_arc_start {
-            if !self.points[c.point].helper {
-                out.push(format!("C{}: coincident {} {}.start", c.nid, self.points[c.point].name, self.arcs[c.arc].name));
-            }
-        }
-        for c in &self.coincident_arc_end {
-            if !self.points[c.point].helper {
-                out.push(format!("C{}: coincident {} {}.end", c.nid, self.points[c.point].name, self.arcs[c.arc].name));
-            }
-        }
-        // Line-Arc coincident
-        for c in &self.coincident_lp1_arc_center { out.push(format!("C{}: coincident {}.p1 {}.center", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp2_arc_center { out.push(format!("C{}: coincident {}.p2 {}.center", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp1_arc_start { out.push(format!("C{}: coincident {}.p1 {}.start", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp2_arc_start { out.push(format!("C{}: coincident {}.p2 {}.start", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp1_arc_end { out.push(format!("C{}: coincident {}.p1 {}.end", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp2_arc_end { out.push(format!("C{}: coincident {}.p2 {}.end", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        // Arc-Arc coincident
-        for c in &self.coincident_arc_center_start { out.push(format!("C{}: coincident {}.center {}.start", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_center_end { out.push(format!("C{}: coincident {}.center {}.end", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_start_center { out.push(format!("C{}: coincident {}.start {}.center", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_end_center { out.push(format!("C{}: coincident {}.end {}.center", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_start_start { out.push(format!("C{}: coincident {}.start {}.start", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_start_end { out.push(format!("C{}: coincident {}.start {}.end", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_end_start { out.push(format!("C{}: coincident {}.end {}.start", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_end_end { out.push(format!("C{}: coincident {}.end {}.end", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        // Line endpoint on line/arc
-        for c in &self.line_p1_on_line { out.push(format!("C{}: point_on {}.p1 {}", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.line_p2_on_line { out.push(format!("C{}: point_on {}.p2 {}", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.line_p1_on_arc { out.push(format!("C{}: point_on {}.p1 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.line_p2_on_arc { out.push(format!("C{}: point_on {}.p2 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.angle { out.push(format!("C{}: angle {} {} = {:.1}deg", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.angle.to_degrees())); }
-        for c in &self.tangent_la { out.push(format!("C{}: tangent {} {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.tangent_aa { out.push(format!("C{}: tangent {} {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.concentric { out.push(format!("C{}: concentric {} {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.equal_radius { out.push(format!("C{}: equal {} {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.symmetry_ll { out.push(format!("C{}: symmetry {} {} {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
-        for c in &self.symmetry_pp { out.push(format!("C{}: symmetry {} {} {}", c.nid, self.point_display_name(c.a), self.lines[c.line].name, self.point_display_name(c.c))); }
-        for c in &self.symmetry_aa { out.push(format!("C{}: symmetry {} {} {}", c.nid, self.arcs[c.a].name, self.lines[c.line].name, self.arcs[c.c].name)); }
-        // Point-based constraints: use display names to resolve helpers
-        for c in &self.point_on_line { out.push(format!("C{}: point_on {} {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name)); }
-        for c in &self.point_on_arc { out.push(format!("C{}: point_on {} {}", c.nid, self.point_display_name(c.point), self.arcs[c.arc].name)); }
-        for c in &self.midpoint { out.push(format!("C{}: midpoint {} {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name)); }
-        for c in &self.midpoint_lp1 { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.line].name, self.lines[c.target].name)); }
-        for c in &self.midpoint_lp2 { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.line].name, self.lines[c.target].name)); }
-        for c in &self.midpoint_arc_start { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_end { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_point { out.push(format!("C{}: midpoint {} {}", c.nid, self.point_display_name(c.point), self.arcs[c.arc].name)); }
-        for c in &self.midpoint_lp1_arc { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.midpoint_lp2_arc { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.midpoint_arc_start_arc { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.midpoint_arc_end_arc { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.distance_pp { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance.abs())); }
-        for c in &self.hdistance_pp { out.push(format!("C{}: hdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance.abs())); }
-        for c in &self.vdistance_pp { out.push(format!("C{}: vdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance.abs())); }
-        for c in &self.distance_pl { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_lp1l { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.distance_lp2l { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.distance_arc_center_l { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_start_l { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_end_l { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        // Line-endpoint distance constraints
-        for c in &self.distance_ll11 { out.push(format!("C{}: distance {}.p1 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.distance_ll12 { out.push(format!("C{}: distance {}.p1 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.distance_ll21 { out.push(format!("C{}: distance {}.p2 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.distance_ll22 { out.push(format!("C{}: distance {}.p2 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.distance_lp1 { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.distance_lp2 { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.distance_arc_center_p { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.distance_arc_start_p { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.distance_arc_end_p { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.distance_arc_center_l1 { out.push(format!("C{}: distance {}.center {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_center_l2 { out.push(format!("C{}: distance {}.center {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_start_l1 { out.push(format!("C{}: distance {}.start {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_start_l2 { out.push(format!("C{}: distance {}.start {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_end_l1 { out.push(format!("C{}: distance {}.end {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_arc_end_l2 { out.push(format!("C{}: distance {}.end {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.distance_aa_ce_ce { out.push(format!("C{}: distance {}.center {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_ce_s { out.push(format!("C{}: distance {}.center {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_ce_e { out.push(format!("C{}: distance {}.center {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_s_ce { out.push(format!("C{}: distance {}.start {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_s_s { out.push(format!("C{}: distance {}.start {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_s_e { out.push(format!("C{}: distance {}.start {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_e_ce { out.push(format!("C{}: distance {}.end {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_e_s { out.push(format!("C{}: distance {}.end {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_aa_e_e { out.push(format!("C{}: distance {}.end {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.distance_concentric {
-            out.push(format!("C{}: distance {} {} = {} (concentric)", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs()));
-        }
-        // Midpoint variants
-        for c in &self.midpoint_lp1 { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.target].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_lp2 { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.target].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_start { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_end { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
-        // Axis distance constraints
-        let axis_label = |h: bool| if h { "hdistance" } else { "vdistance" };
-        for c in &self.axis_distance_ll11 { out.push(format!("C{}: {} {}.p1 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_ll12 { out.push(format!("C{}: {} {}.p1 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_ll21 { out.push(format!("C{}: {} {}.p2 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_ll22 { out.push(format!("C{}: {} {}.p2 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_lp1 { out.push(format!("C{}: {} {}.p1 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.axis_distance_lp2 { out.push(format!("C{}: {} {}.p2 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.axis_distance_arc_center_p { out.push(format!("C{}: {} {}.center {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.axis_distance_arc_start_p { out.push(format!("C{}: {} {}.start {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.axis_distance_arc_end_p { out.push(format!("C{}: {} {}.end {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
-        for c in &self.axis_distance_arc_center_l1 { out.push(format!("C{}: {} {}.center {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.axis_distance_arc_center_l2 { out.push(format!("C{}: {} {}.center {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.axis_distance_arc_start_l1 { out.push(format!("C{}: {} {}.start {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.axis_distance_arc_start_l2 { out.push(format!("C{}: {} {}.start {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.axis_distance_arc_end_l1 { out.push(format!("C{}: {} {}.end {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.axis_distance_arc_end_l2 { out.push(format!("C{}: {} {}.end {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_ce_ce { out.push(format!("C{}: {} {}.center {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_ce_s { out.push(format!("C{}: {} {}.center {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_ce_e { out.push(format!("C{}: {} {}.center {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_s_ce { out.push(format!("C{}: {} {}.start {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_s_s { out.push(format!("C{}: {} {}.start {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_s_e { out.push(format!("C{}: {} {}.start {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_e_ce { out.push(format!("C{}: {} {}.end {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_e_s { out.push(format!("C{}: {} {}.end {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
-        for c in &self.axis_distance_aa_e_e { out.push(format!("C{}: {} {}.end {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        });
+        items.sort_by_key(|&(nid, _)| nid);
+        out.extend(items.into_iter().map(|(_, s)| s));
         out
     }
 

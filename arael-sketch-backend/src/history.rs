@@ -141,7 +141,13 @@ impl History {
         }
         let mut sketch: Sketch = bincode::deserialize(&self.snapshots[self.cursor - 1]).unwrap();
         sketch.solve();
-        Some((sketch, self.cursors[self.cursor - 1].clone()))
+        // Each saved cursor state is the one from just before its
+        // action, so the state after the redone group is the next
+        // entry's. For the newest group no later entry exists; the
+        // pre-last-action state is the closest on record.
+        let restored_cursor = self.cursors.get(self.cursor).cloned()
+            .unwrap_or_else(|| self.cursors[self.cursor - 1].clone());
+        Some((sketch, restored_cursor))
     }
 
     /// Return a list of (group_id, end_position, first_action_description) for

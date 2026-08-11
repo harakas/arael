@@ -87,11 +87,10 @@ egui canvas is `arael-sketch`.
 touch. The public surface (from `arael-sketch-backend/src/lib.rs`):
 
 ```rust
-pub use ids::{ConstraintId, CoincidentKind, MidpointKind,
-               Selection, find_constraint_by_name};
+pub use ids::{ConstraintId, Selection, find_constraint_by_name};
 pub use actions::{Action, resolve_dim_endpoint};
 pub use history::{History, CursorState};
-pub use conflicts::check_constraint_conflict;
+pub use conflicts::validate_action;
 pub use commands::{CommandContext, DRAG_PULL_WEIGHT};
 
 pub mod geometry;      // arc/line math, hit-testing
@@ -136,7 +135,7 @@ uniformly across GUI edits, scripted batches, and MCP tool calls:
    `ApplyMidpointLP1Arc`, `ApplyLineP1OnArc`, ...). It also layers
    in auto-perpendicular (`ApplyPerpendicular`) when the drawn line
    crosses a host line at a right angle, gated by
-   `has_perp_conflict` so a redundant perp is never pushed. All of
+   `conflicts::validate_action` so a redundant perp is never pushed. All of
    it goes into one `begin_group()` frame so a single Ctrl+Z
    undoes the line *and* its auto-snaps *and* any auto-perps as
    one unit.
@@ -225,11 +224,14 @@ Additional backend facilities worth knowing about:
   > (see `rectangle_actions`, which uses `Action::LockLineP1`
   > instead of a direct `Param::fixed` assignment precisely so the
   > pin survives undo/redo).
-- **`check_constraint_conflict(sketch, action)`.** Cheap pre-apply
-  validation -- catches self-reference, impossible orientations
-  (horizontal and vertical on the same line), and transitive
-  redundancy before the solver sees the new constraint. Used by the
-  `explain` command and by the interactive validation loop.
+- **`validate_action(sketch, action)`.** Cheap pre-apply validation,
+  run from `exec` for every action on every path -- catches
+  self-reference, impossible orientations (horizontal and vertical
+  on the same line, including transitive chains through parallel,
+  collinear and perpendicular links), transitive redundancy, and
+  degenerate creation (zero-length lines, zero radii, collinear arc
+  points) before the solver sees the change. A rejection here is not
+  overridable with `force`.
 - **Blocker analysis (DOF rejection).** When a constraint is
   rejected because it does not reduce DOF, the solver's
   `Sketch::analyze_blockers` reports which existing constraints are

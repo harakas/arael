@@ -7,7 +7,8 @@
 use arael::model::CrossBlock;
 use arael::vect::vect2d;
 use arael_sketch_solver::{
-    ArcLineParallel, AxisDistanceLP1, CoincidentLP1, MidpointArcPoint, Sketch,
+    ArcLineParallel, AxisDistanceLP1, CoincidentArcCenterStart, CoincidentArcStartCenter,
+    CoincidentLP1, MidpointArcPoint, MidpointLP1, Parallel, Sketch, SymmetryPP,
     registry::CONSTRAINT_COLLECTION_COUNT,
 };
 
@@ -113,6 +114,93 @@ fn consolidation_remaps_midpoint_arc_point() {
         s.points.get(p).is_some(),
         "midpoint_arc_point must be remapped to the surviving helper"
     );
+}
+
+// The old hand-written list walk emitted every midpoint_lp1/lp2/
+// arc_start/arc_end constraint twice, the second copy with swapped
+// operands. The registry lists each constraint exactly once, in the
+// order the residual means: line.p1 sits at the midpoint of target.
+#[test]
+fn midpoint_lp1_is_listed_exactly_once() {
+    let mut s = Sketch::new();
+    let l0 = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(1.0, 1.0));
+    let l1 = s.add_line(vect2d::new(0.0, 2.0), vect2d::new(2.0, 2.0));
+    s.midpoint_lp1.push(MidpointLP1 {
+        line: l0, target: l1, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    s.assign_constraint_names();
+    let entries: Vec<String> = s.list_constraints()
+        .into_iter().filter(|e| e.contains("midpoint")).collect();
+    assert_eq!(entries.len(), 1, "{:?}", entries);
+    assert!(entries[0].ends_with("midpoint L0.p1 L1"), "{}", entries[0]);
+}
+
+// Coincidence collections share one dedup key space: the same
+// endpoint pair expressed through two different collections is a
+// duplicate. The old per-collection dedup kept both.
+#[test]
+fn coincidence_dedup_is_cross_collection() {
+    let mut s = Sketch::new();
+    let a0 = s.add_arc(vect2d::new(0.0, 0.0), 1.0, 0.0, 1.0, false);
+    let a1 = s.add_arc(vect2d::new(3.0, 0.0), 1.0, 0.0, 1.0, false);
+    s.coincident_arc_start_center.push(CoincidentArcStartCenter {
+        a: a0, b: a1, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    s.coincident_arc_center_start.push(CoincidentArcCenterStart {
+        a: a1, b: a0, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    s.dedup_constraints();
+    // Exactly one survives; which collection keeps it follows the
+    // registry walk order, not push order.
+    assert_eq!(
+        s.coincident_arc_start_center.len() + s.coincident_arc_center_start.len(),
+        1,
+        "cross-collection duplicate must be removed"
+    );
+}
+
+// Symmetric pairs dedup order-free; symmetry constraints dedup with
+// the sides swappable and the mirror exact. symmetry_pp previously
+// had no dedup at all.
+#[test]
+fn symmetric_and_mirror_dedup_keys() {
+    let mut s = Sketch::new();
+    let l0 = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(1.0, 0.0));
+    let l1 = s.add_line(vect2d::new(0.0, 1.0), vect2d::new(1.0, 1.0));
+    s.parallel.push(Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
+    s.parallel.push(Parallel { a: l1, b: l0, nid: 0, cid: 0, hb: CrossBlock::new() });
+    s.dedup_constraints();
+    assert_eq!(s.parallel.len(), 1);
+
+    let p0 = s.add_point(vect2d::new(0.0, 2.0));
+    let p1 = s.add_point(vect2d::new(2.0, 2.0));
+    let mirror = s.add_line(vect2d::new(1.0, 0.0), vect2d::new(1.0, 4.0));
+    let sym = |a, c| SymmetryPP {
+        a, c, line: mirror, nid: 0, cid: 0,
+        hb_ac: CrossBlock::new(), hb_al: CrossBlock::new(), hb_cl: CrossBlock::new(),
+    };
+    s.symmetry_pp.push(sym(p0, p1));
+    s.symmetry_pp.push(sym(p1, p0));
+    s.dedup_constraints();
+    assert_eq!(s.symmetry_pp.len(), 1, "swapped sides are the same symmetry");
+}
+
+// The horizontal flag is identity for axis distances: hdistance and
+// vdistance on the same referents are different constraints, not
+// duplicates of each other.
+#[test]
+fn axis_distance_flag_is_dedup_identity() {
+    let mut s = Sketch::new();
+    let l = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 1.0));
+    let p = s.add_point(vect2d::new(5.0, 5.0));
+    for horizontal in [true, false] {
+        s.axis_distance_lp1.push(AxisDistanceLP1 {
+            line: l, point: p, distance: 2.0, horizontal, nid: 0, cid: 0,
+            hb: CrossBlock::new(),
+        });
+    }
+    s.dedup_constraints();
+    assert_eq!(s.axis_distance_lp1.len(), 2, "hdistance and vdistance are distinct");
 }
 
 // The DOF cache is keyed to the structure generation: a mutation

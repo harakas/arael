@@ -1658,7 +1658,11 @@ impl eframe::App for EditorApp {
                             } else {
 
                             let action = Action::AddLine { p1: state.start, p2: end_pos };
-                            let Some(new_line) = self.exec(action).line() else { return; };
+                            // A rejected creation ends the gesture but
+                            // must not return early: the rest of the
+                            // frame still renders (the rejection is in
+                            // status_error).
+                            if let Some(new_line) = self.exec(action).line() {
 
                             // Auto-coincident for start snap
                             if let Some(snap) = state.snap_start {
@@ -1670,19 +1674,21 @@ impl eframe::App for EditorApp {
                             }
                             // Auto-perpendicular constraint, same undo group.
                             if let Some((host, _)) = perp_host {
-                                if !self.has_perp_conflict(new_line, host) {
-                                    self.exec(Action::ApplyPerpendicular { a: new_line, b: host });
+                                let action = Action::ApplyPerpendicular { a: new_line, b: host };
+                                if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
+                                    self.exec(action);
                                 }
                             }
                             if let Some(target) = end_perp_target {
-                                if !self.has_perp_conflict(new_line, target) {
-                                    self.exec(Action::ApplyPerpendicular { a: new_line, b: target });
+                                let action = Action::ApplyPerpendicular { a: new_line, b: target };
+                                if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
+                                    self.exec(action);
                                 }
                             }
                             // Auto-collinear constraint emission.
                             if let Some((host, _)) = collinear_host {
                                 let action = Action::ApplyCollinear { a: new_line, b: host };
-                                if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                                if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
                                     self.exec(action);
                                 }
                             }
@@ -1694,7 +1700,7 @@ impl eframe::App for EditorApp {
                                 } else {
                                     Action::ApplyVertical { lines: vec![new_line] }
                                 };
-                                if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                                if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
                                     self.exec(action);
                                 }
                             }
@@ -1705,6 +1711,7 @@ impl eframe::App for EditorApp {
                                 snap_start: Some(SnapTarget::LineP2(new_line)),
                                 chained: true,
                             });
+                            } // end if let (line created)
                             } // end else (non-zero length)
                         } else {
                             // First click: start line, snap to nearby entity
@@ -1726,18 +1733,19 @@ impl eframe::App for EditorApp {
                             // Second click: edge point
                             let snap = self.find_snap_target(mouse_sketch, hit_threshold);
                             let edge = snap.map_or(mouse_sketch, |(p, _)| p);
-                            let Some(new_arc) = self.exec(Action::AddCircle { center: state.center, edge }).arc()
-                            else { return; };
-
-                            // Auto-coincident for center
-                            if let Some(s) = state.snap_center {
-                                self.apply_snap_coincident_arc(s, new_arc, ArcPoint::Center, state.center);
-                            }
-                            // Auto-coincident for edge (point on circle)
-                            if let Some((_, s)) = snap {
-                                if let Some(helper) = self.exec(Action::AddHelperPoint { pos: edge }).point() {
-                                    self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
-                                    self.apply_snap_coincident_point(s, helper);
+                            // Rejected creation (zero radius): gesture
+                            // ends, frame still renders.
+                            if let Some(new_arc) = self.exec(Action::AddCircle { center: state.center, edge }).arc() {
+                                // Auto-coincident for center
+                                if let Some(s) = state.snap_center {
+                                    self.apply_snap_coincident_arc(s, new_arc, ArcPoint::Center, state.center);
+                                }
+                                // Auto-coincident for edge (point on circle)
+                                if let Some((_, s)) = snap {
+                                    if let Some(helper) = self.exec(Action::AddHelperPoint { pos: edge }).point() {
+                                        self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
+                                        self.apply_snap_coincident_point(s, helper);
+                                    }
                                 }
                             }
                         } else {
@@ -1761,27 +1769,28 @@ impl eframe::App for EditorApp {
 
                         if let Some(state) = self.arc_draw.take() {
                             if let Some((end, snap_end)) = state.end {
-                                // Third click: mid point on arc, create it
-                                let Some(new_arc) = self.exec(Action::AddArc { start: state.start, end, mid: pos }).arc()
-                                else { return; };
+                                // Third click: mid point on arc, create it.
+                                // Rejected creation (collinear points):
+                                // gesture ends, frame still renders.
+                                if let Some(new_arc) = self.exec(Action::AddArc { start: state.start, end, mid: pos }).arc() {
+                                    // Arc start_angle always corresponds to start click,
+                                    // end_angle to end click (direction stored in ccw flag)
+                                    let (start_ap, end_ap) = (ArcPoint::Start, ArcPoint::End);
 
-                                // Arc start_angle always corresponds to start click,
-                                // end_angle to end click (direction stored in ccw flag)
-                                let (start_ap, end_ap) = (ArcPoint::Start, ArcPoint::End);
-
-                                // Auto-coincident for start click
-                                if let Some(s) = state.snap_start {
-                                    self.apply_snap_coincident_arc(s, new_arc, start_ap, state.start);
-                                }
-                                // Auto-coincident for end click
-                                if let Some(s) = snap_end {
-                                    self.apply_snap_coincident_arc(s, new_arc, end_ap, end);
-                                }
-                                // Auto-coincident for mid (point on arc) - needs helper point
-                                if let Some(s) = snap_target
-                                    && let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point() {
-                                        self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
-                                        self.apply_snap_coincident_point(s, helper);
+                                    // Auto-coincident for start click
+                                    if let Some(s) = state.snap_start {
+                                        self.apply_snap_coincident_arc(s, new_arc, start_ap, state.start);
+                                    }
+                                    // Auto-coincident for end click
+                                    if let Some(s) = snap_end {
+                                        self.apply_snap_coincident_arc(s, new_arc, end_ap, end);
+                                    }
+                                    // Auto-coincident for mid (point on arc) - needs helper point
+                                    if let Some(s) = snap_target
+                                        && let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point() {
+                                            self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
+                                            self.apply_snap_coincident_point(s, helper);
+                                    }
                                 }
                             } else {
                                 // Second click: end point
@@ -1825,10 +1834,26 @@ impl eframe::App for EditorApp {
                                 for i in 0..4 {
                                     let a = corners[i];
                                     let b = corners[(i + 1) % 4];
-                                    let Some(r) = self.exec(Action::AddLine { p1: a, p2: b }).line()
-                                    else { return; };
-                                    lines.push(r);
+                                    match self.exec(Action::AddLine { p1: a, p2: b }).line() {
+                                        Some(r) => lines.push(r),
+                                        None => break,
+                                    }
                                 }
+                                if lines.len() < 4 {
+                                    // Atomic: a failed side rolls the
+                                    // partial rect back (the sides so
+                                    // far are the current undo group).
+                                    let rejection = self.status_error.take();
+                                    if !lines.is_empty()
+                                        && let Some((restored, cur)) = self.history.undo() {
+                                            self.sketch = restored.into();
+                                            self.bg_rank = None;
+                                            self.command_cursor = cur.pos;
+                                            self.command_cursor_tangent = cur.tangent;
+                                            self.compute_dof_async();
+                                    }
+                                    self.status_error = rejection;
+                                } else {
 
                                 // Corner coincidents: L(i).p2 = L(i+1).p1
                                 for i in 0..4 {
@@ -1849,6 +1874,7 @@ impl eframe::App for EditorApp {
                                 if let Some((_, s)) = snap {
                                     self.apply_snap_coincident(s, lines[1], false);
                                 }
+                                } // end else (all four sides created)
                             }
                         } else {
                             // First click: opposite corner, snap to nearby entity.
@@ -2428,8 +2454,6 @@ impl eframe::App for EditorApp {
                         Some((p_on_target, SnapTarget::Line(target))) => {
                             let host_ref = state.snap_start.and_then(EditorApp::perp_host_from_snap);
                             if host_ref == Some(target) {
-                                None
-                            } else if self.has_perp_conflict(target, target) {
                                 None
                             } else {
                                 let tl = &self.sketch.lines[target];

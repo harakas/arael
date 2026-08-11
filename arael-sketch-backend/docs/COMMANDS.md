@@ -143,7 +143,7 @@ add_circle 0,0 2              A1 — auto-connects to L0.p1
 add_line 0,0 5,3              L2 — auto-connects L2.p2 to A0.center
 ```
 
-The output shows what was connected: `Added L1: ... [connected: L1.p1=L0.p2]`
+The output shows what was connected, with the constraint id: `Added L1: ... [connected: L1.p1=L0.p2 (C3)]`
 
 Append `noconnect` to suppress auto-connection:
 ```
@@ -163,7 +163,7 @@ add_line 0,0 5,0
 add_arc 5,0 5,5 7.5,2.5     A0 — auto-tangent with L0 if directions match
 ```
 
-The output shows: `Added A0 [connected: A0.start=L0.p2] [tangent: L0.tangent.A0]`
+The output shows: `Added A0 [connected: A0.start=L0.p2 (C3)] [tangent: L0.tangent.A0 (C4)]`
 
 Auto-tangent works for line-arc and arc-arc connections at shared endpoints.
 
@@ -536,7 +536,13 @@ point_on L0.p1 A0            Line endpoint on arc
 point_on A0.center L0        Arc center on line
 ```
 
-All constraint and dimension commands check that DOF decreases after application. If a constraint doesn't reduce DOF, it is rejected -- the constraint is either redundant or already implied by existing constraints. Append `force` to skip this check:
+Every action runs through one validation gate, on every path (GUI, commands, MCP):
+
+- **Logical conflicts.** Contradictions (horizontal on a vertical line, including transitive chains through parallel, collinear and perpendicular links), duplicates, and self-references are rejected.
+- **Degenerate geometry.** Zero-length lines, zero-radius circles/ellipses, and arcs through collinear points are rejected at creation. Tangents on zero-length lines or concentric arcs are rejected.
+- **DOF check.** Constraint and dimension commands must reduce DOF. If a constraint doesn't reduce DOF, it is rejected -- the constraint is either redundant or already implied by existing constraints.
+
+Append `force` to skip the DOF check only; conflicts and degenerate geometry stay rejected:
 
 ```
 equal L0 L1 force            Skip DOF check

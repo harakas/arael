@@ -19,5 +19,5 @@ pub mod mcp_server;
 pub use ids::{ConstraintId, Selection, find_constraint_by_name};
 pub use actions::{Action, resolve_dim_endpoint};
 pub use history::{History, CursorState};
-pub use conflicts::check_constraint_conflict;
+pub use conflicts::validate_action;
 pub use commands::{CommandContext, DRAG_PULL_WEIGHT};
