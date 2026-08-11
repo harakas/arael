@@ -39,7 +39,6 @@ pub struct CommandContext {
     /// constraints briefly. Cleared on the next successful action.
     pub status_blocker_names: Option<Vec<String>>,
     pub last_cost: f64,
-    pub dof: Option<usize>,
     pub skip_dof_check: bool,
     // View state (used by center/zoom commands; GUI overrides with real values)
     pub scale: f32,
@@ -79,7 +78,6 @@ impl CommandContext {
             status_error: None,
             status_blocker_names: None,
             last_cost: 0.0,
-            dof: None,
             skip_dof_check: false,
             scale: 80.0,
             offset_x: 400.0,
@@ -106,7 +104,6 @@ impl CommandContext {
             status_error: None,
             status_blocker_names: None,
             last_cost: 0.0,
-            dof: None,
             skip_dof_check: false,
             scale: 80.0,
             offset_x: 400.0,
@@ -7949,13 +7946,13 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return err("Usage: dof | dof analyze | dof eigenvalues [raw] | dof singular [raw] | dof jacobian");
     }
 
-    let analyze = arg == "analyze";
-    let result = match ctx.sketch.get_mut().compute_dof(analyze) {
-        Ok(r) => r,
-        Err(e) => return err(e),
-    };
-
-    if analyze {
+    if arg == "analyze" {
+        // The eigenvector analysis has no cached form; it is a
+        // diagnostic and may bump the generation.
+        let result = match ctx.sketch.get_mut().compute_dof(true) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
         let free_dirs = classify_dof_directions(&result);
         let mut lines = vec![format!("DOF: {}", result.dof)];
         for (i, desc) in free_dirs.iter().enumerate() {
@@ -7963,7 +7960,12 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         ok(lines.join("\n"))
     } else {
-        ok(format!("DOF: {}", result.dof))
+        // Plain count: the read door, so the cache and the warm
+        // session survive the query.
+        match ctx.sketch.dof() {
+            Ok(d) => ok(format!("DOF: {}", d)),
+            Err(e) => err(e),
+        }
     }
 }
 

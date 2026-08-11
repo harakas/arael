@@ -322,6 +322,13 @@ pub struct Sketch {
     #[arael(skip)]
     #[serde(skip)]
     cached_dof: Option<(u64, usize)>,
+    /// Rank-analysis cache (DOF plus the null-space basis the probes
+    /// test against), keyed like cached_dof. Owned here so every
+    /// consumer -- GUI display, drag-start probes, commands, MCP --
+    /// reads one authority instead of keeping private copies.
+    #[arael(skip)]
+    #[serde(skip)]
+    cached_rank: Option<(u64, arael::rank::RankResult)>,
     /// Bumped by every structural mutation (see `SketchCell::get_mut`).
     /// A cache records the generation it was built at and rebuilds when the
     /// two differ, so one signal serves every cache independently.
@@ -397,6 +404,13 @@ impl SketchCell {
     /// value-only door, so the derived state and warm session survive.
     pub fn dof(&mut self) -> Result<usize, String> {
         self.mutate_values(|s| s.dof())
+    }
+
+    /// Compute (or refresh) the rank analysis for the current
+    /// structure generation, through the value-only door. Read the
+    /// result back through the deref (`cached_rank`, `cached_dof`).
+    pub fn ensure_rank(&mut self) -> Result<(), String> {
+        self.mutate_values(|s| s.ensure_rank().map(|_| ()))
     }
 
     /// Validate an expression against the current sketch. A query in
@@ -745,6 +759,7 @@ impl Sketch {
             symbol_bag: None,
             expr_hb: TripletBlock::new(),
             cached_dof: None,
+            cached_rank: None,
             structure_gen: 0,
         }
     }
@@ -767,10 +782,31 @@ impl Sketch {
         self.cached_dof = Some((self.structure_gen, dof));
     }
 
-    /// Drop the cache: for mutations that change the instantaneous
+    /// Drop the caches: for mutations that change the instantaneous
     /// rank without a structural change (the generation cannot tell).
     pub fn clear_cached_dof(&mut self) {
         self.cached_dof = None;
+        self.cached_rank = None;
+    }
+
+    /// The cached rank analysis, if one was computed at the current
+    /// structure generation.
+    pub fn cached_rank(&self) -> Option<&arael::rank::RankResult> {
+        self.cached_rank
+            .as_ref()
+            .and_then(|(g, rr)| (*g == self.structure_gen).then_some(rr))
+    }
+
+    /// Compute (or serve) the rank analysis for the current structure
+    /// generation. Fills the DOF cache as a byproduct, so the display
+    /// and the drag-start probes read the same computation.
+    pub fn ensure_rank(&mut self) -> Result<&arael::rank::RankResult, String> {
+        let sgen = self.structure_gen;
+        if !matches!(&self.cached_rank, Some((g, _)) if *g == sgen) {
+            let rr = self.rank_analysis()?;
+            self.cached_rank = Some((sgen, rr));
+        }
+        Ok(&self.cached_rank.as_ref().unwrap().1)
     }
 
     /// Walk every Vec-stored constraint in canonical order and assign a
@@ -2200,11 +2236,12 @@ impl Sketch {
         Ok(result)
     }
 
-    /// Return cached DOF or compute it (count only, no eigenvector analysis).
+    /// Return cached DOF or compute it (count only, no eigenvector
+    /// analysis). Computing goes through the rank cache, so a dof()
+    /// call also leaves the probe basis warm.
     pub fn dof(&mut self) -> Result<usize, String> {
         if let Some(d) = self.cached_dof() { return Ok(d); }
-        let result = self.compute_dof(false)?;
-        Ok(result.dof)
+        Ok(self.ensure_rank()?.nullity)
     }
 
     /// Update tangent_la shared-endpoint flags by scanning coincident collections.

@@ -203,6 +203,29 @@ fn axis_distance_flag_is_dedup_identity() {
     assert_eq!(s.axis_distance_lp1.len(), 2, "hdistance and vdistance are distinct");
 }
 
+// The rank cache is keyed to the structure generation like the DOF
+// cache, and dof() fills it: after any DOF query the probe basis is
+// warm, so a drag start pays nothing. Structural mutation invalidates
+// both with no explicit clear; value-only access preserves them.
+#[test]
+fn rank_cache_is_keyed_and_filled_by_dof() {
+    let mut cell = arael_sketch_solver::SketchCell::new(Sketch::new());
+    cell.get_mut().add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 0.0));
+    cell.ensure_rank().unwrap();
+    assert!(cell.cached_rank().is_some());
+    assert_eq!(cell.cached_dof(), Some(4), "ensure_rank fills the DOF cache");
+
+    cell.get_mut().add_line(vect2d::new(0.0, 1.0), vect2d::new(2.0, 1.0));
+    assert!(cell.cached_rank().is_none(), "structural change must invalidate");
+
+    let d = cell.dof().unwrap();
+    assert_eq!(d, 8);
+    assert!(cell.cached_rank().is_some(), "dof() must leave the basis warm");
+
+    cell.mutate_values(|s| { let _ = s; });
+    assert!(cell.cached_rank().is_some(), "value-only access must preserve");
+}
+
 // The DOF cache is keyed to the structure generation: a mutation
 // through the cell's mutable door invalidates it with no explicit
 // clear anywhere -- the historical bug was a forgotten clear serving

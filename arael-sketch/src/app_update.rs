@@ -133,7 +133,6 @@ impl eframe::App for EditorApp {
         }
 
         // Poll background DOF computation
-        self.poll_dof();
 
         // A tool switch mid-drag (keyboard shortcut or toolbar click)
         // leaves the Select arm before the drag can end; the apparatus
@@ -404,22 +403,20 @@ impl eframe::App for EditorApp {
                 if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked()
                     && let Some((restored, cur)) = self.history.undo() {
                         self.sketch = restored.into();
-                        self.bg_rank = None;
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
                         self.update_cost();
-                        self.compute_dof_async();
+                        self.refresh_dof();
                     }
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked()
                     && let Some((restored, cur)) = self.history.redo() {
                         self.sketch = restored.into();
-                        self.bg_rank = None;
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
                         self.update_cost();
-                        self.compute_dof_async();
+                        self.refresh_dof();
                     }
             });
             ui.label(format!("Actions: {}/{}", self.history.cursor, self.history.actions.len()));
@@ -1137,22 +1134,20 @@ impl eframe::App for EditorApp {
             } else if ctrl && shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
                 if let Some((restored, cur)) = self.history.redo() {
                     self.sketch = restored.into();
-                        self.bg_rank = None;
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
                     self.update_cost();
-                    self.compute_dof_async();
+                    self.refresh_dof();
                 }
             } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z))
                 && let Some((restored, cur)) = self.history.undo() {
                     self.sketch = restored.into();
-                        self.bg_rank = None;
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
                     self.update_cost();
-                    self.compute_dof_async();
+                    self.refresh_dof();
                 }
             if ctrl && ui.input(|i| i.key_pressed(egui::Key::S))
                 && let Ok(json) = serde_json::to_string_pretty(&self.sketch) {
@@ -1338,13 +1333,13 @@ impl eframe::App for EditorApp {
                                             // Dot product with axis direction gives sign
                                             let proj = dx * axis_angle.cos() + dy * axis_angle.sin();
                                             let sign = if proj >= 0.0 { 1.0 } else { -1.0 };
-                                            self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(sign, 0.0);
+                                            self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(sign, 0.0));
                                         } else {
                                             // Circle: free angle
                                             let abs_angle = (mouse_sketch.y - a.center.value.y)
                                                 .atan2(mouse_sketch.x - a.center.value.x);
                                             let rel_angle = abs_angle - a.start_angle.value;
-                                            self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0);
+                                            self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0));
                                         }
                                     }
                                 } else if let DimensionKind::ArcSweep(r) = kind {
@@ -1358,8 +1353,8 @@ impl eframe::App for EditorApp {
                                     let sweep = a.end_angle.value - sa;
                                     let delta = rad2rad(mouse_angle - sa);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, offset_y);
-                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(0.0, offset_y));
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].text_along = along);
                                 } else if let DimensionKind::Angle(a, b, sup) = kind {
                                     // Drag existing: lock to 2 opposing sectors (same supplement)
                                     let la = &self.sketch.lines[a];
@@ -1375,8 +1370,8 @@ impl eframe::App for EditorApp {
                                     let (_ix, start, sweep) = self.angle_dim_sector(a, b, sup, new_offset);
                                     let delta = rad2rad(mouse_angle - start);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.get_mut().dimensions[dim_idx].offset = new_offset;
-                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = new_offset);
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].text_along = along);
                                 } else if let DimensionKind::LineAngle(r) = kind {
                                     let p1 = self.sketch.lines[r].p1.value;
                                     let line_angle = {
@@ -1389,8 +1384,8 @@ impl eframe::App for EditorApp {
                                     let sweep = line_angle;
                                     let delta = rad2rad(mouse_angle);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
-                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3)));
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].text_along = along);
                                 } else if let DimensionKind::ArcRotation(r) = kind {
                                     let a = &self.sketch.arcs[r];
                                     let center = a.center.value;
@@ -1401,8 +1396,8 @@ impl eframe::App for EditorApp {
                                     let sweep = rotation;
                                     let delta = rad2rad(mouse_angle);
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
-                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
-                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3)));
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].text_along = along);
                                 } else if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
                                     let horizontal = matches!(kind, DimensionKind::HDistance(..));
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -1426,8 +1421,8 @@ impl eframe::App for EditorApp {
                                     let qmx = (q1.x + q2.x) / 2.0;
                                     let qmy = (q1.y + q2.y) / 2.0;
                                     let along = ((mouse_sketch.x - qmx) * ddx + (mouse_sketch.y - qmy) * ddy) / (dlen * dlen);
-                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, offset_val);
-                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(0.0, offset_val));
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].text_along = along);
                                 } else if let DimensionKind::ConcentricDistance(a_ref, _b_ref) = kind {
                                     // 2D text anchor in world coords relative
                                     // to the shared center. The leader rotates
@@ -1436,9 +1431,9 @@ impl eframe::App for EditorApp {
                                     // the outer arrow tip to the text when the
                                     // anchor sits past the outer radius.
                                     let center = self.sketch.arcs[a_ref].center.value;
-                                    self.sketch.get_mut().dimensions[dim_idx].offset =
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset =
                                         vect2d::new(mouse_sketch.x - center.x,
-                                                    mouse_sketch.y - center.y);
+                                                    mouse_sketch.y - center.y));
                                 } else {
                                     // Decompose mouse into perpendicular offset and along-line position
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -1455,8 +1450,8 @@ impl eframe::App for EditorApp {
                                     let rel_y = mouse_sketch.y - my;
                                     let perp = rel_x * nx + rel_y * ny;
                                     let along = (rel_x * ux + rel_y * uy) / len;
-                                    self.sketch.get_mut().dimensions[dim_idx].offset = vect2d::new(0.0, perp);
-                                    self.sketch.get_mut().dimensions[dim_idx].text_along = along;
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].offset = vect2d::new(0.0, perp));
+                                    self.sketch.mutate_values(|s| s.dimensions[dim_idx].text_along = along);
                                 }
                             }
                             ctx.request_repaint();
@@ -1851,10 +1846,9 @@ impl eframe::App for EditorApp {
                                     if !lines.is_empty()
                                         && let Some((restored, cur)) = self.history.undo() {
                                             self.sketch = restored.into();
-                                            self.bg_rank = None;
                                             self.command_cursor = cur.pos;
                                             self.command_cursor_tangent = cur.tangent;
-                                            self.compute_dof_async();
+                                            self.refresh_dof();
                                     }
                                     self.status_error = rejection;
                                 } else {
@@ -2825,7 +2819,7 @@ impl eframe::App for EditorApp {
             } // show_hints
 
             // DOF + cost + version at bottom-right
-            let dof_str = match self.dof_display {
+            let dof_str = match self.sketch.cached_dof() {
                 Some(0) => "DOF: 0 (fully constrained)".to_string(),
                 Some(d) => format!("DOF: {}", d),
                 None => "DOF: ...".to_string(),
