@@ -157,7 +157,13 @@ impl SymbolBag {
                 } else {
                     dim_values.insert(dim.name.clone(), dim.value);
                 }
+            } else if dim.derived {
+                // Derived: no target; the name means the live
+                // measurement, so expressions referencing it track
+                // the geometry through the solve.
+                derived.insert(dim.name.clone(), dim.measured_symbol(sketch));
             } else {
+                // Driving: the name means the target value.
                 dim_values.insert(dim.name.clone(), dim.value);
             }
         }

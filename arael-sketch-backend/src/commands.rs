@@ -9150,11 +9150,19 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,5"); // L0 at 45deg
         run_ok(&mut ctx, "xangle L0 derived");
         run_ok(&mut ctx, "add_ellipse 10,10 2 1 0");
-        // Ellipse rotation tracks L0's angle via the expression pipeline.
+        // Ellipse rotation tracks L0's angle via the expression
+        // pipeline. The reference is LIVE: the constraint couples the
+        // rotation to L0's measured angle, and with both sides free
+        // the solve distributes the correction -- so assert the
+        // relation, not a fixed value.
         run_ok(&mut ctx, "xangle EA0 d0");
         let arc = resolve_arc(&ctx.sketch, "EA0").unwrap();
+        let line = resolve_line(&ctx.sketch, "L0").unwrap();
         let rot_deg = ctx.sketch.arcs[arc].rotation.value.to_degrees();
-        assert!(near(rot_deg, 45.0), "rotation = {rot_deg}");
+        let l = &ctx.sketch.lines[line];
+        let angle_deg = (l.p2.value.y - l.p1.value.y)
+            .atan2(l.p2.value.x - l.p1.value.x).to_degrees();
+        assert!(near(rot_deg, angle_deg), "rotation = {rot_deg}, L0 angle = {angle_deg}");
     }
 
     #[test]
@@ -10133,6 +10141,46 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 4,0 noconnect; add_line 0,2 4,2 noconnect; parallel L0 L1");
         let out = run_ok(&mut ctx, "delete L0 L1 parallel");
         assert!(out.contains("C1"), "{}", out);
+    }
+
+    #[test]
+    fn test_expr_radius_follows_drag_frames() {
+        // A circle whose radius is the expression `d+2`, with `d` a
+        // derived distance to the dragged endpoint: the radius must
+        // track during per-frame drag solves, not only at drag end.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "l = add_line 0,0 10,0");
+        run_ok(&mut ctx, "lock l.p1; horizontal l; length l 10");
+        run_ok(&mut ctx, "pivot = add_line l.p2 @5,0");
+        run_ok(&mut ctx, "d = distance l.p1 pivot.p2 derived");
+        run_ok(&mut ctx, "c = add_circle l.p1 20");
+        run_ok(&mut ctx, "radius c d+2");
+        let circle = ctx.sketch.arcs.refs().next().unwrap();
+        let pivot = ctx.sketch.lines.refs().nth(1).unwrap();
+        // The live constraint holds the relation radius = d + 2; with
+        // both sides free the solve distributes the correction.
+        let dist = |s: &Sketch| {
+            let p = s.lines[pivot].p2.value;
+            (p.x * p.x + p.y * p.y).sqrt()
+        };
+        let r0 = ctx.sketch.arcs[circle].radius.value;
+        assert!((r0 - (dist(&ctx.sketch) + 2.0)).abs() < 0.1,
+            "creation: radius {} vs d+2 {}", r0, dist(&ctx.sketch) + 2.0);
+
+        // Simulate GUI drag frames on pivot.p2: install the
+        // apparatus, move the helper, per-frame cell solve.
+        let grab_pos = ctx.sketch.lines[pivot].p2.value;
+        let app = ctx.sketch.get_mut().install_drag(
+            arael_sketch_solver::DragTarget::LineP2(pivot),
+            grab_pos, None, Some(DRAG_PULL_WEIGHT));
+        ctx.sketch.mutate_values(|s| s.move_drag_helper(app.helper, vect2d::new(25.0, 0.0)));
+        ctx.sketch.solve();
+        let mid_radius = ctx.sketch.arcs[circle].radius.value;
+        let mid_dist = dist(&ctx.sketch);
+        ctx.sketch.get_mut().remove_drag(&app);
+        assert!(mid_dist > r0 + 1.0, "drag must have pulled the pivot out, d at {}", mid_dist);
+        assert!((mid_radius - (mid_dist + 2.0)).abs() < 0.5,
+            "radius {} must track d+2 (~{}) during the drag frame", mid_radius, mid_dist + 2.0);
     }
 
     #[test]
