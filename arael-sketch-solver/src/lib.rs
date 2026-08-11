@@ -1909,6 +1909,11 @@ impl Sketch {
         self.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
         self.drift_isigma = saved_drift;
         let t_hessian = timer.lap();
+        // Degenerate geometry (a /len residual on collapsed entities)
+        // yields NaN; the spectral sorts below must never see it.
+        if hessian.iter().any(|v| !v.is_finite()) {
+            return Err("Hessian contains non-finite values (degenerate geometry)".into());
+        }
 
         // Symmetric Jacobi preconditioning: scale by `sqrt(diag(H))`
         // which equals the Jacobian's column L2 norms. Preserves
@@ -1931,7 +1936,7 @@ impl Sketch {
         // Determine rank via spectral gap in the lower portion of the spectrum.
         let rank_from_evs = |evs: &[f64]| -> usize {
             let mut sorted: Vec<f64> = evs.iter().map(|v| v.abs()).collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let max_ev = sorted.last().copied().unwrap_or(0.0);
             let upper_bound = max_ev * 0.01;
             // Same zero-floor trick as rank_from_svs: let near-zero
@@ -2100,6 +2105,13 @@ impl Sketch {
         if n == 0 {
             return Ok(DofResult { dof: 0, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() });
         }
+        // Degenerate geometry (a /len residual on collapsed entities)
+        // yields NaN; the SVD and the spectral sorts below must never
+        // see it. The rank_analysis path has the same guard inside
+        // numeric_rank.
+        if jacobian.rows.iter().any(|r| r.entries.iter().any(|&(_, v)| !v.is_finite())) {
+            return Err("Jacobian contains non-finite values (degenerate geometry)".into());
+        }
 
         let param_names = if analyze {
             let bag = SymbolBag::build(self);
@@ -2183,7 +2195,7 @@ impl Sketch {
             if sorted.iter().any(|v| !v.is_finite()) {
                 return Err("non-finite singular values (degenerate geometry?)".into());
             }
-            sorted.sort_by(|a: &f64, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a: &f64, b| a.total_cmp(b));
             let (cut, _) = arael::rank::rank_cut(&sorted);
             let rank = sorted.len() - cut;
             (n.saturating_sub(rank), "dense svd".to_string())

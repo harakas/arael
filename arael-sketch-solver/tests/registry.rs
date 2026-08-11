@@ -8,7 +8,7 @@ use arael::model::CrossBlock;
 use arael::vect::vect2d;
 use arael_sketch_solver::{
     ArcLineParallel, AxisDistanceLP1, CoincidentArcCenterStart, CoincidentArcStartCenter,
-    CoincidentLP1, MidpointArcPoint, MidpointLP1, Parallel, Sketch, SymmetryPP,
+    CoincidentLP1, MidpointArcPoint, MidpointLP1, Parallel, PointOnLine, Sketch, SymmetryPP,
     registry::CONSTRAINT_COLLECTION_COUNT,
 };
 
@@ -201,6 +201,22 @@ fn axis_distance_flag_is_dedup_identity() {
     }
     s.dedup_constraints();
     assert_eq!(s.axis_distance_lp1.len(), 2, "hdistance and vdistance are distinct");
+}
+
+// A point-on-line residual divides by line length. Collapse the line
+// after creation -- something a solve can produce -- and every DOF /
+// analysis path must return an error, not panic on a NaN sort.
+#[test]
+fn degenerate_geometry_errors_instead_of_panicking() {
+    let mut s = Sketch::new();
+    let l = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 0.0));
+    let p = s.add_point(vect2d::new(2.0, 1.0));
+    s.point_on_line.push(PointOnLine { point: p, line: l, nid: 0, cid: 0, hb: CrossBlock::new() });
+    let p1 = s.lines[l].p1.value;
+    s.lines[l].p2.value = p1;
+    assert!(s.dof().is_err(), "rank path must error");
+    assert!(s.compute_dof(true).is_err(), "SVD/analyze path must error");
+    assert!(s.compute_dof_eigenvalues(false).is_err(), "eigen path must error");
 }
 
 // The rank cache is keyed to the structure generation like the DOF

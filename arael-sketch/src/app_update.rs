@@ -288,7 +288,7 @@ impl eframe::App for EditorApp {
             ui.heading("Tools");
             ui.separator();
             egui::Grid::new("tools_grid").num_columns(2).show(ui, |ui| {
-                if ui.selectable_label(self.tool == Tool::Select, "Select (S)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Select, "Select (Esc)").clicked() {
                     self.tool = Tool::Select;
                 }
                 if ui.selectable_label(self.tool == Tool::DrawPoint, "Point (P)").clicked() {
@@ -1037,15 +1037,18 @@ impl eframe::App for EditorApp {
                 self.pending_fit = false;
             }
 
-            // Keyboard shortcuts (skip when any text field has focus)
-            if !ctx.wants_keyboard_input() {
-            if ui.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) { self.tool = Tool::Select; }
+            // Keyboard shortcuts (skip when any text field has focus).
+            // One ctrl/cmd gate for the whole block: Ctrl+S/C/V/X/A and
+            // friends belong to the system, not the tool palette.
+            if !ctx.wants_keyboard_input()
+                && !ui.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd) {
+            // Select has no key: Escape returns to it.
             if ui.input(|i| i.key_pressed(egui::Key::P)) { self.tool = Tool::DrawPoint; }
             if ui.input(|i| i.key_pressed(egui::Key::L)) {
                 self.tool = Tool::DrawLine;
                 self.line_draw = None;
             }
-            if ui.input(|i| i.key_pressed(egui::Key::O) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
+            if ui.input(|i| i.key_pressed(egui::Key::O)) {
                 self.tool = Tool::DrawCircle;
                 self.circle_draw = None;
             }
@@ -1053,11 +1056,11 @@ impl eframe::App for EditorApp {
                 self.tool = Tool::DrawArc;
                 self.arc_draw = None;
             }
-            if ui.input(|i| i.key_pressed(egui::Key::R) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
+            if ui.input(|i| i.key_pressed(egui::Key::R)) {
                 self.tool = Tool::DrawRect;
                 self.rect_draw = None;
             }
-            if ui.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
+            if ui.input(|i| i.key_pressed(egui::Key::F)) {
                 self.tool = Tool::Fillet;
                 self.selection.clear();
             }
@@ -1068,8 +1071,9 @@ impl eframe::App for EditorApp {
             if ui.input(|i| i.key_pressed(egui::Key::T)) { self.try_apply_or_enter_mode(ConstraintType::Tangent); }
             if ui.input(|i| i.key_pressed(egui::Key::M)) { self.try_apply_or_enter_mode(ConstraintType::Midpoint); }
             if ui.input(|i| i.key_pressed(egui::Key::S)) { self.try_apply_or_enter_mode(ConstraintType::Symmetry); }
+            if ui.input(|i| i.key_pressed(egui::Key::Equals)) { self.try_apply_or_enter_mode(ConstraintType::EqualLength); }
             if ui.input(|i| i.key_pressed(egui::Key::X)) { self.try_apply_or_enter_mode(ConstraintType::ToggleConstruction); }
-            if ui.input(|i| i.key_pressed(egui::Key::D) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
+            if ui.input(|i| i.key_pressed(egui::Key::D)) {
                 self.tool = Tool::Dimension;
                 self.dim_editing = false;
                 self.dim_kind = None;
@@ -1103,7 +1107,7 @@ impl eframe::App for EditorApp {
                 self.tool = Tool::Select;
                 self.cancel_drag();
             }
-            } // !wants_keyboard_input
+            } // !wants_keyboard_input && no ctrl/cmd
 
             // Delete selected entities/constraints with Backspace/Delete
             // (skip when editing dimension text — Backspace edits the text field)

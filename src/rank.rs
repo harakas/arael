@@ -260,7 +260,7 @@ impl Jacobian<f64> {
         let (svd, _) = self.svd_column_normalised();
         let k = svd.singular_values.len();
         let mut sorted: Vec<f64> = svd.singular_values.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.total_cmp(b));
         let (zeros_in_spectrum, gap) = rank_cut(&sorted);
         let rank = k - zeros_in_spectrum;
         let nullity = n - rank;
@@ -414,7 +414,7 @@ impl Jacobian<f64> {
             let s = bsvd.S().column_vector();
             let mn = s.nrows();
             let mut order: Vec<usize> = (0..mn).collect();
-            order.sort_by(|&a, &c| s[a].partial_cmp(&s[c]).unwrap());
+            order.sort_by(|&a, &c| s[a].total_cmp(&s[c]));
             // When k > m the thin SVD reports only m singular values;
             // the remaining k - m directions of the block are
             // structurally zero and take part in the gap search.

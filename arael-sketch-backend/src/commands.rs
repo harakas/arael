@@ -7714,7 +7714,7 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     let mut lines = vec![format!("{}: {}x{}, DOF: {}, time: {:.2}ms",
         header, n, n, result.dof, t_total.as_secs_f64() * 1000.0)];
     let mut evs: Vec<(f64, usize)> = result.eigenvalues.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
-    evs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    evs.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (val, col) in &evs {
         let ev = &result.eigenvectors[*col];
         let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
@@ -7759,6 +7759,11 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     if m == 0 || n == 0 {
         return ok(format!("Jacobian: {} residuals x {} params (empty)", m, n));
     }
+    // Degenerate geometry yields NaN; an SVD iterating on it never
+    // converges. Same guard as compute_dof.
+    if jacobian.rows.iter().any(|r| r.entries.iter().any(|&(_, v)| !v.is_finite())) {
+        return err("Jacobian contains non-finite values (degenerate geometry)");
+    }
     // Raw SVD: un-normalised Jacobian; sigmas carry the real
     // per-parameter scale, useful for spotting residual-design issues.
     // Normalised SVD (the default): each column of J scaled by
@@ -7798,7 +7803,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
         t_build.as_secs_f64() * 1000.0,
         t_svd.as_secs_f64() * 1000.0));
     let mut svs: Vec<(f64, usize)> = svs_vec.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
-    svs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    svs.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (val, idx) in &svs {
         // Right singular vector: direction in parameter space.
         // For the normalised SVD we back-transform by dividing each
@@ -7847,7 +7852,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
         }
         // Sum over all constraints = 1 (u is a unit vector). Report as percentages.
         let mut contribs: Vec<((u32, &'static str), f64)> = weight.into_iter().collect();
-        contribs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        contribs.sort_by(|a, b| b.1.total_cmp(&a.1));
         let top_max = contribs.first().map(|(_, w)| *w).unwrap_or(0.0);
         let top_threshold = top_max * 0.1; // show anything >= 10% of dominant
         contribs.retain(|(_, w)| *w > top_threshold);
@@ -10141,6 +10146,27 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 4,0 noconnect; add_line 0,2 4,2 noconnect; parallel L0 L1");
         let out = run_ok(&mut ctx, "delete L0 L1 parallel");
         assert!(out.contains("C1"), "{}", out);
+    }
+
+    #[test]
+    fn test_dof_commands_error_on_degenerate_geometry() {
+        // Solver-collapsed zero-length line under a point-on-line
+        // residual: every dof command variant errors cleanly.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
+        run_ok(&mut ctx, "add_point 2,1");
+        run_ok(&mut ctx, "point_on P0 L0");
+        let l = ctx.sketch.lines.refs().next().unwrap();
+        ctx.sketch.mutate_values(|s| {
+            let p1 = s.lines[l].p1.value;
+            s.lines[l].p2.value = p1;
+            // Value-only change that alters the instantaneous rank.
+            s.clear_cached_dof();
+        });
+        for cmd in ["dof", "dof analyze", "dof eigenvalues", "dof singular"] {
+            let msg = run_err(&mut ctx, cmd);
+            assert!(msg.contains("non-finite"), "{}: {}", cmd, msg);
+        }
     }
 
     #[test]

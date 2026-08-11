@@ -329,7 +329,7 @@ impl EditorApp {
             (rad2rad(ang_b), false),
             (rad2rad(ang_b + pi), false),
         ];
-        halves.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        halves.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         // Find which sector the mouse is in
         let m = rad2rad(mouse_angle);
