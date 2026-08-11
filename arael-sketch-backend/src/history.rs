@@ -80,7 +80,9 @@ impl History {
     pub fn new(sketch: &Sketch) -> Self {
         History {
             actions: Vec::new(), snapshots: Vec::new(), cursors: Vec::new(), groups: Vec::new(),
-            cursor: 0, next_group: 0, current_group: 0,
+            // Pushes before the first begin_group carry group 0; the
+            // first explicit group must not share that id.
+            cursor: 0, next_group: 1, current_group: 0,
             initial_snapshot: bincode::serialize(sketch).unwrap(),
         }
     }

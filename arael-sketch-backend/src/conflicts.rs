@@ -209,6 +209,38 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
             }
         }
 
+        // A line-line distance rides on parallel lines (the command
+        // emits the parallel first); if that parallel could not be
+        // satisfied, the dimension would silently no-op. Reject with
+        // the reason instead.
+        Action::AddDimension { kind: DimensionKind::LineLineDistance(a, b), .. } => {
+            let (Some(la), Some(lb)) = (sketch.lines.get(*a), sketch.lines.get(*b)) else {
+                return Some("Line-line distance: line no longer exists".into());
+            };
+            let ax = la.p2.value.x - la.p1.value.x;
+            let ay = la.p2.value.y - la.p1.value.y;
+            let bx = lb.p2.value.x - lb.p1.value.x;
+            let by = lb.p2.value.y - lb.p1.value.y;
+            let alen = (ax * ax + ay * ay).sqrt();
+            let blen = (bx * bx + by * by).sqrt();
+            if alen < 1e-12 || blen < 1e-12 {
+                return Some("Line-line distance requires non-degenerate lines".into());
+            }
+            if (ax * by - ay * bx).abs() / (alen * blen) >= 1e-6 {
+                return Some(format!(
+                    "Line-line distance requires parallel lines ({} and {} are not)",
+                    la.name, lb.name));
+            }
+        }
+        Action::AddDimension { kind: DimensionKind::ConcentricDistance(a, b), .. } => {
+            let (Some(aa), Some(ab)) = (sketch.arcs.get(*a), sketch.arcs.get(*b)) else {
+                return Some("Concentric distance: arc no longer exists".into());
+            };
+            if aa.is_ellipse || ab.is_ellipse {
+                return Some("Concentric distance applies to circular arcs".into());
+            }
+        }
+
         // ----- Self-referential checks -----
         Action::ApplyParallel { a, b } if a == b => {
             return Some(format!("Cannot constrain {} to itself", line_name(sketch, *a)));

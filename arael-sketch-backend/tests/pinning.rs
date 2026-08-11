@@ -58,7 +58,6 @@ fn u1_perpendicular_is_scale_independent() {
 // the current winding, so a supplement reading can come out negative.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U2 confirmed: supplement reading negative for negative winding"]
 fn u2_supplement_angle_reading_is_positive() {
     let mut ctx = CommandContext::new();
     run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
@@ -126,7 +125,6 @@ fn u6_range_and_expression_do_not_coexist() {
 // match the true (radius_b/rotation-aware) endpoint position.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U7 confirmed: helper seeded with circle parametrisation"]
 fn u7_dim_endpoint_helper_seeds_at_true_elliptic_arc_start() {
     let mut s = Sketch::new();
     let r = s.add_elliptic_arc(vect2d::new(2.0, 1.0), 3.0, 1.0,
@@ -145,7 +143,6 @@ fn u7_dim_endpoint_helper_seeds_at_true_elliptic_arc_start() {
 // point then cascades the symmetry away.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U8 confirmed: symmetry binds the user point, delete cascades it"]
 fn u8_symmetry_survives_deleting_a_coincident_user_point() {
     let mut ctx = CommandContext::new();
     run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
@@ -167,7 +164,6 @@ fn u8_symmetry_survives_deleting_a_coincident_user_point() {
 // with an empty name while no dimension exists.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U9 confirmed: forced no-op reports phantom success with empty name"]
 fn u9_noop_dimension_paths_do_not_report_phantom_success() {
     let mut ctx = CommandContext::new();
     run_ok(&mut ctx, "add_line 0,0 4,0 noconnect");
@@ -190,7 +186,6 @@ fn u9_noop_dimension_paths_do_not_report_phantom_success() {
 // first explicit group, so one undo removes both.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U10 confirmed: pre-group pushes merge with the first group"]
 fn u10_pre_group_pushes_do_not_merge_with_first_group() {
     let mut s = Sketch::new();
     let mut h = History::new(&s);
@@ -214,7 +209,6 @@ fn u10_pre_group_pushes_do_not_merge_with_first_group() {
 // value, the resolution depends on iteration order.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U11 confirmed: alias chains resolve by HashMap order"]
 fn u11_alias_substitution_is_deterministic() {
     for _ in 0..48 {
         let mut ctx = CommandContext::new();
@@ -233,7 +227,6 @@ fn u11_alias_substitution_is_deterministic() {
 // panics mid-UTF-8.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U12 confirmed: byte-slice panic mid-UTF-8"]
 fn u12_complete_survives_mid_utf8_cursor() {
     let s = Sketch::new();
     let names = HashMap::new();
@@ -243,19 +236,25 @@ fn u12_complete_survives_mid_utf8_cursor() {
 }
 
 // ---------------------------------------------------------------------------
-// U13: fit_earc_tangent's bulge_sign falls back to +1 when the
-// tangent normals are parallel (the half-ellipse case); the arc must
-// still bulge to the side the entry tangent points to.
+// U13 (bulge-sign half, REFUTED): with parallel tangent lines the
+// contact points are antipodal, the conic is centrally symmetric
+// about the chord midpoint and both target sides give the same
+// lambda, so bulge_sign is inert; ccw (from the entry tangent) picks
+// the piece. This characterizes that the swept piece lands on the
+// tangent side.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "U13 confirmed: parallel-normal fallback bulges to the wrong side"]
 fn u13_parallel_normal_fit_bulges_to_the_tangent_side() {
     // Entry heading down at (0,0), exit heading up at (4,0): the arc
     // lives below the chord.
-    let (c, rx, ry, rot, sa, ea, _ccw) = fit_earc_tangent(
+    let (c, rx, ry, rot, sa, ea, ccw) = fit_earc_tangent(
         vect2d::new(0.0, 0.0), vect2d::new(0.0, -1.0),
         vect2d::new(4.0, 0.0), vect2d::new(0.0, 1.0), 0.6).unwrap();
-    let mid = (sa + ea) / 2.0;
+    // Midpoint of the piece actually swept: from sa, half the
+    // directional sweep (raw (sa+ea)/2 would sample the complement).
+    let tau = std::f64::consts::TAU;
+    let sweep = if ccw { (ea - sa).rem_euclid(tau) } else { -((sa - ea).rem_euclid(tau)) };
+    let mid = sa + sweep / 2.0;
     let (cr, sr) = (rot.cos(), rot.sin());
     let (cm, sm) = (mid.cos(), mid.sin());
     let mid_pt = vect2d::new(

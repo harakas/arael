@@ -341,7 +341,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
     match *ep {
         DimensionEndpoint::Point(r) => r,
         DimensionEndpoint::LineP1(r) => {
-            if let Some(hp) = sketch.coincident_lp1.iter().find(|c| c.line == r).map(|c| c.point) {
+            if let Some(hp) = sketch.coincident_lp1.iter().find(|c| c.line == r && sketch.points.get(c.point).is_some_and(|p| p.helper)).map(|c| c.point) {
                 return hp;
             }
             let pos = sketch.lines[r].p1.value;
@@ -350,7 +350,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             hp
         }
         DimensionEndpoint::LineP2(r) => {
-            if let Some(hp) = sketch.coincident_lp2.iter().find(|c| c.line == r).map(|c| c.point) {
+            if let Some(hp) = sketch.coincident_lp2.iter().find(|c| c.line == r && sketch.points.get(c.point).is_some_and(|p| p.helper)).map(|c| c.point) {
                 return hp;
             }
             let pos = sketch.lines[r].p2.value;
@@ -359,7 +359,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             hp
         }
         DimensionEndpoint::ArcCenter(r) => {
-            if let Some(hp) = sketch.coincident_arc_center.iter().find(|c| c.arc == r).map(|c| c.point) {
+            if let Some(hp) = sketch.coincident_arc_center.iter().find(|c| c.arc == r && sketch.points.get(c.point).is_some_and(|p| p.helper)).map(|c| c.point) {
                 return hp;
             }
             let pos = sketch.arcs[r].center.value;
@@ -368,7 +368,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             hp
         }
         DimensionEndpoint::ArcStart(r) => {
-            if let Some(hp) = sketch.coincident_arc_start.iter().find(|c| c.arc == r).map(|c| c.point) {
+            if let Some(hp) = sketch.coincident_arc_start.iter().find(|c| c.arc == r && sketch.points.get(c.point).is_some_and(|p| p.helper)).map(|c| c.point) {
                 return hp;
             }
             let pos = arc_start_pos_sketch(sketch, r);
@@ -377,7 +377,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             hp
         }
         DimensionEndpoint::ArcEnd(r) => {
-            if let Some(hp) = sketch.coincident_arc_end.iter().find(|c| c.arc == r).map(|c| c.point) {
+            if let Some(hp) = sketch.coincident_arc_end.iter().find(|c| c.arc == r && sketch.points.get(c.point).is_some_and(|p| p.helper)).map(|c| c.point) {
                 return hp;
             }
             let pos = arc_end_pos_sketch(sketch, r);
@@ -388,20 +388,14 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
     }
 }
 
+// The radius_b/rotation-aware parametrisation lives in geometry.rs;
+// a circle-only copy here seeded elliptic-arc helpers off-curve.
 pub fn arc_start_pos_sketch(sketch: &Sketch, r: Ref<Arc>) -> vect2d {
-    let a = &sketch.arcs[r];
-    vect2d::new(
-        a.center.value.x + a.radius.value * a.start_angle.value.cos(),
-        a.center.value.y + a.radius.value * a.start_angle.value.sin(),
-    )
+    crate::geometry::arc_start_pos(&sketch.arcs[r])
 }
 
 pub fn arc_end_pos_sketch(sketch: &Sketch, r: Ref<Arc>) -> vect2d {
-    let a = &sketch.arcs[r];
-    vect2d::new(
-        a.center.value.x + a.radius.value * a.end_angle.value.cos(),
-        a.center.value.y + a.radius.value * a.end_angle.value.sin(),
-    )
+    crate::geometry::arc_end_pos(&sketch.arcs[r])
 }
 
 /// Get position of a DimensionEndpoint from a Sketch (read-only).
@@ -1264,12 +1258,15 @@ impl Action {
                         && let Some(d) = sketch.dimensions.last_mut() { d.derived = true; }
                     return (false, created);
                 }
-                let name = format!("d{}", sketch.next_dimension_id);
-                sketch.next_dimension_id += 1;
-                // Apply the numeric constraint (skip for derived dims)
+                // Apply the numeric constraint (skip for derived dims).
+                // Validation first: a refused push must not burn the
+                // d<n> counter. The gate pre-rejects these, this is
+                // the backstop.
                 if !derived && !push_numeric_dim_constraint(sketch, kind, value) {
                     return (false, created);
                 }
+                let name = format!("d{}", sketch.next_dimension_id);
+                sketch.next_dimension_id += 1;
                 sketch.dimensions.push(Dimension {
                     did: 0, // minted by assign_dimension_ids
                     kind: *kind, value: *value,

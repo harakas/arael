@@ -387,8 +387,13 @@ impl Dimension {
                 let deg_factor = arael_sym::constant(180.0 / std::f64::consts::PI);
                 let signed_deg = angle * deg_factor;
                 if *supplement {
-                    let sup_sign = if cur_angle >= 0.0 { 1.0 } else { -1.0 };
-                    arael_sym::constant(sup_sign * 180.0) - signed_deg
+                    // 180 - |angle|: the reading is a magnitude, like
+                    // the non-supplement branch below.
+                    if cur_angle >= 0.0 {
+                        arael_sym::constant(180.0) - signed_deg
+                    } else {
+                        arael_sym::constant(180.0) + signed_deg
+                    }
                 } else {
                     if cur_angle >= 0.0 { signed_deg } else { -signed_deg }
                 }

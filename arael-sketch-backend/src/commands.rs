@@ -1425,31 +1425,37 @@ fn resolve_endpoint_ref(sketch: &Sketch, name: &str) -> Result<EndpointRef, Stri
 // ---------------------------------------------------------------------------
 
 /// Replace session name aliases in a string (word-boundary aware).
+/// Replace session-name aliases with their entity names. One pass,
+/// left to right, longest alias first at each position. Replaced text
+/// is never rescanned, so an alias whose entity name collides with
+/// another alias's name cannot chain, and the result does not depend
+/// on map iteration order.
 fn substitute_aliases(ctx: &CommandContext, input: &str) -> String {
     if ctx.session_names.is_empty() { return input.to_string(); }
-    let mut result = input.to_string();
-    for (alias, real_name) in &ctx.session_names {
-        if alias == "_" && !input.contains('_') { continue; }
-        // Word-boundary replacement: alias must not be part of a larger identifier
-        let mut new = String::new();
-        let mut rest = result.as_str();
-        while let Some(pos) = rest.find(alias.as_str()) {
-            let before = pos > 0 && (rest.as_bytes()[pos - 1].is_ascii_alphanumeric() || rest.as_bytes()[pos - 1] == b'_');
-            let after_pos = pos + alias.len();
-            let after = after_pos < rest.len()
-                && (rest.as_bytes()[after_pos].is_ascii_alphanumeric() || rest.as_bytes()[after_pos] == b'_');
-            new.push_str(&rest[..pos]);
-            if before || after {
-                new.push_str(alias);
-            } else {
-                new.push_str(real_name);
+    let mut aliases: Vec<(&str, &str)> = ctx.session_names.iter()
+        .map(|(a, r)| (a.as_str(), r.as_str())).collect();
+    aliases.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(b.0)));
+    let bytes = input.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let boundary_before = i == 0 || !is_word(bytes[i - 1]);
+        if boundary_before {
+            if let Some((alias, real)) = aliases.iter().find(|(a, _)| {
+                input[i..].starts_with(a)
+                    && (i + a.len() >= input.len() || !is_word(bytes[i + a.len()]))
+            }) {
+                out.push_str(real);
+                i += alias.len();
+                continue;
             }
-            rest = &rest[after_pos..];
         }
-        new.push_str(rest);
-        result = new;
+        let ch_len = input[i..].chars().next().map_or(1, |c| c.len_utf8());
+        out.push_str(&input[i..i + ch_len]);
+        i += ch_len;
     }
-    result
+    out
 }
 
 pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
@@ -8199,7 +8205,11 @@ pub fn complete(
     input: &str,
     cursor_pos: usize,
 ) -> Vec<String> {
-    let input = &input[..cursor_pos.min(input.len())];
+    // The caller's cursor is a byte position; floor it to a char
+    // boundary so a cursor inside a multibyte char cannot panic.
+    let mut end = cursor_pos.min(input.len());
+    while end > 0 && !input.is_char_boundary(end) { end -= 1; }
+    let input = &input[..end];
     let current_line = input.lines().last().unwrap_or("");
     let word_start = current_line.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
     let current_word = &current_line[word_start..];

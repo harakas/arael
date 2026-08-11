@@ -51,6 +51,11 @@ pub fn fit_earc_tangent(
         let center_side = m.0 * center_guess.x + m.1 * center_guess.y + m.2;
         if center_side >= 0.0 { -1.0 } else { 1.0 } // arc bulges opposite to center
     } else {
+        // Parallel tangent lines: the contact points are antipodal,
+        // so the conic is centrally symmetric about the chord
+        // midpoint and both target sides yield the same lambda --
+        // the sign is inert here; ccw (from the entry tangent below)
+        // picks the piece.
         1.0
     };
 
