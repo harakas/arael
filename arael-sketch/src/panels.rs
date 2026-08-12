@@ -789,11 +789,10 @@ impl EditorApp {
                             .stick_to_bottom(!scroll_top && !kbd_scrolling_up);
                         scroll.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            let mut md_cache = egui_commonmark::CommonMarkCache::default();
                             for (text, is_err, is_md) in self.command_output.iter() {
                                 if *is_md {
                                     egui_commonmark::CommonMarkViewer::new()
-                                        .show(ui, &mut md_cache, text);
+                                        .show(ui, &mut self.md_cache, text);
                                 } else {
                                     let color = if *is_err {
                                         self.colors.error_text

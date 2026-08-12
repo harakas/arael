@@ -126,8 +126,14 @@ impl Gui {
         self.button(to, false);
     }
 
+    /// Press the primary button at a sketch position without
+    /// releasing (starts a gesture the test continues manually).
+    pub fn press(&mut self, p: vect2d) {
+        self.button(p, true);
+    }
+
     /// Release the primary button at a sketch position (ends a
-    /// gesture started with drag_moves).
+    /// gesture started with drag_moves or press).
     pub fn release(&mut self, p: vect2d) {
         self.button(p, false);
         self.time += 0.4;

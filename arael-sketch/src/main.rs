@@ -17,6 +17,8 @@ mod coincide;
 mod test_harness;
 #[cfg(test)]
 mod gui_tests;
+#[cfg(test)]
+mod perf_probe;
 
 use std::collections::HashMap;
 use eframe::egui;
@@ -125,6 +127,10 @@ pub struct EditorApp {
     /// still held: blocks the drag branch from re-grabbing at the
     /// press origin until the button is released.
     pub suppress_drag_regrab: bool,
+    /// Markdown render cache for the command panel. Lives on the app
+    /// so parsed output is reused across frames (a per-frame cache
+    /// re-parses every markdown entry every frame).
+    pub md_cache: egui_commonmark::CommonMarkCache,
     /// The installed drag apparatus (solver-owned helpers, bridge,
     /// locks and anchors) for the active gesture.
     pub drag_apparatus: Option<arael_sketch_solver::DragApparatus>,
@@ -368,6 +374,7 @@ impl EditorApp {
             hovered: None,
             grab: None,
             suppress_drag_regrab: false,
+            md_cache: Default::default(),
             drag_apparatus: None,
             drag_offset: vect2d::new(0.0, 0.0),
             drag_offset2: vect2d::new(0.0, 0.0),
