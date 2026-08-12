@@ -8,6 +8,11 @@ mod colors;
 mod tools;
 mod drawing;
 mod app_update;
+mod panels;
+mod tool_input;
+mod overlays;
+mod dim_input;
+mod coincide;
 
 use std::collections::HashMap;
 use eframe::egui;
@@ -2070,66 +2075,9 @@ impl EditorApp {
     // Check if two "vertices" (point-like entities) are already transitively coincident.
     // Uses the same union-find as compute_locked_sets.
     fn are_transitively_coincident(&self, sel_a: Selection, sel_b: Selection) -> bool {
-        let np = self.sketch.points.slot_count();
-        let nl = self.sketch.lines.slot_count();
-        let na = self.sketch.arcs.slot_count();
-        let total = np + 2 * nl + 3 * na;
-        let mut parent: Vec<usize> = (0..total).collect();
-        let find = |parent: &mut Vec<usize>, mut x: usize| -> usize {
-            while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x]; } x
-        };
-        let union = |parent: &mut Vec<usize>, a: usize, b: usize| {
-            let (ra, rb) = (find(parent, a), find(parent, b));
-            if ra != rb { parent[ra] = rb; }
-        };
-        let pt_id = |r: Ref<Point>| r.index() as usize;
-        let lp1_id = |r: Ref<Line>| np + r.index() as usize;
-        let lp2_id = |r: Ref<Line>| np + nl + r.index() as usize;
-        let ac_id = |r: Ref<Arc>| np + 2 * nl + r.index() as usize;
-        let as_id = |r: Ref<Arc>| np + 2 * nl + na + r.index() as usize;
-        let ae_id = |r: Ref<Arc>| np + 2 * nl + 2 * na + r.index() as usize;
-
-        // Build unions (same as compute_locked_sets)
-        for c in &self.sketch.coincident_pp { union(&mut parent, pt_id(c.a), pt_id(c.b)); }
-        for c in &self.sketch.coincident_lp1 { union(&mut parent, lp1_id(c.line), pt_id(c.point)); }
-        for c in &self.sketch.coincident_lp2 { union(&mut parent, lp2_id(c.line), pt_id(c.point)); }
-        for c in &self.sketch.coincident_ll11 { union(&mut parent, lp1_id(c.a), lp1_id(c.b)); }
-        for c in &self.sketch.coincident_ll12 { union(&mut parent, lp1_id(c.a), lp2_id(c.b)); }
-        for c in &self.sketch.coincident_ll21 { union(&mut parent, lp2_id(c.a), lp1_id(c.b)); }
-        for c in &self.sketch.coincident_ll22 { union(&mut parent, lp2_id(c.a), lp2_id(c.b)); }
-        for c in &self.sketch.coincident_arc_center { union(&mut parent, pt_id(c.point), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_arc_start { union(&mut parent, pt_id(c.point), as_id(c.arc)); }
-        for c in &self.sketch.coincident_arc_end { union(&mut parent, pt_id(c.point), ae_id(c.arc)); }
-        for c in &self.sketch.coincident_lp1_arc_center { union(&mut parent, lp1_id(c.line), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_center { union(&mut parent, lp2_id(c.line), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_lp1_arc_start { union(&mut parent, lp1_id(c.line), as_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_start { union(&mut parent, lp2_id(c.line), as_id(c.arc)); }
-        for c in &self.sketch.coincident_lp1_arc_end { union(&mut parent, lp1_id(c.line), ae_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_end { union(&mut parent, lp2_id(c.line), ae_id(c.arc)); }
-        for c in &self.sketch.concentric { union(&mut parent, ac_id(c.a), ac_id(c.b)); }
-        for c in &self.sketch.coincident_arc_center_start { union(&mut parent, ac_id(c.a), as_id(c.b)); }
-        for c in &self.sketch.coincident_arc_center_end { union(&mut parent, ac_id(c.a), ae_id(c.b)); }
-        for c in &self.sketch.coincident_arc_start_center { union(&mut parent, as_id(c.a), ac_id(c.b)); }
-        for c in &self.sketch.coincident_arc_end_center { union(&mut parent, ae_id(c.a), ac_id(c.b)); }
-        for c in &self.sketch.coincident_arc_start_start { union(&mut parent, as_id(c.a), as_id(c.b)); }
-        for c in &self.sketch.coincident_arc_start_end { union(&mut parent, as_id(c.a), ae_id(c.b)); }
-        for c in &self.sketch.coincident_arc_end_start { union(&mut parent, ae_id(c.a), as_id(c.b)); }
-        for c in &self.sketch.coincident_arc_end_end { union(&mut parent, ae_id(c.a), ae_id(c.b)); }
-
-        let sel_to_id = |s: Selection| -> Option<usize> {
-            match s {
-                Selection::Point(r) => Some(pt_id(r)),
-                Selection::LineP1(r) => Some(lp1_id(r)),
-                Selection::LineP2(r) => Some(lp2_id(r)),
-                Selection::ArcCenter(r) => Some(ac_id(r)),
-                Selection::ArcStart(r) => Some(as_id(r)),
-                Selection::ArcEnd(r) => Some(ae_id(r)),
-                _ => None,
-            }
-        };
-
-        if let (Some(id_a), Some(id_b)) = (sel_to_id(sel_a), sel_to_id(sel_b)) {
-            find(&mut parent, id_a) == find(&mut parent, id_b)
+        let mut groups = coincide::CoincidenceGroups::build(&self.sketch);
+        if let (Some(id_a), Some(id_b)) = (groups.selection_id(sel_a), groups.selection_id(sel_b)) {
+            groups.same_group(id_a, id_b)
         } else {
             false
         }
@@ -2563,19 +2511,13 @@ impl EditorApp {
             match sel[0] {
                 Selection::Line(r) => return Some(self.pick_line_dim_kind(r, mouse)),
                 Selection::Arc(r) => {
-                    let a = &self.sketch.arcs[r];
-                    if a.is_ellipse
-                        && let Some(m) = mouse {
-                            // Project mouse onto major/minor axes to pick radius or radius_b
-                            let dx = m.x - a.center.value.x;
-                            let dy = m.y - a.center.value.y;
-                            let rot = a.rotation.value;
-                            // Component along major axis vs minor axis
-                            let major = (dx * rot.cos() + dy * rot.sin()).abs();
-                            let minor = (-dx * rot.sin() + dy * rot.cos()).abs();
-                            if minor > major {
-                                return Some(DimensionKind::ArcRadiusB(r));
-                            }
+                    // Unlocked placement picks radius vs radius_b from
+                    // the mouse's nearest axis (ellipses only).
+                    if let Some(m) = mouse
+                        && let Some(p) = self.dim_placement_from_mouse(
+                            &DimensionKind::ArcRadius(r), m, false)
+                        && let Some(nk) = p.new_kind {
+                            return Some(nk);
                         }
                     return Some(DimensionKind::ArcRadius(r));
                 }
@@ -2709,36 +2651,20 @@ impl EditorApp {
             DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) => {
                 let a = &self.sketch.arcs[*r];
                 let is_b = matches!(kind, DimensionKind::ArcRadiusB(_));
-                let rv = if is_b { a.radius_b.value } else { a.radius.value };
-                let angle = if a.is_ellipse {
-                    if is_b { a.rotation.value + std::f64::consts::FRAC_PI_2 }
-                    else { a.rotation.value }
-                } else { 0.0 };
-                let edge = vect2d::new(
-                    a.center.value.x + rv * angle.cos(),
-                    a.center.value.y + rv * angle.sin(),
-                );
+                // Semi-axis edge: major axis at t=0, minor at t=pi/2.
+                let edge = if is_b { a.point_at(std::f64::consts::FRAC_PI_2) }
+                           else { a.point_at(0.0) };
                 (a.center.value, edge)
             }
             DimensionKind::ArcSweep(r) => {
                 let a = &self.sketch.arcs[*r];
-                let sa = a.start_angle.value;
-                let ea = a.end_angle.value;
-                let rad = a.radius.value;
-                let p1 = vect2d::new(a.center.value.x + rad * sa.cos(), a.center.value.y + rad * sa.sin());
-                let p2 = vect2d::new(a.center.value.x + rad * ea.cos(), a.center.value.y + rad * ea.sin());
-                (p1, p2)
+                (a.start_pos(), a.end_pos())
             }
             DimensionKind::ArcRotation(r) => {
-                // Two endpoints along the major axis at the current
-                // rotation, from center out to the +major-axis edge.
+                // From center out to the +major-axis edge at the
+                // current rotation.
                 let a = &self.sketch.arcs[*r];
-                let rot = a.rotation.value;
-                let edge = vect2d::new(
-                    a.center.value.x + a.radius.value * rot.cos(),
-                    a.center.value.y + a.radius.value * rot.sin(),
-                );
-                (a.center.value, edge)
+                (a.center.value, a.point_at(0.0))
             }
             DimensionKind::Angle(a, b, _) => {
                 // Return midpoints of both lines (for hit testing fallback)
@@ -3440,76 +3366,36 @@ impl EditorApp {
     // Find the directly locked vertex in the same transitive group as `sel`.
     // Returns unlock actions for all directly locked vertices in the group.
     fn find_direct_locks_in_group(&self, sel: Selection) -> Vec<Action> {
-        let (_pt_locked, _l_p1_locked, _l_p2_locked, _arc_c_locked) = self.compute_locked_sets();
-
-        // Build union-find (same as compute_locked_sets)
-        let np = self.sketch.points.slot_count();
-        let nl = self.sketch.lines.slot_count();
-        let na = self.sketch.arcs.slot_count();
-        let total = np + 2 * nl + 3 * na;
-        let mut parent: Vec<usize> = (0..total).collect();
-        let find = |parent: &mut Vec<usize>, mut x: usize| -> usize {
-            while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x]; } x
+        let mut groups = coincide::CoincidenceGroups::build(&self.sketch);
+        let sel_id = match groups.selection_id(sel) {
+            Some(id) => id,
+            None => return Vec::new(),
         };
-        let union = |parent: &mut Vec<usize>, a: usize, b: usize| {
-            let (ra, rb) = (find(parent, a), find(parent, b));
-            if ra != rb { parent[ra] = rb; }
-        };
-        let pt_id = |r: Ref<Point>| r.index() as usize;
-        let lp1_id = |r: Ref<Line>| np + r.index() as usize;
-        let lp2_id = |r: Ref<Line>| np + nl + r.index() as usize;
-        let ac_id = |r: Ref<Arc>| np + 2 * nl + r.index() as usize;
-
-        // Build unions (abbreviated - same constraint list as compute_locked_sets)
-        for c in &self.sketch.coincident_pp { union(&mut parent, pt_id(c.a), pt_id(c.b)); }
-        for c in &self.sketch.coincident_lp1 { union(&mut parent, lp1_id(c.line), pt_id(c.point)); }
-        for c in &self.sketch.coincident_lp2 { union(&mut parent, lp2_id(c.line), pt_id(c.point)); }
-        for c in &self.sketch.coincident_ll11 { union(&mut parent, lp1_id(c.a), lp1_id(c.b)); }
-        for c in &self.sketch.coincident_ll12 { union(&mut parent, lp1_id(c.a), lp2_id(c.b)); }
-        for c in &self.sketch.coincident_ll21 { union(&mut parent, lp2_id(c.a), lp1_id(c.b)); }
-        for c in &self.sketch.coincident_ll22 { union(&mut parent, lp2_id(c.a), lp2_id(c.b)); }
-        for c in &self.sketch.coincident_arc_center { union(&mut parent, pt_id(c.point), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_lp1_arc_center { union(&mut parent, lp1_id(c.line), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_center { union(&mut parent, lp2_id(c.line), ac_id(c.arc)); }
-        for c in &self.sketch.concentric { union(&mut parent, ac_id(c.a), ac_id(c.b)); }
-        // (other arc constraint unions omitted for brevity - they follow the same pattern as compute_locked_sets)
-        for c in &self.sketch.coincident_arc_start { union(&mut parent, pt_id(c.point), np + 2*nl + na + c.arc.index() as usize); }
-        for c in &self.sketch.coincident_arc_end { union(&mut parent, pt_id(c.point), np + 2*nl + 2*na + c.arc.index() as usize); }
-        for c in &self.sketch.coincident_lp1_arc_start { union(&mut parent, lp1_id(c.line), np + 2*nl + na + c.arc.index() as usize); }
-        for c in &self.sketch.coincident_lp2_arc_start { union(&mut parent, lp2_id(c.line), np + 2*nl + na + c.arc.index() as usize); }
-        for c in &self.sketch.coincident_lp1_arc_end { union(&mut parent, lp1_id(c.line), np + 2*nl + 2*na + c.arc.index() as usize); }
-        for c in &self.sketch.coincident_lp2_arc_end { union(&mut parent, lp2_id(c.line), np + 2*nl + 2*na + c.arc.index() as usize); }
-
-        let sel_id = match sel {
-            Selection::Point(r) => Some(pt_id(r)),
-            Selection::LineP1(r) => Some(lp1_id(r)),
-            Selection::LineP2(r) => Some(lp2_id(r)),
-            Selection::ArcCenter(r) => Some(ac_id(r)),
-            _ => None,
-        };
-        let sel_id = match sel_id { Some(id) => id, None => return Vec::new() };
-        let sel_root = find(&mut parent, sel_id);
+        let sel_root = groups.find(sel_id);
 
         let mut actions = Vec::new();
         // Find all directly locked vertices in the same group
         for r in self.sketch.points.refs() {
             let p = &self.sketch.points[r];
-            if p.constraints.has_fix_x && p.constraints.has_fix_y && find(&mut parent, pt_id(r)) == sel_root {
+            let id = groups.pt(r);
+            if p.constraints.has_fix_x && p.constraints.has_fix_y && groups.find(id) == sel_root {
                 actions.push(Action::UnlockPoint { point: r });
             }
         }
         for r in self.sketch.lines.refs() {
             let l = &self.sketch.lines[r];
-            if !l.p1.optimize && find(&mut parent, lp1_id(r)) == sel_root {
+            let (id1, id2) = (groups.lp1(r), groups.lp2(r));
+            if !l.p1.optimize && groups.find(id1) == sel_root {
                 actions.push(Action::UnlockLineP1 { line: r });
             }
-            if !l.p2.optimize && find(&mut parent, lp2_id(r)) == sel_root {
+            if !l.p2.optimize && groups.find(id2) == sel_root {
                 actions.push(Action::UnlockLineP2 { line: r });
             }
         }
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
-            if !a.center.optimize && find(&mut parent, ac_id(r)) == sel_root {
+            let id = groups.arc_center(r);
+            if !a.center.optimize && groups.find(id) == sel_root {
                 actions.push(Action::UnlockArcCenter { arc: r });
             }
         }
@@ -4213,75 +4099,27 @@ impl EditorApp {
         std::collections::HashSet<u32>,  // locked line indices (p2)
         std::collections::HashSet<u32>,  // locked arc indices (center)
     ) {
-        // Flat IDs: points, line p1s, line p2s, arc centers, arc starts, arc ends
-        let np = self.sketch.points.slot_count();
-        let nl = self.sketch.lines.slot_count();
-        let na = self.sketch.arcs.slot_count();
-        let total = np + 2 * nl + 3 * na;
-
-        let mut parent: Vec<usize> = (0..total).collect();
-        let find = |parent: &mut Vec<usize>, mut x: usize| -> usize {
-            while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x]; }
-            x
-        };
-        let union = |parent: &mut Vec<usize>, a: usize, b: usize| {
-            let (ra, rb) = (find(parent, a), find(parent, b));
-            if ra != rb { parent[ra] = rb; }
-        };
-
-        let pt_id = |r: Ref<Point>| r.index() as usize;
-        let lp1_id = |r: Ref<Line>| np + r.index() as usize;
-        let lp2_id = |r: Ref<Line>| np + nl + r.index() as usize;
-        let ac_id = |r: Ref<Arc>| np + 2 * nl + r.index() as usize;
-        let as_id = |r: Ref<Arc>| np + 2 * nl + na + r.index() as usize;
-        let ae_id = |r: Ref<Arc>| np + 2 * nl + 2 * na + r.index() as usize;
-
-        // Point-Point, Line-Point, Line-Line
-        for c in &self.sketch.coincident_pp { union(&mut parent, pt_id(c.a), pt_id(c.b)); }
-        for c in &self.sketch.coincident_lp1 { union(&mut parent, lp1_id(c.line), pt_id(c.point)); }
-        for c in &self.sketch.coincident_lp2 { union(&mut parent, lp2_id(c.line), pt_id(c.point)); }
-        for c in &self.sketch.coincident_ll11 { union(&mut parent, lp1_id(c.a), lp1_id(c.b)); }
-        for c in &self.sketch.coincident_ll12 { union(&mut parent, lp1_id(c.a), lp2_id(c.b)); }
-        for c in &self.sketch.coincident_ll21 { union(&mut parent, lp2_id(c.a), lp1_id(c.b)); }
-        for c in &self.sketch.coincident_ll22 { union(&mut parent, lp2_id(c.a), lp2_id(c.b)); }
-        // Point-Arc
-        for c in &self.sketch.coincident_arc_center { union(&mut parent, pt_id(c.point), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_arc_start { union(&mut parent, pt_id(c.point), as_id(c.arc)); }
-        for c in &self.sketch.coincident_arc_end { union(&mut parent, pt_id(c.point), ae_id(c.arc)); }
-        // Line-Arc
-        for c in &self.sketch.coincident_lp1_arc_center { union(&mut parent, lp1_id(c.line), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_center { union(&mut parent, lp2_id(c.line), ac_id(c.arc)); }
-        for c in &self.sketch.coincident_lp1_arc_start { union(&mut parent, lp1_id(c.line), as_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_start { union(&mut parent, lp2_id(c.line), as_id(c.arc)); }
-        for c in &self.sketch.coincident_lp1_arc_end { union(&mut parent, lp1_id(c.line), ae_id(c.arc)); }
-        for c in &self.sketch.coincident_lp2_arc_end { union(&mut parent, lp2_id(c.line), ae_id(c.arc)); }
-        // Arc-Arc
-        for c in &self.sketch.concentric { union(&mut parent, ac_id(c.a), ac_id(c.b)); }
-        for c in &self.sketch.coincident_arc_center_start { union(&mut parent, ac_id(c.a), as_id(c.b)); }
-        for c in &self.sketch.coincident_arc_center_end { union(&mut parent, ac_id(c.a), ae_id(c.b)); }
-        for c in &self.sketch.coincident_arc_start_center { union(&mut parent, as_id(c.a), ac_id(c.b)); }
-        for c in &self.sketch.coincident_arc_end_center { union(&mut parent, ae_id(c.a), ac_id(c.b)); }
-        for c in &self.sketch.coincident_arc_start_start { union(&mut parent, as_id(c.a), as_id(c.b)); }
-        for c in &self.sketch.coincident_arc_start_end { union(&mut parent, as_id(c.a), ae_id(c.b)); }
-        for c in &self.sketch.coincident_arc_end_start { union(&mut parent, ae_id(c.a), as_id(c.b)); }
-        for c in &self.sketch.coincident_arc_end_end { union(&mut parent, ae_id(c.a), ae_id(c.b)); }
+        let mut groups = coincide::CoincidenceGroups::build(&self.sketch);
 
         // Find locked roots
         let mut locked_roots: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for r in self.sketch.points.refs() {
             let p = &self.sketch.points[r];
+            let id = groups.pt(r);
             if p.constraints.has_fix_x && p.constraints.has_fix_y {
-                locked_roots.insert(find(&mut parent, pt_id(r)));
+                locked_roots.insert(groups.find(id));
             }
         }
         for r in self.sketch.lines.refs() {
             let l = &self.sketch.lines[r];
-            if !l.p1.optimize { locked_roots.insert(find(&mut parent, lp1_id(r))); }
-            if !l.p2.optimize { locked_roots.insert(find(&mut parent, lp2_id(r))); }
+            let (id1, id2) = (groups.lp1(r), groups.lp2(r));
+            if !l.p1.optimize { locked_roots.insert(groups.find(id1)); }
+            if !l.p2.optimize { locked_roots.insert(groups.find(id2)); }
         }
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
-            if !a.center.optimize { locked_roots.insert(find(&mut parent, ac_id(r))); }
+            let id = groups.arc_center(r);
+            if !a.center.optimize { locked_roots.insert(groups.find(id)); }
         }
 
         // Collect locked vertices
@@ -4291,20 +4129,23 @@ impl EditorApp {
         let mut arc_c_locked = std::collections::HashSet::new();
 
         for r in self.sketch.points.refs() {
-            if locked_roots.contains(&find(&mut parent, pt_id(r))) {
+            let id = groups.pt(r);
+            if locked_roots.contains(&groups.find(id)) {
                 pt_locked.insert(r.index());
             }
         }
         for r in self.sketch.lines.refs() {
-            if locked_roots.contains(&find(&mut parent, lp1_id(r))) {
+            let (id1, id2) = (groups.lp1(r), groups.lp2(r));
+            if locked_roots.contains(&groups.find(id1)) {
                 l_p1_locked.insert(r.index());
             }
-            if locked_roots.contains(&find(&mut parent, lp2_id(r))) {
+            if locked_roots.contains(&groups.find(id2)) {
                 l_p2_locked.insert(r.index());
             }
         }
         for r in self.sketch.arcs.refs() {
-            if locked_roots.contains(&find(&mut parent, ac_id(r))) {
+            let id = groups.arc_center(r);
+            if locked_roots.contains(&groups.find(id)) {
                 arc_c_locked.insert(r.index());
             }
         }

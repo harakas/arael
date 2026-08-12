@@ -10,6 +10,36 @@ use crate::tools::*;
 use arael_sketch_backend::geometry::*;
 use crate::EditorApp;
 
+/// H / V constraint glyph at half-size `s`: an H shape (two verticals
+/// plus crossbar) or a V shape (two diagonals meeting at the bottom).
+/// Shared by the committed constraint markers and the live hints so
+/// both look the same.
+pub(crate) fn hv_glyph(painter: &egui::Painter, p: egui::Pos2, horizontal: bool,
+                       s: f32, stroke: egui::Stroke) {
+    if horizontal {
+        let g = s * 0.45;
+        painter.line_segment([egui::Pos2::new(p.x - g, p.y - s), egui::Pos2::new(p.x - g, p.y + s)], stroke);
+        painter.line_segment([egui::Pos2::new(p.x + g, p.y - s), egui::Pos2::new(p.x + g, p.y + s)], stroke);
+        painter.line_segment([egui::Pos2::new(p.x - g, p.y), egui::Pos2::new(p.x + g, p.y)], stroke);
+    } else {
+        painter.line_segment([egui::Pos2::new(p.x - s, p.y - s), egui::Pos2::new(p.x, p.y + s)], stroke);
+        painter.line_segment([egui::Pos2::new(p.x + s, p.y - s), egui::Pos2::new(p.x, p.y + s)], stroke);
+    }
+}
+
+/// Collinear constraint glyph: a diagonal line with a gap in the
+/// middle. Shared by committed markers and live hints.
+pub(crate) fn collinear_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke: egui::Stroke) {
+    painter.line_segment([
+        egui::Pos2::new(p.x - s * 0.7, p.y + s * 0.7),
+        egui::Pos2::new(p.x - s * 0.1, p.y + s * 0.1),
+    ], stroke);
+    painter.line_segment([
+        egui::Pos2::new(p.x + s * 0.1, p.y - s * 0.1),
+        egui::Pos2::new(p.x + s * 0.7, p.y - s * 0.7),
+    ], stroke);
+}
+
 /// Compute (start_angle, span) for an arc respecting ccw flag.
 /// CCW arcs have positive span, CW arcs have negative span.
 fn arc_span(a: &Arc) -> (f64, f64) {
@@ -489,14 +519,10 @@ impl EditorApp {
         // for a dimension reading and uniform visually).
         let ann_rx = (a.radius.value + offset.y).max(0.1);
         let ann_ry = (a.radius_b.value + offset.y).max(0.1);
-        let cr = a.rotation.value.cos();
-        let sr = a.rotation.value.sin();
         // Ellipse point at parametric angle t, with custom rx/ry.
+        let rot = a.rotation.value;
         let ellipse_pt = |t: f64, rx: f64, ry: f64| -> vect2d {
-            let ct = t.cos();
-            let st = t.sin();
-            vect2d::new(cx + rx * ct * cr - ry * st * sr,
-                        cy + rx * ct * sr + ry * st * cr)
+            ellipse_point(vect2d::new(cx, cy), rx, ry, rot, t)
         };
         let stroke = egui::Stroke::new(1.0, color);
         let ext_stroke = egui::Stroke::new(0.5, color);
@@ -1318,14 +1344,7 @@ impl EditorApp {
         let offset_world = 10.0 / self.scale as f64;
         let r = (a.radius.value - offset_world).max(1e-6);
         let rb = (a.radius_b.value - offset_world).max(1e-6);
-        let ct = angle.cos();
-        let st = angle.sin();
-        let cr = a.rotation.value.cos();
-        let sr = a.rotation.value.sin();
-        let pos = vect2d::new(
-            a.center.value.x + r * ct * cr - rb * st * sr,
-            a.center.value.y + r * ct * sr + rb * st * cr,
-        );
+        let pos = ellipse_point(a.center.value, r, rb, a.rotation.value, angle);
         self.to_screen(pos)
     }
 
@@ -2095,18 +2114,8 @@ impl EditorApp {
             let p = marker.pos;
             let stroke = egui::Stroke::new(w, color);
             match marker.symbol {
-                ConstraintSymbol::H => {
-                    // H shape: two verticals close together + horizontal crossbar
-                    let g = s * 0.45;
-                    painter.line_segment([egui::Pos2::new(p.x - g, p.y - s), egui::Pos2::new(p.x - g, p.y + s)], stroke);
-                    painter.line_segment([egui::Pos2::new(p.x + g, p.y - s), egui::Pos2::new(p.x + g, p.y + s)], stroke);
-                    painter.line_segment([egui::Pos2::new(p.x - g, p.y), egui::Pos2::new(p.x + g, p.y)], stroke);
-                }
-                ConstraintSymbol::V => {
-                    // V shape: two diagonals meeting at bottom
-                    painter.line_segment([egui::Pos2::new(p.x - s, p.y - s), egui::Pos2::new(p.x, p.y + s)], stroke);
-                    painter.line_segment([egui::Pos2::new(p.x + s, p.y - s), egui::Pos2::new(p.x, p.y + s)], stroke);
-                }
+                ConstraintSymbol::H => hv_glyph(painter, p, true, s, stroke),
+                ConstraintSymbol::V => hv_glyph(painter, p, false, s, stroke),
                 ConstraintSymbol::Parallel => {
                     // Two vertical parallel lines
                     let g = s * 0.35;
@@ -2143,17 +2152,7 @@ impl EditorApp {
                         egui::Pos2::new(tx + k * half, ty + k * half),
                     ], stroke);
                 }
-                ConstraintSymbol::Collinear => {
-                    // Diagonal line with gap in the middle
-                    painter.line_segment([
-                        egui::Pos2::new(p.x - s * 0.7, p.y + s * 0.7),
-                        egui::Pos2::new(p.x - s * 0.1, p.y + s * 0.1),
-                    ], stroke);
-                    painter.line_segment([
-                        egui::Pos2::new(p.x + s * 0.1, p.y - s * 0.1),
-                        egui::Pos2::new(p.x + s * 0.7, p.y - s * 0.7),
-                    ], stroke);
-                }
+                ConstraintSymbol::Collinear => collinear_glyph(painter, p, s, stroke),
                 ConstraintSymbol::Midpoint => {
                     // Triangle pointing up
                     let h = s * 1.56;

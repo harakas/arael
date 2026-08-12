@@ -88,11 +88,17 @@ pub enum DeleteTarget {
     Arc(Ref<Arc>),
 }
 
+// A clicked anchor during tool drawing: the position and what it
+// snapped to (for auto-coincident on completion).
+#[derive(Clone, Copy)]
+pub struct PlacedPoint {
+    pub pos: vect2d,
+    pub snap: Option<SnapTarget>,
+}
+
 // In-progress line drawing state
 pub struct LineDrawState {
-    pub start: vect2d,
-    // What the start point snapped to (for auto-coincident on completion)
-    pub snap_start: Option<SnapTarget>,
+    pub start: PlacedPoint,
     // True when this segment starts from the end of a just-placed segment
     // (line-tool chaining). Suppresses the start-snap marker in the preview
     // since that endpoint was just confirmed by the user's last click.
@@ -100,22 +106,19 @@ pub struct LineDrawState {
 }
 
 pub struct CircleDrawState {
-    pub center: vect2d,
-    pub snap_center: Option<SnapTarget>,
+    pub center: PlacedPoint,
 }
 
 pub struct ArcDrawState {
-    pub start: vect2d,
-    pub snap_start: Option<SnapTarget>,
-    pub end: Option<(vect2d, Option<SnapTarget>)>,  // None until second click
+    pub start: PlacedPoint,
+    pub end: Option<PlacedPoint>,  // None until second click
 }
 
 // Rectangle drawing: user clicks two opposite corners, we build an
 // axis-aligned rect as four lines with corner coincidents and H/V
 // constraints on the sides.
 pub struct RectDrawState {
-    pub corner: vect2d,
-    pub snap_corner: Option<SnapTarget>,
+    pub corner: PlacedPoint,
 }
 
 // In-flight corner-op set (fillet or chamfer), created when the tool
