@@ -117,32 +117,18 @@ impl SymbolBag {
             }
             // Derived
             let r_sym = arael_sym::symbol(&format!("{}.radius", name));
-            let rb_sym = arael_sym::symbol(&format!("{}.radius_b", name));
-            let rot_sym = arael_sym::symbol(&format!("{}.rotation", name));
-            derived.insert(format!("{}.diameter", name), r_sym.clone() * arael_sym::constant(2.0));
+            derived.insert(format!("{}.diameter", name), r_sym * arael_sym::constant(2.0));
             let sa_sym = arael_sym::symbol(&format!("{}.start_angle", name));
             let ea_sym = arael_sym::symbol(&format!("{}.end_angle", name));
             derived.insert(format!("{}.sweep", name),
                 arael_sym::abs(ea_sym.clone() - sa_sym.clone()) * arael_sym::constant(180.0 / std::f64::consts::PI));
             // Arc/ellipse endpoint positions: start.x/y, end.x/y
-            let cx_sym = arael_sym::symbol(&format!("{}.center.x", name));
-            let cy_sym = arael_sym::symbol(&format!("{}.center.y", name));
-            let cr = arael_sym::cos(rot_sym.clone());
-            let sr = arael_sym::sin(rot_sym);
-            // start point
-            let ct_s = arael_sym::cos(sa_sym.clone());
-            let st_s = arael_sym::sin(sa_sym);
-            derived.insert(format!("{}.start.x", name),
-                cx_sym.clone() + r_sym.clone() * ct_s.clone() * cr.clone() - rb_sym.clone() * st_s.clone() * sr.clone());
-            derived.insert(format!("{}.start.y", name),
-                cy_sym.clone() + r_sym.clone() * ct_s * sr.clone() + rb_sym.clone() * st_s * cr.clone());
-            // end point
-            let ct_e = arael_sym::cos(ea_sym.clone());
-            let st_e = arael_sym::sin(ea_sym);
-            derived.insert(format!("{}.end.x", name),
-                cx_sym + r_sym.clone() * ct_e.clone() * cr.clone() - rb_sym.clone() * st_e.clone() * sr.clone());
-            derived.insert(format!("{}.end.y", name),
-                cy_sym + r_sym * ct_e * sr + rb_sym * st_e * cr);
+            let (sx, sy) = crate::arc_endpoint_symbols(name, sa_sym);
+            derived.insert(format!("{}.start.x", name), sx);
+            derived.insert(format!("{}.start.y", name), sy);
+            let (ex, ey) = crate::arc_endpoint_symbols(name, ea_sym);
+            derived.insert(format!("{}.end.x", name), ex);
+            derived.insert(format!("{}.end.y", name), ey);
         }
 
         // Dimensions: d{n} -> target value or live expression

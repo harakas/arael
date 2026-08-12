@@ -151,9 +151,8 @@ pub fn fit_earc_tangent(
     let ea = (ly2 / ry).atan2(lx2 / rx);
 
     // Determine CCW from tangent direction at start
-    let arc_tan_x = -rx * sa.sin() * cr - ry * sa.cos() * sr;
-    let arc_tan_y = -rx * sa.sin() * sr + ry * sa.cos() * cr;
-    let dot = arc_tan_x * t1.x + arc_tan_y * t1.y;
+    let tv = arael_sketch_solver::ellipse_tangent(rx, ry, rot, sa);
+    let dot = tv.x * t1.x + tv.y * t1.y;
     let ccw = dot > 0.0;
 
     Some((center, rx, ry, rot, sa, ea, ccw))
@@ -163,23 +162,7 @@ pub fn fit_earc_tangent(
 mod tests {
     use super::*;
 
-    fn arc_point(center: vect2d, rx: f64, ry: f64, rot: f64, t: f64) -> vect2d {
-        let cr = rot.cos(); let sr = rot.sin();
-        let ct = t.cos(); let st = t.sin();
-        vect2d::new(
-            center.x + rx * ct * cr - ry * st * sr,
-            center.y + rx * ct * sr + ry * st * cr,
-        )
-    }
-
-    fn arc_tangent(rx: f64, ry: f64, rot: f64, t: f64) -> vect2d {
-        let cr = rot.cos(); let sr = rot.sin();
-        let ct = t.cos(); let st = t.sin();
-        vect2d::new(
-            -rx * st * cr - ry * ct * sr,
-            -rx * st * sr + ry * ct * cr,
-        )
-    }
+    use arael_sketch_solver::{ellipse_point as arc_point, ellipse_tangent as arc_tangent};
 
     #[test]
     fn test_fit_semicircle_bulge1() {

@@ -117,6 +117,9 @@ use arael::refs::{Ref, Arena};
 // #[arael::model] macro emits private `_PARAM_COUNT` constants that
 // CrossBlock<A, B> expansions need to reference.
 include!("entities.rs");
+// arc_math.rs must expand before constraints.rs: its #[arael::function]
+// registrations are used by the constraint bodies there.
+include!("arc_math.rs");
 include!("constraints.rs");
 
 // ---------------------------------------------------------------------------
@@ -2272,21 +2275,15 @@ impl Sketch {
                 let a = &self.arcs[t.arc];
                 // Compute arc endpoint and tangent from arc parameters
                 let angle = if t.p1_arc_start || t.p2_arc_start { a.start_angle.value } else { a.end_angle.value };
-                let cr = a.rotation.value.cos();
-                let sr = a.rotation.value.sin();
-                let ct = angle.cos();
-                let st = angle.sin();
-                let ax = a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr;
-                let ay = a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr;
-                let tx = -a.radius.value * st * cr - a.radius_b.value * ct * sr;
-                let ty = -a.radius.value * st * sr + a.radius_b.value * ct * cr;
+                let ap = a.point_at(angle);
+                let tv = a.tangent_at(angle);
                 // Direction from arc endpoint to the line's other end
                 let (dx, dy) = if t.p1_arc_start || t.p1_arc_end {
-                    (l.p2.value.x - ax, l.p2.value.y - ay)
+                    (l.p2.value.x - ap.x, l.p2.value.y - ap.y)
                 } else {
-                    (l.p1.value.x - ax, l.p1.value.y - ay)
+                    (l.p1.value.x - ap.x, l.p1.value.y - ap.y)
                 };
-                let dot = dx * tx + dy * ty;
+                let dot = dx * tv.x + dy * tv.y;
                 t.dir_sign = if dot >= 0.0 { 1.0 } else { -1.0 };
             }
         }
@@ -2369,20 +2366,6 @@ impl Sketch {
     /// dragged endpoint is already "joined" (to the drag helper) and
     /// won't get a redundant auto-anchor.
     pub fn add_drag_auto_anchors(&mut self) -> DragAutoAnchorState {
-        // Arc endpoint world position: c + R * cos(t) * cos(rot) - R_b * sin(t) * sin(rot),
-        //                              c + R * cos(t) * sin(rot) + R_b * sin(t) * cos(rot)
-        // where t is the start_angle or end_angle.
-        fn arc_pt(a: &Arc, angle: f64) -> vect2d {
-            let ct = angle.cos();
-            let st = angle.sin();
-            let cr = a.rotation.value.cos();
-            let sr = a.rotation.value.sin();
-            vect2d::new(
-                a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr,
-                a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr,
-            )
-        }
-
         let mut state = DragAutoAnchorState {
             helper_points: std::vec::Vec::new(),
         };
@@ -2446,7 +2429,7 @@ impl Sketch {
         for r in arc_refs {
             let a = &self.arcs[r];
             if a.start_angle.optimize && !joined_arc_start.contains(&r) {
-                let pt = arc_pt(a, a.start_angle.value);
+                let pt = a.start_pos();
                 let pos = vect2d::new(pt.x + 0.001, pt.y);
                 let p = self.add_helper_point(pos);
                 self.coincident_arc_start.push(CoincidentArcStart {
@@ -2456,7 +2439,7 @@ impl Sketch {
             }
             let a = &self.arcs[r];
             if a.end_angle.optimize && !joined_arc_end.contains(&r) {
-                let pt = arc_pt(a, a.end_angle.value);
+                let pt = a.end_pos();
                 let pos = vect2d::new(pt.x + 0.001, pt.y);
                 let p = self.add_helper_point(pos);
                 self.coincident_arc_end.push(CoincidentArcEnd {

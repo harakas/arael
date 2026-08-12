@@ -1031,20 +1031,14 @@ impl Action {
                 let shared = p1_arc_start || p1_arc_end || p2_arc_start || p2_arc_end;
                 let dir_sign = if shared {
                     let angle = if p1_arc_start || p2_arc_start { a.start_angle.value } else { a.end_angle.value };
-                    let cr = a.rotation.value.cos();
-                    let sr = a.rotation.value.sin();
-                    let ct = angle.cos();
-                    let st = angle.sin();
-                    let ax = a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr;
-                    let ay = a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr;
-                    let tx = -a.radius.value * st * cr - a.radius_b.value * ct * sr;
-                    let ty = -a.radius.value * st * sr + a.radius_b.value * ct * cr;
+                    let ap = a.point_at(angle);
+                    let tv = a.tangent_at(angle);
                     let (ldx, ldy) = if p1_arc_start || p1_arc_end {
-                        (l.p2.value.x - ax, l.p2.value.y - ay)
+                        (l.p2.value.x - ap.x, l.p2.value.y - ap.y)
                     } else {
-                        (l.p1.value.x - ax, l.p1.value.y - ay)
+                        (l.p1.value.x - ap.x, l.p1.value.y - ap.y)
                     };
-                    let dot = ldx * tx + ldy * ty;
+                    let dot = ldx * tv.x + ldy * tv.y;
                     if dot >= 0.0 { 1.0 } else { -1.0 }
                 } else {
                     f64::NAN

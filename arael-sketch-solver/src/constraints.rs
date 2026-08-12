@@ -192,10 +192,8 @@ pub struct DistanceArcCenterP {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let dx = sx - point.pos.x; let dy = sy - point.pos.y;
     [(sqrt(dx * dx + dy * dy) - distancearcstartp.distance) * sketch.constraint_isigma]
 }))]
@@ -214,10 +212,8 @@ pub struct DistanceArcStartP {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let dx = ex - point.pos.x; let dy = ey - point.pos.y;
     [(sqrt(dx * dx + dy * dy) - distancearcendp.distance) * sketch.constraint_isigma]
 }))]
@@ -274,10 +270,8 @@ pub struct DistanceArcCenterL2 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let dx = sx - line.p1.x; let dy = sy - line.p1.y;
     [(sqrt(dx * dx + dy * dy) - distancearcstartl1.distance) * sketch.constraint_isigma]
 }))]
@@ -296,10 +290,8 @@ pub struct DistanceArcStartL1 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let dx = sx - line.p2.x; let dy = sy - line.p2.y;
     [(sqrt(dx * dx + dy * dy) - distancearcstartl2.distance) * sketch.constraint_isigma]
 }))]
@@ -318,10 +310,8 @@ pub struct DistanceArcStartL2 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let dx = ex - line.p1.x; let dy = ey - line.p1.y;
     [(sqrt(dx * dx + dy * dy) - distancearcendl1.distance) * sketch.constraint_isigma]
 }))]
@@ -340,10 +330,8 @@ pub struct DistanceArcEndL1 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let dx = ex - line.p2.x; let dy = ey - line.p2.y;
     [(sqrt(dx * dx + dy * dy) - distancearcendl2.distance) * sketch.constraint_isigma]
 }))]
@@ -382,10 +370,8 @@ pub struct DistanceAACeCe {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     let dx = a.center.x - bsx; let dy = a.center.y - bsy;
     [(sqrt(dx * dx + dy * dy) - distanceaaces.distance) * sketch.constraint_isigma]
 }))]
@@ -404,10 +390,8 @@ pub struct DistanceAACeS {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     let dx = a.center.x - bex; let dy = a.center.y - bey;
     [(sqrt(dx * dx + dy * dy) - distanceaacee.distance) * sketch.constraint_isigma]
 }))]
@@ -426,10 +410,8 @@ pub struct DistanceAACeE {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
     let dx = asx - b.center.x; let dy = asy - b.center.y;
     [(sqrt(dx * dx + dy * dy) - distanceaasce.distance) * sketch.constraint_isigma]
 }))]
@@ -448,14 +430,10 @@ pub struct DistanceAASCe {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     let dx = asx - bsx; let dy = asy - bsy;
     [(sqrt(dx * dx + dy * dy) - distanceaass.distance) * sketch.constraint_isigma]
 }))]
@@ -474,14 +452,10 @@ pub struct DistanceAASS {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     let dx = asx - bex; let dy = asy - bey;
     [(sqrt(dx * dx + dy * dy) - distanceaase.distance) * sketch.constraint_isigma]
 }))]
@@ -500,10 +474,8 @@ pub struct DistanceAASE {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
     let dx = aex - b.center.x; let dy = aey - b.center.y;
     [(sqrt(dx * dx + dy * dy) - distanceaaece.distance) * sketch.constraint_isigma]
 }))]
@@ -522,14 +494,10 @@ pub struct DistanceAAECe {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     let dx = aex - bsx; let dy = aey - bsy;
     [(sqrt(dx * dx + dy * dy) - distanceaaes.distance) * sketch.constraint_isigma]
 }))]
@@ -548,14 +516,10 @@ pub struct DistanceAAES {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     let dx = aex - bex; let dy = aey - bey;
     [(sqrt(dx * dx + dy * dy) - distanceaaee.distance) * sketch.constraint_isigma]
 }))]
@@ -710,10 +674,8 @@ pub struct MidpointLP2 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let mx = (line.p1.x + line.p2.x) * 0.5;
     let my = (line.p1.y + line.p2.y) * 0.5;
     [(sx - mx) * sketch.constraint_isigma,
@@ -737,10 +699,8 @@ pub struct MidpointArcStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let mx = (line.p1.x + line.p2.x) * 0.5;
     let my = (line.p1.y + line.p2.y) * 0.5;
     [(ex - mx) * sketch.constraint_isigma,
@@ -767,10 +727,8 @@ pub struct MidpointArcEnd {
 #[arael::model]
 #[arael(constraint(hb, {
     let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
-    let ctm = cos(mid_angle); let stm = sin(mid_angle);
-    let crm = cos(arc.rotation); let srm = sin(arc.rotation);
-    let mx = arc.center.x + arc.radius * ctm * crm - arc.radius_b * stm * srm;
-    let my = arc.center.y + arc.radius * ctm * srm + arc.radius_b * stm * crm;
+    let mx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, mid_angle);
+    let my = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, mid_angle);
     [(point.pos.x - mx) * sketch.constraint_isigma,
      (point.pos.y - my) * sketch.constraint_isigma]
 }))]
@@ -793,10 +751,8 @@ pub struct MidpointArcPoint {
 #[arael::model]
 #[arael(constraint(hb, {
     let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
-    let ctm = cos(mid_angle); let stm = sin(mid_angle);
-    let crm = cos(arc.rotation); let srm = sin(arc.rotation);
-    let mx = arc.center.x + arc.radius * ctm * crm - arc.radius_b * stm * srm;
-    let my = arc.center.y + arc.radius * ctm * srm + arc.radius_b * stm * crm;
+    let mx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, mid_angle);
+    let my = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, mid_angle);
     [(line.p1.x - mx) * sketch.constraint_isigma,
      (line.p1.y - my) * sketch.constraint_isigma]
 }))]
@@ -819,10 +775,8 @@ pub struct MidpointLP1Arc {
 #[arael::model]
 #[arael(constraint(hb, {
     let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
-    let ctm = cos(mid_angle); let stm = sin(mid_angle);
-    let crm = cos(arc.rotation); let srm = sin(arc.rotation);
-    let mx = arc.center.x + arc.radius * ctm * crm - arc.radius_b * stm * srm;
-    let my = arc.center.y + arc.radius * ctm * srm + arc.radius_b * stm * crm;
+    let mx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, mid_angle);
+    let my = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, mid_angle);
     [(line.p2.x - mx) * sketch.constraint_isigma,
      (line.p2.y - my) * sketch.constraint_isigma]
 }))]
@@ -844,15 +798,11 @@ pub struct MidpointLP2Arc {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let sx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let sy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let sx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let sy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
     let mid_angle = (b.start_angle + b.end_angle) * 0.5;
-    let ctm_b = cos(mid_angle); let stm_b = sin(mid_angle);
-    let crm_b = cos(b.rotation); let srm_b = sin(b.rotation);
-    let mx = b.center.x + b.radius * ctm_b * crm_b - b.radius_b * stm_b * srm_b;
-    let my = b.center.y + b.radius * ctm_b * srm_b + b.radius_b * stm_b * crm_b;
+    let mx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, mid_angle);
+    let my = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, mid_angle);
     [(sx - mx) * sketch.constraint_isigma,
      (sy - my) * sketch.constraint_isigma]
 }))]
@@ -874,15 +824,11 @@ pub struct MidpointArcStartArc {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let ex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let ey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let ex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let ey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
     let mid_angle = (b.start_angle + b.end_angle) * 0.5;
-    let ctm_b = cos(mid_angle); let stm_b = sin(mid_angle);
-    let crm_b = cos(b.rotation); let srm_b = sin(b.rotation);
-    let mx = b.center.x + b.radius * ctm_b * crm_b - b.radius_b * stm_b * srm_b;
-    let my = b.center.y + b.radius * ctm_b * srm_b + b.radius_b * stm_b * crm_b;
+    let mx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, mid_angle);
+    let my = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, mid_angle);
     [(ex - mx) * sketch.constraint_isigma,
      (ey - my) * sketch.constraint_isigma]
 }))]
@@ -952,10 +898,8 @@ pub struct CoincidentArcCenter {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(point.pos.x - sx) * sketch.constraint_isigma,
      (point.pos.y - sy) * sketch.constraint_isigma]
 }))]
@@ -977,10 +921,8 @@ pub struct CoincidentArcStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(point.pos.x - ex) * sketch.constraint_isigma,
      (point.pos.y - ey) * sketch.constraint_isigma]
 }))]
@@ -1361,12 +1303,10 @@ pub struct CoincidentLL22 {
 // stays well-defined even for zero-length lines.  Four variants for which
 // line endpoint (p1/p2) meets which arc endpoint (start/end).
 #[arael(constraint(hb, guard = self.p1_arc_start, {
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
-    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
-    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let ax = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let ay = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let tx = arc_tangent_x(arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let ty = arc_tangent_y(arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let tlen = sqrt(tx * tx + ty * ty);
     let dx = line.p2.x - ax;
     let dy = line.p2.y - ay;
@@ -1379,12 +1319,10 @@ pub struct CoincidentLL22 {
     ]
 }))]
 #[arael(constraint(hb, guard = self.p1_arc_end, {
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
-    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
-    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let ax = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ay = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let tx = arc_tangent_x(arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ty = arc_tangent_y(arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let tlen = sqrt(tx * tx + ty * ty);
     let dx = line.p2.x - ax;
     let dy = line.p2.y - ay;
@@ -1397,12 +1335,10 @@ pub struct CoincidentLL22 {
     ]
 }))]
 #[arael(constraint(hb, guard = self.p2_arc_start, {
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
-    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
-    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let ax = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let ay = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let tx = arc_tangent_x(arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let ty = arc_tangent_y(arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let tlen = sqrt(tx * tx + ty * ty);
     let dx = line.p1.x - ax;
     let dy = line.p1.y - ay;
@@ -1415,12 +1351,10 @@ pub struct CoincidentLL22 {
     ]
 }))]
 #[arael(constraint(hb, guard = self.p2_arc_end, {
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
-    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
-    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let ax = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ay = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let tx = arc_tangent_x(arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ty = arc_tangent_y(arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let tlen = sqrt(tx * tx + ty * ty);
     let dx = line.p1.x - ax;
     let dy = line.p1.y - ay;
@@ -1655,10 +1589,8 @@ pub struct CoincidentLP2ArcCenter {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(line.p1.x - sx) * sketch.constraint_isigma,
      (line.p1.y - sy) * sketch.constraint_isigma]
 }))]
@@ -1679,10 +1611,8 @@ pub struct CoincidentLP1ArcStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(line.p2.x - sx) * sketch.constraint_isigma,
      (line.p2.y - sy) * sketch.constraint_isigma]
 }))]
@@ -1703,10 +1633,8 @@ pub struct CoincidentLP2ArcStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(line.p1.x - ex) * sketch.constraint_isigma,
      (line.p1.y - ey) * sketch.constraint_isigma]
 }))]
@@ -1727,10 +1655,8 @@ pub struct CoincidentLP1ArcEnd {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(line.p2.x - ex) * sketch.constraint_isigma,
      (line.p2.y - ey) * sketch.constraint_isigma]
 }))]
@@ -1753,10 +1679,8 @@ pub struct CoincidentLP2ArcEnd {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(a.center.x - bsx) * sketch.constraint_isigma,
      (a.center.y - bsy) * sketch.constraint_isigma]
 }))]
@@ -1777,10 +1701,8 @@ pub struct CoincidentArcCenterStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(a.center.x - bex) * sketch.constraint_isigma,
      (a.center.y - bey) * sketch.constraint_isigma]
 }))]
@@ -1801,10 +1723,8 @@ pub struct CoincidentArcCenterEnd {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
     [(asx - b.center.x) * sketch.constraint_isigma,
      (asy - b.center.y) * sketch.constraint_isigma]
 }))]
@@ -1825,10 +1745,8 @@ pub struct CoincidentArcStartCenter {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
     [(aex - b.center.x) * sketch.constraint_isigma,
      (aey - b.center.y) * sketch.constraint_isigma]
 }))]
@@ -1849,14 +1767,10 @@ pub struct CoincidentArcEndCenter {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(asx - bsx) * sketch.constraint_isigma,
      (asy - bsy) * sketch.constraint_isigma]
 }))]
@@ -1877,14 +1791,10 @@ pub struct CoincidentArcStartStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(asx - bex) * sketch.constraint_isigma,
      (asy - bey) * sketch.constraint_isigma]
 }))]
@@ -1905,14 +1815,10 @@ pub struct CoincidentArcStartEnd {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(aex - bsx) * sketch.constraint_isigma,
      (aey - bsy) * sketch.constraint_isigma]
 }))]
@@ -1933,14 +1839,10 @@ pub struct CoincidentArcEndStart {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(aex - bex) * sketch.constraint_isigma,
      (aey - bey) * sketch.constraint_isigma]
 }))]
@@ -2216,10 +2118,8 @@ pub struct DistanceArcCenterL {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len = sqrt(dx * dx + dy * dy);
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     let dist = ((sx - line.p1.x) * dy - (sy - line.p1.y) * dx) / len;
     [(dist - distancearcstartl.distance) * sketch.constraint_isigma]
 }))]
@@ -2242,10 +2142,8 @@ pub struct DistanceArcStartL {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len = sqrt(dx * dx + dy * dy);
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     let dist = ((ex - line.p1.x) * dy - (ey - line.p1.y) * dx) / len;
     [(dist - distancearcendl.distance) * sketch.constraint_isigma]
 }))]
@@ -2524,15 +2422,11 @@ pub struct AxisDistanceArcCenterP {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(sx - point.pos.x - axisdistancearcstartp.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(sy - point.pos.y - axisdistancearcstartp.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceArcStartP {
@@ -2551,15 +2445,11 @@ pub struct AxisDistanceArcStartP {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(ex - point.pos.x - axisdistancearcendp.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(ey - point.pos.y - axisdistancearcendp.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceArcEndP {
@@ -2622,15 +2512,11 @@ pub struct AxisDistanceArcCenterL2 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(sx - line.p1.x - axisdistancearcstartl1.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(sy - line.p1.y - axisdistancearcstartl1.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceArcStartL1 {
@@ -2649,15 +2535,11 @@ pub struct AxisDistanceArcStartL1 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sx = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(sx - line.p2.x - axisdistancearcstartl2.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let sy = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let sy = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
     [(sy - line.p2.y - axisdistancearcstartl2.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceArcStartL2 {
@@ -2676,15 +2558,11 @@ pub struct AxisDistanceArcStartL2 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(ex - line.p1.x - axisdistancearcendl1.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(ey - line.p1.y - axisdistancearcendl1.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceArcEndL1 {
@@ -2703,15 +2581,11 @@ pub struct AxisDistanceArcEndL1 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ex = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(ex - line.p2.x - axisdistancearcendl2.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let ey = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let ey = arc_point_y(arc.center.y, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
     [(ey - line.p2.y - axisdistancearcendl2.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceArcEndL2 {
@@ -2753,15 +2627,11 @@ pub struct AxisDistanceAACeCe {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(a.center.x - bsx - axisdistanceaaces.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(a.center.y - bsy - axisdistanceaaces.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAACeS {
@@ -2780,15 +2650,11 @@ pub struct AxisDistanceAACeS {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(a.center.x - bex - axisdistanceaacee.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(a.center.y - bey - axisdistanceaacee.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAACeE {
@@ -2807,15 +2673,11 @@ pub struct AxisDistanceAACeE {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
     [(asx - b.center.x - axisdistanceaasce.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
     [(asy - b.center.y - axisdistanceaasce.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAASCe {
@@ -2834,21 +2696,13 @@ pub struct AxisDistanceAASCe {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(asx - bsx - axisdistanceaass.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(asy - bsy - axisdistanceaass.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAASS {
@@ -2867,21 +2721,13 @@ pub struct AxisDistanceAASS {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asx = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
+    let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(asx - bex - axisdistanceaase.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_a = cos(a.start_angle); let st_a = sin(a.start_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let asy = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let asy = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(asy - bey - axisdistanceaase.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAASE {
@@ -2900,15 +2746,11 @@ pub struct AxisDistanceAASE {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
     [(aex - b.center.x - axisdistanceaaece.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
     [(aey - b.center.y - axisdistanceaaece.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAAECe {
@@ -2927,21 +2769,13 @@ pub struct AxisDistanceAAECe {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsx = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(aex - bsx - axisdistanceaaes.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.start_angle); let st_b = sin(b.start_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bsy = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bsy = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
     [(aey - bsy - axisdistanceaaes.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAAES {
@@ -2960,21 +2794,13 @@ pub struct AxisDistanceAAES {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aex = a.center.x + a.radius * ct_a * cr_a - a.radius_b * st_a * sr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bex = b.center.x + b.radius * ct_b * cr_b - b.radius_b * st_b * sr_b;
+    let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(aex - bex - axisdistanceaaee.distance) * sketch.constraint_isigma]
 }))]
 #[arael(constraint(hb, guard = !self.horizontal, {
-    let ct_a = cos(a.end_angle); let st_a = sin(a.end_angle);
-    let cr_a = cos(a.rotation); let sr_a = sin(a.rotation);
-    let aey = a.center.y + a.radius * ct_a * sr_a + a.radius_b * st_a * cr_a;
-    let ct_b = cos(b.end_angle); let st_b = sin(b.end_angle);
-    let cr_b = cos(b.rotation); let sr_b = sin(b.rotation);
-    let bey = b.center.y + b.radius * ct_b * sr_b + b.radius_b * st_b * cr_b;
+    let aey = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let bey = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
     [(aey - bey - axisdistanceaaee.distance) * sketch.constraint_isigma]
 }))]
 pub struct AxisDistanceAAEE {
