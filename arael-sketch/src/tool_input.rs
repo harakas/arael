@@ -194,6 +194,11 @@ impl EditorApp {
 
     /// Canvas input for `Tool::Select`.
     pub(crate) fn handle_select_input(&mut self, ui: &egui::Ui, ctx: &egui::Context, response: &egui::Response, mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        // An Escape-cancelled gesture stays suppressed while the
+        // pointer button is held; release re-arms dragging.
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.suppress_drag_regrab = false;
+        }
         // Double-click on dimension to edit value
         if response.double_clicked_by(egui::PointerButton::Primary) {
             let mut edited = false;
@@ -236,7 +241,8 @@ impl EditorApp {
 
         // Drag: geometry or dimension
         if response.dragged_by(egui::PointerButton::Primary) {
-            if self.grab.is_none() && self.drag_dimension.is_none() && self.box_select_start.is_none() {
+            if self.grab.is_none() && self.drag_dimension.is_none()
+                && self.box_select_start.is_none() && !self.suppress_drag_regrab {
                 // First drag frame: hit-test against the PRESS ORIGIN,
                 // not the current cursor. egui's dragged_by only fires
                 // after the pointer has moved past its internal

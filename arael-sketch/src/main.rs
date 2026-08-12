@@ -13,6 +13,10 @@ mod tool_input;
 mod overlays;
 mod dim_input;
 mod coincide;
+#[cfg(test)]
+mod test_harness;
+#[cfg(test)]
+mod gui_tests;
 
 use std::collections::HashMap;
 use eframe::egui;
@@ -117,6 +121,10 @@ pub struct EditorApp {
 
     // Drag state
     pub grab: Option<GrabTarget>,
+    /// Set when Escape cancels a gesture while the pointer button is
+    /// still held: blocks the drag branch from re-grabbing at the
+    /// press origin until the button is released.
+    pub suppress_drag_regrab: bool,
     /// The installed drag apparatus (solver-owned helpers, bridge,
     /// locks and anchors) for the active gesture.
     pub drag_apparatus: Option<arael_sketch_solver::DragApparatus>,
@@ -279,6 +287,10 @@ pub struct EditorApp {
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
+    /// Pre-drag sketch, taken once at start_drag before the apparatus
+    /// exists. Only cancel_drag restores it -- the best-cost snapshot
+    /// above tracks the gesture and is the wrong thing to cancel to.
+    drag_pre_snapshot: Option<Vec<u8>>,
 
     // MCP server channel (None when --mcp not used)
     #[cfg(not(target_arch = "wasm32"))]
@@ -355,6 +367,7 @@ impl EditorApp {
             selection: Vec::new(),
             hovered: None,
             grab: None,
+            suppress_drag_regrab: false,
             drag_apparatus: None,
             drag_offset: vect2d::new(0.0, 0.0),
             drag_offset2: vect2d::new(0.0, 0.0),
@@ -428,6 +441,7 @@ impl EditorApp {
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
+            drag_pre_snapshot: None,
             #[cfg(not(target_arch = "wasm32"))]
             mcp_rx: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1099,6 +1113,7 @@ impl EditorApp {
         // Save pre-drag state before adding drag apparatus
         self.drag_saved_cost = self.last_cost;
         self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
+        self.drag_pre_snapshot = self.drag_saved_snapshot.clone();
 
         // Pre-compute pairs that are already perpendicular now, so the
         // per-frame auto-perp hint can short-circuit without a rank-based
@@ -1432,11 +1447,15 @@ impl EditorApp {
         self.drag_perp_snap = None;
         self.drag_hv_hint = None;
         self.drag_collinear_hint = None;
-        // The snapshot predates the apparatus; restoring it removes
-        // everything the gesture added, so the token is just dropped.
+        // The pre-drag snapshot predates the apparatus; restoring it
+        // removes everything the gesture added, so the token is just
+        // dropped. The best-cost snapshot is NOT the one to restore:
+        // update_drag refreshes it every good frame, so it tracks the
+        // gesture instead of undoing it.
         self.drag_apparatus = None;
         self.grab = None;
-        if let Some(snap) = self.drag_saved_snapshot.take()
+        self.drag_saved_snapshot = None;
+        if let Some(snap) = self.drag_pre_snapshot.take()
             && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
                 self.sketch = restored.into();
                 let result = self.sketch.solve();
@@ -1470,6 +1489,7 @@ impl EditorApp {
                         self.last_cost = result.end_cost;
                     }
             self.drag_saved_snapshot = None;
+            self.drag_pre_snapshot = None;
 
             // Record drag as a non-deterministic action with full state snapshot
             let snapshot = bincode::serialize(&self.sketch).unwrap();

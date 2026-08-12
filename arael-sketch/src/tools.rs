@@ -15,7 +15,7 @@ pub use arael_sketch_backend::ids::{ConstraintId, Selection};
 pub use arael_sketch_backend::ids::find_constraint_by_name;
 
 // What the user can grab and drag
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GrabTarget {
     Point(Ref<Point>),
     LineP1(Ref<Line>),
@@ -28,7 +28,7 @@ pub enum GrabTarget {
 }
 
 // Constraint type for constraint mode
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ConstraintType {
     Horizontal,
     Vertical,
@@ -65,7 +65,7 @@ impl ConstraintType {
 }
 
 // Active tool
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tool {
     Select,
     DrawPoint,

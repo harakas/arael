@@ -33,6 +33,16 @@ pub fn hv_snap_from(start: arael::vect::vect2d, end: arael::vect::vect2d, scale:
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_app(ctx);
+    }
+}
+
+impl EditorApp {
+    /// One frame of the application: panels, canvas input, drawing,
+    /// overlays. Separated from the eframe::App impl so the GUI test
+    /// harness can drive frames headlessly (eframe::Frame is not
+    /// constructible outside eframe).
+    pub(crate) fn update_app(&mut self, ctx: &egui::Context) {
         // Handle exit request
         if self.exit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -242,6 +252,9 @@ impl eframe::App for EditorApp {
                 self.dim_edit_did = None;
                 self.status_error = None;
                 self.tool = Tool::Select;
+                // Cancel any live grab and keep the still-held pointer
+                // from re-grabbing at the press origin next frame.
+                self.suppress_drag_regrab = true;
                 self.cancel_drag();
             }
             } // !wants_keyboard_input && no ctrl/cmd

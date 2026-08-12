@@ -7,7 +7,7 @@ use arael_sketch_solver::*;
 
 // Selection -- what entity is selected for constraint application.
 // Held by CommandContext so command output and the GUI can share state.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Selection {
     Point(Ref<Point>),
     Line(Ref<Line>),
@@ -22,7 +22,7 @@ pub enum Selection {
     Dimension(u32),
 }
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ConstraintId {
     /// Line H flag constraint (name CL0H).
     Horizontal(Ref<Line>),

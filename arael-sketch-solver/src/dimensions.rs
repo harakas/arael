@@ -7,7 +7,7 @@ use crate::{Point, Line, Arc};
 // Dimension annotations (constraint + visual)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DimensionEndpoint {
     Point(Ref<Point>),
     LineP1(Ref<Line>),
@@ -17,7 +17,7 @@ pub enum DimensionEndpoint {
     ArcEnd(Ref<Arc>),
 }
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DimensionKind {
     LineLength(Ref<Line>),
     PointPointDistance(DimensionEndpoint, DimensionEndpoint),
