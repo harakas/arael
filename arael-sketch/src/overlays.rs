@@ -650,8 +650,14 @@ impl EditorApp {
         );
         } // show_hints
 
-        // DOF + cost + version at bottom-right
-        let dof_str = match self.sketch.cached_dof() {
+        // DOF + cost + version at bottom-right. During a drag the
+        // cell's cache is invalid (the apparatus changed the
+        // structure); show the pre-drag DOF from the drag-start rank
+        // analysis instead of "..." -- the number the user cares
+        // about doesn't change mid-gesture.
+        let dof = self.sketch.cached_dof()
+            .or_else(|| self.drag_rank.as_ref().map(|r| r.nullity));
+        let dof_str = match dof {
             Some(0) => "DOF: 0 (fully constrained)".to_string(),
             Some(d) => format!("DOF: {}", d),
             None => "DOF: ...".to_string(),

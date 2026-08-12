@@ -333,6 +333,28 @@ fn test_dimension_label_drag_commits_move() {
     assert_eq!(gui.line_count(), 1, "geometry untouched");
 }
 
+#[test]
+fn test_dof_display_recovers_after_drag() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    let dof_before = gui.sketch().cached_dof();
+    assert!(dof_before.is_some(), "DOF known before drag");
+
+    // Mid-gesture: the cell's cache is retired by the apparatus, but
+    // the display falls back to the pre-drag rank's nullity -- the
+    // corner shows the pre-drag DOF, not "...".
+    gui.drag_moves(v(2.0, 0.0), v(3.0, 1.0));
+    let displayed = gui.sketch().cached_dof()
+        .or_else(|| gui.app.drag_rank.as_ref().map(|r| r.nullity));
+    assert_eq!(displayed, dof_before, "mid-drag display should show pre-drag DOF");
+    gui.release(v(3.0, 1.0));
+
+    // After the gesture the cache must be a number again.
+    gui.frames(3);
+    assert_eq!(gui.sketch().cached_dof(), dof_before,
+        "DOF display must recover after drag");
+}
+
 // -- Undo/redo keyboard -------------------------------------------------
 
 #[test]

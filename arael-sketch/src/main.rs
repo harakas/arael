@@ -1130,17 +1130,17 @@ impl EditorApp {
         self.drag_line_locked_h = false;
         self.drag_line_locked_v = false;
         self.drag_line_endpoint_connected = false;
+        // One rank analysis of the apparatus-free sketch, for every
+        // drag kind: line-endpoint probes row-test against its null
+        // basis, and the DOF display shows its nullity while the
+        // gesture is live (the apparatus retires the cell's copy).
+        // The cell's cache usually has it from the last action;
+        // ensure_rank recomputes only when it does not.
+        let _ = self.sketch.ensure_rank();
+        self.drag_rank = self.sketch.cached_rank().cloned();
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let timer = Timer::new();
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
-            // One rank analysis of the apparatus-free sketch; every
-            // probe this gesture is a row test against its null basis.
-            // The cell's cache usually has it from the last action;
-            // ensure_rank recomputes only when it does not. The clone
-            // insulates the gesture: installing the drag apparatus
-            // bumps the generation and retires the cell's copy.
-            let _ = self.sketch.ensure_rank();
-            self.drag_rank = self.sketch.cached_rank().cloned();
             if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
                 if !self.perp_would_reduce_dof(line, host) {
                     self.drag_perp_already.push((line.index(), host.index()));
@@ -1624,6 +1624,10 @@ impl EditorApp {
             self.flash_start = None;
         }
         self.grab = None;
+        // The apparatus removal (and any auto-snap) bumped the
+        // structure generation; recompute so the DOF display comes
+        // back as a number instead of staying at "...".
+        self.refresh_dof();
     }
 
     // Toggle selection
