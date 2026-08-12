@@ -161,27 +161,25 @@
      - An explicit soft ceiling on `|rotation - target|` that saturates above a tolerance so the solver can't trade radius for rotation regardless of scaling.
      Same review applies to ArcLineParallel (`... / mlen` -- uses the live `mlen`, same collapse risk at tiny line lengths; `mlen` could become a `_value`-pattern if needed) and ArcArcParallel (`sin(a.rot - b.rot)` -- pure dimensionless, no sketch-scale link at all).
   4. Document the convention in a short comment block above the constraint bodies so future contributors know why the radius / mlen factors are there and when to keep them.
-- **arael-sketch conflict messages**: Enhance `conflicts::validate_action` so the "already parallel / perpendicular / equal / ..." error messages include the offending existing constraint's name (e.g. "conflict with C5: parallel L0 L1"). The plan (`yes-did-you-check-memoized-wren.md`) called this a single-site change, but the conflict messages are spread across many arms in `arael-sketch/src/conflicts.rs` and the current `pair_exists` helper does not expose the matching index. Adding a sibling helper that returns both the boolean and the index (or refactoring `pair_exists` to return `Option<usize>`) would let every arm include the nid. Skipped for now to keep the initial naming feature surface-area small.
-- **Sketch editor**: Tag constraints owned by dimensions so they can be deleted logically instead of matching by approximate value comparison. Currently `RemoveDimension` in `arael-sketch/examples/editor.rs` searches for the underlying constraint (e.g. `distance_pl`) by floating-point distance match, which is fragile (e.g. signed vs unsigned mismatch for `PointLineDistance` — the constraint stores -5.0 but the dimension stores 5.0).
-- **Sketch editor**: Add `MoveDimension` action to cleanly reposition dimension annotations (offset + text_along). Currently dimension dragging uses the `Drag` action which snapshots the entire sketch state. Alternatively, extend `AddDimension` to accept optional offset/text_along so the position can be specified at creation time.
+- **arael-sketch conflict messages**: Enhance `conflicts::validate_action` so the "already parallel / perpendicular / equal / ..." error messages include the offending existing constraint's name (e.g. "conflict with C5: parallel L0 L1"). The conflict messages are spread across many arms in `arael-sketch-backend/src/conflicts.rs` and the current `pair_exists` helper does not expose the matching index. Adding a sibling helper that returns both the boolean and the index (or refactoring `pair_exists` to return `Option<usize>`) would let every arm include the nid.
+- **Sketch editor**: Tag constraints owned by dimensions so they can be deleted logically instead of matching by approximate value comparison. -- DONE (DimensionKind carries typed endpoints; remove_numeric_dim_constraint retains by exact refs in arael-sketch-backend/src/actions.rs)
+- **Sketch editor**: Add `MoveDimension` action to cleanly reposition dimension annotations (offset + text_along). -- DONE (MoveDimension { did, offset, text_along }; label drags commit it on release)
 - derived dimensions -- DONE
 - hiding of intermediary PcN points -- DONE
 - dragging hide cost != 0
 - investigate arc negative radiuses -- DONE (ccw flag + sweep_sign + negative radius rejection)
-- implement elliptic arcs
-- rect tools etc
-- circle creaing tools etc
-- mirror tool
-- fillet tool
-- offset tool
+- implement elliptic arcs -- DONE (is_ellipse + radius_b + rotation; add_ellipse, add_earc family)
+- rect tools etc -- DONE (add_rect / add_rect3 / add_rectcenter + GUI rect tool)
+- circle creating tools etc -- DONE (add_circle / 2 / 3 / 2t / 3t + GUI circle tool)
+- mirror tool -- DONE (mirror command with symmetry constraints; selection form)
+- fillet tool -- DONE (fillet command + GUI tool, variadic corners, live radius edit)
+- offset tool -- DONE (offset_line / offset)
 - trim tool
 - split tool
 - scale tool
-- mirror tool
-- various circle tools
 - text placement
 - polygon tool
-- **Duplicate constraint check**: `symmetry_pp` (point symmetry) skips duplicate detection because `resolve_as_point` creates helper points before we can check — need to compare semantic endpoints, not Ref<Point> values
+- **Duplicate constraint check**: `symmetry_pp` (point symmetry) skips duplicate detection -- DONE (registry dedup keys compare semantic endpoints with swappable sides; resolve_as_point is gone)
 - **Redundancy warning**: DONE -- constraints now checked for DOF reduction, rejected if redundant. Use `force` to override.
 - Way to get the Jacobian for the system with constraints identifiable for more efficient SVD analysis of DOF in arael-sketch -- DONE (`#[arael(root, jacobian)]` + `#[arael(constraint_index)]`)
 - **Document Jacobian feature**: DONE -- documented in lib.rs features, macro docs, README.
@@ -194,18 +192,17 @@
 - **arael-sketch**: just help: add"Type help full for ..". Add Help button. Open command, expand half sketch, issue help full. -- DONE
 - **arael-sketch**: dragging should keep hilight, not hilight others -- DONE
 - **arael-sketch**: sometimes we somehow get stuck pasting into cmd input -- ??? browser/wasm issue?
-- **arael-sketch**: make language more real so that you can do vector algebra
+- **arael-sketch**: make language more real so that you can do vector algebra -- DONE (vector arithmetic in coordinate expressions: `L0.p2 + normal(L0) * 3`, geometric functions, `let` session vectors)
 - **arael-sketch**: add keywords into language? stop assigning to anything?
-- **arael-sketch**: dimension: distance between concentric circles
+- **arael-sketch**: dimension: distance between concentric circles -- DONE (ConcentricDistance kind + DistanceConcentric constraint; `distance A0 A1 <v>`)
 - **arael**: support single struct model+root. right now it does not function. -- DONE (SelfBlock<Self> on root + direct-composed sub-model fields now route through EntityLocation::RootSelf / EntityLocation::DirectField in arael-macros)
 - **arael-sym**: parse_with_bag -- bag with functions and substitutions so func() gets current active function -- DONE
 - **arael-sym**: cli calculator demo app, better than bc, define functions, etc. -- DONE
 - **arael**: docs: document constraint has name= property
 - **arael**: extend jacobi demo with constraint labels
 - **arael-sketch**: clean up points obscuring everything, make line endpoint when creating explicit and clean -- cross on line snap, cross+box on point snap
-- **arael-sketch**: auto-perpendicular constraint
-- **arael-sketch**: switch to hdimension/vdimension at creation when moving mouse far -- switching commands during tool usage
-- **arael-sketch**: hdimension/vdimension at creation when moving mouse far
+- **arael-sketch**: auto-perpendicular constraint -- DONE (line tool emits it on right-angle crossings, gated by conflicts::validate_action)
+- **arael-sketch**: switch to hdimension/vdimension at creation when moving the mouse far -- switching commands during tool usage
 - **arael-sketch**: toggle tags like driven, quiet, construction during line creation
 - **arael-sketch**: robot.cmd scale to 0.1 takes us to "interesting" view
 - **arael-sketch**: investigate chain misbehavior
@@ -287,7 +284,7 @@
 
 - **arael/arael-faer**: fill-reducing ordering for a LARGE SPARSE Schur complement -- DONE. `FaerOrdering::NestedDissection` exists and benchmarks/bal orders the reduced camera system with it. It is the whole ballgame on the clique structure a bundle problem's S has: AMD needs 4716 ms just to factorize S at Ladybug-1723, where under ND the entire Schur iteration -- assembly, reduction, factorization, solve -- is 1806 ms. What is NOT done is choosing it automatically; see the BAL-structure-detection entry above (arael's default is still AMD, and under AMD's fill `SchurPolicy::Auto` declines a reduction it should take).
 
-- **arael**: keep the Schur structural analysis across solves. SHIPPED as `LmSession` (REVIEW3 item 3): the session owns the backend and its matrix storage, skips the entry `reset()`, and reuses the pattern, position map, ordering, symbolic factorization and Schur plan on every solve after the first. A parameter-count change invalidates by itself; `invalidate()` covers structure changes at the same count. Warm solves are bit-identical to cold ones (tests/lm_session.rs). NOT done: arael-sketch integration -- a session field on `Sketch` (take/put around `Sketch::solve()`) with action-level invalidation, so graduated stages and drag re-solves go warm; left out because it touches the sketch crate's action layer, a separate change from the library API.
+- **arael**: keep the Schur structural analysis across solves. SHIPPED as `LmSession` (REVIEW3 item 3): the session owns the backend and its matrix storage, skips the entry `reset()`, and reuses the pattern, position map, ordering, symbolic factorization and Schur plan on every solve after the first. A parameter-count change invalidates by itself; `invalidate()` covers structure changes at the same count. Warm solves are bit-identical to cold ones (tests/lm_session.rs). The arael-sketch integration is DONE too: `SketchCell` owns a warm `LmSession` keyed to the structure generation, so drag re-solves and repeated solves go warm and a structural edit invalidates by itself.
 - **arael-faer**: narrow-band solver for the reduced system. SHIPPED (opt-in, `arael_faer::band`). Envelope Cholesky over the reduced Schur system in block form: fill confined to each column's envelope, no scalar-CSC round trip, no symbolic/ordering pass; reuses schur.rs's unrolled tile kernels (`gemm_sub`). `SparseFaer::with_narrow_band(true)` routes any banded system through it, whatever the bandwidth -- the caller's explicit choice; faer is the fallback for non-banded systems. Applies to BOTH the reduced Schur system (when it reduces) AND the whole Hessian (when it does not -- pose graph / localization); `setup_whole_band` handles the non-reduced banded case. Loc benchmark (`LOC_ARAEL_SOLVER=narrow_band`): the whole-system block route is a WASH against the tuned scalar `Band` solver at kd=11 (17.4 ms/iter both at 1000 poses) and ~3-5% ahead of faer -- at this bandwidth it does not beat scalar, but it auto-detects bandwidth and needs no manual kd. `SchurPlan::narrow_band` reports whether it was taken; a `warn!` fires when the half-bandwidth exceeds `NARROW_BAND_WIDE_KD` (128). Slam benchmark hook: `SLAM_NARROW_BAND=1` (and `SLAM_SPAN=N` caps landmark span to make a narrow-band scene). Benchmarked (interleaved, this dev VM, f64 ms/iter): it WINS in the narrow regime and loses in the wide one -- band vs faer-supernodal ratio at slam-1200 was 0.86 (kd 60) / 0.97 (kd 120) / 1.05 (kd 240), holding at 6000 poses; first iteration is a bigger win (0.73 at kd 24) because that is where faer pays for symbolic + scalar-CSC setup. Crossover ~kd 130-150 (hardware-dependent). NOT done: the "+ border" case (wide landmarks, loop closures, global params -- SCHUR.md) for band-plus-a-few-violations systems; supernodal panel blocking to compete on WIDE bands (large, and largely re-implements what faer supernodal already does well -- low ROI); a cheaper low-effort squeeze is unrolling the 6x6/3x3 diagonal Cholesky + triangular tile solves. A general BAL-style camera set is NOT banded (Ladybug-1723's S loses), so the route is trajectory/local-feature-shaped only.
 
 - **Schur: S is stored twice** -- once as blocks (what `schur_reduce` writes) and once as the scalar CSC values faer factorizes, ~260 MB each at 6000 slam poses. Tried removing the block form: give every S tile a strided view into the CSC values (a tile's rows are contiguous, its columns one block-column of nonzeros apart) so the reduction accumulates straight into the array the factorization reads. It works and is exact, but it is SLOWER, consistently, and was rejected: the GEMM's destination tile stops being contiguous, and the 6 columns of a 6x6 tile land ~14 KB apart. Interleaved A/B at 6000 poses -- f64 2310 -> 2344 ms/iter, f32 1612 -> 1721 (+6.8%); at 300 poses f64 49.2 -> 50.2. Memory did fall (f64 peak 2476 -> 2247 MB) but only for f64; the f32 peak did not move at all, because it is set during the symbolic phase, before S exists. The double storage is the price of handing S to a SCALAR sparse factorization, so the way out is not a cleverer copy -- it is the band/block solver above, which factorizes S in the block form the reduction already produces and needs no scalar CSC at all.

@@ -18,6 +18,12 @@ Each entity type has a fixed number of degrees of freedom (DOF) — parameters t
 | Line   | 4   | p1.x, p1.y, p2.x, p2.y |
 | Arc    | 5   | center.x, center.y, radius, start_angle, end_angle |
 | Circle | 3   | center.x, center.y, radius (angles fixed at 0 and 2pi) |
+| Ellipse | 5  | center.x, center.y, radius, radius_b, rotation (angles fixed) |
+| Elliptic arc | 7 | center.x, center.y, radius, radius_b, rotation, start_angle, end_angle |
+
+The serialized parameter count differs from the DOF: circles carry 4
+parameters and arcs 6, because `radius_b` is always a parameter and an
+internal constraint pins it to `radius` for non-ellipses.
 
 Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use `dof` to check, `dof analyze` to see which entities can still move.
 
@@ -368,7 +374,7 @@ add_earc_center 0,0 3 1 45 0 90          Quarter elliptic arc
 
 **Tangent-defined** (endpoints + tangent directions + curvature weight):
 ```
-add_earc_tangent p1 t1 p2 t2 [w] [noconnect] [notangent] [nocursor] [quiet] [driven]
+add_earc_tangent p1 t1 p2 t2 [bulge] [noconnect] [notangent] [nocursor] [quiet] [driven]
 add_earc_tangent 0,0 1,0 5,3 0,1          Horizontal start, vertical end (w=1, circular)
 add_earc_tangent 0,0 1,0 5,3 0,1 2        Tighter curve at start (w=2, elliptic)
 add_earc_tangent @cursor @tangent 10,3 0,1  Chain from previous entity
@@ -438,8 +444,8 @@ and the constraint type:
 delete L0 horizontal                  Drop the horizontal flag from L0
 delete L0 vertical                    Drop the vertical flag from L0
 delete L0 L1 parallel                 Drop a parallel constraint between L0 and L1
-delete L0 L1 perpendicular            Drop a perpendicular constraint
-delete L0 L1 equal                    Drop an equal-length constraint
+delete L0 L1 perpendicular            Drop a perpendicular constraint (alias: perp)
+delete L0 L1 equal                    Drop an equal-length constraint (alias: equal_length)
 delete A0 A1 equal_radius             Drop an equal-radius constraint
 delete L0 L1 collinear                Drop a collinear constraint
 delete L0 A0 tangent                  Drop a line-arc tangent
@@ -472,8 +478,7 @@ Deleted line L0
   cascade:
     C1: coincident L1.p1 L0.p2
     CL0H: horizontal L0
-    length L0 = 4
-    d0
+    d0: length L0 = 4
 ```
 
 What cascades:
@@ -668,7 +673,7 @@ angle L0 L1 30 to 60          Angle range: two-sided.
 angle L0 L1 >= 90 supplement  Range on the supplementary angle. `closest` / `acute` / `obtuse` modifiers require a single target value and are rejected with a range.
 radius A0 >= 2                Radius range: lower bound.
 radius A0 2 to 4              Radius range: two-sided.
-radius_b A0 <= 3              Ellipse semi-minor-axis range.
+radius_b EA0 <= 3             Ellipse semi-minor-axis range.
 xangle L0 30 to 60            Line-angle range (degrees from x-axis).
 hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
 hdistance L0.p1 L1.p2 2 to 5 Range on |x|-distance.
@@ -676,8 +681,8 @@ vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints
 vdistance L0.p1 L0.p2 >= 3   Range on |y|-distance.
 xangle L0 45                  Line angle from x-axis (degrees, CCW positive)
 delete d0                     Remove dimension by name
-freeze                        Add numeric dimensions for all entities at current values
-freeze L0 A0                  Freeze specific entities only
+freeze                        Add numeric dimensions for all lines and arcs at current values (line length; arc radius and sweep)
+freeze L0 A0                  Freeze specific lines/arcs only
 ```
 
 ### Expression syntax
@@ -867,7 +872,7 @@ add_point rotate(P0, A0.center, 45)   Rotated point
 
 ## Entity Name Capture
 
-Entity creation commands (`add_line`, `add_rect`, `add_rect3`, `add_rectcenter`, `add_point`, `add_circle`, `add_circle2`, `add_circle3`, `add_circle2t`, `add_circle3t`, `add_arc`, `add_earc`, `add_earc3`, `add_earc_center`, `offset_line`) automatically set the `_` variable to the created entity's name. Use assignment to capture it with a meaningful name:
+Every entity creation command (`add_line`, `add_rect`, `add_rect3`, `add_rectcenter`, `add_point`, `add_circle`, `add_circle2`, `add_circle3`, `add_circle2t`, `add_circle3t`, `add_arc`, `add_earc`, `add_earc3`, `add_earc_center`, `add_earc_tangent`, `add_earc_rtangent`, `add_ellipse`, `offset_line`, `fillet`, `chamfer`, `mirror`) automatically sets the `_` variable to the created entity's name (for fillet: the arc; for mirror: the first mirrored copy). Dimension names are not captured -- they are shown in the command output and by `list dims`. Use assignment to capture the entity name with a meaningful name:
 
 ```
 add_line 0,0 5,0; vertical _; length _ 3       Use _ for the last created entity
@@ -891,17 +896,25 @@ horizontal a
 perpendicular a b
 ```
 
+Multi-name assignment also works for the rectangle commands (four
+sides in order) and `mirror` (the mirrored copies in source order):
+
+```
+bot, right, top, left = add_rect 0,0 5,3
+m1, m2 = mirror L0 L1 about L2
+```
+
 ## Cursor
 
 The cursor is a visible crosshair at a fixed sketch position. It serves as a reference point for relative coordinates and can be used as a coordinate in commands.
 
 ```
-cursor                       Show current position
+cursor                       Show current position and tangent (alias: cursor info)
 cursor 5,3                   Set to absolute position
 cursor L0.p2                 Set to endpoint
 cursor @dx,dy                Move relative to current position
-cursor on                    Show (at 0,0 if not set)
-cursor off                   Hide cursor
+cursor on                    Show (at 0,0 if not set) (alias: show)
+cursor off                   Hide cursor (alias: hide)
 ```
 
 The cursor is automatically set to the last created endpoint:
@@ -981,6 +994,8 @@ list arcs                    List only arcs
 list dims                    List only dimensions (shows "derived" tag)
 list params                  List only parameters
 list constraints             List all active constraints
+list selection               List the current selection
+list constr                  List construction entities
 list horizontal              Filter by constraint type (also: vertical, parallel,
                              perpendicular, equal, collinear, tangent, coincident,
                              concentric, midpoint, symmetry, point_on, lock,
@@ -1090,6 +1105,17 @@ Separate commands with `;`:
 ```
 add_line 0,0 5,0; horizontal L0; length L0 3
 ```
+
+## Session
+
+```
+help                         Command summary
+help full                    This full reference
+exit                         Exit the editor (alias: quit)
+```
+
+`ai` is a placeholder that points at the MCP server; use `--mcp` to
+give external agents access.
 
 ## Examples
 

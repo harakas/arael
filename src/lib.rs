@@ -2154,7 +2154,7 @@
 //!
 //! [Try it in the browser](https://sketch.mare.ee/)
 //!
-//! The editor includes a command panel (`/` to toggle) with 40+ scripting
+//! The editor includes a command panel (`/` to toggle) with 79 scripting
 //! commands, and an embedded MCP server (`--mcp`) that enables AI agents
 //! like Claude Code to create and modify sketches programmatically.
 //!

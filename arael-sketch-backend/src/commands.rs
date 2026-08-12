@@ -2812,9 +2812,9 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let [nocursor, noconnect, notangent, driven, quiet, constr] = peel_keywords(&mut tokens,
         ["nocursor", "noconnect", "notangent", "driven", "quiet", "constr"]);
-    // Syntax: add_earc_tangent p1 t1 p2 t2 [w]
+    // Syntax: add_earc_tangent p1 t1 p2 t2 [bulge]
     if tokens.len() < 4 || tokens.len() > 5 {
-        return err("Usage: add_earc_tangent p1 t1 p2 t2 [w] [noconnect] [notangent] [nocursor] [quiet] [driven]");
+        return err("Usage: add_earc_tangent p1 t1 p2 t2 [bulge] [noconnect] [notangent] [nocursor] [quiet] [driven]");
     }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let t1 = match parse_coord(ctx, tokens[1], None) { Ok(p) => p, Err(e) => return err(e) };

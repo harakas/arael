@@ -179,7 +179,7 @@ backend:
    execute(&mut ctx, "length L0 3");
    ```
 
-Full command reference (40+ commands for geometry, constraints,
+Full command reference (79 commands for geometry, constraints,
 dimensions, parameters, introspection, view control, explain / DOF
 diagnostics): see
 [`arael-sketch-backend/docs/COMMANDS.md`](../arael-sketch-backend/docs/COMMANDS.md).
@@ -274,13 +274,14 @@ python3 -m http.server -d dist 8080
 
 ## Tools
 
-- **Line (L)**, **Circle (O)**, **Arc (A)**, **Point (P)** -- draw
-  geometry with auto-snap to nearby points, endpoints, and curves.
+- **Line (L)**, **Circle (O)**, **Arc (A)**, **Point (P)**,
+  **Rect (R)**, **Fillet (F)**, **Chamfer** -- draw geometry with
+  auto-snap to nearby points, endpoints, and curves.
 - **Dimension (D)** -- length, distance, radius, angle, and
   point-to-line distance dimensions with draggable annotations.
   Numeric values and parametric expressions (`d0 * 2`,
   `L0.length + 3`) are both accepted.
-- **Select (S)** -- click to select, drag to move entities,
+- **Select (Escape)** -- click to select, drag to move entities,
   Backspace/Delete to remove.
 - **Dark/Light mode** toggle, **Save/Load** (JSON),
   **Undo/Redo** (Ctrl+Z / Ctrl+Shift+Z).
@@ -288,10 +289,10 @@ python3 -m http.server -d dist 8080
 ## Constraints
 
 Horizontal (H), Vertical (V), Coincident (C), Parallel,
-Perpendicular, Equal length/radius, Tangent (T), Collinear, Midpoint
-(M), Symmetry (lines or points about a mirror line), Lock (K), Line
-style (X). Constraints are visualised as symbols on the geometry and
-can be selected and deleted.
+Perpendicular, Equal length/radius (=), Tangent (T), Collinear,
+Midpoint (M), Symmetry (S; lines or points about a mirror line),
+Lock (K), Construction toggle (X). Constraints are visualised as
+symbols on the geometry and can be selected and deleted.
 
 Internally these are plain Rust structs in `arael-sketch-solver`
 with a `#[arael(constraint(...))]` attribute describing the residual,
@@ -374,7 +375,7 @@ use runtime differentiation via `ExtendedModel` and a root-mounted
 ## Command panel & scripting
 
 Press `/` in the GUI to open the command panel. Full scripting
-support with 40+ commands for geometry creation, constraints,
+support with 79 commands for geometry creation, constraints,
 dimensions, parameters, introspection, and view control. Commands
 support expressions, coordinate references (`L0.p2`, `@dx,dy`),
 geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector
@@ -410,6 +411,30 @@ Run the native editor with:
 ```bash
 cargo run -r -p arael-sketch -- --mcp --mcp-allow-all
 ```
+
+The `--mcp-allow-all` flag auto-approves OAuth connections from AI
+agents (recommended for local use). Without it, connections require
+manual approval in the GUI (not yet implemented).
+
+Configure Claude Code (`~/.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "arael-sketch": {
+      "type": "http",
+      "url": "http://127.0.0.1:8585/mcp"
+    }
+  }
+}
+```
+
+The MCP server exposes tools for executing sketch commands
+(`execute_command`, `execute_script`), querying state
+(`get_sketch_state`), and reading documentation (`get_help`). The
+`initialize` response includes a condensed command reference that the
+AI loads into context automatically. File operations (`save`, `load`)
+are blocked for security.
 
 The MCP server is decoupled from egui: it takes a wake callback
 (`Arc<dyn Fn() + Send + Sync>`) instead of a handle to the GUI. The

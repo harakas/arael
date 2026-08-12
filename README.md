@@ -889,94 +889,25 @@ python3 -m http.server -d dist 8080
 # Open http://localhost:8080
 ```
 
-### Tools
+### Tools and constraints
 
-- **Line (L)**, **Circle (O)**, **Arc (A)**, **Point (P)** -- draw geometry with auto-snap to nearby points, endpoints, and curves
-- **Dimension (D)** -- add length, distance, radius, angle, and point-to-line distance dimensions with draggable annotations. Supports numeric values and parametric expressions (`d0 * 2`, `L0.length + 3`).
-- **Select (S)** -- click to select, drag to move entities, Backspace/Delete to remove
-- **Dark/Light mode** toggle, **Save/Load** (JSON), **Undo/Redo** (Ctrl+Z/Ctrl+Shift+Z)
-
-### Constraints
-
-Horizontal (H), Vertical (V), Coincident (C), Parallel, Perpendicular, Equal length/radius, Tangent (T), Collinear, Midpoint (M), Symmetry (lines or points about a mirror line), Lock (K), Line style (X). Constraints are visualized as symbols on the geometry and can be selected and deleted.
-
-### Example: Sketch Solver API
-
-```rust
-use arael::model::CrossBlock;
-use arael::vect::vect2d;
-use arael_sketch::*;
-
-let mut sketch = Sketch::new();
-
-// Create a rectangle from 4 lines
-let bottom = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.1));
-let right  = sketch.add_line(vect2d::new(3.1, 0.0), vect2d::new(3.0, 2.1));
-let top    = sketch.add_line(vect2d::new(2.9, 2.0), vect2d::new(0.1, 1.9));
-let left   = sketch.add_line(vect2d::new(0.0, 2.1), vect2d::new(0.1, 0.1));
-
-// Horizontal/vertical constraints
-sketch.lines[bottom].constraints.horizontal = true;
-sketch.lines[top].constraints.horizontal = true;
-sketch.lines[left].constraints.vertical = true;
-sketch.lines[right].constraints.vertical = true;
-
-// Connect corners (a.p2 == b.p1)
-sketch.coincident_ll21.push(CoincidentLL21 { a: bottom, b: right, hb: CrossBlock::new() });
-sketch.coincident_ll21.push(CoincidentLL21 { a: right, b: top, hb: CrossBlock::new() });
-sketch.coincident_ll21.push(CoincidentLL21 { a: top, b: left, hb: CrossBlock::new() });
-sketch.coincident_ll21.push(CoincidentLL21 { a: left, b: bottom, hb: CrossBlock::new() });
-
-// Fix bottom-left corner and set dimensions
-sketch.lines[bottom].p1 = arael::model::Param::fixed(vect2d::new(0.0, 0.0));
-sketch.lines[bottom].constraints.has_length = true;
-sketch.lines[bottom].constraints.length = 4.0;
-sketch.lines[left].constraints.has_length = true;
-sketch.lines[left].constraints.length = 2.0;
-
-// Solve -- all constraints satisfied simultaneously
-sketch.solve();
-// bottom: (0,0)->(4,0), right: (4,0)->(4,2), top: (4,2)->(0,2), left: (0,2)->(0,0)
-```
-
-The sketch solver uses Levenberg-Marquardt optimization with drift regularization and robust drag constraints. Geometric constraints are differentiated at compile time; parametric expression dimensions use runtime differentiation via `ExtendedModel`.
+Draw points, lines, circles, arcs, ellipses and rectangles with auto-snap to nearby geometry; fillet and chamfer corners. Dimensions (length, distance, radius, angle, ...) have draggable annotations and accept numeric values or parametric expressions (`d0 * 2`, `L0.length + 3`). Constraints cover the usual set -- horizontal, coincident, parallel, tangent, symmetry, equal and so on -- visualized as symbols on the geometry; a constraint that contradicts or duplicates the existing system is rejected with an explanation of what blocks it.
 
 ### Command Panel & Scripting
 
-Press `/` to open the command panel. Full scripting support with 40+ commands for geometry creation, constraints, dimensions, parameters, introspection, and view control. Commands support expressions, coordinate references (`L0.p2`, `@dx,dy`), geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector arithmetic (`L0.p2 + normal(L0) * 3`).
+Press `/` to open the command panel. Full scripting support with 79 commands for geometry creation, constraints, dimensions, parameters, introspection, and view control. Commands support expressions, coordinate references (`L0.p2`, `@dx,dy`), geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector arithmetic (`L0.p2 + normal(L0) * 3`).
 
 See [arael-sketch-backend/docs/COMMANDS.md](arael-sketch-backend/docs/COMMANDS.md) for the full command reference.
 
 ### AI Agent Integration (MCP)
 
-The sketch editor embeds an MCP (Model Context Protocol) server, enabling AI agents like Claude Code to create and modify sketches programmatically. The AI sends sketch commands and reads state through the standard MCP tool interface.
+The sketch editor embeds an MCP (Model Context Protocol) server, so AI agents like Claude Code can create and modify sketches programmatically:
 
-![Dark mode with AI-drawn geometry](arael-sketch/docs/dark.png)
-
-*Dark mode with parameters panel, command history showing MCP agent connection, and geometry drawn by Claude Code.*
-
-Start the editor with MCP enabled:
 ```bash
 cargo run -r -p arael-sketch -- --mcp --mcp-allow-all
 ```
 
-The `--mcp-allow-all` flag auto-approves OAuth connections from AI agents (recommended for local use). Without it, connections require manual approval in the GUI (not yet implemented).
-
-Configure Claude Code (`~/.claude.json`):
-```json
-{
-  "mcpServers": {
-    "arael-sketch": {
-      "type": "http",
-      "url": "http://127.0.0.1:8585/mcp"
-    }
-  }
-}
-```
-
-The MCP server exposes tools for executing sketch commands (`execute_command`, `execute_script`), querying state (`get_sketch_state`), and reading documentation (`get_help`). The `initialize` response includes a condensed command reference that the AI loads into context automatically. File operations (`save`, `load`) are blocked for security.
-
-See [arael-sketch/](arael-sketch/) for the full implementation.
+See [docs/ARAEL_SKETCH.md](docs/ARAEL_SKETCH.md) for the client configuration, the exposed tools, and the sketch editor architecture in general.
 
 ## Project Structure
 
@@ -1044,7 +975,7 @@ arael-sketch-solver/ 2D constraint solver library
   src/
     lib.rs          Sketch root, solve(), entity management
     entities.rs     Point, Line, Arc types
-    constraints.rs  40+ cross-constraint types
+    constraints.rs  112 constraint types
     expr_constraint.rs  Expression-based constraints for parametric dimensions
     dimensions.rs   Dimension annotations
     blocker.rs      Blocker analysis for DOF-rejected constraints
