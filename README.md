@@ -716,54 +716,62 @@ Python drivers over shared models. See [docs/CXX.md](docs/CXX.md) and
 
 ### My solve doesn't converge. What do I check?
 
-0. **Run `model.validate()` and turn on solver verbose mode first.** `validate()` reports non-finite parameters, stale refs, unconstrained parameters, and derivative mismatches in one pass (see [docs/SOLVERS.md](docs/SOLVERS.md#validation----modelvalidate)). Then set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
+- **Turn on verbose mode.** Set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
 
-    ```rust,ignore
-    let cfg = LmConfig::conservative().with_verbose(true).with_gather_timing(true);
-    let result = model.solve_sparse(&cfg).unwrap();
-    result.pretty_print();
-    ```
+  ```rust,ignore
+  let cfg = LmConfig::conservative().with_verbose(true).with_gather_timing(true);
+  let result = model.solve_sparse(&cfg).unwrap();
+  result.pretty_print();
+  ```
 
-    ```text
-    [arael INFO] 1/0: 264639->131839 / 132800, lambda=1e-4 (step=197)
-    [arael INFO] 2/0: 131839->26411.6 / 105428, lambda=2e-5 (step=53)
-    [arael INFO] 3/0: 26411.6->4182.65 / 22229, lambda=4e-6 (step=49)
-    [arael INFO] 4/0: 4182.65->188975 / -184793, lambda=8e-7 (step=43)   <- worse: rejected
-    [arael INFO] 5/1: 4182.65->186852 / -182669, lambda=8e-6 (step=39)   <- retry, lambda climbs
-    ```
+  ```text
+  [arael INFO] 1/0: 264639->131839 / 132800, lambda=1e-4 (step=197)
+  [arael INFO] 2/0: 131839->26411.6 / 105428, lambda=2e-5 (step=53)
+  [arael INFO] 3/0: 26411.6->4182.65 / 22229, lambda=4e-6 (step=49)
+  [arael INFO] 4/0: 4182.65->188975 / -184793, lambda=8e-7 (step=43)   <- worse: rejected
+  [arael INFO] 5/1: 4182.65->186852 / -182669, lambda=8e-6 (step=39)   <- retry, lambda climbs
+  ```
 
-    The pair is `iteration/retry`. A negative improvement is a rejected step: the parameters stay put, lambda goes up, and the next line retries from the same linearization.
+  The pair is `iteration/retry`. A negative improvement is a rejected step: the parameters stay put, lambda goes up, and the next line retries from the same linearization.
 
-    On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix -- four quick signals that narrow the problem before any deeper digging. (A non-positive diagonal is caught before the inner loop and fails the solve with `SolveFailureKind::DegenerateDiagonal`, naming the parameter.)
+  On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix -- four quick signals that narrow the problem before any deeper digging. (A non-positive diagonal is caught before the inner loop and fails the solve with `SolveFailureKind::DegenerateDiagonal`, naming the parameter.)
 
-    `gather_timing` also makes the result print itself -- status, cost, where the time went, and every attempt in order:
+  `gather_timing` also makes the result print itself -- status, cost, where the time went, and every attempt in order:
 
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/docs/report-dark.svg">
-      <img alt="arael LM report: converged in 14 iterations, cost 264639 down to 148.738, a per-phase timing breakdown with bars, the accept/reject timeline, and the Schur plan" src="docs/report-light.svg">
-    </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/docs/report-dark.svg">
+    <img alt="arael LM report: converged in 14 iterations, cost 264639 down to 148.738, a per-phase timing breakdown with bars, the accept/reject timeline, and the Schur plan" src="docs/report-light.svg">
+  </picture>
 
-    That is `pretty_print()`, straight from [examples/slam2d_simple_demo.rs](examples/slam2d_simple_demo.rs). `print()` writes the same thing in plain ASCII -- safe in a log or a file -- and `report()` / `pretty_report()` hand it back as a `String` instead of writing it.
+  That is `pretty_print()`, straight from [examples/slam2d_simple_demo.rs](examples/slam2d_simple_demo.rs). `print()` writes the same thing in plain ASCII -- safe in a log or a file -- and `report()` / `pretty_report()` hand it back as a `String` instead of writing it.
 
-    A healthy pass is steady cost drops with no Cholesky rejections. A run of rejections in the timeline means the step size is being fought over -- try the gain-ratio `NielsenLambdaDriver`. If verbose reports NaN / Inf, or the solve fails with `SolveFailureKind::DegenerateDiagonal`, skip to steps 2 / 3 below; otherwise continue to the cost-by-label breakdown.
+  A healthy pass is steady cost drops with no Cholesky rejections. What the trace shows points at the rest of this list: a run of rejections means the step size is being fought over (damping), NaN / Inf counts or a `DegenerateDiagonal` failure name their own items below.
 
-1. **Cost breakdown by label.** Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable.
+- **Initial damping.** The `lambda` column in the verbose output is the LM damping, seeded by `LmConfig::initial_lambda` (1e-4 in `conservative()`). Too small and early steps are near-Gauss-Newton: they overshoot from a rough start and get rejected, and lambda has to climb before progress begins. Too large and every step is a short gradient-descent crawl. Start near a minimum (re-solving after a small perturbation) at 1e-8 to 1e-6; start far from one at 1e-3 or higher. The `LmConfig::well_conditioned()` and `ill_conditioned()` presets carry both ends. When no single value works, `ill_conditioned()`'s gain-ratio `NielsenLambdaDriver` adapts lambda per step instead of holding a schedule. Re-solving the same problem: `LmConfig::continue_from(&result)` seeds `initial_lambda` from the previous solve's `final_lambda`.
 
-2. **NaN or Inf residuals / derivatives.** The verbose-mode output from step 0 already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. Before reaching for them, prefer to redesign the constraint so the singularity can't be hit. A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals -- the 3D formulation is simpler, better conditioned, and has no pixel-wraparound / behind-camera pathology.
+- **Better initial values.** LM is a local method: it linearises around the current parameters, so a starting point far from the optimum converges slowly, lands in the wrong minimum, or stalls -- and a robustifier makes the requirement stricter, since it is built to ignore far-out residuals. Seed from whatever structure you have (odometry, a closed-form estimate, the previous solve) before tuning anything else. See [Initialisation matters](#initialisation-matters).
 
-3. **Non-positive diagonal.** A solve that fails with `SolveFailureKind::DegenerateDiagonal { param, fault }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
+- **Run `model.validate()`.** The model linter reports non-finite parameters, stale refs, unconstrained parameters, and derivative mismatches in one pass, instead of a solve failing on the first one (see [docs/SOLVERS.md](docs/SOLVERS.md#validation----modelvalidate)).
 
-4. **Gradient magnitude.** After `calc_grad_hessian_dense`, the maximum absolute gradient component should be small relative to the cost scale at a local minimum. A huge gradient with tiny cost means the parameter scaling is off -- one parameter moves cost several orders of magnitude more than another, which destabilises Levenberg-Marquardt.
+- **Cost breakdown by label.** Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable. Read the small end too: a label that is missing, zero, or suspiciously small is a constraint that never ran. Check its guard, that the collection it iterates is non-empty, and that its refs point where you think.
 
-5. **Hessian health.** The same `hessian` array should be finite and positive-semi-definite at a minimum (smallest eigenvalue ≥ 0 modulo roundoff). A significantly-negative smallest eigenvalue means the Gauss-Newton approximation `J^T J` is a poor local fit -- often because constraints are ill-conditioned or cancel.
+- **NaN or Inf residuals / derivatives.** The verbose-mode output already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. Before reaching for them, prefer to redesign the constraint so the singularity can't be hit. A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals. 3D is not automatically better: a badly chosen 3D quantity keeps the behind-camera and singularity problems. A well-chosen one has neither.
 
-6. **Stiffness.** Ratios between the smallest and largest sigmas (or between the smallest and largest eigenvalues of `J^T J`) that span many orders of magnitude make the problem numerically stiff. LM damping has to pick a lambda that suits both ends, which is hard at f32 precision. Keep isigmas comparable where you can; if a tight constraint dominates one direction, a gauge direction orthogonal to it will starve for signal. Starting with a loose scale and ramping up (graduated optimisation -- see `loc_demo` / `slam_demo` for the `frine_isigma_scale` pattern) helps LM climb a stiff problem without rejecting early steps.
+- **Derivatives that disagree with finite differences.** `model.check_gradients(&params)` compares the assembled gradient against central differences of `calc_cost` and reports each component that disagrees. It catches a wrong `derivs = [...]` on an `#[arael::function]` or a wrong `deriv =` cache: the cost comes from the function value and the gradient from the declared derivative, so only a finite-difference comparison sees them disagree. The symptom is a solve that stalls or oscillates at a plausible-looking cost, because the step direction is not downhill. `check_gradients_tol(&params, tol)` loosens the comparison for noisy f32 costs. `validate()` runs the same check; use the standalone form for a custom tolerance or to re-check one fix.
 
-7. **Simpler math beats clever math.** Reformulate residuals on the most natural geometric quantity. 3D direction / position errors are cheaper and better-conditioned than 2D reprojection errors; relative rotations compared as matrices or unit quaternions avoid Euler-angle gimbal lock; distances compared in squared form avoid `sqrt` derivatives near zero. Every nonlinear operation you remove is one less place for the residual / derivative to misbehave and one less source of stiffness.
+- **Non-positive diagonal.** A solve that fails with `SolveFailureKind::DegenerateDiagonal { param, fault }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
 
-8. **Inspect the generated code.** Use [`cargo expand`](https://github.com/dtolnay/cargo-expand) to see what the macro emitted for your constraint body -- see [Looking under the hood](#looking-under-the-hood-with-cargo-expand) below.
+- **Gradient magnitude.** After `calc_grad_hessian_dense`, the maximum absolute gradient component should be small relative to the cost scale at a local minimum. A huge gradient with tiny cost means the parameter scaling is off -- one parameter moves cost several orders of magnitude more than another, which destabilises Levenberg-Marquardt.
 
-9. **Rank / DOF.** Call `Jacobian::singular_values` (or the full `Jacobian::svd` for directions). Near-zero singular values count the degrees of freedom. If this is higher than you expect, the model is under-constrained. The right singular vectors (columns of `SvdResult::v`) corresponding to σ ≈ 0 name the unconstrained parameter directions -- useful for identifying *which* parameters are free. SVD is always performed in f64 regardless of the model's element type, so rank detection stays reliable even for f32 models.
+- **Hessian health.** The same `hessian` array should be finite and positive-semi-definite at a minimum (smallest eigenvalue ≥ 0 modulo roundoff). A significantly-negative smallest eigenvalue means the Gauss-Newton approximation `J^T J` is a poor local fit -- often because constraints are ill-conditioned or cancel.
+
+- **Stiffness.** Ratios between the smallest and largest sigmas (or between the smallest and largest eigenvalues of `J^T J`) that span many orders of magnitude make the problem numerically stiff. LM damping has to pick a lambda that suits both ends, which is hard at f32 precision. Keep isigmas comparable where you can; if a tight constraint dominates one direction, a gauge direction orthogonal to it will starve for signal. Starting with a loose scale and ramping up (graduated optimisation -- see `loc_demo` / `slam_demo` for the `frine_isigma_scale` pattern) helps LM climb a stiff problem without rejecting early steps.
+
+- **Simpler math beats clever math.** Reformulate residuals on the most natural geometric quantity. 3D direction / position errors are cheaper and better-conditioned than 2D reprojection errors; relative rotations compared as matrices or unit quaternions avoid Euler-angle gimbal lock; distances compared in squared form avoid `sqrt` derivatives near zero. Every nonlinear operation you remove is one less place for the residual / derivative to misbehave and one less source of stiffness.
+
+- **Inspect the generated code.** Use [`cargo expand`](https://github.com/dtolnay/cargo-expand) to see what the macro emitted for your constraint body -- see [Looking under the hood](#looking-under-the-hood-with-cargo-expand) below.
+
+- **Rank / DOF.** Call `Jacobian::singular_values` (or the full `Jacobian::svd` for directions). Near-zero singular values count the degrees of freedom. If this is higher than you expect, the model is under-constrained. The right singular vectors (columns of `SvdResult::v`) corresponding to σ ≈ 0 name the unconstrained parameter directions -- useful for identifying *which* parameters are free. SVD is always performed in f64 regardless of the model's element type, so rank detection stays reliable even for f32 models.
 
 ### Looking under the hood with `cargo expand`
 
