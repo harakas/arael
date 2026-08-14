@@ -529,3 +529,80 @@ fn test_chain_select_stops_at_construction() {
     assert_eq!(lines, 1,
         "construction geometry stays out of the chain: {:?}", gui.app.selection);
 }
+
+// -- Fillet / Chamfer gestures ----------------------------------------
+
+#[test]
+fn test_fillet_tool_gesture() {
+    let mut gui = Gui::new();
+    // Two lines meeting at a right-angle corner at (2,0).
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 2,0 2,2");
+    gui.key(egui::Key::F);
+    assert_eq!(gui.app.tool, Tool::Fillet);
+    // Click the shared corner endpoint: the session starts with a
+    // 10 % mock radius already applied.
+    gui.click(v(2.0, 0.0));
+    assert!(gui.app.fillet_pending.is_some(), "corner click starts the session");
+    assert_eq!(gui.arc_count(), 1, "mock fillet applied immediately");
+    assert!(gui.app.dim_editing, "radius edit opens");
+    // Type a radius and commit.
+    gui.frame();
+    gui.type_text("0.5");
+    gui.key(egui::Key::Enter);
+    assert!(gui.app.fillet_pending.is_none(), "Enter finalises the session");
+    assert_eq!(gui.arc_count(), 1);
+    let arc = gui.sketch().arcs.iter().next().unwrap();
+    assert!((arc.radius.value - 0.5).abs() < 1e-6, "radius = {}", arc.radius.value);
+    // Radius dim + tangents landed.
+    assert_eq!(gui.sketch().dimensions.len(), 1);
+    assert_eq!(gui.sketch().tangent_la.len(), 2);
+    // One Ctrl+Z undoes the whole fillet.
+    gui.key_with(egui::Key::Z, egui::Modifiers::CTRL);
+    assert_eq!(gui.arc_count(), 0);
+    assert_eq!(gui.sketch().dimensions.len(), 0);
+}
+
+#[test]
+fn test_fillet_escape_restores() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 2,0 2,2");
+    let actions0 = gui.app.history.actions.len();
+    gui.key(egui::Key::F);
+    gui.click(v(2.0, 0.0));
+    assert_eq!(gui.arc_count(), 1);
+    // Escape rolls the whole session back.
+    gui.frame();
+    gui.key(egui::Key::Escape);
+    assert!(gui.app.fillet_pending.is_none());
+    assert_eq!(gui.arc_count(), 0);
+    assert_eq!(gui.app.history.actions.len(), actions0);
+    // The trimmed endpoints are restored.
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(2.0, 0.0), 0.01), "p2 restored: {:?}", p2);
+}
+
+#[test]
+fn test_chamfer_tool_gesture() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 2,0 2,2");
+    gui.key(egui::Key::F);
+    gui.key(egui::Key::F); // cycle to Chamfer
+    assert_eq!(gui.app.tool, Tool::Chamfer);
+    gui.click(v(2.0, 0.0));
+    assert!(gui.app.fillet_pending.is_some());
+    assert_eq!(gui.line_count(), 3, "bevel line added");
+    gui.frame();
+    gui.type_text("0.4");
+    gui.key(egui::Key::Enter);
+    assert!(gui.app.fillet_pending.is_none());
+    // Two leg dims, the corner anchor point, both point-on constraints.
+    assert_eq!(gui.sketch().dimensions.len(), 2);
+    assert_eq!(gui.sketch().point_on_line.len(), 2);
+    let bevel = gui.line(2);
+    let len = ((bevel.1.x - bevel.0.x).powi(2) + (bevel.1.y - bevel.0.y).powi(2)).sqrt();
+    let expect = 0.4_f64 * std::f64::consts::SQRT_2;
+    assert!((len - expect).abs() < 0.01, "bevel length = {} vs {}", len, expect);
+}

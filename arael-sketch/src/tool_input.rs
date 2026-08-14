@@ -726,16 +726,15 @@ impl EditorApp {
     /// Canvas input for `Tool::Fillet | Tool::Chamfer`.
     pub(crate) fn handle_fillet_chamfer(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
         if response.clicked_by(egui::PointerButton::Primary) {
-            // Derive a "corner arg" from this click: an
-            // endpoint snap yields "<line>.pN"; a
-            // line-body click accumulates into
-            // self.selection and, once two lines are in,
-            // yields "L0 L1". Returns the arg plus the
-            // shortest line length (used for the 10 %
-            // starting radius when this is the first
-            // corner of the session).
+            // Derive a typed corner from this click: an endpoint snap
+            // yields Endpoint{line, is_p1}; a line-body click
+            // accumulates into self.selection and, once two lines are
+            // in, yields Lines(a, b). Returns the corner plus the
+            // shortest line length (used for the 10 % starting
+            // radius when this is the first corner of the session).
+            use arael_sketch_backend::corner_ops::CornerSpec;
             #[derive(Clone)]
-            enum Picked { Corner(String, f64), Nothing }
+            enum Picked { Corner(CornerSpec, f64), Nothing }
             let pre_len = |app: &Self, r: Ref<Line>| -> f64 {
                 let ln = &app.sketch.lines[r];
                 let dx = ln.p2.value.x - ln.p1.value.x;
@@ -744,10 +743,10 @@ impl EditorApp {
             };
             let picked = match self.find_snap_target(mouse_sketch, hit_threshold) {
                 Some((_, SnapTarget::LineP1(l))) => {
-                    Picked::Corner(format!("{}.p1", self.sketch.lines[l].name), pre_len(self, l))
+                    Picked::Corner(CornerSpec::Endpoint { line: l, is_p1: true }, pre_len(self, l))
                 }
                 Some((_, SnapTarget::LineP2(l))) => {
-                    Picked::Corner(format!("{}.p2", self.sketch.lines[l].name), pre_len(self, l))
+                    Picked::Corner(CornerSpec::Endpoint { line: l, is_p1: false }, pre_len(self, l))
                 }
                 _ => if let Some(Selection::Line(r)) = self.hit_test_selection(mouse_sketch, hit_threshold) {
                     if self.selection.iter().any(|s| matches!(s, Selection::Line(rr) if *rr == r)) {
@@ -760,20 +759,19 @@ impl EditorApp {
                     }).collect();
                     if lines.len() == 2 {
                         let shortest = pre_len(self, lines[0]).min(pre_len(self, lines[1]));
-                        let arg = format!("{} {}", self.sketch.lines[lines[0]].name, self.sketch.lines[lines[1]].name);
                         self.selection.clear();
-                        Picked::Corner(arg, shortest)
+                        Picked::Corner(CornerSpec::Lines(lines[0], lines[1]), shortest)
                     } else { Picked::Nothing }
                 } else { Picked::Nothing },
             };
             match picked {
-                Picked::Corner(arg, shortest) => {
+                Picked::Corner(spec, shortest) => {
                     if self.fillet_pending.is_some() {
-                        self.toggle_fillet_corner(&arg);
+                        self.toggle_fillet_corner(spec);
                     } else if self.tool == Tool::Chamfer {
-                        self.try_start_gui_chamfer(&arg, shortest);
+                        self.try_start_gui_chamfer(spec, shortest);
                     } else {
-                        self.try_start_gui_fillet(&arg, shortest);
+                        self.try_start_gui_fillet(spec, shortest);
                     }
                 }
                 Picked::Nothing => {}

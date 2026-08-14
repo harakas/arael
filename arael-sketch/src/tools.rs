@@ -133,28 +133,29 @@ pub struct RectDrawState {
 // chamfer line, coincidents, tangents, and dim(s) all undone -- and
 // `history_cursor_before` matches the dropped actions so undo lines
 // up. Every live edit restores to this snapshot and re-applies all
-// pending corners; keeping state declarative lets the radius edit
-// and corner add/remove ripple through cleanly.
+// pending corners through the typed backend engine
+// (corner_ops::apply_corner_ops); keeping state declarative lets the
+// radius edit and corner add/remove ripple through cleanly.
 pub struct CornerOpPending {
-    /// Backend command name: "fillet" or "chamfer". The reapply loop
-    /// runs `<command> <corner_arg> <radius>` per corner, so the
-    /// two tools share the same live-preview plumbing.
-    pub command: &'static str,
+    pub kind: arael_sketch_backend::corner_ops::CornerKind,
     pub pre_snapshot: std::vec::Vec<u8>,
     pub history_cursor_before: usize,
-    /// Corner argument strings, one per corner: `"L0 L1"` or
-    /// `"L0.p2"`. First entry is the primary -- its created dimension
-    /// receives the user-typed value. Subsequent entries reference
-    /// the primary dim by name (`d<N>`) so every corner tracks it.
-    pub corners: std::vec::Vec<String>,
+    /// Typed corners, one per corner op. First entry is the primary --
+    /// its created dimension receives the user-typed value; the engine
+    /// makes subsequent corners reference it by dim name so every
+    /// corner tracks a single source.
+    pub corners: std::vec::Vec<arael_sketch_backend::corner_ops::CornerSpec>,
+    /// The primary corner's dimension after the last reapply; the
+    /// dim-input overlay edits it live.
+    pub primary_dim_did: Option<u32>,
     /// Last radius/distance token whose reapply actually produced
     /// a result. Empty / 0 / unparseable input falls back to this so
     /// the canvas keeps the most recent valid state while the user
     /// is mid-edit.
     pub last_valid_radius: String,
-    /// Signature of the last successful reapply: radius token plus
-    /// corner count. Used to decide whether another reapply pass is
-    /// needed when dim_input or `corners` changes.
+    /// Signature of the last reapply: radius token plus corners. Used
+    /// to decide whether another reapply pass is needed when
+    /// dim_input or `corners` changes.
     pub last_applied_sig: String,
 }
 

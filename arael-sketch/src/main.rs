@@ -31,6 +31,7 @@ use arael_sketch_solver::*;
 use colors::ColorScheme;
 use tools::*;
 use arael_sketch_backend::{Action, History};
+use arael_sketch_backend::corner_ops::{CornerKind, CornerSpec};
 use arael_sketch_backend::geometry::*;
 
 // drawing module methods are accessed through impl blocks on EditorApp
@@ -321,6 +322,29 @@ struct DragExit {
     pre_snapshot: Option<Vec<u8>>,
     /// Best clean (apparatus-free) state seen during the gesture.
     best_snapshot: Option<Vec<u8>>,
+}
+
+/// The corner-op engine (fillet/chamfer) runs against this the same
+/// way it runs against CommandContext -- one engine, two front ends.
+impl arael_sketch_backend::corner_ops::ActionRunner for EditorApp {
+    fn sketch(&self) -> &Sketch {
+        &self.sketch
+    }
+    fn sketch_mut(&mut self) -> &mut Sketch {
+        self.sketch.get_mut()
+    }
+    fn run(&mut self, action: Action) -> arael_sketch_backend::actions::Created {
+        self.exec(action)
+    }
+    fn run_unchecked(&mut self, action: Action) -> arael_sketch_backend::actions::Created {
+        self.exec_with_skip(action, true)
+    }
+    fn take_error(&mut self) -> Option<String> {
+        self.status_error.take()
+    }
+    fn begin_group(&mut self) {
+        EditorApp::begin_group(self)
+    }
 }
 
 impl EditorApp {
@@ -1834,6 +1858,13 @@ impl EditorApp {
     /// Apply an action. Returns what it added, so a caller acting on the new
     /// entity uses the ref the arena actually issued.
     pub fn exec(&mut self, action: Action) -> arael_sketch_backend::actions::Created {
+        self.exec_with_skip(action, false)
+    }
+
+    /// `exec` with the DOF-redundancy gate optionally suppressed --
+    /// the corner-op engine re-ties just-created geometry through
+    /// this, same as the command path's skip_dof_check.
+    fn exec_with_skip(&mut self, action: Action, skip_dof_check: bool) -> arael_sketch_backend::actions::Created {
         use arael_sketch_backend::actions::Created;
         let mut created = Created::Nothing;
         self.status_error = None;
@@ -1848,7 +1879,7 @@ impl EditorApp {
 
         if action.is_constraint_action() {
             match arael_sketch_backend::commands::validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, false)
+                self.sketch.get_mut(), &action, skip_dof_check)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -1869,6 +1900,10 @@ impl EditorApp {
         self.refresh_dof();
         created
     }
+
+    /// Corner-op engine hookup: the GUI runs fillet/chamfer through
+    /// the same typed backend API as the commands (see
+    /// arael_sketch_backend::corner_ops). Trait impl below.
 
     /// Apply a split plan through the action machinery, returning the
     /// outcome report `exec` cannot carry. Mirrors CommandContext::
@@ -2751,17 +2786,16 @@ impl EditorApp {
     /// of the shortest involved line's length as the starting
     /// radius/distance, then drop the user straight into value
     /// editing. Additional corners can be toggled in/out while
-    /// editing. `command` is the backend command name the reapply
-    /// loop runs.
-    fn try_start_gui_fillet(&mut self, arg: &str, shortest_len: f64) {
-        self.try_start_gui_corner_op("fillet", arg, shortest_len);
+    /// editing.
+    fn try_start_gui_fillet(&mut self, spec: CornerSpec, shortest_len: f64) {
+        self.try_start_gui_corner_op(CornerKind::Fillet, spec, shortest_len);
     }
 
-    fn try_start_gui_chamfer(&mut self, arg: &str, shortest_len: f64) {
-        self.try_start_gui_corner_op("chamfer", arg, shortest_len);
+    fn try_start_gui_chamfer(&mut self, spec: CornerSpec, shortest_len: f64) {
+        self.try_start_gui_corner_op(CornerKind::Chamfer, spec, shortest_len);
     }
 
-    fn try_start_gui_corner_op(&mut self, command: &'static str, arg: &str, shortest_len: f64) {
+    fn try_start_gui_corner_op(&mut self, kind: CornerKind, spec: CornerSpec, shortest_len: f64) {
         if shortest_len < 1e-6 { return; }
         let pre_snapshot = match bincode::serialize(&self.sketch) {
             Ok(s) => s,
@@ -2770,10 +2804,11 @@ impl EditorApp {
         let history_cursor_before = self.history.cursor;
         let initial_r = format!("{:.4}", shortest_len * 0.1);
         self.fillet_pending = Some(FilletPending {
-            command,
+            kind,
             pre_snapshot,
             history_cursor_before,
-            corners: vec![arg.to_string()],
+            corners: vec![spec],
+            primary_dim_did: None,
             last_valid_radius: initial_r.clone(),
             last_applied_sig: String::new(),
         });
@@ -2799,24 +2834,11 @@ impl EditorApp {
         self.selection.clear();
     }
 
-    /// Index of the radius dimension created by the first (primary)
-    /// fillet in `fillet_pending`. None if reapply has never run or
-    /// the primary fillet failed.
+    /// The primary corner's dimension in the active corner-op
+    /// session. None if reapply has never run or the primary corner
+    /// failed.
     pub fn primary_fillet_dim_did(&self) -> Option<u32> {
-        // The primary fillet is the first entry in `corners`. After
-        // reapply, its AddDimension is the oldest fillet-created dim;
-        // scan by name prefix isn't reliable here, so find the first
-        // dim whose kind is ArcRadius(arc) where arc is filleted.
-        // Simpler: pick the first ArcRadius dim whose index >= the
-        // pre-snapshot dim count. Use last-applied signature to know
-        // how many dims were pre-existing.
-        let p = self.fillet_pending.as_ref()?;
-        // Deserialize pre_snapshot once to learn how many dims existed
-        // before the fillet session started. Cheap vs. every-frame.
-        let pre = bincode::deserialize::<Sketch>(&p.pre_snapshot).ok()?;
-        let n_pre = pre.dimensions.len();
-        // First dim added by fillet session (the primary's radius).
-        self.sketch.dimensions.get(n_pre).map(|d| d.did)
+        self.fillet_pending.as_ref()?.primary_dim_did
     }
 
     /// Current radius token for reapply: the user's dim_input if it
@@ -2850,22 +2872,24 @@ impl EditorApp {
     }
 
     /// Restore the pre-fillet sketch and reapply every pending
-    /// corner from scratch. Called whenever the radius or the
-    /// corner list changes during an active fillet edit. Cheap
-    /// enough for live typing (one bincode deserialize + a handful
-    /// of `fillet` command runs).
+    /// corner from scratch through the typed backend engine. Called
+    /// whenever the radius or the corner list changes during an
+    /// active fillet edit. Cheap enough for live typing (one bincode
+    /// deserialize + a handful of corner ops).
     pub fn reapply_fillets(&mut self) {
+        use arael_sketch_backend::corner_ops::{apply_corner_ops, CornerOpConfig};
         let Some(p) = self.fillet_pending.as_ref() else { return; };
-        let radius = match self.fillet_effective_radius() {
+        let radius_tok = match self.fillet_effective_radius() {
             Some(r) => r,
             None => return,
         };
-        let sig = format!("{}|{}", radius, p.corners.join(","));
+        let sig = format!("{}|{:?}", radius_tok, p.corners);
         if sig == p.last_applied_sig { return; }
 
         let pre_snapshot = p.pre_snapshot.clone();
         let history_cursor_before = p.history_cursor_before;
         let corners = p.corners.clone();
+        let kind = p.kind;
 
         // Restore pre-fillet state so the reapply is deterministic.
         if let Ok(s) = bincode::deserialize::<Sketch>(&pre_snapshot) {
@@ -2878,56 +2902,29 @@ impl EditorApp {
         self.history.cursor = history_cursor_before;
         self.status_error = None;
 
-        // Run primary corner op. Its dim name drives the rest.
-        let command = self.fillet_pending.as_ref().map(|p| p.command).unwrap_or("fillet");
-        let mut primary_dim_name: Option<String> = None;
-        let mut applied_any = false;
-        let mut first_result_radius = radius.clone();
-        if let Some(first) = corners.first() {
-            let cmd = format!("{} {} {}", command, first, radius);
-            let results = self.run_commands(&cmd);
-            let ok = !results.iter().any(|r| r.is_error)
-                && self.sketch.dimensions.last().is_some();
-            if ok {
-                applied_any = true;
-                primary_dim_name = self.sketch.dimensions.last().map(|d| d.name.clone());
-            } else {
-                // Primary failed: surface the error and leave
-                // last_applied_sig empty so the next typed change
-                // retries.
-                if let Some(r) = results.iter().find(|r| r.is_error) {
-                    self.status_error = Some(r.output.clone());
+        let (radius, radius_expr) =
+            match arael_sketch_backend::commands::parse_radius_token(&self.sketch, &radius_tok) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.status_error = Some(e);
+                    return;
                 }
-                first_result_radius.clear();
-            }
-        }
+            };
+        let cfg = CornerOpConfig { kind, radius, radius_expr, notangent: false, noradius: false };
+        // One apply, one undo group -- the engine opens a single
+        // group for the whole corner set.
+        let result = apply_corner_ops(self, &cfg, &corners);
 
-        // Secondary corner ops reference the primary dim by name.
-        if let Some(pdn) = &primary_dim_name {
-            for corner in corners.iter().skip(1) {
-                let cmd = format!("{} {} {}", command, corner, pdn);
-                let results = self.run_commands(&cmd);
-                if results.iter().any(|r| r.is_error) {
-                    // Leave this corner failed; the others still stick.
-                }
-            }
-        }
-
-        // Collapse every action pushed in this reapply into a
-        // single undo group. `cmd_fillet` opens its own group per
-        // call, so without this stitching a 3-corner fillet tool
-        // session would need three Ctrl+Z presses to undo.
-        if self.history.cursor > history_cursor_before
-            && let Some(&first) = self.history.groups.get(history_cursor_before)
+        let primary_ok = result.outcomes.first().is_some_and(|o| o.error.is_none());
+        if !primary_ok
+            && let Some(e) = result.outcomes.first().and_then(|o| o.error.clone())
         {
-            for g in &mut self.history.groups[history_cursor_before..self.history.cursor] {
-                *g = first;
-            }
+            self.status_error = Some(e);
         }
-
         if let Some(pending) = self.fillet_pending.as_mut() {
-            if applied_any && !first_result_radius.is_empty() {
-                pending.last_valid_radius = first_result_radius;
+            pending.primary_dim_did = result.primary_dim_did;
+            if primary_ok {
+                pending.last_valid_radius = radius_tok;
             }
             pending.last_applied_sig = sig;
         }
@@ -2936,12 +2933,12 @@ impl EditorApp {
 
     /// Add a corner to the active fillet session, or remove it if
     /// it's already there. Reapplies so the preview updates.
-    pub fn toggle_fillet_corner(&mut self, arg: &str) {
+    pub fn toggle_fillet_corner(&mut self, spec: CornerSpec) {
         if let Some(p) = self.fillet_pending.as_mut() {
-            if let Some(idx) = p.corners.iter().position(|c| c == arg) {
+            if let Some(idx) = p.corners.iter().position(|c| *c == spec) {
                 p.corners.remove(idx);
             } else {
-                p.corners.push(arg.to_string());
+                p.corners.push(spec);
             }
         }
         // If we removed the last corner, drop the pending and bail.
