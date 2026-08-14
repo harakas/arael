@@ -56,6 +56,32 @@ pub fn coincidence_key(a: u64, b: u64) -> DedupKey {
     DedupKey::Coincidence(a.min(b), a.max(b))
 }
 
+/// Endpoint role carried in the low bits of a canonical endpoint id;
+/// the inverse of the `ep_*` encoders above.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EndpointRole {
+    Point,
+    LineP1,
+    LineP2,
+    ArcCenter,
+    ArcStart,
+    ArcEnd,
+}
+
+/// Decode a canonical endpoint id into its role and arena index.
+pub fn decode_endpoint(enc: u64) -> (EndpointRole, u32) {
+    let role = match enc & 7 {
+        0 => EndpointRole::Point,
+        1 => EndpointRole::LineP1,
+        2 => EndpointRole::LineP2,
+        3 => EndpointRole::ArcCenter,
+        4 => EndpointRole::ArcStart,
+        5 => EndpointRole::ArcEnd,
+        r => panic!("decode_endpoint: unknown role {}", r),
+    };
+    (role, (enc >> 3) as u32)
+}
+
 /// Role a line/arc reference plays in its constraint, declared per
 /// field at the registration site. The split engine's reference
 /// transfer is driven entirely by these (see docs/dev/TRIMSPLIT.md):
@@ -629,6 +655,33 @@ sketch_constraint!(AxisDistanceAAEE, points(), lines(), arcs(a: end, b: end),
 
 /// Number of registered constraint collections; a tripwire for tests.
 pub const CONSTRAINT_COLLECTION_COUNT: usize = 112;
+
+impl Sketch {
+    /// Hand every coincidence constraint's canonical endpoint pair to
+    /// `f`, in the same encoding the dedup keys use (decode with
+    /// [`decode_endpoint`]). Registry-driven, so a new coincidence
+    /// collection participates without any caller changing -- this is
+    /// what the GUI's transitive-coincidence union-finds build from.
+    pub fn for_each_coincidence_pair(&self, mut f: impl FnMut(u64, u64)) {
+        self.for_each_constraint_collection_ref(|_, meta, coll| {
+            if !meta.coincidence {
+                return;
+            }
+            for i in 0..coll.len() {
+                match coll.item(i).dedup_key() {
+                    DedupKey::Coincidence(a, b) => f(a, b),
+                    // A collection flagged coincidence must dedup as
+                    // one; a Local key here would silently drop its
+                    // unions from every consumer.
+                    k => panic!(
+                        "collection {} is marked coincidence but deduped {:?}",
+                        meta.name, k
+                    ),
+                }
+            }
+        });
+    }
+}
 
 impl Sketch {
     /// Hand every constraint collection to `f`, mutably, with the
@@ -1232,5 +1285,52 @@ mod role_tests {
                 assert_eq!(arefs, afields);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod coincidence_pair_tests {
+    use super::*;
+    use arael::model::CrossBlock;
+    use arael::vect::vect2d;
+
+    #[test]
+    fn test_decode_endpoint_roundtrip() {
+        let mut s = Sketch::new();
+        let p = s.add_point(vect2d::new(0.0, 0.0));
+        let l = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(1.0, 0.0));
+        let a = s.add_arc(vect2d::new(0.0, 0.0), 1.0, 0.0, 1.0, false);
+        assert_eq!(decode_endpoint(ep_point(p)), (EndpointRole::Point, p.index()));
+        assert_eq!(decode_endpoint(ep_line_p1(l)), (EndpointRole::LineP1, l.index()));
+        assert_eq!(decode_endpoint(ep_line_p2(l)), (EndpointRole::LineP2, l.index()));
+        assert_eq!(decode_endpoint(ep_arc_center(a)), (EndpointRole::ArcCenter, a.index()));
+        assert_eq!(decode_endpoint(ep_arc_start(a)), (EndpointRole::ArcStart, a.index()));
+        assert_eq!(decode_endpoint(ep_arc_end(a)), (EndpointRole::ArcEnd, a.index()));
+    }
+
+    #[test]
+    fn test_for_each_coincidence_pair_yields_only_coincidences() {
+        let mut s = Sketch::new();
+        let l0 = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(1.0, 0.0));
+        let l1 = s.add_line(vect2d::new(1.0, 0.0), vect2d::new(2.0, 0.0));
+        let a0 = s.add_arc(vect2d::new(2.0, 1.0), 1.0, 0.0, 1.0, false);
+        s.coincident_ll21.push(crate::CoincidentLL21 {
+            a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new(),
+        });
+        s.coincident_lp2_arc_start.push(crate::CoincidentLP2ArcStart {
+            line: l1, arc: a0, nid: 0, cid: 0, hb: CrossBlock::new(),
+        });
+        // A non-coincidence constraint must not appear.
+        s.parallel.push(crate::Parallel { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
+        let mut pairs = Vec::new();
+        s.for_each_coincidence_pair(|a, b| pairs.push((a, b)));
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&coincidence_pair(ep_line_p2(l0), ep_line_p1(l1))));
+        assert!(pairs.contains(&coincidence_pair(ep_line_p2(l1), ep_arc_start(a0))));
+    }
+
+    // The (min, max) normalisation dedup applies; pairs arrive that way.
+    fn coincidence_pair(a: u64, b: u64) -> (u64, u64) {
+        (a.min(b), a.max(b))
     }
 }

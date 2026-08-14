@@ -43,7 +43,8 @@ pub use drag::{DragApparatus, DragTarget};
 pub mod probe;
 pub mod registry;
 pub use arael::rank::RankResult;
-pub use registry::{CollectionMeta, ConstraintArenas, ConstraintCollection, RefRole, SketchConstraint};
+pub use registry::{CollectionMeta, ConstraintArenas, ConstraintCollection, EndpointRole,
+    RefRole, SketchConstraint, decode_endpoint};
 
 use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
