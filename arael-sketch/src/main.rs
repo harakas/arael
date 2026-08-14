@@ -1491,10 +1491,22 @@ impl EditorApp {
                         self.last_cost = result.end_cost;
                     }
 
-            // Record drag as a non-deterministic action with full state snapshot
-            let snapshot = bincode::serialize(&self.sketch).unwrap();
-            let action = Action::Drag { snapshot };
-            self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
+            // Record drag as a non-deterministic action with full state
+            // snapshot. A failed serialize loses this drag's undo entry
+            // but must not crash the release gesture; the error is
+            // surfaced after the auto-snap section (which clears
+            // status_error for its own rejections).
+            let mut snapshot_err: Option<String> = None;
+            match bincode::serialize(&self.sketch) {
+                Ok(snapshot) => {
+                    let action = Action::Drag { snapshot };
+                    self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
+                }
+                Err(e) => {
+                    eprintln!("drag snapshot serialize failed; drag not recorded in history: {}", e);
+                    snapshot_err = Some(format!("drag not recorded in history: {}", e));
+                }
+            }
 
             // Auto-snap: if a point-like entity was dragged near another,
             // create a coincident constraint
@@ -1611,8 +1623,9 @@ impl EditorApp {
             // be shown -- clear both the error string and the
             // blocker-flash state so an internally-rejected
             // auto-perp / auto-snap doesn't flash constraints at the
-            // user on every drag release.
-            self.status_error = None;
+            // user on every drag release. A failed history snapshot
+            // IS shown.
+            self.status_error = snapshot_err;
             self.flash_names.clear();
             self.flash_start = None;
         }

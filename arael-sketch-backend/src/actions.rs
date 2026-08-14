@@ -1690,7 +1690,12 @@ impl Action {
                 }
             }
             Action::Drag { snapshot } => {
-                *sketch = bincode::deserialize(snapshot).unwrap();
+                // A corrupt snapshot (e.g. from a damaged save replay)
+                // leaves the sketch as-is rather than crashing.
+                match bincode::deserialize(snapshot) {
+                    Ok(s) => *sketch = s,
+                    Err(e) => eprintln!("BUG: drag snapshot deserialize failed: {}", e),
+                }
             }
         }
         (false, created)
