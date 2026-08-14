@@ -174,8 +174,8 @@
 - mirror tool -- DONE (mirror command with symmetry constraints; selection form)
 - fillet tool -- DONE (fillet command + GUI tool, variadic corners, live radius edit)
 - offset tool -- DONE (offset_line / offset)
-- trim tool
-- split tool
+- trim tool -- DONE (trim command + GUI tool; split engine with role-driven reference transfer)
+- split tool -- DONE (split command + GUI tool, B key cycles Split/Trim; docs in COMMANDS.md, design in docs/dev/TRIMSPLIT.md)
 - scale tool
 - text placement
 - polygon tool

@@ -211,6 +211,11 @@ impl EditorApp {
                 self.tool = Tool::Fillet;
                 self.selection.clear();
             }
+            // B cycles Break (Split) <-> Trim.
+            if ui.input(|i| i.key_pressed(egui::Key::B)) {
+                self.tool = if self.tool == Tool::Split { Tool::Trim } else { Tool::Split };
+                self.selection.clear();
+            }
             if ui.input(|i| i.key_pressed(egui::Key::H)) { self.try_apply_or_enter_mode(ConstraintType::Horizontal); }
             if ui.input(|i| i.key_pressed(egui::Key::V)) { self.try_apply_or_enter_mode(ConstraintType::Vertical); }
             if ui.input(|i| i.key_pressed(egui::Key::C)) { self.try_apply_or_enter_mode(ConstraintType::Coincident); }
@@ -359,6 +364,7 @@ impl EditorApp {
                 Tool::DrawArc => self.handle_draw_arc(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::DrawRect => self.handle_draw_rect(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Fillet | Tool::Chamfer => self.handle_fillet_chamfer(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
+                Tool::Split | Tool::Trim => self.handle_split_trim(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::ConstraintMode(ct) => self.handle_constraint_mode(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold, ct),
                 Tool::Dimension => self.handle_dimension_tool(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
             }

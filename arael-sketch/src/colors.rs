@@ -30,6 +30,10 @@ pub struct ColorScheme {
     pub dimension_preview: egui::Color32,
     pub error_text: egui::Color32,
     pub command_cursor: egui::Color32,
+    /// Split tool hover: the span that would become its own entity.
+    pub split_preview: egui::Color32,
+    /// Trim tool hover: the span that would be deleted.
+    pub trim_preview: egui::Color32,
 }
 
 impl ColorScheme {
@@ -61,6 +65,8 @@ impl ColorScheme {
             dimension_preview: egui::Color32::from_rgba_premultiplied(200, 100, 50, 180),
             error_text: egui::Color32::from_rgb(255, 80, 80),
             command_cursor: egui::Color32::from_rgb(0, 160, 255),
+            split_preview: egui::Color32::from_rgb(0, 170, 90),
+            trim_preview: egui::Color32::from_rgb(230, 60, 60),
         }
     }
 
@@ -92,6 +98,8 @@ impl ColorScheme {
             dimension_preview: egui::Color32::from_rgba_premultiplied(220, 140, 80, 180),
             error_text: egui::Color32::from_rgb(255, 100, 100),
             command_cursor: egui::Color32::from_rgb(0, 160, 255),
+            split_preview: egui::Color32::from_rgb(60, 220, 130),
+            trim_preview: egui::Color32::from_rgb(255, 80, 80),
         }
     }
 }

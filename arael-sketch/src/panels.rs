@@ -131,6 +131,15 @@ impl EditorApp {
                     self.selection.clear();
                 }
                 ui.end_row();
+                if ui.selectable_label(self.tool == Tool::Split, "Split (B)").clicked() {
+                    self.tool = Tool::Split;
+                    self.selection.clear();
+                }
+                if ui.selectable_label(self.tool == Tool::Trim, "Trim (B)").clicked() {
+                    self.tool = Tool::Trim;
+                    self.selection.clear();
+                }
+                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
                     self.tool = Tool::Dimension;
                     self.dim_editing = false;

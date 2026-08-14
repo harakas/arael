@@ -781,6 +781,125 @@ impl EditorApp {
         }
     }
 
+    /// Canvas input for `Tool::Split | Tool::Trim`.
+    pub(crate) fn handle_split_trim(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        if response.clicked_by(egui::PointerButton::Primary) {
+            let trim = self.tool == Tool::Trim;
+            self.gui_split_trim(mouse_sketch, hit_threshold, trim);
+        }
+    }
+
+    /// The line/arc under the cursor, as a split target. Endpoint hits
+    /// resolve to their entity so a near-endpoint click still picks
+    /// the curve (the cut itself is refused if degenerate).
+    pub(crate) fn split_trim_target_at(&self, mouse_sketch: vect2d, hit_threshold: f64)
+        -> Option<arael_sketch_backend::split::SplitTarget>
+    {
+        use arael_sketch_backend::split::SplitTarget;
+        match self.hit_test_selection(mouse_sketch, hit_threshold)? {
+            Selection::Line(r) | Selection::LineP1(r) | Selection::LineP2(r) => {
+                Some(SplitTarget::Line(r))
+            }
+            Selection::Arc(r) | Selection::ArcStart(r) | Selection::ArcEnd(r) => {
+                Some(SplitTarget::Arc(r))
+            }
+            _ => None,
+        }
+    }
+
+    /// Hover preview for the split/trim tools: the target under the
+    /// cursor and the parameter span a click would isolate. A `None`
+    /// span means the whole entity (trim would delete it entirely).
+    pub(crate) fn split_trim_preview(&self, mouse_sketch: vect2d, hit_threshold: f64)
+        -> Option<(arael_sketch_backend::split::SplitTarget, Option<(f64, f64)>)>
+    {
+        use arael_sketch_backend::split;
+        let target = self.split_trim_target_at(mouse_sketch, hit_threshold)?;
+        let (t, _) = split::target_param_near(&self.sketch, target, mouse_sketch);
+        let (all_cuts, _) = split::find_cuts(&self.sketch, target, None);
+        Some((target, split::preview_span(&self.sketch, target, &all_cuts, t)))
+    }
+
+    /// One split/trim click: bracket the cuts around the click, run
+    /// the plan plus its gated follow-ups as one undo group, and push
+    /// the id-rich report to the command panel.
+    pub(crate) fn gui_split_trim(&mut self, mouse_sketch: vect2d, hit_threshold: f64, trim: bool) {
+        use arael_sketch_backend::split::{self, SplitPlan, SplitTarget};
+        let Some(target) = self.split_trim_target_at(mouse_sketch, hit_threshold) else {
+            return;
+        };
+        let (closed, tname) = match target {
+            SplitTarget::Line(r) => (false, self.sketch.lines[r].name.clone()),
+            SplitTarget::Arc(r) => (self.sketch.arcs[r].closed, self.sketch.arcs[r].name.clone()),
+        };
+        let (t, _) = split::target_param_near(&self.sketch, target, mouse_sketch);
+        let (all_cuts, _) = split::find_cuts(&self.sketch, target, None);
+        if all_cuts.is_empty() || (closed && all_cuts.len() < 2) {
+            if trim {
+                // Nothing to cut at: trim deletes the whole entity.
+                self.begin_group();
+                match target {
+                    SplitTarget::Line(r) => { self.exec(Action::DeleteLine { line: r }); }
+                    SplitTarget::Arc(r) => { self.exec(Action::DeleteArc { arc: r }); }
+                }
+                self.command_output.push((
+                    format!("Trimmed (no intersections): deleted {}", tname),
+                    false, false,
+                ));
+            } else {
+                self.status_error = Some(format!("no intersections on {} to split at", tname));
+            }
+            return;
+        }
+        let (cuts, clicked) = split::bracket_cuts(&self.sketch, target, &all_cuts, t, closed);
+        let n = split::piece_count(closed, cuts.len());
+        let mut keep = vec![true; n];
+        if trim {
+            keep[clicked] = false;
+        }
+        let plan = SplitPlan { target, cuts, keep };
+        self.begin_group();
+        let outcome = match self.exec_split(plan.clone()) {
+            Ok(o) => o,
+            Err(e) => {
+                self.status_error = Some(e);
+                return;
+            }
+        };
+        // Gated follow-ups; a rejection here means "already implied".
+        let mark = self.sketch.next_constraint_id;
+        for action in split::post_split_actions(&plan, &outcome.pieces, true) {
+            self.exec(action);
+            self.status_error = None;
+        }
+        let mut added: Vec<String> = Vec::new();
+        self.sketch.for_each_constraint_collection_ref(|_, meta, coll| {
+            if meta.dimension_backed {
+                return;
+            }
+            for i in 0..coll.len() {
+                let c = coll.item(i);
+                if c.nid() >= mark {
+                    added.push(format!("C{} {}", c.nid(), c.describe(&self.sketch)));
+                }
+            }
+        });
+        let kept: Vec<String> = outcome.piece_names.iter().flatten().cloned().collect();
+        let verb = if trim { "Trimmed" } else { "Split" };
+        let mut lines = vec![format!("{} {} -> {}", verb, tname, kept.join(" "))];
+        let section = |label: &str, items: &[String], lines: &mut Vec<String>| {
+            if !items.is_empty() {
+                lines.push(format!("  {}: {}", label, items.join("; ")));
+            }
+        };
+        section("added", &added, &mut lines);
+        section("moved", &outcome.moved, &mut lines);
+        section("copied", &outcome.copied, &mut lines);
+        section("dropped", &outcome.dropped, &mut lines);
+        section("expressions", &outcome.expr_report, &mut lines);
+        self.command_output.push((lines.join("\n"), false, false));
+    }
+
     /// Canvas input for `Tool::ConstraintMode(ct)`.
     pub(crate) fn handle_constraint_mode(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64, ct: ConstraintType) {
         if response.clicked_by(egui::PointerButton::Primary) {

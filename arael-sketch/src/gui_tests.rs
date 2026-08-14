@@ -370,3 +370,97 @@ fn test_undo_redo_keys() {
     gui.key_with(egui::Key::Z, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
     assert_eq!(gui.line_count(), 1, "Ctrl+Shift+Z should restore it");
 }
+
+// -- Split / Trim tools -----------------------------------------------
+
+/// A 10-long horizontal line crossed by a vertical cutter at x=4,
+/// drawn via commands so the geometry is exact.
+fn split_gui() -> Gui {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 10,0");
+    gui.cmd("add_line 4,-2 4,2 noconnect");
+    gui
+}
+
+#[test]
+fn test_split_trim_key_cycles() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::B);
+    assert_eq!(gui.app.tool, Tool::Split);
+    gui.key(egui::Key::B);
+    assert_eq!(gui.app.tool, Tool::Trim);
+    gui.key(egui::Key::B);
+    assert_eq!(gui.app.tool, Tool::Split);
+    gui.key(egui::Key::Escape);
+    assert_eq!(gui.app.tool, Tool::Select);
+}
+
+#[test]
+fn test_split_tool_click() {
+    let mut gui = split_gui();
+    assert_eq!(gui.line_count(), 2);
+    gui.key(egui::Key::B);
+    gui.click(v(2.0, 0.0));
+    assert_eq!(gui.line_count(), 3, "target replaced by two pieces");
+    // Pieces joined at the cut and pinned to the cutter.
+    assert_eq!(gui.sketch().coincident_ll21.len(), 1);
+    assert_eq!(gui.sketch().line_p2_on_line.len(), 1);
+    // Report landed in the command panel.
+    assert!(gui.app.command_output.iter().any(|(t, _, _)| t.contains("Split L0")),
+        "command_output: {:?}", gui.app.command_output.last());
+}
+
+#[test]
+fn test_split_preview_picks_clicked_span() {
+    let mut gui = split_gui();
+    gui.key(egui::Key::B);
+    // Hover left of the cutter: the preview span is 0..4.
+    let (_, span) = gui.app.split_trim_preview(v(2.0, 0.0), 0.2).unwrap();
+    let (t0, t1) = span.unwrap();
+    assert!(near_f(t0, 0.0) && near_f(t1, 0.4), "span {:?}", (t0, t1));
+    // Hover right of the cutter: 4..10.
+    let (_, span) = gui.app.split_trim_preview(v(8.0, 0.0), 0.2).unwrap();
+    let (t0, t1) = span.unwrap();
+    assert!(near_f(t0, 0.4) && near_f(t1, 1.0), "span {:?}", (t0, t1));
+}
+
+fn near_f(a: f64, b: f64) -> bool { (a - b).abs() < 1e-6 }
+
+#[test]
+fn test_trim_tool_click_removes_span() {
+    let mut gui = split_gui();
+    gui.key(egui::Key::B);
+    gui.key(egui::Key::B); // cycle to Trim
+    assert_eq!(gui.app.tool, Tool::Trim);
+    gui.click(v(2.0, 0.0));
+    // The clicked left span is gone; one piece + cutter remain.
+    assert_eq!(gui.line_count(), 2);
+    let survivor = gui.sketch().lines.iter()
+        .find(|l| l.name != "L1").unwrap();
+    assert!(near(survivor.p1.value, v(4.0, 0.0), 0.05),
+        "surviving piece starts at the cut: {:?}", survivor.p1.value);
+}
+
+#[test]
+fn test_trim_no_cuts_deletes_entity() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 10,0");
+    gui.key(egui::Key::B);
+    gui.key(egui::Key::B);
+    gui.click(v(5.0, 0.0));
+    assert_eq!(gui.line_count(), 0);
+}
+
+#[test]
+fn test_split_undo_one_group() {
+    let mut gui = split_gui();
+    gui.key(egui::Key::B);
+    gui.click(v(2.0, 0.0));
+    assert_eq!(gui.line_count(), 3);
+    // One Ctrl+Z restores the target, its pieces, and the follow-up
+    // constraints as a single group.
+    gui.key_with(egui::Key::Z, egui::Modifiers::CTRL);
+    assert_eq!(gui.line_count(), 2);
+    assert!(gui.sketch().lines.iter().any(|l| l.name == "L0"));
+    assert!(gui.sketch().coincident_ll21.is_empty());
+}

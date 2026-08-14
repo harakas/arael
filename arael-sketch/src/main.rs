@@ -1902,6 +1902,34 @@ impl EditorApp {
         created
     }
 
+    /// Apply a split plan through the action machinery, returning the
+    /// outcome report `exec` cannot carry. Mirrors CommandContext::
+    /// exec_split: apply, name, solve, dedup, record in history.
+    pub fn exec_split(&mut self, plan: arael_sketch_backend::split::SplitPlan)
+        -> Result<arael_sketch_backend::split::SplitOutcome, String>
+    {
+        self.status_error = None;
+        let outcome = {
+            let s = self.sketch.get_mut();
+            let o = arael_sketch_backend::split::apply_split(s, &plan)?;
+            s.assign_constraint_names();
+            s.solve();
+            s.update_expr_dim_values();
+            o
+        };
+        self.sketch.get_mut().dedup_constraints();
+        self.history.push(
+            Action::SplitEntity { plan },
+            &self.sketch,
+            arael_sketch_backend::history::CursorState {
+                pos: self.command_cursor,
+                tangent: self.command_cursor_tangent,
+            },
+        );
+        self.refresh_dof();
+        Ok(outcome)
+    }
+
     /// Apply a user parameter change with solve and cost check.
     /// Rolls back if the change causes constraints to break.
     pub fn apply_param_change(&mut self, action: Action) {

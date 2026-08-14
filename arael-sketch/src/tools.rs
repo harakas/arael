@@ -75,6 +75,11 @@ pub enum Tool {
     DrawRect,
     Fillet,
     Chamfer,
+    /// Break the hovered line/arc at the intersections bracketing the
+    /// click; all pieces survive.
+    Split,
+    /// Same bracketing, but the clicked span is deleted.
+    Trim,
     ConstraintMode(ConstraintType),
     Dimension,
 }

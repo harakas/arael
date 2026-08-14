@@ -85,6 +85,12 @@ impl EditorApp {
     pub(crate) fn draw_canvas_overlays(&mut self, ui: &mut egui::Ui, painter: &egui::Painter,
                                        rect: egui::Rect, mouse_screen: egui::Pos2,
                                        mouse_sketch: vect2d, hit_threshold: f64) {
+        // Split/Trim hover preview: the span a click would isolate
+        // (split, green) or remove (trim, red). A whole-entity trim
+        // shows the full curve in the trim colour.
+        if matches!(self.tool, Tool::Split | Tool::Trim) {
+            self.draw_split_trim_preview(painter, mouse_sketch, hit_threshold);
+        }
         // Dimension preview while placing (not when editing an existing dimension)
         if (self.dim_placing || (self.dim_editing && self.dim_edit_did.is_none())) && self.dim_kind.is_some() {
             let kind = self.dim_kind.unwrap();
@@ -634,6 +640,8 @@ impl EditorApp {
             } else {
                 "Chamfer: click a connecting endpoint, or select two lines. Escape to cancel."
             },
+            Tool::Split => "Split: click a line/arc to break it at the crossings around the click. B switches to Trim.",
+            Tool::Trim => "Trim: click the span to remove (cut at the crossings around it). B switches to Split.",
             Tool::ConstraintMode(_) => "Constraint: click entities to apply. Escape to cancel.",
             Tool::Dimension => if self.dim_editing {
                 "Dimension: type value and press Enter. Escape to cancel."
@@ -682,5 +690,62 @@ impl EditorApp {
             egui::RichText::new(version_str).size(11.0),
             "https://github.com/harakas/arael",
         ).open_in_new_tab(true));
+    }
+
+    /// Draw the split/trim hover span. The span endpoints come from
+    /// the same bracketing the click will use, so the preview and the
+    /// action agree by construction.
+    fn draw_split_trim_preview(&self, painter: &egui::Painter, mouse_sketch: vect2d, hit_threshold: f64) {
+        use arael_sketch_backend::split::SplitTarget;
+        let Some((target, span)) = self.split_trim_preview(mouse_sketch, hit_threshold) else {
+            return;
+        };
+        let trim = self.tool == Tool::Trim;
+        // Split with nothing to cut at: no preview (the click errors).
+        if span.is_none() && !trim {
+            return;
+        }
+        let color = if trim { self.colors.trim_preview } else { self.colors.split_preview };
+        let stroke = egui::Stroke::new(3.5, color);
+        match target {
+            SplitTarget::Line(r) => {
+                let l = &self.sketch.lines[r];
+                let (a, b) = match span {
+                    Some((t0, t1)) => (
+                        vect2d::new(
+                            l.p1.value.x + t0 * (l.p2.value.x - l.p1.value.x),
+                            l.p1.value.y + t0 * (l.p2.value.y - l.p1.value.y),
+                        ),
+                        vect2d::new(
+                            l.p1.value.x + t1 * (l.p2.value.x - l.p1.value.x),
+                            l.p1.value.y + t1 * (l.p2.value.y - l.p1.value.y),
+                        ),
+                    ),
+                    None => (l.p1.value, l.p2.value),
+                };
+                painter.line_segment([self.to_screen(a), self.to_screen(b)], stroke);
+            }
+            SplitTarget::Arc(r) => {
+                let arc = &self.sketch.arcs[r];
+                let (t0, t1) = match span {
+                    Some(s) => s,
+                    None => {
+                        let sa = arc.start_angle.value;
+                        let ea = if arc.closed { sa + std::f64::consts::TAU } else { arc.end_angle.value };
+                        (sa, ea)
+                    }
+                };
+                let n = 48;
+                let pts: Vec<egui::Pos2> = (0..=n)
+                    .map(|i| {
+                        let t = t0 + (t1 - t0) * (i as f64 / n as f64);
+                        self.to_screen(arc.point_at(t))
+                    })
+                    .collect();
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], stroke);
+                }
+            }
+        }
     }
 }
