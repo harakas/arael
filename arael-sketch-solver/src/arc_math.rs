@@ -83,6 +83,31 @@ pub fn arc_tangent_y(r: arael_sym::E, rb: arael_sym::E,
     -r * sin(t) * sin(rot) + rb * cos(t) * cos(rot)
 }
 
+/// Implicit ellipse equation value for a point: 0 on the curve,
+/// negative inside, positive outside. The point-on-ellipse residual
+/// shared by PointOnArc / LineP1OnArc / LineP2OnArc.
+#[arael::function]
+pub fn ellipse_implicit(px: arael_sym::E, py: arael_sym::E,
+                        cx: arael_sym::E, cy: arael_sym::E,
+                        r: arael_sym::E, rb: arael_sym::E,
+                        rot: arael_sym::E) -> arael_sym::E {
+    ((px - cx) * cos(rot) + (py - cy) * sin(rot))
+        * ((px - cx) * cos(rot) + (py - cy) * sin(rot)) / (r * r)
+    + (0.0 - (px - cx) * sin(rot) + (py - cy) * cos(rot))
+        * (0.0 - (px - cx) * sin(rot) + (py - cy) * cos(rot)) / (rb * rb)
+    - 1.0
+}
+
+/// Effective ellipse radius along a direction given in the ellipse's
+/// own frame (nlx, nly): the tangency distance the TangentLA /
+/// TangentAA residuals compare against. For circles (r == rb) this is
+/// r for any unit direction.
+#[arael::function]
+pub fn ellipse_effective_radius(nlx: arael_sym::E, nly: arael_sym::E,
+                                r: arael_sym::E, rb: arael_sym::E) -> arael_sym::E {
+    sqrt(nlx * nlx * r * r + nly * nly * rb * rb)
+}
+
 /// Symbolic (x, y) of an arc/ellipse point at the given angle expression,
 /// built from the arc's canonical parameter symbol names.
 pub fn arc_endpoint_symbols(arc_name: &str, angle: arael_sym::E) -> (arael_sym::E, arael_sym::E) {
@@ -153,5 +178,57 @@ mod arc_math_tests {
         assert!((ey.eval(&vars).unwrap() - p.y).abs() < 1e-12);
         assert!((tx.eval(&vars).unwrap() - tv.x).abs() < 1e-12);
         assert!((ty.eval(&vars).unwrap() - tv.y).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod ellipse_fn_tests {
+    use super::*;
+
+    #[test]
+    fn test_ellipse_implicit_zero_on_curve() {
+        let (cx, cy, r, rb, rot) = (1.0, -0.5, 3.0, 1.5, 0.6);
+        let sym = |n: &str| arael_sym::symbol(n);
+        let e = ellipse_implicit(sym("px"), sym("py"), sym("cx"), sym("cy"),
+            sym("r"), sym("rb"), sym("rot"));
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("cx", cx);
+        vars.insert("cy", cy);
+        vars.insert("r", r);
+        vars.insert("rb", rb);
+        vars.insert("rot", rot);
+        // A point ON the curve evaluates to 0; center to -1.
+        for t in [0.0, 0.8, 2.5, 4.0] {
+            let p = ellipse_point(arael::vect::vect2d::new(cx, cy), r, rb, rot, t);
+            vars.insert("px", p.x);
+            vars.insert("py", p.y);
+            let v = e.eval(&vars).unwrap();
+            assert!(v.abs() < 1e-9, "on-curve implicit at t={}: {}", t, v);
+        }
+        vars.insert("px", cx);
+        vars.insert("py", cy);
+        assert!((e.eval(&vars).unwrap() + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ellipse_effective_radius() {
+        let sym = |n: &str| arael_sym::symbol(n);
+        let e = ellipse_effective_radius(sym("nlx"), sym("nly"), sym("r"), sym("rb"));
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("r", 3.0);
+        vars.insert("rb", 1.5);
+        // Along the major axis: r. Along the minor: rb. For a circle
+        // (r == rb): r for any unit direction.
+        vars.insert("nlx", 1.0);
+        vars.insert("nly", 0.0);
+        assert!((e.eval(&vars).unwrap() - 3.0).abs() < 1e-12);
+        vars.insert("nlx", 0.0);
+        vars.insert("nly", 1.0);
+        assert!((e.eval(&vars).unwrap() - 1.5).abs() < 1e-12);
+        vars.insert("rb", 3.0);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        vars.insert("nlx", s);
+        vars.insert("nly", s);
+        assert!((e.eval(&vars).unwrap() - 3.0).abs() < 1e-12);
     }
 }

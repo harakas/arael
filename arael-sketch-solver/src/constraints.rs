@@ -852,12 +852,8 @@ pub struct MidpointArcEndArc {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let dx = point.pos.x - arc.center.x;
-    let dy = point.pos.y - arc.center.y;
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let u = dx * cr + dy * sr;
-    let v = 0.0 - dx * sr + dy * cr;
-    [(u * u / (arc.radius * arc.radius) + v * v / (arc.radius_b * arc.radius_b) - 1.0) * sketch.constraint_isigma]
+    [ellipse_implicit(point.pos.x, point.pos.y, arc.center.x, arc.center.y,
+        arc.radius, arc.radius_b, arc.rotation) * sketch.constraint_isigma]
 }))]
 pub struct PointOnArc {
     #[arael(ref = root.points)]
@@ -1295,7 +1291,7 @@ pub struct CoincidentLL22 {
     let cr = cos(arc.rotation); let sr = sin(arc.rotation);
     let nlx = nx * cr + ny * sr;
     let nly = 0.0 - nx * sr + ny * cr;
-    let r_eff = sqrt(nlx * nlx * arc.radius * arc.radius + nly * nly * arc.radius_b * arc.radius_b);
+    let r_eff = ellipse_effective_radius(nlx, nly, arc.radius, arc.radius_b);
     [(dist - tangentla.sign * r_eff) * sketch.constraint_isigma]
 }))]
 // Directed tangent at shared endpoint: uses arc parametric endpoint position
@@ -1488,12 +1484,12 @@ pub struct EqualRadius {
     let sra = sin(a.rotation);
     let nxa = nx * cra + ny * sra;
     let nya = 0.0 - nx * sra + ny * cra;
-    let r_eff_a = sqrt(nxa * nxa * a.radius * a.radius + nya * nya * a.radius_b * a.radius_b);
+    let r_eff_a = ellipse_effective_radius(nxa, nya, a.radius, a.radius_b);
     let crb = cos(b.rotation);
     let srb = sin(b.rotation);
     let nxb = 0.0 - nx * crb - ny * srb;
     let nyb = nx * srb - ny * crb;
-    let r_eff_b = sqrt(nxb * nxb * b.radius * b.radius + nyb * nyb * b.radius_b * b.radius_b);
+    let r_eff_b = ellipse_effective_radius(nxb, nyb, b.radius, b.radius_b);
     [(dist - r_eff_a - r_eff_b) * sketch.constraint_isigma]
 }))]
 // Shared endpoint a.start = b.start: cross(tangent_a, tangent_b) = 0
@@ -1916,12 +1912,8 @@ pub struct LineP2OnLine {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let dx = line.p1.x - arc.center.x;
-    let dy = line.p1.y - arc.center.y;
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let u = dx * cr + dy * sr;
-    let v = 0.0 - dx * sr + dy * cr;
-    [(u * u / (arc.radius * arc.radius) + v * v / (arc.radius_b * arc.radius_b) - 1.0) * sketch.constraint_isigma]
+    [ellipse_implicit(line.p1.x, line.p1.y, arc.center.x, arc.center.y,
+        arc.radius, arc.radius_b, arc.rotation) * sketch.constraint_isigma]
 }))]
 pub struct LineP1OnArc {
     #[arael(ref = root.lines)]
@@ -1941,12 +1933,8 @@ pub struct LineP1OnArc {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let dx = line.p2.x - arc.center.x;
-    let dy = line.p2.y - arc.center.y;
-    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let u = dx * cr + dy * sr;
-    let v = 0.0 - dx * sr + dy * cr;
-    [(u * u / (arc.radius * arc.radius) + v * v / (arc.radius_b * arc.radius_b) - 1.0) * sketch.constraint_isigma]
+    [ellipse_implicit(line.p2.x, line.p2.y, arc.center.x, arc.center.y,
+        arc.radius, arc.radius_b, arc.rotation) * sketch.constraint_isigma]
 }))]
 pub struct LineP2OnArc {
     #[arael(ref = root.lines)]
