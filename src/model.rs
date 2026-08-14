@@ -1719,7 +1719,6 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
 /// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
 /// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
 /// `T` is the float type (f32 or f64, default f64).
-#[derive(Clone)]
 pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],
@@ -1727,6 +1726,21 @@ pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T:
     pos: TilePosition,
     cross_hessian: [T; P],    // NA*NB row-major (the macro sizes this)
     _marker: std::marker::PhantomData<(A, B, T)>,
+}
+
+// Manual impl: the derive would bound the phantom entity types A and B,
+// but only float storage is actually cloned. Lets constraint structs
+// holding a CrossBlock derive Clone without their entities being Clone.
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Clone for CrossBlock<A, B, NA, NB, P, T> {
+    fn clone(&self) -> Self {
+        CrossBlock {
+            indices_a: self.indices_a,
+            indices_b: self.indices_b,
+            pos: self.pos,
+            cross_hessian: self.cross_hessian,
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for CrossBlock<A, B, NA, NB, P, T> {
