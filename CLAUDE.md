@@ -27,3 +27,4 @@
  * Use codegen-units = 1 compile setting when benchmarking rust.
  * When adding/changing main API make sure the cxx/python export also gets the same API when relevant -- and update docs/CXX.md and docs/PYTHON.md with it.
  * When encountering missing API/functionality that would simplify implementation, add the API instead of doing hacky workarounds.
+ * arael-sketch: when modifying or adding features to gui, if possible create tests for them using the gui test harness.
