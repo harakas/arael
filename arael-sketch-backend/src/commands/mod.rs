@@ -35,6 +35,9 @@ pub(crate) use resolve::*;
 pub use expr::*;
 pub(crate) use entities::*;
 pub(crate) use arcs_fillet::*;
+// The GUI's corner tools parse radius tokens the same way the
+// commands do.
+pub use arcs_fillet::parse_radius_token;
 pub(crate) use constraint_cmds::*;
 pub use dimension_cmds::*;
 pub(crate) use edit::*;
