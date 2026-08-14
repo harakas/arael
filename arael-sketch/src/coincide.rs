@@ -17,7 +17,10 @@ pub struct CoincidenceGroups {
 
 impl CoincidenceGroups {
     /// Build the groups from every coincidence collection in the
-    /// sketch (including concentric, which couples arc centers).
+    /// sketch, via the registry's canonical endpoint pairs -- a new
+    /// coincidence collection participates without this file
+    /// changing. Concentric couples arc centers without being a
+    /// coincidence collection; it is the one explicit addition.
     pub fn build(sketch: &Sketch) -> Self {
         let np = sketch.points.slot_count();
         let nl = sketch.lines.slot_count();
@@ -25,36 +28,27 @@ impl CoincidenceGroups {
         let total = np + 2 * nl + 3 * na;
         let mut g = CoincidenceGroups { np, nl, na, parent: (0..total).collect() };
 
-        // Point-Point, Line-Point, Line-Line
-        for c in &sketch.coincident_pp { g.union(g.pt(c.a), g.pt(c.b)); }
-        for c in &sketch.coincident_lp1 { g.union(g.lp1(c.line), g.pt(c.point)); }
-        for c in &sketch.coincident_lp2 { g.union(g.lp2(c.line), g.pt(c.point)); }
-        for c in &sketch.coincident_ll11 { g.union(g.lp1(c.a), g.lp1(c.b)); }
-        for c in &sketch.coincident_ll12 { g.union(g.lp1(c.a), g.lp2(c.b)); }
-        for c in &sketch.coincident_ll21 { g.union(g.lp2(c.a), g.lp1(c.b)); }
-        for c in &sketch.coincident_ll22 { g.union(g.lp2(c.a), g.lp2(c.b)); }
-        // Point-Arc
-        for c in &sketch.coincident_arc_center { g.union(g.pt(c.point), g.arc_center(c.arc)); }
-        for c in &sketch.coincident_arc_start { g.union(g.pt(c.point), g.arc_start(c.arc)); }
-        for c in &sketch.coincident_arc_end { g.union(g.pt(c.point), g.arc_end(c.arc)); }
-        // Line-Arc
-        for c in &sketch.coincident_lp1_arc_center { g.union(g.lp1(c.line), g.arc_center(c.arc)); }
-        for c in &sketch.coincident_lp2_arc_center { g.union(g.lp2(c.line), g.arc_center(c.arc)); }
-        for c in &sketch.coincident_lp1_arc_start { g.union(g.lp1(c.line), g.arc_start(c.arc)); }
-        for c in &sketch.coincident_lp2_arc_start { g.union(g.lp2(c.line), g.arc_start(c.arc)); }
-        for c in &sketch.coincident_lp1_arc_end { g.union(g.lp1(c.line), g.arc_end(c.arc)); }
-        for c in &sketch.coincident_lp2_arc_end { g.union(g.lp2(c.line), g.arc_end(c.arc)); }
-        // Arc-Arc
+        sketch.for_each_coincidence_pair(|a, b| {
+            let sa = g.slot_of(a);
+            let sb = g.slot_of(b);
+            g.union(sa, sb);
+        });
         for c in &sketch.concentric { g.union(g.arc_center(c.a), g.arc_center(c.b)); }
-        for c in &sketch.coincident_arc_center_start { g.union(g.arc_center(c.a), g.arc_start(c.b)); }
-        for c in &sketch.coincident_arc_center_end { g.union(g.arc_center(c.a), g.arc_end(c.b)); }
-        for c in &sketch.coincident_arc_start_center { g.union(g.arc_start(c.a), g.arc_center(c.b)); }
-        for c in &sketch.coincident_arc_end_center { g.union(g.arc_end(c.a), g.arc_center(c.b)); }
-        for c in &sketch.coincident_arc_start_start { g.union(g.arc_start(c.a), g.arc_start(c.b)); }
-        for c in &sketch.coincident_arc_start_end { g.union(g.arc_start(c.a), g.arc_end(c.b)); }
-        for c in &sketch.coincident_arc_end_start { g.union(g.arc_end(c.a), g.arc_start(c.b)); }
-        for c in &sketch.coincident_arc_end_end { g.union(g.arc_end(c.a), g.arc_end(c.b)); }
         g
+    }
+
+    /// Union-find slot for a canonical endpoint id.
+    fn slot_of(&self, enc: u64) -> usize {
+        let (role, idx) = decode_endpoint(enc);
+        let idx = idx as usize;
+        match role {
+            EndpointRole::Point => idx,
+            EndpointRole::LineP1 => self.np + idx,
+            EndpointRole::LineP2 => self.np + self.nl + idx,
+            EndpointRole::ArcCenter => self.np + 2 * self.nl + idx,
+            EndpointRole::ArcStart => self.np + 2 * self.nl + self.na + idx,
+            EndpointRole::ArcEnd => self.np + 2 * self.nl + 2 * self.na + idx,
+        }
     }
 
     pub fn pt(&self, r: Ref<Point>) -> usize { r.index() as usize }

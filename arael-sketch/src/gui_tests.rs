@@ -499,3 +499,33 @@ fn test_tool_switch_mid_drag_cancels() {
     assert_eq!(gui.app.history.actions.len(), actions0,
         "cancelled drag must not commit");
 }
+
+#[test]
+fn test_chain_select_through_arc() {
+    let mut gui = Gui::new();
+    // line -> arc -> line, joined by the auto-connect coincidences.
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_arc 2,0 4,0 3,1");
+    gui.cmd("add_line 4,0 6,0");
+    assert_eq!(gui.line_count(), 2);
+    assert_eq!(gui.arc_count(), 1);
+    gui.double_click(v(1.0, 0.0));
+    let lines = gui.app.selection.iter()
+        .filter(|s| matches!(s, Selection::Line(_))).count();
+    let arcs = gui.app.selection.iter()
+        .filter(|s| matches!(s, Selection::Arc(_))).count();
+    assert_eq!((lines, arcs), (2, 1),
+        "chain crosses the arc: {:?}", gui.app.selection);
+}
+
+#[test]
+fn test_chain_select_stops_at_construction() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 2,0 4,1 constr");
+    gui.double_click(v(1.0, 0.0));
+    let lines = gui.app.selection.iter()
+        .filter(|s| matches!(s, Selection::Line(_))).count();
+    assert_eq!(lines, 1,
+        "construction geometry stays out of the chain: {:?}", gui.app.selection);
+}

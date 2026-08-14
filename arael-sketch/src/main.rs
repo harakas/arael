@@ -648,103 +648,46 @@ impl EditorApp {
             if self.sketch.points[r].helper { continue; }
             ensure(&mut parent, Ep::Point(r));
         }
-        // Skip construction-tied coincidents below via these
-        // predicates so unions never touch a construction entity.
-        let line_ok = |r: Ref<Line>| -> bool { !self.sketch.lines[r].construction };
-        let arc_ok = |r: Ref<Arc>| -> bool { !self.sketch.arcs[r].construction };
-
-        // Line-line coincidents.
-        for c in &self.sketch.coincident_ll11 {
-            if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP1(c.a), Ep::LineP1(c.b));
+        // Unions come from the registry's coincidence pairs, so a new
+        // coincidence collection participates without this list
+        // changing. The chain's filters live in the index->ref maps:
+        // construction lines/arcs, helper points and arc centers
+        // (junction fixtures, not chain endpoints) resolve to None and
+        // their unions drop.
+        let mut line_by_idx: HashMap<u32, Ref<Line>> = HashMap::new();
+        for r in self.sketch.lines.refs() {
+            if !self.sketch.lines[r].construction {
+                line_by_idx.insert(r.index(), r);
             }
         }
-        for c in &self.sketch.coincident_ll12 {
-            if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP1(c.a), Ep::LineP2(c.b));
+        let mut arc_by_idx: HashMap<u32, Ref<Arc>> = HashMap::new();
+        for r in self.sketch.arcs.refs() {
+            if !self.sketch.arcs[r].construction {
+                arc_by_idx.insert(r.index(), r);
             }
         }
-        for c in &self.sketch.coincident_ll21 {
-            if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP2(c.a), Ep::LineP1(c.b));
+        let mut point_by_idx: HashMap<u32, Ref<Point>> = HashMap::new();
+        for r in self.sketch.points.refs() {
+            if !self.sketch.points[r].helper {
+                point_by_idx.insert(r.index(), r);
             }
         }
-        for c in &self.sketch.coincident_ll22 {
-            if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP2(c.a), Ep::LineP2(c.b));
+        let to_ep = |enc: u64| -> Option<Ep> {
+            let (role, idx) = decode_endpoint(enc);
+            match role {
+                EndpointRole::Point => point_by_idx.get(&idx).map(|r| Ep::Point(*r)),
+                EndpointRole::LineP1 => line_by_idx.get(&idx).map(|r| Ep::LineP1(*r)),
+                EndpointRole::LineP2 => line_by_idx.get(&idx).map(|r| Ep::LineP2(*r)),
+                EndpointRole::ArcCenter => None,
+                EndpointRole::ArcStart => arc_by_idx.get(&idx).map(|r| Ep::ArcStart(*r)),
+                EndpointRole::ArcEnd => arc_by_idx.get(&idx).map(|r| Ep::ArcEnd(*r)),
             }
-        }
-        // Line endpoint <-> bare point.
-        for c in &self.sketch.coincident_lp1 {
-            if line_ok(c.line) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::LineP1(c.line), Ep::Point(c.point));
+        };
+        self.sketch.for_each_coincidence_pair(|a, b| {
+            if let (Some(ea), Some(eb)) = (to_ep(a), to_ep(b)) {
+                union(&mut parent, ea, eb);
             }
-        }
-        for c in &self.sketch.coincident_lp2 {
-            if line_ok(c.line) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::LineP2(c.line), Ep::Point(c.point));
-            }
-        }
-        // Point-point coincidents keep a junction "one" node even if
-        // the sketch author used two separate points.
-        for c in &self.sketch.coincident_pp {
-            if !self.sketch.points[c.a].helper && !self.sketch.points[c.b].helper {
-                union(&mut parent, Ep::Point(c.a), Ep::Point(c.b));
-            }
-        }
-        // Line endpoint <-> arc endpoint (direct).
-        for c in &self.sketch.coincident_lp1_arc_start {
-            if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP1(c.line), Ep::ArcStart(c.arc));
-            }
-        }
-        for c in &self.sketch.coincident_lp2_arc_start {
-            if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP2(c.line), Ep::ArcStart(c.arc));
-            }
-        }
-        for c in &self.sketch.coincident_lp1_arc_end {
-            if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP1(c.line), Ep::ArcEnd(c.arc));
-            }
-        }
-        for c in &self.sketch.coincident_lp2_arc_end {
-            if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP2(c.line), Ep::ArcEnd(c.arc));
-            }
-        }
-        // Arc endpoint <-> bare point.
-        for c in &self.sketch.coincident_arc_start {
-            if arc_ok(c.arc) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::ArcStart(c.arc), Ep::Point(c.point));
-            }
-        }
-        for c in &self.sketch.coincident_arc_end {
-            if arc_ok(c.arc) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::ArcEnd(c.arc), Ep::Point(c.point));
-            }
-        }
-        // Arc-arc endpoint unions (direct).
-        for c in &self.sketch.coincident_arc_start_start {
-            if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcStart(c.a), Ep::ArcStart(c.b));
-            }
-        }
-        for c in &self.sketch.coincident_arc_start_end {
-            if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcStart(c.a), Ep::ArcEnd(c.b));
-            }
-        }
-        for c in &self.sketch.coincident_arc_end_start {
-            if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcEnd(c.a), Ep::ArcStart(c.b));
-            }
-        }
-        for c in &self.sketch.coincident_arc_end_end {
-            if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcEnd(c.a), Ep::ArcEnd(c.b));
-            }
-        }
+        });
 
         // ---- Chain walk ----
         // An entity key distinguishes "self" from "other" when
