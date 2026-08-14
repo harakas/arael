@@ -1095,15 +1095,19 @@ impl EditorApp {
             }
         }
 
-        // Sweep dimension: text along arc
+        // Sweep dimension: text along arc. Mirror
+        // draw_sweep_dimension's annotation curve -- the ellipse with
+        // both semi-axes expanded by offset.y, rotation included --
+        // or the hit segment lands nowhere near the drawn label on
+        // elliptic arcs.
         if let DimensionKind::ArcSweep(r) = dim.kind {
             let a = &self.sketch.arcs[r];
-            let cx = a.center.value.x;
-            let cy = a.center.value.y;
             let (start_angle, sweep) = arc_span(a);
-            let radius = (a.radius.value + dim.offset.y).max(0.1);
+            let ann_rx = (a.radius.value + dim.offset.y).max(0.1);
+            let ann_ry = (a.radius_b.value + dim.offset.y).max(0.1);
             let text_angle = start_angle + sweep * (0.5 + dim.text_along);
-            let text_pt = vect2d::new(cx + radius * text_angle.cos(), cy + radius * text_angle.sin());
+            let text_pt = ellipse_point(a.center.value, ann_rx, ann_ry,
+                a.rotation.value, text_angle);
             let screen_pt = self.to_screen(text_pt);
             let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
             let tx = -(text_angle.sin() as f32) * sign;

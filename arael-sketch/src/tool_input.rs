@@ -73,9 +73,22 @@ impl EditorApp {
                 let a = &self.sketch.arcs[r];
                 let cx = a.center.value.x;
                 let cy = a.center.value.y;
-                let dist = ((mouse.x - cx).powi(2) + (mouse.y - cy).powi(2)).sqrt();
-                let offset_y = dist - a.radius.value;
-                let mouse_angle = (mouse.y - cy).atan2(mouse.x - cx);
+                // Parametric angle of the mouse in the ellipse's own
+                // frame; the radial offset is measured against the
+                // base curve point at that angle. Exact for circles,
+                // and follows the annotation-curve family
+                // draw_sweep_dimension renders for ellipses.
+                let rot = a.rotation.value;
+                let dx = mouse.x - cx;
+                let dy = mouse.y - cy;
+                let lx = dx * rot.cos() + dy * rot.sin();
+                let ly = -dx * rot.sin() + dy * rot.cos();
+                let mouse_angle = (ly / a.radius_b.value.max(1e-9))
+                    .atan2(lx / a.radius.value.max(1e-9));
+                let base = a.point_at(mouse_angle);
+                let base_dist = ((base.x - cx).powi(2) + (base.y - cy).powi(2)).sqrt();
+                let dist = (dx * dx + dy * dy).sqrt();
+                let offset_y = dist - base_dist;
                 let sa = a.start_angle.value;
                 let sweep = a.end_angle.value - sa;
                 let delta = rad2rad(mouse_angle - sa);

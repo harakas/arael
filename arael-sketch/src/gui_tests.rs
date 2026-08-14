@@ -606,3 +606,173 @@ fn test_chamfer_tool_gesture() {
     let expect = 0.4_f64 * std::f64::consts::SQRT_2;
     assert!((len - expect).abs() < 0.01, "bevel length = {} vs {}", len, expect);
 }
+
+#[test]
+fn test_dim_placement_hv_switch() {
+    let mut gui = Gui::new();
+    gui.cmd("add_point 0,0");
+    gui.cmd("add_point 2,1");
+    gui.key(egui::Key::D);
+    gui.click(v(0.0, 0.0));
+    gui.click(v(2.0, 1.0));
+    assert!(gui.app.dim_placing, "two points enter placement");
+    // Above the pair's box: horizontal distance.
+    gui.move_to(v(1.0, 3.0));
+    assert!(matches!(gui.app.dim_kind, Some(DimensionKind::HDistance(..))),
+        "above -> HDistance, got {:?}", gui.app.dim_kind);
+    // Right of the box: vertical distance.
+    gui.move_to(v(4.0, 0.5));
+    assert!(matches!(gui.app.dim_kind, Some(DimensionKind::VDistance(..))),
+        "right -> VDistance, got {:?}", gui.app.dim_kind);
+    // Near the diagonal: plain point-point distance.
+    gui.move_to(v(1.0, 0.5));
+    assert!(matches!(gui.app.dim_kind, Some(DimensionKind::PointPointDistance(..))),
+        "inside -> PointPointDistance, got {:?}", gui.app.dim_kind);
+}
+
+#[test]
+fn test_earc_sweep_label_selectable() {
+    let mut gui = Gui::new();
+    // The n5_check shape: rotated elliptic arc with a derived sweep dim.
+    gui.cmd("add_earc_center 2,4 3 1.2 25 0 210");
+    gui.cmd("sweep EA0 derived");
+    gui.cmd("center 2,4");
+    assert_eq!(gui.sketch().dimensions.len(), 1);
+    let dim = gui.sketch().dimensions[0].clone();
+    let did = dim.did;
+    // The hit segment must sit where draw_sweep_dimension puts the
+    // text: on the rotated annotation ellipse, not on an unrotated
+    // circle of radius r + offset. Compare in screen pixels (the
+    // segment is offset from the anchor by text height).
+    let a = gui.sketch().arcs.iter().next().unwrap();
+    let (sa, ea) = (a.start_angle.value, a.end_angle.value);
+    let text_angle = sa + (ea - sa) * (0.5 + dim.text_along);
+    let expected = arael_sketch_solver::ellipse_point(
+        a.center.value,
+        (a.radius.value + dim.offset.y).max(0.1),
+        (a.radius_b.value + dim.offset.y).max(0.1),
+        a.rotation.value,
+        text_angle,
+    );
+    let expected_screen = gui.app.to_screen(expected);
+    let (ts, te) = gui.app.dim_text_segment(&dim);
+    let mid = egui::Pos2::new((ts.x + te.x) / 2.0, (ts.y + te.y) / 2.0);
+    let d = ((mid.x - expected_screen.x).powi(2) + (mid.y - expected_screen.y).powi(2)).sqrt();
+    assert!(d < 20.0,
+        "label hit segment {} px from the drawn text (at {:?}, drawn {:?})",
+        d, (mid.x, mid.y), (expected_screen.x, expected_screen.y));
+    // Clicking the drawn label selects the dimension.
+    gui.click(expected);
+    assert!(gui.app.selection.contains(&Selection::Dimension(did)),
+        "click on the sweep label must select it: {:?}", gui.app.selection);
+    // Dragging the label outward from the center grows offset.y (the
+    // placement math follows the ellipse frame, not a raw circle).
+    let c = gui.sketch().arcs.iter().next().unwrap().center.value;
+    let dir = v(expected.x - c.x, expected.y - c.y);
+    let dlen = (dir.x * dir.x + dir.y * dir.y).sqrt();
+    let target = v(expected.x + dir.x / dlen, expected.y + dir.y / dlen);
+    gui.drag(expected, target);
+    let off = gui.sketch().dimensions[0].offset.y;
+    assert!(off > 1.2, "outward label drag must grow offset.y, got {}", off);
+}
+
+// -- All dimension kinds: select / drag / edit ------------------------
+
+/// One scene per DimensionKind: setup commands (the last creates the
+/// dimension), the value to type in the edit test, and the expected
+/// stored value after Enter.
+const DIM_SCENES: &[(&[&str], &str, f64)] = &[
+    // LineLength
+    (&["add_line 0,0 3,0", "length L0 3"], "3.5", 3.5),
+    // PointPointDistance
+    (&["add_point 0,0", "add_point 2,1", "distance P0 P1 2.5"], "2.8", 2.8),
+    // PointLineDistance
+    (&["add_line 0,0 3,0", "add_point 1,1", "distance P0 L0 1"], "1.2", 1.2),
+    // ArcRadius
+    (&["add_circle 0,0 1.5", "radius A0 1.5"], "1.8", 1.8),
+    // ArcRadiusB
+    (&["add_ellipse 0,0 2 1 0", "radius_b EA0 1"], "0.8", 0.8),
+    // ArcSweep, circular
+    (&["add_arc 1,0 -1,0 0,1", "sweep A0 180"], "170", 170.0),
+    // ArcSweep on a rotated elliptic arc (the label used to hit-test
+    // on an unrotated circle and was unreachable)
+    (&["add_earc_center 2,4 3 1.2 25 0 210", "sweep EA0 210", "center 2,4"], "190", 190.0),
+    // ArcRotation
+    (&["add_ellipse 0,0 2 1 30", "xangle EA0 30"], "40", 40.0),
+    // Angle
+    (&["add_line 0,0 2,0", "add_line 0,0 0,2 noconnect", "angle L0 L1 90"], "80", 80.0),
+    // HDistance
+    (&["add_point 0,0", "add_point 2,1", "hdistance P0 P1 2"], "2.4", 2.4),
+    // VDistance
+    (&["add_point 0,0", "add_point 2,1", "vdistance P0 P1 1"], "1.3", 1.3),
+    // LineAngle
+    (&["add_line 0,0 2,1", "xangle L0 26.5651"], "35", 35.0),
+    // ConcentricDistance
+    (&["add_circle 0,0 1", "add_circle 0,0 2 noconnect", "distance A0 A1 1"], "1.2", 1.2),
+    // LineLineDistance
+    (&["add_line 0,0 3,0", "add_line 0,1 3,1 noconnect", "distance L0 L1 1"], "1.4", 1.4),
+];
+
+fn dim_scene(cmds: &[&str]) -> (Gui, u32) {
+    let mut gui = Gui::new();
+    for c in cmds {
+        gui.cmd(c);
+    }
+    assert_eq!(gui.sketch().dimensions.len(), 1, "scene {:?}", cmds);
+    let did = gui.sketch().dimensions[0].did;
+    (gui, did)
+}
+
+/// Sketch-space position of the dimension's drawn label.
+fn dim_label_pos(gui: &Gui, did: u32) -> arael::vect::vect2d {
+    let i = gui.app.sketch.dimension_index_by_did(did).unwrap();
+    let dim = gui.app.sketch.dimensions[i].clone();
+    let (ts, te) = gui.app.dim_text_segment(&dim);
+    gui.app.to_sketch(egui::Pos2::new((ts.x + te.x) / 2.0, (ts.y + te.y) / 2.0))
+}
+
+#[test]
+fn test_all_dims_selectable() {
+    for (cmds, _, _) in DIM_SCENES {
+        let (mut gui, did) = dim_scene(cmds);
+        let pos = dim_label_pos(&gui, did);
+        gui.click(pos);
+        assert!(gui.app.selection.contains(&Selection::Dimension(did)),
+            "clicking the label must select the dim: scene {:?}, selection {:?}",
+            cmds, gui.app.selection);
+    }
+}
+
+#[test]
+fn test_all_dims_label_drag() {
+    for (cmds, _, _) in DIM_SCENES {
+        let (mut gui, did) = dim_scene(cmds);
+        let actions0 = gui.app.history.actions.len();
+        let pos = dim_label_pos(&gui, did);
+        gui.drag(pos, v(pos.x + 0.4, pos.y + 0.4));
+        // The drag commits exactly one MoveDimension.
+        assert_eq!(gui.app.history.actions.len(), actions0 + 1,
+            "label drag must commit one action: scene {:?}", cmds);
+        let desc = gui.app.history.actions.last().unwrap().describe();
+        assert_eq!(desc, "Move dimension",
+            "label drag committed '{}' instead: scene {:?}", desc, cmds);
+    }
+}
+
+#[test]
+fn test_all_dims_editable() {
+    for (cmds, typed, expected) in DIM_SCENES {
+        let (mut gui, did) = dim_scene(cmds);
+        let pos = dim_label_pos(&gui, did);
+        gui.double_click(pos);
+        assert!(gui.app.dim_editing && gui.app.dim_edit_did == Some(did),
+            "double-click must open the value edit: scene {:?}", cmds);
+        gui.frame();
+        gui.type_text(typed);
+        gui.key(egui::Key::Enter);
+        let i = gui.app.sketch.dimension_index_by_did(did).unwrap();
+        let v = gui.app.sketch.dimensions[i].value;
+        assert!((v - expected).abs() < 1e-6,
+            "edited value should be {}, got {}: scene {:?}", expected, v, cmds);
+    }
+}
