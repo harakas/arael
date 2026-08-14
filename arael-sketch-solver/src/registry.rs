@@ -56,11 +56,51 @@ pub fn coincidence_key(a: u64, b: u64) -> DedupKey {
     DedupKey::Coincidence(a.min(b), a.max(b))
 }
 
+/// Role a line/arc reference plays in its constraint, declared per
+/// field at the registration site. The split engine's reference
+/// transfer is driven entirely by these (see docs/dev/TRIMSPLIT.md):
+/// the role decides which piece of a split entity inherits the
+/// reference, whether the constraint is replicated, or whether it is
+/// dropped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RefRole {
+    /// Line p1 / arc start: follows the piece owning that endpoint.
+    Start,
+    /// Line p2 / arc end: follows the piece owning that endpoint.
+    End,
+    /// Arc center: shared by every piece; follows the first survivor.
+    Center,
+    /// The unbounded curve (point-on, distance-to-line anchor,
+    /// symmetry mirror): follows the piece nearest the constraint's
+    /// other referents.
+    Host,
+    /// Direction or shape of the whole entity: replicated onto every
+    /// surviving piece.
+    Whole,
+    /// Tangency: follows the piece containing the contact point.
+    Contact,
+    /// A measure of the whole span (equal length, midpoint-of,
+    /// symmetry operand): dropped on split.
+    Extent,
+}
+
+// Lowercase role tokens for the sketch_constraint! field lists.
+macro_rules! ref_role {
+    (start) => { RefRole::Start };
+    (end) => { RefRole::End };
+    (center) => { RefRole::Center };
+    (host) => { RefRole::Host };
+    (whole) => { RefRole::Whole };
+    (contact) => { RefRole::Contact };
+    (extent) => { RefRole::Extent };
+}
+
 /// The interface every constraint struct implements.
 pub trait SketchConstraint {
     fn nid(&self) -> u32;
     fn set_nid(&mut self, nid: u32);
     fn cid(&self) -> u32;
+    fn set_cid(&mut self, cid: u32);
     fn references_point(&self, r: Ref<Point>) -> bool;
     fn references_line(&self, r: Ref<Line>) -> bool;
     fn references_arc(&self, r: Ref<Arc>) -> bool;
@@ -72,6 +112,14 @@ pub trait SketchConstraint {
     fn each_arc_ref(&self, f: &mut dyn FnMut(Ref<Arc>));
     /// Rewrite point references `old -> new` (helper consolidation).
     fn remap_point(&mut self, old: Ref<Point>, new: Ref<Point>);
+    /// Visit every line-ref field: (slot among line fields, ref, role).
+    fn each_line_field(&self, f: &mut dyn FnMut(usize, Ref<Line>, RefRole));
+    /// Rewrite the line-ref field at `slot` (numbering of each_line_field).
+    fn set_line_field(&mut self, slot: usize, new: Ref<Line>);
+    /// Visit every arc-ref field: (slot among arc fields, ref, role).
+    fn each_arc_field(&self, f: &mut dyn FnMut(usize, Ref<Arc>, RefRole));
+    /// Rewrite the arc-ref field at `slot` (numbering of each_arc_field).
+    fn set_arc_field(&mut self, slot: usize, new: Ref<Arc>);
     /// Identity for duplicate removal (see [`DedupKey`]).
     fn dedup_key(&self) -> DedupKey;
     /// Human-readable description, as shown by `list constraints`
@@ -85,9 +133,13 @@ pub trait ConstraintCollection {
     fn item(&self, i: usize) -> &dyn SketchConstraint;
     fn item_mut(&mut self, i: usize) -> &mut dyn SketchConstraint;
     fn retain_constraints(&mut self, f: &mut dyn FnMut(&dyn SketchConstraint) -> bool);
+    /// Clone item `i` and push the copy with nid/cid zeroed (fresh ids
+    /// minted by `assign_constraint_names`). Returns the copy's index.
+    /// The split engine's Whole-role replication runs through this.
+    fn clone_push_blank(&mut self, i: usize) -> usize;
 }
 
-impl<C: SketchConstraint> ConstraintCollection for Vec<C> {
+impl<C: SketchConstraint + Clone> ConstraintCollection for Vec<C> {
     fn len(&self) -> usize {
         self.len()
     }
@@ -99,6 +151,13 @@ impl<C: SketchConstraint> ConstraintCollection for Vec<C> {
     }
     fn retain_constraints(&mut self, f: &mut dyn FnMut(&dyn SketchConstraint) -> bool) {
         self.retain(|c| f(c));
+    }
+    fn clone_push_blank(&mut self, i: usize) -> usize {
+        let mut c = self[i].clone();
+        c.set_nid(0);
+        c.set_cid(0);
+        self.push(c);
+        self.len() - 1
     }
 }
 
@@ -159,12 +218,13 @@ macro_rules! describe_arg {
 }
 
 macro_rules! sketch_constraint {
-    ($ty:ident, points($($p:ident),*), lines($($l:ident),*), arcs($($a:ident),*),
+    ($ty:ident, points($($p:ident),*), lines($($l:ident: $lr:tt),*), arcs($($a:ident: $arr:tt),*),
      dedup($($dk:tt)*), describe($fmt:literal $(, $ar:ident($af:ident))*)) => {
         impl SketchConstraint for crate::$ty {
             fn nid(&self) -> u32 { self.nid }
             fn set_nid(&mut self, nid: u32) { self.nid = nid; }
             fn cid(&self) -> u32 { self.cid }
+            fn set_cid(&mut self, cid: u32) { self.cid = cid; }
             fn references_point(&self, r: Ref<Point>) -> bool {
                 let _ = &r;
                 false $(|| self.$p == r)*
@@ -193,6 +253,30 @@ macro_rules! sketch_constraint {
                 let _ = (&old, &new);
                 $(if self.$p == old { self.$p = new; })*
             }
+            fn each_line_field(&self, f: &mut dyn FnMut(usize, Ref<Line>, RefRole)) {
+                let _ = &f;
+                let mut _slot = 0usize;
+                $(f(_slot, self.$l, ref_role!($lr)); _slot += 1;)*
+            }
+            fn set_line_field(&mut self, slot: usize, new: Ref<Line>) {
+                let _ = &new;
+                let mut _slot = 0usize;
+                $(if _slot == slot { self.$l = new; return; } _slot += 1;)*
+                panic!("set_line_field: {} has no line field at slot {}",
+                    stringify!($ty), slot);
+            }
+            fn each_arc_field(&self, f: &mut dyn FnMut(usize, Ref<Arc>, RefRole)) {
+                let _ = &f;
+                let mut _slot = 0usize;
+                $(f(_slot, self.$a, ref_role!($arr)); _slot += 1;)*
+            }
+            fn set_arc_field(&mut self, slot: usize, new: Ref<Arc>) {
+                let _ = &new;
+                let mut _slot = 0usize;
+                $(if _slot == slot { self.$a = new; return; } _slot += 1;)*
+                panic!("set_arc_field: {} has no arc field at slot {}",
+                    stringify!($ty), slot);
+            }
             fn dedup_key(&self) -> DedupKey {
                 let c = self;
                 dedup_key_expr!(c, $($dk)*)
@@ -209,22 +293,22 @@ macro_rules! sketch_constraint {
 sketch_constraint!(CoincidentPP, points(a, b), lines(), arcs(),
     dedup(coincide(ep_point(a), ep_point(b))),
     describe("coincident {} {}", point(a), point(b)));
-sketch_constraint!(CoincidentLP1, points(point), lines(line), arcs(),
+sketch_constraint!(CoincidentLP1, points(point), lines(line: start), arcs(),
     dedup(coincide(ep_line_p1(line), ep_point(point))),
     describe("coincident {}.p1 {}", line(line), point(point)));
-sketch_constraint!(CoincidentLP2, points(point), lines(line), arcs(),
+sketch_constraint!(CoincidentLP2, points(point), lines(line: end), arcs(),
     dedup(coincide(ep_line_p2(line), ep_point(point))),
     describe("coincident {}.p2 {}", line(line), point(point)));
-sketch_constraint!(CoincidentLL11, points(), lines(a, b), arcs(),
+sketch_constraint!(CoincidentLL11, points(), lines(a: start, b: start), arcs(),
     dedup(coincide(ep_line_p1(a), ep_line_p1(b))),
     describe("coincident {}.p1 {}.p1", line(a), line(b)));
-sketch_constraint!(CoincidentLL12, points(), lines(a, b), arcs(),
+sketch_constraint!(CoincidentLL12, points(), lines(a: start, b: end), arcs(),
     dedup(coincide(ep_line_p1(a), ep_line_p2(b))),
     describe("coincident {}.p1 {}.p2", line(a), line(b)));
-sketch_constraint!(CoincidentLL21, points(), lines(a, b), arcs(),
+sketch_constraint!(CoincidentLL21, points(), lines(a: end, b: start), arcs(),
     dedup(coincide(ep_line_p2(a), ep_line_p1(b))),
     describe("coincident {}.p2 {}.p1", line(a), line(b)));
-sketch_constraint!(CoincidentLL22, points(), lines(a, b), arcs(),
+sketch_constraint!(CoincidentLL22, points(), lines(a: end, b: end), arcs(),
     dedup(coincide(ep_line_p2(a), ep_line_p2(b))),
     describe("coincident {}.p2 {}.p2", line(a), line(b)));
 sketch_constraint!(DistancePP, points(a, b), lines(), arcs(),
@@ -236,310 +320,310 @@ sketch_constraint!(HorizontalDistancePP, points(a, b), lines(), arcs(),
 sketch_constraint!(VerticalDistancePP, points(a, b), lines(), arcs(),
     dedup(exact(a, b)),
     describe("vdistance {} {} = {}", point(a), point(b), num(distance)));
-sketch_constraint!(PointOnLine, points(point), lines(line), arcs(),
+sketch_constraint!(PointOnLine, points(point), lines(line: host), arcs(),
     dedup(exact(point, line)),
     describe("point_on {} {}", point(point), line(line)));
-sketch_constraint!(MidpointConstraint, points(point), lines(line), arcs(),
+sketch_constraint!(MidpointConstraint, points(point), lines(line: extent), arcs(),
     dedup(exact(point, line)),
     describe("midpoint {} {}", point(point), line(line)));
-sketch_constraint!(MidpointLP1, points(), lines(line, target), arcs(),
+sketch_constraint!(MidpointLP1, points(), lines(line: start, target: extent), arcs(),
     dedup(exact(line, target)),
     describe("midpoint {}.p1 {}", line(line), line(target)));
-sketch_constraint!(MidpointLP2, points(), lines(line, target), arcs(),
+sketch_constraint!(MidpointLP2, points(), lines(line: end, target: extent), arcs(),
     dedup(exact(line, target)),
     describe("midpoint {}.p2 {}", line(line), line(target)));
-sketch_constraint!(MidpointArcStart, points(), lines(line), arcs(arc),
+sketch_constraint!(MidpointArcStart, points(), lines(line: extent), arcs(arc: start),
     dedup(exact(arc, line)),
     describe("midpoint {}.start {}", arc(arc), line(line)));
-sketch_constraint!(MidpointArcEnd, points(), lines(line), arcs(arc),
+sketch_constraint!(MidpointArcEnd, points(), lines(line: extent), arcs(arc: end),
     dedup(exact(arc, line)),
     describe("midpoint {}.end {}", arc(arc), line(line)));
-sketch_constraint!(MidpointArcPoint, points(point), lines(), arcs(arc),
+sketch_constraint!(MidpointArcPoint, points(point), lines(), arcs(arc: extent),
     dedup(exact(point, arc)),
     describe("midpoint {} {}", point(point), arc(arc)));
-sketch_constraint!(MidpointLP1Arc, points(), lines(line), arcs(arc),
+sketch_constraint!(MidpointLP1Arc, points(), lines(line: start), arcs(arc: extent),
     dedup(exact(line, arc)),
     describe("midpoint {}.p1 {}", line(line), arc(arc)));
-sketch_constraint!(MidpointLP2Arc, points(), lines(line), arcs(arc),
+sketch_constraint!(MidpointLP2Arc, points(), lines(line: end), arcs(arc: extent),
     dedup(exact(line, arc)),
     describe("midpoint {}.p2 {}", line(line), arc(arc)));
-sketch_constraint!(MidpointArcStartArc, points(), lines(), arcs(a, b),
+sketch_constraint!(MidpointArcStartArc, points(), lines(), arcs(a: start, b: extent),
     dedup(exact(a, b)),
     describe("midpoint {}.start {}", arc(a), arc(b)));
-sketch_constraint!(MidpointArcEndArc, points(), lines(), arcs(a, b),
+sketch_constraint!(MidpointArcEndArc, points(), lines(), arcs(a: end, b: extent),
     dedup(exact(a, b)),
     describe("midpoint {}.end {}", arc(a), arc(b)));
-sketch_constraint!(PointOnArc, points(point), lines(), arcs(arc),
+sketch_constraint!(PointOnArc, points(point), lines(), arcs(arc: host),
     dedup(exact(point, arc)),
     describe("point_on {} {}", point(point), arc(arc)));
-sketch_constraint!(Parallel, points(), lines(a, b), arcs(),
+sketch_constraint!(Parallel, points(), lines(a: whole, b: whole), arcs(),
     dedup(sorted(a, b)),
     describe("parallel {} {}", line(a), line(b)));
-sketch_constraint!(Perpendicular, points(), lines(a, b), arcs(),
+sketch_constraint!(Perpendicular, points(), lines(a: whole, b: whole), arcs(),
     dedup(sorted(a, b)),
     describe("perpendicular {} {}", line(a), line(b)));
-sketch_constraint!(ArcLineParallel, points(), lines(line), arcs(arc),
+sketch_constraint!(ArcLineParallel, points(), lines(line: whole), arcs(arc: whole),
     dedup(exact(arc, line)),
     describe("parallel {} {}", arc(arc), line(line)));
-sketch_constraint!(ArcArcParallel, points(), lines(), arcs(a, b),
+sketch_constraint!(ArcArcParallel, points(), lines(), arcs(a: whole, b: whole),
     dedup(sorted(a, b)),
     describe("parallel {} {}", arc(a), arc(b)));
-sketch_constraint!(Collinear, points(), lines(a, b), arcs(),
+sketch_constraint!(Collinear, points(), lines(a: whole, b: whole), arcs(),
     dedup(sorted(a, b)),
     describe("collinear {} {}", line(a), line(b)));
-sketch_constraint!(EqualLength, points(), lines(a, b), arcs(),
+sketch_constraint!(EqualLength, points(), lines(a: extent, b: extent), arcs(),
     dedup(sorted(a, b)),
     describe("equal {} {}", line(a), line(b)));
-sketch_constraint!(AngleConstraint, points(), lines(a, b), arcs(),
+sketch_constraint!(AngleConstraint, points(), lines(a: whole, b: whole), arcs(),
     dedup(exact(a, b)),
     describe("angle {} {} = {:.1}deg", line(a), line(b), deg(angle)));
-sketch_constraint!(TangentLA, points(), lines(line), arcs(arc),
+sketch_constraint!(TangentLA, points(), lines(line: contact), arcs(arc: contact),
     dedup(exact(line, arc)),
     describe("tangent {} {}", line(line), arc(arc)));
-sketch_constraint!(Concentric, points(), lines(), arcs(a, b),
+sketch_constraint!(Concentric, points(), lines(), arcs(a: whole, b: whole),
     dedup(sorted(a, b)),
     describe("concentric {} {}", arc(a), arc(b)));
-sketch_constraint!(EqualRadius, points(), lines(), arcs(a, b),
+sketch_constraint!(EqualRadius, points(), lines(), arcs(a: whole, b: whole),
     dedup(sorted(a, b)),
     describe("equal {} {}", arc(a), arc(b)));
-sketch_constraint!(TangentAA, points(), lines(), arcs(a, b),
+sketch_constraint!(TangentAA, points(), lines(), arcs(a: contact, b: contact),
     dedup(sorted(a, b)),
     describe("tangent {} {}", arc(a), arc(b)));
-sketch_constraint!(SymmetryLL, points(), lines(a, b, c), arcs(),
+sketch_constraint!(SymmetryLL, points(), lines(a: extent, b: host, c: extent), arcs(),
     dedup(mirror(a, c; b)),
     describe("symmetry {} {} {}", line(a), line(b), line(c)));
-sketch_constraint!(SymmetryPP, points(a, c), lines(line), arcs(),
+sketch_constraint!(SymmetryPP, points(a, c), lines(line: host), arcs(),
     dedup(mirror(a, c; line)),
     describe("symmetry {} {} {}", point(a), line(line), point(c)));
-sketch_constraint!(SymmetryAA, points(), lines(line), arcs(a, c),
+sketch_constraint!(SymmetryAA, points(), lines(line: host), arcs(a: whole, c: whole),
     dedup(mirror(a, c; line)),
     describe("symmetry {} {} {}", arc(a), line(line), arc(c)));
-sketch_constraint!(DistancePL, points(point), lines(line), arcs(),
+sketch_constraint!(DistancePL, points(point), lines(line: host), arcs(),
     dedup(exact(point, line)),
     describe("distance {} {} = {}", point(point), line(line), num(distance)));
-sketch_constraint!(DistanceLP1L, points(), lines(a, b), arcs(),
+sketch_constraint!(DistanceLP1L, points(), lines(a: start, b: host), arcs(),
     dedup(exact(a, b)),
     describe("distance {}.p1 {} = {}", line(a), line(b), num(distance)));
-sketch_constraint!(DistanceLP2L, points(), lines(a, b), arcs(),
+sketch_constraint!(DistanceLP2L, points(), lines(a: end, b: host), arcs(),
     dedup(exact(a, b)),
     describe("distance {}.p2 {} = {}", line(a), line(b), num(distance)));
-sketch_constraint!(DistanceArcCenterL, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcCenterL, points(), lines(line: host), arcs(arc: center),
     dedup(exact(arc, line)),
     describe("distance {}.center {} = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcStartL, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcStartL, points(), lines(line: host), arcs(arc: start),
     dedup(exact(arc, line)),
     describe("distance {}.start {} = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcEndL, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcEndL, points(), lines(line: host), arcs(arc: end),
     dedup(exact(arc, line)),
     describe("distance {}.end {} = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(LineP1OnLine, points(), lines(a, b), arcs(),
+sketch_constraint!(LineP1OnLine, points(), lines(a: start, b: host), arcs(),
     dedup(exact(a, b)),
     describe("point_on {}.p1 {}", line(a), line(b)));
-sketch_constraint!(LineP2OnLine, points(), lines(a, b), arcs(),
+sketch_constraint!(LineP2OnLine, points(), lines(a: end, b: host), arcs(),
     dedup(exact(a, b)),
     describe("point_on {}.p2 {}", line(a), line(b)));
-sketch_constraint!(CoincidentArcCenter, points(point), lines(), arcs(arc),
+sketch_constraint!(CoincidentArcCenter, points(point), lines(), arcs(arc: center),
     dedup(coincide(ep_point(point), ep_arc_center(arc))),
     describe("coincident {} {}.center", point(point), arc(arc)));
-sketch_constraint!(CoincidentArcStart, points(point), lines(), arcs(arc),
+sketch_constraint!(CoincidentArcStart, points(point), lines(), arcs(arc: start),
     dedup(coincide(ep_point(point), ep_arc_start(arc))),
     describe("coincident {} {}.start", point(point), arc(arc)));
-sketch_constraint!(CoincidentArcEnd, points(point), lines(), arcs(arc),
+sketch_constraint!(CoincidentArcEnd, points(point), lines(), arcs(arc: end),
     dedup(coincide(ep_point(point), ep_arc_end(arc))),
     describe("coincident {} {}.end", point(point), arc(arc)));
-sketch_constraint!(CoincidentLP1ArcCenter, points(), lines(line), arcs(arc),
+sketch_constraint!(CoincidentLP1ArcCenter, points(), lines(line: start), arcs(arc: center),
     dedup(coincide(ep_line_p1(line), ep_arc_center(arc))),
     describe("coincident {}.p1 {}.center", line(line), arc(arc)));
-sketch_constraint!(CoincidentLP2ArcCenter, points(), lines(line), arcs(arc),
+sketch_constraint!(CoincidentLP2ArcCenter, points(), lines(line: end), arcs(arc: center),
     dedup(coincide(ep_line_p2(line), ep_arc_center(arc))),
     describe("coincident {}.p2 {}.center", line(line), arc(arc)));
-sketch_constraint!(CoincidentLP1ArcStart, points(), lines(line), arcs(arc),
+sketch_constraint!(CoincidentLP1ArcStart, points(), lines(line: start), arcs(arc: start),
     dedup(coincide(ep_line_p1(line), ep_arc_start(arc))),
     describe("coincident {}.p1 {}.start", line(line), arc(arc)));
-sketch_constraint!(CoincidentLP2ArcStart, points(), lines(line), arcs(arc),
+sketch_constraint!(CoincidentLP2ArcStart, points(), lines(line: end), arcs(arc: start),
     dedup(coincide(ep_line_p2(line), ep_arc_start(arc))),
     describe("coincident {}.p2 {}.start", line(line), arc(arc)));
-sketch_constraint!(CoincidentLP1ArcEnd, points(), lines(line), arcs(arc),
+sketch_constraint!(CoincidentLP1ArcEnd, points(), lines(line: start), arcs(arc: end),
     dedup(coincide(ep_line_p1(line), ep_arc_end(arc))),
     describe("coincident {}.p1 {}.end", line(line), arc(arc)));
-sketch_constraint!(CoincidentLP2ArcEnd, points(), lines(line), arcs(arc),
+sketch_constraint!(CoincidentLP2ArcEnd, points(), lines(line: end), arcs(arc: end),
     dedup(coincide(ep_line_p2(line), ep_arc_end(arc))),
     describe("coincident {}.p2 {}.end", line(line), arc(arc)));
-sketch_constraint!(CoincidentArcCenterStart, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcCenterStart, points(), lines(), arcs(a: center, b: start),
     dedup(coincide(ep_arc_center(a), ep_arc_start(b))),
     describe("coincident {}.center {}.start", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcCenterEnd, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcCenterEnd, points(), lines(), arcs(a: center, b: end),
     dedup(coincide(ep_arc_center(a), ep_arc_end(b))),
     describe("coincident {}.center {}.end", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcStartCenter, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcStartCenter, points(), lines(), arcs(a: start, b: center),
     dedup(coincide(ep_arc_start(a), ep_arc_center(b))),
     describe("coincident {}.start {}.center", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcEndCenter, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcEndCenter, points(), lines(), arcs(a: end, b: center),
     dedup(coincide(ep_arc_end(a), ep_arc_center(b))),
     describe("coincident {}.end {}.center", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcStartStart, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcStartStart, points(), lines(), arcs(a: start, b: start),
     dedup(coincide(ep_arc_start(a), ep_arc_start(b))),
     describe("coincident {}.start {}.start", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcStartEnd, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcStartEnd, points(), lines(), arcs(a: start, b: end),
     dedup(coincide(ep_arc_start(a), ep_arc_end(b))),
     describe("coincident {}.start {}.end", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcEndStart, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcEndStart, points(), lines(), arcs(a: end, b: start),
     dedup(coincide(ep_arc_end(a), ep_arc_start(b))),
     describe("coincident {}.end {}.start", arc(a), arc(b)));
-sketch_constraint!(CoincidentArcEndEnd, points(), lines(), arcs(a, b),
+sketch_constraint!(CoincidentArcEndEnd, points(), lines(), arcs(a: end, b: end),
     dedup(coincide(ep_arc_end(a), ep_arc_end(b))),
     describe("coincident {}.end {}.end", arc(a), arc(b)));
-sketch_constraint!(LineP1OnArc, points(), lines(line), arcs(arc),
+sketch_constraint!(LineP1OnArc, points(), lines(line: start), arcs(arc: host),
     dedup(exact(line, arc)),
     describe("point_on {}.p1 {}", line(line), arc(arc)));
-sketch_constraint!(LineP2OnArc, points(), lines(line), arcs(arc),
+sketch_constraint!(LineP2OnArc, points(), lines(line: end), arcs(arc: host),
     dedup(exact(line, arc)),
     describe("point_on {}.p2 {}", line(line), arc(arc)));
-sketch_constraint!(DistanceLL11, points(), lines(a, b), arcs(),
+sketch_constraint!(DistanceLL11, points(), lines(a: start, b: start), arcs(),
     dedup(exact(a, b)),
     describe("distance {}.p1 {}.p1 = {}", line(a), line(b), num(distance)));
-sketch_constraint!(DistanceLL12, points(), lines(a, b), arcs(),
+sketch_constraint!(DistanceLL12, points(), lines(a: start, b: end), arcs(),
     dedup(exact(a, b)),
     describe("distance {}.p1 {}.p2 = {}", line(a), line(b), num(distance)));
-sketch_constraint!(DistanceLL21, points(), lines(a, b), arcs(),
+sketch_constraint!(DistanceLL21, points(), lines(a: end, b: start), arcs(),
     dedup(exact(a, b)),
     describe("distance {}.p2 {}.p1 = {}", line(a), line(b), num(distance)));
-sketch_constraint!(DistanceLL22, points(), lines(a, b), arcs(),
+sketch_constraint!(DistanceLL22, points(), lines(a: end, b: end), arcs(),
     dedup(exact(a, b)),
     describe("distance {}.p2 {}.p2 = {}", line(a), line(b), num(distance)));
-sketch_constraint!(DistanceLP1, points(point), lines(line), arcs(),
+sketch_constraint!(DistanceLP1, points(point), lines(line: start), arcs(),
     dedup(exact(line, point)),
     describe("distance {}.p1 {} = {}", line(line), point(point), num(distance)));
-sketch_constraint!(DistanceLP2, points(point), lines(line), arcs(),
+sketch_constraint!(DistanceLP2, points(point), lines(line: end), arcs(),
     dedup(exact(line, point)),
     describe("distance {}.p2 {} = {}", line(line), point(point), num(distance)));
-sketch_constraint!(DistanceArcCenterP, points(point), lines(), arcs(arc),
+sketch_constraint!(DistanceArcCenterP, points(point), lines(), arcs(arc: center),
     dedup(exact(arc, point)),
     describe("distance {}.center {} = {}", arc(arc), point(point), num(distance)));
-sketch_constraint!(DistanceArcStartP, points(point), lines(), arcs(arc),
+sketch_constraint!(DistanceArcStartP, points(point), lines(), arcs(arc: start),
     dedup(exact(arc, point)),
     describe("distance {}.start {} = {}", arc(arc), point(point), num(distance)));
-sketch_constraint!(DistanceArcEndP, points(point), lines(), arcs(arc),
+sketch_constraint!(DistanceArcEndP, points(point), lines(), arcs(arc: end),
     dedup(exact(arc, point)),
     describe("distance {}.end {} = {}", arc(arc), point(point), num(distance)));
-sketch_constraint!(DistanceArcCenterL1, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcCenterL1, points(), lines(line: start), arcs(arc: center),
     dedup(exact(arc, line)),
     describe("distance {}.center {}.p1 = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcCenterL2, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcCenterL2, points(), lines(line: end), arcs(arc: center),
     dedup(exact(arc, line)),
     describe("distance {}.center {}.p2 = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcStartL1, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcStartL1, points(), lines(line: start), arcs(arc: start),
     dedup(exact(arc, line)),
     describe("distance {}.start {}.p1 = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcStartL2, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcStartL2, points(), lines(line: end), arcs(arc: start),
     dedup(exact(arc, line)),
     describe("distance {}.start {}.p2 = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcEndL1, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcEndL1, points(), lines(line: start), arcs(arc: end),
     dedup(exact(arc, line)),
     describe("distance {}.end {}.p1 = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceArcEndL2, points(), lines(line), arcs(arc),
+sketch_constraint!(DistanceArcEndL2, points(), lines(line: end), arcs(arc: end),
     dedup(exact(arc, line)),
     describe("distance {}.end {}.p2 = {}", arc(arc), line(line), num(distance)));
-sketch_constraint!(DistanceAACeCe, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAACeCe, points(), lines(), arcs(a: center, b: center),
     dedup(exact(a, b)),
     describe("distance {}.center {}.center = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAACeS, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAACeS, points(), lines(), arcs(a: center, b: start),
     dedup(exact(a, b)),
     describe("distance {}.center {}.start = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAACeE, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAACeE, points(), lines(), arcs(a: center, b: end),
     dedup(exact(a, b)),
     describe("distance {}.center {}.end = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAASCe, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAASCe, points(), lines(), arcs(a: start, b: center),
     dedup(exact(a, b)),
     describe("distance {}.start {}.center = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAASS, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAASS, points(), lines(), arcs(a: start, b: start),
     dedup(exact(a, b)),
     describe("distance {}.start {}.start = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAASE, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAASE, points(), lines(), arcs(a: start, b: end),
     dedup(exact(a, b)),
     describe("distance {}.start {}.end = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAAECe, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAAECe, points(), lines(), arcs(a: end, b: center),
     dedup(exact(a, b)),
     describe("distance {}.end {}.center = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAAES, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAAES, points(), lines(), arcs(a: end, b: start),
     dedup(exact(a, b)),
     describe("distance {}.end {}.start = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceAAEE, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceAAEE, points(), lines(), arcs(a: end, b: end),
     dedup(exact(a, b)),
     describe("distance {}.end {}.end = {}", arc(a), arc(b), num(distance)));
-sketch_constraint!(DistanceConcentric, points(), lines(), arcs(a, b),
+sketch_constraint!(DistanceConcentric, points(), lines(), arcs(a: whole, b: whole),
     dedup(exact(a, b)),
     describe("distance {} {} = {} (concentric)", arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceLL11, points(), lines(a, b), arcs(),
+sketch_constraint!(AxisDistanceLL11, points(), lines(a: start, b: start), arcs(),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.p1 {}.p1 = {}", axis(horizontal), line(a), line(b), num(distance)));
-sketch_constraint!(AxisDistanceLL12, points(), lines(a, b), arcs(),
+sketch_constraint!(AxisDistanceLL12, points(), lines(a: start, b: end), arcs(),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.p1 {}.p2 = {}", axis(horizontal), line(a), line(b), num(distance)));
-sketch_constraint!(AxisDistanceLL21, points(), lines(a, b), arcs(),
+sketch_constraint!(AxisDistanceLL21, points(), lines(a: end, b: start), arcs(),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.p2 {}.p1 = {}", axis(horizontal), line(a), line(b), num(distance)));
-sketch_constraint!(AxisDistanceLL22, points(), lines(a, b), arcs(),
+sketch_constraint!(AxisDistanceLL22, points(), lines(a: end, b: end), arcs(),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.p2 {}.p2 = {}", axis(horizontal), line(a), line(b), num(distance)));
-sketch_constraint!(AxisDistanceLP1, points(point), lines(line), arcs(),
+sketch_constraint!(AxisDistanceLP1, points(point), lines(line: start), arcs(),
     dedup(axis(line, point; horizontal)),
     describe("{} {}.p1 {} = {}", axis(horizontal), line(line), point(point), num(distance)));
-sketch_constraint!(AxisDistanceLP2, points(point), lines(line), arcs(),
+sketch_constraint!(AxisDistanceLP2, points(point), lines(line: end), arcs(),
     dedup(axis(line, point; horizontal)),
     describe("{} {}.p2 {} = {}", axis(horizontal), line(line), point(point), num(distance)));
-sketch_constraint!(AxisDistanceArcCenterP, points(point), lines(), arcs(arc),
+sketch_constraint!(AxisDistanceArcCenterP, points(point), lines(), arcs(arc: center),
     dedup(axis(arc, point; horizontal)),
     describe("{} {}.center {} = {}", axis(horizontal), arc(arc), point(point), num(distance)));
-sketch_constraint!(AxisDistanceArcStartP, points(point), lines(), arcs(arc),
+sketch_constraint!(AxisDistanceArcStartP, points(point), lines(), arcs(arc: start),
     dedup(axis(arc, point; horizontal)),
     describe("{} {}.start {} = {}", axis(horizontal), arc(arc), point(point), num(distance)));
-sketch_constraint!(AxisDistanceArcEndP, points(point), lines(), arcs(arc),
+sketch_constraint!(AxisDistanceArcEndP, points(point), lines(), arcs(arc: end),
     dedup(axis(arc, point; horizontal)),
     describe("{} {}.end {} = {}", axis(horizontal), arc(arc), point(point), num(distance)));
-sketch_constraint!(AxisDistanceArcCenterL1, points(), lines(line), arcs(arc),
+sketch_constraint!(AxisDistanceArcCenterL1, points(), lines(line: start), arcs(arc: center),
     dedup(axis(arc, line; horizontal)),
     describe("{} {}.center {}.p1 = {}", axis(horizontal), arc(arc), line(line), num(distance)));
-sketch_constraint!(AxisDistanceArcCenterL2, points(), lines(line), arcs(arc),
+sketch_constraint!(AxisDistanceArcCenterL2, points(), lines(line: end), arcs(arc: center),
     dedup(axis(arc, line; horizontal)),
     describe("{} {}.center {}.p2 = {}", axis(horizontal), arc(arc), line(line), num(distance)));
-sketch_constraint!(AxisDistanceArcStartL1, points(), lines(line), arcs(arc),
+sketch_constraint!(AxisDistanceArcStartL1, points(), lines(line: start), arcs(arc: start),
     dedup(axis(arc, line; horizontal)),
     describe("{} {}.start {}.p1 = {}", axis(horizontal), arc(arc), line(line), num(distance)));
-sketch_constraint!(AxisDistanceArcStartL2, points(), lines(line), arcs(arc),
+sketch_constraint!(AxisDistanceArcStartL2, points(), lines(line: end), arcs(arc: start),
     dedup(axis(arc, line; horizontal)),
     describe("{} {}.start {}.p2 = {}", axis(horizontal), arc(arc), line(line), num(distance)));
-sketch_constraint!(AxisDistanceArcEndL1, points(), lines(line), arcs(arc),
+sketch_constraint!(AxisDistanceArcEndL1, points(), lines(line: start), arcs(arc: end),
     dedup(axis(arc, line; horizontal)),
     describe("{} {}.end {}.p1 = {}", axis(horizontal), arc(arc), line(line), num(distance)));
-sketch_constraint!(AxisDistanceArcEndL2, points(), lines(line), arcs(arc),
+sketch_constraint!(AxisDistanceArcEndL2, points(), lines(line: end), arcs(arc: end),
     dedup(axis(arc, line; horizontal)),
     describe("{} {}.end {}.p2 = {}", axis(horizontal), arc(arc), line(line), num(distance)));
-sketch_constraint!(AxisDistanceAACeCe, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAACeCe, points(), lines(), arcs(a: center, b: center),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.center {}.center = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAACeS, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAACeS, points(), lines(), arcs(a: center, b: start),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.center {}.start = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAACeE, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAACeE, points(), lines(), arcs(a: center, b: end),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.center {}.end = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAASCe, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAASCe, points(), lines(), arcs(a: start, b: center),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.start {}.center = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAASS, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAASS, points(), lines(), arcs(a: start, b: start),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.start {}.start = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAASE, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAASE, points(), lines(), arcs(a: start, b: end),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.start {}.end = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAAECe, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAAECe, points(), lines(), arcs(a: end, b: center),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.end {}.center = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAAES, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAAES, points(), lines(), arcs(a: end, b: start),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.end {}.start = {}", axis(horizontal), arc(a), arc(b), num(distance)));
-sketch_constraint!(AxisDistanceAAEE, points(), lines(), arcs(a, b),
+sketch_constraint!(AxisDistanceAAEE, points(), lines(), arcs(a: end, b: end),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.end {}.end = {}", axis(horizontal), arc(a), arc(b), num(distance)));
 
@@ -1054,5 +1138,99 @@ impl Sketch {
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_ce", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_ce);
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_s", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_s);
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_e", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_e);
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    use arael::model::CrossBlock;
+    use arael::vect::vect2d;
+
+    fn two_line_sketch() -> (Sketch, Ref<Line>, Ref<Line>) {
+        let mut s = Sketch::new();
+        let a = s.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+        let b = s.add_line(vect2d::new(0.0, 1.0), vect2d::new(5.0, 1.0));
+        (s, a, b)
+    }
+
+    #[test]
+    fn test_roles_and_slots() {
+        let (mut s, a, b) = two_line_sketch();
+        s.coincident_ll21.push(crate::CoincidentLL21 {
+            a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
+        });
+        let c = &s.coincident_ll21[0];
+        let mut fields = Vec::new();
+        c.each_line_field(&mut |slot, r, role| fields.push((slot, r, role)));
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0], (0, a, RefRole::End));
+        assert_eq!(fields[1], (1, b, RefRole::Start));
+        // No arc fields.
+        let mut arc_fields = 0;
+        c.each_arc_field(&mut |_, _, _| arc_fields += 1);
+        assert_eq!(arc_fields, 0);
+    }
+
+    #[test]
+    fn test_set_line_field_rewrites_one_slot() {
+        let (mut s, a, b) = two_line_sketch();
+        let c2 = s.add_line(vect2d::new(0.0, 2.0), vect2d::new(5.0, 2.0));
+        s.parallel.push(crate::Parallel { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+        s.parallel[0].set_line_field(1, c2);
+        assert_eq!(s.parallel[0].a, a);
+        assert_eq!(s.parallel[0].b, c2);
+    }
+
+    #[test]
+    fn test_clone_push_blank_zeroes_ids() {
+        let (mut s, a, b) = two_line_sketch();
+        s.perpendicular.push(crate::Perpendicular {
+            a, b, dir_sign: 1.0, nid: 7, cid: 3, hb: CrossBlock::new(),
+        });
+        let coll: &mut dyn ConstraintCollection = &mut s.perpendicular;
+        let idx = coll.clone_push_blank(0);
+        assert_eq!(idx, 1);
+        assert_eq!(s.perpendicular[1].nid, 0);
+        assert_eq!(s.perpendicular[1].cid, 0);
+        assert_eq!(s.perpendicular[1].a, a);
+        assert_eq!(s.perpendicular[1].b, b);
+        assert_eq!(s.perpendicular[1].dir_sign, 1.0);
+        // Original untouched.
+        assert_eq!(s.perpendicular[0].nid, 7);
+    }
+
+    #[test]
+    fn test_field_walk_matches_ref_walk_everywhere() {
+        // each_line_field / each_line_ref are generated from the same
+        // macro list, but this pins the contract for hand-written
+        // impls that might appear later. Exercise via a sketch with a
+        // few constraint kinds present.
+        let (mut s, a, b) = two_line_sketch();
+        let arc = s.add_arc(vect2d::new(2.0, 2.0), 1.0, 0.0, 1.0, false);
+        s.tangent_la.push(crate::TangentLA {
+            line: a, arc, sign: 1.0,
+            p1_arc_start: false, p1_arc_end: false,
+            p2_arc_start: false, p2_arc_end: false,
+            dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new(),
+        });
+        s.coincident_ll12.push(crate::CoincidentLL12 {
+            a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
+        });
+        s.for_each_constraint_collection(|_, _, coll| {
+            for i in 0..coll.len() {
+                let c = coll.item(i);
+                let mut refs = 0;
+                c.each_line_ref(&mut |_| refs += 1);
+                let mut fields = 0;
+                c.each_line_field(&mut |_, _, _| fields += 1);
+                assert_eq!(refs, fields);
+                let mut arefs = 0;
+                c.each_arc_ref(&mut |_| arefs += 1);
+                let mut afields = 0;
+                c.each_arc_field(&mut |_, _, _| afields += 1);
+                assert_eq!(arefs, afields);
+            }
+        });
     }
 }

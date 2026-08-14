@@ -16,7 +16,7 @@ pub enum SharedEndpoint {
 
 // -- Point-Point --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [a.pos.x - b.pos.x, a.pos.y - b.pos.y]
@@ -35,7 +35,7 @@ pub struct CoincidentPP {
     pub hb: CrossBlock<Point, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.pos.x - b.pos.x;
@@ -59,7 +59,7 @@ pub struct DistancePP {
 
 // -- Line-Line endpoint distance --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.p1.x - b.p1.x; let dy = a.p1.y - b.p1.y;
@@ -77,7 +77,7 @@ pub struct DistanceLL11 {
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.p1.x - b.p2.x; let dy = a.p1.y - b.p2.y;
@@ -95,7 +95,7 @@ pub struct DistanceLL12 {
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.p2.x - b.p1.x; let dy = a.p2.y - b.p1.y;
@@ -113,7 +113,7 @@ pub struct DistanceLL21 {
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.p2.x - b.p2.x; let dy = a.p2.y - b.p2.y;
@@ -133,7 +133,7 @@ pub struct DistanceLL22 {
 
 // -- Line endpoint to Point distance --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p1.x - point.pos.x; let dy = line.p1.y - point.pos.y;
@@ -151,7 +151,7 @@ pub struct DistanceLP1 {
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - point.pos.x; let dy = line.p2.y - point.pos.y;
@@ -171,7 +171,7 @@ pub struct DistanceLP2 {
 
 // -- Arc-Point distance --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = arc.center.x - point.pos.x; let dy = arc.center.y - point.pos.y;
@@ -189,7 +189,7 @@ pub struct DistanceArcCenterP {
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -209,7 +209,7 @@ pub struct DistanceArcStartP {
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -231,7 +231,7 @@ pub struct DistanceArcEndP {
 
 // -- Arc-Line distance --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = arc.center.x - line.p1.x; let dy = arc.center.y - line.p1.y;
@@ -249,7 +249,7 @@ pub struct DistanceArcCenterL1 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = arc.center.x - line.p2.x; let dy = arc.center.y - line.p2.y;
@@ -267,7 +267,7 @@ pub struct DistanceArcCenterL2 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -287,7 +287,7 @@ pub struct DistanceArcStartL1 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -307,7 +307,7 @@ pub struct DistanceArcStartL2 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -327,7 +327,7 @@ pub struct DistanceArcEndL1 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -349,7 +349,7 @@ pub struct DistanceArcEndL2 {
 
 // -- Arc-Arc distance --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.center.x - b.center.x; let dy = a.center.y - b.center.y;
@@ -367,7 +367,7 @@ pub struct DistanceAACeCe {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
@@ -387,7 +387,7 @@ pub struct DistanceAACeS {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
@@ -407,7 +407,7 @@ pub struct DistanceAACeE {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -427,7 +427,7 @@ pub struct DistanceAASCe {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -449,7 +449,7 @@ pub struct DistanceAASS {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -471,7 +471,7 @@ pub struct DistanceAASE {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -491,7 +491,7 @@ pub struct DistanceAAECe {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -513,7 +513,7 @@ pub struct DistanceAAES {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -535,7 +535,7 @@ pub struct DistanceAAEE {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.pos.x - b.pos.x - horizontaldistancepp.distance) * sketch.constraint_isigma]
@@ -555,7 +555,7 @@ pub struct HorizontalDistancePP {
     pub hb: CrossBlock<Point, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.pos.y - b.pos.y - verticaldistancepp.distance) * sketch.constraint_isigma]
@@ -578,7 +578,7 @@ pub struct VerticalDistancePP {
 // -- Point-Line --
 
 // Point lies on infinite line through p1-p2 (cross product = 0)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - line.p1.x;
@@ -602,7 +602,7 @@ pub struct PointOnLine {
 }
 
 // Point at midpoint of line segment
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let mx = (line.p1.x + line.p2.x) * 0.5;
@@ -625,7 +625,7 @@ pub struct MidpointConstraint {
 }
 
 // Line P1 at midpoint of another line
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let mx = (target.p1.x + target.p2.x) * 0.5;
@@ -648,7 +648,7 @@ pub struct MidpointLP1 {
 }
 
 // Line P2 at midpoint of another line
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let mx = (target.p1.x + target.p2.x) * 0.5;
@@ -671,7 +671,7 @@ pub struct MidpointLP2 {
 }
 
 // Arc start point at midpoint of line
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -696,7 +696,7 @@ pub struct MidpointArcStart {
 }
 
 // Arc end point at midpoint of line
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -723,7 +723,7 @@ pub struct MidpointArcEnd {
 // -- Midpoint on Arc (angular midpoint) --
 
 // Point at angular midpoint of arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
@@ -747,7 +747,7 @@ pub struct MidpointArcPoint {
 }
 
 // Line P1 at angular midpoint of arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
@@ -771,7 +771,7 @@ pub struct MidpointLP1Arc {
 }
 
 // Line P2 at angular midpoint of arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
@@ -795,7 +795,7 @@ pub struct MidpointLP2Arc {
 }
 
 // Arc start at angular midpoint of another arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -821,7 +821,7 @@ pub struct MidpointArcStartArc {
 }
 
 // Arc end at angular midpoint of another arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -849,7 +849,7 @@ pub struct MidpointArcEndArc {
 // -- Point-Arc --
 
 // Point lies on ellipse/circle defined by arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = point.pos.x - arc.center.x;
@@ -874,7 +874,7 @@ pub struct PointOnArc {
 }
 
 // Point coincides with arc center
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(point.pos.x - arc.center.x) * sketch.constraint_isigma,
@@ -895,7 +895,7 @@ pub struct CoincidentArcCenter {
 }
 
 // Point coincides with arc start endpoint (center + radius * [cos(sa), sin(sa)])
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -918,7 +918,7 @@ pub struct CoincidentArcStart {
 }
 
 // Point coincides with arc end endpoint (center + radius * [cos(ea), sin(ea)])
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -943,7 +943,7 @@ pub struct CoincidentArcEnd {
 // -- Line-Line --
 
 // Parallel: cross product of direction vectors = 0
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx1 = a.p2.x - a.p1.x;
@@ -972,7 +972,7 @@ pub struct Parallel {
 // Perpendicular: dot product of direction vectors = 0, with direction enforcement.
 // The Heaviside on the unnormalized cross product prevents direction reversal.
 // Its gradient at zero line length is the other line's direction -- always well-defined.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx1 = a.p2.x - a.p1.x;
@@ -1027,7 +1027,7 @@ pub struct Perpendicular {
 //
 // Guarded on arc.is_ellipse; circular arcs have rotation fixed at 0
 // and the constraint would be meaningless.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = arc.is_ellipse, {
     let dx = line.p2.x - line.p1.x;
@@ -1053,7 +1053,7 @@ pub struct ArcLineParallel {
 // match modulo pi, which matches the ellipse's inherent two-fold
 // rotational symmetry. Guarded on both is_ellipse; inert for
 // circular-arc operands (whose rotations are fixed at 0 anyway).
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = a.is_ellipse && b.is_ellipse, {
     [sin(a.rotation - b.rotation) * sketch.constraint_isigma]
@@ -1073,7 +1073,7 @@ pub struct ArcArcParallel {
 }
 
 // Collinear: line2 endpoints both lie on infinite line of line1
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.p2.x - a.p1.x;
@@ -1098,7 +1098,7 @@ pub struct Collinear {
 }
 
 // Equal length
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx1 = a.p2.x - a.p1.x;
@@ -1122,7 +1122,7 @@ pub struct EqualLength {
 }
 
 // Angle between lines
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx1 = a.p2.x - a.p1.x;
@@ -1150,7 +1150,7 @@ pub struct AngleConstraint {
 // -- Line-Point (endpoint coincidence) --
 
 // Line p1 coincides with standalone point
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(line.p1.x - point.pos.x) * sketch.constraint_isigma,
@@ -1171,7 +1171,7 @@ pub struct CoincidentLP1 {
 }
 
 // Line p2 coincides with standalone point
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(line.p2.x - point.pos.x) * sketch.constraint_isigma,
@@ -1194,7 +1194,7 @@ pub struct CoincidentLP2 {
 // -- Line-Line endpoint coincidence (4 variants for endpoint combos) --
 
 // a.p1 == b.p1
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.p1.x - b.p1.x) * sketch.constraint_isigma,
@@ -1215,7 +1215,7 @@ pub struct CoincidentLL11 {
 }
 
 // a.p1 == b.p2
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.p1.x - b.p2.x) * sketch.constraint_isigma,
@@ -1236,7 +1236,7 @@ pub struct CoincidentLL12 {
 }
 
 // a.p2 == b.p1  (most common: end of line a -> start of line b)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.p2.x - b.p1.x) * sketch.constraint_isigma,
@@ -1257,7 +1257,7 @@ pub struct CoincidentLL21 {
 }
 
 // a.p2 == b.p2
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.p2.x - b.p2.x) * sketch.constraint_isigma,
@@ -1282,7 +1282,7 @@ pub struct CoincidentLL22 {
 // Line tangent to arc/ellipse. Uses perpendicular-distance residual (always active)
 // plus a gradient-based residual when the tangent point is a shared endpoint.
 // For ellipses, the effective radius along the line normal direction is used.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 // Perpendicular distance from center to line = sign * effective_radius (no shared endpoint)
 #[arael(constraint(hb, guard = !self.p1_arc_start && !self.p1_arc_end && !self.p2_arc_start && !self.p2_arc_end, {
@@ -1399,7 +1399,7 @@ fn default_tangent_sign() -> f64 { 1.0 }
 // -- Arc-Arc --
 
 // Concentric: centers coincide
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.center.x - b.center.x) * sketch.constraint_isigma,
@@ -1427,7 +1427,7 @@ pub struct Concentric {
 // outer). Self-containment means the dim survives manual deletion of
 // the paired `Concentric` constraint -- the circles stay concentric
 // because the dim is enforcing it directly.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, name = "concentric_distance", {
     [(a.center.x - b.center.x) * sketch.constraint_isigma,
@@ -1453,7 +1453,7 @@ pub struct DistanceConcentric {
 }
 
 // Equal radius
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.radius - b.radius) * sketch.constraint_isigma]
@@ -1475,7 +1475,7 @@ pub struct EqualRadius {
 // Tangent arc-arc (external tangency).
 // Uses effective radii along center-to-center direction.
 // Generalizes circles: when rx=ry=r, r_eff = r.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 // No shared endpoint: center-distance = sum of effective radii
 #[arael(constraint(hb, guard = self.shared == SharedEndpoint::None, {
@@ -1546,7 +1546,7 @@ pub struct TangentAA {
 
 // -- Line endpoint <-> Arc point coincidence --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(line.p1.x - arc.center.x) * sketch.constraint_isigma,
@@ -1566,7 +1566,7 @@ pub struct CoincidentLP1ArcCenter {
     pub hb: CrossBlock<Line, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     [(line.p2.x - arc.center.x) * sketch.constraint_isigma,
@@ -1586,7 +1586,7 @@ pub struct CoincidentLP2ArcCenter {
     pub hb: CrossBlock<Line, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -1608,7 +1608,7 @@ pub struct CoincidentLP1ArcStart {
     pub hb: CrossBlock<Line, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -1630,7 +1630,7 @@ pub struct CoincidentLP2ArcStart {
     pub hb: CrossBlock<Line, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -1652,7 +1652,7 @@ pub struct CoincidentLP1ArcEnd {
     pub hb: CrossBlock<Line, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -1676,7 +1676,7 @@ pub struct CoincidentLP2ArcEnd {
 
 // -- Arc-Arc endpoint coincidence --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
@@ -1698,7 +1698,7 @@ pub struct CoincidentArcCenterStart {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
@@ -1720,7 +1720,7 @@ pub struct CoincidentArcCenterEnd {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -1742,7 +1742,7 @@ pub struct CoincidentArcStartCenter {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -1764,7 +1764,7 @@ pub struct CoincidentArcEndCenter {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -1788,7 +1788,7 @@ pub struct CoincidentArcStartStart {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -1812,7 +1812,7 @@ pub struct CoincidentArcStartEnd {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -1836,7 +1836,7 @@ pub struct CoincidentArcEndStart {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -1863,7 +1863,7 @@ pub struct CoincidentArcEndEnd {
 // -- Line endpoint on line --
 
 // Line a's p1 lies on infinite line through b's p1-p2
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = b.p2.x - b.p1.x;
@@ -1887,7 +1887,7 @@ pub struct LineP1OnLine {
 }
 
 // Line a's p2 lies on infinite line through b's p1-p2
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = b.p2.x - b.p1.x;
@@ -1913,7 +1913,7 @@ pub struct LineP2OnLine {
 // -- Line endpoint on arc --
 
 // Line p1 lies on ellipse/circle defined by arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p1.x - arc.center.x;
@@ -1938,7 +1938,7 @@ pub struct LineP1OnArc {
 }
 
 // Line p2 lies on ellipse/circle defined by arc
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - arc.center.x;
@@ -1973,7 +1973,7 @@ pub struct LineP2OnArc {
 // ref pair. Packed NA*NB storage is faster than TripletBlock's COO push.
 // `cross = (refA, refB)` is mandatory here since all three CrossBlocks
 // share the same type signature.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint([hb_ab, hb_ac, hb_bc], {
     let bn = (b.p2 - b.p1).across();
@@ -2021,7 +2021,7 @@ pub struct SymmetryLL {
 
 // -- Distance Point-Line --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - line.p1.x;
@@ -2046,7 +2046,7 @@ pub struct DistancePL {
 }
 
 // Line endpoint p1 to line (signed perpendicular distance)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = b.p2.x - b.p1.x;
@@ -2068,7 +2068,7 @@ pub struct DistanceLP1L {
 }
 
 // Line endpoint p2 to line (signed perpendicular distance)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = b.p2.x - b.p1.x;
@@ -2090,7 +2090,7 @@ pub struct DistanceLP2L {
 }
 
 // Arc center to line (signed perpendicular distance)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - line.p1.x;
@@ -2112,7 +2112,7 @@ pub struct DistanceArcCenterL {
 }
 
 // Arc start to line (signed perpendicular distance)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - line.p1.x;
@@ -2136,7 +2136,7 @@ pub struct DistanceArcStartL {
 }
 
 // Arc end to line (signed perpendicular distance)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = line.p2.x - line.p1.x;
@@ -2169,7 +2169,7 @@ pub struct DistanceArcEndL {
 /// TripletBlock's COO push. hb_ac is unambiguous by type (only
 /// Point-Point pair); the two Point-Line blocks need explicit
 /// `cross = (..)` to pick their ref.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint([hb_ac, hb_al, hb_cl], {
     let dx = line.p2.x - line.p1.x;
@@ -2212,7 +2212,7 @@ pub struct SymmetryPP {
 // constraint), so the extra residuals affect DOF counting.
 // Dense 3-entity coupling; decomposed into packed CrossBlocks per pair.
 // Both guarded constraint bodies share the same three CrossBlock fields.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint([hb_ac, hb_al, hb_cl], guard = !a.is_ellipse && !c.is_ellipse, {
     let dx = line.p2.x - line.p1.x;
@@ -2268,7 +2268,7 @@ pub struct SymmetryAA {
 
 // -- Line-Line --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(a.p1.x - b.p1.x - axisdistancell11.distance) * sketch.constraint_isigma]
@@ -2289,7 +2289,7 @@ pub struct AxisDistanceLL11 {
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(a.p1.x - b.p2.x - axisdistancell12.distance) * sketch.constraint_isigma]
@@ -2310,7 +2310,7 @@ pub struct AxisDistanceLL12 {
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(a.p2.x - b.p1.x - axisdistancell21.distance) * sketch.constraint_isigma]
@@ -2331,7 +2331,7 @@ pub struct AxisDistanceLL21 {
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(a.p2.x - b.p2.x - axisdistancell22.distance) * sketch.constraint_isigma]
@@ -2354,7 +2354,7 @@ pub struct AxisDistanceLL22 {
 
 // -- Line-Point --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(line.p1.x - point.pos.x - axisdistancelp1.distance) * sketch.constraint_isigma]
@@ -2375,7 +2375,7 @@ pub struct AxisDistanceLP1 {
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(line.p2.x - point.pos.x - axisdistancelp2.distance) * sketch.constraint_isigma]
@@ -2398,7 +2398,7 @@ pub struct AxisDistanceLP2 {
 
 // -- Arc-Point --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(arc.center.x - point.pos.x - axisdistancearccenterp.distance) * sketch.constraint_isigma]
@@ -2419,7 +2419,7 @@ pub struct AxisDistanceArcCenterP {
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -2442,7 +2442,7 @@ pub struct AxisDistanceArcStartP {
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -2467,7 +2467,7 @@ pub struct AxisDistanceArcEndP {
 
 // -- Arc-Line --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(arc.center.x - line.p1.x - axisdistancearccenterl1.distance) * sketch.constraint_isigma]
@@ -2488,7 +2488,7 @@ pub struct AxisDistanceArcCenterL1 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(arc.center.x - line.p2.x - axisdistancearccenterl2.distance) * sketch.constraint_isigma]
@@ -2509,7 +2509,7 @@ pub struct AxisDistanceArcCenterL2 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -2532,7 +2532,7 @@ pub struct AxisDistanceArcStartL1 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let sx = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.start_angle);
@@ -2555,7 +2555,7 @@ pub struct AxisDistanceArcStartL2 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -2578,7 +2578,7 @@ pub struct AxisDistanceArcEndL1 {
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let ex = arc_point_x(arc.center.x, arc.radius, arc.radius_b, arc.rotation, arc.end_angle);
@@ -2603,7 +2603,7 @@ pub struct AxisDistanceArcEndL2 {
 
 // -- Arc-Arc --
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     [(a.center.x - b.center.x - axisdistanceaacece.distance) * sketch.constraint_isigma]
@@ -2624,7 +2624,7 @@ pub struct AxisDistanceAACeCe {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let bsx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
@@ -2647,7 +2647,7 @@ pub struct AxisDistanceAACeS {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let bex = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
@@ -2670,7 +2670,7 @@ pub struct AxisDistanceAACeE {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -2693,7 +2693,7 @@ pub struct AxisDistanceAASCe {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -2718,7 +2718,7 @@ pub struct AxisDistanceAASS {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let asx = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
@@ -2743,7 +2743,7 @@ pub struct AxisDistanceAASE {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -2766,7 +2766,7 @@ pub struct AxisDistanceAAECe {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
@@ -2791,7 +2791,7 @@ pub struct AxisDistanceAAES {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, guard = self.horizontal, {
     let aex = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);

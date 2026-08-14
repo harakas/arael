@@ -35,7 +35,7 @@ pub use dimensions::*;
 pub mod symbol_bag;
 pub use symbol_bag::SymbolBag;
 pub mod expr_constraint;
-pub use expr_constraint::ExpressionConstraint;
+pub use expr_constraint::{ExpressionConstraint, ExprRewrite, rewrite_expr_symbols};
 pub mod blocker;
 pub use blocker::{BlockerReport, analyze as analyze_blockers};
 pub mod drag;
@@ -43,7 +43,7 @@ pub use drag::{DragApparatus, DragTarget};
 pub mod probe;
 pub mod registry;
 pub use arael::rank::RankResult;
-pub use registry::{CollectionMeta, ConstraintArenas, ConstraintCollection, SketchConstraint};
+pub use registry::{CollectionMeta, ConstraintArenas, ConstraintCollection, RefRole, SketchConstraint};
 
 use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
