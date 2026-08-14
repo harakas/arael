@@ -308,6 +308,21 @@ pub struct EditorApp {
     egui_ctx: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
 }
 
+/// Per-gesture drag state, taken whole by [`EditorApp::take_drag_state`]
+/// when a drag exits. Owning the pieces here forces every exit path
+/// through the one place that clears them all.
+struct DragExit {
+    grab: Option<GrabTarget>,
+    apparatus: Option<arael_sketch_solver::DragApparatus>,
+    perp_hint: Option<(Ref<Line>, vect2d)>,
+    hv_hint: Option<(Ref<Line>, bool)>,
+    collinear_hint: Option<(Ref<Line>, Ref<Line>)>,
+    /// Sketch as it stood before start_drag installed anything.
+    pre_snapshot: Option<Vec<u8>>,
+    /// Best clean (apparatus-free) state seen during the gesture.
+    best_snapshot: Option<Vec<u8>>,
+}
+
 impl EditorApp {
     fn demo() -> Self {
         let mut sketch = Sketch::new();
@@ -1436,6 +1451,29 @@ impl EditorApp {
 
 
 
+    /// Clear every per-gesture drag field and hand back the pieces an
+    /// exit consumes. Both exits (cancel_drag, end_drag) come through
+    /// here, so neither can forget a field the other clears -- each of
+    /// the three drag-teardown bugs so far was exactly that shape.
+    fn take_drag_state(&mut self) -> DragExit {
+        self.drag_snap_preview = None;
+        self.drag_rank = None;
+        self.drag_perp_already.clear();
+        self.drag_collinear_already.clear();
+        self.drag_line_locked_h = false;
+        self.drag_line_locked_v = false;
+        self.drag_line_endpoint_connected = false;
+        DragExit {
+            grab: self.grab.take(),
+            apparatus: self.drag_apparatus.take(),
+            perp_hint: self.drag_perp_snap.take(),
+            hv_hint: self.drag_hv_hint.take(),
+            collinear_hint: self.drag_collinear_hint.take(),
+            pre_snapshot: self.drag_pre_snapshot.take(),
+            best_snapshot: self.drag_saved_snapshot.take(),
+        }
+    }
+
     /// Abort an active drag without committing anything: restore the
     /// pre-drag snapshot (taken at start_drag before the drag
     /// apparatus existed), drop all drag state, push no history entry.
@@ -1447,22 +1485,13 @@ impl EditorApp {
         if self.grab.is_none() && self.drag_apparatus.is_none() {
             return;
         }
-        self.drag_snap_preview = None;
-        self.drag_rank = None;
-        self.drag_perp_already.clear();
-        self.drag_collinear_already.clear();
-        self.drag_perp_snap = None;
-        self.drag_hv_hint = None;
-        self.drag_collinear_hint = None;
         // The pre-drag snapshot predates the apparatus; restoring it
-        // removes everything the gesture added, so the token is just
-        // dropped. The best-cost snapshot is NOT the one to restore:
-        // update_drag refreshes it every good frame, so it tracks the
-        // gesture instead of undoing it.
-        self.drag_apparatus = None;
-        self.grab = None;
-        self.drag_saved_snapshot = None;
-        if let Some(snap) = self.drag_pre_snapshot.take()
+        // removes everything the gesture added, so the apparatus token
+        // is just dropped. The best-cost snapshot is NOT the one to
+        // restore: update_drag refreshes it every good frame, so it
+        // tracks the gesture instead of undoing it.
+        let exit = self.take_drag_state();
+        if let Some(snap) = exit.pre_snapshot
             && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
                 self.sketch = restored.into();
                 let result = self.sketch.solve();
@@ -1472,31 +1501,28 @@ impl EditorApp {
     }
 
     // End drag: remove temporary point and constraint, auto-snap, record action.
-    // If the final cost is much worse than pre-drag, revert to pre-drag state.
+    // If the final cost is much worse than pre-drag, revert to the best
+    // clean state seen during the gesture.
     fn end_drag(&mut self, hit_threshold: f64) {
         self.begin_group();
-        self.drag_snap_preview = None;
-        self.drag_rank = None;
-        self.drag_perp_already.clear();
-        self.drag_collinear_already.clear();
-        if let Some(app) = self.drag_apparatus.take() {
-            let grab = self.grab;
+        let exit = self.take_drag_state();
+        if let Some(app) = exit.apparatus {
+            let grab = exit.grab;
 
             // Remove drag apparatus (anchors included) and re-solve
             self.sketch.get_mut().remove_drag(&app);
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
 
-            // If cost is much worse than pre-drag, revert to pre-drag state
+            // If cost is much worse than pre-drag, revert to the best
+            // clean state
             if self.last_cost > self.drag_saved_cost + 1e-3
-                && let Some(snap) = self.drag_saved_snapshot.take()
+                && let Some(snap) = exit.best_snapshot
                     && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
                         self.sketch = restored.into();
                         let result = self.sketch.solve();
                         self.last_cost = result.end_cost;
                     }
-            self.drag_saved_snapshot = None;
-            self.drag_pre_snapshot = None;
 
             // Record drag as a non-deterministic action with full state snapshot
             let snapshot = bincode::serialize(&self.sketch).unwrap();
@@ -1508,12 +1534,12 @@ impl EditorApp {
             // Use the same in-loop "skip already-attached" filter as
             // update_drag so a twin sitting at the just-released position
             // cannot shadow the real new target.
-            // Snapshot auto-perp hint before it's cleared -- it may still
-            // apply even when no snap target wins, and it must be emitted
-            // inside the same undo group as the drag itself.
-            let perp_hint = self.drag_perp_snap.take();
-            let hv_hint = self.drag_hv_hint.take();
-            let collinear_hint = self.drag_collinear_hint.take();
+            // The auto-perp hint may still apply even when no snap
+            // target wins, and it must be emitted inside the same undo
+            // group as the drag itself.
+            let perp_hint = exit.perp_hint;
+            let hv_hint = exit.hv_hint;
+            let collinear_hint = exit.collinear_hint;
             match grab {
                 Some(g @ (GrabTarget::LineP1(line) | GrabTarget::LineP2(line))) => {
                     let is_p1 = matches!(g, GrabTarget::LineP1(_));
@@ -1623,7 +1649,6 @@ impl EditorApp {
             self.flash_names.clear();
             self.flash_start = None;
         }
-        self.grab = None;
         // The apparatus removal (and any auto-snap) bumped the
         // structure generation; recompute so the DOF display comes
         // back as a number instead of staying at "...".

@@ -477,3 +477,25 @@ fn test_fillet_chamfer_key_cycles() {
     gui.key(egui::Key::Escape);
     assert_eq!(gui.app.tool, Tool::Select);
 }
+
+#[test]
+fn test_tool_switch_mid_drag_cancels() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    let actions0 = gui.app.history.actions.len();
+    gui.drag_moves(v(2.0, 0.0), v(2.5, 0.8));
+    assert!(gui.app.grab.is_some(), "drag should be active");
+    // A tool shortcut mid-gesture switches the tool; the frame-top
+    // check must cancel the drag: apparatus removed, geometry
+    // restored, nothing committed.
+    gui.key(egui::Key::L);
+    gui.frames(1);
+    assert_eq!(gui.app.tool, Tool::DrawLine);
+    assert!(gui.app.grab.is_none(), "tool switch must cancel the grab");
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(2.0, 0.0), 0.05), "p2 after tool-switch cancel = {:?}", p2);
+    assert_eq!(gui.sketch().points.len(), 0, "no leftover helper points");
+    gui.release(v(2.5, 0.8));
+    assert_eq!(gui.app.history.actions.len(), actions0,
+        "cancelled drag must not commit");
+}
