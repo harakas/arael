@@ -135,6 +135,11 @@ fillet L1 L2 L3.pN ... r     Multiple corners at once (any mix of two-line and e
 chamfer L1 L2 d              Bevel the shared corner at distance d from the corner
 chamfer L1.pN d              Same, naming the corner endpoint directly
 chamfer L1 L2 L3.pN ... d    Multiple corners at once
+split L0 x,y [r]             Cut L0 at the intersections bracketing x,y; all pieces survive
+split L0 by L1 L2            Cut L0 at every intersection with the named cutters
+trim L0 x,y [r]              Delete the span of L0 containing x,y
+trim L0 by L1 L2             Delete the span of L0 between the two cutters
+trim L0 by L1 forward        Delete from L1's crossing to the p2/end side
 ```
 
 ### Auto-Coincident
@@ -1283,6 +1288,77 @@ add_rect 0,0 5,3 hv
 chamfer L0 L1 0.5            Bevel the (5,0) corner
 chamfer L1 L2 0.5            Bevel the (5,3) corner
 ```
+
+### Split
+
+Cut a line or arc where other curves cross it. The target is deleted
+and every piece is a new entity with a new name; all references --
+constraints, dimensions, expressions -- transfer onto the pieces:
+
+- Endpoint references (`L0.p1`, `A0.start`, ...) follow the piece
+  owning that endpoint.
+- Whole-entity constraints (`parallel`, `perpendicular`, H/V flags,
+  `concentric`, `equal` radius) are replicated onto every piece.
+- Tangencies follow the piece containing the contact point.
+- Whole-span measures (`equal` length, host-side `midpoint`,
+  `symmetry` operands) have no successor and are dropped, reported.
+- A driving `length` dimension becomes a point-to-point `distance`
+  between the outer endpoints, keeping its `d<n>` id, name, value and
+  placement. An arc `sweep` dimension is dropped.
+- Expression strings are rewritten (`L0.p1.x` -> the piece's,
+  `L0.length` -> the sum of the pieces' lengths). An expression whose
+  referent has no successor marks its dimension/parameter broken.
+
+The cut endpoints are joined with a coincident constraint and pinned
+onto the cutter with a point-on constraint (skip with `nopin`).
+Adjacent arc pieces get a `concentric` tie. All of it is one undo
+group, and the output lists every added, moved, copied and dropped id.
+
+```
+split L0 4,0                 Cut at the intersections bracketing (4,0)
+split L0 4,1 0.5             Same, but error if (4,1) is farther than 0.5 from L0
+split L0 by L1               Cut at every intersection with L1
+split A0 by L1 L2            Cut the circle at every crossing with L1 and L2
+split L0 4,0 nopin           Do not pin the cut endpoints onto the cutter
+```
+
+The coordinate does not have to sit on the curve: it is projected
+onto the target and the nearest point wins. The optional radius
+bounds that search. A closed circle/ellipse needs at least two
+crossings.
+
+All pieces are captured (`_0`, `_1`, ...), so a named-piece trim
+composes from split + delete:
+
+```
+# split a line where L1 crosses it, then drop the far half
+a, b = split L0 by L1
+delete b
+
+# same thing directly
+trim L0 by L1 forward
+```
+
+### Trim
+
+A split whose clicked/named span is deleted instead of kept. Same
+reference transfer, same output. With no intersections at all, trim
+deletes the whole entity.
+
+```
+trim L0 4,0                  Delete the span of L0 containing (4,0)
+trim L0 4,1 0.5              Same, with a bounded coordinate search
+trim L0 by L1 L2             Delete the span between L1's and L2's crossings
+trim L0 by L1 forward        Delete from L1's crossing toward p2/end
+trim L0 by L1 backward       Delete from L1's crossing toward p1/start
+```
+
+`forward` / `backward` follow the entity's own direction (p1 -> p2,
+start -> end); with a twice-crossing cutter, `forward` cuts at the
+crossing nearest the end. `trim by` between two cutters removes
+everything between their crossings, including any other crossings in
+between. On a closed circle/ellipse the `by` forms are rejected (the
+boundaries name two complementary spans); use the coordinate form.
 
 ## Solver Parameters
 

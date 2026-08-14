@@ -28,6 +28,7 @@ mod view_history;
 mod session;
 mod dof;
 mod help;
+mod split_cmds;
 
 pub use context::*;
 pub(crate) use resolve::*;
@@ -43,6 +44,7 @@ pub(crate) use view_history::*;
 pub(crate) use session::*;
 pub(crate) use dof::*;
 pub use help::*;
+pub(crate) use split_cmds::*;
 
 #[cfg(test)]
 mod tests;
@@ -180,6 +182,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
                 "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
                 "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" |
                 "add_earc" | "add_earc3" | "add_earc_center" | "add_earc_tangent" | "add_earc_rtangent" | "offset_line" | "offset" | "fillet" | "chamfer" | "mirror" |
+                "split" | "trim" |
                 "length" | "radius" | "radius_b" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -249,6 +252,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
         "fillet" => cmd_fillet(ctx, args_str),
         "chamfer" => cmd_chamfer(ctx, args_str),
+        "split" => cmd_split(ctx, args_str),
+        "trim" => cmd_trim(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
         "horizontal" => cmd_horizontal(ctx, args_str),
         "vertical" => cmd_vertical(ctx, args_str),

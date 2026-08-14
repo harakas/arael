@@ -8,7 +8,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
         });
     }
     if args.is_empty() {
-        Ok(ok("Commands: add_line add_point add_circle add_arc offset_line delete horizontal vertical \
+        Ok(ok("Commands: add_line add_point add_circle add_arc offset_line fillet chamfer split trim delete horizontal vertical \
             parallel perpendicular equal collinear tangent coincident concentric midpoint \
             symmetry point_on length radius sweep angle distance hdistance vdistance xangle freeze set_derived set_driven \
             lock unlock param del_param rename_param style select deselect print info list \
@@ -89,6 +89,8 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "offset_line" | "offset" => "offset_line L0 distance (create parallel line offset by distance)",
             "fillet" => "fillet L1 L2 r [notangent] [noradius]  or  fillet L1.pN r [notangent] [noradius] (round a corner with a tangent arc of radius r; breaks the shared LL coincident, trims both lines, adds arc + tangent + radius dim)",
             "chamfer" => "chamfer L1 L2 d  or  chamfer L1.pN d (bevel a corner at distance d from the corner; breaks the shared LL coincident, trims both lines by d, adds a bevel line + corner anchor point + two equal distance dims)",
+            "split" => "split L0 x,y [r]  or  split L0 by L1 L2... [nopin] (cut a line/arc at the intersections bracketing x,y, or at every crossing with the named cutters; pieces get new names, all constraints/dims/expressions transfer, cut endpoints are joined and pinned onto the cutter)",
+            "trim" => "trim L0 x,y [r]  or  trim L0 by L1 L2  or  trim L0 by L1 forward|backward [nopin] (delete the span of a line/arc between crossings; same reference transfer as split; with no crossings the whole entity is deleted)",
             "let" => "let name = expression (session variable, scalar or coordinate)",
             "save" => "save path.json",
             "load" => "load path.json",
@@ -108,7 +110,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
 pub(crate) const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
-    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer",
+    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer", "split", "trim",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -484,6 +486,33 @@ pub fn complete(
                 }
                 _ => {
                     add_expression_completions(sketch, session_names, &mut results, current_word);
+                }
+            }
+        }
+
+        // Split/Trim: arg1=target entity; then `by` + cutters, or a
+        // coordinate; trailing keywords.
+        "split" | "trim" => {
+            match token_index {
+                1 => {
+                    add_lines(sketch, &mut results, current_word);
+                    add_arcs(sketch, &mut results, current_word);
+                }
+                2 => {
+                    add_matching(&mut results, current_word, &["by"]);
+                    add_expression_completions(sketch, session_names, &mut results, current_word);
+                }
+                _ => {
+                    add_lines(sketch, &mut results, current_word);
+                    add_arcs(sketch, &mut results, current_word);
+                    let kws: &[&str] = if first_cmd == "trim" {
+                        &["forward", "backward", "nopin"]
+                    } else {
+                        &["nopin"]
+                    };
+                    for k in kws {
+                        if k.starts_with(current_word) { results.push((*k).to_string()); }
+                    }
                 }
             }
         }

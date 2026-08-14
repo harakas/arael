@@ -5190,3 +5190,283 @@ fn test_range_numeric_roundtrip() {
     assert!(near(line_len(&ctx, "L0"), 2.0),
         "numeric->range clamp: got {:.4}", line_len(&ctx, "L0"));
 }
+
+// -- Split / Trim --
+
+/// A 10-long horizontal line with a vertical cutter through (4,0).
+/// `noconnect` keeps the cutter from snapping to L0 so the crossing
+/// stays a plain geometric intersection.
+fn split_fixture() -> CommandContext {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 10,0");
+    run_ok(&mut ctx, "add_line 4,-2 4,2 noconnect");
+    ctx
+}
+
+#[test]
+fn test_split_line_coordinate_form() {
+    let mut ctx = split_fixture();
+    let out = run_ok(&mut ctx, "split L0 4,0");
+    assert!(out.contains("Split L0 -> L2 L3"), "{}", out);
+    assert!(resolve_line(&ctx.sketch, "L0").is_err(), "target name retired");
+    assert!(near(line_len(&ctx, "L2"), 4.0));
+    assert!(near(line_len(&ctx, "L3"), 6.0));
+    // Cut endpoints joined and pinned onto the cutter.
+    assert_eq!(ctx.sketch.coincident_ll21.len(), 1);
+    assert_eq!(ctx.sketch.line_p2_on_line.len(), 1);
+    assert!(out.contains("added:"), "{}", out);
+}
+
+#[test]
+fn test_split_line_by_form_and_capture() {
+    let mut ctx = split_fixture();
+    let out = run_ok(&mut ctx, "a, b = split L0 by L1");
+    assert!(out.contains("Split L0"), "{}", out);
+    assert_eq!(ctx.session_names.get("a").map(|s| s.as_str()), Some("L2"));
+    assert_eq!(ctx.session_names.get("b").map(|s| s.as_str()), Some("L3"));
+    // Scripted trim: delete the far piece by its captured name.
+    run_ok(&mut ctx, "delete b");
+    assert!(resolve_line(&ctx.sketch, "L3").is_err());
+    assert!(resolve_line(&ctx.sketch, "L2").is_ok());
+}
+
+#[test]
+fn test_split_dof_neutral_with_perpendicular() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "add_line 0,5 0,9 noconnect");
+    run_ok(&mut ctx, "perpendicular L0 L2");
+    let dof_before = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "split L0 4,0");
+    // Perpendicular replicated onto both pieces.
+    assert_eq!(ctx.sketch.perpendicular.len(), 2, "{}", out);
+    assert!(out.contains("copied:"), "{}", out);
+    let dof_after = ctx.sketch.dof().unwrap();
+    assert_eq!(dof_after, dof_before,
+        "pinned split of a direction-constrained line is DOF-neutral");
+}
+
+#[test]
+fn test_split_bare_line_dof_plus_one_pinned() {
+    let mut ctx = split_fixture();
+    let dof_before = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "split L0 4,0");
+    let dof_after = ctx.sketch.dof().unwrap();
+    // Bare line: +2 for the junction, -1 for the pin.
+    assert_eq!(dof_after, dof_before + 1);
+}
+
+#[test]
+fn test_split_nopin_dof_plus_two() {
+    let mut ctx = split_fixture();
+    let dof_before = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "split L0 4,0 nopin");
+    assert!(ctx.sketch.line_p2_on_line.is_empty());
+    let dof_after = ctx.sketch.dof().unwrap();
+    assert_eq!(dof_after, dof_before + 2);
+}
+
+#[test]
+fn test_split_length_dim_becomes_distance() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "length L0 10");
+    let did = ctx.sketch.dimensions[0].did;
+    let out = run_ok(&mut ctx, "split L0 4,0");
+    assert!(out.contains("moved:"), "{}", out);
+    assert_eq!(ctx.sketch.dimensions.len(), 1);
+    let d = &ctx.sketch.dimensions[0];
+    assert_eq!(d.did, did);
+    assert!(matches!(d.kind, DimensionKind::PointPointDistance(
+        DimensionEndpoint::LineP1(_), DimensionEndpoint::LineP2(_))));
+    // The distance constraint drives: total end-to-end length holds.
+    let a = resolve_line(&ctx.sketch, "L2").unwrap();
+    let b = resolve_line(&ctx.sketch, "L3").unwrap();
+    let p1 = ctx.sketch.lines[a].p1.value;
+    let p2 = ctx.sketch.lines[b].p2.value;
+    assert!(near(((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt(), 10.0));
+}
+
+#[test]
+fn test_split_expression_rewrite() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "param w L0.length / 2");
+    let out = run_ok(&mut ctx, "split L0 4,0");
+    assert!(out.contains("expressions:"), "{}", out);
+    assert_eq!(ctx.sketch.user_params[0].expr_str, "(L2.length + L3.length) / 2");
+    assert!(!ctx.sketch.user_params[0].broken);
+}
+
+#[test]
+fn test_split_no_intersections_errors() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 10,0");
+    let out = run_err(&mut ctx, "split L0 4,0");
+    assert!(out.contains("no intersections"), "{}", out);
+}
+
+#[test]
+fn test_split_search_radius() {
+    let mut ctx = split_fixture();
+    let out = run_err(&mut ctx, "split L0 4,3 1.0");
+    assert!(out.contains("search radius"), "{}", out);
+    run_ok(&mut ctx, "split L0 4,3 5.0");
+}
+
+#[test]
+fn test_split_undo_restores() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "split L0 4,0");
+    assert!(resolve_line(&ctx.sketch, "L0").is_err());
+    run_ok(&mut ctx, "undo");
+    assert!(resolve_line(&ctx.sketch, "L0").is_ok());
+    assert!(resolve_line(&ctx.sketch, "L2").is_err());
+    assert!(near(line_len(&ctx, "L0"), 10.0));
+}
+
+#[test]
+fn test_trim_coordinate_form() {
+    let mut ctx = split_fixture();
+    // Remove the span left of the cutter.
+    let out = run_ok(&mut ctx, "trim L0 1,0");
+    assert!(out.contains("Trimmed L0"), "{}", out);
+    assert!(resolve_line(&ctx.sketch, "L0").is_err());
+    // One piece: from the cut to the old p2.
+    let r = resolve_line(&ctx.sketch, "L2").unwrap();
+    assert!(near(ctx.sketch.lines[r].p1.value.x, 4.0));
+    assert!(near(ctx.sketch.lines[r].p2.value.x, 10.0));
+    // No coincidence (nothing to join), but the pin holds.
+    assert!(ctx.sketch.coincident_ll21.is_empty());
+    assert_eq!(ctx.sketch.line_p1_on_line.len(), 1);
+}
+
+#[test]
+fn test_trim_no_intersections_deletes() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 10,0");
+    let out = run_ok(&mut ctx, "trim L0 5,0");
+    assert!(out.contains("deleted L0"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 0);
+}
+
+#[test]
+fn test_trim_by_two_cutters() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "add_line 7,-2 7,2 noconnect");
+    let out = run_ok(&mut ctx, "trim L0 by L1 L2");
+    assert!(out.contains("Trimmed L0"), "{}", out);
+    // Outer pieces survive; the 4..7 span is gone.
+    let a = resolve_line(&ctx.sketch, "L3").unwrap();
+    let b = resolve_line(&ctx.sketch, "L4").unwrap();
+    assert!(near(ctx.sketch.lines[a].p2.value.x, 4.0));
+    assert!(near(ctx.sketch.lines[b].p1.value.x, 7.0));
+}
+
+#[test]
+fn test_trim_by_forward_backward() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "trim L0 by L1 forward");
+    let r = resolve_line(&ctx.sketch, "L2").unwrap();
+    assert!(near(ctx.sketch.lines[r].p1.value.x, 0.0));
+    assert!(near(ctx.sketch.lines[r].p2.value.x, 4.0));
+
+    let mut ctx2 = split_fixture();
+    run_ok(&mut ctx2, "trim L0 by L1 backward");
+    let r = resolve_line(&ctx2.sketch, "L2").unwrap();
+    assert!(near(ctx2.sketch.lines[r].p1.value.x, 4.0));
+    assert!(near(ctx2.sketch.lines[r].p2.value.x, 10.0));
+}
+
+#[test]
+fn test_trim_by_forward_twice_crossing_cutter() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 10,0");
+    // A circle crossing L0 at x=5 and x=7.
+    run_ok(&mut ctx, "add_circle 6,0 1 noconnect");
+    run_ok(&mut ctx, "trim L0 by A0 forward");
+    // Forward trims past the crossing nearest p2 (x=7), not x=5.
+    let r = resolve_line(&ctx.sketch, "L1").unwrap();
+    assert!(near(ctx.sketch.lines[r].p1.value.x, 0.0));
+    assert!(near(ctx.sketch.lines[r].p2.value.x, 7.0));
+}
+
+#[test]
+fn test_split_circle_concentric_dof() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 0,0 2");
+    run_ok(&mut ctx, "add_line 0,-3 0,3 noconnect");
+    let dof_before = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "split A0 by L0");
+    assert!(out.contains("Split A0 -> A1 A2"), "{}", out);
+    assert!(ctx.sketch.arcs.refs().count() == 2);
+    // Concentric joined the pieces; both cut points coincident + pinned.
+    assert_eq!(ctx.sketch.concentric.len(), 1);
+    assert_eq!(ctx.sketch.coincident_arc_end_start.len(), 2);
+    let dof_after = ctx.sketch.dof().unwrap();
+    assert_eq!(dof_after, dof_before,
+        "circle split at two pinned cuts is DOF-neutral through concentricity");
+}
+
+#[test]
+fn test_trim_closed_circle_span() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 0,0 2");
+    run_ok(&mut ctx, "add_line 0,-3 0,3 noconnect");
+    // Remove the left span (the one containing (-2,0)).
+    let out = run_ok(&mut ctx, "trim A0 -2,0");
+    assert!(out.contains("Trimmed A0"), "{}", out);
+    assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+    let r = ctx.sketch.arcs.refs().next().unwrap();
+    let arc = &ctx.sketch.arcs[r];
+    assert!(!arc.closed);
+    // The surviving span passes through (+2, 0).
+    let mid = arc.point_at(0.5 * (arc.start_angle.value + arc.end_angle.value));
+    assert!(mid.x > 0.0, "kept the right-hand span, got mid {:?}", (mid.x, mid.y));
+}
+
+#[test]
+fn test_trim_closed_by_form_rejected() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 0,0 2");
+    run_ok(&mut ctx, "add_line 0,-3 0,3 noconnect");
+    let out = run_err(&mut ctx, "trim A0 by L0 forward");
+    assert!(out.contains("closed"), "{}", out);
+}
+
+#[test]
+fn test_split_elliptic_arc_dof_plus_two() {
+    let mut ctx = CommandContext::new();
+    // Elliptic arc spanning the upper half, cut once by a vertical line.
+    run_ok(&mut ctx, "add_earc_center 0,0 3 1 0 0 180");
+    run_ok(&mut ctx, "add_line 0,-2 0,2 noconnect");
+    let dof_before = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "split EA0 by L0");
+    assert!(out.contains("Split EA0"), "{}", out);
+    assert_eq!(ctx.sketch.concentric.len(), 1);
+    let dof_after = ctx.sketch.dof().unwrap();
+    // Concentric-only ellipse ties: mutual rotation and semi-minor
+    // stay free (+2), the pinned junction is neutral.
+    assert_eq!(dof_after, dof_before + 2);
+}
+
+#[test]
+fn test_split_equal_length_dropped_and_reported() {
+    let mut ctx = split_fixture();
+    run_ok(&mut ctx, "add_line 0,5 10,5 noconnect");
+    run_ok(&mut ctx, "equal L0 L2");
+    let out = run_ok(&mut ctx, "split L0 4,0");
+    assert!(ctx.sketch.equal_length.is_empty());
+    assert!(out.contains("dropped:"), "{}", out);
+    assert!(out.contains("equal"), "{}", out);
+}
+
+#[test]
+fn test_split_tangent_lands_on_touching_piece() {
+    let mut ctx = split_fixture();
+    // Circle tangent to L0 from above at (7,0).
+    run_ok(&mut ctx, "add_circle 7,1 1 noconnect");
+    run_ok(&mut ctx, "tangent L0 A0");
+    run_ok(&mut ctx, "split L0 4,0");
+    assert_eq!(ctx.sketch.tangent_la.len(), 1);
+    let t = &ctx.sketch.tangent_la[0];
+    let b = resolve_line(&ctx.sketch, "L3").unwrap();
+    assert_eq!(t.line, b, "tangency follows the piece containing the contact");
+}

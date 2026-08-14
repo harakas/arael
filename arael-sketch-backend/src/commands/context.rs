@@ -766,6 +766,32 @@ impl CommandContext {
             created
         }
     }
+
+    /// Apply a split plan through the action machinery, returning the
+    /// outcome report `exec` cannot carry. Mirrors the non-constraint
+    /// `exec` path: apply, name, solve, dedup, record in history --
+    /// the recorded `Action::SplitEntity` replays the same plan.
+    pub fn exec_split(&mut self, plan: crate::split::SplitPlan)
+        -> Result<crate::split::SplitOutcome, String>
+    {
+        self.status_error = None;
+        self.status_blocker_names = None;
+        let outcome = {
+            let s = self.sketch.get_mut();
+            let o = crate::split::apply_split(s, &plan)?;
+            s.assign_constraint_names();
+            s.solve();
+            s.update_expr_dim_values();
+            o
+        };
+        self.sketch.get_mut().dedup_constraints();
+        self.history.push(
+            Action::SplitEntity { plan },
+            &self.sketch,
+            CursorState { pos: self.cursor, tangent: self.cursor_tangent },
+        );
+        Ok(outcome)
+    }
 }
 
 pub struct CommandResult {

@@ -199,6 +199,11 @@ pub enum Action {
     UpdateUserParam { index: usize, name: String, expr_str: String },
     RemoveUserParam { index: usize },
     DeleteConstraint { id: crate::ids::ConstraintId },
+    /// Split/trim: cut a line or arc at resolved parameters and
+    /// transfer every reference onto the pieces (see crate::split).
+    /// The plan is fully resolved -- cut params, positions, cutters,
+    /// keep mask -- so applying is deterministic.
+    SplitEntity { plan: crate::split::SplitPlan },
     // Drag is non-deterministic; store full state after drag completes
     Drag { snapshot: Vec<u8> },
 }
@@ -291,6 +296,10 @@ impl Action {
             Action::UpdateUserParam { name, .. } => format!("Update param {}", name),
             Action::RemoveUserParam { .. } => "Remove param".into(),
             Action::DeleteConstraint { .. } => "Delete constraint".into(),
+            Action::SplitEntity { plan } => {
+                let kept = plan.keep.iter().filter(|&&k| k).count();
+                if kept < plan.keep.len() { "Trim".into() } else { "Split".into() }
+            }
             Action::Drag { .. } => "Drag".into(),
         }
     }
@@ -520,7 +529,7 @@ fn remove_distance_pl(sketch: &mut Sketch, pt: &DimensionEndpoint, line: Ref<Lin
 /// dimension. Returns false when the kind's validation rejects the
 /// geometry (missing arcs, non-parallel lines) -- the caller must not
 /// create the dimension then.
-fn push_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind, value: &f64) -> bool {
+pub(crate) fn push_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind, value: &f64) -> bool {
     match kind {
         DimensionKind::LineLength(line) => {
             sketch.lines[*line].constraints.has_length = true;
@@ -661,7 +670,7 @@ fn push_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind, value:
 /// new value, or switched to a range / expression (where the equality
 /// constraint must go so the barrier / expr residual can drive the
 /// parameter unopposed).
-fn remove_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind) {
+pub(crate) fn remove_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind) {
     match *kind {
         DimensionKind::LineLength(line) => {
             if let Some(l) = sketch.lines.get_mut(line) {
@@ -817,13 +826,16 @@ fn remove_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &Dimensio
 /// an auto-coincident against whatever the new point snapped to, say. The
 /// arena chooses the slot, so a freed slot gets refilled and the new entity
 /// is not the last one; only the value `add_*` returned identifies it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Created {
     #[default]
     Nothing,
     Point(Ref<Point>),
     Line(Ref<Line>),
     Arc(Ref<Arc>),
+    /// A split created several entities at once (piece order, trimmed
+    /// slots omitted).
+    Many(Vec<Created>),
 }
 
 impl Created {
@@ -1652,6 +1664,28 @@ impl Action {
                         if sketch.points.get(*pt).is_some_and(|p| p.helper) {
                             sketch.delete_point(*pt);
                         }
+                    }
+                }
+            }
+            Action::SplitEntity { plan } => {
+                match crate::split::apply_split(sketch, plan) {
+                    Ok(outcome) => {
+                        created = Created::Many(
+                            outcome
+                                .pieces
+                                .iter()
+                                .flatten()
+                                .map(|p| match p {
+                                    crate::split::PieceRef::Line(r) => Created::Line(*r),
+                                    crate::split::PieceRef::Arc(r) => Created::Arc(*r),
+                                })
+                                .collect(),
+                        );
+                        // Expression dims may have been rewritten or broken.
+                        return (true, created);
+                    }
+                    Err(e) => {
+                        eprintln!("BUG: SplitEntity replay failed: {}", e);
                     }
                 }
             }
