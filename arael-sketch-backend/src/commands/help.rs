@@ -96,6 +96,9 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "load" => "load path.json",
             "exit" | "quit" => "exit — close the application (blocked for MCP clients)",
             "dof" => "dof | dof analyze | dof eigenvalues [raw] | dof singular [raw] | dof jacobian",
+            "cost" => "cost — print the current solver cost (sum of squared residuals)",
+            "help" => "help | help <command> | help full",
+            "explain" => "explain <constraint-command> [args] — dry-run: report accept/reject without changing the sketch",
             "perp" => "alias for perpendicular",
             other => return Err(format!("help: unknown command: {}. Usage: help | help <command> | help full", other).into()),
         };
@@ -119,6 +122,7 @@ pub(crate) const COMMAND_NAMES: &[&str] = &[
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
     "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
     "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
+    "explain", "exit", "quit",
 ];
 
 pub(crate) const GEO_FUNCTIONS: &[&str] = &[

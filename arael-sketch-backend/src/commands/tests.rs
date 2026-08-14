@@ -5470,3 +5470,68 @@ fn test_split_tangent_lands_on_touching_piece() {
     let b = resolve_line(&ctx.sketch, "L3").unwrap();
     assert_eq!(t.line, b, "tangency follows the piece containing the contact");
 }
+
+// -- Command-name parity ----------------------------------------------
+
+/// Names of the dispatch match arms in mod.rs, scraped from source:
+/// the only place they exist as data.
+fn dispatch_names() -> std::collections::HashSet<String> {
+    let src = include_str!("mod.rs");
+    let start = src.find("let result: CmdResult = match cmd {")
+        .expect("dispatch match not found; update the parity test's anchor");
+    let end = src[start..].find("\n    };").expect("dispatch match end") + start;
+    let mut names = std::collections::HashSet::new();
+    for line in src[start..end].lines() {
+        let Some(arrow) = line.find("=>") else { continue };
+        // Every quoted name in the arm pattern (handles alias arms
+        // like `"perpendicular" | "perp"`).
+        let mut rest = &line[..arrow];
+        while let Some(q) = rest.find('"') {
+            let after = &rest[q + 1..];
+            let Some(q2) = after.find('"') else { break };
+            names.insert(after[..q2].to_string());
+            rest = &after[q2 + 1..];
+        }
+    }
+    names
+}
+
+/// Commands dispatchable on purpose but kept out of autocomplete.
+const HIDDEN_COMMANDS: &[&str] = &["ai"];
+
+#[test]
+fn test_command_names_match_dispatch() {
+    let dispatch = dispatch_names();
+    assert!(dispatch.len() > 50, "scraper broke: only {} arms found", dispatch.len());
+    let listed: std::collections::HashSet<String> =
+        COMMAND_NAMES.iter().map(|s| s.to_string()).collect();
+    let missing: Vec<&String> = dispatch.iter()
+        .filter(|n| !listed.contains(*n) && !HIDDEN_COMMANDS.contains(&n.as_str()))
+        .collect();
+    assert!(missing.is_empty(),
+        "dispatchable but missing from COMMAND_NAMES (autocomplete): {:?}", missing);
+    let stale: Vec<&String> = listed.iter().filter(|n| !dispatch.contains(*n)).collect();
+    assert!(stale.is_empty(),
+        "in COMMAND_NAMES but not dispatchable: {:?}", stale);
+}
+
+#[test]
+fn test_every_command_has_help() {
+    for name in COMMAND_NAMES {
+        let r = cmd_help(name);
+        assert!(r.is_ok(), "help {} errors: {:?}", name, r.err());
+    }
+}
+
+#[test]
+fn test_every_command_dispatches() {
+    for name in COMMAND_NAMES {
+        let mut ctx = CommandContext::new();
+        let results = execute(&mut ctx, name);
+        assert!(
+            !results.iter().any(|r| r.output.contains("Unknown command")),
+            "{} does not dispatch: {:?}", name,
+            results.first().map(|r| r.output.clone())
+        );
+    }
+}
