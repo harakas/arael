@@ -1552,10 +1552,10 @@
 //!
 //!   A healthy pass looks like steady cost drops with rising /
 //!   stabilising step sizes and no Cholesky rejections -- see
-//!   `examples/slam_demo.rs` run for a reference trace. What the trace
-//!   shows points at the rest of this list: a run of rejections means
-//!   the step size is being fought over (damping), NaN / Inf counts or
-//!   diag ≤ 0 name their own items below.
+//!   `examples/slam_demo.rs` run for a reference trace. The trace
+//!   points at the rest of this list: a run of rejections before the
+//!   first major cost reduction is the initial-damping entry; NaN /
+//!   Inf counts and diag <= 0 each have their own entry below.
 //!
 //! - **Initial damping.** The `lambda` column in the verbose output
 //!   is the LM damping, seeded by
@@ -1564,12 +1564,12 @@
 //!   and early steps are near-Gauss-Newton: they overshoot from a
 //!   rough start and get rejected, and lambda has to climb before
 //!   progress begins. Too large and every step is a short
-//!   gradient-descent crawl. Start near a minimum (re-solving after a
-//!   small perturbation) at 1e-8 to 1e-6; start far from one at 1e-3
-//!   or higher. The
+//!   gradient-descent crawl. Starting near a minimum (a re-solve
+//!   after a small perturbation): 1e-8 to 1e-6. Starting far from
+//!   one: 1e-3 or higher. The
 //!   [`well_conditioned`](simple_lm::LmConfig::well_conditioned) and
 //!   [`ill_conditioned`](simple_lm::LmConfig::ill_conditioned)
-//!   presets carry both ends. When no single value works,
+//!   presets cover the two regimes. When no single value works,
 //!   `ill_conditioned`'s gain-ratio
 //!   [`NielsenLambdaDriver`](simple_lm::NielsenLambdaDriver) adapts
 //!   lambda per step instead of holding a schedule. Re-solving the
@@ -1605,8 +1605,8 @@
 //!   either an overly tight sigma, bad initial values for its inputs,
 //!   or a constraint that's mathematically unsatisfiable. Read the
 //!   small end too: a label that is missing, zero, or suspiciously
-//!   small is a constraint that never ran. Check its guard, that the
-//!   collection it iterates is non-empty, and that its refs point
+//!   small may be a constraint that never ran. Check its guard, that
+//!   the collection it iterates is non-empty, and that its refs point
 //!   where you think.
 //!
 //! - **NaN or Inf residuals / derivatives.** The verbose-mode output
@@ -1682,7 +1682,7 @@
 //!   destabilises Levenberg-Marquardt.
 //!
 //! - **Hessian health.** The same `hessian` array should be finite and
-//!   positive-semi-definite at a minimum (smallest eigenvalue ≥ 0
+//!   positive-semi-definite at a minimum (smallest eigenvalue >= 0
 //!   modulo roundoff). A significantly-negative smallest eigenvalue
 //!   means the Gauss-Newton approximation J^T J is a poor local fit
 //!   -- often because constraints are ill-conditioned or cancel.
@@ -1724,7 +1724,7 @@
 //!   Near-zero singular values count the degrees of freedom. If this
 //!   is higher than you expect, the model is under-constrained. The
 //!   right singular vectors (columns of [`SvdResult::v`](model::SvdResult))
-//!   corresponding to σ ≈ 0 name the unconstrained parameter
+//!   corresponding to near-zero singular values name the unconstrained parameter
 //!   directions -- useful for identifying *which* parameters are free.
 //!   SVD is always performed in f64 regardless of the model's element
 //!   type, so rank detection stays reliable even for f32 models.
