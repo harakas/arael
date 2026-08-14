@@ -5535,3 +5535,20 @@ fn test_every_command_dispatches() {
         );
     }
 }
+
+#[test]
+fn test_conflict_message_names_blocking_constraint() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 5,0");
+    run_ok(&mut ctx, "add_line 0,1 5,2 noconnect");
+    let out = run_ok(&mut ctx, "parallel L0 L1");
+    // The applied constraint's id (from "C<n>: ..." output).
+    let nid: String = out.split(':').next().unwrap_or("").trim().to_string();
+    assert!(nid.starts_with('C'), "unexpected apply output: {}", out);
+    let err = run_err(&mut ctx, "parallel L0 L1");
+    assert!(err.contains(&format!("({})", nid)),
+        "duplicate rejection must name {}: {}", nid, err);
+    let err = run_err(&mut ctx, "perpendicular L0 L1");
+    assert!(err.contains(&format!("({})", nid)),
+        "conflict rejection must name {}: {}", nid, err);
+}

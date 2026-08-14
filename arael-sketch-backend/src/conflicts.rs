@@ -17,23 +17,29 @@ fn arc_name(sketch: &Sketch, r: Ref<Arc>) -> String {
     sketch.arcs[r].name.clone()
 }
 
-// Check if a pair (a, b) or (b, a) exists in a list of pairs.
-fn pair_exists<T, F: Fn(&T) -> (Ref<Line>, Ref<Line>)>(
+// Find a pair (a, b) or (b, a) in a list of pair constraints and
+// return the match's nid, so the rejection message can name the
+// blocking constraint.
+fn pair_find<T: SketchConstraint, F: Fn(&T) -> (Ref<Line>, Ref<Line>)>(
     list: &[T], a: Ref<Line>, b: Ref<Line>, get: F,
-) -> bool {
-    list.iter().any(|item| {
-        let (x, y) = get(item);
-        (x == a && y == b) || (x == b && y == a)
-    })
+) -> Option<u32> {
+    list.iter()
+        .find(|item| {
+            let (x, y) = get(item);
+            (x == a && y == b) || (x == b && y == a)
+        })
+        .map(|c| c.nid())
 }
 
-fn arc_pair_exists<T, F: Fn(&T) -> (Ref<Arc>, Ref<Arc>)>(
+fn arc_pair_find<T: SketchConstraint, F: Fn(&T) -> (Ref<Arc>, Ref<Arc>)>(
     list: &[T], a: Ref<Arc>, b: Ref<Arc>, get: F,
-) -> bool {
-    list.iter().any(|item| {
-        let (x, y) = get(item);
-        (x == a && y == b) || (x == b && y == a)
-    })
+) -> Option<u32> {
+    list.iter()
+        .find(|item| {
+            let (x, y) = get(item);
+            (x == a && y == b) || (x == b && y == a)
+        })
+        .map(|c| c.nid())
 }
 
 // ---------------------------------------------------------------------------
@@ -400,12 +406,12 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
             let b_name = line_name(sketch, *b);
 
             // Duplicate
-            if pair_exists(&sketch.parallel, *a, *b, |p| (p.a, p.b)) {
-                return Some(format!("{} and {} are already parallel", a_name, b_name));
+            if let Some(nid) = pair_find(&sketch.parallel, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!("{} and {} are already parallel (C{})", a_name, b_name, nid));
             }
             // Conflict: already perpendicular
-            if pair_exists(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
-                return Some(format!("{} and {} are already perpendicular", a_name, b_name));
+            if let Some(nid) = pair_find(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!("{} and {} are already perpendicular (C{})", a_name, b_name, nid));
             }
 
             // Transitive: if groups have conflicting orientations
@@ -443,12 +449,12 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
             let b_name = line_name(sketch, *b);
 
             // Duplicate
-            if pair_exists(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
-                return Some(format!("{} and {} are already perpendicular", a_name, b_name));
+            if let Some(nid) = pair_find(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!("{} and {} are already perpendicular (C{})", a_name, b_name, nid));
             }
             // Conflict: already parallel
-            if pair_exists(&sketch.parallel, *a, *b, |p| (p.a, p.b)) {
-                return Some(format!("{} and {} are already parallel", a_name, b_name));
+            if let Some(nid) = pair_find(&sketch.parallel, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!("{} and {} are already parallel (C{})", a_name, b_name, nid));
             }
 
             // Transitive: if in the same parallel group, they are parallel
@@ -475,37 +481,37 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
         }
 
         Action::ApplyEqualLength { a, b } => {
-            if pair_exists(&sketch.equal_length, *a, *b, |p| (p.a, p.b)) {
+            if let Some(nid) = pair_find(&sketch.equal_length, *a, *b, |p| (p.a, p.b)) {
                 return Some(format!(
-                    "{} and {} already have equal length",
-                    line_name(sketch, *a), line_name(sketch, *b)
+                    "{} and {} already have equal length (C{})",
+                    line_name(sketch, *a), line_name(sketch, *b), nid
                 ));
             }
         }
 
         Action::ApplyConcentric { a, b } => {
-            if arc_pair_exists(&sketch.concentric, *a, *b, |p| (p.a, p.b)) {
+            if let Some(nid) = arc_pair_find(&sketch.concentric, *a, *b, |p| (p.a, p.b)) {
                 return Some(format!(
-                    "{} and {} are already concentric",
-                    arc_name(sketch, *a), arc_name(sketch, *b)
+                    "{} and {} are already concentric (C{})",
+                    arc_name(sketch, *a), arc_name(sketch, *b), nid
                 ));
             }
         }
 
         Action::ApplyEqualRadius { a, b } => {
-            if arc_pair_exists(&sketch.equal_radius, *a, *b, |p| (p.a, p.b)) {
+            if let Some(nid) = arc_pair_find(&sketch.equal_radius, *a, *b, |p| (p.a, p.b)) {
                 return Some(format!(
-                    "{} and {} already have equal radius",
-                    arc_name(sketch, *a), arc_name(sketch, *b)
+                    "{} and {} already have equal radius (C{})",
+                    arc_name(sketch, *a), arc_name(sketch, *b), nid
                 ));
             }
         }
 
         Action::ApplyTangentAA { a, b } => {
-            if arc_pair_exists(&sketch.tangent_aa, *a, *b, |p| (p.a, p.b)) {
+            if let Some(nid) = arc_pair_find(&sketch.tangent_aa, *a, *b, |p| (p.a, p.b)) {
                 return Some(format!(
-                    "{} and {} are already tangent",
-                    arc_name(sketch, *a), arc_name(sketch, *b)
+                    "{} and {} are already tangent (C{})",
+                    arc_name(sketch, *a), arc_name(sketch, *b), nid
                 ));
             }
             // Concentric arcs have a 0/0 direction sign and a NaN
@@ -533,14 +539,14 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
         Action::ApplyCollinear { a, b } => {
             let a_name = line_name(sketch, *a);
             let b_name = line_name(sketch, *b);
-            if pair_exists(&sketch.collinear, *a, *b, |p| (p.a, p.b)) {
-                return Some(format!("{} and {} are already collinear", a_name, b_name));
+            if let Some(nid) = pair_find(&sketch.collinear, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!("{} and {} are already collinear (C{})", a_name, b_name, nid));
             }
             // Conflict: perpendicular lines cannot be collinear
-            if pair_exists(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
+            if let Some(nid) = pair_find(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
                 return Some(format!(
-                    "{} and {} are perpendicular, cannot be collinear",
-                    a_name, b_name
+                    "{} and {} are perpendicular (C{}), cannot be collinear",
+                    a_name, b_name, nid
                 ));
             }
 

@@ -1,18 +1,18 @@
 use super::*;
 
-/// Shared tail for constraint-applying commands: duplicate rejection,
-/// grouped action application, and the applied-message carrying the
-/// minted C-id.
+/// Shared tail for constraint-applying commands: duplicate rejection
+/// (naming the blocking constraint), grouped action application, and
+/// the applied-message carrying the minted C-id.
 fn apply_constraint(
     ctx: &mut CommandContext,
-    exists: bool,
+    exists: Option<u32>,
     what: &str,
     action: Action,
     last_nid: impl Fn(&Sketch) -> u32,
     applied: &str,
 ) -> CmdResult {
-    if exists {
-        return Err(format!("{} constraint already exists", what));
+    if let Some(nid) = exists {
+        return Err(format!("{} constraint already exists (C{})", what, nid));
     }
     ctx.begin_group();
     ctx.exec(action);
@@ -111,19 +111,19 @@ pub(crate) fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CmdResult {
     match (a, b) {
         (ParallelArg::Line(la), ParallelArg::Line(lb)) => {
             if la == lb { return Err("Cannot constrain a line parallel to itself".into()); }
-            let exists = ctx.sketch.parallel.iter().any(|c| (c.a == la && c.b == lb) || (c.a == lb && c.b == la));
+            let exists = ctx.sketch.parallel.iter().find(|c| (c.a == la && c.b == lb) || (c.a == lb && c.b == la)).map(|c| c.nid);
             apply_constraint(ctx, exists, "Parallel", Action::ApplyParallel { a: la, b: lb },
                              last_nid!(parallel), "parallel")
         }
         (ParallelArg::Ellipse(ea), ParallelArg::Ellipse(eb)) => {
             if ea == eb { return Err("Cannot constrain an ellipse parallel to itself".into()); }
-            let exists = ctx.sketch.arc_arc_parallel.iter().any(|c| (c.a == ea && c.b == eb) || (c.a == eb && c.b == ea));
+            let exists = ctx.sketch.arc_arc_parallel.iter().find(|c| (c.a == ea && c.b == eb) || (c.a == eb && c.b == ea)).map(|c| c.nid);
             apply_constraint(ctx, exists, "Parallel", Action::ApplyArcArcParallel { a: ea, b: eb },
                              last_nid!(arc_arc_parallel), "parallel")
         }
         (ParallelArg::Ellipse(ea), ParallelArg::Line(lb))
         | (ParallelArg::Line(lb), ParallelArg::Ellipse(ea)) => {
-            let exists = ctx.sketch.arc_line_parallel.iter().any(|c| c.arc == ea && c.line == lb);
+            let exists = ctx.sketch.arc_line_parallel.iter().find(|c| c.arc == ea && c.line == lb).map(|c| c.nid);
             apply_constraint(ctx, exists, "Parallel", Action::ApplyArcLineParallel { arc: ea, line: lb },
                              last_nid!(arc_line_parallel), "parallel")
         }
@@ -136,7 +136,7 @@ pub(crate) fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CmdResu
     let a = resolve_line(&ctx.sketch, tokens[0])?;
     let b = resolve_line(&ctx.sketch, tokens[1])?;
     if a == b { return Err("Cannot constrain a line perpendicular to itself".into()); }
-    let exists = ctx.sketch.perpendicular.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a));
+    let exists = ctx.sketch.perpendicular.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid);
     apply_constraint(ctx, exists, "Perpendicular", Action::ApplyPerpendicular { a, b },
                      last_nid!(perpendicular), "perpendicular")
 }
@@ -148,16 +148,16 @@ pub(crate) fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CmdResult {
         let a = resolve_line(&ctx.sketch, tokens[0])?;
         let b = resolve_line(&ctx.sketch, tokens[1])?;
         if a == b { return Err("Cannot constrain a line equal to itself".into()); }
-        let exists = ctx.sketch.equal_length.iter().any(|c|
-            (c.a == a && c.b == b) || (c.a == b && c.b == a));
+        let exists = ctx.sketch.equal_length.iter().find(|c|
+            (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid);
         apply_constraint(ctx, exists, "Equal length", Action::ApplyEqualLength { a, b },
                          last_nid!(equal_length), "equal length")
     } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
         let a = resolve_arc(&ctx.sketch, tokens[0])?;
         let b = resolve_arc(&ctx.sketch, tokens[1])?;
         if a == b { return Err("Cannot constrain an arc equal to itself".into()); }
-        let exists = ctx.sketch.equal_radius.iter().any(|c|
-            (c.a == a && c.b == b) || (c.a == b && c.b == a));
+        let exists = ctx.sketch.equal_radius.iter().find(|c|
+            (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid);
         apply_constraint(ctx, exists, "Equal radius", Action::ApplyEqualRadius { a, b },
                          last_nid!(equal_radius), "equal radius")
     } else {
@@ -171,7 +171,7 @@ pub(crate) fn cmd_collinear(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let a = resolve_line(&ctx.sketch, tokens[0])?;
     let b = resolve_line(&ctx.sketch, tokens[1])?;
     if a == b { return Err("Cannot constrain a line collinear with itself".into()); }
-    let exists = ctx.sketch.collinear.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a));
+    let exists = ctx.sketch.collinear.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid);
     apply_constraint(ctx, exists, "Collinear", Action::ApplyCollinear { a, b },
                      last_nid!(collinear), "collinear")
 }
@@ -182,14 +182,14 @@ pub(crate) fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CmdResult {
     if tokens[0].starts_with('L') && is_arc_name(tokens[1]) {
         let line = resolve_line(&ctx.sketch, tokens[0])?;
         let arc = resolve_arc(&ctx.sketch, tokens[1])?;
-        let exists = ctx.sketch.tangent_la.iter().any(|c| c.line == line && c.arc == arc);
+        let exists = ctx.sketch.tangent_la.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid);
         apply_constraint(ctx, exists, "Tangent", Action::ApplyTangentLA { line, arc },
                          last_nid!(tangent_la), "tangent")
     } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
         let a = resolve_arc(&ctx.sketch, tokens[0])?;
         let b = resolve_arc(&ctx.sketch, tokens[1])?;
         if a == b { return Err("Cannot constrain an arc tangent to itself".into()); }
-        let exists = ctx.sketch.tangent_aa.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a));
+        let exists = ctx.sketch.tangent_aa.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid);
         apply_constraint(ctx, exists, "Tangent", Action::ApplyTangentAA { a, b },
                          last_nid!(tangent_aa), "tangent")
     } else {
@@ -207,25 +207,25 @@ pub(crate) fn cmd_coincident(ctx: &mut CommandContext, args: &str) -> CmdResult 
     let s = &ctx.sketch;
     // Check for existing equivalent coincident constraint
     let exists = match (a, b) {
-        (Point(a), Point(b)) => s.coincident_pp.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
-        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => s.coincident_lp1.iter().any(|c| c.line == l && c.point == p),
-        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => s.coincident_lp2.iter().any(|c| c.line == l && c.point == p),
-        (LineP1(a), LineP1(b)) => s.coincident_ll11.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
-        (LineP1(a), LineP2(b)) => s.coincident_ll12.iter().any(|c| c.a == a && c.b == b)
-            || s.coincident_ll21.iter().any(|c| c.a == b && c.b == a),
-        (LineP2(a), LineP1(b)) => s.coincident_ll21.iter().any(|c| c.a == a && c.b == b)
-            || s.coincident_ll12.iter().any(|c| c.a == b && c.b == a),
-        (LineP2(a), LineP2(b)) => s.coincident_ll22.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
-        (Point(p), ArcCenter(arc)) | (ArcCenter(arc), Point(p)) => s.coincident_arc_center.iter().any(|c| c.point == p && c.arc == arc),
-        (Point(p), ArcStart(arc)) | (ArcStart(arc), Point(p)) => s.coincident_arc_start.iter().any(|c| c.point == p && c.arc == arc),
-        (Point(p), ArcEnd(arc)) | (ArcEnd(arc), Point(p)) => s.coincident_arc_end.iter().any(|c| c.point == p && c.arc == arc),
-        (LineP1(line), ArcCenter(arc)) | (ArcCenter(arc), LineP1(line)) => s.coincident_lp1_arc_center.iter().any(|c| c.line == line && c.arc == arc),
-        (LineP2(line), ArcCenter(arc)) | (ArcCenter(arc), LineP2(line)) => s.coincident_lp2_arc_center.iter().any(|c| c.line == line && c.arc == arc),
-        (LineP1(line), ArcStart(arc)) | (ArcStart(arc), LineP1(line)) => s.coincident_lp1_arc_start.iter().any(|c| c.line == line && c.arc == arc),
-        (LineP2(line), ArcStart(arc)) | (ArcStart(arc), LineP2(line)) => s.coincident_lp2_arc_start.iter().any(|c| c.line == line && c.arc == arc),
-        (LineP1(line), ArcEnd(arc)) | (ArcEnd(arc), LineP1(line)) => s.coincident_lp1_arc_end.iter().any(|c| c.line == line && c.arc == arc),
-        (LineP2(line), ArcEnd(arc)) | (ArcEnd(arc), LineP2(line)) => s.coincident_lp2_arc_end.iter().any(|c| c.line == line && c.arc == arc),
-        _ => false,
+        (Point(a), Point(b)) => s.coincident_pp.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid),
+        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => s.coincident_lp1.iter().find(|c| c.line == l && c.point == p).map(|c| c.nid),
+        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => s.coincident_lp2.iter().find(|c| c.line == l && c.point == p).map(|c| c.nid),
+        (LineP1(a), LineP1(b)) => s.coincident_ll11.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid),
+        (LineP1(a), LineP2(b)) => s.coincident_ll12.iter().find(|c| c.a == a && c.b == b).map(|c| c.nid)
+            .or_else(|| s.coincident_ll21.iter().find(|c| c.a == b && c.b == a).map(|c| c.nid)),
+        (LineP2(a), LineP1(b)) => s.coincident_ll21.iter().find(|c| c.a == a && c.b == b).map(|c| c.nid)
+            .or_else(|| s.coincident_ll12.iter().find(|c| c.a == b && c.b == a).map(|c| c.nid)),
+        (LineP2(a), LineP2(b)) => s.coincident_ll22.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid),
+        (Point(p), ArcCenter(arc)) | (ArcCenter(arc), Point(p)) => s.coincident_arc_center.iter().find(|c| c.point == p && c.arc == arc).map(|c| c.nid),
+        (Point(p), ArcStart(arc)) | (ArcStart(arc), Point(p)) => s.coincident_arc_start.iter().find(|c| c.point == p && c.arc == arc).map(|c| c.nid),
+        (Point(p), ArcEnd(arc)) | (ArcEnd(arc), Point(p)) => s.coincident_arc_end.iter().find(|c| c.point == p && c.arc == arc).map(|c| c.nid),
+        (LineP1(line), ArcCenter(arc)) | (ArcCenter(arc), LineP1(line)) => s.coincident_lp1_arc_center.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid),
+        (LineP2(line), ArcCenter(arc)) | (ArcCenter(arc), LineP2(line)) => s.coincident_lp2_arc_center.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid),
+        (LineP1(line), ArcStart(arc)) | (ArcStart(arc), LineP1(line)) => s.coincident_lp1_arc_start.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid),
+        (LineP2(line), ArcStart(arc)) | (ArcStart(arc), LineP2(line)) => s.coincident_lp2_arc_start.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid),
+        (LineP1(line), ArcEnd(arc)) | (ArcEnd(arc), LineP1(line)) => s.coincident_lp1_arc_end.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid),
+        (LineP2(line), ArcEnd(arc)) | (ArcEnd(arc), LineP2(line)) => s.coincident_lp2_arc_end.iter().find(|c| c.line == line && c.arc == arc).map(|c| c.nid),
+        _ => None,
     };
     let action = match (a, b) {
         (Point(a), Point(b)) => Action::ApplyCoincidentPP { a, b },
@@ -255,7 +255,7 @@ pub(crate) fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CmdResult 
     let a = resolve_arc(&ctx.sketch, tokens[0])?;
     let b = resolve_arc(&ctx.sketch, tokens[1])?;
     if a == b { return Err("Cannot constrain an arc concentric with itself".into()); }
-    let exists = ctx.sketch.concentric.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a));
+    let exists = ctx.sketch.concentric.iter().find(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)).map(|c| c.nid);
     apply_constraint(ctx, exists, "Concentric", Action::ApplyConcentric { a, b },
                      last_nid!(concentric), "concentric")
 }
@@ -274,12 +274,12 @@ pub(crate) fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CmdResult {
     if let Ok(line) = resolve_line(&ctx.sketch, target) {
         let s = &ctx.sketch;
         let exists = match ep {
-            EndpointRef::Point(p) => s.midpoint.iter().any(|c| c.point == p && c.line == line),
-            EndpointRef::LineP1(l) => s.midpoint_lp1.iter().any(|c| c.line == l && c.target == line),
-            EndpointRef::LineP2(l) => s.midpoint_lp2.iter().any(|c| c.line == l && c.target == line),
-            EndpointRef::ArcStart(a) => s.midpoint_arc_start.iter().any(|c| c.arc == a && c.line == line),
-            EndpointRef::ArcEnd(a) => s.midpoint_arc_end.iter().any(|c| c.arc == a && c.line == line),
-            _ => false,
+            EndpointRef::Point(p) => s.midpoint.iter().find(|c| c.point == p && c.line == line).map(|c| c.nid),
+            EndpointRef::LineP1(l) => s.midpoint_lp1.iter().find(|c| c.line == l && c.target == line).map(|c| c.nid),
+            EndpointRef::LineP2(l) => s.midpoint_lp2.iter().find(|c| c.line == l && c.target == line).map(|c| c.nid),
+            EndpointRef::ArcStart(a) => s.midpoint_arc_start.iter().find(|c| c.arc == a && c.line == line).map(|c| c.nid),
+            EndpointRef::ArcEnd(a) => s.midpoint_arc_end.iter().find(|c| c.arc == a && c.line == line).map(|c| c.nid),
+            _ => None,
         };
         let action = match ep {
             EndpointRef::Point(p) => Action::ApplyMidpoint { point: p, line },
@@ -294,12 +294,12 @@ pub(crate) fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CmdResult {
         if ctx.sketch.arcs[arc].closed { return Err("Cannot use midpoint on a full circle".into()); }
         let s = &ctx.sketch;
         let exists = match ep {
-            EndpointRef::Point(p) => s.midpoint_arc_point.iter().any(|c| c.point == p && c.arc == arc),
-            EndpointRef::LineP1(l) => s.midpoint_lp1_arc.iter().any(|c| c.line == l && c.arc == arc),
-            EndpointRef::LineP2(l) => s.midpoint_lp2_arc.iter().any(|c| c.line == l && c.arc == arc),
-            EndpointRef::ArcStart(a) => s.midpoint_arc_start_arc.iter().any(|c| c.a == a && c.b == arc),
-            EndpointRef::ArcEnd(a) => s.midpoint_arc_end_arc.iter().any(|c| c.a == a && c.b == arc),
-            _ => false,
+            EndpointRef::Point(p) => s.midpoint_arc_point.iter().find(|c| c.point == p && c.arc == arc).map(|c| c.nid),
+            EndpointRef::LineP1(l) => s.midpoint_lp1_arc.iter().find(|c| c.line == l && c.arc == arc).map(|c| c.nid),
+            EndpointRef::LineP2(l) => s.midpoint_lp2_arc.iter().find(|c| c.line == l && c.arc == arc).map(|c| c.nid),
+            EndpointRef::ArcStart(a) => s.midpoint_arc_start_arc.iter().find(|c| c.a == a && c.b == arc).map(|c| c.nid),
+            EndpointRef::ArcEnd(a) => s.midpoint_arc_end_arc.iter().find(|c| c.a == a && c.b == arc).map(|c| c.nid),
+            _ => None,
         };
         let action = match ep {
             EndpointRef::Point(p) => Action::ApplyMidpointArcPoint { point: p, arc },
@@ -338,8 +338,8 @@ pub(crate) fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CmdResult {
             resolve_arc(&ctx.sketch, tokens[2]))
         {
             if a == c { return Err("Cannot constrain an arc symmetric with itself".into()); }
-            let exists = ctx.sketch.symmetry_aa.iter().any(|s|
-                s.line == line && ((s.a == a && s.c == c) || (s.a == c && s.c == a)));
+            let exists = ctx.sketch.symmetry_aa.iter().find(|s|
+                s.line == line && ((s.a == a && s.c == c) || (s.a == c && s.c == a))).map(|c| c.nid);
             return apply_constraint(ctx, exists, "Symmetry", Action::ApplySymmetryAA { a, line, c },
                                     last_nid!(symmetry_aa), "arc symmetry");
         }
@@ -355,15 +355,15 @@ pub(crate) fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CmdResult {
         let a = to_dim_endpoint(resolve_endpoint_ref(&ctx.sketch, tokens[0])?);
         let line = resolve_line(&ctx.sketch, tokens[1]).unwrap();
         let c = to_dim_endpoint(resolve_endpoint_ref(&ctx.sketch, tokens[2])?);
-        return apply_constraint(ctx, false, "Symmetry", Action::ApplySymmetryPP { a, line, c },
+        return apply_constraint(ctx, None, "Symmetry", Action::ApplySymmetryPP { a, line, c },
                                 last_nid!(symmetry_pp), "point symmetry");
     }
     // Fall back to line-line-line symmetry
     let a = resolve_line(&ctx.sketch, tokens[0])?;
     let b = resolve_line(&ctx.sketch, tokens[1])?;
     let c = resolve_line(&ctx.sketch, tokens[2])?;
-    let exists = ctx.sketch.symmetry_ll.iter().any(|s|
-        s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a)));
+    let exists = ctx.sketch.symmetry_ll.iter().find(|s|
+        s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a))).map(|c| c.nid);
     apply_constraint(ctx, exists, "Symmetry", Action::ApplySymmetryLL { a, b, c },
                      last_nid!(symmetry_ll), "symmetry")
 }
@@ -651,7 +651,7 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
 pub(crate) enum ArcEp { Center, Start, End }
 
 /// Check if an arc endpoint already has a point_on_line constraint via a helper point.
-pub(crate) fn has_arc_endpoint_on_line(s: &Sketch, arc: Ref<Arc>, ep: ArcEp, line: Ref<Line>) -> bool {
+pub(crate) fn has_arc_endpoint_on_line(s: &Sketch, arc: Ref<Arc>, ep: ArcEp, line: Ref<Line>) -> Option<u32> {
     // Find helper points bridged to this arc endpoint
     let bridged_points: Vec<Ref<Point>> = match ep {
         ArcEp::Center => s.coincident_arc_center.iter()
@@ -661,12 +661,15 @@ pub(crate) fn has_arc_endpoint_on_line(s: &Sketch, arc: Ref<Arc>, ep: ArcEp, lin
         ArcEp::End => s.coincident_arc_end.iter()
             .filter(|c| c.arc == arc).map(|c| c.point).collect(),
     };
-    // Check if any of those points are on the target line
-    bridged_points.iter().any(|p| s.point_on_line.iter().any(|c| c.point == *p && c.line == line))
+    // The point_on_line constraint holding one of those points, if any
+    s.point_on_line.iter()
+        .find(|c| c.line == line && bridged_points.contains(&c.point))
+        .map(|c| c.nid)
 }
 
-/// Check if an arc endpoint already has a point_on_arc constraint via a helper point.
-pub(crate) fn has_arc_endpoint_on_arc(s: &Sketch, src: Ref<Arc>, ep: ArcEp, target: Ref<Arc>) -> bool {
+/// The point_on_arc constraint an arc endpoint already carries via a
+/// helper point, if any.
+pub(crate) fn has_arc_endpoint_on_arc(s: &Sketch, src: Ref<Arc>, ep: ArcEp, target: Ref<Arc>) -> Option<u32> {
     let bridged_points: Vec<Ref<Point>> = match ep {
         ArcEp::Center => s.coincident_arc_center.iter()
             .filter(|c| c.arc == src).map(|c| c.point).collect(),
@@ -675,7 +678,9 @@ pub(crate) fn has_arc_endpoint_on_arc(s: &Sketch, src: Ref<Arc>, ep: ArcEp, targ
         ArcEp::End => s.coincident_arc_end.iter()
             .filter(|c| c.arc == src).map(|c| c.point).collect(),
     };
-    bridged_points.iter().any(|p| s.point_on_arc.iter().any(|c| c.point == *p && c.arc == target))
+    s.point_on_arc.iter()
+        .find(|c| c.arc == target && bridged_points.contains(&c.point))
+        .map(|c| c.nid)
 }
 
 pub(crate) fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CmdResult {
@@ -687,9 +692,9 @@ pub(crate) fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CmdResult {
         let line = resolve_line(&ctx.sketch, target)?;
         let s = &ctx.sketch;
         let exists = match ep {
-            EndpointRef::Point(p) => s.point_on_line.iter().any(|c| c.point == p && c.line == line),
-            EndpointRef::LineP1(l) => s.line_p1_on_line.iter().any(|c| c.a == l && c.b == line),
-            EndpointRef::LineP2(l) => s.line_p2_on_line.iter().any(|c| c.a == l && c.b == line),
+            EndpointRef::Point(p) => s.point_on_line.iter().find(|c| c.point == p && c.line == line).map(|c| c.nid),
+            EndpointRef::LineP1(l) => s.line_p1_on_line.iter().find(|c| c.a == l && c.b == line).map(|c| c.nid),
+            EndpointRef::LineP2(l) => s.line_p2_on_line.iter().find(|c| c.a == l && c.b == line).map(|c| c.nid),
             EndpointRef::ArcCenter(arc) => has_arc_endpoint_on_line(s, arc, ArcEp::Center, line),
             EndpointRef::ArcStart(arc) => has_arc_endpoint_on_line(s, arc, ArcEp::Start, line),
             EndpointRef::ArcEnd(arc) => has_arc_endpoint_on_line(s, arc, ArcEp::End, line),
@@ -707,9 +712,9 @@ pub(crate) fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CmdResult {
         let arc = resolve_arc(&ctx.sketch, target)?;
         let s = &ctx.sketch;
         let exists = match ep {
-            EndpointRef::Point(p) => s.point_on_arc.iter().any(|c| c.point == p && c.arc == arc),
-            EndpointRef::LineP1(l) => s.line_p1_on_arc.iter().any(|c| c.line == l && c.arc == arc),
-            EndpointRef::LineP2(l) => s.line_p2_on_arc.iter().any(|c| c.line == l && c.arc == arc),
+            EndpointRef::Point(p) => s.point_on_arc.iter().find(|c| c.point == p && c.arc == arc).map(|c| c.nid),
+            EndpointRef::LineP1(l) => s.line_p1_on_arc.iter().find(|c| c.line == l && c.arc == arc).map(|c| c.nid),
+            EndpointRef::LineP2(l) => s.line_p2_on_arc.iter().find(|c| c.line == l && c.arc == arc).map(|c| c.nid),
             EndpointRef::ArcCenter(src) => has_arc_endpoint_on_arc(s, src, ArcEp::Center, arc),
             EndpointRef::ArcStart(src) => has_arc_endpoint_on_arc(s, src, ArcEp::Start, arc),
             EndpointRef::ArcEnd(src) => has_arc_endpoint_on_arc(s, src, ArcEp::End, arc),

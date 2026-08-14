@@ -161,7 +161,7 @@
      - An explicit soft ceiling on `|rotation - target|` that saturates above a tolerance so the solver can't trade radius for rotation regardless of scaling.
      Same review applies to ArcLineParallel (`... / mlen` -- uses the live `mlen`, same collapse risk at tiny line lengths; `mlen` could become a `_value`-pattern if needed) and ArcArcParallel (`sin(a.rot - b.rot)` -- pure dimensionless, no sketch-scale link at all).
   4. Document the convention in a short comment block above the constraint bodies so future contributors know why the radius / mlen factors are there and when to keep them.
-- **arael-sketch conflict messages**: Enhance `conflicts::validate_action` so the "already parallel / perpendicular / equal / ..." error messages include the offending existing constraint's name (e.g. "conflict with C5: parallel L0 L1"). The conflict messages are spread across many arms in `arael-sketch-backend/src/conflicts.rs` and the current `pair_exists` helper does not expose the matching index. Adding a sibling helper that returns both the boolean and the index (or refactoring `pair_exists` to return `Option<usize>`) would let every arm include the nid.
+- **arael-sketch conflict messages**: Enhance `conflicts::validate_action` so the "already parallel / perpendicular / equal / ..." error messages include the offending existing constraint's name (e.g. "conflict with C5: parallel L0 L1"). -- DONE (pair_find/arc_pair_find return the matching nid; every duplicate/conflict rejection in conflicts.rs and the command layer's `apply_constraint` names the blocking C<n>)
 - **Sketch editor**: Tag constraints owned by dimensions so they can be deleted logically instead of matching by approximate value comparison. -- DONE (DimensionKind carries typed endpoints; remove_numeric_dim_constraint retains by exact refs in arael-sketch-backend/src/actions.rs)
 - **Sketch editor**: Add `MoveDimension` action to cleanly reposition dimension annotations (offset + text_along). -- DONE (MoveDimension { did, offset, text_along }; label drags commit it on release)
 - derived dimensions -- DONE
@@ -202,7 +202,7 @@
 - **arael**: extend jacobi demo with constraint labels
 - **arael-sketch**: clean up points obscuring everything, make line endpoint when creating explicit and clean -- cross on line snap, cross+box on point snap
 - **arael-sketch**: auto-perpendicular constraint -- DONE (line tool emits it on right-angle crossings, gated by conflicts::validate_action)
-- **arael-sketch**: switch to hdimension/vdimension at creation when moving the mouse far -- switching commands during tool usage
+- **arael-sketch**: switch to hdimension/vdimension at creation when moving the mouse far -- switching commands during tool usage -- DONE (pick_point_pair_dim_kind re-picks PP/H/V from the mouse zone every placing frame; pinned by test_dim_placement_hv_switch)
 - **arael-sketch**: toggle tags like driven, quiet, construction during line creation
 - **arael-sketch**: robot.cmd scale to 0.1 takes us to "interesting" view
 - **arael-sketch**: investigate chain misbehavior
