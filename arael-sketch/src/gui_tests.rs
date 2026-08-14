@@ -464,3 +464,16 @@ fn test_split_undo_one_group() {
     assert!(gui.sketch().lines.iter().any(|l| l.name == "L0"));
     assert!(gui.sketch().coincident_ll21.is_empty());
 }
+
+#[test]
+fn test_fillet_chamfer_key_cycles() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::F);
+    assert_eq!(gui.app.tool, Tool::Fillet);
+    gui.key(egui::Key::F);
+    assert_eq!(gui.app.tool, Tool::Chamfer);
+    gui.key(egui::Key::F);
+    assert_eq!(gui.app.tool, Tool::Fillet);
+    gui.key(egui::Key::Escape);
+    assert_eq!(gui.app.tool, Tool::Select);
+}

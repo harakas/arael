@@ -126,7 +126,7 @@ impl EditorApp {
                     self.tool = Tool::Fillet;
                     self.selection.clear();
                 }
-                if ui.selectable_label(self.tool == Tool::Chamfer, "Chamfer").clicked() {
+                if ui.selectable_label(self.tool == Tool::Chamfer, "Chamfer (F)").clicked() {
                     self.tool = Tool::Chamfer;
                     self.selection.clear();
                 }

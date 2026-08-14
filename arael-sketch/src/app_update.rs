@@ -207,8 +207,9 @@ impl EditorApp {
                 self.tool = Tool::DrawRect;
                 self.rect_draw = None;
             }
+            // F cycles Fillet <-> Chamfer.
             if ui.input(|i| i.key_pressed(egui::Key::F)) {
-                self.tool = Tool::Fillet;
+                self.tool = if self.tool == Tool::Fillet { Tool::Chamfer } else { Tool::Fillet };
                 self.selection.clear();
             }
             // B cycles Break (Split) <-> Trim.

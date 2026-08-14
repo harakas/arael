@@ -633,12 +633,12 @@ impl EditorApp {
             Tool::Fillet => if self.fillet_pending.is_some() {
                 "Fillet: type radius and press Enter. Escape to cancel."
             } else {
-                "Fillet: click a connecting endpoint, or select two lines. Escape to cancel."
+                "Fillet: click a connecting endpoint, or select two lines. F switches to Chamfer."
             },
             Tool::Chamfer => if self.fillet_pending.is_some() {
                 "Chamfer: type corner-to-end distance and press Enter. Escape to cancel."
             } else {
-                "Chamfer: click a connecting endpoint, or select two lines. Escape to cancel."
+                "Chamfer: click a connecting endpoint, or select two lines. F switches to Fillet."
             },
             Tool::Split => "Split: click a line/arc to break it at the crossings around the click. B switches to Trim.",
             Tool::Trim => "Trim: click the span to remove (cut at the crossings around it). B switches to Split.",
