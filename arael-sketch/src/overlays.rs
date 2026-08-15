@@ -91,6 +91,17 @@ impl EditorApp {
         if matches!(self.tool, Tool::Split | Tool::Trim) {
             self.draw_split_trim_preview(painter, mouse_sketch, hit_threshold);
         }
+        // Scale center crosshair.
+        if self.tool == Tool::Scale
+            && let Some(c) = self.scale_center
+        {
+            let p = self.to_screen(c);
+            let stroke = egui::Stroke::new(2.0, self.colors.constraint_marker_selected);
+            let s = 9.0;
+            painter.line_segment([egui::Pos2::new(p.x - s, p.y), egui::Pos2::new(p.x + s, p.y)], stroke);
+            painter.line_segment([egui::Pos2::new(p.x, p.y - s), egui::Pos2::new(p.x, p.y + s)], stroke);
+            painter.circle_stroke(p, s * 0.6, egui::Stroke::new(1.0, self.colors.constraint_marker_selected));
+        }
         // Dimension preview while placing (not when editing an existing dimension)
         if (self.dim_placing || (self.dim_editing && self.dim_edit_did.is_none())) && self.dim_kind.is_some() {
             let kind = self.dim_kind.unwrap();
@@ -642,6 +653,13 @@ impl EditorApp {
             },
             Tool::Split => "Split: click a line/arc to break it at the crossings around the click. B switches to Trim.",
             Tool::Trim => "Trim: click the span to remove (cut at the crossings around it). B switches to Split.",
+            Tool::Scale => if self.scale_pending.is_some() {
+                "Scale: type the factor and press Enter. Clicks adjust the set; double-click moves the center. Escape to cancel."
+            } else if self.scale_center.is_some() {
+                "Scale: click or drag a box over entities to include; the factor input opens once the set is non-empty."
+            } else {
+                "Scale: click or drag a box over entities to include, double-click a point to set the center."
+            },
             Tool::ConstraintMode(_) => "Constraint: click entities to apply. Escape to cancel.",
             Tool::Dimension => if self.dim_editing {
                 "Dimension: type value and press Enter. Escape to cancel."

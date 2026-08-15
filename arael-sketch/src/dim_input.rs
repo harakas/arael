@@ -13,6 +13,12 @@ impl EditorApp {
     /// offset / text_along / measured value so `dim_text_segment`
     /// computes the same text position the preview is showing.
     pub(crate) fn dim_input_anchor_screen(&self) -> Option<egui::Pos2> {
+        // Scale session: the factor input floats at the scale center.
+        if self.scale_pending.is_some()
+            && let Some(c) = self.scale_center
+        {
+            return Some(self.to_screen(c));
+        }
         let dim_ref = if let Some(idx) = self.dim_edit_did.and_then(|d| self.sketch.dimension_index_by_did(d)) {
             self.sketch.dimensions.get(idx).cloned()
         } else if let Some(kind) = self.dim_kind {
@@ -42,11 +48,10 @@ impl EditorApp {
     /// can be hosted in a floating `egui::Area` over the canvas,
     /// near the dimension label where the user is looking.
     pub(crate) fn render_dim_input(&mut self, ui: &mut egui::Ui) {
-        // Derived checkbox is meaningless during a fillet edit --
-        // the radius dim is always driven (it's the control the user
-        // is actively setting), and its value flows from the typed
-        // expression or the fallback literal.
-        if self.fillet_pending.is_none() {
+        // Derived checkbox is meaningless during a fillet or scale
+        // edit -- the value being typed is the control itself (radius
+        // / factor), not a dimension that could go derived.
+        if self.fillet_pending.is_none() && self.scale_pending.is_none() {
             ui.checkbox(&mut self.dim_derived, "Derived");
         }
         // Edge-detect the checkbox: on false -> true, back up what
@@ -85,6 +90,10 @@ impl EditorApp {
         if self.fillet_pending.is_some() && response.changed() {
             self.reapply_fillets();
         }
+        // Live scale preview, same shape.
+        if self.scale_pending.is_some() && response.changed() {
+            self.reapply_scale();
+        }
         // Select all text when entering edit mode (one-shot flag)
         if (self.dim_select_all || self.dim_select_all_on_uncheck) && response.has_focus() {
             self.dim_select_all = false;
@@ -103,6 +112,8 @@ impl EditorApp {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.fillet_pending.is_some() {
                 self.cancel_pending_fillet();
+            } else if self.scale_pending.is_some() {
+                self.cancel_pending_scale();
             } else {
                 self.dim_editing = false;
                 self.dim_kind = None;
@@ -110,6 +121,12 @@ impl EditorApp {
                 self.dim_edit_did = None;
                 self.dim_input.clear();
             }
+            return;
+        }
+        if enter_pressed && self.scale_pending.is_some() {
+            // Scale commit: reapply already baked the typed factor in;
+            // Enter finalises and reports.
+            self.commit_pending_scale();
             return;
         }
         if enter_pressed && self.fillet_pending.is_some() {

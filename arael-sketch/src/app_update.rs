@@ -240,12 +240,16 @@ impl EditorApp {
             // the command panel or an overlay never flips the tool
             // (those fields handle their own Escape).
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                // Fillet-in-flight gets first crack: roll back the
-                // applied fillet before the generic Escape clears
+                // Fillet/scale-in-flight get first crack: roll back
+                // the applied preview before the generic Escape clears
                 // dim-editing state and flips the tool.
                 if self.fillet_pending.is_some() {
                     self.cancel_pending_fillet();
                 }
+                if self.scale_pending.is_some() {
+                    self.cancel_pending_scale();
+                }
+                self.scale_center = None;
                 self.selection.clear();
                 self.line_draw = None;
                 self.circle_draw = None;
@@ -366,6 +370,7 @@ impl EditorApp {
                 Tool::DrawRect => self.handle_draw_rect(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Fillet | Tool::Chamfer => self.handle_fillet_chamfer(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Split | Tool::Trim => self.handle_split_trim(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
+                Tool::Scale => self.handle_scale_input(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::ConstraintMode(ct) => self.handle_constraint_mode(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold, ct),
                 Tool::Dimension => self.handle_dimension_tool(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
             }

@@ -140,6 +140,11 @@ impl EditorApp {
                     self.selection.clear();
                 }
                 ui.end_row();
+                if ui.selectable_label(self.tool == Tool::Scale, "Scale").clicked() {
+                    self.tool = Tool::Scale;
+                    self.adopt_selection_for_scale();
+                    self.scale_center = None;
+                }
                 if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
                     self.tool = Tool::Dimension;
                     self.dim_editing = false;

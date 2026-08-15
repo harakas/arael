@@ -212,8 +212,10 @@ impl EditorApp {
         if !ui.input(|i| i.pointer.primary_down()) {
             self.suppress_drag_regrab = false;
         }
-        // Double-click on dimension to edit value
-        if response.double_clicked_by(egui::PointerButton::Primary) {
+        // Double-click on dimension to edit value (multi_clicked: a
+        // preceding click would otherwise turn the pair into a
+        // "triple" and swallow it)
+        if Self::multi_clicked(response) {
             let mut edited = false;
             for dim in self.sketch.dimensions.iter() {
                 let (ts, te) = self.dim_text_segment(dim);
@@ -355,7 +357,7 @@ impl EditorApp {
         // in that case so the double-click chain-select isn't immediately
         // toggled off by the same event.
         if response.clicked_by(egui::PointerButton::Primary)
-            && !response.double_clicked_by(egui::PointerButton::Primary)
+            && !Self::multi_clicked(response)
         {
             if let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold) {
                 if self.show_command && self.command_has_focus {
@@ -409,7 +411,7 @@ impl EditorApp {
     /// Canvas input for `Tool::DrawLine`.
     pub(crate) fn handle_draw_line(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
         // Double-click terminates the line chain without adding a segment.
-        if response.double_clicked_by(egui::PointerButton::Primary) {
+        if Self::multi_clicked(response) {
             self.line_draw = None;
         } else if response.clicked_by(egui::PointerButton::Primary) {
             self.begin_group();
@@ -909,6 +911,253 @@ impl EditorApp {
         section("dropped", &outcome.dropped, &mut lines);
         section("expressions", &outcome.expr_report, &mut lines);
         self.command_output.push((lines.join("\n"), false, false));
+    }
+
+    /// Canvas input for `Tool::Scale`: single click toggles an entity
+    /// into the scale set (lines, arcs and points alike); double-click
+    /// on a point-like target sets the center. Once both exist, the
+    /// value overlay opens with a live preview.
+    pub(crate) fn handle_scale_input(&mut self, ui: &egui::Ui, ctx: &egui::Context, response: &egui::Response, mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        // Drag: box-select. The scale tool has no geometry drag, so
+        // every drag is a marquee. Always additive -- the set is
+        // built incrementally and clicks toggle entities back out.
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if self.box_select_start.is_none() {
+                self.box_select_start = ui.ctx().input(|i| i.pointer.press_origin());
+            }
+            ctx.request_repaint();
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            && let Some(start) = self.box_select_start.take()
+        {
+            let end = mouse_screen;
+            if (end.x - start.x).abs() >= 2.0 || (end.y - start.y).abs() >= 2.0 {
+                self.apply_box_select(start, end, true);
+                self.try_start_scale_session();
+            }
+        }
+
+        if Self::multi_clicked(response) {
+            let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold) else { return };
+            let pos = match sel {
+                Selection::Point(r) => Some(self.sketch.points[r].pos.value),
+                Selection::LineP1(r) => Some(self.sketch.lines[r].p1.value),
+                Selection::LineP2(r) => Some(self.sketch.lines[r].p2.value),
+                Selection::ArcCenter(r) => Some(self.sketch.arcs[r].center.value),
+                Selection::ArcStart(r) => Some(arc_start_pos(&self.sketch.arcs[r])),
+                Selection::ArcEnd(r) => Some(arc_end_pos(&self.sketch.arcs[r])),
+                _ => None,
+            };
+            let Some(pos) = pos else { return };
+            // The pair's first click already toggled this target into
+            // the set; toggling again reverts it.
+            if let Some(norm) = Self::scale_set_member(sel) {
+                self.toggle_selection(norm);
+            }
+            self.scale_center = Some(pos);
+            self.try_start_scale_session();
+        } else if response.clicked_by(egui::PointerButton::Primary)
+            && !Self::multi_clicked(response)
+        {
+            let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold) else { return };
+            if let Some(norm) = Self::scale_set_member(sel) {
+                self.toggle_selection(norm);
+                self.try_start_scale_session();
+            }
+        }
+    }
+
+    /// Double-click detection that survives a nearby preceding click.
+    /// egui's click count is time-based only: a release within the
+    /// double window of the last click counts 2, but within the wider
+    /// triple window of the click before THAT it counts 3 -- so a
+    /// stray click anywhere shortly before a double-click turns it
+    /// into a "triple" and `double_clicked` stays false. Any count
+    /// above one means the user double-clicked as far as the tools
+    /// here care.
+    pub(crate) fn multi_clicked(response: &egui::Response) -> bool {
+        response.double_clicked_by(egui::PointerButton::Primary)
+            || response.triple_clicked_by(egui::PointerButton::Primary)
+    }
+
+    /// Whole-entity membership for a scale-set click: endpoint hits
+    /// resolve to their entity.
+    fn scale_set_member(sel: Selection) -> Option<Selection> {
+        match sel {
+            Selection::Line(r) | Selection::LineP1(r) | Selection::LineP2(r) => {
+                Some(Selection::Line(r))
+            }
+            Selection::Arc(r) | Selection::ArcCenter(r)
+            | Selection::ArcStart(r) | Selection::ArcEnd(r) => Some(Selection::Arc(r)),
+            Selection::Point(r) => Some(Selection::Point(r)),
+            _ => None,
+        }
+    }
+
+    /// Entering the Scale tool: keep an existing selection as the
+    /// initial scale set. Endpoint selections resolve to their
+    /// entity; constraints, dimensions and duplicates drop out.
+    pub(crate) fn adopt_selection_for_scale(&mut self) {
+        let mut kept: Vec<Selection> = Vec::new();
+        for sel in self.selection.drain(..) {
+            if let Some(norm) = Self::scale_set_member(sel) {
+                if !kept.contains(&norm) {
+                    kept.push(norm);
+                }
+            }
+        }
+        self.selection = kept;
+    }
+
+    /// The scale sets, read from the live selection.
+    fn scale_sets(&self) -> (Vec<Ref<Line>>, Vec<Ref<Arc>>, Vec<Ref<Point>>) {
+        let mut lines = Vec::new();
+        let mut arcs = Vec::new();
+        let mut points = Vec::new();
+        for sel in &self.selection {
+            match sel {
+                Selection::Line(r) => if !lines.contains(r) { lines.push(*r); },
+                Selection::Arc(r) => if !arcs.contains(r) { arcs.push(*r); },
+                Selection::Point(r) => if !points.contains(r) { points.push(*r); },
+                _ => {}
+            }
+        }
+        (lines, arcs, points)
+    }
+
+    /// Open the value overlay once a center and at least one entity
+    /// exist; re-preview if a session is already live.
+    fn try_start_scale_session(&mut self) {
+        if self.scale_pending.is_some() {
+            self.reapply_scale();
+            return;
+        }
+        if self.scale_center.is_none() {
+            return;
+        }
+        let (l, a, p) = self.scale_sets();
+        if l.is_empty() && a.is_empty() && p.is_empty() {
+            return;
+        }
+        let Ok(pre_snapshot) = bincode::serialize(&self.sketch) else { return };
+        self.scale_pending = Some(ScalePending {
+            pre_snapshot,
+            history_cursor_before: self.history.cursor,
+            last_valid_factor: "1".into(),
+            last_applied_sig: String::new(),
+        });
+        self.dim_input = "1".into();
+        self.dim_editing = true;
+        self.dim_edit_did = None;
+        self.dim_kind = None;
+        self.dim_placing = false;
+        self.dim_select_all = true;
+        self.dim_derived = false;
+        self.dim_derived_prev = false;
+        self.dim_input_backup.clear();
+        self.reapply_scale();
+    }
+
+    /// Current factor token: the typed input when it evaluates to a
+    /// positive number, otherwise the last valid one.
+    fn scale_effective_factor(&self) -> Option<String> {
+        let p = self.scale_pending.as_ref()?;
+        let typed = self.dim_input.trim();
+        if !typed.is_empty()
+            && arael_sketch_backend::commands::eval_expr(&self.sketch, typed)
+                .map(|v| v.is_finite() && v > 0.0)
+                .unwrap_or(false)
+        {
+            return Some(typed.to_string());
+        }
+        Some(p.last_valid_factor.clone())
+    }
+
+    /// Restore the pre-scale sketch and re-apply with the current
+    /// factor, sets and center. No-op when nothing changed.
+    pub(crate) fn reapply_scale(&mut self) {
+        let Some(p) = self.scale_pending.as_ref() else { return };
+        let Some(center) = self.scale_center else { return };
+        let Some(factor_tok) = self.scale_effective_factor() else { return };
+        let (lines, arcs, points) = self.scale_sets();
+        let sig = format!("{}|{:?}|{:?}|{:?}|{:?}", factor_tok, (center.x, center.y), lines, arcs, points);
+        if sig == p.last_applied_sig {
+            return;
+        }
+        let pre_snapshot = p.pre_snapshot.clone();
+        let history_cursor_before = p.history_cursor_before;
+        if let Ok(s) = bincode::deserialize::<Sketch>(&pre_snapshot) {
+            self.sketch = s.into();
+        }
+        self.history.actions.truncate(history_cursor_before);
+        self.history.snapshots.truncate(history_cursor_before);
+        self.history.cursors.truncate(history_cursor_before);
+        self.history.groups.truncate(history_cursor_before);
+        self.history.cursor = history_cursor_before;
+        self.status_error = None;
+        let factor = arael_sketch_backend::commands::eval_expr(&self.sketch, &factor_tok)
+            .unwrap_or(1.0);
+        self.begin_group();
+        self.exec(Action::Scale { lines, arcs, points, center, factor });
+        let ok = self.status_error.is_none();
+        if let Some(pending) = self.scale_pending.as_mut() {
+            if ok {
+                pending.last_valid_factor = factor_tok;
+            }
+            pending.last_applied_sig = sig;
+        }
+    }
+
+    /// Enter: keep the applied scale, report, and end the session.
+    pub(crate) fn commit_pending_scale(&mut self) {
+        self.reapply_scale();
+        // Report like the command does.
+        let (lines, arcs, points) = self.scale_sets();
+        let (_, report) = arael_sketch_backend::scale::classify_scale_dims(
+            &self.sketch, &lines, &arcs, &points);
+        let mut msg = "Scaled".to_string();
+        for r in &lines { msg += &format!(" {}", self.sketch.lines[*r].name); }
+        for r in &arcs { msg += &format!(" {}", self.sketch.arcs[*r].name); }
+        for r in &points { msg += &format!(" {}", self.sketch.points[*r].name); }
+        if let Some(p) = self.scale_pending.as_ref() {
+            msg += &format!(" x{}", p.last_valid_factor);
+        }
+        if !report.scaled.is_empty() {
+            msg += &format!("\n  dims scaled: {}", report.scaled.join(" "));
+        }
+        if !report.left.is_empty() {
+            let left: Vec<String> = report.left.iter()
+                .map(|(n, why)| format!("{} ({})", n, why)).collect();
+            msg += &format!("\n  dims left: {}", left.join("; "));
+        }
+        self.command_output.push((msg, false, false));
+        self.scale_pending = None;
+        self.scale_center = None;
+        self.selection.clear();
+        self.dim_editing = false;
+        self.dim_edit_did = None;
+        self.dim_kind = None;
+        self.dim_input.clear();
+    }
+
+    /// Escape: restore the pre-scale sketch and end the session.
+    pub(crate) fn cancel_pending_scale(&mut self) {
+        let Some(p) = self.scale_pending.take() else { return };
+        if let Ok(s) = bincode::deserialize::<Sketch>(&p.pre_snapshot) {
+            self.sketch = s.into();
+        }
+        self.history.actions.truncate(p.history_cursor_before);
+        self.history.snapshots.truncate(p.history_cursor_before);
+        self.history.cursors.truncate(p.history_cursor_before);
+        self.history.groups.truncate(p.history_cursor_before);
+        self.history.cursor = p.history_cursor_before;
+        self.scale_center = None;
+        self.dim_editing = false;
+        self.dim_edit_did = None;
+        self.dim_kind = None;
+        self.dim_input.clear();
+        self.status_error = None;
+        self.refresh_dof();
     }
 
     /// Canvas input for `Tool::ConstraintMode(ct)`.

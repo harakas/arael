@@ -117,6 +117,12 @@ pub struct EditorApp {
     /// actions run; kept alive while the radius dim-input overlay is
     /// open so Escape can restore the pre-fillet sketch.
     pub fillet_pending: Option<FilletPending>,
+    /// In-flight scale session (see ScalePending); entities come from
+    /// the live selection, the center from `scale_center`.
+    pub scale_pending: Option<ScalePending>,
+    /// Center of the scale tool, set by double-clicking a point-like
+    /// target; drawn as a crosshair while the tool is active.
+    pub scale_center: Option<vect2d>,
 
     // Selection and hover
     pub selection: Vec<Selection>,
@@ -409,6 +415,8 @@ impl EditorApp {
             arc_draw: None,
             rect_draw: None,
             fillet_pending: None,
+            scale_pending: None,
+            scale_center: None,
             selection: Vec::new(),
             hovered: None,
             grab: None,

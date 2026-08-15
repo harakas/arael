@@ -80,6 +80,9 @@ pub enum Tool {
     Split,
     /// Same bracketing, but the clicked span is deleted.
     Trim,
+    /// Uniform scale of clicked entities about a double-clicked
+    /// center point, factor typed in the value overlay.
+    Scale,
     ConstraintMode(ConstraintType),
     Dimension,
 }
@@ -162,6 +165,19 @@ pub struct CornerOpPending {
 /// Back-compat type alias while the rest of the code still uses
 /// FilletPending. Cheap rename target.
 pub type FilletPending = CornerOpPending;
+
+/// In-flight scale session: entities come from the live selection and
+/// the center from EditorApp::scale_center; this holds what a live
+/// re-preview needs to restore and re-apply deterministically.
+pub struct ScalePending {
+    pub pre_snapshot: std::vec::Vec<u8>,
+    pub history_cursor_before: usize,
+    /// Last factor token whose reapply succeeded; empty/invalid input
+    /// falls back to it so the canvas keeps the latest valid state.
+    pub last_valid_factor: String,
+    /// Signature (factor + sets + center) of the last reapply.
+    pub last_applied_sig: String,
+}
 
 // Constraint symbol types (drawn with painter, not text)
 #[derive(Clone, Copy)]

@@ -776,3 +776,136 @@ fn test_all_dims_editable() {
             "edited value should be {}, got {}: scene {:?}", expected, v, cmds);
     }
 }
+
+// -- Scale tool -------------------------------------------------------
+
+#[test]
+fn test_scale_tool_flow() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 0,0 0,1 noconnect");
+    gui.cmd("add_point 0,0");
+    gui.app.tool = Tool::Scale;
+    gui.click(v(1.0, 0.0));
+    gui.click(v(0.0, 0.5));
+    assert_eq!(gui.app.selection.len(), 2);
+    assert!(gui.app.scale_pending.is_none(), "no session before a center exists");
+    // Double-click the point: center set, session + value input open.
+    gui.double_click(v(0.0, 0.0));
+    assert!(gui.app.scale_center.is_some());
+    assert!(gui.app.scale_pending.is_some());
+    assert!(gui.app.dim_editing);
+    // Live preview: typing updates the canvas before Enter.
+    gui.frame();
+    gui.type_text("3");
+    gui.frame();
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(6.0, 0.0), 0.05), "live preview at x3: {:?}", p2);
+    // Commit.
+    gui.key(egui::Key::Enter);
+    assert!(gui.app.scale_pending.is_none());
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(6.0, 0.0), 0.05));
+    let (_, q2) = gui.line(1);
+    assert!(near(q2, v(0.0, 3.0), 0.05), "second line scaled too: {:?}", q2);
+    assert!(gui.app.command_output.iter().any(|(t, _, _)| t.contains("Scaled")),
+        "report in command panel");
+    // One undo restores the pre-scale geometry.
+    gui.cmd("undo");
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(2.0, 0.0), 0.05), "after undo: {:?}", p2);
+}
+
+#[test]
+fn test_scale_escape_restores() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_point 0,0");
+    let actions0 = gui.app.history.actions.len();
+    gui.app.tool = Tool::Scale;
+    gui.click(v(1.0, 0.0));
+    gui.double_click(v(0.0, 0.0));
+    gui.frame();
+    gui.type_text("4");
+    gui.frame();
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(8.0, 0.0), 0.05), "preview applied: {:?}", p2);
+    gui.key(egui::Key::Escape);
+    assert!(gui.app.scale_pending.is_none());
+    assert!(gui.app.scale_center.is_none());
+    let (_, p2) = gui.line(0);
+    assert!(near(p2, v(2.0, 0.0), 0.05), "Escape restores: {:?}", p2);
+    assert_eq!(gui.app.history.actions.len(), actions0, "nothing committed");
+}
+
+#[test]
+fn test_scale_point_in_set() {
+    let mut gui = Gui::new();
+    gui.cmd("add_point 0,0");
+    gui.cmd("add_point 2,1");
+    gui.app.tool = Tool::Scale;
+    // P1 into the set, P0 as center.
+    gui.click(v(2.0, 1.0));
+    gui.double_click(v(0.0, 0.0));
+    assert!(gui.app.scale_pending.is_some());
+    gui.frame();
+    gui.type_text("2");
+    gui.key(egui::Key::Enter);
+    let p1 = gui.sketch().points.iter().find(|p| p.name == "P1").unwrap().pos.value;
+    assert!(near(p1, v(4.0, 2.0), 0.05), "P1 scaled: {:?}", p1);
+    let p0 = gui.sketch().points.iter().find(|p| p.name == "P0").unwrap().pos.value;
+    assert!(near(p0, v(0.0, 0.0), 0.05), "center point untouched");
+}
+
+#[test]
+fn test_scale_adopts_prior_selection() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 1,0 2,0");
+    gui.cmd("add_line 1,1 2,1");
+    gui.cmd("add_point 0,0");
+    // Select a line and an endpoint with the Select tool...
+    gui.click(v(1.5, 0.0));
+    gui.click(v(1.0, 1.0));
+    assert_eq!(gui.app.selection.len(), 2, "sel = {:?}", gui.app.selection);
+    // ...then enter Scale the way the toolbar button does.
+    gui.app.tool = Tool::Scale;
+    gui.app.adopt_selection_for_scale();
+    gui.app.scale_center = None;
+    assert!(
+        gui.app.selection.iter().all(|s| matches!(s, Selection::Line(_)))
+            && gui.app.selection.len() == 2,
+        "selection carried over as whole lines: {:?}", gui.app.selection
+    );
+    gui.double_click(v(0.0, 0.0));
+    assert!(gui.app.scale_pending.is_some());
+    gui.frame();
+    gui.type_text("2");
+    gui.key(egui::Key::Enter);
+    let l1 = gui.sketch().lines.iter().find(|l| l.name == "L1").unwrap();
+    assert!(near(l1.p1.value, v(2.0, 2.0), 0.05), "L1.p1 scaled: {:?}", l1.p1.value);
+    assert!(near(l1.p2.value, v(4.0, 2.0), 0.05), "L1.p2 scaled: {:?}", l1.p2.value);
+    let l0 = gui.sketch().lines.iter().find(|l| l.name == "L0").unwrap();
+    assert!(near(l0.p2.value, v(4.0, 0.0), 0.05), "L0.p2 scaled: {:?}", l0.p2.value);
+}
+
+#[test]
+fn test_scale_box_select() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 1,0 2,0; add_line 1,1 2,1");
+    gui.cmd("add_point 0,0");
+    gui.app.tool = Tool::Scale;
+    // Marquee over both lines (center point stays outside).
+    gui.drag(v(0.5, -0.5), v(2.5, 1.5));
+    let lines = gui.app.selection.iter()
+        .filter(|s| matches!(s, Selection::Line(_)))
+        .count();
+    assert_eq!(lines, 2, "box selected both lines: {:?}", gui.app.selection);
+    gui.double_click(v(0.0, 0.0));
+    assert!(gui.app.scale_pending.is_some());
+    gui.frame();
+    gui.type_text("2");
+    gui.key(egui::Key::Enter);
+    let l1 = gui.sketch().lines.iter().find(|l| l.name == "L1").unwrap();
+    assert!(near(l1.p1.value, v(2.0, 2.0), 0.05), "L1.p1 scaled: {:?}", l1.p1.value);
+    assert!(near(l1.p2.value, v(4.0, 2.0), 0.05), "L1.p2 scaled: {:?}", l1.p2.value);
+}
