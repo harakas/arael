@@ -117,6 +117,8 @@ pub struct EditorApp {
     /// actions run; kept alive while the radius dim-input overlay is
     /// open so Escape can restore the pre-fillet sketch.
     pub fillet_pending: Option<FilletPending>,
+    /// In-progress ellipse drawing (see EllipseDrawState).
+    pub ellipse_draw: Option<EllipseDrawState>,
     /// In-flight scale session (see ScalePending); entities come from
     /// the live selection, the center from `scale_center`.
     pub scale_pending: Option<ScalePending>,
@@ -418,6 +420,7 @@ impl EditorApp {
             arc_draw: None,
             rect_draw: None,
             fillet_pending: None,
+            ellipse_draw: None,
             scale_pending: None,
             scale_center: None,
             selection: Vec::new(),

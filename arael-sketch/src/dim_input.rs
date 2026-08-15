@@ -19,6 +19,11 @@ impl EditorApp {
         {
             return Some(self.to_screen(c));
         }
+        // Ellipse session: the length input trails the cursor
+        // below-right so it never sits under the next click.
+        if let Some(state) = &self.ellipse_draw {
+            return Some(egui::Pos2::new(state.cursor.x + 18.0, state.cursor.y + 18.0));
+        }
         let dim_ref = if let Some(idx) = self.dim_edit_did.and_then(|d| self.sketch.dimension_index_by_did(d)) {
             self.sketch.dimensions.get(idx).cloned()
         } else if let Some(kind) = self.dim_kind {
@@ -48,10 +53,13 @@ impl EditorApp {
     /// can be hosted in a floating `egui::Area` over the canvas,
     /// near the dimension label where the user is looking.
     pub(crate) fn render_dim_input(&mut self, ui: &mut egui::Ui) {
-        // Derived checkbox is meaningless during a fillet or scale
-        // edit -- the value being typed is the control itself (radius
-        // / factor), not a dimension that could go derived.
-        if self.fillet_pending.is_none() && self.scale_pending.is_none() {
+        // Derived checkbox is meaningless during a fillet, scale or
+        // ellipse edit -- the value being typed is the control itself
+        // (radius / factor / axis length), not a dimension that could
+        // go derived.
+        if self.fillet_pending.is_none() && self.scale_pending.is_none()
+            && self.ellipse_draw.is_none()
+        {
             ui.checkbox(&mut self.dim_derived, "Derived");
         }
         // Edge-detect the checkbox: on false -> true, back up what
@@ -94,6 +102,29 @@ impl EditorApp {
         if self.scale_pending.is_some() && response.changed() {
             self.reapply_scale();
         }
+        // Live ellipse axis length: any typed text takes the active
+        // length over from mouse tracking (major while aiming the
+        // axis, minor after); the length itself updates only once the
+        // text evaluates, so a half-typed "." or "sqrt(" keeps the
+        // last good value instead of being clobbered by the mouse.
+        // Cleared input hands control back to the mouse (no dim on
+        // commit). Typing also cancels the select-all this frame's
+        // tracking queued -- it would select the fresh text and the
+        // next keystroke would replace it.
+        if response.changed() && self.ellipse_draw.is_some() {
+            let raw = self.dim_input.trim().to_string();
+            let parsed = self.parse_axis_input(&raw);
+            self.dim_select_all = false;
+            let state = self.ellipse_draw.as_mut().unwrap();
+            let typed = if raw.is_empty() { None } else { Some(raw) };
+            if state.axis_fixed {
+                state.typed_ry = typed;
+                if let Some((v, _)) = parsed { state.ry = v; }
+            } else {
+                state.typed_rx = typed;
+                if let Some((v, _)) = parsed { state.rx = v; }
+            }
+        }
         // Select all text when entering edit mode (one-shot flag)
         if (self.dim_select_all || self.dim_select_all_on_uncheck) && response.has_focus() {
             self.dim_select_all = false;
@@ -114,6 +145,8 @@ impl EditorApp {
                 self.cancel_pending_fillet();
             } else if self.scale_pending.is_some() {
                 self.cancel_pending_scale();
+            } else if self.ellipse_draw.is_some() {
+                self.cancel_ellipse_session();
             } else {
                 self.dim_editing = false;
                 self.dim_kind = None;
@@ -121,6 +154,16 @@ impl EditorApp {
                 self.dim_edit_did = None;
                 self.dim_input.clear();
             }
+            return;
+        }
+        if enter_pressed && let Some(state) = self.ellipse_draw.as_ref() {
+            if state.axis_fixed && state.typed_ry.is_some() && state.ry > 1e-6 {
+                // Both lengths typed/fixed: Enter completes without
+                // the minor click.
+                self.complete_ellipse();
+            }
+            // Otherwise Enter keeps the fixed value; the next click
+            // is still needed for direction / minor side.
             return;
         }
         if enter_pressed && self.scale_pending.is_some() {

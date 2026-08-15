@@ -6,6 +6,7 @@
 use arael::refs::Ref;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
+use eframe::egui;
 // Re-export backend identity types so existing `crate::tools::*` imports
 // across main.rs/drawing.rs/app_update.rs continue to resolve after the
 // split into arael-sketch-backend.
@@ -71,6 +72,10 @@ pub enum Tool {
     DrawPoint,
     DrawLine,
     DrawCircle,
+    /// Three-click ellipse: center, end of the major axis (H/V
+    /// snapped unless disabled), minor extent. Typed axis lengths
+    /// become driving dimensions.
+    DrawEllipse,
     DrawArc,
     DrawRect,
     Fillet,
@@ -115,6 +120,40 @@ pub struct LineDrawState {
 
 pub struct CircleDrawState {
     pub center: PlacedPoint,
+}
+
+// In-progress ellipse drawing. The value overlay opens with the
+// center click and live-tracks the length under the mouse (semi-major
+// while aiming the axis, semi-minor after the axis click); typing
+// takes the value over and fixes it. Only typed values become
+// driving dimensions on commit.
+pub struct EllipseDrawState {
+    pub center: PlacedPoint,
+    /// Unit direction of the major axis; tracks the (H/V snapped)
+    /// mouse until the second click fixes it.
+    pub dir: vect2d,
+    /// H/V snap in effect for the axis (drives the preview marker).
+    pub hv: Option<bool>,
+    /// True once the second click fixed the axis direction.
+    pub axis_fixed: bool,
+    /// Semi-major: live from the mouse until typed, then fixed.
+    pub rx: f64,
+    pub typed_rx: Option<String>,
+    /// Semi-minor: live once the axis is fixed, until typed.
+    pub ry: f64,
+    /// Which side of the axis the minor preview points (mouse side).
+    pub ry_sign: f64,
+    pub typed_ry: Option<String>,
+    /// Last cursor position (screen). The value input trails it at
+    /// an offset while aiming so it never sits under the click.
+    pub cursor: egui::Pos2,
+    /// Snap target under the mouse for the point being aimed (axis
+    /// end, then minor extent); the rim passes through it. Not
+    /// offered while that axis length is typed.
+    pub live_snap: Option<(vect2d, SnapTarget)>,
+    /// Snapped rim points confirmed by clicks; each becomes a helper
+    /// point on the ellipse tied to its target at completion.
+    pub rim_snaps: Vec<(vect2d, SnapTarget)>,
 }
 
 pub struct ArcDrawState {

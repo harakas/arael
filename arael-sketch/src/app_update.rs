@@ -63,6 +63,11 @@ impl EditorApp {
         if self.grab.is_some() && !matches!(self.tool, crate::tools::Tool::Select) {
             self.cancel_drag();
         }
+        // Same for an ellipse gesture: a tool switch mid-gesture would
+        // orphan the state and its value overlay.
+        if self.ellipse_draw.is_some() && !matches!(self.tool, crate::tools::Tool::DrawEllipse) {
+            self.cancel_ellipse_session();
+        }
 
         // Keep repainting while a constraint-conflict flash is active
         // (3 flashes at 3 Hz = 1 s total). Without continuous repaint
@@ -202,8 +207,9 @@ impl EditorApp {
                 self.tool = Tool::DrawLine;
                 self.line_draw = None;
             }
+            // O cycles Circle <-> Ellipse.
             if ui.input(|i| i.key_pressed(egui::Key::O)) {
-                self.tool = Tool::DrawCircle;
+                self.tool = if self.tool == Tool::DrawCircle { Tool::DrawEllipse } else { Tool::DrawCircle };
                 self.circle_draw = None;
             }
             if ui.input(|i| i.key_pressed(egui::Key::A)) {
@@ -256,6 +262,7 @@ impl EditorApp {
                 if self.scale_pending.is_some() {
                     self.cancel_pending_scale();
                 }
+                self.cancel_ellipse_session();
                 self.scale_center = None;
                 self.selection.clear();
                 self.line_draw = None;
@@ -374,6 +381,7 @@ impl EditorApp {
                 Tool::DrawLine => self.handle_draw_line(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::DrawCircle => self.handle_draw_circle(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::DrawArc => self.handle_draw_arc(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
+                Tool::DrawEllipse => self.handle_draw_ellipse(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::DrawRect => self.handle_draw_rect(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Fillet | Tool::Chamfer => self.handle_fillet_chamfer(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Split | Tool::Trim => self.handle_split_trim(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),

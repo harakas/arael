@@ -612,6 +612,250 @@ impl EditorApp {
         }
     }
 
+    /// Canvas input for `Tool::DrawEllipse`: click 1 center, click 2
+    /// major-axis direction (H/V snapped unless disabled), click 3
+    /// minor extent. The value overlay is live from the center click:
+    /// it tracks the length under the mouse until the user types,
+    /// which fixes that axis. Typed lengths become driving dims on
+    /// commit (end_ellipse_session).
+    pub(crate) fn handle_draw_ellipse(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        // Per-frame live tracking: direction and untyped lengths
+        // follow the mouse; the input mirrors the active length and
+        // stays fully selected so a keystroke replaces it. A snap
+        // target under the mouse (points, endpoints, line/arc bodies)
+        // takes over the aimed rim point -- offered only while that
+        // axis length is not typed, so a snapped point is always one
+        // the rim passes through and a constraint can honour.
+        if self.ellipse_draw.is_some() {
+            let (c, axis_fixed, dir, rx, typed_rx, typed_ry) = {
+                let s = self.ellipse_draw.as_ref().unwrap();
+                (s.center.pos, s.axis_fixed, s.dir, s.rx, s.typed_rx.is_some(), s.typed_ry.is_some())
+            };
+            let snap_ok = if axis_fixed { !typed_ry } else { !typed_rx };
+            let snap = if snap_ok {
+                self.find_snap_target(mouse_sketch, hit_threshold).filter(|(p, _)| {
+                    let dx = p.x - c.x;
+                    let dy = p.y - c.y;
+                    dx * dx + dy * dy > 1e-12
+                })
+            } else { None };
+            let hv = if !axis_fixed && snap.is_none() && !self.snap_disabled {
+                hv_snap_from(c, mouse_sketch, self.scale, crate::PERP_SNAP_PX)
+            } else { None };
+            let scale = self.scale;
+            let state = self.ellipse_draw.as_mut().unwrap();
+            state.cursor = mouse_screen;
+            state.live_snap = None;
+            if !axis_fixed {
+                let end = snap.map(|(p, _)| p).or(hv.map(|(_, p)| p)).unwrap_or(mouse_sketch);
+                let dx = end.x - c.x;
+                let dy = end.y - c.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                if len > 1e-6 {
+                    state.dir = vect2d::new(dx / len, dy / len);
+                    state.hv = hv.map(|(h, _)| h);
+                    if !typed_rx {
+                        state.rx = len;
+                        state.live_snap = snap;
+                        self.dim_input = format!("{:.4}", len);
+                        self.dim_select_all = true;
+                    }
+                }
+            } else {
+                // Rim snap: the semi-minor that puts the ellipse
+                // through the snapped point (needs it strictly inside
+                // the major span); otherwise the perpendicular
+                // distance of the mouse.
+                let frame = |p: vect2d| (
+                    (p.x - c.x) * dir.x + (p.y - c.y) * dir.y,
+                    (p.x - c.x) * (-dir.y) + (p.y - c.y) * dir.x,
+                );
+                let snapped = snap.and_then(|(p, t)| {
+                    let (u, v) = frame(p);
+                    let k = 1.0 - (u / rx) * (u / rx);
+                    (k > 1e-9 && v.abs() > 1e-9).then(|| (v.abs() / k.sqrt(), v.signum(), (p, t)))
+                });
+                let (ry, sign, live) = match snapped {
+                    Some((ry, sign, s)) => (Some(ry), sign, Some(s)),
+                    None => {
+                        let (_, v) = frame(mouse_sketch);
+                        if v.abs() > 1e-6 { (Some(v.abs()), v.signum(), None) } else { (None, state.ry_sign, None) }
+                    }
+                };
+                let _ = scale;
+                state.ry_sign = sign;
+                if let Some(ry) = ry && !typed_ry {
+                    state.ry = ry;
+                    state.live_snap = live;
+                    self.dim_input = format!("{:.4}", ry);
+                    self.dim_select_all = true;
+                }
+            }
+        }
+
+        if !response.clicked_by(egui::PointerButton::Primary) {
+            return;
+        }
+        enum Phase { Center, Axis, Minor }
+        let phase = match &self.ellipse_draw {
+            None => Phase::Center,
+            Some(s) if !s.axis_fixed => Phase::Axis,
+            Some(_) => Phase::Minor,
+        };
+        match phase {
+            Phase::Center => self.start_ellipse(mouse_sketch, hit_threshold),
+            Phase::Axis => {
+                // A half-typed major length keeps the session on it.
+                if let Some(raw) = self.ellipse_draw.as_ref().unwrap().typed_rx.clone()
+                    && self.parse_axis_input(&raw).is_none()
+                {
+                    self.status_error = Some(format!("Semi-major: invalid value or expression: {}", raw));
+                    return;
+                }
+                // Direction needs the mouse off-center; the live
+                // tracking above already refreshed dir/rx this frame.
+                let state = self.ellipse_draw.as_mut().unwrap();
+                let c = state.center.pos;
+                let dx = mouse_sketch.x - c.x;
+                let dy = mouse_sketch.y - c.y;
+                if dx * dx + dy * dy < 1e-12 || state.rx < 1e-6 {
+                    return; // no direction yet: keep waiting
+                }
+                state.axis_fixed = true;
+                if let Some(snap) = state.live_snap.take() {
+                    state.rim_snaps.push(snap);
+                }
+                // Overlay switches to the semi-minor length; the next
+                // frame's live tracking fills it.
+                self.dim_input.clear();
+                self.dim_select_all = true;
+            }
+            Phase::Minor => {
+                // The minor was already live-editable while aiming,
+                // so the click completes the session outright. A
+                // click on the axis line itself (no size yet) waits;
+                // typed text always goes through complete_ellipse so
+                // a broken value is reported, not silently ignored.
+                let s = self.ellipse_draw.as_mut().unwrap();
+                if s.typed_ry.is_some() || s.ry >= 1e-6 {
+                    if let Some(snap) = s.live_snap.take() {
+                        s.rim_snaps.push(snap);
+                    }
+                    self.complete_ellipse();
+                }
+            }
+        }
+    }
+
+    fn start_ellipse(&mut self, mouse_sketch: vect2d, hit_threshold: f64) {
+        let snap = self.find_snap_target(mouse_sketch, hit_threshold);
+        let center = snap.map_or(mouse_sketch, |(p, _)| p);
+        self.ellipse_draw = Some(EllipseDrawState {
+            center: PlacedPoint { pos: center, snap: snap.map(|(_, t)| t) },
+            dir: vect2d::new(1.0, 0.0),
+            hv: None,
+            axis_fixed: false,
+            rx: 0.0,
+            typed_rx: None,
+            ry: 0.0,
+            ry_sign: 1.0,
+            typed_ry: None,
+            cursor: egui::Pos2::ZERO,
+            live_snap: None,
+            rim_snaps: Vec::new(),
+        });
+        // Open the value overlay: it live-tracks the semi-major.
+        self.dim_editing = true;
+        self.dim_kind = None;
+        self.dim_edit_did = None;
+        self.dim_derived = false;
+        self.dim_input.clear();
+        self.dim_select_all = true;
+    }
+
+    /// Parse a typed axis length: a plain number or `=expr` snapshot
+    /// gives (value, None); a live expression gives (value, Some(expr)).
+    /// None while the text is not (yet) a positive finite length.
+    pub(crate) fn parse_axis_input(&self, raw: &str) -> Option<(f64, Option<String>)> {
+        let raw = raw.trim();
+        if raw.is_empty() { return None; }
+        let (text, live) = match raw.strip_prefix('=') {
+            Some(rest) => (rest.trim(), false),
+            None => (raw, raw.parse::<f64>().is_err()),
+        };
+        let v = arael_sketch_backend::commands::eval_expr(&self.sketch, text).ok()?;
+        if !v.is_finite() || v <= 0.0 { return None; }
+        Some((v, live.then(|| text.to_string())))
+    }
+
+    /// Create the ellipse from the current session values (axis
+    /// fixed, ry set), add typed-length dims in the same undo group,
+    /// and end the session. Called by the minor click and by Enter
+    /// with a typed minor. A typed length that does not evaluate
+    /// keeps the session open with a status error. Returns false
+    /// when nothing was created.
+    pub(crate) fn complete_ellipse(&mut self) -> bool {
+        let Some(s) = self.ellipse_draw.as_ref() else { return false };
+        let (typed_rx, typed_ry) = (s.typed_rx.clone(), s.typed_ry.clone());
+        let mut dims = Vec::new();
+        for (raw, what, minor) in [(typed_rx, "Semi-major", false), (typed_ry, "Semi-minor", true)] {
+            let Some(raw) = raw else { continue };
+            match self.parse_axis_input(&raw) {
+                Some(parsed) => dims.push((minor, parsed)),
+                None => {
+                    self.status_error = Some(format!("{}: invalid value or expression: {}", what, raw));
+                    return false;
+                }
+            }
+        }
+        let state = self.ellipse_draw.take().unwrap();
+        let center = state.center.pos;
+        let rotation = state.dir.y.atan2(state.dir.x);
+        self.begin_group();
+        let created = self.exec(Action::AddEllipse {
+            center, rx: state.rx, ry: state.ry, rotation,
+        }).arc();
+        let Some(arc) = created else {
+            // Rejected creation ends the gesture.
+            self.close_ellipse_input();
+            return false;
+        };
+        if let Some(s) = state.center.snap {
+            self.apply_snap_coincident_arc(s, arc, ArcPoint::Center, center);
+        }
+        // Snapped rim points: helper on the ellipse, tied to the
+        // target (circle-tool edge-snap pattern).
+        for (pos, target) in state.rim_snaps {
+            if let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point() {
+                self.exec(Action::ApplyPointOnArc { point: helper, arc });
+                self.apply_snap_coincident_point(target, helper);
+            }
+        }
+        for (minor, (value, expr)) in dims {
+            let kind = if minor { DimensionKind::ArcRadiusB(arc) } else { DimensionKind::ArcRadius(arc) };
+            let value = if expr.is_some() { 0.0 } else { value };
+            self.exec(Action::AddDimension { kind, value, expr, derived: false, range: None });
+        }
+        self.close_ellipse_input();
+        true
+    }
+
+    fn close_ellipse_input(&mut self) {
+        self.dim_editing = false;
+        self.dim_kind = None;
+        self.dim_edit_did = None;
+        self.dim_input.clear();
+    }
+
+    /// Drop an in-progress ellipse gesture and close its value
+    /// overlay. Nothing is committed -- creation happens only in
+    /// complete_ellipse. Safe to call in any state.
+    pub(crate) fn cancel_ellipse_session(&mut self) {
+        if self.ellipse_draw.take().is_some() {
+            self.close_ellipse_input();
+        }
+    }
+
     /// Canvas input for `Tool::DrawArc`.
     pub(crate) fn handle_draw_arc(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
         if response.clicked_by(egui::PointerButton::Primary) {

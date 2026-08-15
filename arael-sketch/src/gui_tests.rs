@@ -888,6 +888,245 @@ fn test_scale_adopts_prior_selection() {
     assert!(near(l0.p2.value, v(4.0, 0.0), 0.05), "L0.p2 scaled: {:?}", l0.p2.value);
 }
 
+// -- Ellipse tool -----------------------------------------------------
+
+#[test]
+fn test_ellipse_three_clicks() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    assert!(gui.app.dim_editing, "length input live from the center click");
+    gui.click(v(3.0, 0.02)); // snaps horizontal -> rx exactly 3
+    assert!(gui.app.ellipse_draw.as_ref().is_some_and(|s| s.axis_fixed));
+    gui.click(v(1.0, 2.0)); // minor extent: perpendicular distance 2, completes
+    let arc = gui.sketch().arcs.iter().next().expect("ellipse created").clone();
+    assert!((arc.radius.value - 3.0).abs() < 1e-6, "rx {}", arc.radius.value);
+    assert!((arc.radius_b.value - 2.0).abs() < 1e-6, "ry {}", arc.radius_b.value);
+    assert!(arc.rotation.value.abs() < 1e-9, "rotation {}", arc.rotation.value);
+    assert!(gui.sketch().dimensions.is_empty(), "click-only: no dims");
+    assert!(gui.app.ellipse_draw.is_none(), "session ends at the third click");
+    assert!(!gui.app.dim_editing);
+}
+
+#[test]
+fn test_ellipse_hv_snap_and_q_disable() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    // Near-vertical axis snaps to exactly pi/2.
+    gui.click(v(0.0, 0.0));
+    gui.click(v(0.02, 2.5));
+    gui.click(v(1.0, 1.0));
+    let arc = gui.sketch().arcs.iter().next().unwrap().clone();
+    let quarter = std::f64::consts::FRAC_PI_2;
+    assert!((arc.rotation.value.abs() - quarter).abs() < 1e-9,
+        "snapped vertical: {}", arc.rotation.value);
+    // Q held: same gesture stays unsnapped.
+    gui.cmd("clear");
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.hold_key(egui::Key::Q);
+    gui.click(v(0.02, 2.5));
+    gui.release_key(egui::Key::Q);
+    gui.click(v(1.0, 1.0));
+    let arc = gui.sketch().arcs.iter().next().unwrap().clone();
+    assert!((arc.rotation.value.abs() - quarter).abs() > 1e-4,
+        "unsnapped: {}", arc.rotation.value);
+}
+
+#[test]
+fn test_ellipse_typed_axes_make_dims() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.frame(); // input takes focus; select-all applies next frame
+    gui.type_text("5"); // fix the semi-major while aiming
+    gui.click(v(3.0, 0.0)); // direction only; length stays 5
+    gui.frame();
+    gui.type_text("1.5"); // fix the semi-minor
+    gui.key(egui::Key::Enter); // completes without a minor click
+    let arc = gui.sketch().arcs.iter().next().unwrap().clone();
+    assert!((arc.radius.value - 5.0).abs() < 1e-6, "typed rx {}", arc.radius.value);
+    assert!((arc.radius_b.value - 1.5).abs() < 1e-6, "typed ry {}", arc.radius_b.value);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 2, "both typed values became dims: {:?}",
+        dims.iter().map(|d| &d.name).collect::<Vec<_>>());
+    assert!(dims.iter().any(|d| (d.value - 5.0).abs() < 1e-9 && !d.derived));
+    assert!(dims.iter().any(|d| (d.value - 1.5).abs() < 1e-9 && !d.derived));
+    // Whole creation (ellipse + dims) is one undo step.
+    gui.cmd("undo");
+    assert!(gui.sketch().arcs.iter().next().is_none(), "undo removed the ellipse");
+    assert!(gui.sketch().dimensions.is_empty(), "undo removed the dims");
+}
+
+#[test]
+fn test_ellipse_typed_minor_only() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.click(v(3.0, 0.0));
+    gui.frame();
+    gui.type_text("1.25"); // fix the minor while aiming it
+    gui.click(v(1.0, 2.0)); // picks the side only; completes
+    let arc = gui.sketch().arcs.iter().next().unwrap().clone();
+    assert!((arc.radius_b.value - 1.25).abs() < 1e-6, "ry {}", arc.radius_b.value);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 1, "only the typed minor became a dim");
+    assert!((dims[0].value - 1.25).abs() < 1e-9);
+}
+
+#[test]
+fn test_ellipse_typing_char_by_char() {
+    // Regression: a half-typed value ("." or "s...") must take over
+    // from mouse tracking instead of being clobbered by it, and the
+    // first typed char must not be select-all'd away by the next.
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.frame();
+    for ch in [".", "5"] { gui.type_text(ch); }
+    assert_eq!(gui.app.dim_input, ".5", "input kept across frames");
+    let rx = gui.app.ellipse_draw.as_ref().unwrap().rx;
+    assert!((rx - 0.5).abs() < 1e-9, "rx follows the typed value: {}", rx);
+    gui.click(v(3.0, 0.0)); // direction only
+    gui.frame();
+    for ch in ["s", "q", "r", "t", "(", "2", ")"] { gui.type_text(ch); }
+    assert_eq!(gui.app.dim_input, "sqrt(2)");
+    gui.key(egui::Key::Enter);
+    let arc = gui.sketch().arcs.iter().next().expect("ellipse created").clone();
+    assert!((arc.radius.value - 0.5).abs() < 1e-6, "rx {}", arc.radius.value);
+    assert!((arc.radius_b.value - 2f64.sqrt()).abs() < 1e-6, "ry {}", arc.radius_b.value);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 2);
+    assert!(dims.iter().any(|d| d.expr_str.as_deref() == Some("sqrt(2)")),
+        "expression stays live: {:?}", dims.iter().map(|d| &d.expr_str).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_ellipse_invalid_typed_blocks_completion() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.click(v(3.0, 0.0));
+    gui.frame();
+    gui.type_text("sqrt(");
+    gui.click(v(1.0, 2.0)); // would complete, but the minor text is broken
+    assert!(gui.sketch().arcs.iter().next().is_none(), "nothing created");
+    assert!(gui.app.ellipse_draw.is_some(), "session stays open");
+    assert!(gui.app.status_error.as_deref().is_some_and(|e| e.contains("Semi-minor")),
+        "status error names the field: {:?}", gui.app.status_error);
+    // Fixing the text lets the click through.
+    gui.type_text("2)");
+    gui.click(v(1.0, 2.0));
+    let arc = gui.sketch().arcs.iter().next().expect("created after fix").clone();
+    assert!((arc.radius_b.value - 2f64.sqrt()).abs() < 1e-6);
+}
+
+#[test]
+fn test_ellipse_axis_end_snaps_to_point() {
+    let mut gui = Gui::new();
+    gui.cmd("add_point 3,0.3");
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    // Aim just off the point: the snap wins over the H/V pull.
+    gui.move_to(v(2.97, 0.32));
+    let s = gui.app.ellipse_draw.as_ref().unwrap();
+    assert!(s.live_snap.is_some(), "snap offered while aiming the axis");
+    assert!(s.hv.is_none(), "point snap suppresses H/V");
+    gui.click(v(2.97, 0.32));
+    gui.click(v(1.0, 2.0));
+    let arc = gui.sketch().arcs.iter().next().expect("created").clone();
+    let want = (3f64 * 3.0 + 0.3 * 0.3).sqrt();
+    assert!((arc.radius.value - want).abs() < 1e-6, "rx from the snapped point: {}", arc.radius.value);
+    assert!((arc.rotation.value - 0.3f64.atan2(3.0)).abs() < 1e-9, "axis points at it: {}", arc.rotation.value);
+    // Rim tie: helper on the ellipse, coincident with P0.
+    assert_eq!(gui.sketch().point_on_arc.len(), 1, "helper on the ellipse");
+    assert_eq!(gui.sketch().coincident_pp.len(), 1, "helper tied to the point");
+}
+
+#[test]
+fn test_ellipse_minor_snaps_through_point() {
+    let mut gui = Gui::new();
+    gui.cmd("add_point 1,1.5");
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.click(v(3.0, 0.0));
+    gui.move_to(v(1.02, 1.48));
+    let s = gui.app.ellipse_draw.as_ref().unwrap();
+    assert!(s.live_snap.is_some(), "snap offered while aiming the minor");
+    // Semi-minor that puts the rim through (1, 1.5) with rx = 3.
+    let want = 1.5 / (1.0 - (1.0f64 / 3.0).powi(2)).sqrt();
+    assert!((s.ry - want).abs() < 1e-6, "ry solves the rim through the point: {} vs {}", s.ry, want);
+    gui.click(v(1.02, 1.48));
+    let arc = gui.sketch().arcs.iter().next().expect("created").clone();
+    assert!((arc.radius_b.value - want).abs() < 1e-6);
+    assert_eq!(gui.sketch().point_on_arc.len(), 1);
+    assert_eq!(gui.sketch().coincident_pp.len(), 1);
+    // The tie holds through a solve: drag P0 and the rim follows it.
+    gui.app.tool = Tool::Select;
+    gui.drag(v(1.0, 1.5), v(1.0, 2.0));
+    let p0 = gui.sketch().points.iter().find(|p| p.name == "P0").unwrap().pos.value;
+    let arc = gui.sketch().arcs.iter().next().unwrap().clone();
+    let (dx, dy) = (p0.x - arc.center.value.x, p0.y - arc.center.value.y);
+    let (co, si) = (arc.rotation.value.cos(), arc.rotation.value.sin());
+    let (u, w) = (dx * co + dy * si, -dx * si + dy * co);
+    let r = (u / arc.radius.value).powi(2) + (w / arc.radius_b.value).powi(2);
+    assert!((r - 1.0).abs() < 1e-3, "P0 still on the rim after the drag: {}", r);
+}
+
+#[test]
+fn test_ellipse_typed_length_ignores_snap() {
+    let mut gui = Gui::new();
+    gui.cmd("add_point 3,0.3");
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.frame();
+    gui.type_text("2");
+    gui.move_to(v(2.97, 0.32));
+    let s = gui.app.ellipse_draw.as_ref().unwrap();
+    assert!(s.live_snap.is_none(), "typed length: rim would miss the point, no snap");
+    assert!((s.rx - 2.0).abs() < 1e-9);
+    gui.click(v(2.97, 0.32));
+    gui.click(v(1.0, 2.0));
+    assert_eq!(gui.sketch().point_on_arc.len(), 0, "no rim tie");
+    assert_eq!(gui.sketch().dimensions.len(), 1, "typed major became a dim");
+}
+
+#[test]
+fn test_ellipse_escape_cancels_gesture() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.click(v(3.0, 0.0));
+    assert!(gui.app.dim_editing);
+    gui.key(egui::Key::Escape);
+    assert!(gui.app.ellipse_draw.is_none(), "gesture dropped");
+    assert!(!gui.app.dim_editing);
+    assert!(gui.sketch().arcs.iter().next().is_none(), "no entity created");
+}
+
+#[test]
+fn test_ellipse_o_toggle_and_center_snap() {
+    let mut gui = Gui::new();
+    assert_eq!(gui.app.tool, Tool::Select);
+    gui.key(egui::Key::O);
+    assert_eq!(gui.app.tool, Tool::DrawCircle);
+    gui.key(egui::Key::O);
+    assert_eq!(gui.app.tool, Tool::DrawEllipse);
+    gui.key(egui::Key::O);
+    assert_eq!(gui.app.tool, Tool::DrawCircle);
+    // Center snapped onto an existing point ties the ellipse center.
+    gui.cmd("add_point 1,1");
+    let n_points = gui.sketch().points.len();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(1.0, 1.0));
+    gui.click(v(3.5, 1.0));
+    gui.click(v(2.0, 2.0));
+    let arc = gui.sketch().arcs.iter().next().unwrap().clone();
+    assert!(near(arc.center.value, v(1.0, 1.0), 1e-6), "center on P0");
+    assert_eq!(gui.sketch().points.len(), n_points + 1,
+        "helper point bridges the center coincident");
+}
+
 #[test]
 fn test_scale_box_select() {
     let mut gui = Gui::new();

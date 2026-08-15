@@ -172,6 +172,31 @@ impl Gui {
         self.frame();
     }
 
+    /// Press a key and keep it held across subsequent frames (for
+    /// key_down-gated behavior like the Q snap-disable); pair with
+    /// release_key.
+    pub fn hold_key(&mut self, key: egui::Key) {
+        self.events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: self.modifiers,
+        });
+        self.frame();
+    }
+
+    pub fn release_key(&mut self, key: egui::Key) {
+        self.events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: self.modifiers,
+        });
+        self.frame();
+    }
+
     /// Key with modifiers held for the whole frame (Ctrl+Z etc.).
     pub fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
         let saved = self.modifiers;

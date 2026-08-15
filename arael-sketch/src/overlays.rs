@@ -414,9 +414,9 @@ impl EditorApp {
             }
         } else if matches!(self.tool,
             Tool::DrawLine | Tool::DrawPoint
-            | Tool::DrawCircle | Tool::DrawArc | Tool::DrawRect)
+            | Tool::DrawCircle | Tool::DrawEllipse | Tool::DrawArc | Tool::DrawRect)
             && self.circle_draw.is_none() && self.arc_draw.is_none()
-            && self.rect_draw.is_none()
+            && self.rect_draw.is_none() && self.ellipse_draw.is_none()
         {
             // Pre-first-click hint: snap marker if a target is in
             // range, otherwise the plain "+" cursor cross so the
@@ -492,6 +492,82 @@ impl EditorApp {
             if let Some(ref t) = state.center.snap { draw_snap_hint(center, t); }
             if let Some((_, t)) = &edge_snap { draw_snap_hint(edge_pt, t); }
             if edge_snap.is_none() { draw_cursor_cross(edge_pt); }
+        }
+
+        // Ellipse preview: center dot, axis segments, outline, and
+        // the live length as a dimension readout. Direction and
+        // untyped lengths were refreshed from the mouse by the tool
+        // handler this frame.
+        if let Some(ref state) = self.ellipse_draw {
+            let c = state.center.pos;
+            let center_pt = self.to_screen(c);
+            painter.circle_filled(center_pt, 4.0, self.colors.endpoint);
+            let dir = state.dir;
+            let (rx, ry) = if state.axis_fixed {
+                (state.rx, state.ry.max(1e-9))
+            } else {
+                // 2:1 proportion until the axis is fixed.
+                (state.rx, state.rx * 0.5)
+            };
+            if rx > 1e-9 {
+                let end = arael::vect::vect2d::new(c.x + dir.x * rx, c.y + dir.y * rx);
+                let end_pt = self.to_screen(end);
+                let stroke = egui::Stroke::new(1.5, self.colors.preview_line);
+                painter.line_segment([center_pt, end_pt], stroke);
+                if state.axis_fixed {
+                    // Minor segment on the mouse's side of the axis.
+                    let minor = arael::vect::vect2d::new(
+                        c.x - dir.y * ry * state.ry_sign,
+                        c.y + dir.x * ry * state.ry_sign,
+                    );
+                    painter.line_segment([center_pt, self.to_screen(minor)], stroke);
+                    // Major length stays visible as a dim readout
+                    // while the minor is being picked.
+                    let mid = self.to_screen(arael::vect::vect2d::new(
+                        c.x + dir.x * rx * 0.5,
+                        c.y + dir.y * rx * 0.5,
+                    ));
+                    painter.text(
+                        egui::Pos2::new(mid.x + 10.0, mid.y + 12.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{:.4}", rx),
+                        egui::FontId::proportional(12.0),
+                        self.colors.dimension_preview,
+                    );
+                }
+                let n = 64;
+                let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
+                    let t = i as f64 / n as f64 * std::f64::consts::TAU;
+                    let (s, co) = t.sin_cos();
+                    self.to_screen(arael::vect::vect2d::new(
+                        c.x + dir.x * rx * co - dir.y * ry * s,
+                        c.y + dir.y * rx * co + dir.x * ry * s,
+                    ))
+                }).collect();
+                painter.add(egui::Shape::line(pts, stroke));
+                // H/V marker beside the axis, line-preview convention.
+                if !state.axis_fixed && let Some(horizontal) = state.hv {
+                    let mx = (center_pt.x + end_pt.x) * 0.5;
+                    let my = (center_pt.y + end_pt.y) * 0.5;
+                    let dx = end_pt.x - center_pt.x;
+                    let dy = end_pt.y - center_pt.y;
+                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let nx = -dy / len;
+                    let ny = dx / len;
+                    let sign = if ny > 0.0 { -1.0 } else { 1.0 };
+                    let off = 10.0f32;
+                    let pos = egui::Pos2::new(mx + nx * off * sign, my + ny * off * sign);
+                    draw_hv_marker(&painter, pos, horizontal,
+                        self.colors.constraint_marker_selected);
+                }
+                // Aimed rim point: snap marker when a target took it
+                // over, else the plain cursor cross on the axis end.
+                match &state.live_snap {
+                    Some((p, t)) => draw_snap_hint(self.to_screen(*p), t),
+                    None => if !state.axis_fixed { draw_cursor_cross(end_pt); },
+                }
+            }
+            if let Some(ref t) = state.center.snap { draw_snap_hint(center_pt, t); }
         }
 
         // Rect preview
@@ -625,7 +701,14 @@ impl EditorApp {
             Tool::DrawCircle => if self.circle_draw.is_some() {
                 "Circle: click to set radius."
             } else {
-                "Circle: click to place center."
+                "Circle: click to place center. O switches to Ellipse."
+            },
+            Tool::DrawEllipse => if self.ellipse_draw.as_ref().is_some_and(|s| s.axis_fixed) {
+                "Ellipse: click the minor extent, or type its length and press Enter. Escape cancels."
+            } else if self.ellipse_draw.is_some() {
+                "Ellipse: click the end of the major axis, or type the length and click the direction (snaps to H/V; hold Q to disable)."
+            } else {
+                "Ellipse: click to place center. O switches to Circle."
             },
             Tool::DrawArc => if let Some(ref s) = self.arc_draw {
                 if s.end.is_some() {

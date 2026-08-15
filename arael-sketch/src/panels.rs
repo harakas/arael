@@ -114,24 +114,38 @@ impl EditorApp {
                     self.tool = Tool::DrawLine;
                     self.line_draw = None;
                 }
-                if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)")
-                    .on_hover_text("Click the center, then click to set the radius.")
-                    .clicked() {
-                    self.tool = Tool::DrawCircle;
-                    self.circle_draw = None;
-                }
-                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::DrawArc, "Arc (A)")
                     .on_hover_text("Click the start, the end, then a point on the arc.")
                     .clicked() {
                     self.tool = Tool::DrawArc;
                     self.arc_draw = None;
                 }
+                ui.end_row();
+                if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)")
+                    .on_hover_text("Click the center, then click to set the radius. O switches to Ellipse.")
+                    .clicked() {
+                    self.tool = Tool::DrawCircle;
+                    self.circle_draw = None;
+                }
+                if ui.selectable_label(self.tool == Tool::DrawEllipse, "Ellipse (O)")
+                    .on_hover_text("Click the center, the end of the major axis (snaps to H/V; hold Q to disable), then the minor size. Typed lengths become driving dimensions. O switches to Circle.")
+                    .clicked() {
+                    self.tool = Tool::DrawEllipse;
+                    self.cancel_ellipse_session();
+                }
+                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::DrawRect, "Rect (R)")
                     .on_hover_text("Click two opposite corners.")
                     .clicked() {
                     self.tool = Tool::DrawRect;
                     self.rect_draw = None;
+                }
+                if ui.selectable_label(self.tool == Tool::Scale, "Scale")
+                    .on_hover_text("Scale about a center: click or box-select entities, double-click a point to set the center, then type the factor.")
+                    .clicked() {
+                    self.tool = Tool::Scale;
+                    self.adopt_selection_for_scale();
+                    self.scale_center = None;
                 }
                 ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)")
@@ -160,13 +174,6 @@ impl EditorApp {
                     self.selection.clear();
                 }
                 ui.end_row();
-                if ui.selectable_label(self.tool == Tool::Scale, "Scale")
-                    .on_hover_text("Scale about a center: click or box-select entities, double-click a point to set the center, then type the factor.")
-                    .clicked() {
-                    self.tool = Tool::Scale;
-                    self.adopt_selection_for_scale();
-                    self.scale_center = None;
-                }
                 if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)")
                     .on_hover_text("Add dimensions: click a line or arc, or two points, then type the value. Double-click an existing dimension to edit it.")
                     .clicked() {
