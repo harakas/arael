@@ -43,6 +43,13 @@ impl EditorApp {
     /// harness can drive frames headlessly (eframe::Frame is not
     /// constructible outside eframe).
     pub(crate) fn update_app(&mut self, ctx: &egui::Context) {
+        // Tool-button hints must appear the moment the mouse is over
+        // the button, not after egui's default hover delay.
+        if !self.style_tuned {
+            ctx.style_mut(|s| s.interaction.tooltip_delay = 0.0);
+            self.style_tuned = true;
+        }
+
         // Handle exit request
         if self.exit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

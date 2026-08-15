@@ -260,6 +260,9 @@ pub struct EditorApp {
     /// screen coords so the rect renders correctly across pan/zoom
     /// during the drag. Cleared when the drag completes.
     pub box_select_start: Option<egui::Pos2>,
+    /// One-time egui style tweaks (instant tooltips) applied on the
+    /// first frame; the context is not available at construction.
+    style_tuned: bool,
     /// Pairs (line, host) that were already (directly or implicitly)
     /// perpendicular at drag-start. During drag the geometry is briefly
     /// off-axis so a rank-based re-check would spuriously report the
@@ -485,6 +488,7 @@ impl EditorApp {
             flash_start: None,
             drag_rank: None,
             box_select_start: None,
+            style_tuned: false,
             drag_perp_already: Vec::new(),
             drag_hv_hint: None,
             drag_line_locked_h: false,

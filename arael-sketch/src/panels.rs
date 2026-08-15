@@ -97,55 +97,79 @@ impl EditorApp {
             ui.heading("Tools");
             ui.separator();
             egui::Grid::new("tools_grid").num_columns(2).show(ui, |ui| {
-                if ui.selectable_label(self.tool == Tool::Select, "Select (Esc)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Select, "Select (Esc)")
+                    .on_hover_text("Click to select/deselect. Drag an entity to move it, drag empty space for box-select (Shift extends). Double-click a line to select its chain.")
+                    .clicked() {
                     self.tool = Tool::Select;
                 }
-                if ui.selectable_label(self.tool == Tool::DrawPoint, "Point (P)").clicked() {
+                if ui.selectable_label(self.tool == Tool::DrawPoint, "Point (P)")
+                    .on_hover_text("Click to place a point.")
+                    .clicked() {
                     self.tool = Tool::DrawPoint;
                 }
                 ui.end_row();
-                if ui.selectable_label(self.tool == Tool::DrawLine, "Line (L)").clicked() {
+                if ui.selectable_label(self.tool == Tool::DrawLine, "Line (L)")
+                    .on_hover_text("Click to place the start, then each end; every end starts the next segment. Double-click or Escape ends the chain.")
+                    .clicked() {
                     self.tool = Tool::DrawLine;
                     self.line_draw = None;
                 }
-                if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)").clicked() {
+                if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)")
+                    .on_hover_text("Click the center, then click to set the radius.")
+                    .clicked() {
                     self.tool = Tool::DrawCircle;
                     self.circle_draw = None;
                 }
                 ui.end_row();
-                if ui.selectable_label(self.tool == Tool::DrawArc, "Arc (A)").clicked() {
+                if ui.selectable_label(self.tool == Tool::DrawArc, "Arc (A)")
+                    .on_hover_text("Click the start, the end, then a point on the arc.")
+                    .clicked() {
                     self.tool = Tool::DrawArc;
                     self.arc_draw = None;
                 }
-                if ui.selectable_label(self.tool == Tool::DrawRect, "Rect (R)").clicked() {
+                if ui.selectable_label(self.tool == Tool::DrawRect, "Rect (R)")
+                    .on_hover_text("Click two opposite corners.")
+                    .clicked() {
                     self.tool = Tool::DrawRect;
                     self.rect_draw = None;
                 }
                 ui.end_row();
-                if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)")
+                    .on_hover_text("Round a corner with a tangent arc: click a corner endpoint or two joined lines, then type the radius. F switches to Chamfer.")
+                    .clicked() {
                     self.tool = Tool::Fillet;
                     self.selection.clear();
                 }
-                if ui.selectable_label(self.tool == Tool::Chamfer, "Chamfer (F)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Chamfer, "Chamfer (F)")
+                    .on_hover_text("Bevel a corner: click a corner endpoint or two joined lines, then type the distance. F switches to Fillet.")
+                    .clicked() {
                     self.tool = Tool::Chamfer;
                     self.selection.clear();
                 }
                 ui.end_row();
-                if ui.selectable_label(self.tool == Tool::Split, "Split (B)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Split, "Split (B)")
+                    .on_hover_text("Cut a line or arc at the crossings around the click; all pieces stay, constraints and dimensions transfer. B switches to Trim.")
+                    .clicked() {
                     self.tool = Tool::Split;
                     self.selection.clear();
                 }
-                if ui.selectable_label(self.tool == Tool::Trim, "Trim (B)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Trim, "Trim (B)")
+                    .on_hover_text("Delete the span of a line or arc between the crossings around the click. B switches to Split.")
+                    .clicked() {
                     self.tool = Tool::Trim;
                     self.selection.clear();
                 }
                 ui.end_row();
-                if ui.selectable_label(self.tool == Tool::Scale, "Scale").clicked() {
+                if ui.selectable_label(self.tool == Tool::Scale, "Scale")
+                    .on_hover_text("Scale about a center: click or box-select entities, double-click a point to set the center, then type the factor.")
+                    .clicked() {
                     self.tool = Tool::Scale;
                     self.adopt_selection_for_scale();
                     self.scale_center = None;
                 }
-                if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
+                if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)")
+                    .on_hover_text("Add dimensions: click a line or arc, or two points, then type the value. Double-click an existing dimension to edit it.")
+                    .clicked() {
                     self.tool = Tool::Dimension;
                     self.dim_editing = false;
                     self.dim_kind = None;
@@ -157,28 +181,43 @@ impl EditorApp {
             ui.heading("Constraints");
             ui.separator();
 
-            let constraint_btn = |ui: &mut egui::Ui, this: &mut EditorApp, ct: ConstraintType, label: &str| {
+            let constraint_btn = |ui: &mut egui::Ui, this: &mut EditorApp, ct: ConstraintType, label: &str, hint: &str| {
                 let active = matches!(this.tool, Tool::ConstraintMode(t) if t == ct);
                 let can_apply = this.can_apply_constraint(ct);
                 let can_enter = this.could_enter_constraint_mode(ct);
                 let enabled = can_apply || can_enter;
                 let btn = egui::Button::new(label).selected(active);
-                if ui.add_enabled(enabled, btn).clicked() {
+                if ui.add_enabled(enabled, btn)
+                    .on_hover_text(hint)
+                    .on_disabled_hover_text(hint)
+                    .clicked() {
                     this.try_apply_or_enter_mode(ct);
                 }
             };
-            constraint_btn(ui, self, ConstraintType::Horizontal, "Horizontal (H)");
-            constraint_btn(ui, self, ConstraintType::Vertical, "Vertical (V)");
-            constraint_btn(ui, self, ConstraintType::Coincident, "Coincident (C)");
-            constraint_btn(ui, self, ConstraintType::Parallel, "Parallel");
-            constraint_btn(ui, self, ConstraintType::Perpendicular, "Perpendicular");
-            constraint_btn(ui, self, ConstraintType::EqualLength, "Equal (=)");
-            constraint_btn(ui, self, ConstraintType::Tangent, "Tangent (T)");
-            constraint_btn(ui, self, ConstraintType::Collinear, "Collinear");
-            constraint_btn(ui, self, ConstraintType::Midpoint, "Midpoint (M)");
-            constraint_btn(ui, self, ConstraintType::Symmetry, "Symmetry (S)");
-            constraint_btn(ui, self, ConstraintType::Lock, "Lock (K)");
-            constraint_btn(ui, self, ConstraintType::ToggleConstruction, "Constr (X)");
+            constraint_btn(ui, self, ConstraintType::Horizontal, "Horizontal (H)",
+                "Make the selected lines horizontal.");
+            constraint_btn(ui, self, ConstraintType::Vertical, "Vertical (V)",
+                "Make the selected lines vertical.");
+            constraint_btn(ui, self, ConstraintType::Coincident, "Coincident (C)",
+                "Join two points or endpoints, or pin a point onto a line or arc.");
+            constraint_btn(ui, self, ConstraintType::Parallel, "Parallel",
+                "Make two lines, a line and an arc, or two arcs parallel.");
+            constraint_btn(ui, self, ConstraintType::Perpendicular, "Perpendicular",
+                "Make two lines perpendicular.");
+            constraint_btn(ui, self, ConstraintType::EqualLength, "Equal (=)",
+                "Make two lines equal length, or two arcs equal radius.");
+            constraint_btn(ui, self, ConstraintType::Tangent, "Tangent (T)",
+                "Make a line and an arc, or two arcs, tangent.");
+            constraint_btn(ui, self, ConstraintType::Collinear, "Collinear",
+                "Put two lines on the same infinite line.");
+            constraint_btn(ui, self, ConstraintType::Midpoint, "Midpoint (M)",
+                "Pin a point to the midpoint of a line or arc.");
+            constraint_btn(ui, self, ConstraintType::Symmetry, "Symmetry (S)",
+                "Mirror about a line: select two points and the axis, two arcs and the axis, or three lines (two mirrored, one axis).");
+            constraint_btn(ui, self, ConstraintType::Lock, "Lock (K)",
+                "Fix the selected points at their current positions.");
+            constraint_btn(ui, self, ConstraintType::ToggleConstruction, "Constr (X)",
+                "Toggle the selected lines/arcs between normal and construction geometry.");
 
             // Dimension tool now lives under Tools (see "Dims (D)" in
             // the tools grid above). Dimension value input renders as
