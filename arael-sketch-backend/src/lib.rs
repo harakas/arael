@@ -14,6 +14,7 @@ pub mod history;
 pub mod conflicts;
 pub mod commands;
 pub mod corner_ops;
+pub mod scale;
 pub mod split;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp_server;

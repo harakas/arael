@@ -1496,3 +1496,91 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
     Ok(ok(msg))
 }
 
+
+// ---------------------------------------------------------------------------
+// Scale
+// ---------------------------------------------------------------------------
+
+pub(crate) fn cmd_scale(ctx: &mut CommandContext, args: &str) -> CmdResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let usage = "Usage: scale <entity|selection>... about <center> <factor>";
+    let about_pos = match tokens.iter().position(|&t| t == "about") {
+        Some(p) => p,
+        None => return Err(usage.into()),
+    };
+    if about_pos == 0 {
+        return Err("No entities to scale".into());
+    }
+    let after = &tokens[about_pos + 1..];
+    if after.len() != 2 {
+        return Err(usage.into());
+    }
+    // Center: a point-like endpoint name or a coordinate.
+    let center = resolve_endpoint_pos(&ctx.sketch, after[0])
+        .or_else(|_| parse_coord(ctx, after[0], None))
+        .map_err(|e| format!("scale center '{}': {}", after[0], e))?;
+    let factor = eval_expr(&ctx.sketch, after[1])?;
+    if !factor.is_finite() || factor <= 0.0 {
+        return Err(format!("Scale factor must be positive, got {}", after[1]));
+    }
+
+    // Entities: explicit names or the current selection.
+    let mut lines: Vec<Ref<Line>> = Vec::new();
+    let mut arcs: Vec<Ref<Arc>> = Vec::new();
+    let mut points: Vec<Ref<Point>> = Vec::new();
+    let source_tokens = &tokens[..about_pos];
+    if source_tokens.len() == 1 && source_tokens[0] == "selection" {
+        for sel in &ctx.selection {
+            match sel {
+                Selection::Line(r) => if !lines.contains(r) { lines.push(*r); },
+                Selection::Arc(r) => if !arcs.contains(r) { arcs.push(*r); },
+                Selection::Point(r) => if !points.contains(r) { points.push(*r); },
+                _ => {} // endpoint/constraint/dimension selections skipped
+            }
+        }
+        if lines.is_empty() && arcs.is_empty() && points.is_empty() {
+            return Err("No lines, arcs, or points in selection".into());
+        }
+    } else {
+        for &name in source_tokens {
+            if name.starts_with('P') {
+                let r = resolve_point(&ctx.sketch, name)?;
+                if !points.contains(&r) { points.push(r); }
+            } else if is_arc_name(name) {
+                let r = resolve_arc(&ctx.sketch, name)?;
+                if !arcs.contains(&r) { arcs.push(r); }
+            } else {
+                let r = resolve_line(&ctx.sketch, name)?;
+                if !lines.contains(&r) { lines.push(r); }
+            }
+        }
+    }
+
+    // Dimension classification, for the report (the action applies
+    // the same classification).
+    let (_, report) = crate::scale::classify_scale_dims(&ctx.sketch, &lines, &arcs, &points);
+    let mut names: Vec<String> = Vec::new();
+    for r in &lines { names.push(ctx.sketch.lines[*r].name.clone()); }
+    for r in &arcs { names.push(ctx.sketch.arcs[*r].name.clone()); }
+    for r in &points { names.push(ctx.sketch.points[*r].name.clone()); }
+
+    ctx.begin_group();
+    ctx.exec(Action::Scale { lines, arcs, points, center, factor });
+    if let Some(e) = ctx.status_error.take() {
+        return Err(e);
+    }
+    let mut msg = format!(
+        "Scaled {} about ({:.3},{:.3}) x{}",
+        names.join(" "), center.x, center.y, factor
+    );
+    if !report.scaled.is_empty() {
+        msg += &format!("\n  dims scaled: {}", report.scaled.join(" "));
+    }
+    if !report.left.is_empty() {
+        let left: Vec<String> = report.left.iter()
+            .map(|(n, why)| format!("{} ({})", n, why))
+            .collect();
+        msg += &format!("\n  dims left: {}", left.join("; "));
+    }
+    Ok(ok(msg))
+}

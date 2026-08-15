@@ -590,6 +590,21 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
             }
         }
 
+        Action::Scale { lines, arcs, points, factor, .. } => {
+            if !factor.is_finite() || *factor <= 0.0 {
+                return Some(format!("Scale factor must be positive, got {}", factor));
+            }
+            if lines.is_empty() && arcs.is_empty() && points.is_empty() {
+                return Some("Scale: no entities to scale".into());
+            }
+            if lines.iter().any(|r| sketch.lines.get(*r).is_none())
+                || arcs.iter().any(|r| sketch.arcs.get(*r).is_none())
+                || points.iter().any(|r| sketch.points.get(*r).is_none())
+            {
+                return Some("Scale: an entity no longer exists".into());
+            }
+        }
+
         _ => {}
     }
 

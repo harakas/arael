@@ -176,7 +176,7 @@
 - offset tool -- DONE (offset_line / offset)
 - trim tool -- DONE (trim command + GUI tool; split engine with role-driven reference transfer)
 - split tool -- DONE (split command + GUI tool, B key cycles Split/Trim; docs in COMMANDS.md, design in docs/dev/TRIMSPLIT.md)
-- scale tool
+- scale tool -- DONE (scale command + GUI tool; uniform scale about a center, driving linear dims scale along; design in docs/dev/SCALETOOL.md)
 - text placement
 - polygon tool
 - **Duplicate constraint check**: `symmetry_pp` (point symmetry) skips duplicate detection -- DONE (registry dedup keys compare semantic endpoints with swappable sides; resolve_as_point is gone)

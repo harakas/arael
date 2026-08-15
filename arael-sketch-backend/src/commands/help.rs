@@ -91,6 +91,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "chamfer" => "chamfer L1 L2 d  or  chamfer L1.pN d (bevel a corner at distance d from the corner; breaks the shared LL coincident, trims both lines by d, adds a bevel line + corner anchor point + two equal distance dims)",
             "split" => "split L0 x,y [r]  or  split L0 by L1 L2... [nopin] (cut a line/arc at the intersections bracketing x,y, or at every crossing with the named cutters; pieces get new names, all constraints/dims/expressions transfer, cut endpoints are joined and pinned onto the cutter)",
             "trim" => "trim L0 x,y [r]  or  trim L0 by L1 L2  or  trim L0 by L1 forward|backward [nopin] (delete the span of a line/arc between crossings; same reference transfer as split; with no crossings the whole entity is deleted)",
+            "scale" => "scale L0 A0 P0 about <center> <factor>  or  scale selection about P1 1.5 (uniform scale about a point; center is an endpoint name or coordinate; driving linear dims fully inside the set scale with the geometry, others are left and reported)",
             "let" => "let name = expression (session variable, scalar or coordinate)",
             "save" => "save path.json",
             "load" => "load path.json",
@@ -113,7 +114,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
 pub(crate) const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
-    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer", "split", "trim",
+    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer", "split", "trim", "scale",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -491,6 +492,19 @@ pub fn complete(
                 _ => {
                     add_expression_completions(sketch, session_names, &mut results, current_word);
                 }
+            }
+        }
+
+        // Scale: entities (or `selection`), then `about`, center, factor.
+        "scale" => {
+            if typed_args.contains(&"about") {
+                add_points(sketch, &mut results, current_word);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            } else {
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+                add_points(sketch, &mut results, current_word);
+                add_matching(&mut results, current_word, &["selection", "about"]);
             }
         }
 

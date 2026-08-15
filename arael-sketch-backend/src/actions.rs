@@ -204,6 +204,16 @@ pub enum Action {
     /// The plan is fully resolved -- cut params, positions, cutters,
     /// keep mask -- so applying is deterministic.
     SplitEntity { plan: crate::split::SplitPlan },
+    /// Uniform scale of the listed entities about `center` by
+    /// `factor`. Fully-inside driving linear dimensions scale with
+    /// the geometry (see crate::scale).
+    Scale {
+        lines: Vec<Ref<Line>>,
+        arcs: Vec<Ref<Arc>>,
+        points: Vec<Ref<Point>>,
+        center: vect2d,
+        factor: f64,
+    },
     // Drag is non-deterministic; store full state after drag completes
     Drag { snapshot: Vec<u8> },
 }
@@ -300,6 +310,7 @@ impl Action {
                 let kept = plan.keep.iter().filter(|&&k| k).count();
                 if kept < plan.keep.len() { "Trim".into() } else { "Split".into() }
             }
+            Action::Scale { factor, .. } => format!("Scale x{:.3}", factor),
             Action::Drag { .. } => "Drag".into(),
         }
     }
@@ -1688,6 +1699,11 @@ impl Action {
                         eprintln!("BUG: SplitEntity replay failed: {}", e);
                     }
                 }
+            }
+            Action::Scale { lines, arcs, points, center, factor } => {
+                crate::scale::apply_scale(sketch, lines, arcs, points, *center, *factor);
+                // Dimension values changed; expression dims re-read them.
+                return (true, created);
             }
             Action::Drag { snapshot } => {
                 // A corrupt snapshot (e.g. from a damaged save replay)

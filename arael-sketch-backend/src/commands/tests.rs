@@ -5552,3 +5552,90 @@ fn test_conflict_message_names_blocking_constraint() {
     assert!(err.contains(&format!("({})", nid)),
         "conflict rejection must name {}: {}", nid, err);
 }
+
+// -- Scale ------------------------------------------------------------
+
+#[test]
+fn test_scale_lines_about_point() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_rect 0,0 2,1");
+    run_ok(&mut ctx, "add_point 0,0");
+    let out = run_ok(&mut ctx, "scale L0 L1 L2 L3 about P0 2");
+    assert!(out.contains("Scaled L0 L1 L2 L3"), "{}", out);
+    // The far corner doubled away from the origin.
+    let l1 = resolve_line(&ctx.sketch, "L1").unwrap();
+    let p = ctx.sketch.lines[l1].p2.value;
+    assert!(near(p.x, 4.0) && near(p.y, 2.0), "far corner = {:?}", (p.x, p.y));
+    // One undo restores everything.
+    run_ok(&mut ctx, "undo");
+    let p = ctx.sketch.lines[l1].p2.value;
+    assert!(near(p.x, 2.0) && near(p.y, 1.0), "after undo = {:?}", (p.x, p.y));
+}
+
+#[test]
+fn test_scale_about_endpoint_and_coord() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 1,0 3,0");
+    run_ok(&mut ctx, "scale L0 about L0.p1 2");
+    assert!(near(line_len(&ctx, "L0"), 4.0));
+    let l0 = resolve_line(&ctx.sketch, "L0").unwrap();
+    assert!(near(ctx.sketch.lines[l0].p1.value.x, 1.0), "center endpoint stays");
+    run_ok(&mut ctx, "scale L0 about 0,0 0.5");
+    assert!(near(line_len(&ctx, "L0"), 2.0));
+}
+
+#[test]
+fn test_scale_circle_radius_and_dim() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 2,0 1");
+    run_ok(&mut ctx, "radius A0 1");
+    let out = run_ok(&mut ctx, "scale A0 about 0,0 3");
+    assert!(out.contains("dims scaled: d0"), "{}", out);
+    let a = resolve_arc(&ctx.sketch, "A0").unwrap();
+    assert!(near(ctx.sketch.arcs[a].radius.value, 3.0));
+    assert!(near(ctx.sketch.arcs[a].center.value.x, 6.0));
+    assert!(near(ctx.sketch.dimensions[0].value, 3.0));
+}
+
+#[test]
+fn test_scale_boundary_dim_reported_left() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0");
+    run_ok(&mut ctx, "add_line 0,1 2,1 noconnect");
+    run_ok(&mut ctx, "distance L0.p1 L1.p1 1");
+    let out = run_ok(&mut ctx, "scale L0 about 0,0 2");
+    assert!(out.contains("dims left: d0 (spans unscaled geometry)"), "{}", out);
+    assert!(near(ctx.sketch.dimensions[0].value, 1.0));
+}
+
+#[test]
+fn test_scale_selection_form() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0");
+    run_ok(&mut ctx, "select L0");
+    run_ok(&mut ctx, "scale selection about 0,0 1.5");
+    assert!(near(line_len(&ctx, "L0"), 3.0));
+}
+
+#[test]
+fn test_scale_rejects_bad_factor() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0");
+    let e = run_err(&mut ctx, "scale L0 about 0,0 0");
+    assert!(e.contains("positive"), "{}", e);
+    let e = run_err(&mut ctx, "scale L0 about 0,0 -1");
+    assert!(e.contains("positive"), "{}", e);
+    run_err(&mut ctx, "scale about 0,0 2");
+}
+
+#[test]
+fn test_scale_length_dim_holds_after_solve() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 3,0");
+    run_ok(&mut ctx, "length L0 3");
+    let out = run_ok(&mut ctx, "scale L0 about 0,0 2");
+    assert!(out.contains("dims scaled: d0"), "{}", out);
+    // The solve keeps the scaled length: no snap-back.
+    assert!(near(line_len(&ctx, "L0"), 6.0));
+    assert!(near(ctx.sketch.dimensions[0].value, 6.0));
+}

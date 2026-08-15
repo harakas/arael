@@ -140,6 +140,8 @@ split L0 by L1 L2            Cut L0 at every intersection with the named cutters
 trim L0 x,y [r]              Delete the span of L0 containing x,y
 trim L0 by L1 L2             Delete the span of L0 between the two cutters
 trim L0 by L1 forward        Delete from L1's crossing to the p2/end side
+scale L0 A0 about P0 2       Uniform scale about a point; center is an endpoint or coordinate
+scale selection about 0,0 0.5  Scale the current selection
 ```
 
 ### Auto-Coincident
@@ -1359,6 +1361,35 @@ crossing nearest the end. `trim by` between two cutters removes
 everything between their crossings, including any other crossings in
 between. On a closed circle/ellipse the `by` forms are rejected (the
 boundaries name two complementary spans); use the coordinate form.
+
+### Scale
+
+Uniformly scale lines, arcs and points about a center point. Every
+position moves to `center + factor * (position - center)`; radii
+multiply by the factor; angles and sweeps do not change. Lock targets
+follow their points.
+
+```
+scale L0 L1 about P0 2       Double L0 and L1 away from P0
+scale A0 about 0,0 0.5       Halve the circle about the origin
+scale L0 about L1.p1 1.5     Center named by any endpoint reference
+scale selection about P0 w/3 Factor is an expression
+scale P1 P2 about P0 2       Points can be scaled too
+```
+
+The factor must be positive; `1` is a no-op geometrically. Driving
+linear dimensions (`length`, `distance`, `hdistance`, `vdistance`,
+`radius`, `radius_b`) whose endpoints all lie inside the scaled set
+scale with the geometry: the value multiplies by the factor, literal
+range bounds too. Derived dimensions just re-measure. Dimensions that
+cannot follow are left untouched and reported with a reason:
+
+- expression-driven values (the expression still means what it says),
+- live (non-literal) range bounds,
+- linear dimensions spanning unscaled geometry.
+
+The command output lists both groups (`dims scaled:` / `dims
+left:`). The whole scale is one undo step.
 
 ## Solver Parameters
 

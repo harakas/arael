@@ -257,6 +257,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "chamfer" => cmd_chamfer(ctx, args_str),
         "split" => cmd_split(ctx, args_str),
         "trim" => cmd_trim(ctx, args_str),
+        "scale" => cmd_scale(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
         "horizontal" => cmd_horizontal(ctx, args_str),
         "vertical" => cmd_vertical(ctx, args_str),
