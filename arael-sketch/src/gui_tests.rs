@@ -888,6 +888,104 @@ fn test_scale_adopts_prior_selection() {
     assert!(near(l0.p2.value, v(4.0, 0.0), 0.05), "L0.p2 scaled: {:?}", l0.p2.value);
 }
 
+// -- Circle / rect typed inputs ---------------------------------------
+
+#[test]
+fn test_circle_typed_radius() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::O);
+    gui.click(v(0.0, 0.0));
+    assert!(gui.app.dim_editing, "radius input live from the center click");
+    gui.frame();
+    gui.type_text("2.5");
+    gui.move_to(v(1.0, 0.0)); // mouse no longer changes the radius
+    assert!((gui.app.circle_draw.as_ref().unwrap().r - 2.5).abs() < 1e-9);
+    gui.key(egui::Key::Enter); // completes without the edge click
+    assert_eq!(gui.arc_count(), 1);
+    let a = gui.sketch().arcs.iter().next().unwrap().clone();
+    assert!(a.closed && (a.radius.value - 2.5).abs() < 1e-9, "r {}", a.radius.value);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 1);
+    assert!(matches!(dims[0].kind, DimensionKind::ArcRadius(_)) && (dims[0].value - 2.5).abs() < 1e-9);
+    assert!(gui.app.circle_draw.is_none() && !gui.app.dim_editing);
+    // Click-only circle: no dim (test_circle_tool covers geometry).
+    gui.click(v(5.0, 0.0));
+    gui.click(v(6.0, 0.0));
+    assert_eq!(gui.arc_count(), 2);
+    assert_eq!(gui.sketch().dimensions.len(), 1, "click-only circle adds no dim");
+}
+
+#[test]
+fn test_circle_typed_radius_ignores_snap_and_reports_invalid() {
+    let mut gui = Gui::new();
+    gui.cmd("add_point 2,0");
+    gui.key(egui::Key::O);
+    gui.click(v(0.0, 0.0));
+    gui.move_to(v(1.98, 0.02));
+    assert!(gui.app.circle_draw.as_ref().unwrap().live_snap.is_some(), "rim snap offered while live");
+    gui.frame();
+    gui.type_text("sqrt(");
+    gui.move_to(v(1.98, 0.02));
+    assert!(gui.app.circle_draw.as_ref().unwrap().live_snap.is_none(), "typed radius: no snap");
+    gui.click(v(1.98, 0.02));
+    assert_eq!(gui.arc_count(), 0, "broken text blocks completion");
+    assert!(gui.app.status_error.as_deref().is_some_and(|e| e.contains("Radius")), "{:?}", gui.app.status_error);
+    gui.type_text("2)");
+    gui.click(v(1.98, 0.02));
+    let a = gui.sketch().arcs.iter().next().expect("created after fix").clone();
+    assert!((a.radius.value - 2f64.sqrt()).abs() < 1e-9);
+    assert_eq!(gui.sketch().point_on_arc.len(), 0, "no rim tie with a typed radius");
+    assert!(gui.sketch().dimensions[0].expr_str.as_deref() == Some("sqrt(2)"));
+}
+
+#[test]
+fn test_rect_typed_sides() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::R);
+    gui.click(v(1.0, 1.0));
+    assert!(gui.app.dim_editing, "width/height inputs live from the first corner");
+    gui.frame();
+    gui.type_text("4");
+    gui.key(egui::Key::Tab);
+    gui.frame();
+    gui.type_text("2");
+    // Quadrant follows the mouse; sides stay typed.
+    gui.move_to(v(-1.0, 2.0));
+    let s = gui.app.rect_draw.as_ref().unwrap();
+    assert!((s.w - 4.0).abs() < 1e-9 && (s.h - 2.0).abs() < 1e-9, "w {} h {}", s.w, s.h);
+    assert!(s.sx < 0.0 && s.sy > 0.0, "quadrant from the mouse");
+    gui.key(egui::Key::Enter); // both typed: completes without the click
+    assert_eq!(gui.line_count(), 4);
+    let (p1, p2) = gui.line(0);
+    assert!(near(p1, v(1.0, 1.0), 1e-9) && near(p2, v(-3.0, 1.0), 1e-9), "bottom side {:?} {:?}", p1, p2);
+    let (_, p2) = gui.line(1);
+    assert!(near(p2, v(-3.0, 3.0), 1e-9), "opposite corner {:?}", p2);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 2, "width and height dims");
+    assert!(dims.iter().any(|d| matches!(d.kind, DimensionKind::LineLength(_)) && (d.value - 4.0).abs() < 1e-9));
+    assert!(dims.iter().any(|d| matches!(d.kind, DimensionKind::LineLength(_)) && (d.value - 2.0).abs() < 1e-9));
+    // One undo step for the whole rect incl. dims.
+    gui.cmd("undo");
+    assert_eq!(gui.line_count(), 0);
+    assert!(gui.sketch().dimensions.is_empty());
+}
+
+#[test]
+fn test_rect_typed_width_only() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::R);
+    gui.click(v(0.0, 0.0));
+    gui.frame();
+    gui.type_text("3");
+    gui.click(v(1.0, 1.5)); // height from the mouse, width fixed at 3
+    assert_eq!(gui.line_count(), 4);
+    let (_, p2) = gui.line(1);
+    assert!(near(p2, v(3.0, 1.5), 1e-9), "opposite corner {:?}", p2);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 1, "only the typed width became a dim");
+    assert!((dims[0].value - 3.0).abs() < 1e-9);
+}
+
 // -- Ellipse tool -----------------------------------------------------
 
 #[test]

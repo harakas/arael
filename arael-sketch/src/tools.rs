@@ -118,8 +118,22 @@ pub struct LineDrawState {
     pub chained: bool,
 }
 
+// In-progress circle drawing. The value overlay opens with the center
+// click and live-tracks the radius under the mouse (or a rim snap);
+// typing takes it over. A typed radius becomes a driving dimension.
 pub struct CircleDrawState {
     pub center: PlacedPoint,
+    /// Radius: live until typed, then fixed.
+    pub r: f64,
+    pub typed_r: Option<String>,
+    /// Unit direction center -> mouse; places the edge point of a
+    /// typed radius.
+    pub dir: vect2d,
+    /// Snap target the rim passes through; offered while the radius
+    /// is not typed.
+    pub live_snap: Option<(vect2d, SnapTarget)>,
+    /// Last cursor position (screen); the value input trails it.
+    pub cursor: egui::Pos2,
 }
 
 // In-progress ellipse drawing. The value overlay opens with the
@@ -167,9 +181,28 @@ pub struct ArcDrawState {
 
 // Rectangle drawing: user clicks two opposite corners, we build an
 // axis-aligned rect as four lines with corner coincidents and H/V
-// constraints on the sides.
+// constraints on the sides. The value overlay opens with the first
+// corner and live-tracks width and height (Tab between them); typed
+// sides become driving length dims on the first horizontal and
+// vertical side.
 pub struct RectDrawState {
     pub corner: PlacedPoint,
+    /// Width / height: live from the mouse until typed, then fixed.
+    pub w: f64,
+    pub typed_w: Option<String>,
+    pub h: f64,
+    /// Second field's text (the first is `dim_input`).
+    pub height_text: String,
+    pub typed_h: Option<String>,
+    /// Quadrant of the opposite corner: signs of (dx, dy) from the
+    /// mouse, so typed sides still follow the mouse's side.
+    pub sx: f64,
+    pub sy: f64,
+    /// Snap target for the opposite corner; offered while neither
+    /// side is typed.
+    pub live_snap: Option<(vect2d, SnapTarget)>,
+    /// Last cursor position (screen); the value input trails it.
+    pub cursor: egui::Pos2,
 }
 
 // In-flight corner-op set (fillet or chamfer), created when the tool

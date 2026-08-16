@@ -63,10 +63,17 @@ impl EditorApp {
         if self.grab.is_some() && !matches!(self.tool, crate::tools::Tool::Select) {
             self.cancel_drag();
         }
-        // Same for an ellipse gesture: a tool switch mid-gesture would
-        // orphan the state and its value overlay.
+        // Same for a creation session (circle / ellipse / rect): a
+        // tool switch mid-gesture would orphan the state and its
+        // value overlay.
+        if self.circle_draw.is_some() && !matches!(self.tool, crate::tools::Tool::DrawCircle) {
+            self.cancel_circle_session();
+        }
         if self.ellipse_draw.is_some() && !matches!(self.tool, crate::tools::Tool::DrawEllipse) {
             self.cancel_ellipse_session();
+        }
+        if self.rect_draw.is_some() && !matches!(self.tool, crate::tools::Tool::DrawRect) {
+            self.cancel_rect_session();
         }
 
         // Keep repainting while a constraint-conflict flash is active
@@ -210,7 +217,8 @@ impl EditorApp {
             // O cycles Circle <-> Ellipse.
             if ui.input(|i| i.key_pressed(egui::Key::O)) {
                 self.tool = if self.tool == Tool::DrawCircle { Tool::DrawEllipse } else { Tool::DrawCircle };
-                self.circle_draw = None;
+                self.cancel_circle_session();
+                self.cancel_ellipse_session();
             }
             if ui.input(|i| i.key_pressed(egui::Key::A)) {
                 self.tool = Tool::DrawArc;
@@ -218,7 +226,7 @@ impl EditorApp {
             }
             if ui.input(|i| i.key_pressed(egui::Key::R)) {
                 self.tool = Tool::DrawRect;
-                self.rect_draw = None;
+                self.cancel_rect_session();
             }
             // F cycles Fillet <-> Chamfer.
             if ui.input(|i| i.key_pressed(egui::Key::F)) {
@@ -263,12 +271,12 @@ impl EditorApp {
                     self.cancel_pending_scale();
                 }
                 self.cancel_ellipse_session();
+                self.cancel_circle_session();
+                self.cancel_rect_session();
                 self.scale_center = None;
                 self.selection.clear();
                 self.line_draw = None;
-                self.circle_draw = None;
                 self.arc_draw = None;
-                self.rect_draw = None;
                 self.box_select_start = None;
                 self.dim_editing = false;
                 self.dim_kind = None;

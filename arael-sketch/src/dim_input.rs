@@ -19,10 +19,11 @@ impl EditorApp {
         {
             return Some(self.to_screen(c));
         }
-        // Ellipse session: the length input trails the cursor
-        // below-right so it never sits under the next click.
-        if let Some(state) = &self.ellipse_draw {
-            return Some(egui::Pos2::new(state.cursor.x + 18.0, state.cursor.y + 18.0));
+        // Creation session (circle / ellipse / rect): the value input
+        // trails the cursor below-right so it never sits under the
+        // next click.
+        if let Some(cursor) = self.creation_session_cursor() {
+            return Some(egui::Pos2::new(cursor.x + 18.0, cursor.y + 18.0));
         }
         let dim_ref = if let Some(idx) = self.dim_edit_did.and_then(|d| self.sketch.dimension_index_by_did(d)) {
             self.sketch.dimensions.get(idx).cloned()
@@ -54,12 +55,11 @@ impl EditorApp {
     /// near the dimension label where the user is looking.
     pub(crate) fn render_dim_input(&mut self, ui: &mut egui::Ui) {
         // Derived checkbox is meaningless during a fillet, scale or
-        // ellipse edit -- the value being typed is the control itself
-        // (radius / factor / axis length), not a dimension that could
-        // go derived.
-        if self.fillet_pending.is_none() && self.scale_pending.is_none()
-            && self.ellipse_draw.is_none()
-        {
+        // creation-session edit -- the value being typed is the
+        // control itself (radius / factor / axis length / side), not
+        // a dimension that could go derived.
+        let creation = self.creation_session_cursor().is_some();
+        if self.fillet_pending.is_none() && self.scale_pending.is_none() && !creation {
             ui.checkbox(&mut self.dim_derived, "Derived");
         }
         // Edge-detect the checkbox: on false -> true, back up what
@@ -88,22 +88,38 @@ impl EditorApp {
         // sketch currently measures; show it read-only so the user
         // can't mistakenly type a number that won't be used.
         //
-        // Ellipse axis phase: two fields -- semi-major length and
-        // absolute axis angle (degrees). Tab moves between them (egui
-        // focus traversal); a typed angle fixes the direction and
-        // becomes an xangle dim.
-        let ellipse_axis_phase = self.ellipse_draw.as_ref().is_some_and(|s| !s.axis_fixed);
-        let mut angle_response = None;
-        let response = if ellipse_axis_phase {
-            let mut angle_text = std::mem::take(&mut self.ellipse_draw.as_mut().unwrap().angle_text);
-            let mut len_response = None;
+        // Two-field sessions: the ellipse axis phase (semi-major
+        // length + absolute axis angle in degrees) and the rect (width
+        // + height). Tab moves between the fields (egui focus
+        // traversal); the second field's text lives in the session
+        // state and is swapped in for rendering.
+        #[derive(PartialEq, Clone, Copy)]
+        enum Second { None, EllipseAngle, RectHeight }
+        let second = if self.ellipse_draw.as_ref().is_some_and(|s| !s.axis_fixed) {
+            Second::EllipseAngle
+        } else if self.rect_draw.is_some() {
+            Second::RectHeight
+        } else {
+            Second::None
+        };
+        let mut second_response = None;
+        let response = if second != Second::None {
+            let mut second_text = match second {
+                Second::EllipseAngle => std::mem::take(&mut self.ellipse_draw.as_mut().unwrap().angle_text),
+                _ => std::mem::take(&mut self.rect_draw.as_mut().unwrap().height_text),
+            };
+            let label = if second == Second::EllipseAngle { "deg" } else { "h" };
+            let mut first_response = None;
             ui.horizontal(|ui| {
-                len_response = Some(ui.add(egui::TextEdit::singleline(&mut self.dim_input).desired_width(72.0)));
-                angle_response = Some(ui.add(egui::TextEdit::singleline(&mut angle_text).desired_width(56.0)));
-                ui.label("deg");
+                first_response = Some(ui.add(egui::TextEdit::singleline(&mut self.dim_input).desired_width(72.0)));
+                second_response = Some(ui.add(egui::TextEdit::singleline(&mut second_text).desired_width(72.0)));
+                ui.label(label);
             });
-            self.ellipse_draw.as_mut().unwrap().angle_text = angle_text;
-            len_response.unwrap()
+            match second {
+                Second::EllipseAngle => self.ellipse_draw.as_mut().unwrap().angle_text = second_text,
+                _ => self.rect_draw.as_mut().unwrap().height_text = second_text,
+            }
+            first_response.unwrap()
         } else {
             ui.add(
                 egui::TextEdit::singleline(&mut self.dim_input)
@@ -130,46 +146,76 @@ impl EditorApp {
         // commit). Typing also cancels the select-all this frame's
         // tracking queued -- it would select the fresh text and the
         // next keystroke would replace it.
-        if response.changed() && self.ellipse_draw.is_some() {
+        if response.changed() && creation {
             let raw = self.dim_input.trim().to_string();
             let parsed = self.parse_axis_input(&raw);
             self.dim_select_all = false;
-            let state = self.ellipse_draw.as_mut().unwrap();
             let typed = if raw.is_empty() { None } else { Some(raw) };
-            if state.axis_fixed {
-                state.typed_ry = typed;
-                if let Some((v, _)) = parsed { state.ry = v; }
-            } else {
-                state.typed_rx = typed;
-                if let Some((v, _)) = parsed { state.rx = v; }
+            if let Some(state) = self.ellipse_draw.as_mut() {
+                if state.axis_fixed {
+                    state.typed_ry = typed;
+                    if let Some((v, _)) = parsed { state.ry = v; }
+                } else {
+                    state.typed_rx = typed;
+                    if let Some((v, _)) = parsed { state.rx = v; }
+                }
+            } else if let Some(state) = self.circle_draw.as_mut() {
+                state.typed_r = typed;
+                if let Some((v, _)) = parsed { state.r = v; }
+                if state.typed_r.is_some() { state.live_snap = None; }
+            } else if let Some(state) = self.rect_draw.as_mut() {
+                state.typed_w = typed;
+                if let Some((v, _)) = parsed { state.w = v; }
+                if state.typed_w.is_some() { state.live_snap = None; }
             }
         }
-        // Ellipse axis angle field: typing takes the direction over
-        // from the mouse (dir follows once the text evaluates); an
-        // emptied field hands it back. While it still mirrors the
-        // mouse, keep it fully selected under focus so a keystroke
-        // replaces the live value.
-        if let Some(ar) = &angle_response {
-            if ar.changed() {
-                let raw = self.ellipse_draw.as_ref().unwrap().angle_text.trim().to_string();
-                let parsed = self.parse_typed_input(&raw, false);
-                let state = self.ellipse_draw.as_mut().unwrap();
-                state.typed_angle = if raw.is_empty() { None } else { Some(raw) };
-                if state.typed_angle.is_some() && let Some((deg, _)) = parsed {
-                    let (s, c) = deg.to_radians().sin_cos();
-                    state.dir = arael::vect::vect2d::new(c, s);
-                    state.hv = None;
-                    state.live_snap = None;
+        // Second field (ellipse angle / rect height): typing takes it
+        // over from the mouse (the value follows once the text
+        // evaluates); an emptied field hands it back. While it still
+        // mirrors the mouse, keep it fully selected under focus so a
+        // keystroke replaces the live value.
+        if let Some(sr) = &second_response {
+            if sr.changed() {
+                match second {
+                    Second::EllipseAngle => {
+                        let raw = self.ellipse_draw.as_ref().unwrap().angle_text.trim().to_string();
+                        let parsed = self.parse_typed_input(&raw, false);
+                        let state = self.ellipse_draw.as_mut().unwrap();
+                        state.typed_angle = if raw.is_empty() { None } else { Some(raw) };
+                        if state.typed_angle.is_some() && let Some((deg, _)) = parsed {
+                            let (s, c) = deg.to_radians().sin_cos();
+                            state.dir = arael::vect::vect2d::new(c, s);
+                            state.hv = None;
+                            state.live_snap = None;
+                        }
+                    }
+                    _ => {
+                        let raw = self.rect_draw.as_ref().unwrap().height_text.trim().to_string();
+                        let parsed = self.parse_axis_input(&raw);
+                        let state = self.rect_draw.as_mut().unwrap();
+                        state.typed_h = if raw.is_empty() { None } else { Some(raw) };
+                        if let Some((v, _)) = parsed { state.h = v; }
+                        if state.typed_h.is_some() { state.live_snap = None; }
+                    }
                 }
             }
-            if ar.has_focus() && self.ellipse_draw.as_ref().unwrap().typed_angle.is_none() {
-                let mut st = egui::TextEdit::load_state(ui.ctx(), ar.id).unwrap_or_default();
-                let len = self.ellipse_draw.as_ref().unwrap().angle_text.len();
+            let (untyped, len) = match second {
+                Second::EllipseAngle => {
+                    let s = self.ellipse_draw.as_ref().unwrap();
+                    (s.typed_angle.is_none(), s.angle_text.len())
+                }
+                _ => {
+                    let s = self.rect_draw.as_ref().unwrap();
+                    (s.typed_h.is_none(), s.height_text.len())
+                }
+            };
+            if sr.has_focus() && untyped {
+                let mut st = egui::TextEdit::load_state(ui.ctx(), sr.id).unwrap_or_default();
                 st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
                     egui::text::CCursor::new(0),
                     egui::text::CCursor::new(len),
                 )));
-                egui::TextEdit::store_state(ui.ctx(), ar.id, st);
+                egui::TextEdit::store_state(ui.ctx(), sr.id, st);
             }
         }
         // Select all text when entering edit mode (one-shot flag)
@@ -194,6 +240,10 @@ impl EditorApp {
                 self.cancel_pending_scale();
             } else if self.ellipse_draw.is_some() {
                 self.cancel_ellipse_session();
+            } else if self.circle_draw.is_some() {
+                self.cancel_circle_session();
+            } else if self.rect_draw.is_some() {
+                self.cancel_rect_session();
             } else {
                 self.dim_editing = false;
                 self.dim_kind = None;
@@ -214,6 +264,21 @@ impl EditorApp {
             }
             // Otherwise Enter keeps the typed value; the next click
             // is still needed for direction / minor side.
+            return;
+        }
+        if enter_pressed && self.circle_draw.is_some() {
+            // Radius typed: Enter completes without the edge click.
+            if self.circle_draw.as_ref().unwrap().typed_r.is_some() {
+                self.complete_circle();
+            }
+            return;
+        }
+        if enter_pressed && let Some(state) = self.rect_draw.as_ref() {
+            // Both sides typed: Enter completes without the corner
+            // click (quadrant from the mouse's side).
+            if state.typed_w.is_some() && state.typed_h.is_some() {
+                self.complete_rect();
+            }
             return;
         }
         if enter_pressed && self.scale_pending.is_some() {
@@ -419,7 +484,7 @@ impl EditorApp {
                 self.fillet_pending = None;
             }
         } else if !response.has_focus() && self.dim_editing
-            && !angle_response.as_ref().is_some_and(|r| r.has_focus())
+            && !second_response.as_ref().is_some_and(|r| r.has_focus())
         {
             // Keep the value field focused -- unless the user tabbed
             // into the ellipse angle field.

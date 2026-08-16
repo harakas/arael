@@ -579,37 +579,142 @@ impl EditorApp {
     }
 
     /// Canvas input for `Tool::DrawCircle`.
-    pub(crate) fn handle_draw_circle(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
-        if response.clicked_by(egui::PointerButton::Primary) {
-            self.begin_group();
-            if let Some(state) = self.circle_draw.take() {
-                // Second click: edge point
-                let snap = self.find_snap_target(mouse_sketch, hit_threshold);
-                let edge = snap.map_or(mouse_sketch, |(p, _)| p);
-                // Rejected creation (zero radius): gesture
-                // ends, frame still renders.
-                if let Some(new_arc) = self.exec(Action::AddCircle { center: state.center.pos, edge }).arc() {
-                    // Auto-coincident for center
-                    if let Some(s) = state.center.snap {
-                        self.apply_snap_coincident_arc(s, new_arc, ArcPoint::Center, state.center.pos);
-                    }
-                    // Auto-coincident for edge (point on circle)
-                    if let Some((_, s)) = snap {
-                        if let Some(helper) = self.exec(Action::AddHelperPoint { pos: edge }).point() {
-                            self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
-                            self.apply_snap_coincident_point(s, helper);
-                        }
-                    }
+    pub(crate) fn handle_draw_circle(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        // Live tracking: the radius follows the mouse (or a rim snap)
+        // until typed; the input mirrors it fully selected. A snap is
+        // offered only while the radius is not typed, so a snapped
+        // point is always one the rim passes through.
+        if self.circle_draw.is_some() {
+            let (c, typed) = {
+                let s = self.circle_draw.as_ref().unwrap();
+                (s.center.pos, s.typed_r.is_some())
+            };
+            let snap = if typed { None } else {
+                self.find_snap_target(mouse_sketch, hit_threshold).filter(|(p, _)| {
+                    let dx = p.x - c.x;
+                    let dy = p.y - c.y;
+                    dx * dx + dy * dy > 1e-12
+                })
+            };
+            let state = self.circle_draw.as_mut().unwrap();
+            state.cursor = mouse_screen;
+            state.live_snap = None;
+            let edge = snap.map_or(mouse_sketch, |(p, _)| p);
+            let dx = edge.x - c.x;
+            let dy = edge.y - c.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 1e-9 {
+                state.dir = vect2d::new(dx / len, dy / len);
+                if !typed {
+                    state.r = len;
+                    state.live_snap = snap;
+                    self.dim_input = format!("{:.4}", len);
+                    self.dim_select_all = true;
                 }
-            } else {
-                // First click: center
-                let snap = self.find_snap_target(mouse_sketch, hit_threshold);
-                let center = snap.map_or(mouse_sketch, |(p, _)| p);
-                self.circle_draw = Some(CircleDrawState {
-                    center: PlacedPoint { pos: center, snap: snap.map(|(_, t)| t) },
-                });
             }
         }
+
+        if !response.clicked_by(egui::PointerButton::Primary) {
+            return;
+        }
+        if self.circle_draw.is_none() {
+            // First click: center. Opens the value overlay.
+            let snap = self.find_snap_target(mouse_sketch, hit_threshold);
+            let center = snap.map_or(mouse_sketch, |(p, _)| p);
+            self.circle_draw = Some(CircleDrawState {
+                center: PlacedPoint { pos: center, snap: snap.map(|(_, t)| t) },
+                r: 0.0,
+                typed_r: None,
+                dir: vect2d::new(1.0, 0.0),
+                live_snap: None,
+                cursor: mouse_screen,
+            });
+            self.open_creation_input();
+        } else if self.circle_draw.as_ref().unwrap().typed_r.is_some()
+            || self.circle_draw.as_ref().unwrap().r > 1e-9
+        {
+            // Second click: edge point. Typed text always goes
+            // through complete_circle so a broken value is reported.
+            self.complete_circle();
+        }
+    }
+
+    /// Create the circle from the session values, add a radius dim
+    /// for a typed radius, and end the session. Called by the edge
+    /// click and by Enter with a typed radius. Typed text that does
+    /// not evaluate keeps the session open with a status error.
+    pub(crate) fn complete_circle(&mut self) -> bool {
+        let Some(s) = self.circle_draw.as_ref() else { return false };
+        let typed = match s.typed_r.clone() {
+            None => None,
+            Some(raw) => match self.parse_axis_input(&raw) {
+                Some(parsed) => Some(parsed),
+                None => {
+                    self.status_error = Some(format!("Radius: invalid value or expression: {}", raw));
+                    return false;
+                }
+            },
+        };
+        let state = self.circle_draw.take().unwrap();
+        let center = state.center.pos;
+        let edge = vect2d::new(center.x + state.dir.x * state.r, center.y + state.dir.y * state.r);
+        self.begin_group();
+        // Rejected creation (zero radius) ends the gesture.
+        let Some(arc) = self.exec(Action::AddCircle { center, edge }).arc() else {
+            self.close_creation_input();
+            return false;
+        };
+        if let Some(sn) = state.center.snap {
+            self.apply_snap_coincident_arc(sn, arc, ArcPoint::Center, center);
+        }
+        // Rim snap: helper on the circle, tied to the target.
+        if let Some((pos, target)) = state.live_snap
+            && let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point()
+        {
+            self.exec(Action::ApplyPointOnArc { point: helper, arc });
+            self.apply_snap_coincident_point(target, helper);
+        }
+        if let Some((value, expr)) = typed {
+            let value = if expr.is_some() { 0.0 } else { value };
+            self.exec(Action::AddDimension {
+                kind: DimensionKind::ArcRadius(arc), value, expr, derived: false, range: None,
+            });
+        }
+        self.close_creation_input();
+        true
+    }
+
+    /// Drop an in-progress circle gesture and close its value overlay.
+    pub(crate) fn cancel_circle_session(&mut self) {
+        if self.circle_draw.take().is_some() {
+            self.close_creation_input();
+        }
+    }
+
+    /// Open the value overlay for a creation session (circle,
+    /// ellipse, rect): it live-tracks the first value from the mouse.
+    fn open_creation_input(&mut self) {
+        self.dim_editing = true;
+        self.dim_kind = None;
+        self.dim_edit_did = None;
+        self.dim_derived = false;
+        self.dim_input.clear();
+        self.dim_select_all = true;
+    }
+
+    fn close_creation_input(&mut self) {
+        self.dim_editing = false;
+        self.dim_kind = None;
+        self.dim_edit_did = None;
+        self.dim_input.clear();
+    }
+
+    /// Whether a creation session (circle, ellipse, rect) owns the
+    /// value overlay, and where its cursor last was.
+    pub(crate) fn creation_session_cursor(&self) -> Option<egui::Pos2> {
+        self.circle_draw.as_ref().map(|s| s.cursor)
+            .or(self.ellipse_draw.as_ref().map(|s| s.cursor))
+            .or(self.rect_draw.as_ref().map(|s| s.cursor))
     }
 
     /// Canvas input for `Tool::DrawEllipse`: click 1 center, click 2
@@ -793,13 +898,7 @@ impl EditorApp {
             live_snap: None,
             rim_snaps: Vec::new(),
         });
-        // Open the value overlay: it live-tracks the semi-major.
-        self.dim_editing = true;
-        self.dim_kind = None;
-        self.dim_edit_did = None;
-        self.dim_derived = false;
-        self.dim_input.clear();
-        self.dim_select_all = true;
+        self.open_creation_input();
     }
 
     /// Parse a typed ellipse value: a plain number or `=expr` snapshot
@@ -859,7 +958,7 @@ impl EditorApp {
         }).arc();
         let Some(arc) = created else {
             // Rejected creation ends the gesture.
-            self.close_ellipse_input();
+            self.close_creation_input();
             return false;
         };
         if let Some(s) = state.center.snap {
@@ -877,15 +976,8 @@ impl EditorApp {
             let value = if expr.is_some() { 0.0 } else { value };
             self.exec(Action::AddDimension { kind: kind_of(arc), value, expr, derived: false, range: None });
         }
-        self.close_ellipse_input();
+        self.close_creation_input();
         true
-    }
-
-    fn close_ellipse_input(&mut self) {
-        self.dim_editing = false;
-        self.dim_kind = None;
-        self.dim_edit_did = None;
-        self.dim_input.clear();
     }
 
     /// Drop an in-progress ellipse gesture and close its value
@@ -893,7 +985,7 @@ impl EditorApp {
     /// complete_ellipse. Safe to call in any state.
     pub(crate) fn cancel_ellipse_session(&mut self) {
         if self.ellipse_draw.take().is_some() {
-            self.close_ellipse_input();
+            self.close_creation_input();
         }
     }
 
@@ -947,79 +1039,166 @@ impl EditorApp {
         }
     }
 
-    /// Canvas input for `Tool::DrawRect`.
-    pub(crate) fn handle_draw_rect(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
-        if response.clicked_by(egui::PointerButton::Primary) {
-            self.begin_group();
-            if let Some(state) = self.rect_draw.take() {
-                // Second click: opposite corner. Snap it, reject
-                // zero-area rects.
-                let snap = self.find_snap_target(mouse_sketch, hit_threshold);
-                let p2 = snap.map_or(mouse_sketch, |(p, _)| p);
-                let dx = p2.x - state.corner.pos.x;
-                let dy = p2.y - state.corner.pos.y;
-                if dx.abs() < 1e-6 || dy.abs() < 1e-6 {
-                    self.rect_draw = Some(state);
-                } else {
-                    let bl = state.corner.pos;
-                    let br = vect2d::new(p2.x, state.corner.pos.y);
-                    let tr = p2;
-                    let tl = vect2d::new(state.corner.pos.x, p2.y);
-                    let corners = [bl, br, tr, tl];
+    /// Canvas input for `Tool::DrawRect`: click the first corner, then
+    /// the opposite one. The value overlay is live from the first
+    /// click with width and height (Tab between them); typed sides
+    /// are fixed -- the mouse then only picks the quadrant -- and
+    /// become driving length dims on completion.
+    pub(crate) fn handle_draw_rect(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        // Live tracking: untyped sides follow the mouse (or a corner
+        // snap, offered only while neither side is typed -- the
+        // corner must land exactly on the target for the coincidence
+        // to be honest); the quadrant always follows the mouse.
+        if self.rect_draw.is_some() {
+            let (c, typed_w, typed_h) = {
+                let s = self.rect_draw.as_ref().unwrap();
+                (s.corner.pos, s.typed_w.is_some(), s.typed_h.is_some())
+            };
+            let snap = if typed_w || typed_h { None } else {
+                self.find_snap_target(mouse_sketch, hit_threshold).filter(|(p, _)| {
+                    (p.x - c.x).abs() > 1e-6 && (p.y - c.y).abs() > 1e-6
+                })
+            };
+            let state = self.rect_draw.as_mut().unwrap();
+            state.cursor = mouse_screen;
+            state.live_snap = None;
+            let p = snap.map_or(mouse_sketch, |(p, _)| p);
+            let dx = p.x - c.x;
+            let dy = p.y - c.y;
+            if dx.abs() > 1e-9 { state.sx = dx.signum(); }
+            if dy.abs() > 1e-9 { state.sy = dy.signum(); }
+            if !typed_w && dx.abs() > 1e-9 {
+                state.w = dx.abs();
+                self.dim_input = format!("{:.4}", dx.abs());
+                self.dim_select_all = true;
+            }
+            if !typed_h && dy.abs() > 1e-9 {
+                state.h = dy.abs();
+                state.height_text = format!("{:.4}", dy.abs());
+            }
+            if !typed_w && !typed_h {
+                state.live_snap = snap;
+            }
+        }
 
-                    let mut lines: std::vec::Vec<Ref<Line>> = std::vec::Vec::with_capacity(4);
-                    for i in 0..4 {
-                        let a = corners[i];
-                        let b = corners[(i + 1) % 4];
-                        match self.exec(Action::AddLine { p1: a, p2: b }).line() {
-                            Some(r) => lines.push(r),
-                            None => break,
-                        }
-                    }
-                    if lines.len() < 4 {
-                        // Atomic: a failed side rolls the
-                        // partial rect back (the sides so
-                        // far are the current undo group).
-                        let rejection = self.status_error.take();
-                        if !lines.is_empty()
-                            && let Some((restored, cur)) = self.history.undo() {
-                                self.sketch = restored.into();
-                                self.command_cursor = cur.pos;
-                                self.command_cursor_tangent = cur.tangent;
-                                self.refresh_dof();
-                        }
-                        self.status_error = rejection;
-                    } else {
+        if !response.clicked_by(egui::PointerButton::Primary) {
+            return;
+        }
+        if self.rect_draw.is_none() {
+            // First click: corner, snap to nearby entity. Opens the
+            // value overlay.
+            let snap = self.find_snap_target(mouse_sketch, hit_threshold);
+            let corner = snap.map_or(mouse_sketch, |(p, _)| p);
+            self.rect_draw = Some(RectDrawState {
+                corner: PlacedPoint { pos: corner, snap: snap.map(|(_, t)| t) },
+                w: 0.0,
+                typed_w: None,
+                h: 0.0,
+                height_text: String::new(),
+                typed_h: None,
+                sx: 1.0,
+                sy: 1.0,
+                live_snap: None,
+                cursor: mouse_screen,
+            });
+            self.open_creation_input();
+        } else {
+            // Second click: opposite corner. A zero-area rect waits;
+            // typed text always goes through complete_rect so a
+            // broken value is reported.
+            let s = self.rect_draw.as_ref().unwrap();
+            if s.typed_w.is_some() || s.typed_h.is_some() || (s.w > 1e-6 && s.h > 1e-6) {
+                self.complete_rect();
+            }
+        }
+    }
 
-                    // Corner coincidents: L(i).p2 = L(i+1).p1
-                    for i in 0..4 {
-                        self.exec(Action::ApplyCoincidentLL21 {
-                            a: lines[i],
-                            b: lines[(i + 1) % 4],
-                        });
-                    }
-
-                    // Axis-aligned: top/bottom horizontal, sides vertical.
-                    self.exec(Action::ApplyHorizontal { lines: vec![lines[0], lines[2]] });
-                    self.exec(Action::ApplyVertical { lines: vec![lines[1], lines[3]] });
-
-                    // External snap for bl (L0.p1) and tr (L1.p2).
-                    if let Some(s) = state.corner.snap {
-                        self.apply_snap_coincident(s, lines[0], true);
-                    }
-                    if let Some((_, s)) = snap {
-                        self.apply_snap_coincident(s, lines[1], false);
-                    }
-                    } // end else (all four sides created)
+    /// Build the rect from the session values -- four lines, corner
+    /// coincidents, H/V, snaps, and length dims for typed sides -- as
+    /// one undo group, and end the session. Called by the corner
+    /// click and by Enter with both sides typed. Typed text that does
+    /// not evaluate keeps the session open with a status error.
+    pub(crate) fn complete_rect(&mut self) -> bool {
+        let Some(s) = self.rect_draw.as_ref() else { return false };
+        let mut typed = [None, None];
+        for (i, (raw, what)) in [(s.typed_w.clone(), "Width"), (s.typed_h.clone(), "Height")].into_iter().enumerate() {
+            let Some(raw) = raw else { continue };
+            match self.parse_axis_input(&raw) {
+                Some(parsed) => typed[i] = Some(parsed),
+                None => {
+                    self.status_error = Some(format!("{}: invalid value or expression: {}", what, raw));
+                    return false;
                 }
-            } else {
-                // First click: opposite corner, snap to nearby entity.
-                let snap = self.find_snap_target(mouse_sketch, hit_threshold);
-                let corner = snap.map_or(mouse_sketch, |(p, _)| p);
-                self.rect_draw = Some(RectDrawState {
-                    corner: PlacedPoint { pos: corner, snap: snap.map(|(_, t)| t) },
+            }
+        }
+        let s = self.rect_draw.as_ref().unwrap();
+        if s.w < 1e-6 || s.h < 1e-6 { return false; }
+        let state = self.rect_draw.take().unwrap();
+        let bl = state.corner.pos;
+        let tr = vect2d::new(bl.x + state.sx * state.w, bl.y + state.sy * state.h);
+        let br = vect2d::new(tr.x, bl.y);
+        let tl = vect2d::new(bl.x, tr.y);
+        let corners = [bl, br, tr, tl];
+
+        self.begin_group();
+        let mut lines: std::vec::Vec<Ref<Line>> = std::vec::Vec::with_capacity(4);
+        for i in 0..4 {
+            let a = corners[i];
+            let b = corners[(i + 1) % 4];
+            match self.exec(Action::AddLine { p1: a, p2: b }).line() {
+                Some(r) => lines.push(r),
+                None => break,
+            }
+        }
+        if lines.len() < 4 {
+            // Atomic: a failed side rolls the partial rect back (the
+            // sides so far are the current undo group).
+            let rejection = self.status_error.take();
+            if !lines.is_empty()
+                && let Some((restored, cur)) = self.history.undo() {
+                    self.sketch = restored.into();
+                    self.command_cursor = cur.pos;
+                    self.command_cursor_tangent = cur.tangent;
+                    self.refresh_dof();
+            }
+            self.status_error = rejection;
+            self.close_creation_input();
+            return false;
+        }
+
+        // Corner coincidents: L(i).p2 = L(i+1).p1
+        for i in 0..4 {
+            self.exec(Action::ApplyCoincidentLL21 { a: lines[i], b: lines[(i + 1) % 4] });
+        }
+        // Axis-aligned: top/bottom horizontal, sides vertical.
+        self.exec(Action::ApplyHorizontal { lines: vec![lines[0], lines[2]] });
+        self.exec(Action::ApplyVertical { lines: vec![lines[1], lines[3]] });
+        // External snap for the first corner (L0.p1) and the opposite
+        // one (L1.p2).
+        if let Some(sn) = state.corner.snap {
+            self.apply_snap_coincident(sn, lines[0], true);
+        }
+        if let Some((_, sn)) = state.live_snap {
+            self.apply_snap_coincident(sn, lines[1], false);
+        }
+        // Typed sides: length dims on the first horizontal / vertical
+        // side.
+        for (i, line) in [(0, lines[0]), (1, lines[1])] {
+            if let Some((value, expr)) = typed[i].take() {
+                let value = if expr.is_some() { 0.0 } else { value };
+                self.exec(Action::AddDimension {
+                    kind: DimensionKind::LineLength(line), value, expr, derived: false, range: None,
                 });
             }
+        }
+        self.close_creation_input();
+        true
+    }
+
+    /// Drop an in-progress rect gesture and close its value overlay.
+    pub(crate) fn cancel_rect_session(&mut self) {
+        if self.rect_draw.take().is_some() {
+            self.close_creation_input();
         }
     }
 

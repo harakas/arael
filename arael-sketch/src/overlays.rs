@@ -471,27 +471,21 @@ impl EditorApp {
             );
         }
 
-        // Circle preview
+        // Circle preview: radius from the session (mouse, rim snap or
+        // typed -- the tool handler refreshed it this frame).
         if let Some(ref state) = self.circle_draw {
-            let center = self.to_screen(state.center.pos);
-            // Live snap lookup on the edge-point click.
-            let edge_snap = self.find_snap_target(mouse_sketch, hit_threshold)
-                .filter(|(p, _)| {
-                    let dx = p.x - state.center.pos.x;
-                    let dy = p.y - state.center.pos.y;
-                    dx * dx + dy * dy > 1e-12
-                });
-            let edge_sketch = edge_snap.map_or(mouse_sketch, |(p, _)| p);
-            let edge_pt = self.to_screen(edge_sketch);
-            let radius_px = ((edge_sketch.x - state.center.pos.x).powi(2)
-                + (edge_sketch.y - state.center.pos.y).powi(2)).sqrt() as f32 * self.scale;
-            painter.circle_stroke(center, radius_px,
+            let c = state.center.pos;
+            let center = self.to_screen(c);
+            painter.circle_stroke(center, state.r as f32 * self.scale,
                 egui::Stroke::new(1.5, self.colors.preview_line));
             painter.circle_filled(center, 4.0, self.colors.endpoint);
-
             if let Some(ref t) = state.center.snap { draw_snap_hint(center, t); }
-            if let Some((_, t)) = &edge_snap { draw_snap_hint(edge_pt, t); }
-            if edge_snap.is_none() { draw_cursor_cross(edge_pt); }
+            let edge_pt = self.to_screen(arael::vect::vect2d::new(
+                c.x + state.dir.x * state.r, c.y + state.dir.y * state.r));
+            match &state.live_snap {
+                Some((p, t)) => draw_snap_hint(self.to_screen(*p), t),
+                None => draw_cursor_cross(edge_pt),
+            }
         }
 
         // Ellipse preview: center dot, axis segments, outline, and
@@ -570,30 +564,27 @@ impl EditorApp {
             if let Some(ref t) = state.center.snap { draw_snap_hint(center_pt, t); }
         }
 
-        // Rect preview
+        // Rect preview: sides and quadrant from the session (mouse,
+        // corner snap or typed -- the tool handler refreshed them
+        // this frame).
         if let Some(ref state) = self.rect_draw {
-            let corner_screen = self.to_screen(state.corner.pos);
-            painter.circle_filled(corner_screen, 4.0, self.colors.endpoint);
-            if let Some(ref t) = state.corner.snap { draw_snap_hint(corner_screen, t); }
-
-            let end_snap = self.find_snap_target(mouse_sketch, hit_threshold)
-                .filter(|(p, _)| {
-                    (p.x - state.corner.pos.x).abs() > 1e-6
-                        && (p.y - state.corner.pos.y).abs() > 1e-6
-                });
-            let end_sketch = end_snap.map_or(mouse_sketch, |(p, _)| p);
-            let end_pt = self.to_screen(end_sketch);
-            let c1 = self.to_screen(state.corner.pos);
-            let c2 = egui::Pos2::new(end_pt.x, c1.y);
-            let c3 = end_pt;
-            let c4 = egui::Pos2::new(c1.x, end_pt.y);
+            let c = state.corner.pos;
+            let c1 = self.to_screen(c);
+            painter.circle_filled(c1, 4.0, self.colors.endpoint);
+            if let Some(ref t) = state.corner.snap { draw_snap_hint(c1, t); }
+            let opposite = arael::vect::vect2d::new(c.x + state.sx * state.w, c.y + state.sy * state.h);
+            let c3 = self.to_screen(opposite);
+            let c2 = egui::Pos2::new(c3.x, c1.y);
+            let c4 = egui::Pos2::new(c1.x, c3.y);
             let stroke = egui::Stroke::new(1.5, self.colors.preview_line);
             painter.line_segment([c1, c2], stroke);
             painter.line_segment([c2, c3], stroke);
             painter.line_segment([c3, c4], stroke);
             painter.line_segment([c4, c1], stroke);
-            if let Some((_, t)) = &end_snap { draw_snap_hint(end_pt, t); }
-            if end_snap.is_none() { draw_cursor_cross(end_pt); }
+            match &state.live_snap {
+                Some((p, t)) => draw_snap_hint(self.to_screen(*p), t),
+                None => draw_cursor_cross(c3),
+            }
         }
 
         // Arc preview
@@ -699,7 +690,7 @@ impl EditorApp {
                 "Line: click to place start point. Snaps to nearby points/endpoints."
             },
             Tool::DrawCircle => if self.circle_draw.is_some() {
-                "Circle: click to set radius."
+                "Circle: click to set the radius, or type it and press Enter. Escape cancels."
             } else {
                 "Circle: click to place center. O switches to Ellipse."
             },
@@ -720,7 +711,7 @@ impl EditorApp {
                 "Arc: click to place start point."
             },
             Tool::DrawRect => if self.rect_draw.is_some() {
-                "Rect: click to place opposite corner."
+                "Rect: click the opposite corner, or type the width, Tab, the height and press Enter. Escape cancels."
             } else {
                 "Rect: click to place first corner."
             },

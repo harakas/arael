@@ -122,10 +122,10 @@ impl EditorApp {
                 }
                 ui.end_row();
                 if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)")
-                    .on_hover_text("Click the center, then click to set the radius. O switches to Ellipse.")
+                    .on_hover_text("Click the center, then click to set the radius -- or type it. A typed radius becomes a driving dimension. O switches to Ellipse.")
                     .clicked() {
                     self.tool = Tool::DrawCircle;
-                    self.circle_draw = None;
+                    self.cancel_circle_session();
                 }
                 if ui.selectable_label(self.tool == Tool::DrawEllipse, "Ellipse (O)")
                     .on_hover_text("Click the center, the end of the major axis (snaps to H/V; hold Q to disable), then the minor size. Typed lengths become driving dimensions. O switches to Circle.")
@@ -135,10 +135,10 @@ impl EditorApp {
                 }
                 ui.end_row();
                 if ui.selectable_label(self.tool == Tool::DrawRect, "Rect (R)")
-                    .on_hover_text("Click two opposite corners.")
+                    .on_hover_text("Click two opposite corners -- or type the width, Tab, the height. Typed sides become driving dimensions.")
                     .clicked() {
                     self.tool = Tool::DrawRect;
-                    self.rect_draw = None;
+                    self.cancel_rect_session();
                 }
                 if ui.selectable_label(self.tool == Tool::Scale, "Scale")
                     .on_hover_text("Scale about a center: click or box-select entities, double-click a point to set the center, then type the factor.")
