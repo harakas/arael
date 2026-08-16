@@ -40,6 +40,26 @@ pub(crate) fn collinear_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, st
     ], stroke);
 }
 
+/// Tangent constraint glyph: a small circle with a line touching it
+/// at top-right. Shared by committed markers and live hints.
+pub(crate) fn tangent_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke: egui::Stroke) {
+    let r = s * 0.45;
+    let cx = p.x - s * 0.15;
+    let cy = p.y + s * 0.15;
+    painter.circle_stroke(egui::Pos2::new(cx, cy), r, stroke);
+    // Touch point at 45 deg, nudged outward by stroke width; the
+    // tangent runs perpendicular to that radius.
+    let k = std::f32::consts::FRAC_1_SQRT_2;
+    let ro = r + stroke.width;
+    let tx = cx + ro * k;
+    let ty = cy - ro * k;
+    let half = s * 0.9;
+    painter.line_segment([
+        egui::Pos2::new(tx - k * half, ty - k * half),
+        egui::Pos2::new(tx + k * half, ty + k * half),
+    ], stroke);
+}
+
 /// Compute (start_angle, span) for an arc respecting ccw flag.
 /// CCW arcs have positive span, CW arcs have negative span.
 fn arc_span(a: &Arc) -> (f64, f64) {
@@ -2137,25 +2157,7 @@ impl EditorApp {
                     painter.line_segment([egui::Pos2::new(p.x - s, p.y - g), egui::Pos2::new(p.x + s, p.y - g)], stroke);
                     painter.line_segment([egui::Pos2::new(p.x - s, p.y + g), egui::Pos2::new(p.x + s, p.y + g)], stroke);
                 }
-                ConstraintSymbol::Tangent => {
-                    // Small circle with a diagonal line tangent at top-right
-                    let r = s * 0.45;
-                    let cx = p.x - s * 0.15;
-                    let cy = p.y + s * 0.15;
-                    painter.circle_stroke(egui::Pos2::new(cx, cy), r, stroke);
-                    // Touch point at 45 deg, nudged outward by stroke width
-                    let k = std::f32::consts::FRAC_1_SQRT_2;
-                    let ro = r + w;
-                    let tx = cx + ro * k;
-                    let ty = cy - ro * k;
-                    // Tangent direction is perpendicular to radius.
-                    // Radius direction at 45 deg: (k, -k). Perpendicular: (k, k).
-                    let half = s * 0.9;
-                    painter.line_segment([
-                        egui::Pos2::new(tx - k * half, ty - k * half),
-                        egui::Pos2::new(tx + k * half, ty + k * half),
-                    ], stroke);
-                }
+                ConstraintSymbol::Tangent => tangent_glyph(painter, p, s, stroke),
                 ConstraintSymbol::Collinear => collinear_glyph(painter, p, s, stroke),
                 ConstraintSymbol::Midpoint => {
                     // Triangle pointing up

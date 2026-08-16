@@ -115,10 +115,10 @@ impl EditorApp {
                     self.line_draw = None;
                 }
                 if ui.selectable_label(self.tool == Tool::DrawArc, "Arc (A)")
-                    .on_hover_text("Click the start, the end, then a point on the arc.")
+                    .on_hover_text("Click the start, the end, then a point on the arc -- or type the radius. Snaps tangent to a line or arc an end is connected to. A typed radius becomes a driving dimension.")
                     .clicked() {
                     self.tool = Tool::DrawArc;
-                    self.arc_draw = None;
+                    self.cancel_arc_session();
                 }
                 ui.end_row();
                 if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)")

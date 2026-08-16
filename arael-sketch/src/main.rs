@@ -3646,6 +3646,48 @@ impl EditorApp {
         best.map(|(_, r, p)| (r, p))
     }
 
+    /// Tangent host at a snapped position: any snap on a line gives
+    /// the line and its direction; an arc endpoint / midpoint / body
+    /// snap gives the arc and its tangent there. Points and arc
+    /// centers have no tangent.
+    pub(crate) fn tangent_host_at_snap(&self, snap: SnapTarget, pos: vect2d) -> Option<(TangentHost, vect2d)> {
+        use arael_sketch_backend::geometry::{arc_param_at_point, arc_tangent_at};
+        match snap {
+            SnapTarget::LineP1(l) | SnapTarget::LineP2(l) | SnapTarget::LineMidpoint(l) | SnapTarget::Line(l) => {
+                let ln = &self.sketch.lines[l];
+                let d = vect2d::new(ln.p2.value.x - ln.p1.value.x, ln.p2.value.y - ln.p1.value.y);
+                (d.x * d.x + d.y * d.y > 1e-18).then_some((TangentHost::Line(l), d))
+            }
+            SnapTarget::ArcStart(a) => Some((TangentHost::Arc(a), arc_tangent_at(&self.sketch.arcs[a], self.sketch.arcs[a].start_angle.value))),
+            SnapTarget::ArcEnd(a) => Some((TangentHost::Arc(a), arc_tangent_at(&self.sketch.arcs[a], self.sketch.arcs[a].end_angle.value))),
+            SnapTarget::ArcMidpoint(a) | SnapTarget::ArcBody(a) => {
+                let arc = &self.sketch.arcs[a];
+                Some((TangentHost::Arc(a), arc_tangent_at(arc, arc_param_at_point(arc, pos))))
+            }
+            SnapTarget::Point(_) | SnapTarget::ArcCenter(_) => None,
+        }
+    }
+
+    /// Line tool: when the line starts on an arc, pull the end onto
+    /// the arc's tangent line through `start` while the cursor is
+    /// within `threshold_px` (perpendicular distance) of it. Returns
+    /// the arc and the cursor's projection onto the tangent line.
+    pub(crate) fn line_tangent_snap(&self, start_snap: Option<SnapTarget>, start: vect2d, cursor: vect2d, threshold_px: f32) -> Option<(Ref<Arc>, vect2d)> {
+        if self.snap_disabled { return None; }
+        let (TangentHost::Arc(arc), t) = self.tangent_host_at_snap(start_snap?, start)? else { return None };
+        let tl = (t.x * t.x + t.y * t.y).sqrt();
+        if tl < 1e-12 { return None; }
+        let (tx, ty) = (t.x / tl, t.y / tl);
+        let cx = cursor.x - start.x;
+        let cy = cursor.y - start.y;
+        let along = cx * tx + cy * ty;
+        let across = -cx * ty + cy * tx;
+        // Too short a segment for the hint to mean anything.
+        if (along.abs() as f32) * self.scale < threshold_px * 3.0 { return None; }
+        if (across.abs() as f32) * self.scale >= threshold_px { return None; }
+        Some((arc, vect2d::new(start.x + tx * along, start.y + ty * along)))
+    }
+
     /// Auto-collinear host search. Mirrors `find_best_perp_host_at`
     /// but looks for a host whose *infinite* line passes through
     /// `anchor` AND is close to `cursor` in the perpendicular sense

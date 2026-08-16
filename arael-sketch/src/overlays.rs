@@ -24,6 +24,16 @@ pub(crate) fn draw_hv_marker(painter: &egui::Painter, pos: egui::Pos2, horizonta
     crate::drawing::hv_glyph(painter, pos, horizontal, 7.0, egui::Stroke::new(2.0, color));
 }
 
+/// Draw the Tangent glyph at hint size, next to `contact` on the side
+/// away from `toward` (so it does not sit on the curve being drawn).
+pub(crate) fn draw_tangent_marker(painter: &egui::Painter, contact: egui::Pos2, toward: egui::Pos2, color: egui::Color32) {
+    let dx = toward.x - contact.x;
+    let dy = toward.y - contact.y;
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let pos = egui::Pos2::new(contact.x - dx / len * 14.0, contact.y - dy / len * 14.0);
+    crate::drawing::tangent_glyph(painter, pos, 7.0, egui::Stroke::new(2.0, color));
+}
+
 // Small right-angle corner marker placed at the corner where the drawn
 // line meets the host line. Two short segments form the open "L".
 //
@@ -326,27 +336,56 @@ impl EditorApp {
             // endpoint, pull it onto the nearest axis through the
             // start so the user sees the axis-aligned line they
             // will commit.
+            // Auto-tangent preview: a line started on an arc pulls
+            // onto the arc's tangent (same gating as the click).
+            let tangent_preview = if combined.is_none()
+                && end_perp.is_none()
+                && perp.is_none()
+                && collinear_preview.is_none()
+                && matches!(end_snap, None | Some((_, SnapTarget::Line(_))))
+            {
+                self.line_tangent_snap(state.start.snap, state.start.pos, mouse_sketch, crate::PERP_SNAP_PX)
+                    .map(|(arc, p)| {
+                        let p = match end_snap {
+                            Some((_, SnapTarget::Line(other))) => {
+                                let ol = &self.sketch.lines[other];
+                                let (odx, ody) = (ol.p2.value.x - ol.p1.value.x, ol.p2.value.y - ol.p1.value.y);
+                                let (tdx, tdy) = (p.x - state.start.pos.x, p.y - state.start.pos.y);
+                                if (tdx * ody - tdy * odx).abs() >= 1e-9 {
+                                    line_line_intersection(state.start.pos, p, ol.p1.value, ol.p2.value)
+                                } else { p }
+                            }
+                            _ => p,
+                        };
+                        (arc, p)
+                    })
+            } else { None };
             let hv_preview = if !self.snap_disabled
                 && combined.is_none()
                 && end_perp.is_none()
                 && end_snap.is_none()
                 && perp.is_none()
                 && collinear_preview.is_none()
+                && tangent_preview.is_none()
             {
                 hv_snap_from(state.start.pos, mouse_sketch, self.scale, crate::PERP_SNAP_PX)
             } else { None };
-            let end_pt = match (combined, &end_perp, &end_snap, &perp, &collinear_preview, &hv_preview) {
-                (Some(p), _, _, _, _, _) => self.to_screen(p),
-                (_, Some((_, p)), _, _, _, _) => self.to_screen(*p),
-                (_, _, Some((p, _)), _, _, _) => self.to_screen(*p),
-                (_, _, None, Some((_, p)), _, _) => self.to_screen(*p),
-                (_, _, _, _, Some((_, p)), _) => self.to_screen(*p),
-                (_, _, _, _, _, Some((_, p))) => self.to_screen(*p),
+            let end_pt = match (combined, &end_perp, &tangent_preview, &end_snap, &perp, &collinear_preview, &hv_preview) {
+                (Some(p), _, _, _, _, _, _) => self.to_screen(p),
+                (_, Some((_, p)), _, _, _, _, _) => self.to_screen(*p),
+                (_, _, Some((_, p)), _, _, _, _) => self.to_screen(*p),
+                (_, _, _, Some((p, _)), _, _, _) => self.to_screen(*p),
+                (_, _, _, None, Some((_, p)), _, _) => self.to_screen(*p),
+                (_, _, _, _, _, Some((_, p)), _) => self.to_screen(*p),
+                (_, _, _, _, _, _, Some((_, p))) => self.to_screen(*p),
                 _ => mouse_screen,
             };
             painter.line_segment([p1, end_pt],
                 egui::Stroke::new(1.5, self.colors.preview_line));
             painter.circle_filled(p1, 4.0, self.colors.endpoint);
+            if tangent_preview.is_some() {
+                draw_tangent_marker(&painter, p1, end_pt, self.colors.constraint_marker_selected);
+            }
             if let Some((host, p)) = collinear_preview {
                 // Marker on the drawn line (side-offset from its
                 // own midpoint), and on the host at its committed
@@ -596,15 +635,10 @@ impl EditorApp {
                 let end_screen = self.to_screen(end);
                 painter.circle_filled(end_screen, 4.0, self.colors.endpoint);
                 if let Some(t) = snap_end { draw_snap_hint(end_screen, t); }
-                // Live snap for the mid-point click.
-                let mid_snap = self.find_snap_target(mouse_sketch, hit_threshold)
-                    .filter(|(p, _)| {
-                        let d_s = (p.x - state.start.pos.x).powi(2) + (p.y - state.start.pos.y).powi(2);
-                        let d_e = (p.x - end.x).powi(2) + (p.y - end.y).powi(2);
-                        d_s > 1e-12 && d_e > 1e-12
-                    });
-                let mid_sketch = mid_snap.map_or(mouse_sketch, |(p, _)| p);
-                // Preview arc through start, end, and mid (or mouse).
+                // Preview arc through start, end and the third point
+                // the tool handler resolved this frame (mouse, point
+                // snap, tangent snap or typed radius).
+                let mid_sketch = state.mid;
                 if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(state.start.pos, end, mid_sketch) {
                     let norm = |v: f64| -> f64 { let rv = v % std::f64::consts::TAU; if rv < 0.0 { rv + std::f64::consts::TAU } else { rv } };
                     let span = if ccw { norm(ea - sa) } else { -norm(sa - ea) };
@@ -618,8 +652,14 @@ impl EditorApp {
                             egui::Stroke::new(1.5, self.colors.preview_line));
                     }
                 }
-                if let Some((_, t)) = &mid_snap { draw_snap_hint(self.to_screen(mid_sketch), t); }
-                if mid_snap.is_none() { draw_cursor_cross(self.to_screen(mid_sketch)); }
+                match &state.live_snap {
+                    Some((p, t)) => draw_snap_hint(self.to_screen(*p), t),
+                    None => draw_cursor_cross(self.to_screen(mid_sketch)),
+                }
+                if let Some((_, anchor)) = state.tangent {
+                    draw_tangent_marker(&painter, self.to_screen(anchor), self.to_screen(mid_sketch),
+                        self.colors.constraint_marker_selected);
+                }
             } else {
                 // Only start placed; draw line to mouse as hint.
                 let end_snap = self.find_snap_target(mouse_sketch, hit_threshold)
@@ -703,7 +743,7 @@ impl EditorApp {
             },
             Tool::DrawArc => if let Some(ref s) = self.arc_draw {
                 if s.end.is_some() {
-                    "Arc: click a point on the arc."
+                    "Arc: click a point on the arc, or type the radius and press Enter (mouse picks the side). Escape cancels."
                 } else {
                     "Arc: click to place end point."
                 }

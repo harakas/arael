@@ -485,12 +485,41 @@ impl EditorApp {
                 } else { None };
                 if let Some((_, p)) = collinear_host { end_pos = p; }
 
+                // Auto-tangent: a line started on an arc pulls onto
+                // the arc's tangent there when the cursor is close
+                // to it. Below collinear (a line-line relation is
+                // the simpler statement of the same direction),
+                // above H/V. Not with a point-like end snap (position
+                // already fixed); an end snap on a line body meets
+                // the tangent line at their intersection.
+                let tangent_host = if !combined_used
+                    && perp_host.is_none()
+                    && end_perp_target.is_none()
+                    && collinear_host.is_none()
+                    && matches!(end_snap, None | Some((_, SnapTarget::Line(_))))
+                {
+                    self.line_tangent_snap(state.start.snap, state.start.pos, mouse_sketch, crate::PERP_SNAP_PX)
+                } else { None };
+                if let Some((_, p)) = tangent_host {
+                    end_pos = match end_snap {
+                        Some((_, SnapTarget::Line(other))) => {
+                            let ol = &self.sketch.lines[other];
+                            let (odx, ody) = (ol.p2.value.x - ol.p1.value.x, ol.p2.value.y - ol.p1.value.y);
+                            let (tdx, tdy) = (p.x - state.start.pos.x, p.y - state.start.pos.y);
+                            if (tdx * ody - tdy * odx).abs() >= 1e-9 {
+                                line_line_intersection(state.start.pos, p, ol.p1.value, ol.p2.value)
+                            } else { p }
+                        }
+                        _ => p,
+                    };
+                }
+
                 // Auto-horizontal/vertical snap: only when no
                 // stronger placement constraint has fired
                 // (end-snap position, start-perp combined,
-                // start-perp free, or end-perp, or collinear).
-                // Otherwise the drawn line already has its
-                // angle determined by the perp/snap and H/V
+                // start-perp free, or end-perp, or collinear, or
+                // tangent). Otherwise the drawn line already has
+                // its angle determined by the perp/snap and H/V
                 // would conflict.
                 let hv = if !self.snap_disabled
                     && !combined_used
@@ -498,6 +527,7 @@ impl EditorApp {
                     && end_perp_target.is_none()
                     && end_snap.is_none()
                     && collinear_host.is_none()
+                    && tangent_host.is_none()
                 {
                     hv_snap_from(state.start.pos, end_pos, self.scale, crate::PERP_SNAP_PX)
                 } else { None };
@@ -542,6 +572,13 @@ impl EditorApp {
                 // Auto-collinear constraint emission.
                 if let Some((host, _)) = collinear_host {
                     let action = Action::ApplyCollinear { a: new_line, b: host };
+                    if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
+                        self.exec(action);
+                    }
+                }
+                // Auto-tangent constraint emission.
+                if let Some((arc, _)) = tangent_host {
+                    let action = Action::ApplyTangentLA { line: new_line, arc };
                     if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
                         self.exec(action);
                     }
@@ -715,6 +752,8 @@ impl EditorApp {
         self.circle_draw.as_ref().map(|s| s.cursor)
             .or(self.ellipse_draw.as_ref().map(|s| s.cursor))
             .or(self.rect_draw.as_ref().map(|s| s.cursor))
+            // The arc's radius input exists once the chord does.
+            .or(self.arc_draw.as_ref().filter(|s| s.end.is_some()).map(|s| s.cursor))
     }
 
     /// Canvas input for `Tool::DrawEllipse`: click 1 center, click 2
@@ -990,52 +1029,201 @@ impl EditorApp {
     }
 
     /// Canvas input for `Tool::DrawArc`.
-    pub(crate) fn handle_draw_arc(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, _mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
-        if response.clicked_by(egui::PointerButton::Primary) {
-            self.begin_group();
-            let snap = self.find_snap_target(mouse_sketch, hit_threshold);
-            let pos = snap.map_or(mouse_sketch, |(p, _)| p);
-            let snap_target = snap.map(|(_, t)| t);
-
-            if let Some(state) = self.arc_draw.take() {
-                if let Some(PlacedPoint { pos: end, snap: snap_end }) = state.end {
-                    // Third click: mid point on arc, create it.
-                    // Rejected creation (collinear points):
-                    // gesture ends, frame still renders.
-                    if let Some(new_arc) = self.exec(Action::AddArc { start: state.start.pos, end, mid: pos }).arc() {
-                        // Arc start_angle always corresponds to start click,
-                        // end_angle to end click (direction stored in ccw flag)
-                        let (start_ap, end_ap) = (ArcPoint::Start, ArcPoint::End);
-
-                        // Auto-coincident for start click
-                        if let Some(s) = state.start.snap {
-                            self.apply_snap_coincident_arc(s, new_arc, start_ap, state.start.pos);
-                        }
-                        // Auto-coincident for end click
-                        if let Some(s) = snap_end {
-                            self.apply_snap_coincident_arc(s, new_arc, end_ap, end);
-                        }
-                        // Auto-coincident for mid (point on arc) - needs helper point
-                        if let Some(s) = snap_target
-                            && let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point() {
-                                self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
-                                self.apply_snap_coincident_point(s, helper);
-                        }
-                    }
+    pub(crate) fn handle_draw_arc(&mut self, _ui: &egui::Ui, _ctx: &egui::Context, response: &egui::Response, mouse_screen: egui::Pos2, mouse_sketch: vect2d, hit_threshold: f64) {
+        // Live tracking once the chord exists: resolve the third
+        // point in priority -- typed radius (mouse picks side and
+        // minor/major), point snap, tangent snap at a connected end,
+        // plain mouse -- and mirror the radius in the input.
+        if let Some(true) = self.arc_draw.as_ref().map(|s| s.end.is_some()) {
+            let (s, e, start_snap, end_snap, typed, prev_side) = {
+                let st = self.arc_draw.as_ref().unwrap();
+                let end = st.end.unwrap();
+                (st.start.pos, end.pos, st.start.snap, end.snap, st.typed_r.is_some(), st.side)
+            };
+            let snap = if typed { None } else {
+                self.find_snap_target(mouse_sketch, hit_threshold).filter(|(p, _)| {
+                    (p.x - s.x).powi(2) + (p.y - s.y).powi(2) > 1e-12
+                        && (p.x - e.x).powi(2) + (p.y - e.y).powi(2) > 1e-12
+                })
+            };
+            let tangent = if !typed && snap.is_none() {
+                self.arc_tangent_snap(s, start_snap, e, end_snap, mouse_sketch, crate::PERP_SNAP_PX)
+            } else { None };
+            let chord = vect2d::new(e.x - s.x, e.y - s.y);
+            let cross = chord.x * (mouse_sketch.y - s.y) - chord.y * (mouse_sketch.x - s.x);
+            let side = if cross.abs() > 1e-12 { cross.signum() } else { prev_side };
+            let state = self.arc_draw.as_mut().unwrap();
+            state.cursor = mouse_screen;
+            state.side = side;
+            state.live_snap = None;
+            state.tangent = None;
+            if typed {
+                // Radius fixed: bulge toward the mouse's side; the
+                // minor arc unless the mouse is farther than r from
+                // the chord. Below half the chord there is no arc --
+                // leave the third point on the chord (no preview,
+                // completion reports it).
+                let len = (chord.x * chord.x + chord.y * chord.y).sqrt();
+                let mid_c = vect2d::new((s.x + e.x) * 0.5, (s.y + e.y) * 0.5);
+                if len > 1e-12 && state.r >= len * 0.5 {
+                    let n = vect2d::new(-chord.y / len * side, chord.x / len * side);
+                    let d = (state.r * state.r - (len * 0.5) * (len * 0.5)).max(0.0).sqrt();
+                    let h = ((mouse_sketch.x - s.x) * n.x + (mouse_sketch.y - s.y) * n.y).abs();
+                    let sag = if h > state.r { state.r + d } else { state.r - d };
+                    state.mid = vect2d::new(mid_c.x + n.x * sag, mid_c.y + n.y * sag);
                 } else {
-                    // Second click: end point
-                    self.arc_draw = Some(ArcDrawState {
-                        start: state.start,
-                        end: Some(PlacedPoint { pos, snap: snap_target }),
-                    });
+                    state.mid = mid_c;
                 }
             } else {
-                // First click: start point
+                state.mid = snap.map(|(p, _)| p)
+                    .or(tangent.map(|(_, _, m)| m))
+                    .unwrap_or(mouse_sketch);
+                state.live_snap = snap;
+                state.tangent = tangent.map(|(h, a, _)| (h, a));
+                if let Some((_, r, _, _, _)) = circumscribed_arc(s, e, state.mid) {
+                    state.r = r;
+                    self.dim_input = format!("{:.4}", r);
+                    self.dim_select_all = true;
+                }
+            }
+        }
+
+        if !response.clicked_by(egui::PointerButton::Primary) {
+            return;
+        }
+        let snap = self.find_snap_target(mouse_sketch, hit_threshold);
+        let pos = snap.map_or(mouse_sketch, |(p, _)| p);
+        let snap_target = snap.map(|(_, t)| t);
+        match self.arc_draw.as_mut() {
+            None => {
+                // First click: start point.
                 self.arc_draw = Some(ArcDrawState {
                     start: PlacedPoint { pos, snap: snap_target },
                     end: None,
+                    mid: pos,
+                    r: 0.0,
+                    typed_r: None,
+                    live_snap: None,
+                    tangent: None,
+                    side: 1.0,
+                    cursor: mouse_screen,
                 });
             }
+            Some(state) if state.end.is_none() => {
+                // Second click: end point. Opens the radius input.
+                state.end = Some(PlacedPoint { pos, snap: snap_target });
+                self.open_creation_input();
+            }
+            Some(_) => {
+                // Third click: point on the arc (resolved above).
+                self.complete_arc();
+            }
+        }
+    }
+
+    /// Arc tool tangent snap: the arc through both chord ends that is
+    /// tangent to what an end is connected to (line direction, or the
+    /// host arc's tangent there). Offered while the cursor is within
+    /// `threshold_px` of that circle; the nearer of the start-side and
+    /// end-side candidates wins. Returns the host, the connected end,
+    /// and the cursor's projection onto the tangent circle (a third
+    /// point that yields exactly that circle).
+    fn arc_tangent_snap(
+        &self,
+        s: vect2d, start_snap: Option<SnapTarget>,
+        e: vect2d, end_snap: Option<SnapTarget>,
+        cursor: vect2d, threshold_px: f32,
+    ) -> Option<(TangentHost, vect2d, vect2d)> {
+        if self.snap_disabled { return None; }
+        let mut best: Option<(f32, TangentHost, vect2d, vect2d)> = None;
+        for (anchor_snap, anchor, other) in [(start_snap, s, e), (end_snap, e, s)] {
+            let Some(sn) = anchor_snap else { continue };
+            let Some((host, t)) = self.tangent_host_at_snap(sn, anchor) else { continue };
+            let Some((c, r)) = circle_tangent_through(anchor, other, t) else { continue };
+            let dx = cursor.x - c.x;
+            let dy = cursor.y - c.y;
+            let dm = (dx * dx + dy * dy).sqrt();
+            if dm < 1e-9 { continue; }
+            let dist_px = ((dm - r).abs() as f32) * self.scale;
+            if dist_px < threshold_px && best.as_ref().map_or(true, |b| dist_px < b.0) {
+                let mid = vect2d::new(c.x + dx / dm * r, c.y + dy / dm * r);
+                best = Some((dist_px, host, anchor, mid));
+            }
+        }
+        best.map(|(_, h, a, m)| (h, a, m))
+    }
+
+    /// Create the arc from the session values, tie its ends, snapped
+    /// third point and tangent host, add a radius dim for a typed
+    /// radius, and end the session. Called by the third click and by
+    /// Enter with a typed radius. Typed text that does not evaluate,
+    /// or a radius below half the chord, keeps the session open with
+    /// a status error.
+    pub(crate) fn complete_arc(&mut self) -> bool {
+        let Some(st) = self.arc_draw.as_ref() else { return false };
+        let Some(end) = st.end else { return false };
+        let typed = match st.typed_r.clone() {
+            None => None,
+            Some(raw) => match self.parse_axis_input(&raw) {
+                Some(parsed) => Some(parsed),
+                None => {
+                    self.status_error = Some(format!("Radius: invalid value or expression: {}", raw));
+                    return false;
+                }
+            },
+        };
+        let s = st.start.pos;
+        let half = ((end.pos.x - s.x).powi(2) + (end.pos.y - s.y).powi(2)).sqrt() * 0.5;
+        if typed.is_some() && st.r < half - 1e-9 {
+            self.status_error = Some(format!("Radius: {:.4} is below half the chord ({:.4})", st.r, half));
+            return false;
+        }
+        let state = self.arc_draw.take().unwrap();
+        self.begin_group();
+        // Rejected creation (collinear points) ends the gesture.
+        let Some(arc) = self.exec(Action::AddArc { start: s, end: end.pos, mid: state.mid }).arc() else {
+            self.close_creation_input();
+            return false;
+        };
+        // Arc start_angle always corresponds to the start click,
+        // end_angle to the end click (direction stored in ccw flag).
+        if let Some(sn) = state.start.snap {
+            self.apply_snap_coincident_arc(sn, arc, ArcPoint::Start, s);
+        }
+        if let Some(sn) = end.snap {
+            self.apply_snap_coincident_arc(sn, arc, ArcPoint::End, end.pos);
+        }
+        // Third point snapped: helper on the arc, tied to the target.
+        if let Some((pos, target)) = state.live_snap
+            && let Some(helper) = self.exec(Action::AddHelperPoint { pos }).point()
+        {
+            self.exec(Action::ApplyPointOnArc { point: helper, arc });
+            self.apply_snap_coincident_point(target, helper);
+        }
+        // Tangent snap: the constraint, when the gate accepts it.
+        if let Some((host, _)) = state.tangent {
+            let action = match host {
+                TangentHost::Line(line) => Action::ApplyTangentLA { line, arc },
+                TangentHost::Arc(other) => Action::ApplyTangentAA { a: arc, b: other },
+            };
+            if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
+                self.exec(action);
+            }
+        }
+        if let Some((value, expr)) = typed {
+            let value = if expr.is_some() { 0.0 } else { value };
+            self.exec(Action::AddDimension {
+                kind: DimensionKind::ArcRadius(arc), value, expr, derived: false, range: None,
+            });
+        }
+        self.close_creation_input();
+        true
+    }
+
+    /// Drop an in-progress arc gesture and close its value overlay.
+    pub(crate) fn cancel_arc_session(&mut self) {
+        if self.arc_draw.take().is_some_and(|s| s.end.is_some()) {
+            self.close_creation_input();
         }
     }
 

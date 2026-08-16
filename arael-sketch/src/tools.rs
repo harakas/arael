@@ -174,9 +174,37 @@ pub struct EllipseDrawState {
     pub rim_snaps: Vec<(vect2d, SnapTarget)>,
 }
 
+/// Entity a live tangent snap is measured against.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TangentHost {
+    Line(Ref<Line>),
+    Arc(Ref<Arc>),
+}
+
+// Three-click arc: start, end, then a point on the arc. Once the end
+// is placed the value overlay live-tracks the radius; typing fixes it
+// (the mouse then only picks the side and minor/major) and a typed
+// radius becomes a driving dimension. The third point snaps to points
+// (the arc passes through them) and, when an end is connected to a
+// line or arc, to the arc tangent to it there.
 pub struct ArcDrawState {
     pub start: PlacedPoint,
     pub end: Option<PlacedPoint>,  // None until second click
+    /// Third point resolved this frame: mouse, point snap, tangent
+    /// snap, or built from a typed radius.
+    pub mid: vect2d,
+    /// Radius: circumradius through start/end/mid until typed.
+    pub r: f64,
+    pub typed_r: Option<String>,
+    /// Point snap for the third click; offered while r is not typed.
+    pub live_snap: Option<(vect2d, SnapTarget)>,
+    /// Tangent snap in effect: host and the connected end it applies at.
+    pub tangent: Option<(TangentHost, vect2d)>,
+    /// Which side of the chord the arc bulges to (typed radius): the
+    /// mouse's last off-chord side.
+    pub side: f64,
+    /// Last cursor position (screen); the value input trails it.
+    pub cursor: egui::Pos2,
 }
 
 // Rectangle drawing: user clicks two opposite corners, we build an

@@ -75,6 +75,9 @@ impl EditorApp {
         if self.rect_draw.is_some() && !matches!(self.tool, crate::tools::Tool::DrawRect) {
             self.cancel_rect_session();
         }
+        if self.arc_draw.is_some() && !matches!(self.tool, crate::tools::Tool::DrawArc) {
+            self.cancel_arc_session();
+        }
 
         // Keep repainting while a constraint-conflict flash is active
         // (3 flashes at 3 Hz = 1 s total). Without continuous repaint
@@ -222,7 +225,7 @@ impl EditorApp {
             }
             if ui.input(|i| i.key_pressed(egui::Key::A)) {
                 self.tool = Tool::DrawArc;
-                self.arc_draw = None;
+                self.cancel_arc_session();
             }
             if ui.input(|i| i.key_pressed(egui::Key::R)) {
                 self.tool = Tool::DrawRect;
@@ -273,10 +276,10 @@ impl EditorApp {
                 self.cancel_ellipse_session();
                 self.cancel_circle_session();
                 self.cancel_rect_session();
+                self.cancel_arc_session();
                 self.scale_center = None;
                 self.selection.clear();
                 self.line_draw = None;
-                self.arc_draw = None;
                 self.box_select_start = None;
                 self.dim_editing = false;
                 self.dim_kind = None;

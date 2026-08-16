@@ -167,6 +167,13 @@ impl EditorApp {
                 state.typed_w = typed;
                 if let Some((v, _)) = parsed { state.w = v; }
                 if state.typed_w.is_some() { state.live_snap = None; }
+            } else if let Some(state) = self.arc_draw.as_mut() {
+                state.typed_r = typed;
+                if let Some((v, _)) = parsed { state.r = v; }
+                if state.typed_r.is_some() {
+                    state.live_snap = None;
+                    state.tangent = None;
+                }
             }
         }
         // Second field (ellipse angle / rect height): typing takes it
@@ -244,6 +251,8 @@ impl EditorApp {
                 self.cancel_circle_session();
             } else if self.rect_draw.is_some() {
                 self.cancel_rect_session();
+            } else if self.arc_draw.is_some() {
+                self.cancel_arc_session();
             } else {
                 self.dim_editing = false;
                 self.dim_kind = None;
@@ -278,6 +287,14 @@ impl EditorApp {
             // click (quadrant from the mouse's side).
             if state.typed_w.is_some() && state.typed_h.is_some() {
                 self.complete_rect();
+            }
+            return;
+        }
+        if enter_pressed && self.arc_draw.is_some() {
+            // Radius typed: Enter completes without the third click
+            // (side and minor/major from the mouse).
+            if self.arc_draw.as_ref().unwrap().typed_r.is_some() {
+                self.complete_arc();
             }
             return;
         }

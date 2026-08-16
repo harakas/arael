@@ -986,6 +986,146 @@ fn test_rect_typed_width_only() {
     assert!((dims[0].value - 3.0).abs() < 1e-9);
 }
 
+// -- Arc tool: radius input and tangent snaps -------------------------
+
+#[test]
+fn test_arc_typed_radius() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::A);
+    gui.click(v(-1.0, 0.0));
+    assert!(!gui.app.dim_editing, "no radius input before the chord exists");
+    gui.click(v(1.0, 0.0));
+    assert!(gui.app.dim_editing, "radius input live once the chord exists");
+    gui.frame();
+    gui.type_text("2");
+    // Mouse above the chord, nearer than r: minor arc bulging up.
+    gui.move_to(v(0.0, 0.5));
+    gui.key(egui::Key::Enter);
+    assert_eq!(gui.arc_count(), 1);
+    let a = gui.sketch().arcs.iter().next().unwrap().clone();
+    assert!((a.radius.value - 2.0).abs() < 1e-9, "r {}", a.radius.value);
+    // Minor arc: center below the chord (bulge up), sweep < 180.
+    assert!(a.center.value.y < 0.0, "center {:?}", a.center.value);
+    let sweep = (a.end_angle.value - a.start_angle.value).abs() % std::f64::consts::TAU;
+    assert!(sweep < std::f64::consts::PI, "minor arc: sweep {}", sweep);
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 1);
+    assert!(matches!(dims[0].kind, DimensionKind::ArcRadius(_)) && (dims[0].value - 2.0).abs() < 1e-9);
+    // Same again, mouse far above (> r): the major arc.
+    gui.click(v(-1.0, -2.0));
+    gui.click(v(1.0, -2.0));
+    gui.frame();
+    gui.type_text("2");
+    gui.move_to(v(0.0, 1.0)); // 3 above the chord > r
+    gui.key(egui::Key::Enter);
+    let a = gui.sketch().arcs.iter().nth(1).unwrap().clone();
+    let sweep = (a.end_angle.value - a.start_angle.value).abs() % std::f64::consts::TAU;
+    assert!(sweep > std::f64::consts::PI, "major arc: sweep {}", sweep);
+    assert!(a.center.value.y > -2.0, "center on the bulge side for the major arc");
+}
+
+#[test]
+fn test_arc_typed_radius_below_half_chord_reports() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::A);
+    gui.click(v(-1.0, 0.0));
+    gui.click(v(1.0, 0.0));
+    gui.frame();
+    gui.type_text("0.5");
+    gui.click(v(0.0, 1.0));
+    assert_eq!(gui.arc_count(), 0);
+    assert!(gui.app.arc_draw.is_some(), "session stays open");
+    assert!(gui.app.status_error.as_deref().is_some_and(|e| e.contains("half the chord")), "{:?}", gui.app.status_error);
+    for _ in 0..3 { gui.key(egui::Key::Backspace); }
+    gui.type_text("2");
+    gui.click(v(0.0, 1.0));
+    assert_eq!(gui.arc_count(), 1, "fixed value creates the arc");
+}
+
+#[test]
+fn test_arc_click_only_no_dim() {
+    let mut gui = Gui::new();
+    gui.key(egui::Key::A);
+    gui.click(v(-1.0, 0.0));
+    gui.click(v(1.0, 0.0));
+    gui.click(v(0.0, 1.0));
+    assert_eq!(gui.arc_count(), 1);
+    assert!(gui.sketch().dimensions.is_empty(), "click-only arc adds no dim");
+    assert!(gui.app.arc_draw.is_none() && !gui.app.dim_editing);
+}
+
+#[test]
+fn test_arc_tangent_snap_off_line_end() {
+    // Line along x; the arc starts at its end. Aiming near the
+    // tangent circle pulls the arc tangent to the line.
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.key(egui::Key::A);
+    gui.click(v(2.0, 0.0)); // start on L0.p2
+    gui.click(v(4.0, 2.0)); // end
+    // The tangent circle: tangent to x-axis at (2,0), through (4,2):
+    // center (2,2), r 2. Aim slightly off it, on the bulge side.
+    let on_circle = v(2.0 + 2.0 * (-std::f64::consts::FRAC_PI_4).cos(), 2.0 + 2.0 * (-std::f64::consts::FRAC_PI_4).sin());
+    gui.move_to(v(on_circle.x + 0.05, on_circle.y - 0.05));
+    let s = gui.app.arc_draw.as_ref().unwrap();
+    assert!(matches!(s.tangent, Some((crate::tools::TangentHost::Line(_), _))), "tangent snap offered: {:?}", s.tangent.map(|t| t.0));
+    assert!((s.r - 2.0).abs() < 1e-6, "snapped to the tangent circle: r {}", s.r);
+    gui.click(v(on_circle.x + 0.05, on_circle.y - 0.05));
+    let a = gui.sketch().arcs.iter().next().expect("created").clone();
+    assert!((a.radius.value - 2.0).abs() < 1e-6);
+    assert!(near(a.center.value, v(2.0, 2.0), 1e-6), "center {:?}", a.center.value);
+    assert_eq!(gui.sketch().tangent_la.len(), 1, "tangent constraint emitted");
+}
+
+#[test]
+fn test_arc_tangent_snap_off_arc_end() {
+    // Unit circle arc from (1,0) to (0,1) ccw; a new arc starts at
+    // its end (0,1) where the tangent is (-1,0).
+    let mut gui = Gui::new();
+    gui.cmd("add_arc 1,0 0,1 0.70710678118654752,0.70710678118654752");
+    gui.key(egui::Key::A);
+    gui.click(v(0.0, 1.0)); // start on A0.end
+    gui.click(v(-2.0, 1.0)); // end: on the tangent line -> no tangent circle
+    gui.move_to(v(-1.0, 1.5));
+    assert!(gui.app.arc_draw.as_ref().unwrap().tangent.is_none(), "end on the tangent line: no circle");
+    gui.key(egui::Key::Escape);
+    gui.key(egui::Key::A);
+    gui.click(v(0.0, 1.0));
+    gui.click(v(-2.0, 3.0)); // circle tangent at (0,1) to (-1,0) through (-2,3): center (0,3), r 2
+    let ang = -0.75 * std::f64::consts::PI; // a point on that circle toward the lower-left
+    let on = v(2.0 * ang.cos(), 3.0 + 2.0 * ang.sin());
+    gui.move_to(v(on.x + 0.04, on.y + 0.04));
+    let s = gui.app.arc_draw.as_ref().unwrap();
+    assert!(matches!(s.tangent, Some((crate::tools::TangentHost::Arc(_), _))), "arc-arc tangent snap: {:?}", s.tangent.map(|t| t.0));
+    gui.click(v(on.x + 0.04, on.y + 0.04));
+    let a = gui.sketch().arcs.iter().nth(1).expect("created").clone();
+    assert!(near(a.center.value, v(0.0, 3.0), 1e-6), "center {:?}", a.center.value);
+    assert_eq!(gui.sketch().tangent_aa.len(), 1, "arc-arc tangent emitted");
+}
+
+#[test]
+fn test_line_tangent_snap_off_arc() {
+    // Unit circle arc ending at (0,1) with tangent (-1,0): a line
+    // started there and aimed roughly along the tangent snaps onto it.
+    let mut gui = Gui::new();
+    gui.cmd("add_arc 1,0 0,1 0.70710678118654752,0.70710678118654752");
+    gui.key(egui::Key::L);
+    gui.click(v(0.0, 1.0)); // start on A0.end
+    gui.click(v(-2.0, 1.06)); // within the pixel threshold of the tangent line y = 1
+    assert_eq!(gui.line_count(), 1);
+    let (p1, p2) = gui.line(0);
+    assert!(near(p1, v(0.0, 1.0), 1e-9));
+    assert!((p2.y - 1.0).abs() < 1e-9 && (p2.x + 2.0).abs() < 1e-6, "end pulled onto the tangent: {:?}", p2);
+    assert_eq!(gui.sketch().tangent_la.len(), 1, "line-arc tangent emitted");
+    // Aimed clearly off the tangent: no snap, no constraint.
+    gui.key(egui::Key::Escape);
+    gui.key(egui::Key::L);
+    gui.click(v(0.0, 1.0));
+    gui.click(v(-2.0, 2.0));
+    assert_eq!(gui.line_count(), 2);
+    assert_eq!(gui.sketch().tangent_la.len(), 1, "no second tangent");
+}
+
 // -- Ellipse tool -----------------------------------------------------
 
 #[test]
