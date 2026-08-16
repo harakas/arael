@@ -213,7 +213,7 @@ impl SupernodalSymbolic {
         };
         let mut inv = vec![NONE; nblk];
         for (k, &b) in order.iter().enumerate() {
-            debug_assert!(inv[b as usize] == NONE, "order names a block twice");
+            assert!(inv[b as usize] == NONE, "order names block {} twice", b);
             inv[b as usize] = k as u32;
         }
 
@@ -334,7 +334,8 @@ impl SupernodalSymbolic {
                 child_count[parent[k] as usize] += 1;
             }
         }
-        let mut fund_begin: Vec<u32> = vec![0];
+        // An empty matrix has no supernodes at all, not one with no columns.
+        let mut fund_begin: Vec<u32> = if nblk == 0 { Vec::new() } else { vec![0] };
         for k in 1..nblk {
             let merge = parent[k - 1] == k as u32
                 && child_count[k] == 1
