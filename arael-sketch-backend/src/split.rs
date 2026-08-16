@@ -614,6 +614,30 @@ fn transfer_dimensions(
                     dim_kind_label(new_kind),
                     dim_subject(sketch, new_kind)
                 ));
+                // Whole-arc dims (radius, radius_b, rotation) hold
+                // for every piece, like whole-role constraints: the
+                // first piece keeps the original, every other kept
+                // piece gets a copy (new did/name, same value /
+                // expression / driven state).
+                for piece in pm.kept().skip(1) {
+                    let Some(kind) = whole_arc_dim_kind(new_kind, piece) else { break };
+                    let copy_name = format!("d{}", sketch.next_dimension_id);
+                    if driving && !push_numeric_dim_constraint(sketch, &kind, &value) {
+                        out.dropped.push(format!(
+                            "{} copy for {} ({} -- refused)",
+                            name, dim_subject(sketch, &kind), dim_kind_label(&kind)));
+                        continue;
+                    }
+                    sketch.next_dimension_id += 1;
+                    let mut copy = sketch.dimensions[*index].clone();
+                    copy.did = 0; // minted by assign_dimension_ids
+                    copy.name = copy_name.clone();
+                    copy.kind = kind;
+                    sketch.dimensions.push(copy);
+                    out.copied.push(format!(
+                        "{} -> {} ({} {})",
+                        name, copy_name, dim_kind_label(&kind), dim_subject(sketch, &kind)));
+                }
             }
             DimOp::Drop { index, reason } => {
                 let (old_kind, name, driving) = {
@@ -633,6 +657,19 @@ fn transfer_dimensions(
     dropped_indices.sort_unstable();
     for &i in dropped_indices.iter().rev() {
         sketch.dimensions.remove(i);
+    }
+}
+
+/// The same whole-arc dimension kind on another piece, for the kinds
+/// that hold for every piece of a split arc. None for every other
+/// kind (or a line piece).
+fn whole_arc_dim_kind(kind: &DimensionKind, piece: PieceRef) -> Option<DimensionKind> {
+    let arc = piece.arc()?;
+    match kind {
+        DimensionKind::ArcRadius(_) => Some(DimensionKind::ArcRadius(arc)),
+        DimensionKind::ArcRadiusB(_) => Some(DimensionKind::ArcRadiusB(arc)),
+        DimensionKind::ArcRotation(_) => Some(DimensionKind::ArcRotation(arc)),
+        _ => None,
     }
 }
 
@@ -1787,7 +1824,7 @@ mod split_tests {
     }
 
     #[test]
-    fn test_arc_radius_dim_retargets_first_piece() {
+    fn test_arc_radius_dim_replicates_to_every_piece() {
         let mut s = Sketch::new();
         let c = s.add_arc(v(0.0, 0.0), 2.0, 0.0, std::f64::consts::TAU, true);
         let cut_line = s.add_line(v(0.0, -3.0), v(0.0, 3.0));
@@ -1798,16 +1835,76 @@ mod split_tests {
             offset: v(0.0, 1.0), text_along: 0.0, name: "d0".into(),
             expr_str: None, broken: false, derived: false, range: None,
         });
+        s.next_dimension_id = 1;
         s.assign_constraint_names();
+        let did0 = s.dimensions[0].did;
         let (cuts, _) = find_cuts(&s, SplitTarget::Arc(c), Some(&[Cutter::Line(cut_line)]));
         let plan = SplitPlan { target: SplitTarget::Arc(c), cuts, keep: vec![true, true] };
         let out = apply_split(&mut s, &plan).unwrap();
+        s.assign_constraint_names();
         let a = out.pieces[0].unwrap().arc().unwrap();
-        assert_eq!(s.dimensions.len(), 1);
-        assert_eq!(s.dimensions[0].kind, DimensionKind::ArcRadius(a));
-        assert!(s.arcs[a].constraints.has_target_radius, "backing flag moved to the piece");
         let b = out.pieces[1].unwrap().arc().unwrap();
-        assert!(!s.arcs[b].constraints.has_target_radius);
+        // Original stays on the first piece with its did; the second
+        // piece gets a copy under a new name.
+        assert_eq!(s.dimensions.len(), 2);
+        assert_eq!(s.dimensions[0].kind, DimensionKind::ArcRadius(a));
+        assert_eq!(s.dimensions[0].did, did0);
+        assert_eq!(s.dimensions[1].kind, DimensionKind::ArcRadius(b));
+        assert_eq!(s.dimensions[1].name, "d1");
+        assert_ne!(s.dimensions[1].did, did0);
+        assert_eq!(s.dimensions[1].value, 2.0);
+        assert!(s.arcs[a].constraints.has_target_radius, "backing flag on the first piece");
+        assert!(s.arcs[b].constraints.has_target_radius, "backing flag on the copy's piece");
+        assert!(out.copied.iter().any(|c| c.starts_with("d0 -> d1")), "copy reported: {:?}", out.copied);
+    }
+
+    #[test]
+    fn test_ellipse_dims_replicate_to_every_piece() {
+        // radius, radius_b and rotation each hold for both halves;
+        // an expression dim copies as an expression.
+        let mut s = Sketch::new();
+        let e = s.add_ellipse(v(0.0, 0.0), 3.0, 1.0, 0.5, true);
+        let cut_line = s.add_line(v(0.0, -5.0), v(0.0, 5.0));
+        s.arcs[e].constraints.has_target_radius = true;
+        s.arcs[e].constraints.target_radius = 3.0;
+        s.arcs[e].constraints.has_target_rotation = true;
+        s.arcs[e].constraints.target_rotation = 0.5;
+        s.dimensions.push(Dimension {
+            did: 0, kind: DimensionKind::ArcRadius(e), value: 3.0,
+            offset: v(0.0, 1.0), text_along: 0.0, name: "d0".into(),
+            expr_str: None, broken: false, derived: false, range: None,
+        });
+        s.next_dimension_id = 1;
+        s.add_expr_dimension(DimensionKind::ArcRadiusB(e), "1", v(0.0, 1.0), 0.0).unwrap(); // d1
+        s.dimensions.push(Dimension {
+            did: 0, kind: DimensionKind::ArcRotation(e), value: 0.5f64.to_degrees(),
+            offset: v(0.0, 1.0), text_along: 0.0, name: "d2".into(),
+            expr_str: None, broken: false, derived: false, range: None,
+        });
+        s.next_dimension_id = 3;
+        s.assign_constraint_names();
+        let (cuts, _) = find_cuts(&s, SplitTarget::Arc(e), Some(&[Cutter::Line(cut_line)]));
+        assert_eq!(cuts.len(), 2);
+        let plan = SplitPlan { target: SplitTarget::Arc(e), cuts, keep: vec![true, true] };
+        let out = apply_split(&mut s, &plan).unwrap();
+        s.assign_constraint_names();
+        let a = out.pieces[0].unwrap().arc().unwrap();
+        let b = out.pieces[1].unwrap().arc().unwrap();
+        assert_eq!(s.dimensions.len(), 6, "{:?}", s.dimensions.iter().map(|d| &d.name).collect::<Vec<_>>());
+        for arc in [a, b] {
+            assert!(s.dimensions.iter().any(|d| d.kind == DimensionKind::ArcRadius(arc)), "radius on each piece");
+            assert!(s.dimensions.iter().any(|d| d.kind == DimensionKind::ArcRadiusB(arc)
+                && d.expr_str.as_deref() == Some("1")), "radius_b expression on each piece");
+            assert!(s.dimensions.iter().any(|d| d.kind == DimensionKind::ArcRotation(arc)), "rotation on each piece");
+            assert!(s.arcs[arc].constraints.has_target_radius);
+            assert!(s.arcs[arc].constraints.has_target_rotation);
+        }
+        assert_eq!(out.copied.len(), 3, "{:?}", out.copied);
+        // Names are fresh and unique.
+        let mut names: Vec<_> = s.dimensions.iter().map(|d| d.name.clone()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 6);
     }
 
     #[test]

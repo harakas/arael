@@ -1307,6 +1307,10 @@ constraints, dimensions, expressions -- transfer onto the pieces:
 - A driving `length` dimension becomes a point-to-point `distance`
   between the outer endpoints, keeping its `d<n>` id, name, value and
   placement. An arc `sweep` dimension is dropped.
+- Whole-arc dimensions (`radius`, `radius_b`, `xangle`) hold for
+  every piece: the first piece keeps the original, every other piece
+  gets a copy with a new `d<n>` (same value, expression and
+  driven/derived state), reported under `copied`.
 - Expression strings are rewritten (`L0.p1.x` -> the piece's,
   `L0.length` -> the sum of the pieces' lengths). An expression whose
   referent has no successor marks its dimension/parameter broken.
