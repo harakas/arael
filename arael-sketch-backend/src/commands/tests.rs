@@ -855,6 +855,81 @@ fn test_list_constraints() {
     assert!(out.contains("horizontal"));
 }
 
+/// One handle per thing: every dimension-managed constraint (value
+/// flags and dimension-backed collections alike) is listed under
+/// `list dims` with its meaning, and only there; `list constraints`
+/// keeps the constraints addressable by their own name.
+#[test]
+fn test_dims_listed_once_with_meaning() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0; add_line 0,2 4,2; add_ellipse 8,0 3 1 45; add_point 10,10");
+    run_ok(&mut ctx, "length L0 4; xangle L1 0; radius EA0 3; radius_b EA0 1; xangle EA0 45");
+    run_ok(&mut ctx, "distance L0.p1 P0 5; horizontal L0");
+    let cs = run_ok(&mut ctx, "list constraints");
+    for leak in ["length", "xangle", "radius", "distance"] {
+        assert!(!cs.contains(leak), "{} must not leak into list constraints:\n{}", leak, cs);
+    }
+    assert!(cs.contains("horizontal L0"), "own-name constraints stay: {}", cs);
+    let ds = run_ok(&mut ctx, "list dims");
+    for want in [
+        "d0: length L0 = 4.0000",
+        "d1: xangle L1 = 0.0000",
+        "d2: radius EA0 = 3.0000",
+        "d3: radius_b EA0 = 1.0000",
+        "d4: xangle EA0 = 45.0000",
+        "d5: distance L0.p1 P0 = 5.0000",
+    ] {
+        assert!(ds.contains(want), "missing {:?} in:\n{}", want, ds);
+    }
+    // Kind filters find dims by their meaning.
+    let r = run_ok(&mut ctx, "list radius");
+    assert!(r.contains("d2: radius EA0") && r.contains("d3: radius_b EA0"), "{}", r);
+    let x = run_ok(&mut ctx, "list xangle");
+    assert!(x.contains("d1: xangle L1") && x.contains("d4: xangle EA0"), "{}", x);
+    // info shows both handles.
+    let info = run_ok(&mut ctx, "info EA0");
+    assert!(info.contains("dims: d2: radius EA0 = 3.0000, d3: radius_b EA0 = 1.0000, d4: xangle EA0 = 45.0000"), "{}", info);
+    let info = run_ok(&mut ctx, "info d5");
+    assert!(info.starts_with("d5: distance L0.p1 P0 value=5.0000"), "{}", info);
+}
+
+/// Expression, range, derived and broken dims render their source
+/// and tags in the dims listing.
+#[test]
+fn test_list_dims_source_and_tags() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0; add_line 0,2 6,2; add_circle 10,0 2");
+    run_ok(&mut ctx, "param w 3");
+    run_ok(&mut ctx, "length L0 w/2; length L1 3 to 7; radius A0 2 derived");
+    let ds = run_ok(&mut ctx, "list dims");
+    assert!(ds.contains("d0: length L0 = w/2 (1.5000)"), "{}", ds);
+    assert!(ds.contains("d1: length L1 3 to 7 ("), "{}", ds);
+    assert!(ds.contains("d2: radius A0 = 2.0000 derived"), "{}", ds);
+    run_ok(&mut ctx, "del_param w");
+    let ds = run_ok(&mut ctx, "list dims");
+    assert!(ds.contains("d0: length L0 = w/2 (") && ds.contains("broken"), "{}", ds);
+}
+
+/// A value flag with no dimension over it (legacy files) still shows
+/// under list constraints so it is not invisible.
+#[test]
+fn test_orphan_value_flag_listed_as_constraint() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 0,0 2; add_ellipse 5,0 3 1 0");
+    let a = ctx.sketch.arcs.refs().next().unwrap();
+    let e = ctx.sketch.arcs.refs().nth(1).unwrap();
+    ctx.sketch.mutate_values(|s| {
+        s.arcs[a].constraints.has_target_radius = true;
+        s.arcs[a].constraints.target_radius = 2.0;
+        s.arcs[e].constraints.has_target_rotation = true;
+        s.arcs[e].constraints.target_rotation = 0.0;
+    });
+    let cs = run_ok(&mut ctx, "list constraints");
+    assert!(cs.contains("radius A0 = 2"), "{}", cs);
+    assert!(cs.contains("xangle EA1 = 0.0000"), "{}", cs); // shared arc counter: A0 then EA1
+    assert!(run_ok(&mut ctx, "list dims").contains("(empty)"));
+}
+
 #[test]
 fn test_find() {
     let mut ctx = CommandContext::new();
@@ -2109,11 +2184,13 @@ fn has_helper_points(ctx: &CommandContext) -> bool {
     ctx.sketch.points.refs().any(|r| ctx.sketch.points[r].helper)
 }
 
+/// Both listings: constraints (addressable by their own name) and
+/// dimensions (each with its own constraint).
 fn list_constraints_output(ctx: &mut CommandContext) -> String {
-    run_ok(ctx, "list constraints")
+    format!("{}\n{}", run_ok(ctx, "list constraints"), run_ok(ctx, "list dims"))
 }
 
-// 6A: Display tests -- list constraints shows no Pc names
+// 6A: Display tests -- neither listing shows Pc names
 
 #[test]
 fn test_list_no_pc_distance_ll_endpoints() {

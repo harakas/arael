@@ -617,10 +617,10 @@ delete L0.p1 L1 midpoint
 delete L0.p1 lock
 ```
 
-Dimension-managed constraints (distances, angles) are reached through
-the backing dimension name (`delete d0`, `info d0`). Name-lookup of
-`C<n>` for those constraints falls through — use the dimension name
-instead.
+Dimension-managed constraints (lengths, radii, angles, distances) are
+reached through the dimension name (`delete d0`, `info d0`) and listed
+under `list dims`, not `list constraints`. Name-lookup of `C<n>` for
+those constraints falls through — use the dimension name instead.
 
 ## Mirror
 
@@ -986,27 +986,28 @@ print <expression>           Evaluate and display
 print L0.length              Entity property
 print dist(P0, L0)           Geometric function
 print width * 2 + 1          Expression with parameters
-info L0                      Line details + all constraints referencing L0
-info L0.p1                   Endpoint position, lock status, constraints
-info P0                      Point details + constraints
-info A0                      Arc details + constraints
+info L0                      Line details + constraints and dimensions referencing L0
+info L0.p1                   Endpoint position, lock status, constraints, dimensions
+info P0                      Point details + constraints and dimensions
+info A0                      Arc details + constraints and dimensions
 info A0.center               Arc endpoint position
-info d0                      Dimension details (value, expression, derived status)
+info d0                      Dimension details (meaning, value, expression, derived status)
 info width                   Parameter details (value, expression, broken)
 list                         List all entities, dimensions, parameters
 list all                     Same as list (explicit)
 list lines                   List only lines
 list points                  List only points
 list arcs                    List only arcs
-list dims                    List only dimensions (shows "derived" tag)
+list dims                    List dimensions: d<n>: <meaning> = value (expression, range, derived, broken shown)
 list params                  List only parameters
-list constraints             List all active constraints
+list constraints             List constraints addressable by their own name (H/V, locks, C<n>); dimensions are under list dims
 list selection               List the current selection
 list constr                  List construction entities
 list horizontal              Filter by constraint type (also: vertical, parallel,
                              perpendicular, equal, collinear, tangent, coincident,
-                             concentric, midpoint, symmetry, point_on, lock,
-                             angle, length, radius, sweep, distance)
+                             concentric, midpoint, symmetry, point_on, lock)
+list radius                  Filter dimensions by kind (also: angle, length, sweep,
+                             distance, hdistance, vdistance, xangle)
 measure L0                   Single entity: length, angle, radius, positions
 measure L0 L1                Two entities: angle, distance, parallel/perpendicular
 measure P0 L0                Point-line: perpendicular distance

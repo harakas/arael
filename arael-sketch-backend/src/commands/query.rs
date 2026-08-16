@@ -1,13 +1,8 @@
 use super::*;
 
-/// Human-readable backing description for a dimension, matching the
-/// phrase `list_constraints()` would emit for its entity-flag or
-/// scalar constraint. Used by the delete-cascade reporter so each
-/// removed dim is shown as `d<n>: <what it was>` and any identical
-/// phrase in the list_constraints diff is suppressed. Returns an
-/// empty string for dimensions that don't have a canonical phrase
-/// (range-only dims without a matching kind string, for example).
-pub(crate) fn dim_phrase(sketch: &Sketch, dim: &Dimension) -> String {
+/// What a dimension measures, in command vocabulary: `radius EA0`,
+/// `distance L0.p1 P0`, `angle L0 L1 supplement`.
+pub(crate) fn dim_meaning(sketch: &Sketch, dim: &Dimension) -> String {
     use arael_sketch_solver::DimensionKind as K;
     use arael_sketch_solver::DimensionEndpoint as E;
     let ep_name = |e: &E| -> String {
@@ -21,42 +16,39 @@ pub(crate) fn dim_phrase(sketch: &Sketch, dim: &Dimension) -> String {
         }
     };
     match dim.kind {
-        // Entity-flag-backed: match the exact `list_constraints` format
-        // so the de-dupe string compare succeeds.
-        K::LineLength(r) => {
-            let l = &sketch.lines[r];
-            format!("length {} = {}", l.name, l.constraints.length)
-        }
-        K::LineAngle(r) => {
-            let l = &sketch.lines[r];
-            format!("xangle {} = {:.4}", l.name, l.constraints.target_angle.to_degrees())
-        }
-        K::ArcRadius(r) => {
-            let a = &sketch.arcs[r];
-            format!("radius {} = {}", a.name, a.constraints.target_radius)
-        }
-        K::ArcRadiusB(r) => {
-            let a = &sketch.arcs[r];
-            format!("radius_b {} = {}", a.name, a.constraints.target_radius_b)
-        }
-        K::ArcSweep(r) => {
-            let a = &sketch.arcs[r];
-            format!("sweep {} = {:.2} deg", a.name, a.constraints.target_sweep.to_degrees())
-        }
-        K::ArcRotation(r) => {
-            let a = &sketch.arcs[r];
-            format!("rotation {} = {:.4}", a.name, a.constraints.target_rotation.to_degrees())
-        }
-        // Collection-backed: phrase the info from the dim itself
-        // (the C<n> form appears separately in list_constraints).
-        K::PointPointDistance(a, b) => format!("distance {} {} = {}", ep_name(&a), ep_name(&b), dim.value),
-        K::PointLineDistance(ep, l) => format!("distance {} {} = {}", ep_name(&ep), sketch.lines[l].name, dim.value),
-        K::Angle(a, b, sup) => format!("angle {} {} = {}{}", sketch.lines[a].name, sketch.lines[b].name, dim.value, if sup { " supplement" } else { "" }),
-        K::HDistance(a, b) => format!("hdistance {} {} = {}", ep_name(&a), ep_name(&b), dim.value),
-        K::VDistance(a, b) => format!("vdistance {} {} = {}", ep_name(&a), ep_name(&b), dim.value),
-        K::ConcentricDistance(a, b) => format!("distance {} {} = {}", sketch.arcs[a].name, sketch.arcs[b].name, dim.value),
-        K::LineLineDistance(a, b) => format!("distance {} {} = {}", sketch.lines[a].name, sketch.lines[b].name, dim.value),
+        K::LineLength(r) => format!("length {}", sketch.lines[r].name),
+        K::LineAngle(r) => format!("xangle {}", sketch.lines[r].name),
+        K::ArcRadius(r) => format!("radius {}", sketch.arcs[r].name),
+        K::ArcRadiusB(r) => format!("radius_b {}", sketch.arcs[r].name),
+        K::ArcSweep(r) => format!("sweep {}", sketch.arcs[r].name),
+        K::ArcRotation(r) => format!("xangle {}", sketch.arcs[r].name),
+        K::PointPointDistance(a, b) => format!("distance {} {}", ep_name(&a), ep_name(&b)),
+        K::PointLineDistance(ep, l) => format!("distance {} {}", ep_name(&ep), sketch.lines[l].name),
+        K::Angle(a, b, sup) => format!("angle {} {}{}", sketch.lines[a].name, sketch.lines[b].name, if sup { " supplement" } else { "" }),
+        K::HDistance(a, b) => format!("hdistance {} {}", ep_name(&a), ep_name(&b)),
+        K::VDistance(a, b) => format!("vdistance {} {}", ep_name(&a), ep_name(&b)),
+        K::ConcentricDistance(a, b) => format!("distance {} {}", sketch.arcs[a].name, sketch.arcs[b].name),
+        K::LineLineDistance(a, b) => format!("distance {} {}", sketch.lines[a].name, sketch.lines[b].name),
     }
+}
+
+/// One `list dims` line: name, meaning, and value -- `d0: radius EA0
+/// = 3.0000`; an expression dim shows the expression with the value
+/// in parentheses (`= w/2 (1.5000)`, the `list params` shape); a
+/// range dim shows its bound the way it was typed (`>= 2 (5.0000)`);
+/// `derived` / `broken` tags follow.
+pub(crate) fn dim_line(sketch: &Sketch, dim: &Dimension) -> String {
+    let meaning = dim_meaning(sketch, dim);
+    let mut s = if let Some(rb) = &dim.range {
+        format!("{}: {} {} ({:.4})", dim.name, meaning, format_range_bound(rb), dim.value)
+    } else if let Some(expr) = &dim.expr_str {
+        format!("{}: {} = {} ({:.4})", dim.name, meaning, expr, dim.value)
+    } else {
+        format!("{}: {} = {:.4}", dim.name, meaning, dim.value)
+    };
+    if dim.derived { s.push_str(" derived"); }
+    if dim.broken { s.push_str(" broken"); }
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -97,8 +89,34 @@ pub(crate) fn cmd_print(ctx: &mut CommandContext, args: &str) -> CmdResult {
 /// Get all constraints that mention a given entity name.
 pub(crate) fn constraints_for(sketch: &Sketch, name: &str) -> Vec<String> {
     sketch.list_constraints().into_iter()
-        .filter(|c| c.split_whitespace().any(|w| w == name || w.starts_with(&format!("{}.", name))))
+        .filter(|c| mentions(c, name))
         .collect()
+}
+
+/// Get all dimensions that mention a given entity name, as `list dims`
+/// lines.
+pub(crate) fn dims_for(sketch: &Sketch, name: &str) -> Vec<String> {
+    sketch.dimensions.iter()
+        .map(|d| dim_line(sketch, d))
+        .filter(|c| mentions(c, name))
+        .collect()
+}
+
+/// Whether a listing line names the entity or one of its parts
+/// (`L0`, `L0.p1`), as a whole word.
+fn mentions(line: &str, name: &str) -> bool {
+    line.split_whitespace().any(|w| w == name || w.starts_with(&format!("{}.", name)))
+}
+
+/// `info <entity>` tail: its constraints and dimensions, each on its
+/// own line when present.
+fn entity_refs_info(sketch: &Sketch, name: &str) -> String {
+    let mut s = String::new();
+    let cstrs = constraints_for(sketch, name);
+    if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+    let dims = dims_for(sketch, name);
+    if !dims.is_empty() { s += &format!("\n  dims: {}", dims.join(", ")); }
+    s
 }
 
 /// Format a `RangeBound` for script / info output using the same
@@ -132,8 +150,7 @@ pub(crate) fn cmd_info(ctx: &mut CommandContext, args: &str) -> CmdResult {
                         if field == "p1" && !l.p1.optimize { s += " [locked]"; }
                         if field == "p2" && !l.p2.optimize { s += " [locked]"; }
                     }
-            let cstrs = constraints_for(&ctx.sketch, name);
-            if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+            s += &entity_refs_info(&ctx.sketch, name);
             return Ok(ok(s));
         }
     if name.starts_with('L') && !name.contains('.') {
@@ -146,8 +163,7 @@ pub(crate) fn cmd_info(ctx: &mut CommandContext, args: &str) -> CmdResult {
         if l.quiet { s += " [quiet]"; }
         if !l.p1.optimize { s += " [p1 locked]"; }
         if !l.p2.optimize { s += " [p2 locked]"; }
-        let cstrs = constraints_for(&ctx.sketch, name);
-        if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+        s += &entity_refs_info(&ctx.sketch, name);
         Ok(ok(s))
     } else if name.starts_with('P') && !name.contains('.') {
         let r = resolve_point(&ctx.sketch, name)?;
@@ -156,8 +172,7 @@ pub(crate) fn cmd_info(ctx: &mut CommandContext, args: &str) -> CmdResult {
         let mut s = format!("{}: ({:.4},{:.4}){}{}", p.name, p.pos.value.x, p.pos.value.y,
             if locked { " [locked]" } else { "" },
             if p.quiet { " [quiet]" } else { "" });
-        let cstrs = constraints_for(&ctx.sketch, name);
-        if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+        s += &entity_refs_info(&ctx.sketch, name);
         Ok(ok(s))
     } else if is_arc_name(name) && !name.contains('.') {
         let r = resolve_arc(&ctx.sketch, name)?;
@@ -177,8 +192,7 @@ pub(crate) fn cmd_info(ctx: &mut CommandContext, args: &str) -> CmdResult {
             sp.x, sp.y, ep.x, ep.y, shape_label);
         if a.construction { s += " [constr]"; }
         if a.quiet { s += " [quiet]"; }
-        let cstrs = constraints_for(&ctx.sketch, name);
-        if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+        s += &entity_refs_info(&ctx.sketch, name);
         Ok(ok(s))
     } else if name.starts_with('d')
         && let Some(d) = ctx.sketch.dimensions.iter().find(|d| d.name == name) {
@@ -195,8 +209,8 @@ pub(crate) fn cmd_info(ctx: &mut CommandContext, args: &str) -> CmdResult {
             (false, true) => " broken",
             (false, false) => "",
         };
-        Ok(ok(format!("{}: value={:.4} {} offset={:.2} along={:.2}{}",
-            d.name, d.value, source, d.offset.y, d.text_along, flags)))
+        Ok(ok(format!("{}: {} value={:.4} {} offset={:.2} along={:.2}{}",
+            d.name, dim_meaning(&ctx.sketch, d), d.value, source, d.offset.y, d.text_along, flags)))
     } else if let Some(p) = ctx.sketch.user_params.iter().find(|p| p.name == name) {
         // Checked after dimensions: a user param may start with 'd'.
         Ok(ok(format!("{}: value={:.4} expr={}{}", p.name, p.value, p.expr_str,
@@ -388,7 +402,11 @@ pub(crate) fn cmd_list(ctx: &mut CommandContext, args: &str) -> CmdResult {
         return if filtered.is_empty() { Ok(ok("(empty)")) } else { Ok(ok(filtered.join("\n"))) };
     }
     if DIMENSION_FILTERS.contains(&filter) {
-        let all = ctx.sketch.list_constraints();
+        // Dimension kinds live in the dims listing (`d<n>: radius A0
+        // = 2`); an orphan value flag with no dimension still shows
+        // in list_constraints, so search both.
+        let mut all: Vec<String> = ctx.sketch.dimensions.iter().map(|d| dim_line(&ctx.sketch, d)).collect();
+        all.extend(ctx.sketch.list_constraints());
         let filtered: Vec<String> = all.into_iter().filter(|s| body_matches(s, filter)).collect();
         return if filtered.is_empty() { Ok(ok("(empty)")) } else { Ok(ok(filtered.join("\n"))) };
     }
@@ -465,13 +483,7 @@ pub(crate) fn cmd_list(ctx: &mut CommandContext, args: &str) -> CmdResult {
     }
     if show_all || filter == "dims" {
         for d in &ctx.sketch.dimensions {
-            let source = if let Some(rb) = &d.range {
-                format_range_bound(rb)
-            } else {
-                d.expr_str.clone().unwrap_or_default()
-            };
-            let tag = if d.derived { " derived" } else { "" };
-            lines.push(format!("{}: {:.4} {}{}", d.name, d.value, source, tag));
+            lines.push(dim_line(&ctx.sketch, d));
         }
     }
     if show_all || filter == "params" {

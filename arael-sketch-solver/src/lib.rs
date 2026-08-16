@@ -1716,15 +1716,27 @@ impl Sketch {
     }
 
     /// List all active constraints as human-readable strings.
+    /// Constraints addressable by their own name: H/V flags, locks and
+    /// the geometric `C<n>` collections. Dimension-managed constraints
+    /// (the value flags length / xangle / radius / radius_b / sweep /
+    /// rotation and the dimension-backed collections) are the
+    /// dimension's business and listed with it -- except an orphan
+    /// value flag with no dimension over it, which still shows here
+    /// so it is not invisible.
     pub fn list_constraints(&self) -> Vec<String> {
         let mut out = Vec::new();
+        let managed = |kind: DimensionKind| self.dimensions.iter().any(|d| d.kind == kind);
         // Entity-level flags
         for r in self.lines.refs() {
             let l = &self.lines[r];
             if l.constraints.horizontal { out.push(format!("{}: horizontal {}", format_flag_name(&l.name, 'H'), l.name)); }
             if l.constraints.vertical { out.push(format!("{}: vertical {}", format_flag_name(&l.name, 'V'), l.name)); }
-            if l.constraints.has_length { out.push(format!("length {} = {}", l.name, l.constraints.length)); }
-            if l.constraints.has_angle { out.push(format!("xangle {} = {:.4}", l.name, l.constraints.target_angle.to_degrees())); }
+            if l.constraints.has_length && !managed(DimensionKind::LineLength(r)) {
+                out.push(format!("length {} = {}", l.name, l.constraints.length));
+            }
+            if l.constraints.has_angle && !managed(DimensionKind::LineAngle(r)) {
+                out.push(format!("xangle {} = {:.4}", l.name, l.constraints.target_angle.to_degrees()));
+            }
             if !l.p1.optimize { out.push(format!("lock {}.p1", l.name)); }
             if !l.p2.optimize { out.push(format!("lock {}.p2", l.name)); }
         }
@@ -1736,8 +1748,18 @@ impl Sketch {
         }
         for r in self.arcs.refs() {
             let a = &self.arcs[r];
-            if a.constraints.has_target_radius { out.push(format!("radius {} = {}", a.name, a.constraints.target_radius)); }
-            if a.constraints.has_target_sweep { out.push(format!("sweep {} = {:.2} deg", a.name, a.constraints.target_sweep.to_degrees())); }
+            if a.constraints.has_target_radius && !managed(DimensionKind::ArcRadius(r)) {
+                out.push(format!("radius {} = {}", a.name, a.constraints.target_radius));
+            }
+            if a.constraints.has_target_radius_b && !managed(DimensionKind::ArcRadiusB(r)) {
+                out.push(format!("radius_b {} = {}", a.name, a.constraints.target_radius_b));
+            }
+            if a.constraints.has_target_sweep && !managed(DimensionKind::ArcSweep(r)) {
+                out.push(format!("sweep {} = {:.2} deg", a.name, a.constraints.target_sweep.to_degrees()));
+            }
+            if a.constraints.has_target_rotation && !managed(DimensionKind::ArcRotation(r)) {
+                out.push(format!("xangle {} = {:.4}", a.name, a.constraints.target_rotation.to_degrees()));
+            }
             if !a.center.optimize { out.push(format!("lock {}.center", a.name)); }
         }
         // Constraint collections, via the registry: one describe()
@@ -1745,9 +1767,13 @@ impl Sketch {
         // listed the midpoint_lp/arc families twice, the second copy
         // with swapped operands). Coincidence entries referencing a
         // helper point are bridges -- internal wiring, suppressed.
+        // Dimension-backed collections belong to their dimension.
         // Sorted by nid: creation order, not collection order.
         let mut items: std::vec::Vec<(u32, String)> = std::vec::Vec::new();
         self.for_each_constraint_collection_ref(|arenas, meta, coll| {
+            if meta.dimension_backed {
+                return;
+            }
             for i in 0..coll.len() {
                 let c = coll.item(i);
                 if meta.coincidence {

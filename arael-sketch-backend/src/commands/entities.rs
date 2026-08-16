@@ -1443,17 +1443,13 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
     };
 
     // Snapshot both views of the current state so we can report
-    // what got cascade-removed. list_constraints() covers flag,
-    // lock, and C<n>-named constraints; a per-dim description pass
-    // covers d<n>-named dimensions. When a dim has a backing entity
-    // flag (LineLength -> "length L0 = V", ArcSweep -> "sweep A0 =
-    // V deg", etc.), its list_constraints phrase duplicates the
-    // dim: the next pair of snapshots captures each separately so
-    // we can de-dupe them in the output.
+    // what got cascade-removed: list_constraints() covers the
+    // constraints addressable by their own name, the dims listing
+    // covers d<n>-named dimensions (each with its own constraint).
     let before_constraints: std::collections::BTreeSet<String> =
         ctx.sketch.list_constraints().into_iter().collect();
-    let before_dim_phrases: Vec<(String, String)> = ctx.sketch.dimensions.iter()
-        .map(|d| (d.name.clone(), dim_phrase(&ctx.sketch, d)))
+    let before_dims: Vec<(String, String)> = ctx.sketch.dimensions.iter()
+        .map(|d| (d.name.clone(), dim_line(&ctx.sketch, d)))
         .collect();
 
     ctx.begin_group();
@@ -1464,20 +1460,12 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let after_dim_names: std::collections::BTreeSet<String> =
         ctx.sketch.dimensions.iter().map(|d| d.name.clone()).collect();
 
-    let mut removed_constraints: Vec<String> = before_constraints
+    let removed_constraints: Vec<String> = before_constraints
         .difference(&after_constraints).cloned().collect();
-    let removed_dims: Vec<(String, String)> = before_dim_phrases.iter()
+    let removed_dims: Vec<&String> = before_dims.iter()
         .filter(|(n, _)| !after_dim_names.contains(n))
-        .cloned().collect();
-
-    // Any list_constraints phrase that exactly duplicates a removed
-    // dim's backing description gets dropped so it isn't shown
-    // twice. The remaining entries are real constraints (C<n>,
-    // CL<n>H/V, lock, horizontal/vertical flags not backed by a dim).
-    let dup: std::collections::HashSet<&str> = removed_dims.iter()
-        .map(|(_, phrase)| phrase.as_str())
+        .map(|(_, line)| line)
         .collect();
-    removed_constraints.retain(|c| !dup.contains(c.as_str()));
 
     let mut msg = format!("Deleted {} {}", kind, name);
     if !removed_constraints.is_empty() || !removed_dims.is_empty() {
@@ -1485,12 +1473,8 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
         for c in &removed_constraints {
             msg.push_str(&format!("\n    {}", c));
         }
-        for (dname, phrase) in &removed_dims {
-            if phrase.is_empty() {
-                msg.push_str(&format!("\n    {}", dname));
-            } else {
-                msg.push_str(&format!("\n    {}: {}", dname, phrase));
-            }
+        for line in &removed_dims {
+            msg.push_str(&format!("\n    {}", line));
         }
     }
     Ok(ok(msg))
