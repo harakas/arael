@@ -236,6 +236,34 @@ pub fn arc_tangent_at(a: &Arc, t: f64) -> vect2d {
     a.tangent_at(t)
 }
 
+/// Parametric angle of the arc/ellipse point in the direction of `p`
+/// as seen from the center (in the ellipse frame). For a point on the
+/// curve this is its parameter.
+pub fn arc_param_at_point(a: &Arc, p: vect2d) -> f64 {
+    let (s, c) = a.rotation.value.sin_cos();
+    let dx = p.x - a.center.value.x;
+    let dy = p.y - a.center.value.y;
+    let u = dx * c + dy * s;
+    let v = -dx * s + dy * c;
+    (v / a.radius_b.value.max(1e-12)).atan2(u / a.radius.value.max(1e-12))
+}
+
+/// The circle through `s` and `e` whose tangent at `s` is `t`
+/// (direction, either sign): center and radius. None when `e` lies on
+/// that tangent line (no such circle) or the points coincide.
+pub fn circle_tangent_through(s: vect2d, e: vect2d, t: vect2d) -> Option<(vect2d, f64)> {
+    let tl = (t.x * t.x + t.y * t.y).sqrt();
+    if tl < 1e-12 { return None; }
+    let n = vect2d::new(-t.y / tl, t.x / tl);
+    let dx = e.x - s.x;
+    let dy = e.y - s.y;
+    let dn = dx * n.x + dy * n.y;
+    if dn.abs() < 1e-12 { return None; }
+    // |C - s| = |C - e| with C = s + k n:  k = |e - s|^2 / (2 (e - s) . n)
+    let k = (dx * dx + dy * dy) / (2.0 * dn);
+    Some((vect2d::new(s.x + k * n.x, s.y + k * n.y), k.abs()))
+}
+
 /// Compute a point on the arc/ellipse at parametric angle t.
 pub fn arc_point_at(a: &Arc, t: f64) -> vect2d {
     a.point_at(t)
