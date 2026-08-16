@@ -1092,6 +1092,61 @@ fn test_ellipse_typed_length_ignores_snap() {
 }
 
 #[test]
+fn test_ellipse_typed_angle_via_tab() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.frame();
+    gui.type_text("2"); // semi-major
+    gui.key(egui::Key::Tab); // into the angle field
+    gui.frame();
+    gui.type_text("30");
+    let s = gui.app.ellipse_draw.as_ref().unwrap();
+    assert_eq!(s.typed_angle.as_deref(), Some("30"), "angle field took the text: {:?}", s.angle_text);
+    let want = 30f64.to_radians();
+    assert!((s.dir.y.atan2(s.dir.x) - want).abs() < 1e-9, "dir follows the typed angle");
+    // Mouse no longer steers the direction.
+    gui.move_to(v(-1.0, 3.0));
+    let s = gui.app.ellipse_draw.as_ref().unwrap();
+    assert!((s.dir.y.atan2(s.dir.x) - want).abs() < 1e-9, "typed angle holds against the mouse");
+    assert!((s.rx - 2.0).abs() < 1e-9, "typed length holds too");
+    gui.key(egui::Key::Enter); // both typed: fixes the axis without a click
+    assert!(gui.app.ellipse_draw.as_ref().unwrap().axis_fixed);
+    gui.click(v(0.0, 1.5)); // minor side
+    let arc = gui.sketch().arcs.iter().next().expect("created").clone();
+    assert!((arc.rotation.value - want).abs() < 1e-9, "rotation {}", arc.rotation.value);
+    assert!((arc.radius.value - 2.0).abs() < 1e-9);
+    // Dims: radius (typed) + xangle (typed); the minor was clicked.
+    let dims = &gui.sketch().dimensions;
+    assert_eq!(dims.len(), 2, "{:?}", dims.iter().map(|d| (&d.name, d.value)).collect::<Vec<_>>());
+    assert!(dims.iter().any(|d| matches!(d.kind, DimensionKind::ArcRotation(_)) && (d.value - 30.0).abs() < 1e-9),
+        "xangle dim at 30 deg");
+    assert!(arc.constraints.has_target_rotation, "rotation pinned by the dim");
+}
+
+#[test]
+fn test_ellipse_typed_angle_mouse_picks_length() {
+    let mut gui = Gui::new();
+    gui.app.tool = Tool::DrawEllipse;
+    gui.click(v(0.0, 0.0));
+    gui.key(egui::Key::Tab);
+    gui.frame();
+    gui.type_text("90");
+    // Length from the projection of the mouse onto the vertical axis.
+    gui.move_to(v(0.7, 2.5));
+    let s = gui.app.ellipse_draw.as_ref().unwrap();
+    assert!((s.rx - 2.5).abs() < 1e-9, "rx = projection: {}", s.rx);
+    assert!(s.typed_rx.is_none(), "length still live");
+    gui.click(v(0.7, 2.5));
+    gui.click(v(1.0, 0.0));
+    let arc = gui.sketch().arcs.iter().next().expect("created").clone();
+    assert!((arc.rotation.value.abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+    assert!((arc.radius.value - 2.5).abs() < 1e-9);
+    assert!((arc.radius_b.value - 1.0).abs() < 1e-9);
+    assert_eq!(gui.sketch().dimensions.len(), 1, "only the angle was typed");
+}
+
+#[test]
 fn test_ellipse_escape_cancels_gesture() {
     let mut gui = Gui::new();
     gui.app.tool = Tool::DrawEllipse;

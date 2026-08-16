@@ -706,7 +706,7 @@ impl EditorApp {
             Tool::DrawEllipse => if self.ellipse_draw.as_ref().is_some_and(|s| s.axis_fixed) {
                 "Ellipse: click the minor extent, or type its length and press Enter. Escape cancels."
             } else if self.ellipse_draw.is_some() {
-                "Ellipse: click the end of the major axis, or type the length and click the direction (snaps to H/V; hold Q to disable)."
+                "Ellipse: click the end of the major axis. Type the length, Tab to the angle; both typed, Enter fixes the axis. Snaps to H/V (hold Q to disable)."
             } else {
                 "Ellipse: click to place center. O switches to Circle."
             },

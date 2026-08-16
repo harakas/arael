@@ -139,6 +139,10 @@ pub struct EllipseDrawState {
     /// Semi-major: live from the mouse until typed, then fixed.
     pub rx: f64,
     pub typed_rx: Option<String>,
+    /// Absolute axis angle field (degrees): mirrors `dir` from the
+    /// mouse until typed, then fixes `dir` and becomes an xangle dim.
+    pub angle_text: String,
+    pub typed_angle: Option<String>,
     /// Semi-minor: live once the axis is fixed, until typed.
     pub ry: f64,
     /// Which side of the axis the minor preview points (mouse side).

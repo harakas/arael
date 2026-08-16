@@ -87,10 +87,29 @@ impl EditorApp {
         // When derived is checked the value is locked to what the
         // sketch currently measures; show it read-only so the user
         // can't mistakenly type a number that won't be used.
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut self.dim_input)
-                .interactive(!self.dim_derived),
-        );
+        //
+        // Ellipse axis phase: two fields -- semi-major length and
+        // absolute axis angle (degrees). Tab moves between them (egui
+        // focus traversal); a typed angle fixes the direction and
+        // becomes an xangle dim.
+        let ellipse_axis_phase = self.ellipse_draw.as_ref().is_some_and(|s| !s.axis_fixed);
+        let mut angle_response = None;
+        let response = if ellipse_axis_phase {
+            let mut angle_text = std::mem::take(&mut self.ellipse_draw.as_mut().unwrap().angle_text);
+            let mut len_response = None;
+            ui.horizontal(|ui| {
+                len_response = Some(ui.add(egui::TextEdit::singleline(&mut self.dim_input).desired_width(72.0)));
+                angle_response = Some(ui.add(egui::TextEdit::singleline(&mut angle_text).desired_width(56.0)));
+                ui.label("deg");
+            });
+            self.ellipse_draw.as_mut().unwrap().angle_text = angle_text;
+            len_response.unwrap()
+        } else {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.dim_input)
+                    .interactive(!self.dim_derived),
+            )
+        };
         // Live fillet preview: whenever the text or corner set
         // changes, restore the pre-fillet sketch and reapply every
         // pending corner. reapply_fillets is a no-op when nothing
@@ -123,6 +142,34 @@ impl EditorApp {
             } else {
                 state.typed_rx = typed;
                 if let Some((v, _)) = parsed { state.rx = v; }
+            }
+        }
+        // Ellipse axis angle field: typing takes the direction over
+        // from the mouse (dir follows once the text evaluates); an
+        // emptied field hands it back. While it still mirrors the
+        // mouse, keep it fully selected under focus so a keystroke
+        // replaces the live value.
+        if let Some(ar) = &angle_response {
+            if ar.changed() {
+                let raw = self.ellipse_draw.as_ref().unwrap().angle_text.trim().to_string();
+                let parsed = self.parse_typed_input(&raw, false);
+                let state = self.ellipse_draw.as_mut().unwrap();
+                state.typed_angle = if raw.is_empty() { None } else { Some(raw) };
+                if state.typed_angle.is_some() && let Some((deg, _)) = parsed {
+                    let (s, c) = deg.to_radians().sin_cos();
+                    state.dir = arael::vect::vect2d::new(c, s);
+                    state.hv = None;
+                    state.live_snap = None;
+                }
+            }
+            if ar.has_focus() && self.ellipse_draw.as_ref().unwrap().typed_angle.is_none() {
+                let mut st = egui::TextEdit::load_state(ui.ctx(), ar.id).unwrap_or_default();
+                let len = self.ellipse_draw.as_ref().unwrap().angle_text.len();
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(len),
+                )));
+                egui::TextEdit::store_state(ui.ctx(), ar.id, st);
             }
         }
         // Select all text when entering edit mode (one-shot flag)
@@ -158,11 +205,14 @@ impl EditorApp {
         }
         if enter_pressed && let Some(state) = self.ellipse_draw.as_ref() {
             if state.axis_fixed && state.typed_ry.is_some() && state.ry > 1e-6 {
-                // Both lengths typed/fixed: Enter completes without
-                // the minor click.
+                // Minor typed: Enter completes without the third click.
                 self.complete_ellipse();
+            } else if !state.axis_fixed && state.typed_rx.is_some() && state.typed_angle.is_some() {
+                // Length and angle typed: Enter fixes the axis without
+                // the second click.
+                self.fix_ellipse_axis();
             }
-            // Otherwise Enter keeps the fixed value; the next click
+            // Otherwise Enter keeps the typed value; the next click
             // is still needed for direction / minor side.
             return;
         }
@@ -368,7 +418,11 @@ impl EditorApp {
                 // Escape would otherwise roll the whole fillet back.
                 self.fillet_pending = None;
             }
-        } else if !response.has_focus() && self.dim_editing {
+        } else if !response.has_focus() && self.dim_editing
+            && !angle_response.as_ref().is_some_and(|r| r.has_focus())
+        {
+            // Keep the value field focused -- unless the user tabbed
+            // into the ellipse angle field.
             response.request_focus();
         }
     }

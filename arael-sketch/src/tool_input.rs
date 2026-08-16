@@ -627,11 +627,14 @@ impl EditorApp {
         // axis length is not typed, so a snapped point is always one
         // the rim passes through and a constraint can honour.
         if self.ellipse_draw.is_some() {
-            let (c, axis_fixed, dir, rx, typed_rx, typed_ry) = {
+            let (c, axis_fixed, dir, rx, typed_rx, typed_ry, typed_angle) = {
                 let s = self.ellipse_draw.as_ref().unwrap();
-                (s.center.pos, s.axis_fixed, s.dir, s.rx, s.typed_rx.is_some(), s.typed_ry.is_some())
+                (s.center.pos, s.axis_fixed, s.dir, s.rx, s.typed_rx.is_some(),
+                 s.typed_ry.is_some(), s.typed_angle.is_some())
             };
-            let snap_ok = if axis_fixed { !typed_ry } else { !typed_rx };
+            // A typed angle fixes the direction, so a snapped point
+            // could not be on the rim either: no snap then.
+            let snap_ok = if axis_fixed { !typed_ry } else { !typed_rx && !typed_angle };
             let snap = if snap_ok {
                 self.find_snap_target(mouse_sketch, hit_threshold).filter(|(p, _)| {
                     let dx = p.x - c.x;
@@ -639,14 +642,24 @@ impl EditorApp {
                     dx * dx + dy * dy > 1e-12
                 })
             } else { None };
-            let hv = if !axis_fixed && snap.is_none() && !self.snap_disabled {
+            let hv = if !axis_fixed && !typed_angle && snap.is_none() && !self.snap_disabled {
                 hv_snap_from(c, mouse_sketch, self.scale, crate::PERP_SNAP_PX)
             } else { None };
             let scale = self.scale;
             let state = self.ellipse_draw.as_mut().unwrap();
             state.cursor = mouse_screen;
             state.live_snap = None;
-            if !axis_fixed {
+            if !axis_fixed && typed_angle {
+                // Direction is typed: the mouse only picks the length,
+                // by projection onto the fixed axis.
+                state.hv = None;
+                let proj = ((mouse_sketch.x - c.x) * dir.x + (mouse_sketch.y - c.y) * dir.y).abs();
+                if !typed_rx && proj > 1e-6 {
+                    state.rx = proj;
+                    self.dim_input = format!("{:.4}", proj);
+                    self.dim_select_all = true;
+                }
+            } else if !axis_fixed {
                 let end = snap.map(|(p, _)| p).or(hv.map(|(_, p)| p)).unwrap_or(mouse_sketch);
                 let dx = end.x - c.x;
                 let dy = end.y - c.y;
@@ -654,6 +667,7 @@ impl EditorApp {
                 if len > 1e-6 {
                     state.dir = vect2d::new(dx / len, dy / len);
                     state.hv = hv.map(|(h, _)| h);
+                    state.angle_text = format!("{:.2}", dy.atan2(dx).to_degrees());
                     if !typed_rx {
                         state.rx = len;
                         state.live_snap = snap;
@@ -705,30 +719,17 @@ impl EditorApp {
         match phase {
             Phase::Center => self.start_ellipse(mouse_sketch, hit_threshold),
             Phase::Axis => {
-                // A half-typed major length keeps the session on it.
-                if let Some(raw) = self.ellipse_draw.as_ref().unwrap().typed_rx.clone()
-                    && self.parse_axis_input(&raw).is_none()
-                {
-                    self.status_error = Some(format!("Semi-major: invalid value or expression: {}", raw));
-                    return;
-                }
-                // Direction needs the mouse off-center; the live
-                // tracking above already refreshed dir/rx this frame.
-                let state = self.ellipse_draw.as_mut().unwrap();
+                // Direction needs the mouse off-center unless the
+                // angle is typed; the live tracking above already
+                // refreshed dir/rx this frame.
+                let state = self.ellipse_draw.as_ref().unwrap();
                 let c = state.center.pos;
                 let dx = mouse_sketch.x - c.x;
                 let dy = mouse_sketch.y - c.y;
-                if dx * dx + dy * dy < 1e-12 || state.rx < 1e-6 {
-                    return; // no direction yet: keep waiting
+                if dx * dx + dy * dy < 1e-12 && state.typed_angle.is_none() {
+                    return;
                 }
-                state.axis_fixed = true;
-                if let Some(snap) = state.live_snap.take() {
-                    state.rim_snaps.push(snap);
-                }
-                // Overlay switches to the semi-minor length; the next
-                // frame's live tracking fills it.
-                self.dim_input.clear();
-                self.dim_select_all = true;
+                self.fix_ellipse_axis();
             }
             Phase::Minor => {
                 // The minor was already live-editable while aiming,
@@ -747,6 +748,32 @@ impl EditorApp {
         }
     }
 
+    /// Fix the major axis from the current session values (second
+    /// click, or Enter with both length and angle typed). Typed text
+    /// that does not evaluate keeps the session on the axis with a
+    /// status error; a zero length keeps waiting. Returns whether the
+    /// axis was fixed.
+    pub(crate) fn fix_ellipse_axis(&mut self) -> bool {
+        let Some(s) = self.ellipse_draw.as_ref() else { return false };
+        for (raw, what, angle) in [(s.typed_rx.clone(), "Semi-major", false), (s.typed_angle.clone(), "Angle", true)] {
+            if let Some(raw) = raw && self.parse_typed_input(&raw, !angle).is_none() {
+                self.status_error = Some(format!("{}: invalid value or expression: {}", what, raw));
+                return false;
+            }
+        }
+        let state = self.ellipse_draw.as_mut().unwrap();
+        if state.rx < 1e-6 { return false; }
+        state.axis_fixed = true;
+        if let Some(snap) = state.live_snap.take() {
+            state.rim_snaps.push(snap);
+        }
+        // Overlay switches to the semi-minor length; the next frame's
+        // live tracking fills it.
+        self.dim_input.clear();
+        self.dim_select_all = true;
+        true
+    }
+
     fn start_ellipse(&mut self, mouse_sketch: vect2d, hit_threshold: f64) {
         let snap = self.find_snap_target(mouse_sketch, hit_threshold);
         let center = snap.map_or(mouse_sketch, |(p, _)| p);
@@ -757,6 +784,8 @@ impl EditorApp {
             axis_fixed: false,
             rx: 0.0,
             typed_rx: None,
+            angle_text: String::new(),
+            typed_angle: None,
             ry: 0.0,
             ry_sign: 1.0,
             typed_ry: None,
@@ -773,10 +802,12 @@ impl EditorApp {
         self.dim_select_all = true;
     }
 
-    /// Parse a typed axis length: a plain number or `=expr` snapshot
+    /// Parse a typed ellipse value: a plain number or `=expr` snapshot
     /// gives (value, None); a live expression gives (value, Some(expr)).
-    /// None while the text is not (yet) a positive finite length.
-    pub(crate) fn parse_axis_input(&self, raw: &str) -> Option<(f64, Option<String>)> {
+    /// None while the text does not (yet) evaluate to a finite value
+    /// -- positive when `positive` (lengths), any sign otherwise
+    /// (the axis angle, degrees).
+    pub(crate) fn parse_typed_input(&self, raw: &str, positive: bool) -> Option<(f64, Option<String>)> {
         let raw = raw.trim();
         if raw.is_empty() { return None; }
         let (text, live) = match raw.strip_prefix('=') {
@@ -784,24 +815,35 @@ impl EditorApp {
             None => (raw, raw.parse::<f64>().is_err()),
         };
         let v = arael_sketch_backend::commands::eval_expr(&self.sketch, text).ok()?;
-        if !v.is_finite() || v <= 0.0 { return None; }
+        if !v.is_finite() || (positive && v <= 0.0) { return None; }
         Some((v, live.then(|| text.to_string())))
     }
 
+    /// Typed axis length (semi-major / semi-minor): see parse_typed_input.
+    pub(crate) fn parse_axis_input(&self, raw: &str) -> Option<(f64, Option<String>)> {
+        self.parse_typed_input(raw, true)
+    }
+
     /// Create the ellipse from the current session values (axis
-    /// fixed, ry set), add typed-length dims in the same undo group,
-    /// and end the session. Called by the minor click and by Enter
-    /// with a typed minor. A typed length that does not evaluate
-    /// keeps the session open with a status error. Returns false
-    /// when nothing was created.
+    /// fixed, ry set), add dims for the typed values in the same undo
+    /// group -- radius / radius_b for typed lengths, xangle for a
+    /// typed axis angle -- and end the session. Called by the minor
+    /// click and by Enter with a typed minor. Typed text that does
+    /// not evaluate keeps the session open with a status error.
+    /// Returns false when nothing was created.
     pub(crate) fn complete_ellipse(&mut self) -> bool {
         let Some(s) = self.ellipse_draw.as_ref() else { return false };
-        let (typed_rx, typed_ry) = (s.typed_rx.clone(), s.typed_ry.clone());
+        type KindOf = fn(Ref<Arc>) -> DimensionKind;
+        let typed: [(Option<String>, &str, KindOf, bool); 3] = [
+            (s.typed_rx.clone(), "Semi-major", DimensionKind::ArcRadius, true),
+            (s.typed_ry.clone(), "Semi-minor", DimensionKind::ArcRadiusB, true),
+            (s.typed_angle.clone(), "Angle", DimensionKind::ArcRotation, false),
+        ];
         let mut dims = Vec::new();
-        for (raw, what, minor) in [(typed_rx, "Semi-major", false), (typed_ry, "Semi-minor", true)] {
+        for (raw, what, kind_of, positive) in typed {
             let Some(raw) = raw else { continue };
-            match self.parse_axis_input(&raw) {
-                Some(parsed) => dims.push((minor, parsed)),
+            match self.parse_typed_input(&raw, positive) {
+                Some(parsed) => dims.push((kind_of, parsed)),
                 None => {
                     self.status_error = Some(format!("{}: invalid value or expression: {}", what, raw));
                     return false;
@@ -831,10 +873,9 @@ impl EditorApp {
                 self.apply_snap_coincident_point(target, helper);
             }
         }
-        for (minor, (value, expr)) in dims {
-            let kind = if minor { DimensionKind::ArcRadiusB(arc) } else { DimensionKind::ArcRadius(arc) };
+        for (kind_of, (value, expr)) in dims {
             let value = if expr.is_some() { 0.0 } else { value };
-            self.exec(Action::AddDimension { kind, value, expr, derived: false, range: None });
+            self.exec(Action::AddDimension { kind: kind_of(arc), value, expr, derived: false, range: None });
         }
         self.close_ellipse_input();
         true
