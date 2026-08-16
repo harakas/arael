@@ -193,6 +193,7 @@ never permuted and no scalar copy of it is ever built.
 | `SupernodalParams` | amalgamation table, update-batching ratio, postordering. `memory_lean()` trades a little speed for a smaller factor |
 | `amd_block_order(a)` | AMD over the block adjacency -- the ordering to hand `new`, blocks kept whole |
 | `SupernodalSymbolic::flops` / `factor_val_count` | what the factorization will cost and hold, for pricing this route against another |
+| `SupernodalSymbolic::subtree_chunks(workers)` | how many independent subtrees the parallel path hands to that many threads; 0 when it runs sequentially with threaded kernels instead |
 | `SupernodalError` | the matrix was not positive definite, or the factor overflowed the index type |
 
 Consecutive small updates into one target panel are batched: they are packed

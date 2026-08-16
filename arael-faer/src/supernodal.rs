@@ -911,6 +911,17 @@ impl SupernodalSymbolic {
     pub fn position_of(&self, old_block: usize) -> usize {
         self.inv[old_block] as usize
     }
+
+    /// How many independent subtrees the parallel path hands to `workers`
+    /// threads. 0 when it declines to split (a chain, or too little work
+    /// below the top of the tree) and factors sequentially with threaded
+    /// dense kernels instead.
+    pub fn subtree_chunks(&self, workers: usize) -> usize {
+        if workers < 2 {
+            return 0;
+        }
+        subtree_cut(self, workers).map_or(0, |cut| cut.chunks.len())
+    }
 }
 
 /// Approximate-minimum-degree order of the BLOCK graph: faer's amd run

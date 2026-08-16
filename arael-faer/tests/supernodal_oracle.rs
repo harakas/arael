@@ -21,7 +21,8 @@ use arael_faer::faer::{Par, Side};
 use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::{
     amd_block_order, nd_block_order, supernodal_factorize, supernodal_solve,
-    supernodal_solve_multi, SupernodalContext, SupernodalParams, SupernodalSymbolic,
+    supernodal_solve_multi, SupernodalContext, SupernodalError, SupernodalParams,
+    SupernodalSymbolic,
 };
 use arael_faer::SparseIndex;
 
@@ -623,4 +624,192 @@ fn a_repeated_block_in_the_order_is_rejected() {
     let sym = random_structure(5, 2, 1, 4);
     let bad = [0usize, 1, 2, 2, 4];
     let _ = SupernodalSymbolic::new(&sym, Some(&bad), &SupernodalParams::default());
+}
+
+/// A chain with every diagonal entry positive, made indefinite by one strong
+/// coupling: blocks 20 and 21, kept in different supernodes (21 also reaches
+/// 25, so their patterns do not nest). The pivot only turns negative in 21's
+/// panel after 20's update lands, so the failure comes out of the middle of
+/// the supernode loop.
+fn late_indefinite() -> (SparseBlockColMat<SparseIndex, f64>, usize, usize) {
+    let nblk = 30usize;
+    let mut rng = Lcg(5);
+    let mut part: Vec<SparseIndex> = vec![0];
+    for _ in 0..nblk {
+        part.push(part.last().unwrap() + (1 + rng.below(3)) as SparseIndex);
+    }
+    let mut cells: Vec<(usize, usize)> = (0..nblk).map(|b| (part[b] as usize, part[b] as usize)).collect();
+    for b in 1..nblk {
+        cells.push((part[b - 1] as usize, part[b] as usize));
+    }
+    cells.push((part[21] as usize, part[25] as usize));
+    let sym = structure(part, cells);
+    let (mut a, _, _) = spd_on(sym.clone(), 5, 2.0);
+    let b = sym.col_range(21).find(|&b| sym.blk_row(b) == 20).unwrap();
+    for v in &mut a.vals_mut()[sym.val_range(b)] {
+        *v = 1e4;
+    }
+    (a, 20, 21)
+}
+
+/// Indefiniteness that only shows after the updates is a clean error from a
+/// later panel, under fundamental supernodes (the two blocks in different
+/// panels, asserted) and under the default amalgamation.
+#[test]
+fn late_indefiniteness_is_rejected() {
+    let (a, lo, hi) = late_indefinite();
+    let sym = a.symbolic();
+    let fundamental = SupernodalParams { relax: None, ..Default::default() };
+    for (pname, params) in [("fundamental", &fundamental), ("default", &SupernodalParams::default())] {
+        let sn = SupernodalSymbolic::new(sym, None, params).unwrap();
+        if params.relax.is_none() {
+            assert_ne!(
+                sn.supernode_of(sn.position_of(lo)),
+                sn.supernode_of(sn.position_of(hi)),
+                "the poisoned pair must sit in different panels"
+            );
+        }
+        let mut factor = vec![0.0; sn.factor_val_count()];
+        let mut ctx = SupernodalContext::new();
+        assert_eq!(
+            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::Seq),
+            Err(SupernodalError::NotPositiveDefinite),
+            "{pname}"
+        );
+    }
+}
+
+/// Two disconnected random components: enough independent subtrees for the
+/// parallel path to split at any thread count.
+#[cfg(feature = "rayon")]
+fn two_components(comp: usize, seed: u64) -> SymbolicSparseBlockColMat<SparseIndex> {
+    let mut rng = Lcg(seed);
+    let mut part: Vec<SparseIndex> = vec![0];
+    for _ in 0..2 * comp {
+        part.push(part.last().unwrap() + (1 + rng.below(4)) as SparseIndex);
+    }
+    let mut cells = Vec::new();
+    for c in 0..2 {
+        let base = c * comp;
+        for j in 0..comp {
+            let bj = base + j;
+            cells.push((part[bj] as usize, part[bj] as usize));
+            if j > 0 {
+                cells.push((part[bj - 1] as usize, part[bj] as usize));
+            }
+            cells.push((part[base + rng.below(j + 1)] as usize, part[bj] as usize));
+        }
+    }
+    structure(part, cells)
+}
+
+/// The lower triangles of two factors, entry by entry.
+#[cfg(feature = "rayon")]
+fn same_factor<T: SchurReal>(sn: &SupernodalSymbolic, a: &[T], b: &[T]) -> bool {
+    (0..sn.n_supernodes()).all(|s| {
+        let (q, h) = sn.supernode_dims(s);
+        let base = sn.panel_range(s).start;
+        (0..q).all(|c| (c..h).all(|r| a[base + c * h + r].to_f64() == b[base + c * h + r].to_f64()))
+    })
+}
+
+/// Every thread count factors the same bits as the sequential path, run
+/// after run, in f64 and f32; the sequential factor matches faer's.
+#[cfg(feature = "rayon")]
+#[test]
+fn every_thread_count_matches_the_sequential_factor_to_the_bit() {
+    for (comp, seed) in [(150usize, 21u64), (300, 22)] {
+        let sym = two_components(comp, seed);
+        let (a, dense, rhs) = spd_on(sym.clone(), seed, 2.0);
+        let nd = nd_block_order(&sym);
+        let sn = check(&format!("threads seq {comp}"), &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), Par::Seq);
+        let mut seq = vec![f64::NAN; sn.factor_val_count()];
+        let mut ctx = SupernodalContext::new();
+        supernodal_factorize(&sn, &a, &mut seq, &mut ctx, Par::Seq).unwrap();
+        let mut x_seq = rhs.clone();
+        supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx);
+        for threads in [2usize, 3, 8, 16] {
+            assert!(sn.subtree_chunks(threads) >= 2, "{comp} blocks x2 must split at {threads} threads");
+            for repeat in 0..2 {
+                let mut par = vec![f64::NAN; sn.factor_val_count()];
+                let mut ctx = SupernodalContext::new();
+                supernodal_factorize(&sn, &a, &mut par, &mut ctx, Par::rayon(threads)).unwrap();
+                assert!(same_factor(&sn, &seq, &par), "comp {comp} threads {threads} repeat {repeat}: factor differs");
+                let mut x = rhs.clone();
+                supernodal_solve(&sn, &par, &mut x, &mut ctx);
+                assert_eq!(x, x_seq, "comp {comp} threads {threads} repeat {repeat}: solution differs");
+            }
+        }
+
+        let a32 = to_f32(&a);
+        let mut seq32 = vec![f32::NAN; sn.factor_val_count()];
+        supernodal_factorize(&sn, &a32, &mut seq32, &mut SupernodalContext::new(), Par::Seq).unwrap();
+        let (max_rel, pads) = compare_with_faer(&a32, &sn, &seq32);
+        assert!(max_rel < 1e-4, "f32 comp {comp}: factor differs from faer's f32 by {max_rel:.3e}");
+        assert_eq!(pads, 0);
+        for threads in [3usize, 8] {
+            let mut par32 = vec![f32::NAN; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), Par::rayon(threads)).unwrap();
+            assert!(same_factor(&sn, &seq32, &par32), "f32 comp {comp} threads {threads}: factor differs");
+        }
+    }
+}
+
+/// A chain gives the cut nothing to split: with threads asked for, the
+/// sequential path runs with threaded dense kernels and still matches faer.
+#[cfg(feature = "rayon")]
+#[test]
+fn a_declined_cut_factors_sequentially_under_threads() {
+    let nblk = 200usize;
+    let part: Vec<SparseIndex> = (0..=nblk as SparseIndex).map(|b| b * 6).collect();
+    let mut cells: Vec<(usize, usize)> = (0..nblk).map(|b| (b * 6, b * 6)).collect();
+    for b in 1..nblk {
+        cells.push(((b - 1) * 6, b * 6));
+    }
+    let sym = structure(part, cells);
+    let (a, dense, rhs) = spd_on(sym.clone(), 22, 2.0);
+    let sn = SupernodalSymbolic::new(&sym, None, &SupernodalParams::default()).unwrap();
+    for threads in [2usize, 4, 16] {
+        assert_eq!(sn.subtree_chunks(threads), 0, "a chain must not split at {threads} threads");
+        check(&format!("declined cut {threads}"), &a, &dense, &rhs, None, &SupernodalParams::default(), Par::rayon(threads));
+    }
+}
+
+/// A failure inside a worker's subtree is the same clean error as a
+/// sequential one, from a poisoned diagonal and from indefiniteness that
+/// only shows after the updates; the poison sits in several places so that
+/// some of them land in a worker's chunk and some in the top.
+#[cfg(feature = "rayon")]
+#[test]
+fn a_failure_inside_a_worker_is_reported() {
+    let sym = two_components(200, 21);
+    let nd = nd_block_order(&sym);
+    let sn = SupernodalSymbolic::new(&sym, Some(&nd), &SupernodalParams::default()).unwrap();
+    assert!(sn.subtree_chunks(4) >= 2);
+    for poisoned in [3usize, 150, 210, 399] {
+        let (mut a, _, _) = spd_on(sym.clone(), 21, 2.0);
+        let b = sym.col_range(poisoned).find(|&b| sym.blk_row(b) == poisoned).unwrap();
+        a.vals_mut()[sym.val_range(b).start] = -5.0;
+        let mut factor = vec![0.0; sn.factor_val_count()];
+        assert_eq!(
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), Par::rayon(4)),
+            Err(SupernodalError::NotPositiveDefinite),
+            "poisoned diagonal of block {poisoned}"
+        );
+    }
+    for (lo, hi) in [(3usize, 4usize), (250, 251)] {
+        let (mut a, _, _) = spd_on(sym.clone(), 21, 2.0);
+        let b = sym.col_range(hi).find(|&b| sym.blk_row(b) == lo).unwrap();
+        for v in &mut a.vals_mut()[sym.val_range(b)] {
+            *v = 1e4;
+        }
+        let mut factor = vec![0.0; sn.factor_val_count()];
+        assert_eq!(
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), Par::rayon(4)),
+            Err(SupernodalError::NotPositiveDefinite),
+            "poisoned coupling {lo}-{hi}"
+        );
+    }
+    let (a, dense, rhs) = spd_on(sym.clone(), 21, 2.0);
+    check("after the failures", &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), Par::rayon(4));
 }

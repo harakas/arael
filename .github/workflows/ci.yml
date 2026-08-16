@@ -83,6 +83,11 @@ jobs:
       # when the features are on.
       - name: Test arael with features
         run: cargo test -p arael --features ${{ matrix.features }}
+      # arael-faer's threaded factorization tests are behind its own rayon
+      # feature, which `cargo test -p arael` turns on but does not test.
+      - name: Test arael-faer with rayon
+        if: matrix.features == 'rayon'
+        run: cargo test -p arael-faer --features rayon
       - name: Check tests and examples build with features
         run: cargo check -p arael --tests --examples --features ${{ matrix.features }}
 
