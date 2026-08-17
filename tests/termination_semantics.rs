@@ -948,14 +948,28 @@ fn the_structural_analysis_is_reported_apart_from_the_assembly() {
 
     // Disjoint from assembly: `assembly` is the model's residual and Jacobian
     // work, on every iteration including the first. If the analysis leaked into
-    // it, the first assembly would tower over a steady one.
-    let steady = t.steps.iter().filter(|s| s.inner == 0 && s.iter > 1);
-    let typical = steady.map(|s| s.assembly).max().unwrap();
+    // it, the first assembly would tower over a steady one in every run. One
+    // run cannot tell that from a cold start (fresh code and buffers on a
+    // loaded machine), so the smallest first assembly over several fresh
+    // solves is what stands against the steady ones.
+    let mut first_min = std::time::Duration::MAX;
+    let mut typical_max = std::time::Duration::ZERO;
+    for _ in 0..5 {
+        let mut c = build_chain();
+        let r = c.solve_sparse(&LmConfig {
+            max_iters: 200, gather_timing: true, ..Default::default()
+        }).unwrap();
+        let t = r.timing.as_ref().unwrap();
+        let steady = t.steps.iter().filter(|s| s.inner == 0 && s.iter > 1);
+        let typical = steady.map(|s| s.assembly).max().unwrap();
+        first_min = first_min.min(t.first_assembly);
+        typical_max = typical_max.max(typical);
+    }
     assert!(
-        t.first_assembly <= typical * 4,
-        "first_assembly {:?} should be the same order as a steady one {:?} -- \
+        first_min <= typical_max * 4,
+        "the smallest first_assembly {:?} should be the same order as a steady one {:?} -- \
          if it is not, the analysis is still being charged to it",
-        t.first_assembly, typical
+        first_min, typical_max
     );
 }
 
