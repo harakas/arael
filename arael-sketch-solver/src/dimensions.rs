@@ -224,14 +224,15 @@ pub struct UserParam {
     pub broken: bool,
 }
 
-/// Check whether a name matches a system naming pattern (d0, L0, P0, A0, etc.)
-/// that could conflict with auto-generated entity/dimension names.
+/// Check whether a name matches a system naming pattern (d0, L0, P0, A0,
+/// M0, etc.) that could conflict with auto-generated entity / dimension /
+/// meta-constraint names.
 pub fn is_system_name(name: &str) -> bool {
     if name.is_empty() { return false; }
     let bytes = name.as_bytes();
-    // Single-letter prefix + digits: d0, L5, P0, A3, etc.
+    // Single-letter prefix + digits: d0, L5, P0, A3, M1, etc.
     let prefix = bytes[0];
-    if matches!(prefix, b'd' | b'L' | b'P' | b'A') && bytes.len() > 1 {
+    if matches!(prefix, b'd' | b'L' | b'P' | b'A' | b'M') && bytes.len() > 1 {
         let rest = &name[1..];
         // Could be "L0" or "L0.p1.x" -- check if first part after prefix is digits
         let num_part = rest.split('.').next().unwrap_or("");

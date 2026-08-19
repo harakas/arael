@@ -32,6 +32,8 @@
 
 pub mod dimensions;
 pub use dimensions::*;
+pub mod metas;
+pub use metas::*;
 pub mod symbol_bag;
 pub use symbol_bag::SymbolBag;
 pub mod expr_constraint;
@@ -296,10 +298,26 @@ pub struct Sketch {
     #[serde(default)] pub axis_distance_aa_e_ce: std::vec::Vec<AxisDistanceAAECe>,
     #[serde(default)] pub axis_distance_aa_e_s: std::vec::Vec<AxisDistanceAAES>,
     #[serde(default)] pub axis_distance_aa_e_e: std::vec::Vec<AxisDistanceAAEE>,
+    /// Endpoint on the normal of a line / arc at its endpoint.
+    #[serde(default)] pub on_normal_ll: std::vec::Vec<EndpointOnNormalLL>,
+    #[serde(default)] pub on_normal_aa: std::vec::Vec<EndpointOnNormalAA>,
     // Dimension annotations
     #[arael(skip)]
     pub dimensions: std::vec::Vec<Dimension>,
     pub next_dimension_id: u32,
+    /// Meta-constraints (see [`metas`]): recorded operations that own
+    /// what they created. Kept consistent by the backend's engines.
+    #[arael(skip)]
+    #[serde(default)]
+    pub metas: std::vec::Vec<Meta>,
+    #[serde(default)]
+    pub next_meta_id: u32,
+    /// Messages for the user raised while a mutation was applied (an
+    /// offset dropped because its result was edited, say). Whoever ran
+    /// the mutation drains them with [`take_notices`](Self::take_notices).
+    #[arael(skip)]
+    #[serde(skip)]
+    pub notices: std::vec::Vec<String>,
     // Next auto-assigned numeric constraint id (C<nid>). 0 is reserved
     // as the "unassigned" sentinel picked up by assign_constraint_names().
     #[serde(default = "default_next_constraint_id")]
@@ -755,8 +773,13 @@ impl Sketch {
             axis_distance_aa_e_ce: Vec::new(),
             axis_distance_aa_e_s: Vec::new(),
             axis_distance_aa_e_e: Vec::new(),
+            on_normal_ll: Vec::new(),
+            on_normal_aa: Vec::new(),
             dimensions: Vec::new(),
             next_dimension_id: 0,
+            metas: Vec::new(),
+            next_meta_id: 0,
+            notices: Vec::new(),
             next_constraint_id: 1,
             user_params: Vec::new(),
             expr_constraints: Vec::new(),
@@ -772,6 +795,26 @@ impl Sketch {
     /// it built and rebuilds when the two no longer match.
     pub fn structure_gen(&self) -> u64 {
         self.structure_gen
+    }
+
+    /// Queue a message for whoever ran the current mutation.
+    pub fn push_notice(&mut self, msg: impl Into<String>) {
+        self.notices.push(msg.into());
+    }
+
+    /// Take the queued messages, leaving none.
+    pub fn take_notices(&mut self) -> std::vec::Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
+
+    /// Index of the meta-constraint named `name` (`M<n>`), if any.
+    pub fn find_meta(&self, name: &str) -> Option<usize> {
+        self.metas.iter().position(|m| m.name == name)
+    }
+
+    /// Index of the meta-constraint with this id, if it still exists.
+    pub fn meta_index(&self, mid: u32) -> Option<usize> {
+        self.metas.iter().position(|m| m.mid == mid)
     }
 
     /// The cached DOF, if one was computed at the current structure

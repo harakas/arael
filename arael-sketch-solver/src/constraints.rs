@@ -1422,13 +1422,19 @@ pub struct Concentric {
 // sign-stable under big value updates (no mirror flip on which arc is
 // outer). Self-containment means the dim survives manual deletion of
 // the paired `Concentric` constraint -- the circles stay concentric
-// because the dim is enforcing it directly.
+// because the dim is enforcing it directly. Between two ellipses the
+// same gap holds on the minor semi-axis too: the offset ellipse, both
+// semi-axes grown or shrunk by the distance.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, name = "concentric_distance", {
     [(a.center.x - b.center.x) * sketch.constraint_isigma,
      (a.center.y - b.center.y) * sketch.constraint_isigma,
      (b.radius - a.radius - distanceconcentric.distance * distanceconcentric.sign)
+     * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = a.is_ellipse && b.is_ellipse, name = "concentric_distance_b", {
+    [(b.radius_b - a.radius_b - distanceconcentric.distance * distanceconcentric.sign)
      * sketch.constraint_isigma]
 }))]
 pub struct DistanceConcentric {
@@ -2804,3 +2810,115 @@ pub struct AxisDistanceAAEE {
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
+
+// ---------------------------------------------------------------------------
+// Endpoint on normal: the placed endpoint (of `a`) lies on the normal of
+// the reference curve `b` at b's endpoint. Residual: the displacement
+// from the reference endpoint to the placed endpoint, projected on the
+// reference tangent there, in length units. For a line the normal at an
+// endpoint is the perpendicular; for a circle the radial ray; for an
+// ellipse the true normal. `placed_end` / `ref_end` pick p2 / end over
+// p1 / start.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, guard = !self.placed_end && !self.ref_end, {
+    let dx = b.p2.x - b.p1.x;
+    let dy = b.p2.y - b.p1.y;
+    let len = sqrt(dx * dx + dy * dy);
+    [((a.p1.x - b.p1.x) * dx + (a.p1.y - b.p1.y) * dy) / len * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = !self.placed_end && self.ref_end, {
+    let dx = b.p2.x - b.p1.x;
+    let dy = b.p2.y - b.p1.y;
+    let len = sqrt(dx * dx + dy * dy);
+    [((a.p1.x - b.p2.x) * dx + (a.p1.y - b.p2.y) * dy) / len * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.placed_end && !self.ref_end, {
+    let dx = b.p2.x - b.p1.x;
+    let dy = b.p2.y - b.p1.y;
+    let len = sqrt(dx * dx + dy * dy);
+    [((a.p2.x - b.p1.x) * dx + (a.p2.y - b.p1.y) * dy) / len * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.placed_end && self.ref_end, {
+    let dx = b.p2.x - b.p1.x;
+    let dy = b.p2.y - b.p1.y;
+    let len = sqrt(dx * dx + dy * dy);
+    [((a.p2.x - b.p2.x) * dx + (a.p2.y - b.p2.y) * dy) / len * sketch.constraint_isigma]
+}))]
+pub struct EndpointOnNormalLL {
+    /// The line whose endpoint is placed.
+    #[arael(ref = root.lines)] pub a: Ref<Line>,
+    /// The reference line, whose normal at its endpoint is used.
+    #[arael(ref = root.lines)] pub b: Ref<Line>,
+    /// `a.p2` when true, `a.p1` otherwise.
+    pub placed_end: bool,
+    /// `b.p2` when true, `b.p1` otherwise.
+    pub ref_end: bool,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)] pub hb: CrossBlock<Line, Line>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, guard = !self.placed_end && !self.ref_end, {
+    let px = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let py = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let rx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let ry = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let tx = arc_tangent_x(b.radius, b.radius_b, b.rotation, b.start_angle);
+    let ty = arc_tangent_y(b.radius, b.radius_b, b.rotation, b.start_angle);
+    let tl = sqrt(tx * tx + ty * ty);
+    [((px - rx) * tx + (py - ry) * ty) / tl * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = !self.placed_end && self.ref_end, {
+    let px = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let py = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.start_angle);
+    let rx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let ry = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let tx = arc_tangent_x(b.radius, b.radius_b, b.rotation, b.end_angle);
+    let ty = arc_tangent_y(b.radius, b.radius_b, b.rotation, b.end_angle);
+    let tl = sqrt(tx * tx + ty * ty);
+    [((px - rx) * tx + (py - ry) * ty) / tl * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.placed_end && !self.ref_end, {
+    let px = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let py = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let rx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let ry = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.start_angle);
+    let tx = arc_tangent_x(b.radius, b.radius_b, b.rotation, b.start_angle);
+    let ty = arc_tangent_y(b.radius, b.radius_b, b.rotation, b.start_angle);
+    let tl = sqrt(tx * tx + ty * ty);
+    [((px - rx) * tx + (py - ry) * ty) / tl * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.placed_end && self.ref_end, {
+    let px = arc_point_x(a.center.x, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let py = arc_point_y(a.center.y, a.radius, a.radius_b, a.rotation, a.end_angle);
+    let rx = arc_point_x(b.center.x, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let ry = arc_point_y(b.center.y, b.radius, b.radius_b, b.rotation, b.end_angle);
+    let tx = arc_tangent_x(b.radius, b.radius_b, b.rotation, b.end_angle);
+    let ty = arc_tangent_y(b.radius, b.radius_b, b.rotation, b.end_angle);
+    let tl = sqrt(tx * tx + ty * ty);
+    [((px - rx) * tx + (py - ry) * ty) / tl * sketch.constraint_isigma]
+}))]
+pub struct EndpointOnNormalAA {
+    /// The arc whose endpoint is placed.
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    /// The reference arc, whose normal at its endpoint is used.
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    /// `a.end` when true, `a.start` otherwise.
+    pub placed_end: bool,
+    /// `b.end` when true, `b.start` otherwise.
+    pub ref_end: bool,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}

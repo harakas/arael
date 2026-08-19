@@ -1,4 +1,4 @@
-//! The constraint registry: one interface over the 112 constraint
+//! The constraint registry: one interface over the 114 constraint
 //! collections, one enumeration point.
 //!
 //! Every constraint struct implements [`SketchConstraint`]; every
@@ -110,15 +110,19 @@ pub enum RefRole {
     Extent,
 }
 
-// Lowercase role tokens for the sketch_constraint! field lists.
+// Lowercase role tokens for the sketch_constraint! field lists. The
+// first argument is the constraint value, for roles that depend on one
+// of its fields: `(end_if flag)` is End when the bool field is set,
+// Start otherwise.
 macro_rules! ref_role {
-    (start) => { RefRole::Start };
-    (end) => { RefRole::End };
-    (center) => { RefRole::Center };
-    (host) => { RefRole::Host };
-    (whole) => { RefRole::Whole };
-    (contact) => { RefRole::Contact };
-    (extent) => { RefRole::Extent };
+    ($c:ident, start) => { RefRole::Start };
+    ($c:ident, end) => { RefRole::End };
+    ($c:ident, center) => { RefRole::Center };
+    ($c:ident, host) => { RefRole::Host };
+    ($c:ident, whole) => { RefRole::Whole };
+    ($c:ident, contact) => { RefRole::Contact };
+    ($c:ident, extent) => { RefRole::Extent };
+    ($c:ident, (end_if $f:ident)) => { if $c.$f { RefRole::End } else { RefRole::Start } };
 }
 
 /// The interface every constraint struct implements.
@@ -211,6 +215,11 @@ macro_rules! dedup_key_expr {
     ($c:ident, axis($f0:ident, $f1:ident; $h:ident)) => {
         DedupKey::Local($c.$f0.index() as u64, $c.$f1.index() as u64, $c.$h as u64)
     };
+    // Two refs plus two endpoint flags (which endpoint of each).
+    ($c:ident, ends($f0:ident, $f1:ident; $e0:ident, $e1:ident)) => {
+        DedupKey::Local($c.$f0.index() as u64, $c.$f1.index() as u64,
+                        ($c.$e0 as u64) * 2 + ($c.$e1 as u64))
+    };
     // Symmetric pair within the collection (parallel, equal, ...).
     ($c:ident, sorted($fa:ident, $fb:ident)) => {{
         let a = $c.$fa.index() as u64;
@@ -241,11 +250,19 @@ macro_rules! describe_arg {
     ($s:ident, $c:ident, axis($f:ident)) => {
         if $c.$f { "hdistance" } else { "vdistance" }
     };
+    // A line endpoint named by a bool flag: `L0.p2` when set, `L0.p1` otherwise.
+    ($s:ident, $c:ident, line_end($f:ident, $e:ident)) => {
+        format!("{}.p{}", $s.lines[$c.$f].name, if $c.$e { 2 } else { 1 })
+    };
+    // An arc endpoint named by a bool flag: `A0.end` when set, `A0.start` otherwise.
+    ($s:ident, $c:ident, arc_end($f:ident, $e:ident)) => {
+        format!("{}.{}", $s.arcs[$c.$f].name, if $c.$e { "end" } else { "start" })
+    };
 }
 
 macro_rules! sketch_constraint {
     ($ty:ident, points($($p:ident),*), lines($($l:ident: $lr:tt),*), arcs($($a:ident: $arr:tt),*),
-     dedup($($dk:tt)*), describe($fmt:literal $(, $ar:ident($af:ident))*)) => {
+     dedup($($dk:tt)*), describe($fmt:literal $(, $ar:ident($($af:ident),+))*)) => {
         impl SketchConstraint for crate::$ty {
             fn nid(&self) -> u32 { self.nid }
             fn set_nid(&mut self, nid: u32) { self.nid = nid; }
@@ -282,7 +299,7 @@ macro_rules! sketch_constraint {
             fn each_line_field(&self, f: &mut dyn FnMut(usize, Ref<Line>, RefRole)) {
                 let _ = &f;
                 let mut _slot = 0usize;
-                $(f(_slot, self.$l, ref_role!($lr)); _slot += 1;)*
+                $(f(_slot, self.$l, ref_role!(self, $lr)); _slot += 1;)*
             }
             fn set_line_field(&mut self, slot: usize, new: Ref<Line>) {
                 let _ = &new;
@@ -294,7 +311,7 @@ macro_rules! sketch_constraint {
             fn each_arc_field(&self, f: &mut dyn FnMut(usize, Ref<Arc>, RefRole)) {
                 let _ = &f;
                 let mut _slot = 0usize;
-                $(f(_slot, self.$a, ref_role!($arr)); _slot += 1;)*
+                $(f(_slot, self.$a, ref_role!(self, $arr)); _slot += 1;)*
             }
             fn set_arc_field(&mut self, slot: usize, new: Ref<Arc>) {
                 let _ = &new;
@@ -310,7 +327,7 @@ macro_rules! sketch_constraint {
             fn describe(&self, s: &Sketch) -> String {
                 let _ = &s;
                 let c = self;
-                format!($fmt $(, describe_arg!(s, c, $ar($af)))*)
+                format!($fmt $(, describe_arg!(s, c, $ar($($af),+)))*)
             }
         }
     };
@@ -652,9 +669,17 @@ sketch_constraint!(AxisDistanceAAES, points(), lines(), arcs(a: end, b: start),
 sketch_constraint!(AxisDistanceAAEE, points(), lines(), arcs(a: end, b: end),
     dedup(axis(a, b; horizontal)),
     describe("{} {}.end {}.end = {}", axis(horizontal), arc(a), arc(b), num(distance)));
+sketch_constraint!(EndpointOnNormalLL, points(),
+    lines(a: (end_if placed_end), b: (end_if ref_end)), arcs(),
+    dedup(ends(a, b; placed_end, ref_end)),
+    describe("on_normal {} {}", line_end(a, placed_end), line_end(b, ref_end)));
+sketch_constraint!(EndpointOnNormalAA, points(), lines(),
+    arcs(a: (end_if placed_end), b: (end_if ref_end)),
+    dedup(ends(a, b; placed_end, ref_end)),
+    describe("on_normal {} {}", arc_end(a, placed_end), arc_end(b, ref_end)));
 
 /// Number of registered constraint collections; a tripwire for tests.
-pub const CONSTRAINT_COLLECTION_COUNT: usize = 112;
+pub const CONSTRAINT_COLLECTION_COUNT: usize = 114;
 
 impl Sketch {
     /// Hand every coincidence constraint's canonical endpoint pair to
@@ -710,6 +735,9 @@ impl Sketch {
             cached_rank: _,
             structure_gen: _,
             dimensions: _,
+            metas: _,
+            next_meta_id: _,
+            notices: _,
             user_params: _,
             expr_constraints: _,
             coincident_pp,
@@ -824,6 +852,8 @@ impl Sketch {
             axis_distance_aa_e_ce,
             axis_distance_aa_e_s,
             axis_distance_aa_e_e,
+            on_normal_ll,
+            on_normal_aa,
         } = self;
         let arenas = ConstraintArenas { points, lines, arcs };
         f(&arenas, &CollectionMeta { name: "coincident_pp", coincidence: true, dimension_backed: false }, coincident_pp);
@@ -938,6 +968,8 @@ impl Sketch {
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_ce", coincidence: false, dimension_backed: true }, axis_distance_aa_e_ce);
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_s", coincidence: false, dimension_backed: true }, axis_distance_aa_e_s);
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_e", coincidence: false, dimension_backed: true }, axis_distance_aa_e_e);
+        f(&arenas, &CollectionMeta { name: "on_normal_ll", coincidence: false, dimension_backed: false }, on_normal_ll);
+        f(&arenas, &CollectionMeta { name: "on_normal_aa", coincidence: false, dimension_backed: false }, on_normal_aa);
     }
 
     /// Read-only twin of [`Self::for_each_constraint_collection`].
@@ -963,6 +995,9 @@ impl Sketch {
             cached_rank: _,
             structure_gen: _,
             dimensions: _,
+            metas: _,
+            next_meta_id: _,
+            notices: _,
             user_params: _,
             expr_constraints: _,
             coincident_pp,
@@ -1077,6 +1112,8 @@ impl Sketch {
             axis_distance_aa_e_ce,
             axis_distance_aa_e_s,
             axis_distance_aa_e_e,
+            on_normal_ll,
+            on_normal_aa,
         } = self;
         let arenas = ConstraintArenas { points, lines, arcs };
         f(&arenas, &CollectionMeta { name: "coincident_pp", coincidence: true, dimension_backed: false }, &*coincident_pp);
@@ -1191,6 +1228,8 @@ impl Sketch {
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_ce", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_ce);
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_s", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_s);
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_e", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_e);
+        f(&arenas, &CollectionMeta { name: "on_normal_ll", coincidence: false, dimension_backed: false }, &*on_normal_ll);
+        f(&arenas, &CollectionMeta { name: "on_normal_aa", coincidence: false, dimension_backed: false }, &*on_normal_aa);
     }
 }
 
