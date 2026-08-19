@@ -149,7 +149,7 @@ impl EditorApp {
                 }
                 ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Offset, "Offset")
-                    .on_hover_text("Offset a sequence of lines and arcs: click or box-select them (double-click walks a sequence), set the distance and side in the window, Apply. Click a result later to edit its offset.")
+                    .on_hover_text("Offset a sequence of lines and arcs: click or box-select them (double-click walks a sequence), set the distance and side in the window, Create. Double-click its marker later to edit the offset.")
                     .clicked() {
                     self.enter_offset_tool();
                 }

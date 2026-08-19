@@ -1444,6 +1444,11 @@ fn test_scale_box_select() {
 
 // -- Offset tool ----------------------------------------------------------
 
+/// The id of the first meta-constraint.
+fn o_mid(gui: &Gui) -> u32 {
+    gui.sketch().metas[0].mid
+}
+
 /// Clicks build the sequence, the preview appears, the typed distance and
 /// Enter create the offset, and the result is then under edit.
 #[test]
@@ -1472,9 +1477,9 @@ fn test_offset_tool_click_type_enter() {
     let m = &gui.sketch().metas[0];
     let o = m.as_offset().unwrap();
     assert!((o.distance.value - 0.5).abs() < 1e-9);
-    // The tool now edits what it made; the result is selected.
-    let st = gui.app.offset_tool.as_ref().unwrap();
-    assert_eq!(st.edit, Some(m.mid));
+    // Created: the tool closes, back in Select with the result selected.
+    assert!(gui.app.offset_tool.is_none());
+    assert_eq!(gui.app.tool, Tool::Select);
     assert_eq!(gui.app.selection.len(), 2);
 }
 
@@ -1514,6 +1519,74 @@ fn test_offset_tool_walk_box_side_escape() {
     assert_eq!(gui.app.selection.len(), 2, "{:?}", gui.app.selection);
     gui.frame();
     assert!(gui.app.offset_tool.as_ref().unwrap().plan.is_some());
+}
+
+/// A fillet offset inward past its radius vanishes from the plan (the
+/// window names it) and the created offset has no arc for it.
+#[test]
+fn test_offset_tool_vanishing_arc() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,3 0,0 4,0; fillet L0 L1 1");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.double_click(v(2.0, 0.0));
+    assert_eq!(gui.app.selection.len(), 3, "{:?}", gui.app.selection);
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        st.distance = "2".into();
+        st.side = 1.0; // inner side of the corner
+        st.side_fixed = true;
+    }
+    gui.app.refresh_offset_plan();
+    let plan = gui.app.offset_tool.as_ref().unwrap().plan.clone().expect("plan");
+    assert_eq!(arael_sketch_backend::offset::dropped_names(gui.sketch(), &plan), vec!["A0"]);
+    assert_eq!(plan.sides[0].sources, vec![0, 2]);
+    gui.app.apply_offset();
+    assert_eq!(gui.app.sketch.arcs.len(), 1, "no result arc");
+    assert_eq!(gui.sketch().metas[0].as_offset().unwrap().sides[0].dropped, vec![1]);
+}
+
+/// Editing a vanished-arc offset back to a distance where the arcs
+/// return rebuilds the side under the tool (the selection and the
+/// markers follow the new entities).
+#[test]
+fn test_offset_tool_edit_rebuild_after_vanish() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,3 0,0 4,0; fillet L0 L1 1");
+    // Created in the tool: walk the chain, inward by 2 (the fillet vanishes).
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.double_click(v(2.0, 0.0));
+    assert_eq!(gui.app.selection.len(), 3, "{:?}", gui.app.selection);
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        st.distance = "2".into();
+        st.side = 1.0;
+        st.side_fixed = true;
+    }
+    gui.app.refresh_offset_plan();
+    gui.app.apply_offset();
+    assert_eq!(gui.sketch().metas.len(), 1);
+    assert_eq!(gui.app.sketch.arcs.len(), 1, "no result arc");
+    assert_eq!(gui.app.tool, Tool::Select, "the tool closed");
+    gui.frame();
+    let mid = gui.sketch().metas[0].mid;
+    let p = gui.app.to_sketch(gui.app.meta_markers[0].pos);
+    gui.double_click(p);
+    assert_eq!(gui.app.offset_tool.as_ref().unwrap().edit, Some(mid));
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        st.distance = "0.5".into();
+        st.pending_text = true;
+    }
+    gui.app.refresh_offset_plan();
+    assert!(gui.app.offset_tool.as_ref().unwrap().plan.is_some());
+    gui.app.update_offset();
+    assert!(gui.app.status_error.is_none(), "{:?}", gui.app.status_error);
+    gui.frames(2);
+    assert_eq!(gui.app.sketch.arcs.len(), 2);
+    assert!(gui.sketch().metas[0].as_offset().unwrap().sides[0].dropped.is_empty());
+    assert_eq!(gui.app.selection.len(), 3, "the new result is selected");
 }
 
 /// An invalid set shows why and has no plan; a rejected plan likewise.
@@ -1607,7 +1680,8 @@ fn test_offset_tool_round_corners() {
     assert!(o.round && o.sides[0].corners.len() == 1);
     assert_eq!(gui.sketch().arcs.len(), 1, "the corner arc");
     assert_eq!(gui.app.sketch.dof().unwrap(), dof);
-    // Edit mode: sharp again removes the arc.
+    // Edit mode (reopened from the marker): sharp again removes the arc.
+    gui.app.open_meta_edit(o_mid(&gui));
     assert!(gui.app.offset_tool.as_ref().unwrap().edit.is_some());
     gui.app.offset_tool.as_mut().unwrap().round = false;
     gui.app.refresh_offset_plan();
@@ -1655,7 +1729,8 @@ fn test_offset_tool_caps() {
     assert_eq!(o.caps.entities.len(), 2);
     assert_eq!(gui.sketch().arcs.len(), 2);
     assert_eq!(gui.app.sketch.dof().unwrap(), dof);
-    // Edit: line caps.
+    // Edit (reopened from the marker): line caps.
+    gui.app.open_meta_edit(o_mid(&gui));
     gui.app.offset_tool.as_mut().unwrap().caps = CapKind::Line;
     gui.app.refresh_offset_plan();
     gui.app.update_offset();

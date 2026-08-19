@@ -366,6 +366,14 @@ impl arael_sketch_backend::corner_ops::ActionRunner for EditorApp {
     fn begin_group(&mut self) {
         EditorApp::begin_group(self)
     }
+    fn rollback_group(&mut self) {
+        if let Some(s) = self.history.discard_current_group() {
+            self.sketch = s.into();
+            self.prune_selection();
+            self.update_cost();
+            self.refresh_dof();
+        }
+    }
 }
 
 impl EditorApp {
@@ -1960,8 +1968,16 @@ impl EditorApp {
             self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
         }
         self.take_notices();
+        self.prune_selection();
         self.refresh_dof();
         created
+    }
+
+    /// Drop selection entries whose referents an action removed, so no
+    /// later frame indexes a stale ref.
+    pub fn prune_selection(&mut self) {
+        let sketch = &self.sketch;
+        self.selection.retain(|s| arael_sketch_backend::commands::selection_valid(sketch, s));
     }
 
     /// Move the sketch's queued notices into the status line.

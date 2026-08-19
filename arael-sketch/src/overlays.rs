@@ -780,7 +780,7 @@ impl EditorApp {
             },
             Tool::Offset => match self.offset_tool.as_ref() {
                 Some(s) if s.edit.is_some() => "Offset: editing -- change the type, distance (Enter applies), Flip or Pin in the window; Done or Escape to finish.",
-                Some(s) if s.plan.is_some() => "Offset: the dashed preview is the result; the side follows the mouse until Flip. Apply or Enter creates it. Escape to cancel.",
+                Some(s) if s.plan.is_some() => "Offset: the dashed preview is the result; the side follows the mouse until Flip. Create or Enter makes it and closes the tool. Escape to cancel.",
                 _ => "Offset: click or box-select lines and arcs that connect end to end; double-click walks a sequence; click an existing result to edit its offset. Escape to cancel.",
             },
             Tool::ConstraintMode(ConstraintType::OnNormal) => if self.selection.is_empty() {

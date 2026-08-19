@@ -162,7 +162,13 @@ impl EditorApp {
         state.round = p.round;
         state.caps = p.caps;
         state.edit = Some(mid);
-        // Show the result as the selection.
+        self.select_offset_result(mid);
+    }
+
+    /// Show an offset's result as the selection.
+    fn select_offset_result(&mut self, mid: u32) {
+        let Some(i) = self.sketch.meta_index(mid) else { return };
+        let Some(o) = self.sketch.metas[i].as_offset() else { return };
         self.selection = o
             .result_entities()
             .map(|e| match e {
@@ -386,15 +392,13 @@ impl EditorApp {
             return;
         };
         self.status_error = None;
-        self.begin_group();
         match offset::apply(self, &plan) {
             Ok(out) => {
-                // The new result becomes the selection and the offset the
-                // thing under edit, so a further change is an edit.
-                let mut state = self.offset_tool.take().unwrap_or_default();
-                self.load_offset_for_edit(&mut state, out.mid);
-                self.offset_tool = Some(state);
-                self.refresh_offset_plan();
+                // Done: the tool closes on the new result, selected; its
+                // marker opens it again for editing.
+                self.select_offset_result(out.mid);
+                self.leave_offset_tool();
+                self.tool = Tool::Select;
             }
             Err(e) => self.status_error = Some(e),
         }
@@ -420,7 +424,12 @@ impl EditorApp {
                 self.offset_tool = Some(state);
                 self.refresh_offset_plan();
             }
-            Err(e) => self.status_error = Some(e),
+            Err(e) => {
+                // Rolled back: the record and its result are as before;
+                // the window keeps what was typed, with the error.
+                self.status_error = Some(e);
+                self.select_offset_result(mid);
+            }
         }
     }
 
@@ -515,6 +524,10 @@ impl EditorApp {
                     if plan.approximate {
                         ui.colored_label(self.colors.notice_text, "approximate: an ellipse's offset is the concentric ellipse with both semi-axes moved");
                     }
+                    let gone = offset::dropped_names(&self.sketch, plan);
+                    if !gone.is_empty() {
+                        ui.colored_label(self.colors.notice_text, format!("{} vanish at this distance (offset inward past the radius); the neighbours meet directly", gone.join(" ")));
+                    }
                 } else if let Some(e) = &state.error {
                     ui.colored_label(self.colors.error_text, e.as_str());
                 }
@@ -528,7 +541,7 @@ impl EditorApp {
                             close = true;
                         }
                     } else {
-                        if ui.add_enabled(state.plan.is_some(), egui::Button::new("Apply")).clicked() {
+                        if ui.add_enabled(state.plan.is_some(), egui::Button::new("Create")).clicked() {
                             apply = true;
                         }
                         if ui.button("Cancel").clicked() {
