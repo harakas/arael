@@ -60,6 +60,24 @@ pub(crate) fn tangent_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stro
     ], stroke);
 }
 
+/// Meta-constraint glyph: two parallel sine waves, one over the other
+/// (an offset, in miniature).
+pub(crate) fn meta_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke: egui::Stroke) {
+    let amp = s * 0.3;
+    let gap = s * 0.45;
+    for dy in [-gap, gap] {
+        let pts: Vec<egui::Pos2> = (0..=16)
+            .map(|i| {
+                let t = i as f32 / 16.0;
+                let x = p.x - s + 2.0 * s * t;
+                let y = p.y + dy - amp * (t * std::f32::consts::TAU * 1.5).sin();
+                egui::Pos2::new(x, y)
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, stroke));
+    }
+}
+
 /// Compute (start_angle, span) for an arc respecting ccw flag.
 /// CCW arcs have positive span, CW arcs have negative span.
 fn arc_span(a: &Arc) -> (f64, f64) {
@@ -1881,6 +1899,35 @@ impl EditorApp {
         }
 
         self.constraint_markers = markers;
+
+        // Meta-constraints: one marker per result group (each side of
+        // an offset), on the group's first entity still there, stacked
+        // with that entity's constraint markers.
+        let mut meta_markers = Vec::new();
+        for m in &self.sketch.metas {
+            for group in m.result_groups() {
+                let Some(first) = group
+                    .into_iter()
+                    .find(|e| arael_sketch_backend::meta::entity_exists(&self.sketch, *e))
+                else {
+                    continue;
+                };
+                let pos = match first {
+                    OffsetEntity::Line(l) => {
+                        let idx = *line_marker_count.get(&l.index()).unwrap_or(&0);
+                        *line_marker_count.entry(l.index()).or_insert(0) += 1;
+                        self.line_marker_pos(l, 10.0, (idx as f32 - 0.5) * 14.0)
+                    }
+                    OffsetEntity::Arc(a) => {
+                        let idx = *arc_marker_count.get(&a.index()).unwrap_or(&0);
+                        *arc_marker_count.entry(a.index()).or_insert(0) += 1;
+                        self.arc_marker_pos(a, idx)
+                    }
+                };
+                meta_markers.push(MetaMarker { pos, mid: m.mid });
+            }
+        }
+        self.meta_markers = meta_markers;
     }
 
     // Draw the canvas
@@ -1947,6 +1994,18 @@ impl EditorApp {
                 for a in ce.arc_starts { highlight_arc_start.insert(a.index()); }
                 for a in ce.arc_ends { highlight_arc_end.insert(a.index()); }
                 for a in ce.arc_centers { highlight_arc_center.insert(a.index()); }
+            }
+            // A meta-constraint: everything it was made of and made.
+            if let Selection::Meta(mid) = sel
+                && let Some(i) = self.sketch.meta_index(*mid)
+            {
+                let m = &self.sketch.metas[i];
+                for e in m.source_entities().into_iter().chain(m.owned_entities()) {
+                    match e {
+                        OffsetEntity::Line(l) => { highlight_lines.insert(l.index()); }
+                        OffsetEntity::Arc(a) => { highlight_arcs.insert(a.index()); }
+                    }
+                }
             }
         }
         let highlight_color = c.highlight;
@@ -2242,6 +2301,17 @@ impl EditorApp {
                     painter.circle_filled(egui::Pos2::new(tick_x, p.y - s * 0.7), s * 0.3, color);
                 }
             }
+        }
+
+        // Meta-constraint markers.
+        for marker in &self.meta_markers {
+            let selected = self.selection.contains(&Selection::Meta(marker.mid));
+            let hovered = self.hovered == Some(Selection::Meta(marker.mid));
+            let color = if selected { c.constraint_marker_selected } else { c.constraint_marker };
+            let emphasized = selected || hovered;
+            let w = if emphasized { 2.0 } else { 1.5 };
+            let s = if emphasized { 7.0 } else { 5.0 };
+            meta_glyph(painter, marker.pos, s, egui::Stroke::new(w, color));
         }
 
         // Dimension annotations

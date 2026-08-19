@@ -309,6 +309,9 @@ impl EditorApp {
                             Selection::Arc(r) => { self.exec(Action::DeleteArc { arc: r }); }
                             Selection::Constraint(id) => { self.delete_constraint(id); }
                             Selection::Dimension(did) => { self.exec(Action::RemoveDimension { did }); }
+                            // A meta-constraint dissolves: its geometry
+                            // stays, as plain constrained geometry.
+                            Selection::Meta(mid) => { self.exec(Action::UnregisterMeta { mid }); }
                             _ => {} // endpoints aren't deletable on their own
                         }
                     }
@@ -409,6 +412,7 @@ impl EditorApp {
                 self.build_constraint_markers();
             } else {
                 self.constraint_markers.clear();
+                self.meta_markers.clear();
             }
             self.draw_canvas(&painter, rect, mouse_screen);
 

@@ -4,7 +4,7 @@
 use eframe::egui;
 use crate::test_harness::{Gui, v, near};
 use crate::tools::{ConstraintSymbol, ConstraintType, Tool};
-use arael_sketch_solver::{DimensionKind, OffsetKind};
+use arael_sketch_solver::{CapKind, DimensionKind, OffsetKind};
 use arael_sketch_backend::Selection;
 
 // -- Tool selection ---------------------------------------------------
@@ -1573,6 +1573,201 @@ fn test_offset_tool_edit_existing() {
     gui.key(egui::Key::Delete);
     assert!(gui.sketch().metas.is_empty());
     assert!(gui.app.status_notice.as_deref().is_some_and(|n| n.contains("dropped")), "{:?}", gui.app.status_notice);
+}
+
+/// Round corners from the tool: the option is in the plan and the
+/// created offset; toggling it in edit mode rebuilds the result; the
+/// option is loaded back when an existing round offset is opened.
+#[test]
+fn test_offset_tool_round_corners() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 3,0 3,2");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(1.5, 0.0));
+    gui.click(v(3.0, 1.0));
+    gui.move_to(v(1.5, -1.0)); // below: the convex side of the corner
+    gui.frame();
+    let dof = gui.app.sketch.dof().unwrap();
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        assert!(!st.round);
+        st.round = true;
+        st.side_fixed = true;
+        st.side = -1.0;
+    }
+    gui.app.refresh_offset_plan();
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    let plan = st.plan.as_ref().expect("plan");
+    assert!(plan.params.round);
+    assert_eq!(plan.sides[0].joints.iter().filter(|j| j.round.is_some()).count(), 1);
+    gui.app.apply_offset();
+    assert_eq!(gui.sketch().metas.len(), 1);
+    let o = gui.sketch().metas[0].as_offset().unwrap().clone();
+    assert!(o.round && o.sides[0].corners.len() == 1);
+    assert_eq!(gui.sketch().arcs.len(), 1, "the corner arc");
+    assert_eq!(gui.app.sketch.dof().unwrap(), dof);
+    // Edit mode: sharp again removes the arc.
+    assert!(gui.app.offset_tool.as_ref().unwrap().edit.is_some());
+    gui.app.offset_tool.as_mut().unwrap().round = false;
+    gui.app.refresh_offset_plan();
+    gui.app.update_offset();
+    assert_eq!(gui.sketch().arcs.len(), 0);
+    assert!(!gui.sketch().metas[0].as_offset().unwrap().round);
+    assert_eq!(gui.app.sketch.dof().unwrap(), dof);
+
+    // Opening a round offset loads the option.
+    let mut gui = Gui::new();
+    gui.cmd("add_rect 0,0 4,3; offset L0 L1 L2 L3 1 outward round");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(2.0, -1.0)); // the bottom result line
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert!(st.edit.is_some() && st.round, "{:?} {}", st.edit, st.round);
+}
+
+/// Caps from the tool: planned and previewed for a symmetric open
+/// sequence, created with the offset, editable; the option is loaded
+/// back for an existing capped offset and drops with one side.
+#[test]
+fn test_offset_tool_caps() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 3,0 3,2");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(1.5, 0.0));
+    gui.click(v(3.0, 1.0));
+    gui.frame();
+    let dof = gui.app.sketch.dof().unwrap();
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        st.kind = OffsetKind::Symmetric;
+        st.caps = CapKind::Round;
+    }
+    gui.app.refresh_offset_plan();
+    let plan = gui.app.offset_tool.as_ref().unwrap().plan.clone().expect("plan");
+    assert_eq!(plan.caps.len(), 2);
+    // The preview shows the results, and the two caps.
+    assert_eq!(arael_sketch_backend::offset::preview_polylines(&plan, 8).len(), 6);
+    gui.app.apply_offset();
+    let o = gui.sketch().metas[0].as_offset().unwrap().clone();
+    assert_eq!(o.caps.kind, CapKind::Round);
+    assert_eq!(o.caps.entities.len(), 2);
+    assert_eq!(gui.sketch().arcs.len(), 2);
+    assert_eq!(gui.app.sketch.dof().unwrap(), dof);
+    // Edit: line caps.
+    gui.app.offset_tool.as_mut().unwrap().caps = CapKind::Line;
+    gui.app.refresh_offset_plan();
+    gui.app.update_offset();
+    assert_eq!(gui.sketch().arcs.len(), 0);
+    assert_eq!(gui.sketch().metas[0].as_offset().unwrap().caps.kind, CapKind::Line);
+    assert_eq!(gui.app.sketch.dof().unwrap(), dof);
+    // One side: the window drops the caps (the state is fixed up when
+    // the window renders), and the update goes through.
+    gui.app.offset_tool.as_mut().unwrap().kind = OffsetKind::OneSide;
+    gui.frame();
+    assert_eq!(gui.app.offset_tool.as_ref().unwrap().caps, CapKind::None);
+
+    // Opening a capped offset loads the option.
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 4,0; offset L0 1 symmetric caps line");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(2.0, 1.0));
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert!(st.edit.is_some());
+    assert_eq!(st.caps, CapKind::Line);
+}
+
+/// The meta-constraint marker: drawn on the first result, a click
+/// selects it (its parts highlight, the status shows its description),
+/// double-click opens the offset for editing, Delete dissolves it; it
+/// hides with the constraint markers.
+#[test]
+fn test_meta_marker_select_open_delete() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 3,0 3,2; offset L0 L1 1");
+    gui.frame();
+    assert_eq!(gui.app.meta_markers.len(), 1);
+    let mid = gui.sketch().metas[0].mid;
+    assert_eq!(gui.app.meta_markers[0].mid, mid);
+    let marker_at = |gui: &Gui| gui.app.to_sketch(gui.app.meta_markers[0].pos);
+    // Click: selected, exclusive.
+    let p = marker_at(&gui);
+    gui.click(p);
+    assert_eq!(gui.app.selection, vec![Selection::Meta(mid)]);
+    assert!(gui.app.hit_test_selection(p, 0.2) == Some(Selection::Meta(mid)));
+    // Double-click: the Offset tool opens on it.
+    let p = marker_at(&gui);
+    gui.double_click(p);
+    assert_eq!(gui.app.tool, Tool::Offset);
+    let st = gui.app.offset_tool.as_ref().expect("tool state");
+    assert_eq!(st.edit, Some(mid));
+    gui.key(egui::Key::Escape);
+    assert_eq!(gui.app.tool, Tool::Select);
+    // Delete on the selected marker dissolves: geometry stays.
+    gui.frame();
+    let p = marker_at(&gui);
+    gui.click(p);
+    assert_eq!(gui.app.selection, vec![Selection::Meta(mid)]);
+    gui.key(egui::Key::Delete);
+    assert!(gui.sketch().metas.is_empty());
+    assert_eq!(gui.line_count(), 4);
+    assert!(gui.app.selection.is_empty());
+    gui.frame();
+    assert!(gui.app.meta_markers.is_empty());
+    // Undo brings the meta and its marker back; hiding constraints
+    // hides the marker too.
+    gui.key_with(egui::Key::Z, egui::Modifiers::CTRL);
+    gui.frame();
+    assert_eq!(gui.app.meta_markers.len(), 1);
+    gui.app.show_constraints = false;
+    gui.frame();
+    assert!(gui.app.meta_markers.is_empty());
+
+    // A two-sided offset has a marker on each side, both for the one meta.
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 4,0; offset L0 1 symmetric");
+    gui.frame();
+    let mid = gui.sketch().metas[0].mid;
+    assert_eq!(gui.app.meta_markers.len(), 2);
+    assert!(gui.app.meta_markers.iter().all(|m| m.mid == mid));
+    let ys: Vec<f64> = gui.app.meta_markers.iter().map(|m| gui.app.to_sketch(m.pos).y).collect();
+    assert!(ys.iter().any(|y| *y > 0.5) && ys.iter().any(|y| *y < -0.5), "{:?}", ys);
+    let p = gui.app.to_sketch(gui.app.meta_markers[1].pos);
+    gui.click(p);
+    assert_eq!(gui.app.selection, vec![Selection::Meta(mid)]);
+}
+
+/// The Offset tool's edit mode previews a typed distance before it is
+/// applied, and a marker click inside the tool opens that offset.
+#[test]
+fn test_offset_tool_edit_preview_and_marker() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 3,0 3,2; offset L0 L1 1");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    let mid = gui.sketch().metas[0].mid;
+    let p = gui.app.to_sketch(gui.app.meta_markers[0].pos);
+    gui.click(p);
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert_eq!(st.edit, Some(mid));
+    assert!(!st.pending_text);
+    // A typed distance: planned (previewed) but not applied until Enter.
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        st.distance = "1.5".into();
+        st.pending_text = true;
+    }
+    gui.app.refresh_offset_plan();
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    let plan = st.plan.as_ref().unwrap_or_else(|| panic!("plan: {:?}", st.error));
+    assert!((plan.params.distance.value - 1.5).abs() < 1e-9);
+    assert!((gui.sketch().metas[0].as_offset().unwrap().distance.value - 1.0).abs() < 1e-9, "not applied yet");
+    assert!(st.edit.is_some() && st.pending_text, "the preview condition holds");
+    gui.app.update_offset();
+    assert!((gui.sketch().metas[0].as_offset().unwrap().distance.value - 1.5).abs() < 1e-9);
+    assert!(!gui.app.offset_tool.as_ref().unwrap().pending_text);
 }
 
 // -- On-normal constraint mode ------------------------------------------

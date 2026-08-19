@@ -314,6 +314,13 @@ pub struct ConstraintMarker {
     pub id: ConstraintId,
 }
 
+/// A meta-constraint's marker, placed on the first of its result
+/// entities.
+pub struct MetaMarker {
+    pub pos: eframe::egui::Pos2,
+    pub mid: u32,
+}
+
 // Which point on an arc we're referring to
 #[derive(Clone, Copy)]
 pub enum ArcPoint { Center, Start, End }

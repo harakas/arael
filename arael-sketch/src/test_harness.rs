@@ -109,14 +109,16 @@ impl Gui {
         self.time += 0.4;
     }
 
-    /// Two clicks within egui's double-click window.
+    /// Two clicks within egui's double-click window. Advances time past
+    /// the triple-click window (twice the double-click delay, counted
+    /// from the first click) so a following click() is a single click.
     pub fn double_click(&mut self, p: vect2d) {
         self.move_to(p);
         self.button(p, true);
         self.button(p, false);
         self.button(p, true);
         self.button(p, false);
-        self.time += 0.4;
+        self.time += 0.7;
     }
 
     /// Press at `from`, move in steps, release at `to`. The step count
@@ -252,6 +254,7 @@ impl Gui {
                 | Selection::ArcStart(r) | Selection::ArcEnd(r) =>
                     s.arcs.contains_ref(r),
                 Selection::Dimension(did) => s.dimension_index_by_did(did).is_some(),
+                Selection::Meta(mid) => s.meta_index(mid).is_some(),
                 Selection::Constraint(_) => true, // nid-addressed, prune handles staleness
             };
             assert!(ok, "stale selection entry {:?}", sel);

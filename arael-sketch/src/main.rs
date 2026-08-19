@@ -174,6 +174,8 @@ pub struct EditorApp {
 
     // Constraint markers (rebuilt each frame for hit testing)
     pub constraint_markers: Vec<ConstraintMarker>,
+    /// Meta-constraint markers, rebuilt with the constraint markers.
+    pub meta_markers: Vec<MetaMarker>,
 
     // File
     pub pending_load: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -447,6 +449,7 @@ impl EditorApp {
             snap_disabled: false,
             history,
             constraint_markers: Vec::new(),
+            meta_markers: Vec::new(),
             pending_load: std::sync::Arc::new(std::sync::Mutex::new(None)),
             pending_fit: true,
             dim_input: String::new(),
@@ -904,20 +907,25 @@ impl EditorApp {
     // Find selection target (entity near mouse)
     // Priority: Constraints > Points > Endpoints > Lines/Arcs
     fn hit_test_selection(&self, sketch_pos: vect2d, threshold: f64) -> Option<Selection> {
-        // Constraint markers first (screen-space, pick closest)
+        // Constraint and meta-constraint markers first (screen-space,
+        // pick closest)
         let screen_pos = self.to_screen(sketch_pos);
-        let mut best_constraint: Option<(f32, ConstraintId)> = None;
-        for marker in &self.constraint_markers {
-            let dx = screen_pos.x - marker.pos.x;
-            let dy = screen_pos.y - marker.pos.y;
+        let mut best_marker: Option<(f32, Selection)> = None;
+        let markers = self
+            .constraint_markers
+            .iter()
+            .map(|m| (m.pos, Selection::Constraint(m.id)))
+            .chain(self.meta_markers.iter().map(|m| (m.pos, Selection::Meta(m.mid))));
+        for (pos, sel) in markers {
+            let dx = screen_pos.x - pos.x;
+            let dy = screen_pos.y - pos.y;
             let d = (dx * dx + dy * dy).sqrt();
-            if d < 10.0
-                && (best_constraint.is_none() || d < best_constraint.unwrap().0) {
-                    best_constraint = Some((d, marker.id));
-                }
+            if d < 10.0 && best_marker.is_none_or(|(bd, _)| d < bd) {
+                best_marker = Some((d, sel));
+            }
         }
-        if let Some((_, id)) = best_constraint {
-            return Some(Selection::Constraint(id));
+        if let Some((_, sel)) = best_marker {
+            return Some(sel);
         }
 
         // Then standalone points (skip helpers, skip if hidden)
@@ -1678,6 +1686,7 @@ impl EditorApp {
                     .map(|i| self.sketch.dimensions[i].name.clone())
             }
             Selection::Constraint(id) => self.constraint_name(id),
+            Selection::Meta(mid) => self.sketch.meta_index(mid).map(|i| self.sketch.metas[i].name.clone()),
         }
     }
 
@@ -1685,12 +1694,13 @@ impl EditorApp {
         if let Some(idx) = self.selection.iter().position(|s| *s == sel) {
             self.selection.remove(idx);
         } else {
-            // Constraints are exclusive - clear everything else when selecting one
-            if matches!(sel, Selection::Constraint(_)) {
+            // Constraints and meta-constraints are exclusive - clear
+            // everything else when selecting one
+            if matches!(sel, Selection::Constraint(_) | Selection::Meta(_)) {
                 self.selection.clear();
             } else {
                 // Clear any constraint selections when selecting non-constraints
-                self.selection.retain(|s| !matches!(s, Selection::Constraint(_)));
+                self.selection.retain(|s| !matches!(s, Selection::Constraint(_) | Selection::Meta(_)));
             }
             self.selection.push(sel);
         }
@@ -3083,6 +3093,10 @@ impl EditorApp {
                     None => "dim?".to_string(),
                 }
             }
+            Selection::Meta(mid) => match self.sketch.meta_index(mid) {
+                Some(i) => self.sketch.metas[i].name.clone(),
+                None => "meta?".to_string(),
+            },
         }
     }
 
@@ -3095,7 +3109,7 @@ impl EditorApp {
             Selection::ArcCenter(r) => Some(self.sketch.arcs[r].center.value),
             Selection::ArcStart(r) => Some(arc_start_pos(&self.sketch.arcs[r])),
             Selection::ArcEnd(r) => Some(arc_end_pos(&self.sketch.arcs[r])),
-            Selection::Line(_) | Selection::Arc(_) | Selection::Constraint(_) | Selection::Dimension(_) => None,
+            Selection::Line(_) | Selection::Arc(_) | Selection::Constraint(_) | Selection::Dimension(_) | Selection::Meta(_) => None,
         }
     }
 
@@ -3109,7 +3123,7 @@ impl EditorApp {
             Selection::ArcCenter(r) => Some(Action::ApplyCoincidentArcCenter { point, arc: r }),
             Selection::ArcStart(r) => Some(Action::ApplyCoincidentArcStart { point, arc: r }),
             Selection::ArcEnd(r) => Some(Action::ApplyCoincidentArcEnd { point, arc: r }),
-            Selection::Line(_) | Selection::Arc(_) | Selection::Constraint(_) | Selection::Dimension(_) => None,
+            Selection::Line(_) | Selection::Arc(_) | Selection::Constraint(_) | Selection::Dimension(_) | Selection::Meta(_) => None,
         }
     }
 

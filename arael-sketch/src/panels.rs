@@ -291,6 +291,10 @@ impl EditorApp {
                                 None => Some("dim?".to_string()),
                             }
                         }
+                        Selection::Meta(mid) => self
+                            .sketch
+                            .meta_index(mid)
+                            .map(|i| arael_sketch_backend::meta::describe(&self.sketch, &self.sketch.metas[i])),
                     }
                 }).collect();
                 // For a single line / circle / arc selection, append

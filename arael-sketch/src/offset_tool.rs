@@ -23,6 +23,10 @@ pub struct OffsetToolState {
     /// Once Flip was pressed the side no longer follows the mouse.
     pub side_fixed: bool,
     pub pinned: bool,
+    /// Round convex corners with an arc of the distance.
+    pub round: bool,
+    /// Close the ends of an open two-sided result.
+    pub caps: CapKind,
     /// Editing an existing offset: its meta id.
     pub edit: Option<u32>,
     /// The sequence the selection orders into (the side is judged on it
@@ -47,6 +51,8 @@ impl Default for OffsetToolState {
             side: 1.0,
             side_fixed: false,
             pinned: true,
+            round: false,
+            caps: CapKind::None,
             edit: None,
             seq: None,
             plan: None,
@@ -63,6 +69,7 @@ impl EditorApp {
     pub fn enter_offset_tool(&mut self) {
         self.tool = Tool::Offset;
         let mut state = OffsetToolState::default();
+        let edit = self.selected_offset_meta();
         let mut kept: Vec<Selection> = Vec::new();
         for sel in self.selection.drain(..) {
             if let Some(norm) = Self::offset_set_member(sel) {
@@ -72,7 +79,7 @@ impl EditorApp {
             }
         }
         self.selection = kept;
-        if let Some(mid) = self.selected_offset_meta() {
+        if let Some(mid) = edit {
             self.load_offset_for_edit(&mut state, mid);
         }
         self.offset_tool = Some(state);
@@ -106,8 +113,28 @@ impl EditorApp {
             .collect()
     }
 
-    /// The offset meta one of the selected entities is a result of.
+    /// Open a meta-constraint in its tool for editing (the Offset tool
+    /// in edit mode, for an offset).
+    pub(crate) fn open_meta_edit(&mut self, mid: u32) {
+        let Some(i) = self.sketch.meta_index(mid) else { return };
+        if self.sketch.metas[i].as_offset().is_none() {
+            return;
+        }
+        self.selection.clear();
+        self.selection.push(Selection::Meta(mid));
+        self.enter_offset_tool();
+    }
+
+    /// The offset meta selected by its marker, or one of the selected
+    /// entities is a result of.
     fn selected_offset_meta(&self) -> Option<u32> {
+        for s in &self.selection {
+            if let Selection::Meta(mid) = s
+                && self.sketch.meta_index(*mid).is_some_and(|i| self.sketch.metas[i].as_offset().is_some())
+            {
+                return Some(*mid);
+            }
+        }
         for e in self.selection_entities() {
             if let Some(m) = arael_sketch_backend::meta::owner_of(&self.sketch, e) {
                 if m.as_offset().is_some() {
@@ -132,6 +159,8 @@ impl EditorApp {
         state.side = p.side;
         state.side_fixed = true;
         state.pinned = p.pinned;
+        state.round = p.round;
+        state.caps = p.caps;
         state.edit = Some(mid);
         // Show the result as the selection.
         self.selection = o
@@ -151,7 +180,15 @@ impl EditorApp {
         } else {
             None
         };
-        Ok(OffsetParams { kind: state.kind, distance, distance2, side: state.side, pinned: state.pinned })
+        Ok(OffsetParams {
+            kind: state.kind,
+            distance,
+            distance2,
+            side: state.side,
+            pinned: state.pinned,
+            round: state.round,
+            caps: state.caps,
+        })
     }
 
     /// The sequence under edit, or the selection ordered into one.
@@ -239,8 +276,9 @@ impl EditorApp {
                 changed = true;
             }
         } else if response.clicked_by(egui::PointerButton::Primary) {
-            match self.hit_test_selection(mouse_sketch, hit_threshold).and_then(Self::offset_set_member) {
-                Some(norm) => {
+            let hit = self.hit_test_selection(mouse_sketch, hit_threshold);
+            match (hit.and_then(Self::offset_set_member), hit) {
+                (Some(norm), _) => {
                     let e = match norm {
                         Selection::Line(r) => OffsetEntity::Line(r),
                         Selection::Arc(r) => OffsetEntity::Arc(r),
@@ -251,7 +289,14 @@ impl EditorApp {
                         self.toggle_selection(norm);
                     }
                 }
-                None => {
+                // A meta-constraint's marker opens it.
+                (None, Some(Selection::Meta(mid))) => {
+                    if !self.open_offset_edit_mid(mid) {
+                        self.leave_offset_edit();
+                        self.selection.clear();
+                    }
+                }
+                (None, _) => {
                     self.leave_offset_edit();
                     self.selection.clear();
                 }
@@ -294,6 +339,15 @@ impl EditorApp {
         else {
             return false;
         };
+        self.open_offset_edit_mid(mid)
+    }
+
+    /// Switch the tool to editing the offset `mid`; false when it is not
+    /// an offset.
+    fn open_offset_edit_mid(&mut self, mid: u32) -> bool {
+        if !self.sketch.meta_index(mid).is_some_and(|i| self.sketch.metas[i].as_offset().is_some()) {
+            return false;
+        }
         let mut state = self.offset_tool.take().unwrap_or_default();
         if state.edit != Some(mid) {
             state = OffsetToolState::default();
@@ -312,6 +366,8 @@ impl EditorApp {
             fresh.distance2 = state.distance2.clone();
             fresh.kind = state.kind;
             fresh.pinned = state.pinned;
+            fresh.round = state.round;
+            fresh.caps = state.caps;
             *state = fresh;
             self.selection.clear();
         }
@@ -432,6 +488,27 @@ impl EditorApp {
                         flip = true;
                     }
                     ui.label(if state.side > 0.0 { "left of the chain" } else { "right of the chain" });
+                });
+                // Caps close the ends of an open two-sided result.
+                let open = state.seq.as_ref().is_none_or(|s| !s.closed);
+                if open && state.kind != OffsetKind::OneSide {
+                    ui.horizontal(|ui| {
+                        ui.label("Caps");
+                        changed |= ui.selectable_value(&mut state.caps, CapKind::None, "None").changed();
+                        changed |= ui.selectable_value(&mut state.caps, CapKind::Line, "Line").on_hover_text("A line across each end").changed();
+                        if state.kind == OffsetKind::Symmetric {
+                            changed |= ui.selectable_value(&mut state.caps, CapKind::Round, "Round").on_hover_text("A half circle of the distance around each end").changed();
+                        } else if state.caps == CapKind::Round {
+                            state.caps = CapKind::Line;
+                            changed = true;
+                        }
+                    });
+                } else if state.caps != CapKind::None {
+                    state.caps = CapKind::None;
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut state.round, "Round corners").on_hover_text("Convex corners get an arc of the distance around the source corner instead of a sharp corner.").changed();
                     changed |= ui.checkbox(&mut state.pinned, "Pin ends").on_hover_text("Hold the free ends and tangent joints on the source's normals (on_normal). Off: they stay free.").changed();
                 });
                 if let Some(plan) = &state.plan {
@@ -487,19 +564,19 @@ impl EditorApp {
         }
     }
 
-    /// The preview: the planned result, dashed, with the side marked.
+    /// The preview: the planned result, dashed. In edit mode only while a
+    /// typed distance is not yet applied (the other changes apply at once),
+    /// so the new place shows before Enter / Apply.
     pub fn draw_offset_preview(&self, painter: &egui::Painter) {
         let Some(state) = self.offset_tool.as_ref() else { return };
-        if state.edit.is_some() {
+        if state.edit.is_some() && !state.pending_text {
             return;
         }
         let Some(plan) = state.plan.as_ref() else { return };
         let stroke = egui::Stroke::new(1.5, self.colors.offset_preview);
-        for side in &plan.sides {
-            for g in &side.results {
-                let pts: Vec<egui::Pos2> = offset::sample_result(g, 48).into_iter().map(|p| self.to_screen(p)).collect();
-                crate::drawing::draw_styled_polyline(painter, &pts, stroke, LineStyle::Dashed);
-            }
+        for poly in offset::preview_polylines(plan, 48) {
+            let pts: Vec<egui::Pos2> = poly.into_iter().map(|p| self.to_screen(p)).collect();
+            crate::drawing::draw_styled_polyline(painter, &pts, stroke, LineStyle::Dashed);
         }
     }
 }

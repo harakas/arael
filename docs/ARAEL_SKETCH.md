@@ -281,6 +281,13 @@ python3 -m http.server -d dist 8080
   point-to-line distance dimensions with draggable annotations.
   Numeric values and parametric expressions (`d0 * 2`,
   `L0.length + 3`) are both accepted.
+- **Offset** -- a parallel copy of a connected sequence of lines and
+  arcs at a distance, on one or both sides, with sharp or round
+  corners, held there by constraints and dimensions and recorded as
+  an editable meta-constraint (`M<n>`) with its own marker: a click
+  highlights its sources and results, a double-click opens it for
+  editing, Delete dissolves it (the geometry stays). In the tool,
+  double-click walks the sequence.
 - **Select (Escape)** -- click to select, drag to move entities,
   Backspace/Delete to remove.
 - **Dark/Light mode** toggle, **Save/Load** (JSON),
@@ -291,6 +298,7 @@ python3 -m http.server -d dist 8080
 Horizontal (H), Vertical (V), Coincident (C), Parallel,
 Perpendicular, Equal length/radius (=), Tangent (T), Collinear,
 Midpoint (M), Symmetry (S; lines or points about a mirror line),
+On normal (an endpoint on another entity's normal at its endpoint),
 Lock (K), Construction toggle (X). Constraints are visualised as
 symbols on the geometry and can be selected and deleted.
 

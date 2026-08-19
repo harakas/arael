@@ -251,6 +251,12 @@ impl EditorApp {
                     if !additive { self.selection.clear(); }
                     self.select_chain(sel);
                 }
+                // Double-click on a meta-constraint's marker: open it
+                // in its tool for editing.
+                if let Selection::Meta(mid) = sel {
+                    self.open_meta_edit(mid);
+                    return;
+                }
             }
         }
 
