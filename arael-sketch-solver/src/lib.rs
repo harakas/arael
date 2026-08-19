@@ -301,6 +301,17 @@ pub struct Sketch {
     /// Endpoint on the normal of a line / arc at its endpoint.
     #[serde(default)] pub on_normal_ll: std::vec::Vec<EndpointOnNormalLL>,
     #[serde(default)] pub on_normal_aa: std::vec::Vec<EndpointOnNormalAA>,
+    /// Pattern images: the copy is the source moved by a translation
+    /// (world axes / a line's frame) or a rotation about a point.
+    #[serde(default)] pub image_line_t: std::vec::Vec<ImageLineT>,
+    #[serde(default)] pub image_line_tf: std::vec::Vec<ImageLineTF>,
+    #[serde(default)] pub image_line_r: std::vec::Vec<ImageLineR>,
+    #[serde(default)] pub image_arc_t: std::vec::Vec<ImageArcT>,
+    #[serde(default)] pub image_arc_tf: std::vec::Vec<ImageArcTF>,
+    #[serde(default)] pub image_arc_r: std::vec::Vec<ImageArcR>,
+    #[serde(default)] pub image_point_t: std::vec::Vec<ImagePointT>,
+    #[serde(default)] pub image_point_tf: std::vec::Vec<ImagePointTF>,
+    #[serde(default)] pub image_point_r: std::vec::Vec<ImagePointR>,
     // Dimension annotations
     #[arael(skip)]
     pub dimensions: std::vec::Vec<Dimension>,
@@ -775,6 +786,15 @@ impl Sketch {
             axis_distance_aa_e_e: Vec::new(),
             on_normal_ll: Vec::new(),
             on_normal_aa: Vec::new(),
+            image_line_t: Vec::new(),
+            image_line_tf: Vec::new(),
+            image_line_r: Vec::new(),
+            image_arc_t: Vec::new(),
+            image_arc_tf: Vec::new(),
+            image_arc_r: Vec::new(),
+            image_point_t: Vec::new(),
+            image_point_tf: Vec::new(),
+            image_point_r: Vec::new(),
             dimensions: Vec::new(),
             next_dimension_id: 0,
             metas: Vec::new(),

@@ -2922,3 +2922,333 @@ pub struct EndpointOnNormalAA {
     pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
+
+// ---------------------------------------------------------------------------
+// Image constraints: the copy entity `b` is the image of the source `a`
+// under a rigid transform -- a translation in world axes (`T`), in the
+// frame of a line (`TF`: `dx` along it, `dy` across it to the left), or
+// a rotation about a point (`R`). `mask` picks the rows enforced (see
+// `image_rows`): a pattern images only what the copy's recreated
+// coincidences leave open, so every row is independent. An arc's angle
+// rows shift by the rotation; a line's and a point's rows are positions.
+// ---------------------------------------------------------------------------
+
+/// Row bits of the image constraints.
+pub mod image_rows {
+    /// Line p1 / arc center / the point.
+    pub const P1: u8 = 1;
+    /// Line p2.
+    pub const P2: u8 = 2;
+    /// Arc center.
+    pub const CENTER: u8 = 1;
+    /// Arc radius (and `radius_b` for an ellipse).
+    pub const RADIUS: u8 = 2;
+    /// Ellipse `radius_b` alone.
+    pub const RADIUS_B: u8 = 4;
+    /// Ellipse rotation.
+    pub const ROTATION: u8 = 8;
+    /// Arc start angle.
+    pub const START: u8 = 16;
+    /// Arc end angle.
+    pub const END: u8 = 32;
+    /// Line: both ends. Point: the point.
+    pub const ALL_LINE: u8 = P1 | P2;
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, guard = self.mask & 1 != 0, name = "p1", {
+    [(b.p1.x - a.p1.x - imagelinet.dx) * sketch.constraint_isigma,
+     (b.p1.y - a.p1.y - imagelinet.dy) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.mask & 2 != 0, name = "p2", {
+    [(b.p2.x - a.p2.x - imagelinet.dx) * sketch.constraint_isigma,
+     (b.p2.y - a.p2.y - imagelinet.dy) * sketch.constraint_isigma]
+}))]
+pub struct ImageLineT {
+    #[arael(ref = root.lines)] pub a: Ref<Line>,
+    #[arael(ref = root.lines)] pub b: Ref<Line>,
+    pub dx: f64,
+    pub dy: f64,
+    pub mask: u8,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)] pub hb: CrossBlock<Line, Line>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 1 != 0, name = "p1", {
+    let fx = frame.p2.x - frame.p1.x;
+    let fy = frame.p2.y - frame.p1.y;
+    let len = sqrt(fx * fx + fy * fy);
+    [(b.p1.x - a.p1.x - (imagelinetf.dx * fx - imagelinetf.dy * fy) / len) * sketch.constraint_isigma,
+     (b.p1.y - a.p1.y - (imagelinetf.dx * fy + imagelinetf.dy * fx) / len) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 2 != 0, name = "p2", {
+    let fx = frame.p2.x - frame.p1.x;
+    let fy = frame.p2.y - frame.p1.y;
+    let len = sqrt(fx * fx + fy * fy);
+    [(b.p2.x - a.p2.x - (imagelinetf.dx * fx - imagelinetf.dy * fy) / len) * sketch.constraint_isigma,
+     (b.p2.y - a.p2.y - (imagelinetf.dx * fy + imagelinetf.dy * fx) / len) * sketch.constraint_isigma]
+}))]
+pub struct ImageLineTF {
+    #[arael(ref = root.lines)] pub a: Ref<Line>,
+    #[arael(ref = root.lines)] pub b: Ref<Line>,
+    #[arael(ref = root.lines)] pub frame: Ref<Line>,
+    pub dx: f64,
+    pub dy: f64,
+    pub mask: u8,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[arael(cross = (a, b))]
+    #[serde(skip)] pub hb_ab: CrossBlock<Line, Line>,
+    #[arael(cross = (a, frame))]
+    #[serde(skip)] pub hb_af: CrossBlock<Line, Line>,
+    #[arael(cross = (b, frame))]
+    #[serde(skip)] pub hb_bf: CrossBlock<Line, Line>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 1 != 0, name = "p1", {
+    let ca = cos(imageliner.angle);
+    let sa = sin(imageliner.angle);
+    let ux = a.p1.x - center.pos.x;
+    let uy = a.p1.y - center.pos.y;
+    [(b.p1.x - center.pos.x - (ca * ux - sa * uy)) * sketch.constraint_isigma,
+     (b.p1.y - center.pos.y - (sa * ux + ca * uy)) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 2 != 0, name = "p2", {
+    let ca = cos(imageliner.angle);
+    let sa = sin(imageliner.angle);
+    let ux = a.p2.x - center.pos.x;
+    let uy = a.p2.y - center.pos.y;
+    [(b.p2.x - center.pos.x - (ca * ux - sa * uy)) * sketch.constraint_isigma,
+     (b.p2.y - center.pos.y - (sa * ux + ca * uy)) * sketch.constraint_isigma]
+}))]
+pub struct ImageLineR {
+    #[arael(ref = root.lines)] pub a: Ref<Line>,
+    #[arael(ref = root.lines)] pub b: Ref<Line>,
+    #[arael(ref = root.points)] pub center: Ref<Point>,
+    /// Radians, counter-clockwise.
+    pub angle: f64,
+    pub mask: u8,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[arael(cross = (a, b))]
+    #[serde(skip)] pub hb_ab: CrossBlock<Line, Line>,
+    #[arael(cross = (a, center))]
+    #[serde(skip)] pub hb_ac: CrossBlock<Line, Point>,
+    #[arael(cross = (b, center))]
+    #[serde(skip)] pub hb_bc: CrossBlock<Line, Point>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    [(b.pos.x - a.pos.x - imagepointt.dx) * sketch.constraint_isigma,
+     (b.pos.y - a.pos.y - imagepointt.dy) * sketch.constraint_isigma]
+}))]
+pub struct ImagePointT {
+    #[arael(ref = root.points)] pub a: Ref<Point>,
+    #[arael(ref = root.points)] pub b: Ref<Point>,
+    pub dx: f64,
+    pub dy: f64,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)] pub hb: CrossBlock<Point, Point>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint([hb_ab, hb_af, hb_bf], {
+    let fx = frame.p2.x - frame.p1.x;
+    let fy = frame.p2.y - frame.p1.y;
+    let len = sqrt(fx * fx + fy * fy);
+    [(b.pos.x - a.pos.x - (imagepointtf.dx * fx - imagepointtf.dy * fy) / len) * sketch.constraint_isigma,
+     (b.pos.y - a.pos.y - (imagepointtf.dx * fy + imagepointtf.dy * fx) / len) * sketch.constraint_isigma]
+}))]
+pub struct ImagePointTF {
+    #[arael(ref = root.points)] pub a: Ref<Point>,
+    #[arael(ref = root.points)] pub b: Ref<Point>,
+    #[arael(ref = root.lines)] pub frame: Ref<Line>,
+    pub dx: f64,
+    pub dy: f64,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[arael(cross = (a, b))]
+    #[serde(skip)] pub hb_ab: CrossBlock<Point, Point>,
+    #[arael(cross = (a, frame))]
+    #[serde(skip)] pub hb_af: CrossBlock<Point, Line>,
+    #[arael(cross = (b, frame))]
+    #[serde(skip)] pub hb_bf: CrossBlock<Point, Line>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], {
+    let ca = cos(imagepointr.angle);
+    let sa = sin(imagepointr.angle);
+    let ux = a.pos.x - center.pos.x;
+    let uy = a.pos.y - center.pos.y;
+    [(b.pos.x - center.pos.x - (ca * ux - sa * uy)) * sketch.constraint_isigma,
+     (b.pos.y - center.pos.y - (sa * ux + ca * uy)) * sketch.constraint_isigma]
+}))]
+pub struct ImagePointR {
+    #[arael(ref = root.points)] pub a: Ref<Point>,
+    #[arael(ref = root.points)] pub b: Ref<Point>,
+    #[arael(ref = root.points)] pub center: Ref<Point>,
+    /// Radians, counter-clockwise.
+    pub angle: f64,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[arael(cross = (a, b))]
+    #[serde(skip)] pub hb_ab: CrossBlock<Point, Point>,
+    #[arael(cross = (a, center))]
+    #[serde(skip)] pub hb_ac: CrossBlock<Point, Point>,
+    #[arael(cross = (b, center))]
+    #[serde(skip)] pub hb_bc: CrossBlock<Point, Point>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, guard = self.mask & 1 != 0, name = "center", {
+    [(b.center.x - a.center.x - imagearct.dx) * sketch.constraint_isigma,
+     (b.center.y - a.center.y - imagearct.dy) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.mask & 2 != 0, name = "radius", {
+    [(b.radius - a.radius) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.mask & 6 != 0 && a.is_ellipse, name = "radius_b", {
+    [(b.radius_b - a.radius_b) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.mask & 8 != 0 && a.is_ellipse, name = "rotation", {
+    [(b.rotation - a.rotation) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.mask & 16 != 0 && !a.closed, name = "start", {
+    [(b.start_angle - a.start_angle) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = self.mask & 32 != 0 && !a.closed, name = "end", {
+    [(b.end_angle - a.end_angle) * sketch.constraint_isigma]
+}))]
+pub struct ImageArcT {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub dx: f64,
+    pub dy: f64,
+    pub mask: u8,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 1 != 0, name = "center", {
+    let fx = frame.p2.x - frame.p1.x;
+    let fy = frame.p2.y - frame.p1.y;
+    let len = sqrt(fx * fx + fy * fy);
+    [(b.center.x - a.center.x - (imagearctf.dx * fx - imagearctf.dy * fy) / len) * sketch.constraint_isigma,
+     (b.center.y - a.center.y - (imagearctf.dx * fy + imagearctf.dy * fx) / len) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 2 != 0, name = "radius", {
+    [(b.radius - a.radius) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 6 != 0 && a.is_ellipse, name = "radius_b", {
+    [(b.radius_b - a.radius_b) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 8 != 0 && a.is_ellipse, name = "rotation", {
+    [(b.rotation - a.rotation) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 16 != 0 && !a.closed, name = "start", {
+    [(b.start_angle - a.start_angle) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_af, hb_bf], guard = self.mask & 32 != 0 && !a.closed, name = "end", {
+    [(b.end_angle - a.end_angle) * sketch.constraint_isigma]
+}))]
+pub struct ImageArcTF {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    #[arael(ref = root.lines)] pub frame: Ref<Line>,
+    pub dx: f64,
+    pub dy: f64,
+    pub mask: u8,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[arael(cross = (a, b))]
+    #[serde(skip)] pub hb_ab: CrossBlock<Arc, Arc>,
+    #[arael(cross = (a, frame))]
+    #[serde(skip)] pub hb_af: CrossBlock<Arc, Line>,
+    #[arael(cross = (b, frame))]
+    #[serde(skip)] pub hb_bf: CrossBlock<Arc, Line>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 1 != 0, name = "center", {
+    let ca = cos(imagearcr.angle);
+    let sa = sin(imagearcr.angle);
+    let ux = a.center.x - center.pos.x;
+    let uy = a.center.y - center.pos.y;
+    [(b.center.x - center.pos.x - (ca * ux - sa * uy)) * sketch.constraint_isigma,
+     (b.center.y - center.pos.y - (sa * ux + ca * uy)) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 2 != 0, name = "radius", {
+    [(b.radius - a.radius) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 6 != 0 && a.is_ellipse, name = "radius_b", {
+    [(b.radius_b - a.radius_b) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 8 != 0 && a.is_ellipse, name = "rotation", {
+    [(b.rotation - a.rotation - imagearcr.angle) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 16 != 0 && !a.closed, name = "start", {
+    [(b.start_angle - a.start_angle - imagearcr.angle) * sketch.constraint_isigma]
+}))]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], guard = self.mask & 32 != 0 && !a.closed, name = "end", {
+    [(b.end_angle - a.end_angle - imagearcr.angle) * sketch.constraint_isigma]
+}))]
+pub struct ImageArcR {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    #[arael(ref = root.points)] pub center: Ref<Point>,
+    /// Radians, counter-clockwise.
+    pub angle: f64,
+    pub mask: u8,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[arael(cross = (a, b))]
+    #[serde(skip)] pub hb_ab: CrossBlock<Arc, Arc>,
+    #[arael(cross = (a, center))]
+    #[serde(skip)] pub hb_ac: CrossBlock<Arc, Point>,
+    #[arael(cross = (b, center))]
+    #[serde(skip)] pub hb_bc: CrossBlock<Arc, Point>,
+}

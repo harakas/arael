@@ -678,8 +678,36 @@ sketch_constraint!(EndpointOnNormalAA, points(), lines(),
     dedup(ends(a, b; placed_end, ref_end)),
     describe("on_normal {} {}", arc_end(a, placed_end), arc_end(b, ref_end)));
 
+sketch_constraint!(ImageLineT, points(), lines(a: extent, b: extent), arcs(),
+    dedup(exact(a, b)),
+    describe("image {} -> {} translate {} {}", line(a), line(b), num(dx), num(dy)));
+sketch_constraint!(ImageLineTF, points(), lines(a: extent, b: extent, frame: host), arcs(),
+    dedup(exact(a, b)),
+    describe("image {} -> {} translate {} {} along {}", line(a), line(b), num(dx), num(dy), line(frame)));
+sketch_constraint!(ImageLineR, points(center), lines(a: extent, b: extent), arcs(),
+    dedup(exact(a, b)),
+    describe("image {} -> {} rotate {} about {}", line(a), line(b), deg(angle), point(center)));
+sketch_constraint!(ImageArcT, points(), lines(), arcs(a: extent, b: extent),
+    dedup(exact(a, b)),
+    describe("image {} -> {} translate {} {}", arc(a), arc(b), num(dx), num(dy)));
+sketch_constraint!(ImageArcTF, points(), lines(frame: host), arcs(a: extent, b: extent),
+    dedup(exact(a, b)),
+    describe("image {} -> {} translate {} {} along {}", arc(a), arc(b), num(dx), num(dy), line(frame)));
+sketch_constraint!(ImageArcR, points(center), lines(), arcs(a: extent, b: extent),
+    dedup(exact(a, b)),
+    describe("image {} -> {} rotate {} about {}", arc(a), arc(b), deg(angle), point(center)));
+sketch_constraint!(ImagePointT, points(a, b), lines(), arcs(),
+    dedup(exact(a, b)),
+    describe("image {} -> {} translate {} {}", point(a), point(b), num(dx), num(dy)));
+sketch_constraint!(ImagePointTF, points(a, b), lines(frame: host), arcs(),
+    dedup(exact(a, b)),
+    describe("image {} -> {} translate {} {} along {}", point(a), point(b), num(dx), num(dy), line(frame)));
+sketch_constraint!(ImagePointR, points(a, b, center), lines(), arcs(),
+    dedup(exact(a, b)),
+    describe("image {} -> {} rotate {} about {}", point(a), point(b), deg(angle), point(center)));
+
 /// Number of registered constraint collections; a tripwire for tests.
-pub const CONSTRAINT_COLLECTION_COUNT: usize = 114;
+pub const CONSTRAINT_COLLECTION_COUNT: usize = 123;
 
 impl Sketch {
     /// Hand every coincidence constraint's canonical endpoint pair to
@@ -854,6 +882,15 @@ impl Sketch {
             axis_distance_aa_e_e,
             on_normal_ll,
             on_normal_aa,
+            image_line_t,
+            image_line_tf,
+            image_line_r,
+            image_arc_t,
+            image_arc_tf,
+            image_arc_r,
+            image_point_t,
+            image_point_tf,
+            image_point_r,
         } = self;
         let arenas = ConstraintArenas { points, lines, arcs };
         f(&arenas, &CollectionMeta { name: "coincident_pp", coincidence: true, dimension_backed: false }, coincident_pp);
@@ -970,6 +1007,15 @@ impl Sketch {
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_e", coincidence: false, dimension_backed: true }, axis_distance_aa_e_e);
         f(&arenas, &CollectionMeta { name: "on_normal_ll", coincidence: false, dimension_backed: false }, on_normal_ll);
         f(&arenas, &CollectionMeta { name: "on_normal_aa", coincidence: false, dimension_backed: false }, on_normal_aa);
+        f(&arenas, &CollectionMeta { name: "image_line_t", coincidence: false, dimension_backed: false }, image_line_t);
+        f(&arenas, &CollectionMeta { name: "image_line_tf", coincidence: false, dimension_backed: false }, image_line_tf);
+        f(&arenas, &CollectionMeta { name: "image_line_r", coincidence: false, dimension_backed: false }, image_line_r);
+        f(&arenas, &CollectionMeta { name: "image_arc_t", coincidence: false, dimension_backed: false }, image_arc_t);
+        f(&arenas, &CollectionMeta { name: "image_arc_tf", coincidence: false, dimension_backed: false }, image_arc_tf);
+        f(&arenas, &CollectionMeta { name: "image_arc_r", coincidence: false, dimension_backed: false }, image_arc_r);
+        f(&arenas, &CollectionMeta { name: "image_point_t", coincidence: false, dimension_backed: false }, image_point_t);
+        f(&arenas, &CollectionMeta { name: "image_point_tf", coincidence: false, dimension_backed: false }, image_point_tf);
+        f(&arenas, &CollectionMeta { name: "image_point_r", coincidence: false, dimension_backed: false }, image_point_r);
     }
 
     /// Read-only twin of [`Self::for_each_constraint_collection`].
@@ -1114,6 +1160,15 @@ impl Sketch {
             axis_distance_aa_e_e,
             on_normal_ll,
             on_normal_aa,
+            image_line_t,
+            image_line_tf,
+            image_line_r,
+            image_arc_t,
+            image_arc_tf,
+            image_arc_r,
+            image_point_t,
+            image_point_tf,
+            image_point_r,
         } = self;
         let arenas = ConstraintArenas { points, lines, arcs };
         f(&arenas, &CollectionMeta { name: "coincident_pp", coincidence: true, dimension_backed: false }, &*coincident_pp);
@@ -1230,6 +1285,15 @@ impl Sketch {
         f(&arenas, &CollectionMeta { name: "axis_distance_aa_e_e", coincidence: false, dimension_backed: true }, &*axis_distance_aa_e_e);
         f(&arenas, &CollectionMeta { name: "on_normal_ll", coincidence: false, dimension_backed: false }, &*on_normal_ll);
         f(&arenas, &CollectionMeta { name: "on_normal_aa", coincidence: false, dimension_backed: false }, &*on_normal_aa);
+        f(&arenas, &CollectionMeta { name: "image_line_t", coincidence: false, dimension_backed: false }, &*image_line_t);
+        f(&arenas, &CollectionMeta { name: "image_line_tf", coincidence: false, dimension_backed: false }, &*image_line_tf);
+        f(&arenas, &CollectionMeta { name: "image_line_r", coincidence: false, dimension_backed: false }, &*image_line_r);
+        f(&arenas, &CollectionMeta { name: "image_arc_t", coincidence: false, dimension_backed: false }, &*image_arc_t);
+        f(&arenas, &CollectionMeta { name: "image_arc_tf", coincidence: false, dimension_backed: false }, &*image_arc_tf);
+        f(&arenas, &CollectionMeta { name: "image_arc_r", coincidence: false, dimension_backed: false }, &*image_arc_r);
+        f(&arenas, &CollectionMeta { name: "image_point_t", coincidence: false, dimension_backed: false }, &*image_point_t);
+        f(&arenas, &CollectionMeta { name: "image_point_tf", coincidence: false, dimension_backed: false }, &*image_point_tf);
+        f(&arenas, &CollectionMeta { name: "image_point_r", coincidence: false, dimension_backed: false }, &*image_point_r);
     }
 }
 
