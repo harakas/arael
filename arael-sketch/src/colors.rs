@@ -29,11 +29,16 @@ pub struct ColorScheme {
     pub dimension_broken: egui::Color32,
     pub dimension_preview: egui::Color32,
     pub error_text: egui::Color32,
+    /// Notices: something happened as a consequence of an edit (a
+    /// meta-constraint dropped), not an error.
+    pub notice_text: egui::Color32,
     pub command_cursor: egui::Color32,
     /// Split tool hover: the span that would become its own entity.
     pub split_preview: egui::Color32,
     /// Trim tool hover: the span that would be deleted.
     pub trim_preview: egui::Color32,
+    /// Offset tool: the planned result before Apply.
+    pub offset_preview: egui::Color32,
 }
 
 impl ColorScheme {
@@ -64,9 +69,11 @@ impl ColorScheme {
             dimension_broken: egui::Color32::from_rgb(255, 30, 30),
             dimension_preview: egui::Color32::from_rgba_premultiplied(200, 100, 50, 180),
             error_text: egui::Color32::from_rgb(255, 80, 80),
+            notice_text: egui::Color32::from_rgb(200, 130, 0),
             command_cursor: egui::Color32::from_rgb(0, 160, 255),
             split_preview: egui::Color32::from_rgb(0, 170, 90),
             trim_preview: egui::Color32::from_rgb(230, 60, 60),
+            offset_preview: egui::Color32::from_rgb(0, 130, 200),
         }
     }
 
@@ -97,9 +104,11 @@ impl ColorScheme {
             dimension_broken: egui::Color32::from_rgb(255, 60, 60),
             dimension_preview: egui::Color32::from_rgba_premultiplied(220, 140, 80, 180),
             error_text: egui::Color32::from_rgb(255, 100, 100),
+            notice_text: egui::Color32::from_rgb(240, 170, 60),
             command_cursor: egui::Color32::from_rgb(0, 160, 255),
             split_preview: egui::Color32::from_rgb(60, 220, 130),
             trim_preview: egui::Color32::from_rgb(255, 80, 80),
+            offset_preview: egui::Color32::from_rgb(90, 180, 255),
         }
     }
 }

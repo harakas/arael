@@ -101,6 +101,10 @@ impl EditorApp {
         if matches!(self.tool, Tool::Split | Tool::Trim) {
             self.draw_split_trim_preview(painter, mouse_sketch, hit_threshold);
         }
+        // Offset tool: the planned result, dashed.
+        if self.tool == Tool::Offset {
+            self.draw_offset_preview(painter);
+        }
         // Scale center crosshair.
         if self.tool == Tool::Scale
             && let Some(c) = self.scale_center
@@ -773,6 +777,16 @@ impl EditorApp {
                 "Scale: click or drag a box over entities to include; the factor input opens once the set is non-empty."
             } else {
                 "Scale: click or drag a box over entities to include, double-click a point to set the center."
+            },
+            Tool::Offset => match self.offset_tool.as_ref() {
+                Some(s) if s.edit.is_some() => "Offset: editing -- change the type, distance (Enter applies), Flip or Pin in the window; Done or Escape to finish.",
+                Some(s) if s.plan.is_some() => "Offset: the dashed preview is the result; the side follows the mouse until Flip. Apply or Enter creates it. Escape to cancel.",
+                _ => "Offset: click or box-select lines and arcs that connect end to end; double-click walks a sequence; click an existing result to edit its offset. Escape to cancel.",
+            },
+            Tool::ConstraintMode(ConstraintType::OnNormal) => if self.selection.is_empty() {
+                "On normal: click the endpoint to place, then the reference endpoint (two line ends or two arc ends). Escape to cancel."
+            } else {
+                "On normal: now click the reference endpoint; the first endpoint will lie on the normal there. Escape to cancel."
             },
             Tool::ConstraintMode(_) => "Constraint: click entities to apply. Escape to cancel.",
             Tool::Dimension => if self.dim_editing {

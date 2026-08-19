@@ -148,6 +148,12 @@ impl EditorApp {
                     self.scale_center = None;
                 }
                 ui.end_row();
+                if ui.selectable_label(self.tool == Tool::Offset, "Offset")
+                    .on_hover_text("Offset a sequence of lines and arcs: click or box-select them (double-click walks a sequence), set the distance and side in the window, Apply. Click a result later to edit its offset.")
+                    .clicked() {
+                    self.enter_offset_tool();
+                }
+                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)")
                     .on_hover_text("Round a corner with a tangent arc: click a corner endpoint or two joined lines, then type the radius. F switches to Chamfer.")
                     .clicked() {
@@ -219,6 +225,8 @@ impl EditorApp {
                 "Put two lines on the same infinite line.");
             constraint_btn(ui, self, ConstraintType::Midpoint, "Midpoint (M)",
                 "Pin a point to the midpoint of a line or arc.");
+            constraint_btn(ui, self, ConstraintType::OnNormal, "On normal",
+                "Put an endpoint on the normal of another line or arc at its endpoint: pick the endpoint to place, then the reference endpoint.");
             constraint_btn(ui, self, ConstraintType::Symmetry, "Symmetry (S)",
                 "Mirror about a line: select two points and the axis, two arcs and the axis, or three lines (two mirrored, one axis).");
             constraint_btn(ui, self, ConstraintType::Lock, "Lock (K)",
@@ -333,6 +341,10 @@ impl EditorApp {
             if let Some(ref err) = self.status_error {
                 ui.separator();
                 ui.colored_label(self.colors.error_text, err.as_str());
+            }
+            if let Some(ref n) = self.status_notice {
+                ui.separator();
+                ui.colored_label(self.colors.notice_text, n.as_str());
             }
 
             // Help button + debug flags at the bottom

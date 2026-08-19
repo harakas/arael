@@ -199,6 +199,7 @@ impl EditorApp {
                 egui::Sense::click_and_drag(),
             );
             let rect = response.rect;
+            self.canvas_rect = rect;
 
             // Auto-fit after file load
             if self.pending_fit {
@@ -278,6 +279,7 @@ impl EditorApp {
                 self.cancel_rect_session();
                 self.cancel_arc_session();
                 self.scale_center = None;
+                self.leave_offset_tool();
                 self.selection.clear();
                 self.line_draw = None;
                 self.box_select_start = None;
@@ -397,6 +399,7 @@ impl EditorApp {
                 Tool::Fillet | Tool::Chamfer => self.handle_fillet_chamfer(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Split | Tool::Trim => self.handle_split_trim(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Scale => self.handle_scale_input(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
+                Tool::Offset => self.handle_offset_input(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::ConstraintMode(ct) => self.handle_constraint_mode(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold, ct),
                 Tool::Dimension => self.handle_dimension_tool(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
             }
@@ -411,6 +414,9 @@ impl EditorApp {
 
             self.draw_canvas_overlays(ui, &painter, rect, mouse_screen, mouse_sketch, hit_threshold);
         });
+
+        // The Offset tool's window (type, distances, flip, apply).
+        self.render_offset_window(ctx);
 
         // Dimension-value input overlay: floats over the canvas at the
         // dim label position so the user types where they're already

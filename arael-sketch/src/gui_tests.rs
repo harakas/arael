@@ -3,8 +3,8 @@
 
 use eframe::egui;
 use crate::test_harness::{Gui, v, near};
-use crate::tools::Tool;
-use arael_sketch_solver::DimensionKind;
+use crate::tools::{ConstraintSymbol, ConstraintType, Tool};
+use arael_sketch_solver::{DimensionKind, OffsetKind};
 use arael_sketch_backend::Selection;
 
 // -- Tool selection ---------------------------------------------------
@@ -1440,4 +1440,161 @@ fn test_scale_box_select() {
     let l1 = gui.sketch().lines.iter().find(|l| l.name == "L1").unwrap();
     assert!(near(l1.p1.value, v(2.0, 2.0), 0.05), "L1.p1 scaled: {:?}", l1.p1.value);
     assert!(near(l1.p2.value, v(4.0, 2.0), 0.05), "L1.p2 scaled: {:?}", l1.p2.value);
+}
+
+// -- Offset tool ----------------------------------------------------------
+
+/// Clicks build the sequence, the preview appears, the typed distance and
+/// Enter create the offset, and the result is then under edit.
+#[test]
+fn test_offset_tool_click_type_enter() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 3,0 3,2");
+    gui.app.enter_offset_tool();
+    gui.frames(2); // the window settles before the canvas takes clicks
+    assert!(gui.app.offset_tool.is_some());
+    gui.click(v(1.5, 0.0));
+    gui.click(v(3.0, 1.0));
+    assert_eq!(gui.app.selection.len(), 2);
+    gui.frame();
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert!(st.plan.is_some(), "a preview plan for two connected lines: {:?}", st.error);
+    assert!(st.edit.is_none());
+    // The distance field has the focus with its text selected: typing
+    // replaces it, Enter applies.
+    gui.type_text("0.5");
+    gui.frame();
+    assert_eq!(gui.app.offset_tool.as_ref().unwrap().distance, "0.5");
+    gui.key(egui::Key::Enter);
+    gui.frame();
+    assert_eq!(gui.sketch().metas.len(), 1, "the offset was created");
+    assert_eq!(gui.line_count(), 4);
+    let m = &gui.sketch().metas[0];
+    let o = m.as_offset().unwrap();
+    assert!((o.distance.value - 0.5).abs() < 1e-9);
+    // The tool now edits what it made; the result is selected.
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert_eq!(st.edit, Some(m.mid));
+    assert_eq!(gui.app.selection.len(), 2);
+}
+
+/// Double-click walks the sequence; a marquee adds; the side follows the
+/// mouse until Flip; Escape leaves the tool.
+#[test]
+fn test_offset_tool_walk_box_side_escape() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0 2,2 0,2");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.double_click(v(1.0, 0.0));
+    assert_eq!(gui.app.selection.len(), 3, "the walk selected the whole open sequence: {:?}", gui.app.selection);
+    // The mouse below the bottom line: right of the chain (0,0)->(2,0).
+    gui.move_to(v(1.0, -1.0));
+    assert_eq!(gui.app.offset_tool.as_ref().unwrap().side, -1.0);
+    gui.move_to(v(1.0, 0.5));
+    assert_eq!(gui.app.offset_tool.as_ref().unwrap().side, 1.0);
+    // Flip fixes the side.
+    {
+        let st = gui.app.offset_tool.as_mut().unwrap();
+        st.side = -st.side;
+        st.side_fixed = true;
+    }
+    gui.move_to(v(1.0, 0.8));
+    assert_eq!(gui.app.offset_tool.as_ref().unwrap().side, -1.0, "fixed");
+    gui.key(egui::Key::Escape);
+    assert_eq!(gui.app.tool, Tool::Select);
+    assert!(gui.app.offset_tool.is_none());
+
+    // A marquee over two lines of a fresh tool session.
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0 2,2");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.drag(v(-0.5, -0.5), v(2.5, 2.5));
+    assert_eq!(gui.app.selection.len(), 2, "{:?}", gui.app.selection);
+    gui.frame();
+    assert!(gui.app.offset_tool.as_ref().unwrap().plan.is_some());
+}
+
+/// An invalid set shows why and has no plan; a rejected plan likewise.
+#[test]
+fn test_offset_tool_errors() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0; add_line 5,-2 6,-3");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(1.0, 0.0));
+    gui.click(v(5.5, -2.5));
+    gui.frame();
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert!(st.plan.is_none());
+    assert!(st.error.as_deref().is_some_and(|e| e.contains("not one connected sequence")), "{:?}", st.error);
+    // A bad distance.
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(1.0, 0.0));
+    gui.app.offset_tool.as_mut().unwrap().distance = "nonsense(".into();
+    gui.app.refresh_offset_plan();
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    assert!(st.plan.is_none() && st.error.is_some());
+}
+
+/// Clicking a result of an existing offset opens it for editing, and a
+/// change in the window updates the geometry.
+#[test]
+fn test_offset_tool_edit_existing() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 4,0; offset L0 1");
+    gui.app.enter_offset_tool();
+    gui.frames(2);
+    gui.click(v(2.0, 1.0)); // L1, the result
+    let st = gui.app.offset_tool.as_ref().unwrap();
+    let mid = gui.sketch().metas[0].mid;
+    assert_eq!(st.edit, Some(mid));
+    assert_eq!(st.distance, "1");
+    // Symmetric: a second side appears.
+    gui.app.offset_tool.as_mut().unwrap().kind = OffsetKind::Symmetric;
+    gui.app.refresh_offset_plan();
+    gui.app.update_offset();
+    assert_eq!(gui.line_count(), 3);
+    assert_eq!(gui.sketch().metas[0].as_offset().unwrap().sides.len(), 2);
+    // A new distance moves the geometry.
+    gui.app.offset_tool.as_mut().unwrap().distance = "2".into();
+    gui.app.refresh_offset_plan();
+    gui.app.update_offset();
+    let ys: Vec<f64> = gui.sketch().lines.iter().filter(|l| l.name != "L0").map(|l| l.p1.value.y).collect();
+    assert!(ys.iter().all(|y| (y.abs() - 2.0).abs() < 1e-6), "{:?}", ys);
+    assert_eq!(gui.sketch().metas.len(), 1);
+    // Deleting a result line drops the offset with a notice on the status line.
+    gui.key(egui::Key::Escape);
+    gui.cmd("select L1");
+    gui.key(egui::Key::Delete);
+    assert!(gui.sketch().metas.is_empty());
+    assert!(gui.app.status_notice.as_deref().is_some_and(|n| n.contains("dropped")), "{:?}", gui.app.status_notice);
+}
+
+// -- On-normal constraint mode ------------------------------------------
+
+/// Two endpoint clicks in the mode, placed first: the constraint is
+/// applied, its marker is drawn, and the mode stays for the next pair.
+#[test]
+fn test_on_normal_mode_two_endpoints() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 3,0; add_line 4,1 6,1");
+    gui.app.tool = Tool::ConstraintMode(ConstraintType::OnNormal);
+    gui.click(v(4.0, 1.0)); // L1.p1, the endpoint to place
+    assert_eq!(gui.app.selection.len(), 1);
+    gui.click(v(3.0, 0.0)); // L0.p2, the reference
+    assert_eq!(gui.sketch().on_normal_ll.len(), 1, "constraint applied");
+    let c = &gui.sketch().on_normal_ll[0];
+    assert!(!c.placed_end && c.ref_end, "L1.p1 placed on L0's normal at p2");
+    assert!(gui.app.selection.is_empty(), "selection cleared for the next pair");
+    assert!(matches!(gui.app.tool, Tool::ConstraintMode(ConstraintType::OnNormal)));
+    gui.frame();
+    assert!(gui.app.constraint_markers.iter().any(|m| m.symbol == ConstraintSymbol::OnNormal), "marker drawn");
+    // A body click is not a valid pick in this mode.
+    gui.click(v(1.5, 0.0));
+    assert!(gui.app.selection.is_empty());
 }

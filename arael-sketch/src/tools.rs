@@ -41,6 +41,9 @@ pub enum ConstraintType {
     Collinear,
     Midpoint,
     Symmetry,
+    /// First pick the endpoint to place, then the reference endpoint:
+    /// the first lies on the normal of the second's curve there.
+    OnNormal,
     Lock,
     ToggleConstruction,
 }
@@ -59,6 +62,7 @@ impl ConstraintType {
             ConstraintType::Collinear => "Collinear",
             ConstraintType::Midpoint => "Midpoint",
             ConstraintType::Symmetry => "Symmetry",
+            ConstraintType::OnNormal => "On normal",
             ConstraintType::Lock => "Lock",
             ConstraintType::ToggleConstruction => "Construction",
         }
@@ -88,6 +92,10 @@ pub enum Tool {
     /// Uniform scale of clicked entities about a double-clicked
     /// center point, factor typed in the value overlay.
     Scale,
+    /// Offset a sequence of lines and arcs: the set from clicks,
+    /// double-click (walk) or a marquee, the parameters in the tool's
+    /// own window (see offset_tool.rs).
+    Offset,
     ConstraintMode(ConstraintType),
     Dimension,
 }
@@ -284,7 +292,7 @@ pub struct ScalePending {
 }
 
 // Constraint symbol types (drawn with painter, not text)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConstraintSymbol {
     H,           // Horizontal
     V,           // Vertical
@@ -296,6 +304,7 @@ pub enum ConstraintSymbol {
     Midpoint,    // triangle
     Symmetry,    // three parallel vertical lines |||
     Coincident,  // corner with dot
+    OnNormal,    // base with a tick rising from its end, dot on top
 }
 
 // A drawn constraint marker with screen position

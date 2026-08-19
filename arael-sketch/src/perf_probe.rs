@@ -8,7 +8,7 @@
 use std::time::Instant;
 use eframe::egui;
 use crate::test_harness::{Gui, v};
-use crate::coincide::CoincidenceGroups;
+use arael_sketch_backend::coincide::CoincidenceGroups;
 use arael_sketch_backend::Selection;
 
 /// Median-ish timing: run `f` n times, report (avg_us, max_us).

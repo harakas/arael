@@ -12,7 +12,8 @@ mod panels;
 mod tool_input;
 mod overlays;
 mod dim_input;
-mod coincide;
+mod offset_tool;
+use arael_sketch_backend::coincide;
 #[cfg(test)]
 mod test_harness;
 #[cfg(test)]
@@ -125,6 +126,10 @@ pub struct EditorApp {
     /// Center of the scale tool, set by double-clicking a point-like
     /// target; drawn as a crosshair while the tool is active.
     pub scale_center: Option<vect2d>,
+    /// The Offset tool's window and session (see offset_tool.rs).
+    pub offset_tool: Option<offset_tool::OffsetToolState>,
+    /// The canvas rectangle of the last frame (tool windows anchor to it).
+    pub canvas_rect: egui::Rect,
 
     // Selection and hover
     pub selection: Vec<Selection>,
@@ -243,6 +248,9 @@ pub struct EditorApp {
 
     // Constraint conflict error message
     pub status_error: Option<String>,
+    /// Notices raised by the last edit (a meta-constraint dropped because
+    /// its result was changed); cleared by the next edit.
+    pub status_notice: Option<String>,
     /// Flash state: when a constraint is rejected, briefly highlight
     /// the conflicting constraints so the user can see what's blocking
     /// the new one, even if those constraints are normally invisible
@@ -423,6 +431,8 @@ impl EditorApp {
             ellipse_draw: None,
             scale_pending: None,
             scale_center: None,
+            offset_tool: None,
+            canvas_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(800.0, 600.0)),
             selection: Vec::new(),
             hovered: None,
             grab: None,
@@ -487,6 +497,7 @@ impl EditorApp {
             drag_raw: false,
             exit_requested: false,
             status_error: None,
+            status_notice: None,
             flash_names: Vec::new(),
             flash_start: None,
             drag_rank: None,
@@ -1742,6 +1753,7 @@ impl EditorApp {
             saved_cursor: arael_sketch_backend::history::CursorState::default(),
             status_error: self.status_error.take(),
             status_blocker_names: None,
+            notices: Vec::new(),
             last_cost: self.last_cost,
             scale: self.scale,
             offset_x: self.offset.x,
@@ -1766,6 +1778,11 @@ impl EditorApp {
         self.status_error = ctx.status_error;
         if let Some(names) = ctx.status_blocker_names.take() {
             self.start_constraint_flash(names);
+        }
+        // Notices ride on the command results; any left over (a command
+        // that errored after its actions ran) land on the status line.
+        if !ctx.notices.is_empty() {
+            self.status_notice = Some(ctx.notices.join("; "));
         }
         self.last_cost = ctx.last_cost;
         self.scale = ctx.scale;
@@ -1846,6 +1863,7 @@ impl EditorApp {
             saved_cursor: arael_sketch_backend::history::CursorState::default(),
             status_error: self.status_error.take(),
             status_blocker_names: None,
+            notices: Vec::new(),
             last_cost: self.last_cost,
             scale: self.scale,
             offset_x: self.offset.x,
@@ -1869,6 +1887,11 @@ impl EditorApp {
         self.status_error = ctx.status_error;
         if let Some(names) = ctx.status_blocker_names.take() {
             self.start_constraint_flash(names);
+        }
+        // Notices ride on the command results; any left over (a command
+        // that errored after its actions ran) land on the status line.
+        if !ctx.notices.is_empty() {
+            self.status_notice = Some(ctx.notices.join("; "));
         }
         self.last_cost = ctx.last_cost;
         self.scale = ctx.scale;
@@ -1896,6 +1919,7 @@ impl EditorApp {
         use arael_sketch_backend::actions::Created;
         let mut created = Created::Nothing;
         self.status_error = None;
+        self.status_notice = None;
         self.show_hints = false;
 
         // Same gate as the command path: logical conflicts and
@@ -1925,8 +1949,17 @@ impl EditorApp {
             self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
         }
+        self.take_notices();
         self.refresh_dof();
         created
+    }
+
+    /// Move the sketch's queued notices into the status line.
+    pub fn take_notices(&mut self) {
+        let notices = self.sketch.mutate_values(|s| s.take_notices());
+        if !notices.is_empty() {
+            self.status_notice = Some(notices.join("; "));
+        }
     }
 
     /// Corner-op engine hookup: the GUI runs fillet/chamfer through
@@ -1957,6 +1990,8 @@ impl EditorApp {
                 tangent: self.command_cursor_tangent,
             },
         );
+        self.status_notice = None;
+        self.take_notices();
         self.refresh_dof();
         Ok(outcome)
     }
@@ -2041,6 +2076,10 @@ impl EditorApp {
                     (pts == 1 && lines == 1) || (pts == 1 && arcs == 1)
                 }
             }
+            ConstraintType::OnNormal => {
+                // Two line endpoints or two arc endpoints, placed first.
+                sel.len() == 2 && Self::on_normal_action(sel[0], sel[1]).is_some()
+            }
             ConstraintType::Symmetry => {
                 if sel.len() != 3 { return false; }
                 // 3 lines (LL symmetry) or 2 point-likes + 1 line (PP symmetry)
@@ -2122,6 +2161,10 @@ impl EditorApp {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_) | Selection::Arc(_))
             }
+            ConstraintType::OnNormal => {
+                matches!(sel, Selection::LineP1(_) | Selection::LineP2(_)
+                    | Selection::ArcStart(_) | Selection::ArcEnd(_))
+            }
             ConstraintType::Symmetry => {
                 matches!(sel, Selection::Line(_) | Selection::Arc(_) | Selection::Point(_)
                     | Selection::LineP1(_) | Selection::LineP2(_)
@@ -2151,6 +2194,7 @@ impl EditorApp {
                 ConstraintType::Tangent => self.apply_tangent(),
                 ConstraintType::Collinear => self.apply_collinear(),
                 ConstraintType::Midpoint => self.apply_midpoint(),
+                ConstraintType::OnNormal => self.apply_on_normal(),
                 ConstraintType::Symmetry => self.apply_symmetry(),
                 ConstraintType::Lock => self.apply_lock(),
                 ConstraintType::ToggleConstruction => self.apply_toggle_construction(),
@@ -3400,6 +3444,32 @@ impl EditorApp {
             _ => None,
         };
         if let Some(action) = action {
+            self.exec(action);
+        }
+    }
+
+    /// The on-normal action for two picks, placed endpoint first; `None`
+    /// when the pair is not two line endpoints or two arc endpoints.
+    fn on_normal_action(placed: Selection, reference: Selection) -> Option<Action> {
+        let ep = |s: Selection| match s {
+            Selection::LineP1(l) => Some(DimensionEndpoint::LineP1(l)),
+            Selection::LineP2(l) => Some(DimensionEndpoint::LineP2(l)),
+            Selection::ArcStart(a) => Some(DimensionEndpoint::ArcStart(a)),
+            Selection::ArcEnd(a) => Some(DimensionEndpoint::ArcEnd(a)),
+            _ => None,
+        };
+        let (placed, reference) = (ep(placed)?, ep(reference)?);
+        let both_lines = matches!(placed, DimensionEndpoint::LineP1(_) | DimensionEndpoint::LineP2(_))
+            && matches!(reference, DimensionEndpoint::LineP1(_) | DimensionEndpoint::LineP2(_));
+        let both_arcs = matches!(placed, DimensionEndpoint::ArcStart(_) | DimensionEndpoint::ArcEnd(_))
+            && matches!(reference, DimensionEndpoint::ArcStart(_) | DimensionEndpoint::ArcEnd(_));
+        (both_lines || both_arcs).then_some(Action::ApplyOnNormal { placed, reference })
+    }
+
+    fn apply_on_normal(&mut self) {
+        if self.selection.len() != 2 { return; }
+        if let Some(action) = Self::on_normal_action(self.selection[0], self.selection[1]) {
+            self.begin_group();
             self.exec(action);
         }
     }

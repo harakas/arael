@@ -1457,6 +1457,19 @@ impl EditorApp {
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Collinear, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Collinear, id, &mut line_marker_count);
         }
+        // On-normal: one marker beside the placed endpoint.
+        for c in self.sketch.on_normal_ll.iter() {
+            let l = &self.sketch.lines[c.a];
+            let p = if c.placed_end { l.p2.value } else { l.p1.value };
+            let pos = self.to_screen(p) + egui::Vec2::new(-10.0, -10.0);
+            markers.push(ConstraintMarker { pos, symbol: ConstraintSymbol::OnNormal, id: ConstraintId::Numbered(c.nid) });
+        }
+        for c in self.sketch.on_normal_aa.iter() {
+            let a = &self.sketch.arcs[c.a];
+            let p = if c.placed_end { a.end_pos() } else { a.start_pos() };
+            let pos = self.to_screen(p) + egui::Vec2::new(-10.0, -10.0);
+            markers.push(ConstraintMarker { pos, symbol: ConstraintSymbol::OnNormal, id: ConstraintId::Numbered(c.nid) });
+        }
         // Midpoint constraints -- place marker on the target line
         for c in self.sketch.midpoint.iter() {
             let id = ConstraintId::Numbered(c.nid);
@@ -2212,6 +2225,21 @@ impl EditorApp {
                         egui::Pos2::new(p.x - s * 0.3, p.y + s * 0.3),
                         egui::Pos2::new(p.x - s * 0.3, p.y - s * 0.7),
                     ], stroke);
+                }
+                ConstraintSymbol::OnNormal => {
+                    // The reference curve as a base, its normal rising from
+                    // the base's end, the placed endpoint as a dot on top.
+                    let base_y = p.y + s * 0.6;
+                    let tick_x = p.x + s * 0.5;
+                    painter.line_segment([
+                        egui::Pos2::new(p.x - s, base_y),
+                        egui::Pos2::new(tick_x, base_y),
+                    ], stroke);
+                    painter.line_segment([
+                        egui::Pos2::new(tick_x, base_y),
+                        egui::Pos2::new(tick_x, p.y - s * 0.5),
+                    ], stroke);
+                    painter.circle_filled(egui::Pos2::new(tick_x, p.y - s * 0.7), s * 0.3, color);
                 }
             }
         }

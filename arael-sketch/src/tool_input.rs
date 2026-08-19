@@ -1832,6 +1832,7 @@ impl EditorApp {
                             ConstraintType::Tangent => self.apply_tangent(),
                             ConstraintType::Collinear => self.apply_collinear(),
                             ConstraintType::Midpoint => self.apply_midpoint(),
+                            ConstraintType::OnNormal => self.apply_on_normal(),
                             ConstraintType::Symmetry => self.apply_symmetry(),
                             ConstraintType::Lock => self.apply_lock(),
                             ConstraintType::ToggleConstruction => self.apply_toggle_construction(),
