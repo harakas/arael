@@ -78,6 +78,24 @@ pub(crate) fn meta_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke:
     }
 }
 
+/// Pattern meta-constraint glyph: two by two small squares.
+pub(crate) fn pattern_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke: egui::Stroke) {
+    let half = s * 0.38;
+    let gap = s * 0.55;
+    for (dx, dy) in [(-gap, -gap), (gap, -gap), (-gap, gap), (gap, gap)] {
+        let c = egui::Pos2::new(p.x + dx, p.y + dy);
+        painter.rect_stroke(egui::Rect::from_center_size(c, egui::Vec2::splat(half * 2.0)), 0.0, stroke, egui::StrokeKind::Middle);
+    }
+}
+
+/// Image constraint glyph: a square and its copy, offset diagonally.
+pub(crate) fn image_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke: egui::Stroke) {
+    let half = s * 0.45;
+    let d = s * 0.45;
+    painter.rect_stroke(egui::Rect::from_center_size(egui::Pos2::new(p.x - d, p.y + d), egui::Vec2::splat(half * 2.0)), 0.0, stroke, egui::StrokeKind::Middle);
+    painter.rect_stroke(egui::Rect::from_center_size(egui::Pos2::new(p.x + d, p.y - d), egui::Vec2::splat(half * 2.0)), 0.0, stroke, egui::StrokeKind::Middle);
+}
+
 /// Compute (start_angle, span) for an arc respecting ccw flag.
 /// CCW arcs have positive span, CW arcs have negative span.
 fn arc_span(a: &Arc) -> (f64, f64) {
@@ -1417,6 +1435,43 @@ impl EditorApp {
             markers.push(ConstraintMarker { pos, symbol, id });
         };
 
+        // Meta-constraints: one marker per result group (each side of
+        // an offset, each copy of a pattern), on the group's first entity
+        // still there. Placed before the constraint markers so it keeps
+        // its slot whatever else comes and goes on that entity.
+        let mut meta_markers = Vec::new();
+        for m in &self.sketch.metas {
+            for group in m.result_groups() {
+                let Some(first) = group
+                    .into_iter()
+                    .find(|e| arael_sketch_backend::meta::entity_exists(&self.sketch, *e))
+                else {
+                    continue;
+                };
+                let pos = match first {
+                    MetaEntity::Line(l) => {
+                        let idx = *line_marker_count.get(&l.index()).unwrap_or(&0);
+                        *line_marker_count.entry(l.index()).or_insert(0) += 1;
+                        self.line_marker_pos(l, 10.0, (idx as f32 - 0.5) * 14.0)
+                    }
+                    MetaEntity::Arc(a) => {
+                        let idx = *arc_marker_count.get(&a.index()).unwrap_or(&0);
+                        *arc_marker_count.entry(a.index()).or_insert(0) += 1;
+                        self.arc_marker_pos(a, idx)
+                    }
+                    MetaEntity::Point(p) => {
+                        // A helper point is not drawn; skip the group.
+                        if self.sketch.points[p].helper {
+                            continue;
+                        }
+                        self.to_screen(self.sketch.points[p].pos.value) + egui::Vec2::new(10.0, -10.0)
+                    }
+                };
+                meta_markers.push(MetaMarker { pos, mid: m.mid });
+            }
+        }
+        self.meta_markers = meta_markers;
+
         let add_point_marker = |this: &EditorApp, markers: &mut Vec<ConstraintMarker>,
                                     point: Ref<Point>, symbol: ConstraintSymbol, id: ConstraintId| {
             let p = this.sketch.points[point].pos.value;
@@ -1487,6 +1542,44 @@ impl EditorApp {
             let p = if c.placed_end { a.end_pos() } else { a.start_pos() };
             let pos = self.to_screen(p) + egui::Vec2::new(-10.0, -10.0);
             markers.push(ConstraintMarker { pos, symbol: ConstraintSymbol::OnNormal, id: ConstraintId::Numbered(c.nid) });
+        }
+        // Image constraints (pattern copies): a marker on the copy, shown
+        // while the source or the copy is selected.
+        {
+            let sel = &self.selection;
+            let line_sel = |r: Ref<Line>| sel.iter().any(|s| matches!(s, Selection::Line(x) | Selection::LineP1(x) | Selection::LineP2(x) if *x == r));
+            let arc_sel = |r: Ref<Arc>| sel.iter().any(|s| matches!(s, Selection::Arc(x) | Selection::ArcCenter(x) | Selection::ArcStart(x) | Selection::ArcEnd(x) if *x == r));
+            let point_sel = |r: Ref<Point>| sel.iter().any(|s| matches!(s, Selection::Point(x) if *x == r));
+            // The marker stays while the constraint itself is selected.
+            let own_sel = |nid: u32| sel.contains(&Selection::Constraint(ConstraintId::Numbered(nid)));
+            let mut image_lines: Vec<(Ref<Line>, Ref<Line>, u32)> = Vec::new();
+            for c in &self.sketch.image_line_t { image_lines.push((c.a, c.b, c.nid)); }
+            for c in &self.sketch.image_line_tf { image_lines.push((c.a, c.b, c.nid)); }
+            for c in &self.sketch.image_line_r { image_lines.push((c.a, c.b, c.nid)); }
+            for (a, b, nid) in image_lines {
+                if line_sel(a) || line_sel(b) || own_sel(nid) {
+                    add_line_marker(self, &mut markers, b, ConstraintSymbol::Image, ConstraintId::Numbered(nid), &mut line_marker_count);
+                }
+            }
+            let mut image_arcs: Vec<(Ref<Arc>, Ref<Arc>, u32)> = Vec::new();
+            for c in &self.sketch.image_arc_t { image_arcs.push((c.a, c.b, c.nid)); }
+            for c in &self.sketch.image_arc_tf { image_arcs.push((c.a, c.b, c.nid)); }
+            for c in &self.sketch.image_arc_r { image_arcs.push((c.a, c.b, c.nid)); }
+            for (a, b, nid) in image_arcs {
+                if arc_sel(a) || arc_sel(b) || own_sel(nid) {
+                    add_arc_marker(self, &mut markers, b, ConstraintSymbol::Image, ConstraintId::Numbered(nid), &mut arc_marker_count);
+                }
+            }
+            let mut image_points: Vec<(Ref<Point>, Ref<Point>, u32)> = Vec::new();
+            for c in &self.sketch.image_point_t { image_points.push((c.a, c.b, c.nid)); }
+            for c in &self.sketch.image_point_tf { image_points.push((c.a, c.b, c.nid)); }
+            for c in &self.sketch.image_point_r { image_points.push((c.a, c.b, c.nid)); }
+            for (a, b, nid) in image_points {
+                if point_sel(a) || point_sel(b) || own_sel(nid) {
+                    let pos = self.to_screen(self.sketch.points[b].pos.value) + egui::Vec2::new(-10.0, -10.0);
+                    markers.push(ConstraintMarker { pos, symbol: ConstraintSymbol::Image, id: ConstraintId::Numbered(nid) });
+                }
+            }
         }
         // Midpoint constraints -- place marker on the target line
         for c in self.sketch.midpoint.iter() {
@@ -1900,34 +1993,6 @@ impl EditorApp {
 
         self.constraint_markers = markers;
 
-        // Meta-constraints: one marker per result group (each side of
-        // an offset), on the group's first entity still there, stacked
-        // with that entity's constraint markers.
-        let mut meta_markers = Vec::new();
-        for m in &self.sketch.metas {
-            for group in m.result_groups() {
-                let Some(first) = group
-                    .into_iter()
-                    .find(|e| arael_sketch_backend::meta::entity_exists(&self.sketch, *e))
-                else {
-                    continue;
-                };
-                let pos = match first {
-                    OffsetEntity::Line(l) => {
-                        let idx = *line_marker_count.get(&l.index()).unwrap_or(&0);
-                        *line_marker_count.entry(l.index()).or_insert(0) += 1;
-                        self.line_marker_pos(l, 10.0, (idx as f32 - 0.5) * 14.0)
-                    }
-                    OffsetEntity::Arc(a) => {
-                        let idx = *arc_marker_count.get(&a.index()).unwrap_or(&0);
-                        *arc_marker_count.entry(a.index()).or_insert(0) += 1;
-                        self.arc_marker_pos(a, idx)
-                    }
-                };
-                meta_markers.push(MetaMarker { pos, mid: m.mid });
-            }
-        }
-        self.meta_markers = meta_markers;
     }
 
     // Draw the canvas
@@ -2002,8 +2067,9 @@ impl EditorApp {
                 let m = &self.sketch.metas[i];
                 for e in m.source_entities().into_iter().chain(m.owned_entities()) {
                     match e {
-                        OffsetEntity::Line(l) => { highlight_lines.insert(l.index()); }
-                        OffsetEntity::Arc(a) => { highlight_arcs.insert(a.index()); }
+                        MetaEntity::Line(l) => { highlight_lines.insert(l.index()); }
+                        MetaEntity::Arc(a) => { highlight_arcs.insert(a.index()); }
+                        MetaEntity::Point(p) => { highlight_points.insert(p.index()); }
                     }
                 }
             }
@@ -2300,6 +2366,7 @@ impl EditorApp {
                     ], stroke);
                     painter.circle_filled(egui::Pos2::new(tick_x, p.y - s * 0.7), s * 0.3, color);
                 }
+                ConstraintSymbol::Image => image_glyph(painter, p, s, stroke),
             }
         }
 
@@ -2311,7 +2378,11 @@ impl EditorApp {
             let emphasized = selected || hovered;
             let w = if emphasized { 2.0 } else { 1.5 };
             let s = if emphasized { 7.0 } else { 5.0 };
-            meta_glyph(painter, marker.pos, s, egui::Stroke::new(w, color));
+            let kind = self.sketch.meta_index(marker.mid).map(|i| self.sketch.metas[i].kind_name());
+            match kind {
+                Some("pattern") => pattern_glyph(painter, marker.pos, s, egui::Stroke::new(w, color)),
+                _ => meta_glyph(painter, marker.pos, s, egui::Stroke::new(w, color)),
+            }
         }
 
         // Dimension annotations

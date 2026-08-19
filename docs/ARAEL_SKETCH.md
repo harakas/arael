@@ -288,6 +288,12 @@ python3 -m http.server -d dist 8080
   highlights its sources and results, a double-click opens it for
   editing, Delete dissolves it (the geometry stays). In the tool,
   double-click walks the sequence.
+- **Pattern** -- circular or rectangular copies of lines, arcs and
+  points (center or direction picked on the canvas, quantity, angle or
+  distances, spacing or extent, symmetric), every copy a rigid image
+  of its source held by image constraints, recorded as a
+  meta-constraint with a marker on each copy; the same marker
+  interaction as the offset's.
 - **Select (Escape)** -- click to select, drag to move entities,
   Backspace/Delete to remove.
 - **Dark/Light mode** toggle, **Save/Load** (JSON),

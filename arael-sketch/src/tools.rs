@@ -96,6 +96,9 @@ pub enum Tool {
     /// double-click (walk) or a marquee, the parameters in the tool's
     /// own window (see offset_tool.rs).
     Offset,
+    /// Circular / rectangular pattern of the clicked entities, the
+    /// parameters in the tool's own window (see pattern_tool.rs).
+    Pattern,
     ConstraintMode(ConstraintType),
     Dimension,
 }
@@ -305,6 +308,7 @@ pub enum ConstraintSymbol {
     Symmetry,    // three parallel vertical lines |||
     Coincident,  // corner with dot
     OnNormal,    // base with a tick rising from its end, dot on top
+    Image,       // two squares, the copy offset from the source
 }
 
 // A drawn constraint marker with screen position

@@ -173,7 +173,11 @@
 - circle creating tools etc -- DONE (add_circle / 2 / 3 / 2t / 3t + GUI circle tool)
 - mirror tool -- DONE (mirror command with symmetry constraints; selection form)
 - fillet tool -- DONE (fillet command + GUI tool, variadic corners, live radius edit)
-- offset tool -- DONE (offset_line / offset)
+- **arael-sketch fillet / chamfer tool**: when lines are already selected as the tool is activated, take the corners between those lines (their shared endpoints) into the corner set right away, so a box-select followed by the tool fillets every corner at once. Not done with the offset tool work: the fillet tool builds its set by clicks only.
+- offset tool -- DONE (offset_line / offset; meta-constraint M<n>, round corners, caps, vanishing arcs)
+- pattern tool -- DONE (pattern circular / rect; image constraints, meta-constraint M<n>, marker per copy; design in docs/dev/PATTERN.md)
+- **arael-sketch pattern**: `delete M0 free` -- dissolve a pattern by removing its image constraints and giving every copy the source's internal constraints (parallel, perpendicular, tangent, equal, H/V, dims) in their place. Not done with the pattern tool: next to the image constraints those rows would be redundant, so they can only go in when the images go; plain `delete M0` keeps the copies as images.
+- **arael-sketch pattern**: instance suppression, a second independent direction line, canvas dimensions for the pattern distance / angle. Not done: the first round mirrors the Fusion 360 dialog as described (one direction line, numbers edited through the meta).
 - trim tool -- DONE (trim command + GUI tool; split engine with role-driven reference transfer)
 - split tool -- DONE (split command + GUI tool, B key cycles Split/Trim; docs in COMMANDS.md, design in docs/dev/TRIMSPLIT.md)
 - scale tool -- DONE (scale command + GUI tool; uniform scale about a center, driving linear dims scale along; design in docs/dev/SCALETOOL.md)

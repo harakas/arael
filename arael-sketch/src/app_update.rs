@@ -280,6 +280,7 @@ impl EditorApp {
                 self.cancel_arc_session();
                 self.scale_center = None;
                 self.leave_offset_tool();
+                self.leave_pattern_tool();
                 self.selection.clear();
                 self.line_draw = None;
                 self.box_select_start = None;
@@ -403,6 +404,7 @@ impl EditorApp {
                 Tool::Split | Tool::Trim => self.handle_split_trim(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Scale => self.handle_scale_input(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::Offset => self.handle_offset_input(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
+                Tool::Pattern => self.handle_pattern_input(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
                 Tool::ConstraintMode(ct) => self.handle_constraint_mode(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold, ct),
                 Tool::Dimension => self.handle_dimension_tool(ui, ctx, &response, mouse_screen, mouse_sketch, hit_threshold),
             }
@@ -421,6 +423,7 @@ impl EditorApp {
 
         // The Offset tool's window (type, distances, flip, apply).
         self.render_offset_window(ctx);
+        self.render_pattern_window(ctx);
 
         // Dimension-value input overlay: floats over the canvas at the
         // dim label position so the user types where they're already

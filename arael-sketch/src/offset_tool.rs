@@ -117,12 +117,12 @@ impl EditorApp {
     /// in edit mode, for an offset).
     pub(crate) fn open_meta_edit(&mut self, mid: u32) {
         let Some(i) = self.sketch.meta_index(mid) else { return };
-        if self.sketch.metas[i].as_offset().is_none() {
-            return;
-        }
         self.selection.clear();
         self.selection.push(Selection::Meta(mid));
-        self.enter_offset_tool();
+        match &self.sketch.metas[i].kind {
+            MetaKind::Offset(_) => self.enter_offset_tool(),
+            MetaKind::Pattern(_) => self.enter_pattern_tool(),
+        }
     }
 
     /// The offset meta selected by its marker, or one of the selected

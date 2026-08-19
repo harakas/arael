@@ -4,7 +4,7 @@
 use eframe::egui;
 use crate::test_harness::{Gui, v, near};
 use crate::tools::{ConstraintSymbol, ConstraintType, Tool};
-use arael_sketch_solver::{CapKind, DimensionKind, OffsetKind};
+use arael_sketch_solver::{CapKind, CenterRef, DimensionKind, OffsetKind};
 use arael_sketch_backend::Selection;
 
 // -- Tool selection ---------------------------------------------------
@@ -1843,6 +1843,111 @@ fn test_offset_tool_edit_preview_and_marker() {
     gui.app.update_offset();
     assert!((gui.sketch().metas[0].as_offset().unwrap().distance.value - 1.5).abs() < 1e-9);
     assert!(!gui.app.offset_tool.as_ref().unwrap().pending_text);
+}
+
+// -- Pattern tool ---------------------------------------------------------
+
+/// Circular pattern from the tool: the set by clicks, the center by
+/// Pick + click, the numbers in the window; Create makes it and closes
+/// the tool; every copy gets a marker; the marker opens it for editing.
+#[test]
+fn test_pattern_tool_circular() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 1,0 3,0; add_point 0,0");
+    gui.app.enter_pattern_tool();
+    gui.frames(2);
+    gui.click(v(2.0, 0.0));
+    assert_eq!(gui.app.selection, vec![Selection::Line(gui.sketch().lines.refs().next().unwrap())]);
+    // Pick the center: the next click goes to the center, not the set.
+    gui.app.pattern_tool.as_mut().unwrap().picking = Some(crate::pattern_tool::Pick::Center);
+    gui.frame();
+    gui.click(v(0.0, 0.0));
+    let st = gui.app.pattern_tool.as_ref().unwrap();
+    assert!(matches!(st.center, Some(CenterRef::Point(_))), "{:?}", st.center);
+    assert!(st.picking.is_none());
+    assert_eq!(gui.app.selection.len(), 1, "the set is unchanged");
+    gui.app.pattern_tool.as_mut().unwrap().quantity = "4".into();
+    gui.app.refresh_pattern_plan();
+    let plan = gui.app.pattern_tool.as_ref().unwrap().plan.clone().expect("plan");
+    assert_eq!(plan.copies.len(), 3);
+    assert_eq!(arael_sketch_backend::pattern::preview_polylines(&plan, 8).len(), 3);
+    let dof = gui.app.sketch.dof().unwrap();
+    gui.app.apply_pattern();
+    assert_eq!(gui.app.tool, Tool::Select);
+    assert!(gui.app.pattern_tool.is_none());
+    assert_eq!(gui.sketch().metas.len(), 1);
+    assert_eq!(gui.line_count(), 4);
+    assert_eq!(gui.app.sketch.dof().unwrap(), dof);
+    assert_eq!(gui.app.selection.len(), 3, "the copies are selected");
+    gui.frame();
+    assert_eq!(gui.app.meta_markers.len(), 3, "one marker per copy");
+    // Double-click a marker: the Pattern tool opens in edit mode. The
+    // marker keeps its place while the selection (and with it the image
+    // markers on the copies) changes.
+    let p = gui.app.to_sketch(gui.app.meta_markers[1].pos);
+    gui.double_click(p);
+    assert_eq!(gui.app.tool, Tool::Pattern);
+    let st = gui.app.pattern_tool.as_ref().unwrap();
+    assert_eq!(st.edit, Some(gui.sketch().metas[0].mid));
+    assert_eq!(st.quantity, "4");
+    // Image markers show while a copy is selected, and stay while the
+    // image constraint itself is the selection (a click on the marker).
+    gui.frame();
+    let marker = gui.app.constraint_markers.iter().find(|m| m.symbol == ConstraintSymbol::Image).map(|m| (m.pos, m.id)).expect("image marker");
+    gui.key(egui::Key::Escape);
+    assert_eq!(gui.app.tool, Tool::Select);
+    gui.cmd("select L1");
+    gui.frame();
+    let marker = gui.app.constraint_markers.iter().find(|m| m.symbol == ConstraintSymbol::Image).map(|m| (m.pos, m.id)).unwrap_or(marker);
+    gui.click(gui.app.to_sketch(marker.0));
+    assert_eq!(gui.app.selection, vec![Selection::Constraint(marker.1)]);
+    gui.frame();
+    assert!(gui.app.constraint_markers.iter().any(|m| m.symbol == ConstraintSymbol::Image && m.id == marker.1), "the selected image marker is drawn");
+}
+
+/// Rectangular pattern from the tool, then an in-place distance edit
+/// with a preview until Enter, and a quantity edit that rebuilds.
+#[test]
+fn test_pattern_tool_rect_edit() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 1,0");
+    gui.app.enter_pattern_tool();
+    gui.frames(2);
+    gui.click(v(0.5, 0.0));
+    {
+        let st = gui.app.pattern_tool.as_mut().unwrap();
+        st.kind = crate::pattern_tool::PatternToolKind::Rectangular;
+        st.quantity1 = "3".into();
+        st.distance1 = "2".into();
+    }
+    gui.app.refresh_pattern_plan();
+    assert_eq!(gui.app.pattern_tool.as_ref().unwrap().plan.as_ref().map(|p| p.copies.len()), Some(2));
+    gui.app.apply_pattern();
+    assert_eq!(gui.line_count(), 3);
+    let mid = gui.sketch().metas[0].mid;
+    gui.app.open_meta_edit(mid);
+    assert_eq!(gui.app.tool, Tool::Pattern);
+    // A typed distance previews until applied.
+    {
+        let st = gui.app.pattern_tool.as_mut().unwrap();
+        st.distance1 = "3".into();
+        st.pending_text = true;
+    }
+    gui.app.refresh_pattern_plan();
+    let st = gui.app.pattern_tool.as_ref().unwrap();
+    assert!(st.plan.is_some() && st.pending_text);
+    let names_before: Vec<String> = gui.sketch().lines.iter().map(|l| l.name.clone()).collect();
+    gui.app.update_pattern();
+    let names_after: Vec<String> = gui.sketch().lines.iter().map(|l| l.name.clone()).collect();
+    assert_eq!(names_before, names_after, "moved in place");
+    let last = gui.sketch().lines.iter().last().unwrap();
+    assert!(near(last.p1.value, v(6.0, 0.0), 1e-6), "{:?}", last.p1.value);
+    // Quantity rebuilds.
+    gui.app.pattern_tool.as_mut().unwrap().quantity1 = "2".into();
+    gui.app.refresh_pattern_plan();
+    gui.app.update_pattern();
+    assert_eq!(gui.line_count(), 2);
+    assert!(gui.app.status_error.is_none(), "{:?}", gui.app.status_error);
 }
 
 // -- On-normal constraint mode ------------------------------------------

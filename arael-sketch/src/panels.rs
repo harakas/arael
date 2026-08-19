@@ -153,6 +153,11 @@ impl EditorApp {
                     .clicked() {
                     self.enter_offset_tool();
                 }
+                if ui.selectable_label(self.tool == Tool::Pattern, "Pattern")
+                    .on_hover_text("Circular or rectangular pattern of lines, arcs and points: click or box-select them, pick the center or direction, set the numbers in the window, Create. Double-click a copy's marker later to edit the pattern.")
+                    .clicked() {
+                    self.enter_pattern_tool();
+                }
                 ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)")
                     .on_hover_text("Round a corner with a tangent arc: click a corner endpoint or two joined lines, then type the radius. F switches to Chamfer.")
