@@ -57,14 +57,41 @@ pub struct OffsetSideResult {
     pub sign: f64,
     /// The result entities, parallel to the source segments.
     pub segs: Vec<OffsetEntity>,
+    /// Round-corner arcs (arcs of the distance around convex source
+    /// corners), in joint order.
+    #[serde(default)]
+    pub corners: Vec<OffsetEntity>,
     /// Owned constraints (nids): the per-segment relations and the
     /// joints. Deleting one drops the offset.
     pub constraints: Vec<u32>,
     /// Soft-owned pins (nids): regenerated and cleaned up with the
     /// offset, but deleting one by hand keeps it.
     pub pins: Vec<u32>,
-    /// Owned dimensions: the per-segment distances.
+    /// Owned dimensions: the per-segment distances (and the corner
+    /// arcs' radii).
     pub dims: Vec<OffsetDim>,
+}
+
+/// How the ends of an open two-sided offset are closed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum CapKind {
+    #[default]
+    None,
+    /// A line across each end.
+    Line,
+    /// A half circle around each source end, tangent to both results
+    /// (symmetric offsets only).
+    Round,
+}
+
+/// The caps of an open two-sided offset: what was made and what holds it.
+#[derive(Clone, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct OffsetCaps {
+    pub kind: CapKind,
+    /// The cap entities: the start cap, then the end cap.
+    pub entities: Vec<OffsetEntity>,
+    /// Owned constraints (nids).
+    pub constraints: Vec<u32>,
 }
 
 /// The offset operation's record.
@@ -79,13 +106,22 @@ pub struct Offset {
     pub side: f64,
     /// Whether the free ends and tangent joints were pinned (`on_normal`).
     pub pinned: bool,
+    /// Convex corners rounded with an arc of the distance instead of
+    /// extended to a sharp corner.
+    #[serde(default)]
+    pub round: bool,
     pub sides: Vec<OffsetSideResult>,
+    #[serde(default)]
+    pub caps: OffsetCaps,
 }
 
 impl Offset {
-    /// Every result entity, both sides.
+    /// Every result entity: both sides, corner arcs and caps included.
     pub fn result_entities(&self) -> impl Iterator<Item = OffsetEntity> + '_ {
-        self.sides.iter().flat_map(|s| s.segs.iter().copied())
+        self.sides
+            .iter()
+            .flat_map(|s| s.segs.iter().copied().chain(s.corners.iter().copied()))
+            .chain(self.caps.entities.iter().copied())
     }
 }
 
@@ -112,6 +148,18 @@ impl Meta {
         }
     }
 
+    /// The result entities grouped: one group per side of an offset
+    /// (segments first, then its corner arcs). Each group gets a marker.
+    pub fn result_groups(&self) -> Vec<Vec<OffsetEntity>> {
+        match &self.kind {
+            MetaKind::Offset(o) => o
+                .sides
+                .iter()
+                .map(|s| s.segs.iter().chain(s.corners.iter()).copied().collect())
+                .collect(),
+        }
+    }
+
     /// The entities this operation was made from.
     pub fn source_entities(&self) -> Vec<OffsetEntity> {
         match &self.kind {
@@ -122,7 +170,12 @@ impl Meta {
     /// Owned constraints (nids); deleting one drops the meta.
     pub fn owned_constraints(&self) -> Vec<u32> {
         match &self.kind {
-            MetaKind::Offset(o) => o.sides.iter().flat_map(|s| s.constraints.iter().copied()).collect(),
+            MetaKind::Offset(o) => o
+                .sides
+                .iter()
+                .flat_map(|s| s.constraints.iter().copied())
+                .chain(o.caps.constraints.iter().copied())
+                .collect(),
         }
     }
 
