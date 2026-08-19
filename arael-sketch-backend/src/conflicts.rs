@@ -7,7 +7,7 @@
 
 use arael::refs::Ref;
 use arael_sketch_solver::*;
-use crate::actions::Action;
+use crate::actions::{Action, Xf};
 
 fn line_name(sketch: &Sketch, r: Ref<Line>) -> String {
     sketch.lines[r].name.clone()
@@ -280,6 +280,31 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
         }
         Action::ApplyCollinear { a, b } if a == b => {
             return Some(format!("Cannot constrain {} to itself", line_name(sketch, *a)));
+        }
+        Action::ApplyImageLine { a, b, xf, .. } => {
+            if a == b {
+                return Some(format!("Cannot image {} onto itself", line_name(sketch, *a)));
+            }
+            if let Xf::TranslateAlong { frame, .. } = xf
+                && (frame == a || frame == b)
+            {
+                return Some("The frame line cannot be one of the imaged lines".into());
+            }
+        }
+        Action::ApplyImageArc { a, b, .. } => {
+            if a == b {
+                return Some(format!("Cannot image {} onto itself", sketch.arcs[*a].name));
+            }
+        }
+        Action::ApplyImagePoint { a, b, xf } => {
+            if a == b {
+                return Some(format!("Cannot image {} onto itself", sketch.points[*a].name));
+            }
+            if let Xf::Rotate { center, .. } = xf
+                && (center == a || center == b)
+            {
+                return Some("The rotation center cannot be one of the imaged points".into());
+            }
         }
         Action::ApplyOnNormal { placed, reference } => {
             use DimensionEndpoint as E;

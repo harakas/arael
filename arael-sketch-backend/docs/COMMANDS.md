@@ -42,6 +42,7 @@ Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use
 | `coincident` (point-point, endpoint-endpoint) | 2 |
 | `concentric` | 2 |
 | `on_normal` | 1 |
+| `image` (pattern copy of a line / point / arc) | 2 per point, 1 per radius / angle row (masked) |
 | `symmetry` (point-point about line) | 2 |
 | `symmetry` (line-line about line) | 2 |
 | `symmetry` (arc-arc about line) | 3 |
@@ -754,6 +755,83 @@ In the GUI the meta-constraint has a marker (two parallel waves) on its
 first result: a click selects it and highlights its sources and results
 (the panel shows its name and description), a double-click opens it in
 the Offset tool, Delete dissolves it.
+
+## Pattern
+
+Copy a set of lines, arcs and points as a circular or rectangular
+pattern. Every copy is a rigid image of its source, held there by
+`image` constraints (`image L0 -> L4 rotate 90 about P0`), and the whole
+operation is recorded as a meta-constraint `M<n>` that can be edited
+afterwards. The sketch DOF is unchanged: a copy brings no freedom of its
+own.
+
+```
+pattern circular L0 A0 P1 about P0 6                 6 instances (the source included) over 360 deg
+pattern circular selection about L0.p1 4 partial 90  4 instances over 90 deg, counter-clockwise (negative: clockwise)
+pattern circular L0 about A0.center 5 symmetric 120  5 instances over 120 deg centered on the source
+pattern rect L0 L1 L2 3 10                           3 instances 10 apart along +x
+pattern rect selection 3 10 by 2 5                   a 3 x 2 grid: 10 apart along x, 5 along y
+pattern rect L0 4 30 extent along L5                 4 instances spanning 30 along L5 (axis 2 across it, to its left)
+pattern rect L0 5 4 symmetric                        5 instances, 2 on each side of the source (even: one less backward)
+pattern rect L0 3 -10                                a negative distance reverses the axis
+m = pattern rect L0 3 10                             name capture: `_` the meta, `_0`.. the copy entities
+```
+
+**Circular**: `about` a point (`P0`) or an endpoint / arc center
+(`L0.p1`, `A0.center`; a hidden helper point follows it); then the
+quantity and `full` (default), `partial A` or `symmetric A` in degrees.
+The copies are rotated about the center (an arc's angles and an
+ellipse's rotation turn with the copy).
+
+**Rectangular**: the quantity and distance of axis 1, `by` the quantity
+and distance of axis 2 (quantity 1 = off); `along L<n>` takes axis 1
+along the line and axis 2 across it to its left (default: +x and +y);
+`extent` makes each distance span from the first instance to the last
+instead of one step (`spacing`, the default); `symmetric` after an axis
+puts instances on both sides of the source; `one` undoes it.
+
+**What is created, per copy:**
+
+| source | image constraint | rows |
+|---|---|---|
+| line | `image` of the line | its endpoints |
+| point | `image` of the point | its position |
+| arc / circle / ellipse | `image` of the arc | center, radius (and `radius_b`, rotation), start and end angles |
+
+Every copy keeps the source's coincidences among the copied entities,
+so a copy of a polyline is a connected polyline; its `image` rows are
+only those the coincidences leave open (a copy parameter is determined
+exactly once, every row independent). Other relations among the sources
+(parallel, equal, tangent, H/V, dims) are not copied: the rigid image
+already implies them. Relations to entities outside the set are not
+copied.
+
+Refused: a quantity under 2 (axis 1 of a rectangular pattern under 2
+with axis 2 off), a zero distance or angle, the center point or the
+direction line inside the set.
+
+**Editing.** The meta-constraint keeps the parameters:
+
+```
+pattern M0 8                      new quantity: the copies are made again
+pattern M0 partial 90 | full      distribution; a new angle moves the copies in place
+pattern M0 3 12 | by 2 6          new quantity / distance on an axis (a distance alone moves in place)
+pattern M0 along L2 | noalong | extent | spacing | symmetric | one
+pattern M0 about P3               another center (the copies are made again)
+info M0 | list metas | select M0 | pattern selection 6
+delete M0                         dissolve: the copies stay, still images of the source
+delete M0 all                     delete the copies too
+```
+
+A distance or angle change rewrites the image constraints and moves
+the copies in place (their names stay); anything else -- quantity,
+distribution, direction, frame, center, extent / spacing, symmetric --
+rebuilds the copies. Deleting a copy entity, an `image` or a recreated
+coincidence, a source, the center or the direction line drops the
+meta-constraint with a `notice:`; the copies stay as plain constrained
+geometry. In the GUI every copy carries the pattern's marker (two by
+two squares); an `image` constraint's glyph shows while one of its
+entities is selected.
 
 ## Dimensions
 

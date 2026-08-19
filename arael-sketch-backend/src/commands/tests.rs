@@ -6632,6 +6632,219 @@ fn test_select_meta() {
     assert!(e.contains("Unknown meta-constraint"), "{}", e);
 }
 
+// -- pattern --
+
+fn line_pts(ctx: &CommandContext, name: &str) -> (vect2d, vect2d) {
+    let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, name).unwrap()];
+    (l.p1.value, l.p2.value)
+}
+
+fn near2(p: vect2d, x: f64, y: f64) -> bool {
+    (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6
+}
+
+/// A circular pattern of a rectangle about a point: every copy is the
+/// rotated rectangle, connected by recreated coincidences, the fourth
+/// side needs no image; the DOF is unchanged; the record describes it.
+#[test]
+fn test_pattern_circular_rect() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_rect 0,0 2,1");
+    run_ok(&mut ctx, "add_point 5,5");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "pattern circular L0 L1 L2 L3 about P0 4");
+    assert!(out.contains("circular pattern of L0 L1 L2 L3 about P0, 4 full -> #1: L4 L5 L6 L7; #2:"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 16);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // Copy 1 is the rectangle rotated 90 degrees about (5,5): (0,0) -> (10,0), (2,0) -> (10,2).
+    let (p1, p2) = line_pts(&ctx, "L4");
+    assert!(near2(p1, 10.0, 0.0) && near2(p2, 10.0, 2.0), "{:?} {:?}", p1, p2);
+    // Three images and four coincidences per copy (the fourth side is
+    // held by its neighbours), three copies.
+    assert_eq!(ctx.sketch.image_line_r.len(), 9);
+    assert_eq!(ctx.sketch.coincident_ll12.len() + ctx.sketch.coincident_ll21.len() + ctx.sketch.coincident_ll11.len() + ctx.sketch.coincident_ll22.len(), 4 + 12);
+    let p = ctx.sketch.metas[0].as_pattern().unwrap();
+    assert_eq!(p.copies.len(), 3);
+    assert_eq!(p.copies[0].index, (1, 0));
+    // Dragging the source moves the copies with it: the copy stays the
+    // rotated image about the center, wherever the solve put things.
+    run_ok(&mut ctx, "drag L0.p1 0.5,0.2");
+    assert_solved(&mut ctx);
+    let l4 = line_pts(&ctx, "L4").0;
+    let l0 = line_pts(&ctx, "L0").0;
+    let c = ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()].pos.value;
+    let (dx, dy) = (l0.x - c.x, l0.y - c.y);
+    assert!(near2(l4, c.x - dy, c.y + dx), "{:?} vs {:?} about {:?}", l4, l0, c);
+}
+
+/// Circular: partial / symmetric distributions, a center at an endpoint
+/// (hidden helper, owned), arcs rotate with the copy, quantity edits
+/// rebuild, angle edits move in place; even symmetric has one less on
+/// the backward side.
+#[test]
+fn test_pattern_circular_arcs_and_edits() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 3,0 5,0");
+    run_ok(&mut ctx, "add_arc 5,0 6,1 5.7071,0.2929");
+    run_ok(&mut ctx, "add_point 0,0");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "pattern circular L0 A0 about P0 3 partial 90");
+    assert!(out.contains("3 partial 90 deg"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // Copy 1 is rotated 45 degrees: the line from (3,0) goes to (3/sqrt2, 3/sqrt2).
+    let (p1, _) = line_pts(&ctx, "L1");
+    let s = 3.0 / 2f64.sqrt();
+    assert!(near2(p1, s, s), "{:?}", p1);
+    // The copied arc's angles are the source's plus 45 degrees.
+    let a0 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+    let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+    assert!((a1.start_angle.value - a0.start_angle.value - std::f64::consts::FRAC_PI_4).abs() < 1e-9);
+    assert!((a1.radius.value - a0.radius.value).abs() < 1e-9);
+    // The line end is coincident with the arc start in the copy (tied).
+    assert_eq!(ctx.sketch.coincident_lp2_arc_start.len(), 1 + 2);
+    // Angle edit in place: the same entities, moved.
+    run_ok(&mut ctx, "pattern M0 partial 180");
+    assert_eq!(ctx.sketch.lines.refs().count(), 3, "kept");
+    let (p1, _) = line_pts(&ctx, "L1");
+    assert!(near2(p1, 0.0, 3.0), "{:?}", p1);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // Quantity edit rebuilds.
+    run_ok(&mut ctx, "pattern M0 5 symmetric 120");
+    assert_eq!(ctx.sketch.lines.refs().count(), 5);
+    assert_eq!(ctx.sketch.metas[0].as_pattern().unwrap().copies.iter().map(|c| c.index.0).collect::<Vec<_>>(), vec![-2, -1, 1, 2]);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    run_ok(&mut ctx, "pattern M0 4");
+    assert_eq!(ctx.sketch.metas[0].as_pattern().unwrap().copies.iter().map(|c| c.index.0).collect::<Vec<_>>(), vec![-1, 1, 2], "even: one less backward");
+
+    // Center at an endpoint: a hidden helper point, owned; refused if the
+    // center's entity is in the set; deleting the center's entity drops.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "add_line 6,0 8,0");
+    run_ok(&mut ctx, "add_point 9,9");
+    let dof = ctx.sketch.dof().unwrap();
+    let e = run_err(&mut ctx, "pattern circular L0 P0 about P0 4");
+    assert!(e.contains("cannot be in the pattern set"), "{}", e);
+    run_ok(&mut ctx, "pattern circular L1 about L0.p2 3 full");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert!(ctx.sketch.points.iter().any(|p| p.helper), "the helper point");
+    let p = ctx.sketch.metas[0].as_pattern().unwrap();
+    assert!(p.helper().is_some() && p.constraints.len() == 1);
+    assert_solved(&mut ctx);
+    let out = run_ok(&mut ctx, "delete M0 all");
+    assert!(out.contains("Deleted M0") && !out.contains("Pc"), "{}", out);
+    assert!(!ctx.sketch.points.iter().any(|p| p.helper), "the helper went with the pattern");
+    assert_eq!(ctx.sketch.lines.refs().count(), 2);
+    run_ok(&mut ctx, "pattern circular L1 about L0.p2 3");
+    let out = run_ok(&mut ctx, "delete L0");
+    assert!(out.contains("notice: pattern M1 dropped"), "{}", out);
+}
+
+/// Rectangular: one and two axes, spacing and extent, along a line,
+/// symmetric (even: one less backward), negative distance; the DOF is
+/// unchanged; a distance edit moves in place, a quantity edit rebuilds;
+/// the set may hold the reference line only by error.
+#[test]
+fn test_pattern_rect() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "pattern rect L0 3 4 by 2 3");
+    assert!(out.contains("3 every 4 x 2 every 3 -> #0,1:"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 6);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    let p = ctx.sketch.metas[0].as_pattern().unwrap();
+    let idx: Vec<(i32, i32)> = p.copies.iter().map(|c| c.index).collect();
+    assert_eq!(idx, vec![(0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]);
+    // Copy (2,1): the line at (8,3).
+    let MetaEntity::Line(l) = p.copies[4].entities[0] else { panic!() };
+    assert!(near2(ctx.sketch.lines[l].p1.value, 8.0, 3.0));
+    // In place: spacing 5 on axis 1.
+    run_ok(&mut ctx, "pattern M0 3 5");
+    assert_eq!(ctx.sketch.lines.refs().count(), 6);
+    assert!(near2(ctx.sketch.lines[l].p1.value, 10.0, 3.0));
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    // Extent: 3 over 10 = 5 apart.
+    run_ok(&mut ctx, "pattern M0 3 10 extent");
+    assert!(near2(ctx.sketch.lines[l].p1.value, 10.0, 3.0));
+    // Symmetric on axis 1 (rebuild), negative distance on axis 2.
+    run_ok(&mut ctx, "pattern M0 4 4 symmetric spacing by 2 -3");
+    let p = ctx.sketch.metas[0].as_pattern().unwrap();
+    let idx: Vec<(i32, i32)> = p.copies.iter().map(|c| c.index).collect();
+    assert_eq!(idx, vec![(-1, 0), (-1, 1), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]);
+    let MetaEntity::Line(l) = p.copies[2].entities[0] else { panic!() };
+    assert!(near2(ctx.sketch.lines[l].p1.value, 0.0, -3.0), "{:?}", ctx.sketch.lines[l].p1.value);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+
+    // Along a line: axis 1 follows it, axis 2 across it.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 1,0");
+    run_ok(&mut ctx, "add_line 0,5 3,8");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "pattern rect L0 2 2 along L1");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    let (p1, _) = line_pts(&ctx, "L2");
+    let s = 2.0 / 2f64.sqrt();
+    assert!(near2(p1, s, s), "{:?}", p1);
+    assert_eq!(ctx.sketch.image_line_tf.len(), 1);
+    // Turning the direction line turns the pattern (the solve may move
+    // the line's other end too: compare with its final direction).
+    run_ok(&mut ctx, "drag L1.p2 3,5");
+    assert_solved(&mut ctx);
+    let (f1, f2) = line_pts(&ctx, "L1");
+    let d = f2 - f1;
+    let len = (d.x * d.x + d.y * d.y).sqrt();
+    let (p1, _) = line_pts(&ctx, "L2");
+    let (o1, _) = line_pts(&ctx, "L0");
+    assert!(near2(p1, o1.x + 2.0 * d.x / len, o1.y + 2.0 * d.y / len), "{:?}", p1);
+    let e = run_err(&mut ctx, "pattern rect L0 L1 2 2 along L1");
+    assert!(e.contains("cannot be in the pattern set"), "{}", e);
+    let e = run_err(&mut ctx, "pattern rect L0 1 2");
+    assert!(e.contains("at least 2"), "{}", e);
+    // Deleting the direction line drops the pattern.
+    let out = run_ok(&mut ctx, "delete L1");
+    assert!(out.contains("notice: pattern M0 dropped"), "{}", out);
+}
+
+/// Ownership and the selected-meta forms: deleting a copy or an image
+/// constraint drops the pattern; dissolve keeps the copies as images;
+/// `select M0` then `pattern selection`; persistence; a point patterns;
+/// a failed apply leaves nothing.
+#[test]
+fn test_pattern_ownership_and_forms() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_point 1,1");
+    run_ok(&mut ctx, "add_point 0,0");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "pattern circular P0 about P1 4");
+    assert_eq!(ctx.sketch.points.iter().filter(|p| !p.helper).count(), 5);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_eq!(ctx.sketch.image_point_r.len(), 3);
+    let json = serde_json::to_string(&*ctx.sketch).unwrap();
+    let back: Sketch = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.metas[0].as_pattern().unwrap().copies.len(), 3);
+    let out = run_ok(&mut ctx, "delete P2");
+    assert!(out.contains("notice: pattern M0 dropped"), "{}", out);
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1);
+    let nid = ctx.sketch.image_point_r[0].nid;
+    let out = run_ok(&mut ctx, &format!("delete C{}", nid));
+    assert!(out.contains("notice: pattern M0 dropped"), "{}", out);
+    run_ok(&mut ctx, "undo");
+    run_ok(&mut ctx, "select M0");
+    let out = run_ok(&mut ctx, "pattern selection 6");
+    assert!(out.contains("6 full"), "{}", out);
+    let out = run_ok(&mut ctx, "delete M0");
+    assert!(out.contains("Dissolved M0"), "{}", out);
+    assert_eq!(ctx.sketch.image_point_r.len(), 5, "the images stay");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+}
+
 // -- on_normal --
 
 /// A line endpoint placed on the normal of another line at its endpoint:

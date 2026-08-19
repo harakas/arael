@@ -99,6 +99,10 @@ pub enum Action {
     AddArc { start: vect2d, end: vect2d, mid: vect2d },
     AddEllipticArc { center: vect2d, rx: f64, ry: f64, rotation: f64,
         start: f64, end: f64, ccw: bool },
+    /// A circular arc by center, radius and parameter angles (radians),
+    /// kept as given: a pattern copy's angles are its source's plus the
+    /// rotation, which the image constraint compares directly.
+    AddArcAngles { center: vect2d, radius: f64, start: f64, end: f64, ccw: bool },
     ApplyCoincidentArcCenter { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcStart { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcEnd { point: Ref<Point>, arc: Ref<Arc> },
@@ -154,6 +158,14 @@ pub enum Action {
     /// endpoint. Two line endpoints or two arc endpoints; anything else
     /// is rejected by `conflicts::validate_action` and ignored here.
     ApplyOnNormal { placed: DimensionEndpoint, reference: DimensionEndpoint },
+    /// The copy `b` is the image of `a` under `xf`; `mask` picks the rows
+    /// (`image_rows`). The pattern engine's relation.
+    ApplyImageLine { a: Ref<Line>, b: Ref<Line>, xf: Xf, mask: u8 },
+    ApplyImageArc { a: Ref<Arc>, b: Ref<Arc>, xf: Xf, mask: u8 },
+    ApplyImagePoint { a: Ref<Point>, b: Ref<Point>, xf: Xf },
+    /// Rewrite image constraints' numbers (a pattern distance / angle
+    /// edit), one undo step; the references stay.
+    SetImageTransforms { updates: Vec<(u32, Xf)> },
     /// Record a meta-constraint (see `arael_sketch_solver::metas` and
     /// `crate::meta`): pushed with the next id and its `M<n>` name when
     /// it comes unnamed, otherwise it replaces the record with that mid.
@@ -162,7 +174,7 @@ pub enum Action {
     UnregisterMeta { mid: u32 },
     /// Rewrite an offset's distances into its owned dimensions and its
     /// record in one step, so the record never disagrees with the dims.
-    SetOffsetDistances { mid: u32, distance: OffsetValue, distance2: Option<OffsetValue> },
+    SetOffsetDistances { mid: u32, distance: MetaValue, distance2: Option<MetaValue> },
     LockPoint { point: Ref<Point>, pos: vect2d },
     UnlockPoint { point: Ref<Point> },
     LockLineP1 { line: Ref<Line>, pos: vect2d },
@@ -275,6 +287,9 @@ impl Action {
             Action::AddEllipse { .. } => "Add ellipse".into(),
             Action::AddArc { .. } => "Add arc".into(),
             Action::AddEllipticArc { .. } => "Add elliptic arc".into(),
+            Action::AddArcAngles { .. } => "Add arc".into(),
+            Action::ApplyImageLine { .. } | Action::ApplyImageArc { .. } | Action::ApplyImagePoint { .. } => "Image".into(),
+            Action::SetImageTransforms { .. } => "Set pattern transforms".into(),
             Action::ApplyHorizontal { lines } => format!("Horizontal ({})", lines.len()),
             Action::ApplyVertical { lines } => format!("Vertical ({})", lines.len()),
             Action::ApplyCoincidentPP { .. } => "Coincident PP".into(),
@@ -401,6 +416,7 @@ impl Action {
             Action::ApplyEndpointOnLine { .. } | Action::ApplyEndpointOnArc { .. } |
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
             Action::ApplyOnNormal { .. } |
+            Action::ApplyImageLine { .. } | Action::ApplyImageArc { .. } | Action::ApplyImagePoint { .. } |
             Action::AddDimension { .. } | Action::UpdateDimension { .. }
         )
     }
@@ -884,6 +900,40 @@ fn remove_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &Dimensio
     }
 }
 
+/// A rigid transform of an image constraint: the copy is the source
+/// moved by it.
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum Xf {
+    /// By `(dx, dy)` in world axes.
+    Translate { dx: f64, dy: f64 },
+    /// By `dx` along `frame` and `dy` across it (to its left).
+    TranslateAlong { frame: Ref<Line>, dx: f64, dy: f64 },
+    /// By `angle` radians counter-clockwise about `center`.
+    Rotate { center: Ref<Point>, angle: f64 },
+}
+
+/// Rewrite the numbers of the image constraint `nid` from `xf` (the
+/// kind and references must match; a mismatch is ignored).
+fn set_image_transform(sketch: &mut Sketch, nid: u32, xf: &Xf) {
+    match *xf {
+        Xf::Translate { dx, dy } => {
+            for c in sketch.image_line_t.iter_mut().filter(|c| c.nid == nid) { c.dx = dx; c.dy = dy; }
+            for c in sketch.image_arc_t.iter_mut().filter(|c| c.nid == nid) { c.dx = dx; c.dy = dy; }
+            for c in sketch.image_point_t.iter_mut().filter(|c| c.nid == nid) { c.dx = dx; c.dy = dy; }
+        }
+        Xf::TranslateAlong { dx, dy, .. } => {
+            for c in sketch.image_line_tf.iter_mut().filter(|c| c.nid == nid) { c.dx = dx; c.dy = dy; }
+            for c in sketch.image_arc_tf.iter_mut().filter(|c| c.nid == nid) { c.dx = dx; c.dy = dy; }
+            for c in sketch.image_point_tf.iter_mut().filter(|c| c.nid == nid) { c.dx = dx; c.dy = dy; }
+        }
+        Xf::Rotate { angle, .. } => {
+            for c in sketch.image_line_r.iter_mut().filter(|c| c.nid == nid) { c.angle = angle; }
+            for c in sketch.image_arc_r.iter_mut().filter(|c| c.nid == nid) { c.angle = angle; }
+            for c in sketch.image_point_r.iter_mut().filter(|c| c.nid == nid) { c.angle = angle; }
+        }
+    }
+}
+
 /// The entity an action added, for a caller that has to act on it next --
 /// an auto-coincident against whatever the new point snapped to, say. The
 /// arena chooses the slot, so a freed slot gets refilled and the new entity
@@ -954,6 +1004,53 @@ impl Action {
             }
             Action::AddEllipticArc { center, rx, ry, rotation, start, end, ccw } => {
                 created = Created::Arc(sketch.add_elliptic_arc(*center, *rx, *ry, *rotation, *start, *end, *ccw));
+            }
+            Action::AddArcAngles { center, radius, start, end, ccw } => {
+                created = Created::Arc(sketch.add_arc_with_dir(*center, *radius, *start, *end, false, *ccw));
+            }
+            Action::ApplyImageLine { a, b, xf, mask } => match *xf {
+                Xf::Translate { dx, dy } => sketch.image_line_t.push(ImageLineT {
+                    a: *a, b: *b, dx, dy, mask: *mask, nid: 0, cid: 0, hb: CrossBlock::new(),
+                }),
+                Xf::TranslateAlong { frame, dx, dy } => sketch.image_line_tf.push(ImageLineTF {
+                    a: *a, b: *b, frame, dx, dy, mask: *mask, nid: 0, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_af: CrossBlock::new(), hb_bf: CrossBlock::new(),
+                }),
+                Xf::Rotate { center, angle } => sketch.image_line_r.push(ImageLineR {
+                    a: *a, b: *b, center, angle, mask: *mask, nid: 0, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
+                }),
+            },
+            Action::ApplyImageArc { a, b, xf, mask } => match *xf {
+                Xf::Translate { dx, dy } => sketch.image_arc_t.push(ImageArcT {
+                    a: *a, b: *b, dx, dy, mask: *mask, nid: 0, cid: 0, hb: CrossBlock::new(),
+                }),
+                Xf::TranslateAlong { frame, dx, dy } => sketch.image_arc_tf.push(ImageArcTF {
+                    a: *a, b: *b, frame, dx, dy, mask: *mask, nid: 0, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_af: CrossBlock::new(), hb_bf: CrossBlock::new(),
+                }),
+                Xf::Rotate { center, angle } => sketch.image_arc_r.push(ImageArcR {
+                    a: *a, b: *b, center, angle, mask: *mask, nid: 0, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
+                }),
+            },
+            Action::ApplyImagePoint { a, b, xf } => match *xf {
+                Xf::Translate { dx, dy } => sketch.image_point_t.push(ImagePointT {
+                    a: *a, b: *b, dx, dy, nid: 0, cid: 0, hb: CrossBlock::new(),
+                }),
+                Xf::TranslateAlong { frame, dx, dy } => sketch.image_point_tf.push(ImagePointTF {
+                    a: *a, b: *b, frame, dx, dy, nid: 0, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_af: CrossBlock::new(), hb_bf: CrossBlock::new(),
+                }),
+                Xf::Rotate { center, angle } => sketch.image_point_r.push(ImagePointR {
+                    a: *a, b: *b, center, angle, nid: 0, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
+                }),
+            },
+            Action::SetImageTransforms { updates } => {
+                for (nid, xf) in updates {
+                    set_image_transform(sketch, *nid, xf);
+                }
             }
             Action::ApplyHorizontal { lines } => {
                 for r in lines {

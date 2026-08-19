@@ -30,8 +30,8 @@ use crate::corner_ops::ActionRunner;
 #[derive(Clone, Debug, PartialEq)]
 pub struct OffsetParams {
     pub kind: OffsetKind,
-    pub distance: OffsetValue,
-    pub distance2: Option<OffsetValue>,
+    pub distance: MetaValue,
+    pub distance2: Option<MetaValue>,
     /// +1: `distance` goes left of the chain direction, -1: right.
     pub side: f64,
     pub pinned: bool,
@@ -44,7 +44,7 @@ pub struct OffsetParams {
 impl OffsetParams {
     /// The (sign, distance) of every side this kind produces, the
     /// `distance` side first.
-    pub fn sides(&self) -> Vec<(f64, OffsetValue)> {
+    pub fn sides(&self) -> Vec<(f64, MetaValue)> {
         match self.kind {
             OffsetKind::OneSide => vec![(self.side, self.distance.clone())],
             OffsetKind::Symmetric => vec![(self.side, self.distance.clone()), (-self.side, self.distance.clone())],
@@ -238,7 +238,7 @@ pub struct JointPlan {
 #[derive(Clone, Debug)]
 pub struct SidePlan {
     pub sign: f64,
-    pub distance: OffsetValue,
+    pub distance: MetaValue,
     /// The source index of every result, in chain order: every segment
     /// but the dropped ones.
     pub sources: Vec<usize>,
@@ -1304,7 +1304,7 @@ fn update_inner(
     // or created. A side survives only with the structure the new plan
     // wants there: the same dropped segments and round corners (both
     // depend on the side and the distance); otherwise it is rebuilt.
-    let wanted: Vec<(f64, OffsetValue)> = params.sides();
+    let wanted: Vec<(f64, MetaValue)> = params.sides();
     let same_structure = |s: &OffsetSideResult, sign: f64| -> bool {
         new_plan.sides.iter().find(|p| p.sign == sign).is_some_and(|p| {
             p.dropped == s.dropped && p.joints.iter().filter(|j| j.round.is_some()).count() == s.corners.len()
@@ -1576,7 +1576,7 @@ pub fn cap_name(k: CapKind) -> &'static str {
     }
 }
 
-fn fmt_value(v: &OffsetValue) -> String {
+fn fmt_value(v: &MetaValue) -> String {
     match &v.expr {
         Some(e) => format!("{} ({:.4})", e, v.value),
         None => format!("{}", v.value),
@@ -1590,10 +1590,10 @@ pub fn side_name(sign: f64) -> &'static str {
 /// Parse a distance token the way dimension values are typed: a number,
 /// a live expression (re-evaluated every solve), or `=expr` evaluated
 /// once. The value is evaluated now either way: the plan needs it.
-pub fn parse_value(sketch: &Sketch, token: &str) -> Result<OffsetValue, String> {
+pub fn parse_value(sketch: &Sketch, token: &str) -> Result<MetaValue, String> {
     let token = token.trim().trim_matches('"');
     if let Ok(v) = token.parse::<f64>() {
-        return Ok(OffsetValue { value: v, expr: None });
+        return Ok(MetaValue { value: v, expr: None });
     }
     let (src, live) = match token.strip_prefix('=') {
         Some(rest) => (rest.trim(), false),
@@ -1601,7 +1601,7 @@ pub fn parse_value(sketch: &Sketch, token: &str) -> Result<OffsetValue, String> 
     };
     let value = crate::commands::eval_expr(sketch, src)
         .map_err(|e| format!("cannot evaluate '{}': {}", src, e))?;
-    Ok(OffsetValue { value, expr: if live { Some(src.to_string()) } else { None } })
+    Ok(MetaValue { value, expr: if live { Some(src.to_string()) } else { None } })
 }
 
 /// Reference helpers for callers holding a `Ref`.
@@ -1659,7 +1659,7 @@ mod tests {
     fn params(d: f64) -> OffsetParams {
         OffsetParams {
             kind: OffsetKind::OneSide,
-            distance: OffsetValue { value: d, expr: None },
+            distance: MetaValue { value: d, expr: None },
             distance2: None,
             side: 1.0,
             pinned: true,

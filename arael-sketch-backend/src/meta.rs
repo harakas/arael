@@ -6,7 +6,6 @@
 use arael_sketch_solver::*;
 
 use crate::actions::Action;
-use crate::chain;
 use crate::corner_ops::ActionRunner;
 
 pub(crate) fn nid_exists(sketch: &Sketch, nid: u32) -> bool {
@@ -25,10 +24,42 @@ pub(crate) fn nid_exists(sketch: &Sketch, nid: u32) -> bool {
     found
 }
 
-pub fn entity_exists(sketch: &Sketch, e: OffsetEntity) -> bool {
+pub fn entity_exists(sketch: &Sketch, e: impl Into<MetaEntity>) -> bool {
+    match e.into() {
+        MetaEntity::Line(l) => sketch.lines.get(l).is_some(),
+        MetaEntity::Arc(a) => sketch.arcs.get(a).is_some(),
+        MetaEntity::Point(p) => sketch.points.get(p).is_some(),
+    }
+}
+
+/// The entity's name.
+pub fn entity_name(sketch: &Sketch, e: MetaEntity) -> String {
     match e {
-        OffsetEntity::Line(l) => sketch.lines.get(l).is_some(),
-        OffsetEntity::Arc(a) => sketch.arcs.get(a).is_some(),
+        MetaEntity::Line(l) => sketch.lines[l].name.clone(),
+        MetaEntity::Arc(a) => sketch.arcs[a].name.clone(),
+        MetaEntity::Point(p) => sketch.points[p].name.clone(),
+    }
+}
+
+/// A point-like reference as the user names it (`L0.p1`, `A0.center`,
+/// `P3`); a helper point shows as what it is bridged to.
+pub fn endpoint_name(sketch: &Sketch, e: &DimensionEndpoint) -> String {
+    match e {
+        DimensionEndpoint::Point(p) => sketch.point_display_name(*p),
+        DimensionEndpoint::LineP1(l) => format!("{}.p1", sketch.lines[*l].name),
+        DimensionEndpoint::LineP2(l) => format!("{}.p2", sketch.lines[*l].name),
+        DimensionEndpoint::ArcCenter(a) => format!("{}.center", sketch.arcs[*a].name),
+        DimensionEndpoint::ArcStart(a) => format!("{}.start", sketch.arcs[*a].name),
+        DimensionEndpoint::ArcEnd(a) => format!("{}.end", sketch.arcs[*a].name),
+    }
+}
+
+/// Delete the entity; its relations cascade.
+pub fn delete_entity(runner: &mut dyn ActionRunner, e: MetaEntity) {
+    match e {
+        MetaEntity::Line(l) => { runner.run(Action::DeleteLine { line: l }); }
+        MetaEntity::Arc(a) => { runner.run(Action::DeleteArc { arc: a }); }
+        MetaEntity::Point(p) => { runner.run(Action::DeletePoint { point: p }); }
     }
 }
 
@@ -89,7 +120,8 @@ pub fn resolve(sketch: &Sketch, name: &str) -> Result<usize, String> {
 }
 
 /// The meta-constraint that owns `e` as a result, if any.
-pub fn owner_of(sketch: &Sketch, e: OffsetEntity) -> Option<&Meta> {
+pub fn owner_of(sketch: &Sketch, e: impl Into<MetaEntity>) -> Option<&Meta> {
+    let e = e.into();
     sketch.metas.iter().find(|m| m.owns_entity(e))
 }
 
@@ -117,11 +149,11 @@ pub fn delete_with_result(runner: &mut dyn ActionRunner, mid: u32) -> Result<Vec
         if !entity_exists(runner.sketch(), e) {
             continue;
         }
-        names.push(chain::entity_name(runner.sketch(), e));
-        match e {
-            OffsetEntity::Line(l) => { runner.run(Action::DeleteLine { line: l }); }
-            OffsetEntity::Arc(a) => { runner.run(Action::DeleteArc { arc: a }); }
+        // Helper points are invisible: not named, deleted all the same.
+        if !matches!(e, MetaEntity::Point(p) if runner.sketch().points[p].helper) {
+            names.push(entity_name(runner.sketch(), e));
         }
+        delete_entity(runner, e);
     }
     Ok(names)
 }
@@ -130,5 +162,6 @@ pub fn delete_with_result(runner: &mut dyn ActionRunner, mid: u32) -> Result<Vec
 pub fn describe(sketch: &Sketch, m: &Meta) -> String {
     match &m.kind {
         MetaKind::Offset(o) => format!("{}: {}", m.name, crate::offset::describe(sketch, o)),
+        MetaKind::Pattern(p) => format!("{}: {}", m.name, crate::pattern::describe(sketch, p)),
     }
 }

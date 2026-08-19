@@ -118,9 +118,11 @@ fn entity_refs_info(sketch: &Sketch, name: &str) -> String {
     if !dims.is_empty() { s += &format!("\n  dims: {}", dims.join(", ")); }
     // A meta-constraint that made this entity, or was made from it.
     let entity = if name.starts_with('L') {
-        resolve_line(sketch, name).ok().map(OffsetEntity::Line)
+        resolve_line(sketch, name).ok().map(MetaEntity::Line)
     } else if is_arc_name(name) {
-        resolve_arc(sketch, name).ok().map(OffsetEntity::Arc)
+        resolve_arc(sketch, name).ok().map(MetaEntity::Arc)
+    } else if name.starts_with('P') {
+        resolve_point(sketch, name).ok().map(MetaEntity::Point)
     } else {
         None
     };
@@ -409,7 +411,7 @@ pub(crate) fn cmd_list(ctx: &mut CommandContext, args: &str) -> CmdResult {
     // Constraint/dimension type filters — show only matching entries
     const CONSTRAINT_FILTERS: &[&str] = &[
         "horizontal", "vertical", "parallel", "perpendicular", "equal", "collinear",
-        "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock",
+        "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock", "on_normal", "image",
     ];
     const DIMENSION_FILTERS: &[&str] = &["angle", "length", "radius", "sweep", "distance", "hdistance", "vdistance", "xangle"];
     // Match against the line body — `list` output prefixes every constraint

@@ -89,6 +89,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "add_earc_rtangent" => "add_earc_rtangent p2 t2 [bulge] (chain from cursor+tangent)",
             "offset_line" => "offset_line L0 distance (create parallel line offset by distance, unconstrained)",
             "offset" => "offset L0 L1 A0 2 [left|right|flip] [symmetric | 2 3] [inward|outward] [round] [caps line|round] [nopin] | offset sequence L0 2 ... | offset selection 2 ... | offset M0 3 [flip|symmetric|two 2 3|one|round|sharp|caps line|round|none|pin|nopin] -- offset a connected sequence of lines/arcs, held at the distance by constraints and dims under meta-constraint M<n>",
+            "pattern" => "pattern circular L0 A0 P1 about P0 6 [full|partial 90|symmetric 120] | pattern rect L0 L1 3 10 [symmetric] [by 2 5 [symmetric]] [along L5|noalong] [extent|spacing] | pattern selection ... | pattern M0 8 | about P1 | partial 90 | by 3 4 | along L2 | extent -- copy the entities as a circular or rectangular pattern, every copy a rigid image of its source held by image constraints, under meta-constraint M<n>",
             "fillet" => "fillet L1 L2 r [notangent] [noradius]  or  fillet L1.pN r [notangent] [noradius] (round a corner with a tangent arc of radius r; breaks the shared LL coincident, trims both lines, adds arc + tangent + radius dim)",
             "chamfer" => "chamfer L1 L2 d  or  chamfer L1.pN d (bevel a corner at distance d from the corner; breaks the shared LL coincident, trims both lines by d, adds a bevel line + corner anchor point + two equal distance dims)",
             "split" => "split L0 x,y [r]  or  split L0 by L1 L2... [nopin] (cut a line/arc at the intersections bracketing x,y, or at every crossing with the named cutters; pieces get new names, all constraints/dims/expressions transfer, cut endpoints are joined and pinned onto the cutter)",
@@ -116,7 +117,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
 pub(crate) const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
-    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer", "split", "trim", "scale",
+    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "pattern", "fillet", "chamfer", "split", "trim", "scale",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "on_normal", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -462,6 +463,22 @@ pub fn complete(
             } else {
                 add_expression_completions(sketch, session_names, &mut results, current_word);
             }
+        }
+        "pattern" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word, &["circular", "rect", "selection"]);
+                for m in &sketch.metas {
+                    if m.name.starts_with(current_word) { results.push(m.name.clone()); }
+                }
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["selection"]);
+            }
+            add_lines(sketch, &mut results, current_word);
+            add_arcs(sketch, &mut results, current_word);
+            add_points(sketch, &mut results, current_word);
+            add_expression_completions(sketch, session_names, &mut results, current_word);
+            add_matching(&mut results, current_word,
+                &["about", "full", "partial", "symmetric", "one", "by", "along", "noalong", "extent", "spacing"]);
         }
         "offset" => {
             if token_index == 1 {

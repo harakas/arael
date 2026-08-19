@@ -205,7 +205,7 @@ pub(crate) fn cmd_offset(ctx: &mut CommandContext, args: &str) -> CmdResult {
 
     let mut params = OffsetParams {
         kind: OffsetKind::OneSide,
-        distance: OffsetValue { value: 0.0, expr: None },
+        distance: MetaValue { value: 0.0, expr: None },
         distance2: None,
         side: 1.0,
         pinned: true,

@@ -20,6 +20,7 @@ pub mod coincide;
 pub mod chain;
 pub mod meta;
 pub mod offset;
+pub mod pattern;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp_server;
 

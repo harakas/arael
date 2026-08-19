@@ -30,6 +30,7 @@ mod dof;
 mod help;
 mod split_cmds;
 mod offset_cmds;
+mod pattern_cmds;
 
 pub use context::*;
 pub(crate) use resolve::*;
@@ -50,6 +51,7 @@ pub(crate) use dof::*;
 pub use help::*;
 pub(crate) use split_cmds::*;
 pub(crate) use offset_cmds::*;
+pub(crate) use pattern_cmds::*;
 
 #[cfg(test)]
 mod tests;
@@ -266,6 +268,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_earc_rtangent" => cmd_add_earc_rtangent(ctx, args_str),
         "offset_line" => cmd_offset_line(ctx, args_str),
         "offset" => cmd_offset(ctx, args_str),
+        "pattern" => cmd_pattern(ctx, args_str),
         "fillet" => cmd_fillet(ctx, args_str),
         "chamfer" => cmd_chamfer(ctx, args_str),
         "split" => cmd_split(ctx, args_str),
