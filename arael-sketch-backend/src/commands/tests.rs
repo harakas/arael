@@ -5716,3 +5716,651 @@ fn test_scale_length_dim_holds_after_solve() {
     assert!(near(line_len(&ctx, "L0"), 6.0));
     assert!(near(ctx.sketch.dimensions[0].value, 6.0));
 }
+
+// -- offset --
+
+/// Perpendicular distances of both endpoints of `res` from the infinite
+/// line of `src` (equal when the lines are parallel).
+fn line_offsets(ctx: &CommandContext, src: &str, res: &str) -> (f64, f64) {
+    let s = &ctx.sketch.lines[resolve_line(&ctx.sketch, src).unwrap()];
+    let r = &ctx.sketch.lines[resolve_line(&ctx.sketch, res).unwrap()];
+    let d = s.p2.value - s.p1.value;
+    let len = (d.x * d.x + d.y * d.y).sqrt();
+    let dist = |p: vect2d| ((p.x - s.p1.value.x) * d.y - (p.y - s.p1.value.y) * d.x).abs() / len;
+    (dist(r.p1.value), dist(r.p2.value))
+}
+
+/// Center distance and radius gap between a source arc and its result.
+fn arc_offsets(ctx: &CommandContext, src: &str, res: &str) -> (f64, f64) {
+    let s = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, src).unwrap()];
+    let r = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, res).unwrap()];
+    let c = s.center.value - r.center.value;
+    ((c.x * c.x + c.y * c.y).sqrt(), (r.radius.value - s.radius.value).abs())
+}
+
+/// Whole-sketch residual after a fresh solve.
+fn solve_cost(ctx: &mut CommandContext) -> f64 {
+    ctx.sketch.get_mut().solve().end_cost
+}
+
+/// The sketch is consistent: every hard constraint holds after a solve.
+fn assert_solved(ctx: &mut CommandContext) {
+    let c = solve_cost(ctx);
+    assert!(c < 1e-8, "the sketch does not solve cleanly: cost {:e}\n{}", c,
+        ctx.sketch.list_constraints().join("\n"));
+}
+
+fn meta_count(ctx: &CommandContext) -> usize {
+    ctx.sketch.metas.len()
+}
+
+/// A single line: one result parallel at the distance, free ends on the
+/// source ends' normals, the DOF unchanged, the meta recorded.
+#[test]
+fn test_offset_single_line() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset L0 1.5");
+    assert!(out.contains("M1: offset of L0 by 1.5 left -> left: L1"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof, "an offset adds no freedom");
+    let (a, b) = line_offsets(&ctx, "L0", "L1");
+    assert!((a - 1.5).abs() < 1e-6 && (b - 1.5).abs() < 1e-6, "{} {}", a, b);
+    // Left of (0,0)->(4,0) is +y; the ends are straight above the source's.
+    let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+    assert!(near(l1.p1.value.y, 1.5) && near(l1.p1.value.x, 0.0) && near(l1.p2.value.x, 4.0), "{:?} {:?}", l1.p1.value, l1.p2.value);
+    assert_eq!(ctx.sketch.parallel.len(), 1);
+    assert_eq!(ctx.sketch.on_normal_ll.len(), 2, "both free ends pinned");
+    assert_eq!(ctx.sketch.dimensions.len(), 1);
+    assert!(matches!(ctx.sketch.dimensions[0].kind, DimensionKind::LineLineDistance(_, _)));
+    assert_eq!(meta_count(&ctx), 1);
+    assert_solved(&mut ctx);
+    let listed = run_ok(&mut ctx, "list metas");
+    assert!(listed.contains("M1: offset of L0"), "{}", listed);
+    let info = run_ok(&mut ctx, "info L1");
+    assert!(info.contains("result of offset M1"), "{}", info);
+}
+
+/// Sides: right, flip, symmetric, two distances, and an expression.
+#[test]
+fn test_offset_line_sides() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "offset L0 1 right");
+    let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+    assert!(near(l1.p1.value.y, -1.0), "{:?}", l1.p1.value);
+    run_ok(&mut ctx, "undo");
+    run_ok(&mut ctx, "offset L0 1 flip");
+    let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+    assert!(near(l1.p1.value.y, -1.0), "{:?}", l1.p1.value);
+    run_ok(&mut ctx, "undo");
+
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset L0 1 symmetric");
+    assert!(out.contains("symmetric"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    let ys: Vec<f64> = ["L1", "L2"].iter().map(|n| ctx.sketch.lines[resolve_line(&ctx.sketch, n).unwrap()].p1.value.y).collect();
+    assert!((ys[0] - 1.0).abs() < 1e-6 && (ys[1] + 1.0).abs() < 1e-6, "{:?}", ys);
+    run_ok(&mut ctx, "undo");
+
+    let out = run_ok(&mut ctx, "offset L0 1 2.5");
+    assert!(out.contains("1 left / 2.5 right"), "{}", out);
+    let ys: Vec<f64> = ["L1", "L2"].iter().map(|n| ctx.sketch.lines[resolve_line(&ctx.sketch, n).unwrap()].p1.value.y).collect();
+    assert!((ys[0] - 1.0).abs() < 1e-6 && (ys[1] + 2.5).abs() < 1e-6, "{:?}", ys);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    run_ok(&mut ctx, "undo");
+
+    run_ok(&mut ctx, "param w 3");
+    run_ok(&mut ctx, "offset L0 w/2");
+    let (a, _) = line_offsets(&ctx, "L0", "L1");
+    assert!((a - 1.5).abs() < 1e-6, "{}", a);
+    assert_eq!(ctx.sketch.dimensions[0].expr_str.as_deref(), Some("w/2"));
+    run_ok(&mut ctx, "param w 5");
+    let (a, _) = line_offsets(&ctx, "L0", "L1");
+    assert!((a - 2.5).abs() < 1e-6, "expression distance follows its parameter: {}", a);
+    assert_eq!(meta_count(&ctx), 1, "a parameter change is not an edit of the offset");
+}
+
+/// Two lines at a corner: the results meet at a sharp corner on both
+/// sides (extended outside, trimmed inside), at the distance.
+#[test]
+fn test_offset_corner() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0 4,3");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset L0 L1 1 symmetric");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    // Left of the chain (0,0)->(4,0)->(4,3) is the inside (+y then -x).
+    let inner_a = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L2").unwrap()];
+    let inner_b = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L3").unwrap()];
+    assert!(near(inner_a.p2.value.x, 3.0) && near(inner_a.p2.value.y, 1.0), "inner corner {:?}", inner_a.p2.value);
+    assert!(near(inner_b.p1.value.x, 3.0) && near(inner_b.p1.value.y, 1.0), "inner corner {:?}", inner_b.p1.value);
+    let outer_a = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L4").unwrap()];
+    assert!(near(outer_a.p2.value.x, 5.0) && near(outer_a.p2.value.y, -1.0), "outer corner {:?}", outer_a.p2.value);
+    for (s, r) in [("L0", "L2"), ("L1", "L3"), ("L0", "L4"), ("L1", "L5")] {
+        let (a, b) = line_offsets(&ctx, s, r);
+        assert!((a - 1.0).abs() < 1e-6 && (b - 1.0).abs() < 1e-6, "{} {}: {} {}", s, r, a, b);
+    }
+    assert_solved(&mut ctx);
+    // Joints are coincidences between the results, no pins at corners.
+    assert_eq!(ctx.sketch.on_normal_ll.len(), 4, "two free ends per side");
+}
+
+/// A closed rectangle inward and outward; inward past the half width is
+/// refused naming the segment that collapses.
+#[test]
+fn test_offset_rectangle() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_rect 0,0 6,4");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset L0 L1 L2 L3 1 inward");
+    assert!(out.contains("(closed)"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    // Every result line sits 1 inside: x in 1..5, y in 1..3.
+    for n in ["L4", "L5", "L6", "L7"] {
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, n).unwrap()];
+        for p in [l.p1.value, l.p2.value] {
+            assert!(p.x > 0.99 && p.x < 5.01 && p.y > 0.99 && p.y < 3.01, "{} {:?}", n, p);
+        }
+    }
+    assert!(ctx.sketch.on_normal_ll.is_empty(), "a closed loop has no free ends");
+    run_ok(&mut ctx, "undo");
+    run_ok(&mut ctx, "offset sequence L0 1 outward");
+    for n in ["L4", "L5", "L6", "L7"] {
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, n).unwrap()];
+        for p in [l.p1.value, l.p2.value] {
+            assert!((p.x < -0.99 || p.x > 6.99) || (p.y < -0.99 || p.y > 4.99), "{} {:?}", n, p);
+        }
+    }
+    run_ok(&mut ctx, "undo");
+    let e = run_err(&mut ctx, "offset sequence L0 2.5 inward");
+    assert!(e.contains("collapses") || e.contains("do not meet"), "{}", e);
+    assert_eq!(ctx.sketch.lines.refs().count(), 4, "nothing left behind: {}", e);
+}
+
+/// A single arc outward and inward (concentric, radius +- d, ends on the
+/// source's rays), a circle both ways, and an inward offset past the
+/// radius refused.
+#[test]
+fn test_offset_arc_and_circle() {
+    let mut ctx = CommandContext::new();
+    // CCW quarter arc of radius 2 about the origin, from (2,0) to (0,2).
+    run_ok(&mut ctx, "add_arc 2,0 0,2 1.41421356,1.41421356");
+    let dof = ctx.sketch.dof().unwrap();
+    // Travelling CCW, left is inward.
+    run_ok(&mut ctx, "offset A0 0.5");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    let (cd, gap) = arc_offsets(&ctx, "A0", "A1");
+    assert!(cd < 1e-6 && (gap - 0.5).abs() < 1e-6, "{} {}", cd, gap);
+    let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+    assert!((a1.radius.value - 1.5).abs() < 1e-6, "inward: {}", a1.radius.value);
+    let s = crate::geometry::arc_start_pos(a1);
+    assert!(near(s.x, 1.5) && near(s.y, 0.0), "start on the source's start ray: {:?}", s);
+    assert_eq!(ctx.sketch.on_normal_aa.len(), 2);
+    assert_eq!(ctx.sketch.concentric.len(), 1);
+    run_ok(&mut ctx, "undo");
+    run_ok(&mut ctx, "offset A0 0.5 right");
+    let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+    assert!((a1.radius.value - 2.5).abs() < 1e-6, "outward: {}", a1.radius.value);
+    run_ok(&mut ctx, "undo");
+    let e = run_err(&mut ctx, "offset A0 2.5");
+    assert!(e.contains("cannot be offset inward"), "{}", e);
+
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 0,0 2");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset A0 0.5 symmetric");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    let radii: Vec<f64> = ["A1", "A2"].iter().map(|n| ctx.sketch.arcs[resolve_arc(&ctx.sketch, n).unwrap()].radius.value).collect();
+    assert!((radii[0] - 1.5).abs() < 1e-6 && (radii[1] - 2.5).abs() < 1e-6, "{:?}", radii);
+    assert!(ctx.sketch.on_normal_aa.is_empty());
+    assert_solved(&mut ctx);
+}
+
+/// Line - arc - line, tangent (a slot end): tangent joints on both sides,
+/// the results tangent too, pins on the earlier segment at each joint.
+#[test]
+fn test_offset_tangent_chain() {
+    let mut ctx = CommandContext::new();
+    // Bottom line to (4,0), semicircle up to (4,2) around (4,1), top line back.
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "add_arc 4,0 4,2 5,1");
+    run_ok(&mut ctx, "add_line 4,2 0,2");
+    assert_eq!(ctx.sketch.tangent_la.len(), 2, "auto-tangent at both joints");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset L0 A0 L1 0.5 symmetric");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof, "{}", out);
+    assert_solved(&mut ctx);
+    // Sides: left of (0,0)->(4,0) is inside: radius 0.5 arc; right: 1.5.
+    let radii: Vec<f64> = ctx.sketch.arcs.iter().filter(|a| a.name != "A0").map(|a| a.radius.value).collect();
+    assert!(radii.iter().any(|r| (r - 0.5).abs() < 1e-6) && radii.iter().any(|r| (r - 1.5).abs() < 1e-6), "{:?}", radii);
+    // Each result line is tangent to its result arc at their shared end
+    // (the joint is at the offset of the source joint).
+    for (l, a) in [("L2", "A1"), ("L3", "A1"), ("L4", "A2"), ("L5", "A2")] {
+        let line = &ctx.sketch.lines[resolve_line(&ctx.sketch, l).unwrap()];
+        let arc = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, a).unwrap()];
+        let d = line.p2.value - line.p1.value;
+        let len = (d.x * d.x + d.y * d.y).sqrt();
+        let c = arc.center.value;
+        let dist = ((c.x - line.p1.value.x) * d.y - (c.y - line.p1.value.y) * d.x).abs() / len;
+        assert!((dist - arc.radius.value).abs() < 1e-6, "{} tangent to {}: {} vs {}", l, a, dist, arc.radius.value);
+    }
+    // Pins: two free ends and two tangent joints per side.
+    assert_eq!(ctx.sketch.on_normal_ll.len() + ctx.sketch.on_normal_aa.len(), 8);
+}
+
+/// A closed slot (two lines, two arcs, all tangent) inward and outward.
+#[test]
+fn test_offset_slot() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "add_arc 4,0 4,2 5,1");
+    run_ok(&mut ctx, "add_line 4,2 0,2");
+    run_ok(&mut ctx, "add_arc 0,2 0,0 -1,1");
+    assert_eq!(ctx.sketch.tangent_la.len(), 4, "auto-tangent at every joint");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset sequence L0 0.25 inward");
+    assert!(out.contains("(closed)"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    let radii: Vec<f64> = ctx.sketch.arcs.iter().filter(|a| !["A0", "A1"].contains(&a.name.as_str())).map(|a| a.radius.value).collect();
+    assert!(radii.iter().all(|r| (r - 0.75).abs() < 1e-6), "{:?}", radii);
+    // One pin per tangent joint, on the earlier segment's result: the
+    // line ends before the arcs (LL), the arc ends before the lines (AA).
+    assert_eq!(ctx.sketch.on_normal_ll.len(), 2);
+    assert_eq!(ctx.sketch.on_normal_aa.len(), 2);
+    run_ok(&mut ctx, "undo");
+    run_ok(&mut ctx, "offset sequence L0 0.25 outward");
+    let radii: Vec<f64> = ctx.sketch.arcs.iter().filter(|a| !["A0", "A1"].contains(&a.name.as_str())).map(|a| a.radius.value).collect();
+    assert!(radii.iter().all(|r| (r - 1.25).abs() < 1e-6), "{:?}", radii);
+}
+
+/// Arc-arc tangent joints: an S-curve and a same-direction pair.
+#[test]
+fn test_offset_arc_arc() {
+    let mut ctx = CommandContext::new();
+    // Quarter arc about (0,0) from (2,0) up to (0,2), then a quarter arc
+    // about (0,4) from (0,2) up to (-2,4): an S with a tangent joint.
+    run_ok(&mut ctx, "add_arc 2,0 0,2 1.41421356,1.41421356");
+    run_ok(&mut ctx, "add_arc 0,2 -2,4 -1.41421356,2.58578644");
+    assert_eq!(ctx.sketch.tangent_aa.len(), 1, "auto-tangent at the joint");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset A0 A1 0.5 symmetric");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // Across an S the same side is inside one arc and outside the next.
+    let names: Vec<String> = ctx.sketch.arcs.iter().map(|a| a.name.clone()).collect();
+    assert_eq!(names.len(), 6, "{:?}", names);
+    let r = |n: &str| ctx.sketch.arcs[resolve_arc(&ctx.sketch, n).unwrap()].radius.value;
+    let side1 = (r("A2"), r("A3"));
+    assert!(((side1.0 - 1.5).abs() < 1e-6 && (side1.1 - 2.5).abs() < 1e-6) || ((side1.0 - 2.5).abs() < 1e-6 && (side1.1 - 1.5).abs() < 1e-6), "{:?}", side1);
+
+    // Same direction: quarter arc then another quarter arc continuing
+    // around the same center, tangent at (0,2).
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_arc 2,0 0,2 1.41421356,1.41421356");
+    run_ok(&mut ctx, "add_arc 0,2 -2,0 -1.41421356,1.41421356");
+    assert_eq!(ctx.sketch.tangent_aa.len(), 1, "auto-tangent at the joint");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset A0 A1 0.5");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    let r = |n: &str| ctx.sketch.arcs[resolve_arc(&ctx.sketch, n).unwrap()].radius.value;
+    assert!((r("A2") - 1.5).abs() < 1e-6 && (r("A3") - 1.5).abs() < 1e-6, "{} {}", r("A2"), r("A3"));
+}
+
+/// Line meeting an arc at a corner (not tangent): the results intersect.
+#[test]
+fn test_offset_line_arc_corner() {
+    let mut ctx = CommandContext::new();
+    // Line along x to (2,0), then a CCW quarter arc about the origin from
+    // (2,0) to (0,2): they meet at 90 degrees.
+    run_ok(&mut ctx, "add_line -2,0 2,0");
+    run_ok(&mut ctx, "add_arc 2,0 0,2 1.41421356,1.41421356");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset L0 A0 0.5 symmetric");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // The results meet: each result line's end lies on its result arc.
+    for (l, a) in [("L1", "A1"), ("L2", "A2")] {
+        let line = &ctx.sketch.lines[resolve_line(&ctx.sketch, l).unwrap()];
+        let arc = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, a).unwrap()];
+        let s = crate::geometry::arc_start_pos(arc);
+        assert!(near(s.x, line.p2.value.x) && near(s.y, line.p2.value.y), "{} {}: {:?} vs {:?}", l, a, s, line.p2.value);
+        let c = arc.center.value;
+        let d = ((line.p2.value.x - c.x).powi(2) + (line.p2.value.y - c.y).powi(2)).sqrt();
+        assert!((d - arc.radius.value).abs() < 1e-6);
+    }
+    assert!(ctx.sketch.on_normal_ll.len() == 2 && ctx.sketch.on_normal_aa.len() == 2, "free ends only");
+}
+
+/// A long mixed chain with corners and tangent joints, symmetric.
+#[test]
+fn test_offset_mixed_chain() {
+    let mut ctx = CommandContext::new();
+    // Tangent joints L0-A0, A0-L1 and L2-A1 (auto-tangent at creation),
+    // a corner L1-L2.
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "add_arc 4,0 6,2 5.41421356,0.58578644");
+    run_ok(&mut ctx, "add_line 6,2 6,5");
+    run_ok(&mut ctx, "add_line 6,5 9,5");
+    run_ok(&mut ctx, "add_arc 9,5 10,6 9.70710678,5.29289322");
+    assert_eq!(ctx.sketch.tangent_la.len(), 3, "auto-tangent at the three tangent joints");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset sequence L0 0.4 symmetric");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof, "{}", out);
+    assert_solved(&mut ctx);
+    assert_eq!(ctx.sketch.lines.refs().count(), 9);
+    assert_eq!(ctx.sketch.arcs.refs().count(), 6);
+    for (s, n) in [("L0", 2), ("L1", 2), ("L2", 2)] {
+        let mut hits = 0;
+        for r in ctx.sketch.lines.refs() {
+            let name = ctx.sketch.lines[r].name.clone();
+            if name == s || !ctx.sketch.parallel.iter().any(|c| (ctx.sketch.lines[c.a].name == s && ctx.sketch.lines[c.b].name == name)) { continue; }
+            let (a, b) = line_offsets(&ctx, s, &name);
+            assert!((a - 0.4).abs() < 1e-6 && (b - 0.4).abs() < 1e-6, "{} -> {}: {} {}", s, name, a, b);
+            hits += 1;
+        }
+        assert_eq!(hits, n, "{} has two results", s);
+    }
+}
+
+/// Selection and walk forms, and the rejections.
+#[test]
+fn test_offset_selection_forms_and_errors() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0 2,2 0,2; add_line 5,5 6,6");
+    run_ok(&mut ctx, "select L1 L0 L2");
+    let out = run_ok(&mut ctx, "offset selection 0.5");
+    assert!(out.contains("offset of L0 L1 L2"), "{}", out);
+    run_ok(&mut ctx, "undo");
+    let out = run_ok(&mut ctx, "select L1 sequence");
+    assert!(out.contains("Sequence: L0 L1 L2"), "{}", out);
+    let e = run_err(&mut ctx, "offset L0 L3 1");
+    assert!(e.contains("not one connected sequence"), "{}", e);
+    let e = run_err(&mut ctx, "offset L0 L1");
+    assert!(e.contains("missing the distance"), "{}", e);
+    let e = run_err(&mut ctx, "offset L0 -1");
+    assert!(e.contains("positive"), "{}", e);
+    let e = run_err(&mut ctx, "offset L0 1 inward");
+    assert!(e.contains("closed sequence"), "{}", e);
+    // A doubled-back chain has no corner.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0; add_line 4,0 1,0");
+    let e = run_err(&mut ctx, "offset L0 L1 1");
+    assert!(e.contains("double back"), "{}", e);
+}
+
+/// Editing: the distance moves the geometry through the dims; flip moves
+/// it to the other side; the kind adds and removes a side; `nopin`.
+#[test]
+fn test_offset_edit() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0 4,3");
+    run_ok(&mut ctx, "offset L0 L1 1");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset M1 2");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    let (a, b) = line_offsets(&ctx, "L0", "L2");
+    assert!((a - 2.0).abs() < 1e-6 && (b - 2.0).abs() < 1e-6, "{} {}", a, b);
+    assert_eq!(ctx.sketch.dimensions.iter().filter(|d| (d.value - 2.0).abs() < 1e-9).count(), 2);
+    assert_eq!(meta_count(&ctx), 1, "the edit keeps the meta");
+    let l2 = ctx.sketch.lines[resolve_line(&ctx.sketch, "L2").unwrap()].p1.value;
+    assert!(near(l2.y, 2.0), "{:?}", l2);
+
+    run_ok(&mut ctx, "offset M1 flip");
+    let l2 = ctx.sketch.lines[resolve_line(&ctx.sketch, "L2").unwrap()].p1.value;
+    assert!(near(l2.y, -2.0), "flipped: {:?}", l2);
+    assert_solved(&mut ctx);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+
+    let out = run_ok(&mut ctx, "offset M1 symmetric");
+    assert!(out.contains("symmetric"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 6, "a second side was created");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    let m = &ctx.sketch.metas[0];
+    assert_eq!(m.as_offset().unwrap().sides.len(), 2);
+
+    run_ok(&mut ctx, "offset M1 one");
+    assert_eq!(ctx.sketch.lines.refs().count(), 4, "the second side is gone");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_eq!(meta_count(&ctx), 1);
+
+    run_ok(&mut ctx, "offset M1 two 1 2");
+    assert_eq!(ctx.sketch.lines.refs().count(), 6);
+    let info = run_ok(&mut ctx, "info M1");
+    assert!(info.contains("1 right / 2 left"), "{}", info);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // An edit that would collapse a segment is refused and changes nothing.
+    let e = run_err(&mut ctx, "offset M1 two 1 3");
+    assert!(e.contains("collapses"), "{}", e);
+    assert_eq!(ctx.sketch.lines.refs().count(), 6);
+    assert_eq!(meta_count(&ctx), 1);
+
+    // nopin: the free ends are free and the DOF shows it.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset L0 1 nopin");
+    assert!(out.contains("[nopin]"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof + 2, "two free ends");
+    assert!(ctx.sketch.on_normal_ll.is_empty());
+}
+
+/// Ownership: deleting a result, an owned constraint, an owned dimension
+/// or a source drops the meta with a notice and keeps the rest; editing
+/// or converting an owned dimension does too; deleting a pin does not;
+/// undo brings the meta back.
+#[test]
+fn test_offset_ownership() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0 4,3");
+    run_ok(&mut ctx, "offset L0 L1 1");
+    assert_eq!(meta_count(&ctx), 1);
+    let out = run_ok(&mut ctx, "delete L3");
+    assert!(out.contains("notice: offset M1 dropped"), "{}", out);
+    assert_eq!(meta_count(&ctx), 0);
+    assert!(ctx.sketch.lines.refs().count() == 3, "the other result line stays");
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1, "undo restores the meta");
+
+    let out = run_ok(&mut ctx, "delete d0");
+    assert!(out.contains("dropped") && out.contains("d0"), "{}", out);
+    assert_eq!(meta_count(&ctx), 0);
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1);
+
+    let out = run_ok(&mut ctx, "distance L0 L2 3");
+    assert!(out.contains("d0 was edited"), "{}", out);
+    assert_eq!(meta_count(&ctx), 0);
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1);
+
+    let out = run_ok(&mut ctx, "set_derived d0");
+    assert!(out.contains("made derived"), "{}", out);
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1);
+
+    // The parallel of L0/L2 is an owned constraint.
+    let nid = ctx.sketch.parallel[0].nid;
+    let out = run_ok(&mut ctx, &format!("delete C{}", nid));
+    assert!(out.contains(&format!("C{} was deleted", nid)), "{}", out);
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1);
+
+    // A pin is soft-owned: deleting it keeps the meta.
+    let pin = ctx.sketch.on_normal_ll[0].nid;
+    let out = run_ok(&mut ctx, &format!("delete C{}", pin));
+    assert!(!out.contains("dropped"), "{}", out);
+    assert_eq!(meta_count(&ctx), 1);
+    run_ok(&mut ctx, "undo");
+
+    // A source entity.
+    let out = run_ok(&mut ctx, "delete L0");
+    assert!(out.contains("dropped"), "{}", out);
+    assert_eq!(meta_count(&ctx), 0);
+    run_ok(&mut ctx, "undo");
+
+    // Splitting a result (at a crossing line).
+    run_ok(&mut ctx, "add_line 2,-1 2,2 noconnect");
+    assert_eq!(meta_count(&ctx), 1);
+    let out = run_ok(&mut ctx, "split L2 2,1");
+    assert!(out.contains("dropped"), "{}", out);
+    assert_eq!(meta_count(&ctx), 0);
+}
+
+/// Dissolve keeps the geometry; delete-all removes it.
+#[test]
+fn test_offset_dissolve_and_delete() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "offset L0 1 symmetric");
+    let out = run_ok(&mut ctx, "delete M1");
+    assert!(out.contains("Dissolved M1"), "{}", out);
+    assert_eq!(meta_count(&ctx), 0);
+    assert_eq!(ctx.sketch.lines.refs().count(), 3);
+    assert_eq!(ctx.sketch.parallel.len(), 2, "the relations stay");
+    run_ok(&mut ctx, "undo");
+    assert_eq!(meta_count(&ctx), 1);
+    let out = run_ok(&mut ctx, "delete M1 all");
+    assert!(out.contains("Deleted M1 and L1, L2"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 1);
+    assert!(ctx.sketch.parallel.is_empty() && ctx.sketch.dimensions.is_empty());
+    assert!(!out.contains("notice"), "no tampering notice for an ordered delete: {}", out);
+    let e = run_err(&mut ctx, "delete M1 some");
+    assert!(e.contains("unknown option") || e.contains("Unknown"), "{}", e);
+}
+
+/// The meta survives save / load.
+#[test]
+fn test_offset_persists() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0 4,3");
+    run_ok(&mut ctx, "offset L0 L1 1");
+    let json = serde_json::to_string(&*ctx.sketch).unwrap();
+    let back: Sketch = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.metas.len(), 1);
+    assert_eq!(back.metas[0].name, "M1");
+    assert_eq!(back.metas[0].as_offset().unwrap().sides[0].segs.len(), 2);
+}
+
+/// Ellipses: the concentric approximation, rotation and both semi-axes
+/// held; a tangent joint at an elliptic arc is refused.
+#[test]
+fn test_offset_ellipse() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_ellipse 0,0 4 2 30");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset EA0 0.5 symmetric");
+    assert!(out.contains("approximate"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    let rx: Vec<(f64, f64)> = ctx.sketch.arcs.iter().filter(|a| a.name != "EA0").map(|a| (a.radius.value, a.radius_b.value)).collect();
+    assert!(rx.iter().any(|(a, b)| (a - 4.5).abs() < 1e-6 && (b - 2.5).abs() < 1e-6), "{:?}", rx);
+    assert!(rx.iter().any(|(a, b)| (a - 3.5).abs() < 1e-6 && (b - 1.5).abs() < 1e-6), "{:?}", rx);
+    assert_eq!(ctx.sketch.arc_arc_parallel.len(), 2, "rotation tied");
+    assert_eq!(ctx.sketch.distance_concentric.len(), 2);
+    // An elliptic arc alone, both free ends on the source ends' normals.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_earc_center 0,0 4 2 0 0 90");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset EA0 0.5 right");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    assert_eq!(ctx.sketch.on_normal_aa.len(), 2);
+    let res = ctx.sketch.arcs.iter().find(|a| a.name != "EA0").unwrap();
+    assert!((res.radius.value - 4.5).abs() < 1e-6 && (res.radius_b.value - 2.5).abs() < 1e-6, "{} {}", res.radius.value, res.radius_b.value);
+    // Elliptic arc and a line at a corner: allowed.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_earc_center 0,0 4 2 0 0 90");
+    run_ok(&mut ctx, "add_line 0,2 -3,4");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset EA0 L0 0.3");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof, "{}", out);
+    assert_solved(&mut ctx);
+    // Elliptic arc tangent to a line (the ellipse's top, a horizontal
+    // line): refused with the reason.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_earc_center 0,0 4 2 0 0 90");
+    run_ok(&mut ctx, "add_line 0,2 -3,2");
+    let e = run_err(&mut ctx, "offset EA0 L0 0.3");
+    assert!(e.contains("tangentially") && e.contains("approximate"), "{}", e);
+}
+
+// -- on_normal --
+
+/// A line endpoint placed on the normal of another line at its endpoint:
+/// the foot of the perpendicular, one DOF, listed, deletable.
+#[test]
+fn test_on_normal_lines() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "add_line 5,2 8,2");
+    let dof_before = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "on_normal L1.p1 L0.p2");
+    assert!(out.contains("on_normal L1.p1 L0.p2"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof_before - 1);
+    // L1.p1 is now on L0's normal at L0.p2 (both lines may have moved).
+    let l0 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+    let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+    let dir = l0.p2.value - l0.p1.value;
+    let d = l1.p1.value - l0.p2.value;
+    assert!((d.x * dir.x + d.y * dir.y).abs() < 1e-6, "L1.p1 is off L0's normal at p2");
+    let listed = run_ok(&mut ctx, "list constraints");
+    assert!(listed.contains("on_normal L1.p1 L0.p2"), "{}", listed);
+    // Duplicate and self-reference are rejected.
+    let e = run_err(&mut ctx, "on_normal L1.p1 L0.p2");
+    assert!(e.contains("already exists"), "{}", e);
+    let e = run_err(&mut ctx, "on_normal L0.p1 L0.p2");
+    assert!(e.contains("own entity"), "{}", e);
+    // Relational and by-name deletion.
+    run_ok(&mut ctx, "delete L1.p1 L0.p2 on_normal");
+    assert!(ctx.sketch.on_normal_ll.is_empty());
+    assert_eq!(ctx.sketch.dof().unwrap(), dof_before);
+    run_ok(&mut ctx, "on_normal L1.p2 L0.p1");
+    let nid = ctx.sketch.on_normal_ll[0].nid;
+    run_ok(&mut ctx, &format!("delete C{}", nid));
+    assert!(ctx.sketch.on_normal_ll.is_empty());
+}
+
+/// An arc endpoint on the normal of another arc at its endpoint: for
+/// circles the radial ray, for an ellipse the true normal there.
+#[test]
+fn test_on_normal_arcs() {
+    let mut ctx = CommandContext::new();
+    // Concentric arcs: A1.start must end up on the ray through A0.start.
+    run_ok(&mut ctx, "add_arc 2,0 0,2 1.4142,1.4142");
+    run_ok(&mut ctx, "add_arc 3.5,1 1,3.5 2.6,2.6");
+    run_ok(&mut ctx, "concentric A0 A1");
+    let dof_before = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "on_normal A1.start A0.start");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof_before - 1);
+    let a0 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+    let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+    let c = a0.center.value;
+    let s0 = crate::geometry::arc_start_pos(a0) - c;
+    let s1 = crate::geometry::arc_start_pos(a1) - c;
+    let cross = s0.x * s1.y - s0.y * s1.x;
+    assert!(cross.abs() < 1e-6, "A1.start is off A0's start ray: cross {}", cross);
+    let listed = run_ok(&mut ctx, "list constraints");
+    assert!(listed.contains("on_normal A1.start A0.start"), "{}", listed);
+
+    // Ellipse reference: the normal at its end is not the center ray.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_earc_center 0,0 4 2 0 0 90");
+    run_ok(&mut ctx, "add_arc 6,1 3,6 5.5,5"); // A1: arcs share one counter
+    let dof_before = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "on_normal A1.start EA0.end");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof_before - 1);
+    let ea = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "EA0").unwrap()];
+    let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+    let e = crate::geometry::arc_end_pos(ea);
+    let t = ea.tangent_at(ea.end_angle.value);
+    let d = crate::geometry::arc_start_pos(a1) - e;
+    assert!((d.x * t.x + d.y * t.y).abs() < 1e-6, "A1.start is off EA0's end normal");
+    // Unsupported operand pair.
+    let e = run_err(&mut ctx, "on_normal A1.start EA0.center");
+    assert!(e.contains("endpoints"), "{}", e);
+}

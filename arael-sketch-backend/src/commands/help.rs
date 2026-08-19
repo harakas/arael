@@ -9,7 +9,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
     }
     if args.is_empty() {
         Ok(ok("Commands: add_line add_point add_circle add_arc offset_line fillet chamfer split trim delete horizontal vertical \
-            parallel perpendicular equal collinear tangent coincident concentric midpoint \
+            parallel perpendicular equal collinear tangent coincident concentric on_normal midpoint \
             symmetry point_on length radius sweep angle distance hdistance vdistance xangle freeze set_derived set_driven \
             lock unlock param del_param rename_param style select deselect print info list \
             find dof cost undo redo history goto center zoom cursor dim_pos clear let save load \
@@ -28,7 +28,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "add_circle2t" => "add_circle2t L0 L1 radius [noconnect] [noconstraint] [driven] [strict] — circle tangent to 2 lines",
             "add_circle3t" => "add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict] — circle tangent to 3 lines",
             "add_ellipse" => "add_ellipse cx,cy rx ry rotation_deg [noconnect] [nocursor] [driven]",
-            "delete" => "delete <L0|P0|A0|EA0|C3|CL0H|d0> | delete L0 L1 parallel",
+            "delete" => "delete <L0|P0|A0|EA0|C3|CL0H|d0> | delete L0 L1 parallel | delete M0 [all]",
             "horizontal" => "horizontal L0 [L1 ...]",
             "vertical" => "vertical L0 [L1 ...]",
             "parallel" => "parallel L0 L1",
@@ -38,6 +38,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "tangent" => "tangent L0 A0 | tangent A0 A1",
             "coincident" => "coincident L0.p2 L1.p1 (any endpoint pair: P0, L0.p1/p2, A0.center/start/end)",
             "concentric" => "concentric A0 A1",
+            "on_normal" => "on_normal L1.p2 L0.p2 | on_normal A1.start A0.start — first endpoint lies on the normal of the second's curve at that endpoint",
             "midpoint" => "midpoint P0 L0 | midpoint L0.p1 L1 | midpoint P0 A0 (arc angular midpoint)",
             "symmetry" => "symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry A0 L0 A1",
             "mirror" => "mirror L0 L1 ... about L_axis [noconstraint] [strict] | mirror selection about L_axis",
@@ -63,12 +64,12 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "quiet" => "quiet L0 [on|off] — toggle/set quiet mode (hides dimensions and center)",
             "constr" => "constr L0 [on|off] — toggle/set construction line (dashdot, different color)",
             "drag" => "drag L0.p1 x,y | drag L0 @dx,dy — drag entity/endpoint to position",
-            "select" => "select L0 [L1 ...] | select all | select L0 chain | select L0 linked",
+            "select" => "select L0 [L1 ...] | select all | select L0 chain | select L0 linked | select L0 sequence",
             "deselect" => "deselect [L0 L1 ...] (clears all or specific)",
             "print" => "print <expression> (evaluate and display)",
-            "info" => "info L0 | info P0 | info A0 | info d0 | info paramname",
+            "info" => "info L0 | info P0 | info A0 | info d0 | info M0 | info paramname",
             "measure" => "measure L0 | measure L0 L1 | measure P0 P1 | measure L0 A0",
-            "list" => "list [all|lines|points|arcs|dims|params|constraints|constr|selection]",
+            "list" => "list [all|lines|points|arcs|dims|params|constraints|metas|constr|selection]",
             "find" => "find x,y [radius] (list nearby entities)",
             "undo" => "undo [n]",
             "redo" => "redo [n]",
@@ -86,7 +87,8 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "add_earc_center" => "add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw]",
             "add_earc_tangent" => "add_earc_tangent p1 t1 p2 t2 [bulge] (tangent-defined, bulge=perp_dist/half_chord)",
             "add_earc_rtangent" => "add_earc_rtangent p2 t2 [bulge] (chain from cursor+tangent)",
-            "offset_line" | "offset" => "offset_line L0 distance (create parallel line offset by distance)",
+            "offset_line" => "offset_line L0 distance (create parallel line offset by distance, unconstrained)",
+            "offset" => "offset L0 L1 A0 2 [left|right|flip] [symmetric | 2 3] [inward|outward] [nopin] | offset sequence L0 2 ... | offset selection 2 ... | offset M0 3 [flip|symmetric|two 2 3|one|pin|nopin] -- offset a connected sequence of lines/arcs, held at the distance by constraints and dims under meta-constraint M<n>",
             "fillet" => "fillet L1 L2 r [notangent] [noradius]  or  fillet L1.pN r [notangent] [noradius] (round a corner with a tangent arc of radius r; breaks the shared LL coincident, trims both lines, adds arc + tangent + radius dim)",
             "chamfer" => "chamfer L1 L2 d  or  chamfer L1.pN d (bevel a corner at distance d from the corner; breaks the shared LL coincident, trims both lines by d, adds a bevel line + corner anchor point + two equal distance dims)",
             "split" => "split L0 x,y [r]  or  split L0 by L1 L2... [nopin] (cut a line/arc at the intersections bracketing x,y, or at every crossing with the named cutters; pieces get new names, all constraints/dims/expressions transfer, cut endpoints are joined and pinned onto the cutter)",
@@ -116,7 +118,7 @@ pub(crate) const COMMAND_NAMES: &[&str] = &[
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
     "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer", "split", "trim", "scale",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
-    "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
+    "equal", "collinear", "tangent", "coincident", "concentric", "on_normal", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
     "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style", "quiet", "constr", "drag",
@@ -241,7 +243,7 @@ pub fn complete(
                 add_matching(&mut results, current_word,
                     &["horizontal", "vertical", "parallel", "perpendicular",
                       "equal", "equal_length", "equal_radius", "collinear",
-                      "tangent", "concentric", "coincident", "point_on",
+                      "tangent", "concentric", "on_normal", "coincident", "point_on",
                       "symmetry", "midpoint", "lock"]);
             }
         }
@@ -251,7 +253,7 @@ pub fn complete(
             }
             add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
             if token_index == 2 {
-                add_matching(&mut results, current_word, &["chain", "linked"]);
+                add_matching(&mut results, current_word, &["chain", "linked", "sequence"]);
             }
         }
 
@@ -423,9 +425,9 @@ pub fn complete(
         "list" => {
             if token_index == 1 {
                 add_matching(&mut results, current_word,
-                    &["all", "lines", "points", "arcs", "dims", "params", "constraints", "constr", "selection",
+                    &["all", "lines", "points", "arcs", "dims", "params", "constraints", "metas", "constr", "selection",
                       "horizontal", "vertical", "parallel", "perpendicular", "equal", "collinear",
-                      "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock",
+                      "tangent", "coincident", "concentric", "on_normal", "midpoint", "symmetry", "point_on", "lock",
                       "angle", "length", "radius", "sweep", "distance"]);
             }
         }
@@ -454,12 +456,25 @@ pub fn complete(
         }
 
         // Offset: arg1=line, arg2=expression
-        "offset_line" | "offset" => {
+        "offset_line" => {
             if token_index == 1 {
                 add_lines(sketch, &mut results, current_word);
             } else {
                 add_expression_completions(sketch, session_names, &mut results, current_word);
             }
+        }
+        "offset" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word, &["sequence", "selection"]);
+                for m in &sketch.metas {
+                    if m.name.starts_with(current_word) { results.push(m.name.clone()); }
+                }
+            }
+            add_lines(sketch, &mut results, current_word);
+            add_arcs(sketch, &mut results, current_word);
+            add_expression_completions(sketch, session_names, &mut results, current_word);
+            add_matching(&mut results, current_word,
+                &["left", "right", "flip", "symmetric", "two", "one", "inward", "outward", "nopin", "pin"]);
         }
 
         // Fillet: arg1=line-or-endpoint, arg2=line-or-radius, arg3=radius,

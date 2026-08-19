@@ -1203,6 +1203,9 @@ pub fn apply_split(sketch: &mut Sketch, plan: &SplitPlan) -> Result<SplitOutcome
     for (nid, d) in copied_desc {
         out.copied.push(format!("C{} {}", nid, d));
     }
+    // A split of a meta-constraint's result (or source) replaces entities
+    // the record names; the record is dropped with a notice.
+    crate::meta::reconcile(sketch);
     Ok(out)
 }
 

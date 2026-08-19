@@ -1392,6 +1392,24 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
     }
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
 
+    // Meta-constraint: `delete M0` dissolves it (the result stays),
+    // `delete M0 all` deletes the result too.
+    if tokens[0].starts_with('M') && let Some(i) = ctx.sketch.find_meta(tokens[0]) {
+        let name = ctx.sketch.metas[i].name.clone();
+        let mid = ctx.sketch.metas[i].mid;
+        return match tokens.get(1) {
+            None => {
+                crate::meta::dissolve(ctx, mid)?;
+                Ok(ok_or_status(ctx, format!("Dissolved {} (its geometry stays)", name)))
+            }
+            Some(&"all") => {
+                let names = crate::meta::delete_with_result(ctx, mid)?;
+                Ok(ok_or_status(ctx, format!("Deleted {} and {}", name, names.join(", "))))
+            }
+            Some(other) => Err(format!("delete {}: unknown option '{}' (use 'all' to delete the result too)", name, other)),
+        };
+    }
+
     // Multi-token relational form: `delete L0 L1 parallel`.
     if tokens.len() > 1 {
         return delete_relational(ctx, cleaned);

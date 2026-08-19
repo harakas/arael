@@ -1,12 +1,13 @@
-// Transitive-coincidence groups over the sketch's endpoint slots.
-// One union-find covers points, line endpoints, and arc
-// center/start/end; every coincident_* collection plus concentric
-// contributes a union. Shared by locked-set computation, drag snap
-// filtering, and group unlock.
+//! Transitive-coincidence groups over the sketch's endpoint slots.
+//! One union-find covers points, line endpoints, and arc
+//! center/start/end; every coincident_* collection plus concentric
+//! contributes a union. Shared by the GUI's locked-set computation,
+//! drag snap filtering and group unlock, and by the offset engine's
+//! sequence walk.
 
 use arael::refs::Ref;
 use arael_sketch_solver::*;
-use arael_sketch_backend::Selection;
+use crate::Selection;
 
 pub struct CoincidenceGroups {
     np: usize,

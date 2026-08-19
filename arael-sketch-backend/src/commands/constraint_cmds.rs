@@ -260,6 +260,29 @@ pub(crate) fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CmdResult 
                      last_nid!(concentric), "concentric")
 }
 
+/// `on_normal <placed endpoint> <reference endpoint>`: the placed endpoint
+/// lies on the normal of the reference curve at the reference endpoint.
+pub(crate) fn cmd_on_normal(ctx: &mut CommandContext, args: &str) -> CmdResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.len() != 2 {
+        return Err("Usage: on_normal L1.p2 L0.p2 | on_normal A1.start A0.start".into());
+    }
+    let to_dim = |ep: EndpointRef| -> Result<DimensionEndpoint, String> {
+        match ep {
+            EndpointRef::LineP1(l) => Ok(DimensionEndpoint::LineP1(l)),
+            EndpointRef::LineP2(l) => Ok(DimensionEndpoint::LineP2(l)),
+            EndpointRef::ArcStart(a) => Ok(DimensionEndpoint::ArcStart(a)),
+            EndpointRef::ArcEnd(a) => Ok(DimensionEndpoint::ArcEnd(a)),
+            _ => Err("on_normal takes line endpoints (p1/p2) or arc endpoints (start/end)".into()),
+        }
+    };
+    let placed = to_dim(resolve_endpoint_ref(&ctx.sketch, tokens[0])?)?;
+    let reference = to_dim(resolve_endpoint_ref(&ctx.sketch, tokens[1])?)?;
+    // Duplicates and unsupported pairs are rejected by validate_action.
+    apply_constraint(ctx, None, "On-normal", Action::ApplyOnNormal { placed, reference },
+                     last_minted_nid, "on_normal")
+}
+
 // ---------------------------------------------------------------------------
 // Dimension commands
 // ---------------------------------------------------------------------------

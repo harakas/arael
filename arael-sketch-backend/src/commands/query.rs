@@ -116,6 +116,23 @@ fn entity_refs_info(sketch: &Sketch, name: &str) -> String {
     if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
     let dims = dims_for(sketch, name);
     if !dims.is_empty() { s += &format!("\n  dims: {}", dims.join(", ")); }
+    // A meta-constraint that made this entity, or was made from it.
+    let entity = if name.starts_with('L') {
+        resolve_line(sketch, name).ok().map(OffsetEntity::Line)
+    } else if is_arc_name(name) {
+        resolve_arc(sketch, name).ok().map(OffsetEntity::Arc)
+    } else {
+        None
+    };
+    if let Some(e) = entity {
+        for m in &sketch.metas {
+            if m.owns_entity(e) {
+                s += &format!("\n  result of {} {}", m.kind_name(), m.name);
+            } else if m.source_entities().contains(&e) {
+                s += &format!("\n  source of {} {}", m.kind_name(), m.name);
+            }
+        }
+    }
     s
 }
 
@@ -153,6 +170,10 @@ pub(crate) fn cmd_info(ctx: &mut CommandContext, args: &str) -> CmdResult {
             s += &entity_refs_info(&ctx.sketch, name);
             return Ok(ok(s));
         }
+    if name.starts_with('M') && !name.contains('.')
+        && let Some(i) = ctx.sketch.find_meta(name) {
+        return Ok(ok(crate::meta::describe(&ctx.sketch, &ctx.sketch.metas[i])));
+    }
     if name.starts_with('L') && !name.contains('.') {
         let r = resolve_line(&ctx.sketch, name)?;
         let l = &ctx.sketch.lines[r];
@@ -427,8 +448,8 @@ pub(crate) fn cmd_list(ctx: &mut CommandContext, args: &str) -> CmdResult {
         }
         return if items.is_empty() { Ok(ok("(no construction entities)")) } else { Ok(ok(items.join("\n"))) };
     }
-    if !filter.is_empty() && !matches!(filter, "all" | "lines" | "points" | "arcs" | "dims" | "params" | "constraints") {
-        return Err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints, constr, selection, or a constraint type (horizontal, parallel, ...)", filter).into());
+    if !filter.is_empty() && !matches!(filter, "all" | "lines" | "points" | "arcs" | "dims" | "params" | "constraints" | "metas" | "offsets") {
+        return Err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints, metas, constr, selection, or a constraint type (horizontal, parallel, ...)", filter).into());
     }
     let mut lines = Vec::new();
     let show_all = filter.is_empty() || filter == "all";
@@ -494,6 +515,12 @@ pub(crate) fn cmd_list(ctx: &mut CommandContext, args: &str) -> CmdResult {
     }
     if show_all || filter == "constraints" {
         lines.extend(ctx.sketch.list_constraints());
+    }
+    if show_all || filter == "metas" || filter == "offsets" {
+        for m in &ctx.sketch.metas {
+            if filter == "offsets" && m.as_offset().is_none() { continue; }
+            lines.push(crate::meta::describe(&ctx.sketch, m));
+        }
     }
     if lines.is_empty() {
         Ok(ok("(empty)"))

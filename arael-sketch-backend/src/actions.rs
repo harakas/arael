@@ -150,6 +150,19 @@ pub enum Action {
     ApplyMidpointArcEndArc { a: Ref<Arc>, b: Ref<Arc> },
     ApplyLineP1OnLine { a: Ref<Line>, b: Ref<Line> },
     ApplyLineP2OnLine { a: Ref<Line>, b: Ref<Line> },
+    /// `placed` lies on the normal of `reference`'s curve at that
+    /// endpoint. Two line endpoints or two arc endpoints; anything else
+    /// is rejected by `conflicts::validate_action` and ignored here.
+    ApplyOnNormal { placed: DimensionEndpoint, reference: DimensionEndpoint },
+    /// Record a meta-constraint (see `arael_sketch_solver::metas` and
+    /// `crate::meta`): pushed with a fresh `M<n>` name when its `mid` is
+    /// 0, otherwise it replaces the record with that mid.
+    RegisterMeta { meta: Meta },
+    /// Forget a meta-constraint; its result stays as plain geometry.
+    UnregisterMeta { mid: u32 },
+    /// Rewrite an offset's distances into its owned dimensions and its
+    /// record in one step, so the record never disagrees with the dims.
+    SetOffsetDistances { mid: u32, distance: OffsetValue, distance2: Option<OffsetValue> },
     LockPoint { point: Ref<Point>, pos: vect2d },
     UnlockPoint { point: Ref<Point> },
     LockLineP1 { line: Ref<Line>, pos: vect2d },
@@ -219,6 +232,39 @@ pub enum Action {
 }
 
 impl Action {
+    /// The coincidence action for two endpoints, or `None` for a pair no
+    /// collection holds (a point on a body, say). Either order.
+    pub fn coincident(a: DimensionEndpoint, b: DimensionEndpoint) -> Option<Action> {
+        use DimensionEndpoint::*;
+        Some(match (a, b) {
+            (Point(a), Point(b)) => Action::ApplyCoincidentPP { a, b },
+            (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => Action::ApplyCoincidentLP1 { line: l, point: p },
+            (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => Action::ApplyCoincidentLP2 { line: l, point: p },
+            (LineP1(a), LineP1(b)) => Action::ApplyCoincidentLL11 { a, b },
+            (LineP1(a), LineP2(b)) => Action::ApplyCoincidentLL12 { a, b },
+            (LineP2(a), LineP1(b)) => Action::ApplyCoincidentLL21 { a, b },
+            (LineP2(a), LineP2(b)) => Action::ApplyCoincidentLL22 { a, b },
+            (Point(p), ArcCenter(arc)) | (ArcCenter(arc), Point(p)) => Action::ApplyCoincidentArcCenter { point: p, arc },
+            (Point(p), ArcStart(arc)) | (ArcStart(arc), Point(p)) => Action::ApplyCoincidentArcStart { point: p, arc },
+            (Point(p), ArcEnd(arc)) | (ArcEnd(arc), Point(p)) => Action::ApplyCoincidentArcEnd { point: p, arc },
+            (LineP1(line), ArcCenter(arc)) | (ArcCenter(arc), LineP1(line)) => Action::ApplyCoincidentLP1ArcCenter { line, arc },
+            (LineP2(line), ArcCenter(arc)) | (ArcCenter(arc), LineP2(line)) => Action::ApplyCoincidentLP2ArcCenter { line, arc },
+            (LineP1(line), ArcStart(arc)) | (ArcStart(arc), LineP1(line)) => Action::ApplyCoincidentLP1ArcStart { line, arc },
+            (LineP2(line), ArcStart(arc)) | (ArcStart(arc), LineP2(line)) => Action::ApplyCoincidentLP2ArcStart { line, arc },
+            (LineP1(line), ArcEnd(arc)) | (ArcEnd(arc), LineP1(line)) => Action::ApplyCoincidentLP1ArcEnd { line, arc },
+            (LineP2(line), ArcEnd(arc)) | (ArcEnd(arc), LineP2(line)) => Action::ApplyCoincidentLP2ArcEnd { line, arc },
+            (ArcCenter(a), ArcStart(b)) => Action::ApplyCoincidentArcCenterStart { a, b },
+            (ArcCenter(a), ArcEnd(b)) => Action::ApplyCoincidentArcCenterEnd { a, b },
+            (ArcStart(a), ArcCenter(b)) => Action::ApplyCoincidentArcStartCenter { a, b },
+            (ArcEnd(a), ArcCenter(b)) => Action::ApplyCoincidentArcEndCenter { a, b },
+            (ArcStart(a), ArcStart(b)) => Action::ApplyCoincidentArcStartStart { a, b },
+            (ArcStart(a), ArcEnd(b)) => Action::ApplyCoincidentArcStartEnd { a, b },
+            (ArcEnd(a), ArcStart(b)) => Action::ApplyCoincidentArcEndStart { a, b },
+            (ArcEnd(a), ArcEnd(b)) => Action::ApplyCoincidentArcEndEnd { a, b },
+            (ArcCenter(_), ArcCenter(_)) => return None,
+        })
+    }
+
     /// Human-readable description of this action.
     pub fn describe(&self) -> String {
         match self {
@@ -251,6 +297,10 @@ impl Action {
             Action::ApplyPointOnLine { .. } | Action::ApplyEndpointOnLine { .. } => "Point on line".into(),
             Action::ApplyPointOnArc { .. } | Action::ApplyEndpointOnArc { .. } => "Point on arc".into(),
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } => "Endpoint on line".into(),
+            Action::ApplyOnNormal { .. } => "On normal".into(),
+            Action::RegisterMeta { meta } => format!("Record {} {}", meta.kind_name(), meta.name),
+            Action::UnregisterMeta { .. } => "Dissolve meta-constraint".into(),
+            Action::SetOffsetDistances { .. } => "Set offset distance".into(),
             Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } => "Endpoint on arc".into(),
             Action::ApplyTangentLA { .. } => "Tangent LA".into(),
             Action::ApplyTangentAA { .. } => "Tangent AA".into(),
@@ -350,6 +400,7 @@ impl Action {
             Action::ApplyPointOnLine { .. } | Action::ApplyPointOnArc { .. } |
             Action::ApplyEndpointOnLine { .. } | Action::ApplyEndpointOnArc { .. } |
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
+            Action::ApplyOnNormal { .. } |
             Action::AddDimension { .. } | Action::UpdateDimension { .. }
         )
     }
@@ -608,8 +659,9 @@ pub(crate) fn push_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionK
             sketch.lines[*line].constraints.target_angle = target;
         }
         DimensionKind::ConcentricDistance(a, b) => {
-            // Validate: both arcs exist and are circular.
-            // `DistanceConcentric`'s residual is
+            // Validate: both arcs exist and are of one kind (two
+            // circles, or two ellipses -- then both semi-axes carry
+            // the gap). `DistanceConcentric`'s residual is
             // self-contained (it enforces center-coincidence
             // itself), so we no longer require a paired
             // `Concentric` -- the caller (cmd_distance / GUI
@@ -618,8 +670,7 @@ pub(crate) fn push_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionK
             // doesn't depend on it.
             let valid_arcs = sketch.arcs.get(*a).is_some()
                 && sketch.arcs.get(*b).is_some()
-                && !sketch.arcs[*a].is_ellipse
-                && !sketch.arcs[*b].is_ellipse;
+                && sketch.arcs[*a].is_ellipse == sketch.arcs[*b].is_ellipse;
             if !valid_arcs {
                 return false;
             }
@@ -865,10 +916,13 @@ impl Created {
 }
 
 impl Action {
-    /// Apply the action, then solve. Returns what it added.
+    /// Apply the action, then solve. Returns what it added. A
+    /// meta-constraint whose result this action touched is dropped here,
+    /// with a notice (`crate::meta::reconcile`).
     pub fn apply(&self, sketch: &mut Sketch) -> Created {
         let (needs_expr_update, created) = self.apply_without_solve(sketch);
         sketch.assign_constraint_names();
+        crate::meta::reconcile(sketch);
         sketch.solve();
         if needs_expr_update {
             sketch.update_expr_dim_values();
@@ -1160,6 +1214,83 @@ impl Action {
             }
             Action::ApplyLineP2OnLine { a, b } => {
                 sketch.line_p2_on_line.push(LineP2OnLine { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
+            }
+            Action::ApplyOnNormal { placed, reference } => {
+                use DimensionEndpoint as E;
+                let line_end = |e: &E| match e {
+                    E::LineP1(l) => Some((*l, false)),
+                    E::LineP2(l) => Some((*l, true)),
+                    _ => None,
+                };
+                let arc_end = |e: &E| match e {
+                    E::ArcStart(a) => Some((*a, false)),
+                    E::ArcEnd(a) => Some((*a, true)),
+                    _ => None,
+                };
+                if let (Some((a, placed_end)), Some((b, ref_end))) = (line_end(placed), line_end(reference)) {
+                    sketch.on_normal_ll.push(EndpointOnNormalLL {
+                        a, b, placed_end, ref_end, nid: 0, cid: 0, hb: CrossBlock::new(),
+                    });
+                } else if let (Some((a, placed_end)), Some((b, ref_end))) = (arc_end(placed), arc_end(reference)) {
+                    sketch.on_normal_aa.push(EndpointOnNormalAA {
+                        a, b, placed_end, ref_end, nid: 0, cid: 0, hb: CrossBlock::new(),
+                    });
+                }
+            }
+            Action::RegisterMeta { meta } => {
+                let mut meta = meta.clone();
+                if meta.mid == 0 {
+                    sketch.next_meta_id += 1;
+                    meta.mid = sketch.next_meta_id;
+                    meta.name = format!("M{}", meta.mid);
+                }
+                match sketch.meta_index(meta.mid) {
+                    Some(i) => sketch.metas[i] = meta,
+                    None => sketch.metas.push(meta),
+                }
+            }
+            Action::UnregisterMeta { mid } => {
+                sketch.metas.retain(|m| m.mid != *mid);
+            }
+            Action::SetOffsetDistances { mid, distance, distance2 } => {
+                let Some(i) = sketch.meta_index(*mid) else {
+                    return (false, created);
+                };
+                let Some(offset) = sketch.metas[i].as_offset().cloned() else {
+                    return (false, created);
+                };
+                // Each side's dims get the value of the distance that
+                // side carries (the second distance on the other side
+                // of a two-sided offset).
+                let value_for = |sign: f64| {
+                    if offset.kind == OffsetKind::TwoSides && sign != offset.side {
+                        distance2.clone().unwrap_or_else(|| distance.clone())
+                    } else {
+                        distance.clone()
+                    }
+                };
+                let mut any_expr = false;
+                for side in &offset.sides {
+                    let v = value_for(side.sign);
+                    any_expr |= v.expr.is_some();
+                    for d in &side.dims {
+                        let _ = Action::UpdateDimension {
+                            did: d.did, value: v.value, expr: v.expr.clone(), range: None,
+                        }
+                        .apply_without_solve(sketch);
+                    }
+                }
+                if let Some(o) = sketch.metas[i].as_offset_mut() {
+                    o.distance = distance.clone();
+                    o.distance2 = distance2.clone();
+                    for side in o.sides.iter_mut() {
+                        let v = value_for(side.sign);
+                        for d in side.dims.iter_mut() {
+                            d.expect = v.clone();
+                        }
+                    }
+                }
+                return (any_expr, created);
             }
             Action::LockPoint { point, pos } => {
                 let p = &mut sketch.points[*point];

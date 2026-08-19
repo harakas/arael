@@ -16,6 +16,10 @@ pub mod commands;
 pub mod corner_ops;
 pub mod scale;
 pub mod split;
+pub mod coincide;
+pub mod chain;
+pub mod meta;
+pub mod offset;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp_server;
 

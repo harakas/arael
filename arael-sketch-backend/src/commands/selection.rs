@@ -20,6 +20,11 @@ pub(crate) fn cmd_select(ctx: &mut CommandContext, args: &str) -> CmdResult {
         return cmd_select_chain(ctx, seed);
     }
 
+    // select <entity> sequence -- end to end until an end or a branch
+    if tokens.len() == 2 && tokens[1] == "sequence" {
+        let seed = tokens[0];
+        return cmd_select_sequence(ctx, seed);
+    }
     // select <entity> linked — follow all constraint relationships
     if tokens.len() == 2 && tokens[1] == "linked" {
         let seed = tokens[0];
@@ -154,6 +159,7 @@ pub(crate) fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CmdResu
         link_ll!(ctx.sketch.coincident_ll12);
         link_ll!(ctx.sketch.coincident_ll21);
         link_ll!(ctx.sketch.coincident_ll22);
+        link_ll!(ctx.sketch.on_normal_ll);
 
         // All arc-arc constraints
         macro_rules! link_aa {
@@ -167,6 +173,7 @@ pub(crate) fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CmdResu
         link_aa!(ctx.sketch.equal_radius);
         link_aa!(ctx.sketch.tangent_aa);
         link_aa!(ctx.sketch.concentric);
+        link_aa!(ctx.sketch.on_normal_aa);
         link_aa!(ctx.sketch.coincident_arc_center_start);
         link_aa!(ctx.sketch.coincident_arc_center_end);
         link_aa!(ctx.sketch.coincident_arc_start_center);

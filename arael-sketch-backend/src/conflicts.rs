@@ -242,8 +242,8 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
             let (Some(aa), Some(ab)) = (sketch.arcs.get(*a), sketch.arcs.get(*b)) else {
                 return Some("Concentric distance: arc no longer exists".into());
             };
-            if aa.is_ellipse || ab.is_ellipse {
-                return Some("Concentric distance applies to circular arcs".into());
+            if aa.is_ellipse != ab.is_ellipse {
+                return Some("Concentric distance takes two circular arcs or two ellipses".into());
             }
         }
 
@@ -280,6 +280,38 @@ pub fn validate_action(sketch: &Sketch, action: &Action) -> Option<String> {
         }
         Action::ApplyCollinear { a, b } if a == b => {
             return Some(format!("Cannot constrain {} to itself", line_name(sketch, *a)));
+        }
+        Action::ApplyOnNormal { placed, reference } => {
+            use DimensionEndpoint as E;
+            let (same_entity, supported) = match (placed, reference) {
+                (E::LineP1(a) | E::LineP2(a), E::LineP1(b) | E::LineP2(b)) => (a == b, true),
+                (E::ArcStart(a) | E::ArcEnd(a), E::ArcStart(b) | E::ArcEnd(b)) => (a == b, true),
+                _ => (false, false),
+            };
+            if !supported {
+                return Some("on_normal takes two line endpoints or two arc endpoints".into());
+            }
+            if same_entity {
+                return Some("Cannot place an endpoint on its own entity's normal".into());
+            }
+            let dup = match (placed, reference) {
+                (E::LineP1(a) | E::LineP2(a), E::LineP1(b) | E::LineP2(b)) => {
+                    let (pe, re) = (matches!(placed, E::LineP2(_)), matches!(reference, E::LineP2(_)));
+                    sketch.on_normal_ll.iter()
+                        .find(|c| c.a == *a && c.b == *b && c.placed_end == pe && c.ref_end == re)
+                        .map(|c| c.nid)
+                }
+                (E::ArcStart(a) | E::ArcEnd(a), E::ArcStart(b) | E::ArcEnd(b)) => {
+                    let (pe, re) = (matches!(placed, E::ArcEnd(_)), matches!(reference, E::ArcEnd(_)));
+                    sketch.on_normal_aa.iter()
+                        .find(|c| c.a == *a && c.b == *b && c.placed_end == pe && c.ref_end == re)
+                        .map(|c| c.nid)
+                }
+                _ => None,
+            };
+            if let Some(nid) = dup {
+                return Some(format!("on_normal constraint already exists (C{})", nid));
+            }
         }
         Action::ApplySymmetryLL { a, b, c } if a == b || b == c || a == c => {
             return Some("Symmetry requires 3 distinct lines".into());

@@ -274,6 +274,25 @@ pub(crate) fn delete_relational(ctx: &mut CommandContext, args: &str) -> CmdResu
             let b = resolve_arc(sketch, tokens[1])?;
             find_ab!(sketch.concentric, a, b).map(|i| ConstraintId::Numbered(sketch.concentric[i].nid))
         }
+        "on_normal" if tokens.len() >= 3 => {
+            let placed = resolve_endpoint_ref(sketch, tokens[0])?;
+            let reference = resolve_endpoint_ref(sketch, tokens[1])?;
+            match (placed, reference) {
+                (EndpointRef::LineP1(a) | EndpointRef::LineP2(a), EndpointRef::LineP1(b) | EndpointRef::LineP2(b)) => {
+                    let (pe, re) = (matches!(placed, EndpointRef::LineP2(_)), matches!(reference, EndpointRef::LineP2(_)));
+                    sketch.on_normal_ll.iter()
+                        .find(|c| c.a == a && c.b == b && c.placed_end == pe && c.ref_end == re)
+                        .map(|c| ConstraintId::Numbered(c.nid))
+                }
+                (EndpointRef::ArcStart(a) | EndpointRef::ArcEnd(a), EndpointRef::ArcStart(b) | EndpointRef::ArcEnd(b)) => {
+                    let (pe, re) = (matches!(placed, EndpointRef::ArcEnd(_)), matches!(reference, EndpointRef::ArcEnd(_)));
+                    sketch.on_normal_aa.iter()
+                        .find(|c| c.a == a && c.b == b && c.placed_end == pe && c.ref_end == re)
+                        .map(|c| ConstraintId::Numbered(c.nid))
+                }
+                _ => None,
+            }
+        }
         "lock" => {
             // Locks are entity flags, not a ConstraintId: route through
             // the unlock actions so undo restores them.

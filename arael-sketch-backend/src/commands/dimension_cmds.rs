@@ -479,12 +479,11 @@ pub(crate) fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CmdResult {
             // still emit one up front for visibility in `list`. The
             // caller-emit pattern mirrors LineLineDistance + Parallel.
             else if !tokens[0].contains('.') && !tokens[1].contains('.')
-                && tokens[0].starts_with('A') && tokens[1].starts_with('A')
+                && is_arc_name(tokens[0]) && is_arc_name(tokens[1])
                 && let Ok(arc_a) = resolve_arc(&ctx.sketch, tokens[0])
                 && let Ok(arc_b) = resolve_arc(&ctx.sketch, tokens[1])
                 && arc_a != arc_b
-                && !ctx.sketch.arcs[arc_a].is_ellipse
-                && !ctx.sketch.arcs[arc_b].is_ellipse
+                && ctx.sketch.arcs[arc_a].is_ellipse == ctx.sketch.arcs[arc_b].is_ellipse
                 && arcs_are_concentric(&ctx.sketch, arc_a, arc_b)
             {
                 let ra = ctx.sketch.arcs[arc_a].radius.value;
@@ -588,12 +587,11 @@ pub(crate) fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CmdResult {
     // `ApplyConcentric` up front when one isn't already there, same
     // pattern as LineLineDistance + Parallel.
     if !tokens[0].contains('.') && !tokens[1].contains('.')
-        && tokens[0].starts_with('A') && tokens[1].starts_with('A')
+        && is_arc_name(tokens[0]) && is_arc_name(tokens[1])
         && let Ok(arc_a) = resolve_arc(&ctx.sketch, tokens[0])
         && let Ok(arc_b) = resolve_arc(&ctx.sketch, tokens[1])
         && arc_a != arc_b
-        && !ctx.sketch.arcs[arc_a].is_ellipse
-        && !ctx.sketch.arcs[arc_b].is_ellipse
+        && ctx.sketch.arcs[arc_a].is_ellipse == ctx.sketch.arcs[arc_b].is_ellipse
         && arcs_are_concentric(&ctx.sketch, arc_a, arc_b)
     {
         let kind = DimensionKind::ConcentricDistance(arc_a, arc_b);

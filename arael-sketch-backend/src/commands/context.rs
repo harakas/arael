@@ -25,6 +25,10 @@ pub struct CommandContext {
     /// existing constraints. Consumed by the GUI to flash those
     /// constraints briefly. Cleared on the next successful action.
     pub status_blocker_names: Option<Vec<String>>,
+    /// Notices the sketch raised while actions were applied (an offset
+    /// dropped because its result was edited, say). Appended to the next
+    /// command result, then cleared.
+    pub notices: Vec<String>,
     pub last_cost: f64,
     pub skip_dof_check: bool,
     // View state (used by center/zoom commands; GUI overrides with real values)
@@ -64,6 +68,7 @@ impl CommandContext {
             saved_cursor: CursorState::default(),
             status_error: None,
             status_blocker_names: None,
+            notices: Vec::new(),
             last_cost: 0.0,
             skip_dof_check: false,
             scale: 80.0,
@@ -90,6 +95,7 @@ impl CommandContext {
             saved_cursor: CursorState::default(),
             status_error: None,
             status_blocker_names: None,
+            notices: Vec::new(),
             last_cost: 0.0,
             skip_dof_check: false,
             scale: 80.0,
@@ -743,7 +749,7 @@ impl CommandContext {
             return Created::Nothing;
         }
 
-        if action.is_constraint_action() {
+        let created = if action.is_constraint_action() {
             match validate_and_apply_constraint(
                 self.sketch.get_mut(), &action, self.skip_dof_check)
             {
@@ -764,7 +770,10 @@ impl CommandContext {
             self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, CursorState { pos: self.cursor, tangent: self.cursor_tangent });
             created
-        }
+        };
+        let notices = self.sketch.mutate_values(|s| s.take_notices());
+        self.notices.extend(notices);
+        created
     }
 
     /// Apply a split plan through the action machinery, returning the
@@ -790,6 +799,8 @@ impl CommandContext {
             &self.sketch,
             CursorState { pos: self.cursor, tangent: self.cursor_tangent },
         );
+        let notices = self.sketch.mutate_values(|s| s.take_notices());
+        self.notices.extend(notices);
         Ok(outcome)
     }
 }

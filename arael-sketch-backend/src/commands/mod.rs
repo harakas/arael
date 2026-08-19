@@ -29,6 +29,7 @@ mod session;
 mod dof;
 mod help;
 mod split_cmds;
+mod offset_cmds;
 
 pub use context::*;
 pub(crate) use resolve::*;
@@ -48,6 +49,7 @@ pub(crate) use session::*;
 pub(crate) use dof::*;
 pub use help::*;
 pub(crate) use split_cmds::*;
+pub(crate) use offset_cmds::*;
 
 #[cfg(test)]
 mod tests;
@@ -65,6 +67,16 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
         let mut r = execute_one(ctx, cmd);
         if r.is_error && !r.output.starts_with('>') {
             r.output = format!("'{}': {}", cmd, r.output);
+        }
+        // Notices raised by the actions this command ran (a meta-
+        // constraint dropped because its result was edited) ride along.
+        for n in std::mem::take(&mut ctx.notices) {
+            if !r.output.is_empty() {
+                r.output.push('\n');
+            }
+            r.output.push_str("notice: ");
+            r.output.push_str(&n);
+            r.no_echo = false;
         }
         if ctx.echo_stdout && !r.output.is_empty() {
             println!("{}", r.output);
@@ -252,7 +264,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_earc_center" => cmd_add_earc_center(ctx, args_str),
         "add_earc_tangent" => cmd_add_earc_tangent(ctx, args_str),
         "add_earc_rtangent" => cmd_add_earc_rtangent(ctx, args_str),
-        "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
+        "offset_line" => cmd_offset_line(ctx, args_str),
+        "offset" => cmd_offset(ctx, args_str),
         "fillet" => cmd_fillet(ctx, args_str),
         "chamfer" => cmd_chamfer(ctx, args_str),
         "split" => cmd_split(ctx, args_str),
@@ -268,6 +281,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "tangent" => cmd_tangent(ctx, args_str),
         "coincident" => cmd_coincident(ctx, args_str),
         "concentric" => cmd_concentric(ctx, args_str),
+        "on_normal" => cmd_on_normal(ctx, args_str),
         "midpoint" => cmd_midpoint(ctx, args_str),
         "symmetry" => cmd_symmetry(ctx, args_str),
         "mirror" => cmd_mirror(ctx, args_str),

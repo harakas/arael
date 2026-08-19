@@ -41,6 +41,7 @@ Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use
 | `midpoint` | 2 |
 | `coincident` (point-point, endpoint-endpoint) | 2 |
 | `concentric` | 2 |
+| `on_normal` | 1 |
 | `symmetry` (point-point about line) | 2 |
 | `symmetry` (line-line about line) | 2 |
 | `symmetry` (arc-arc about line) | 3 |
@@ -531,6 +532,8 @@ tangent L0 A0                Tangent: line-arc (line must be first argument)
 tangent A0 A1                Tangent: arc-arc (either order)
 coincident L0.p2 L1.p1       Coincident: any endpoint pair
 concentric A0 A1             Concentric arcs
+on_normal L1.p2 L0.p2        L1.p2 lies on the normal of L0 at L0.p2 (the perpendicular foot)
+on_normal A1.start A0.start  A1.start lies on the normal of A0 at A0.start (a circle's radial ray, an ellipse's true normal)
 midpoint P0 L0               Point at midpoint of line
 midpoint L0.p1 L1            Line endpoint at midpoint of another line
 midpoint P0 A0               Point at angular midpoint of arc
@@ -606,6 +609,7 @@ delete A0 A1 equal_radius
 delete L0 L1 collinear
 delete L0 A0 tangent
 delete A0 A1 concentric
+delete L1.p2 L0.p2 on_normal
 delete L0.p2 L1.p1 coincident
 delete P0 L0 point_on
 delete L0.p1 A0 point_on
@@ -642,6 +646,79 @@ a, b = mirror L0 L1 about L2
 ```
 
 When mirroring entities that share endpoints (connected via coincident), the mirrored copies also share endpoints, and only one symmetry constraint is created per unique endpoint position (no duplicates).
+
+## Offset
+
+Offset a connected sequence of lines and arcs to one or both sides. Every
+result entity is held at the distance from its source by ordinary
+constraints and a dimension, and the whole operation is recorded as a
+meta-constraint `M<n>` that can be edited afterwards.
+
+```
+offset L0 L1 A0 2                 one side, 2 to the left of the chain direction
+offset L0 L1 A0 2 right           the other side (also: flip)
+offset L0 L1 A0 2 symmetric       both sides at 2
+offset L0 L1 A0 2 3               two sides: 2 left, 3 right
+offset sequence L0 2              walk from L0 both ways to an end or a branch, then offset
+offset selection 2                the current selection, which must be one sequence
+offset L0 L1 L2 L3 1 inward       closed sequences: inward / outward instead of left / right
+offset L0 2 nopin                 leave the free ends and tangent joints unpinned
+m = offset L0 L1 2                name capture: `_` is the meta, `_0`.. the result entities
+```
+
+**The sequence.** Lines and arcs connected end to end (by coincident
+endpoints, directly or through a shared point), with no branch inside
+it; open or closed (a loop, or a full circle / ellipse on its own). The
+chain direction is the first entity's own (`p1 -> p2`, `start -> end`);
+`left` is the left-hand side of travel. A set that is not one sequence
+is refused, naming the stray or the branch.
+
+**What is created, per source segment:**
+
+| source | result | relation |
+|---|---|---|
+| line | parallel line at the distance | `parallel` + a `distance` dim |
+| arc / circle | concentric arc, radius +- the distance | `concentric` + a `distance` dim |
+| ellipse / elliptic arc | concentric ellipse, both semi-axes +- the distance | `concentric` + `parallel` (rotation) + a `distance` dim |
+
+Consecutive results meet at sharp corners (extended or trimmed to their
+intersection) or, where the sources are tangent, at the offset of the
+source joint; a coincident joins them. Tangent joints and the free ends
+of an open sequence are pinned with `on_normal` so the result has no
+slide left (`nopin` skips that). The sketch DOF is unchanged by an
+offset: the result brings exactly as much freedom as its relations take.
+
+An ellipse's offset is not an ellipse; the result is the concentric
+ellipse with both semi-axes moved by the distance, which is exact at the
+axis ends and approximate elsewhere (a few percent of the distance on a
+2:1 ellipse). The output says so. A sequence with an elliptic arc tangent
+to its neighbour is refused: the approximation cannot keep that joint.
+
+Refused, naming the segment: an inward arc offset past its radius, a
+segment its neighbours' corners would turn around or shrink to nothing, a
+chain that doubles back on itself, corners whose offsets do not meet.
+Distances accept the dimension value forms (`2`, `w/2`, `=w/2`).
+
+**Editing.** The meta-constraint keeps the parameters:
+
+```
+offset M0 3                       new distance: the dims are rewritten, the geometry follows
+offset M0 flip                    the other side (the geometry is moved across)
+offset M0 symmetric | two 2 3 | one   add or remove a side (new entities are reported)
+offset M0 nopin | pin
+info M0 | list metas              what it was made of and what it made
+delete M0                         dissolve: the geometry stays, as plain constrained geometry
+delete M0 all                     delete the result entities too
+```
+
+The record owns what it created. Deleting a result entity, an owned
+constraint or an owned dimension, editing or converting an owned
+dimension, deleting a source entity, or splitting a result drops the
+meta-constraint with a `notice:` line on the command that did it; the
+geometry is left as it is. Deleting a pin (`on_normal`) does not drop it.
+Adding constraints to the result, dragging, or changing a parameter a
+distance expression reads keep it. `info L5` shows the meta-constraint an
+entity is the result or source of.
 
 ## Dimensions
 
@@ -836,6 +913,7 @@ select L0 L1 P0              Select multiple
 select all                   Select all entities
 select L0 chain              Select all entities connected via coincident endpoints
 select L0 linked             Select all entities sharing any constraint, recursively
+select L0 sequence           Select the end-to-end sequence through L0, up to an end or a branch
 deselect                     Clear selection
 deselect L0                  Remove specific entity from selection
 list selection               Show current selection
@@ -1001,6 +1079,7 @@ list arcs                    List only arcs
 list dims                    List dimensions: d<n>: <meaning> = value (expression, range, derived, broken shown)
 list params                  List only parameters
 list constraints             List constraints addressable by their own name (H/V, locks, C<n>); dimensions are under list dims
+list metas                   List meta-constraints (offsets): M<n>: what they were made of and what they made
 list selection               List the current selection
 list constr                  List construction entities
 list horizontal              Filter by constraint type (also: vertical, parallel,
@@ -1188,6 +1267,17 @@ they re-evaluate on every solve, so `param b 6` afterward
 reshapes the triangle.
 
 ### Offset Line
+
+The `offset` command (see [Offset](#offset)) holds the copy at the
+distance and records the operation:
+
+```
+l = add_line 0,0 10,0
+m = offset l 2                 M1: parallel line 2 to the left, held there; _0 is the new line
+offset M1 3                    move it to 3
+```
+
+`offset_line` is the bare copy, unconstrained:
 
 ```
 l = add_line 0,0 10,0
