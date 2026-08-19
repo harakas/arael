@@ -88,7 +88,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "add_earc_tangent" => "add_earc_tangent p1 t1 p2 t2 [bulge] (tangent-defined, bulge=perp_dist/half_chord)",
             "add_earc_rtangent" => "add_earc_rtangent p2 t2 [bulge] (chain from cursor+tangent)",
             "offset_line" => "offset_line L0 distance (create parallel line offset by distance, unconstrained)",
-            "offset" => "offset L0 L1 A0 2 [left|right|flip] [symmetric | 2 3] [inward|outward] [nopin] | offset sequence L0 2 ... | offset selection 2 ... | offset M0 3 [flip|symmetric|two 2 3|one|pin|nopin] -- offset a connected sequence of lines/arcs, held at the distance by constraints and dims under meta-constraint M<n>",
+            "offset" => "offset L0 L1 A0 2 [left|right|flip] [symmetric | 2 3] [inward|outward] [round] [caps line|round] [nopin] | offset sequence L0 2 ... | offset selection 2 ... | offset M0 3 [flip|symmetric|two 2 3|one|round|sharp|caps line|round|none|pin|nopin] -- offset a connected sequence of lines/arcs, held at the distance by constraints and dims under meta-constraint M<n>",
             "fillet" => "fillet L1 L2 r [notangent] [noradius]  or  fillet L1.pN r [notangent] [noradius] (round a corner with a tangent arc of radius r; breaks the shared LL coincident, trims both lines, adds arc + tangent + radius dim)",
             "chamfer" => "chamfer L1 L2 d  or  chamfer L1.pN d (bevel a corner at distance d from the corner; breaks the shared LL coincident, trims both lines by d, adds a bevel line + corner anchor point + two equal distance dims)",
             "split" => "split L0 x,y [r]  or  split L0 by L1 L2... [nopin] (cut a line/arc at the intersections bracketing x,y, or at every crossing with the named cutters; pieces get new names, all constraints/dims/expressions transfer, cut endpoints are joined and pinned onto the cutter)",
@@ -470,11 +470,15 @@ pub fn complete(
                     if m.name.starts_with(current_word) { results.push(m.name.clone()); }
                 }
             }
-            add_lines(sketch, &mut results, current_word);
-            add_arcs(sketch, &mut results, current_word);
-            add_expression_completions(sketch, session_names, &mut results, current_word);
-            add_matching(&mut results, current_word,
-                &["left", "right", "flip", "symmetric", "two", "one", "inward", "outward", "nopin", "pin"]);
+            if typed_args.last() == Some(&"caps") {
+                add_matching(&mut results, current_word, &["line", "round", "none"]);
+            } else {
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+                add_matching(&mut results, current_word,
+                    &["left", "right", "flip", "symmetric", "two", "one", "inward", "outward", "round", "sharp", "caps", "nopin", "pin"]);
+            }
         }
 
         // Fillet: arg1=line-or-endpoint, arg2=line-or-radius, arg3=radius,

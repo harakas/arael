@@ -283,6 +283,7 @@ pub(crate) fn prune_selection(ctx: &mut CommandContext) {
         | Selection::ArcStart(r)
         | Selection::ArcEnd(r) => sketch.arcs.get(r).is_some(),
         Selection::Dimension(did) => sketch.dimension_index_by_did(did).is_some(),
+        Selection::Meta(mid) => sketch.meta_index(mid).is_some(),
         Selection::Constraint(id) => match id {
             ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => {
                 sketch.lines.get(r).is_some()

@@ -53,6 +53,9 @@ pub(crate) fn cmd_select(ctx: &mut CommandContext, args: &str) -> CmdResult {
         } else if is_arc_name(name) {
             let r = resolve_arc(&ctx.sketch, name)?;
             ctx.selection.push(Selection::Arc(r));
+        } else if name.starts_with('M') {
+            let i = crate::meta::resolve(&ctx.sketch, name)?;
+            ctx.selection.push(Selection::Meta(ctx.sketch.metas[i].mid));
         } else {
             return Err(format!("Cannot select: {}", name).into());
         }

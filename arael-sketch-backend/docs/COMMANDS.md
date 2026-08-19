@@ -660,8 +660,10 @@ offset L0 L1 A0 2 right           the other side (also: flip)
 offset L0 L1 A0 2 symmetric       both sides at 2
 offset L0 L1 A0 2 3               two sides: 2 left, 3 right
 offset sequence L0 2              walk from L0 both ways to an end or a branch, then offset
-offset selection 2                the current selection, which must be one sequence
+offset selection 2                the current selection, which must be one sequence (or one selected M<n>: edit it)
 offset L0 L1 L2 L3 1 inward       closed sequences: inward / outward instead of left / right
+offset L0 L1 L2 L3 1 outward round   round the convex corners with an arc of the distance
+offset L0 L1 1 symmetric caps round  close the ends: a half circle around each source end (also: caps line)
 offset L0 2 nopin                 leave the free ends and tangent joints unpinned
 m = offset L0 L1 2                name capture: `_` is the meta, `_0`.. the result entities
 ```
@@ -683,10 +685,22 @@ is refused, naming the stray or the branch.
 
 Consecutive results meet at sharp corners (extended or trimmed to their
 intersection) or, where the sources are tangent, at the offset of the
-source joint; a coincident joins them. Tangent joints and the free ends
-of an open sequence are pinned with `on_normal` so the result has no
-slide left (`nopin` skips that). The sketch DOF is unchanged by an
-offset: the result brings exactly as much freedom as its relations take.
+source joint; a coincident joins them. With `round`, a corner the result
+goes around (convex on that side) is an arc of the distance centered on
+the source corner instead: `coincident` at both ends, `tangent` to both
+neighbours, and a `radius` dim; corners the result cuts across stay
+sharp. Tangent joints and the free ends of an open sequence are pinned
+with `on_normal` so the result has no slide left (`nopin` skips that).
+The sketch DOF is unchanged by an offset: the result brings exactly as
+much freedom as its relations take.
+
+**Caps** close the ends of an open two-sided result. `caps line` is a
+line across each end, `coincident` with both results' ends. `caps
+round` (symmetric offsets only) is a half circle around each source
+end, `coincident` with and `tangent` to both results -- which makes its
+radius the distance -- held in place by one `on_normal` pin; the free
+ends get no other pins. A closed sequence or a one-sided offset has no
+caps.
 
 An ellipse's offset is not an ellipse; the result is the concentric
 ellipse with both semi-axes moved by the distance, which is exact at the
@@ -705,7 +719,9 @@ Distances accept the dimension value forms (`2`, `w/2`, `=w/2`).
 offset M0 3                       new distance: the dims are rewritten, the geometry follows
 offset M0 flip                    the other side (the geometry is moved across)
 offset M0 symmetric | two 2 3 | one   add or remove a side (new entities are reported)
-offset M0 nopin | pin
+offset M0 round | sharp           corner style: a side whose corners change is rebuilt
+offset M0 caps line | round | none   the caps (rebuilt; `one` drops them)
+offset M0 nopin | pin             remove or add the pins
 info M0 | list metas              what it was made of and what it made
 delete M0                         dissolve: the geometry stays, as plain constrained geometry
 delete M0 all                     delete the result entities too
@@ -719,6 +735,11 @@ geometry is left as it is. Deleting a pin (`on_normal`) does not drop it.
 Adding constraints to the result, dragging, or changing a parameter a
 distance expression reads keep it. `info L5` shows the meta-constraint an
 entity is the result or source of.
+
+In the GUI the meta-constraint has a marker (two parallel waves) on its
+first result: a click selects it and highlights its sources and results
+(the panel shows its name and description), a double-click opens it in
+the Offset tool, Delete dissolves it.
 
 ## Dimensions
 
@@ -914,6 +935,7 @@ select all                   Select all entities
 select L0 chain              Select all entities connected via coincident endpoints
 select L0 linked             Select all entities sharing any constraint, recursively
 select L0 sequence           Select the end-to-end sequence through L0, up to an end or a branch
+select M0                    Select a meta-constraint (`offset selection ...` then edits it)
 deselect                     Clear selection
 deselect L0                  Remove specific entity from selection
 list selection               Show current selection
@@ -1273,8 +1295,8 @@ distance and records the operation:
 
 ```
 l = add_line 0,0 10,0
-m = offset l 2                 M1: parallel line 2 to the left, held there; _0 is the new line
-offset M1 3                    move it to 3
+m = offset l 2                 M0: parallel line 2 to the left, held there; _0 is the new line
+offset M0 3                    move it to 3
 ```
 
 `offset_line` is the bare copy, unconstrained:

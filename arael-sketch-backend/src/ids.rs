@@ -20,6 +20,8 @@ pub enum Selection {
     Constraint(ConstraintId),
     /// By permanent dimension id (Dimension::did), not Vec index.
     Dimension(u32),
+    /// A meta-constraint (`M<n>`), by its permanent id.
+    Meta(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]

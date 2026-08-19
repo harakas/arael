@@ -155,8 +155,8 @@ pub enum Action {
     /// is rejected by `conflicts::validate_action` and ignored here.
     ApplyOnNormal { placed: DimensionEndpoint, reference: DimensionEndpoint },
     /// Record a meta-constraint (see `arael_sketch_solver::metas` and
-    /// `crate::meta`): pushed with a fresh `M<n>` name when its `mid` is
-    /// 0, otherwise it replaces the record with that mid.
+    /// `crate::meta`): pushed with the next id and its `M<n>` name when
+    /// it comes unnamed, otherwise it replaces the record with that mid.
     RegisterMeta { meta: Meta },
     /// Forget a meta-constraint; its result stays as plain geometry.
     UnregisterMeta { mid: u32 },
@@ -1239,9 +1239,10 @@ impl Action {
             }
             Action::RegisterMeta { meta } => {
                 let mut meta = meta.clone();
-                if meta.mid == 0 {
-                    sketch.next_meta_id += 1;
+                // A new record comes in unnamed and gets the next id.
+                if meta.name.is_empty() {
                     meta.mid = sketch.next_meta_id;
+                    sketch.next_meta_id += 1;
                     meta.name = format!("M{}", meta.mid);
                 }
                 match sketch.meta_index(meta.mid) {

@@ -9,7 +9,7 @@ use crate::actions::Action;
 use crate::chain;
 use crate::corner_ops::ActionRunner;
 
-fn nid_exists(sketch: &Sketch, nid: u32) -> bool {
+pub(crate) fn nid_exists(sketch: &Sketch, nid: u32) -> bool {
     let mut found = false;
     sketch.for_each_constraint_collection_ref(|_, _, coll| {
         if found {

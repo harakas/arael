@@ -6,7 +6,7 @@ use crate::chain;
 use crate::offset::{self, OffsetParams};
 
 const KEYWORDS: &[&str] = &[
-    "left", "right", "flip", "symmetric", "two", "one", "inward", "outward", "nopin", "pin",
+    "left", "right", "flip", "symmetric", "two", "one", "inward", "outward", "nopin", "pin", "round", "sharp", "caps",
 ];
 
 /// Resolve a line / arc name into a sequence entity.
@@ -57,8 +57,19 @@ fn parse_args(
 ) -> Result<usize, String> {
     let mut values = 0usize;
     let mut kind_set = false;
-    for &tok in args {
+    let mut caps_set = false;
+    let mut iter = args.iter();
+    while let Some(&tok) = iter.next() {
         match tok {
+            "caps" => {
+                params.caps = match iter.next().copied() {
+                    Some("line") => CapKind::Line,
+                    Some("round") => CapKind::Round,
+                    Some("none") => CapKind::None,
+                    other => return Err(format!("caps takes line, round or none, got {}", other.unwrap_or("nothing"))),
+                };
+                caps_set = true;
+            }
             "left" => params.side = 1.0,
             "right" => params.side = -1.0,
             "flip" => params.side = -params.side,
@@ -79,6 +90,8 @@ fn parse_args(
             }
             "nopin" => params.pinned = false,
             "pin" => params.pinned = true,
+            "round" => params.round = true,
+            "sharp" => params.round = false,
             _ => {
                 let v = offset::parse_value(&ctx.sketch, tok)?;
                 match values {
@@ -95,6 +108,11 @@ fn parse_args(
     }
     if params.kind != OffsetKind::TwoSides {
         params.distance2 = None;
+    }
+    // Going to one side drops the caps unless they were asked for (then
+    // the plan refuses).
+    if params.kind == OffsetKind::OneSide && !caps_set {
+        params.caps = CapKind::None;
     }
     Ok(values)
 }
@@ -117,16 +135,27 @@ fn outcome_text(ctx: &CommandContext, out: &offset::OffsetOutcome) -> String {
     s
 }
 
-/// `offset <entities|sequence E|selection> d [d2] [left|right|flip|symmetric|two|inward|outward|nopin]`
-/// and `offset M<n> [d [d2]] [flip|left|right|symmetric|two|one|nopin|pin]`.
+/// `offset <entities|sequence E|selection> d [d2] [left|right|flip|symmetric|two|inward|outward|round|caps line|round|nopin]`
+/// and `offset M<n> [d [d2]] [flip|left|right|symmetric|two|one|round|sharp|caps line|round|none|nopin|pin]`.
 pub(crate) fn cmd_offset(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.is_empty() {
-        return Err("Usage: offset L0 L1 A0 2 [left|right|symmetric|2 3|inward|outward|nopin] | offset sequence L0 2 | offset selection 2 | offset M0 3 [flip|symmetric|two 2 3|one]".into());
+        return Err("Usage: offset L0 L1 A0 2 [left|right|symmetric|2 3|inward|outward|round|caps line|round|nopin] | offset sequence L0 2 | offset selection 2 | offset M0 3 [flip|symmetric|two 2 3|one|round|sharp|caps none]".into());
     }
 
-    // Edit an existing offset.
-    if tokens[0].starts_with('M') && let Some(i) = ctx.sketch.find_meta(tokens[0]) {
+    // Edit an existing offset: named, or the selected meta-constraint.
+    let selected_meta = || match ctx.selection.as_slice() {
+        [Selection::Meta(mid)] => ctx.sketch.meta_index(*mid),
+        _ => None,
+    };
+    let edit = if tokens[0].starts_with('M') {
+        ctx.sketch.find_meta(tokens[0]).map(|i| (i, 1))
+    } else if tokens[0] == "selection" {
+        selected_meta().map(|i| (i, 1))
+    } else {
+        None
+    };
+    if let Some((i, skip)) = edit {
         let m = &ctx.sketch.metas[i];
         let mid = m.mid;
         let Some(o) = m.as_offset() else {
@@ -134,7 +163,7 @@ pub(crate) fn cmd_offset(ctx: &mut CommandContext, args: &str) -> CmdResult {
         };
         let mut params = offset::params_of(o);
         let seq = offset::sequence_of(o);
-        parse_args(ctx, &tokens[1..], &mut params, Some(&seq))?;
+        parse_args(ctx, &tokens[skip..], &mut params, Some(&seq))?;
         let out = offset::update(ctx, mid, &params)?;
         let text = outcome_text(ctx, &out);
         return Ok(ok_or_status(ctx, text));
@@ -175,6 +204,8 @@ pub(crate) fn cmd_offset(ctx: &mut CommandContext, args: &str) -> CmdResult {
         distance2: None,
         side: 1.0,
         pinned: true,
+        round: false,
+        caps: CapKind::None,
     };
     let values = parse_args(ctx, rest, &mut params, Some(&seq))?;
     if values == 0 {

@@ -402,6 +402,7 @@ pub(crate) fn cmd_list(ctx: &mut CommandContext, args: &str) -> CmdResult {
             Selection::ArcEnd(r) => format!("{}.end", ctx.sketch.arcs[*r].name),
             Selection::Constraint(_) => "constraint".into(),
             Selection::Dimension(did) => ctx.sketch.dimension_index_by_did(*did).and_then(|i| ctx.sketch.dimensions.get(i)).map(|d| d.name.clone()).unwrap_or("dim?".into()),
+            Selection::Meta(mid) => ctx.sketch.meta_index(*mid).map(|i| ctx.sketch.metas[i].name.clone()).unwrap_or("meta?".into()),
         }).collect();
         return Ok(ok(names.join(", ")));
     }
