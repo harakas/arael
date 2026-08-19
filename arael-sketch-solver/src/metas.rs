@@ -55,8 +55,14 @@ pub struct OffsetDim {
 pub struct OffsetSideResult {
     /// +1 left of the chain direction, -1 right.
     pub sign: f64,
-    /// The result entities, parallel to the source segments.
+    /// The result entities, in chain order: one per source segment
+    /// except the `dropped` ones.
     pub segs: Vec<OffsetEntity>,
+    /// Indices (into the offset's `source`) of the segments whose offset
+    /// vanished on this side (an arc offset inward past its radius);
+    /// their neighbours meet directly.
+    #[serde(default)]
+    pub dropped: Vec<usize>,
     /// Round-corner arcs (arcs of the distance around convex source
     /// corners), in joint order.
     #[serde(default)]
@@ -113,6 +119,14 @@ pub struct Offset {
     pub sides: Vec<OffsetSideResult>,
     #[serde(default)]
     pub caps: OffsetCaps,
+}
+
+impl OffsetSideResult {
+    /// The source index of every result segment, in order: all sources
+    /// but the dropped ones.
+    pub fn sources(&self, source_count: usize) -> Vec<usize> {
+        (0..source_count).filter(|i| !self.dropped.contains(i)).collect()
+    }
 }
 
 impl Offset {
