@@ -265,15 +265,14 @@ impl From<String> for Rejection {
 /// Validate and apply a constraint action on a sketch.
 /// Returns Ok(new_cost) on success, Err(Rejection) on rejection.
 /// Handles snapshot/restore, cost checking, and DOF checking.
-/// Drop selection entries whose referents no longer exist: stale arena
-/// refs and out-of-range indices, left behind by deletes and sketch
+/// Whether a selection entry's referent still exists: stale arena refs
+/// and out-of-range indices are left behind by deletes and sketch
 /// replacement. Constraint validity reuses constraint_id_name's
 /// collection mapping; the flag and helper variants hold raw refs and
 /// are checked against their arenas directly.
-pub(crate) fn prune_selection(ctx: &mut CommandContext) {
+pub fn selection_valid(sketch: &Sketch, s: &Selection) -> bool {
     use crate::ids::ConstraintId;
-    let sketch = &ctx.sketch;
-    ctx.selection.retain(|s| match *s {
+    match *s {
         Selection::Point(r) => sketch.points.get(r).is_some(),
         Selection::Line(r)
         | Selection::LineP1(r)
@@ -291,7 +290,13 @@ pub(crate) fn prune_selection(ctx: &mut CommandContext) {
             ConstraintId::HelperBridge(p) => sketch.points.get(p).is_some(),
             other => crate::ids::constraint_id_name(sketch, other).is_some(),
         },
-    });
+    }
+}
+
+/// Drop selection entries whose referents no longer exist.
+pub(crate) fn prune_selection(ctx: &mut CommandContext) {
+    let sketch = &ctx.sketch;
+    ctx.selection.retain(|s| selection_valid(sketch, s));
 }
 
 pub fn validate_and_apply_constraint(

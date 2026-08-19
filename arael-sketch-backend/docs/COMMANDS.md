@@ -679,9 +679,14 @@ is refused, naming the stray or the branch.
 
 | source | result | relation |
 |---|---|---|
-| line | parallel line at the distance | `parallel` + a `distance` dim |
-| arc / circle | concentric arc, radius +- the distance | `concentric` + a `distance` dim |
-| ellipse / elliptic arc | concentric ellipse, both semi-axes +- the distance | `concentric` + `parallel` (rotation) + a `distance` dim |
+| line | parallel line at the distance | `parallel` |
+| arc / circle | concentric arc, radius +- the distance | `concentric` |
+| ellipse / elliptic arc | concentric ellipse, both semi-axes +- the distance | `concentric` + `parallel` (rotation) |
+
+The distance is a `distance` dim on the first result of each run of
+tangent joints: the distance carries through a tangent joint, and a
+result after a sharp corner has its own dim. So a rounded rectangle's
+offset has one dim, a plain rectangle's four.
 
 Consecutive results meet at sharp corners (extended or trimmed to their
 intersection) or, where the sources are tangent, at the offset of the
@@ -690,9 +695,12 @@ goes around (convex on that side) is an arc of the distance centered on
 the source corner instead: `coincident` at both ends, `tangent` to both
 neighbours, and a `radius` dim; corners the result cuts across stay
 sharp. Tangent joints and the free ends of an open sequence are pinned
-with `on_normal` so the result has no slide left (`nopin` skips that).
-The sketch DOF is unchanged by an offset: the result brings exactly as
-much freedom as its relations take.
+with `on_normal` so the result has no slide left (`nopin` skips that). A
+loop whose joints are all tangent is closed by two pins instead of a
+coincident (the ends meet by geometry; a loop of coincidents would be one
+equation redundant). The sketch DOF is unchanged by an offset, and every
+relation is independent: the result brings exactly as much freedom as
+its relations take.
 
 **Caps** close the ends of an open two-sided result. `caps line` is a
 line across each end, `coincident` with both results' ends. `caps
@@ -708,9 +716,15 @@ axis ends and approximate elsewhere (a few percent of the distance on a
 2:1 ellipse). The output says so. A sequence with an elliptic arc tangent
 to its neighbour is refused: the approximation cannot keep that joint.
 
-Refused, naming the segment: an inward arc offset past its radius, a
-segment its neighbours' corners would turn around or shrink to nothing, a
-chain that doubles back on itself, corners whose offsets do not meet.
+An arc offset inward past its radius has no offset: it vanishes from
+that side's result and its neighbours meet directly (a rounded rectangle
+offset inward by more than the fillet radius is a sharp rectangle). The
+output names it (`vanished: A0 A1`); a later edit that brings it back
+rebuilds that side.
+
+Refused, naming the segment: a segment its neighbours' corners would turn
+around or shrink to nothing, a chain that doubles back on itself, corners
+whose offsets do not meet, an offset where nothing remains.
 Distances accept the dimension value forms (`2`, `w/2`, `=w/2`).
 
 **Editing.** The meta-constraint keeps the parameters:

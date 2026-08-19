@@ -5966,9 +5966,13 @@ fn test_offset_slot() {
     let radii: Vec<f64> = ctx.sketch.arcs.iter().filter(|a| !["A0", "A1"].contains(&a.name.as_str())).map(|a| a.radius.value).collect();
     assert!(radii.iter().all(|r| (r - 0.75).abs() < 1e-6), "{:?}", radii);
     // One pin per tangent joint, on the earlier segment's result: the
-    // line ends before the arcs (LL), the arc ends before the lines (AA).
-    assert_eq!(ctx.sketch.on_normal_ll.len(), 2);
+    // line ends before the arcs (LL), the arc ends before the lines (AA);
+    // the all-tangent loop closes by a second pin on the first line's
+    // start instead of a coincidence, and carries one distance dim.
+    assert_eq!(ctx.sketch.on_normal_ll.len(), 3);
     assert_eq!(ctx.sketch.on_normal_aa.len(), 2);
+    assert_eq!(ctx.sketch.dimensions.len(), 1);
+    assert_eq!(ctx.sketch.metas[0].as_offset().unwrap().sides[0].constraints.len(), 4 + 3, "relations and three coincidences");
     run_ok(&mut ctx, "undo");
     run_ok(&mut ctx, "offset sequence L0 0.25 outward");
     let radii: Vec<f64> = ctx.sketch.arcs.iter().filter(|a| !["A0", "A1"].contains(&a.name.as_str())).map(|a| a.radius.value).collect();
@@ -6477,6 +6481,135 @@ fn test_offset_caps() {
     let o = back.metas[0].as_offset().unwrap();
     assert_eq!(o.caps.kind, CapKind::Round);
     assert_eq!(o.caps.entities.len(), 2);
+}
+
+/// An arc offset inward past its radius vanishes: no result for it, its
+/// neighbours meet at a corner; the record says so; a distance edit that
+/// brings it back (or makes it vanish) rebuilds the side; nothing left is
+/// an error; round caps need the same end segment on both sides.
+#[test]
+fn test_offset_vanishing_arcs() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_rect 0,0 6,4");
+    for pair in ["L0 L1", "L1 L2", "L2 L3", "L3 L0"] {
+        run_ok(&mut ctx, &format!("fillet {} 0.77", pair));
+    }
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset sequence L0 1 inward");
+    assert!(out.contains("(A0 A1 A2 A3 vanished)") && out.contains("vanished: A0 A1 A2 A3"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 8);
+    assert_eq!(ctx.sketch.arcs.refs().count(), 4, "no result arcs");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    // The four result lines form the inner rectangle (1,1)-(5,3).
+    for name in ["L4", "L5", "L6", "L7"] {
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, name).unwrap()];
+        for p in [l.p1.value, l.p2.value] {
+            assert!((near(p.x, 1.0) || near(p.x, 5.0)) && (near(p.y, 1.0) || near(p.y, 3.0)), "{} {:?}", name, p);
+        }
+    }
+    let o = ctx.sketch.metas[0].as_offset().unwrap().clone();
+    assert_eq!(o.sides[0].dropped, vec![1, 3, 5, 7]);
+    assert_eq!(o.sides[0].segs.len(), 4);
+    assert_eq!(o.sides[0].sources(8), vec![0, 2, 4, 6]);
+    let json = serde_json::to_string(&*ctx.sketch).unwrap();
+    let back: Sketch = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.metas[0].as_offset().unwrap().sides[0].dropped, vec![1, 3, 5, 7]);
+
+    // An open corner whose fillet wraps through the angle cut: the fillet
+    // vanishes on the inner side, the lines meet at a sharp corner and
+    // the free ends are pinned as before; the outer side keeps it. A
+    // smaller distance brings it back (the side is rebuilt), the short
+    // way round; larger: gone again.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,3 0,0 4,0");
+    run_ok(&mut ctx, "fillet L0 L1 1");
+    let dof = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "offset L0 A0 L1 2 symmetric");
+    assert!(out.contains("left: L2 L3 (A0 vanished); right: L4 A1 L5") && out.contains("vanished: A0"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    // Four free ends, plus the outer side's two tangent joints.
+    assert_eq!(ctx.sketch.on_normal_ll.len() + ctx.sketch.on_normal_aa.len(), 6);
+    let corner = ctx.sketch.lines[resolve_line(&ctx.sketch, "L2").unwrap()].p2.value;
+    assert!(near(corner.x, 2.0) && near(corner.y, 2.0), "{:?}", corner);
+    let o = ctx.sketch.metas[0].as_offset().unwrap();
+    assert_eq!(o.sides[0].dropped, vec![1]);
+    assert!(o.sides[1].dropped.is_empty());
+    assert_solved(&mut ctx);
+    run_ok(&mut ctx, "offset M0 0.5");
+    assert_eq!(ctx.sketch.arcs.refs().count(), 3);
+    assert!(ctx.sketch.metas[0].as_offset().unwrap().sides.iter().all(|s| s.dropped.is_empty()));
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
+    for a in ctx.sketch.arcs.refs() {
+        let arc = &ctx.sketch.arcs[a];
+        let (sa, ea) = (arc.start_angle.value, arc.end_angle.value);
+        let sweep = if arc.ccw { (ea - sa).rem_euclid(std::f64::consts::TAU) } else { (sa - ea).rem_euclid(std::f64::consts::TAU) };
+        assert!((sweep - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{}: sweep {}", arc.name, sweep);
+    }
+    run_ok(&mut ctx, "offset M0 2");
+    assert_eq!(ctx.sketch.arcs.refs().count(), 2);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    // Round caps with an end arc that vanishes on one side only are refused;
+    // line caps are fine.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 4,0");
+    run_ok(&mut ctx, "add_arc 4,0 5,1 4.7071,0.2929");
+    let e = run_err(&mut ctx, "offset L0 A0 2 symmetric caps round");
+    assert!(e.contains("A0 vanishes on one side"), "{}", e);
+    let out = run_ok(&mut ctx, "offset L0 A0 2 symmetric caps line");
+    assert!(out.contains("line caps"), "{}", out);
+    assert_solved(&mut ctx);
+    // Nothing left.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_arc 4,0 5,1 4.7071,0.2929");
+    let e = run_err(&mut ctx, "offset A0 2 left");
+    assert!(e.contains("nothing remains"), "{}", e);
+    run_ok(&mut ctx, "add_circle 0,0 1");
+    let e = run_err(&mut ctx, "offset A1 2 inward");
+    assert!(e.contains("nothing remains"), "{}", e);
+}
+
+/// One distance dimension per run of tangent joints: the distance
+/// carries through a tangent joint, a segment after a sharp corner has
+/// its own. Every row is independent, so the gate is exact at every
+/// distance (0.5 and 0.9 on this corner used to be refused as redundant)
+/// and after a save / load or undo.
+#[test]
+fn test_offset_tangent_run_dims() {
+    for d in ["0.5", "0.9", "0.3"] {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,3 0,0 4,0");
+        run_ok(&mut ctx, "fillet L0 L1 1");
+        let dof = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, &format!("offset L0 A0 L1 {} symmetric", d));
+        assert_eq!(ctx.sketch.dof().unwrap(), dof, "distance {}", d);
+        assert_eq!(ctx.sketch.dimensions.len(), 1 + 2, "the fillet radius and one per side");
+        assert_solved(&mut ctx);
+        // Loaded back, the offset still edits.
+        let json = serde_json::to_string(&*ctx.sketch).unwrap();
+        let back: Sketch = serde_json::from_str(&json).unwrap();
+        ctx.sketch = back.into();
+        run_ok(&mut ctx, "offset M0 0.7");
+        assert_eq!(ctx.sketch.dof().unwrap(), dof);
+        assert_solved(&mut ctx);
+    }
+    // A sharp corner then a tangent run: two dims.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0 2,2 5,2");
+    run_ok(&mut ctx, "fillet L1 L2 0.5");
+    let dof = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "offset L0 L1 A0 L2 0.3");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    let o = ctx.sketch.metas[0].as_offset().unwrap();
+    assert_eq!(o.sides[0].dims.len(), 2);
+    let named: Vec<String> = o.sides[0].dims.iter().map(|d| ctx.sketch.dimensions[ctx.sketch.dimension_index_by_did(d.did).unwrap()].name.clone()).collect();
+    let listed = run_ok(&mut ctx, "list dims");
+    assert!(listed.contains("distance L0 L3") && listed.contains("distance L1 L4"), "{} {:?}", listed, named);
+    assert_solved(&mut ctx);
+    run_ok(&mut ctx, "offset M0 0.6");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof);
+    assert_solved(&mut ctx);
 }
 
 /// `select M0` selects the meta-constraint; `offset selection` then

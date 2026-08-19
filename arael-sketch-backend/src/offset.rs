@@ -85,7 +85,15 @@ fn seg_of(sketch: &Sketch, src: OffsetSource) -> Seg {
         }
         OffsetEntity::Arc(r) => {
             let a = &sketch.arcs[r];
-            let (sa, ea) = (a.start_angle.value, if a.closed { a.start_angle.value + TAU } else { a.end_angle.value });
+            // The end parameter continues from the start by the signed
+            // sweep (the stored angles may wrap): positive for a ccw arc.
+            let sa = a.start_angle.value;
+            let ea = if a.closed {
+                sa + TAU
+            } else {
+                let norm = |v: f64| v.rem_euclid(TAU);
+                if a.ccw { sa + norm(a.end_angle.value - sa) } else { sa - norm(sa - a.end_angle.value) }
+            };
             let (t0, t1) = if src.reversed { (ea, sa) } else { (sa, ea) };
             SegGeom::Arc {
                 center: a.center.value,
@@ -213,6 +221,10 @@ pub struct JointPlan {
     /// The sources are tangent there: pin the earlier result's end on the
     /// source's normal, then coincide the later result's start with it.
     pub tangent: bool,
+    /// The closing joint of a loop whose joints are all tangent: both
+    /// ends are pinned, nothing is coincided (a loop of coincidences is
+    /// one equation redundant; the ends meet by geometry).
+    pub closure: bool,
     /// Where the results meet (a sharp or tangent joint); for a round
     /// corner the earlier result's end.
     pub point: vect2d,
@@ -227,8 +239,19 @@ pub struct JointPlan {
 pub struct SidePlan {
     pub sign: f64,
     pub distance: OffsetValue,
-    /// Parallel to the sequence.
+    /// The source index of every result, in chain order: every segment
+    /// but the dropped ones.
+    pub sources: Vec<usize>,
+    /// Segments whose offset vanishes on this side (an arc offset inward
+    /// past its radius): no result, the neighbours meet directly.
+    pub dropped: Vec<usize>,
+    /// One per entry of `sources`.
     pub results: Vec<ResultGeom>,
+    /// Per result: whether it carries a distance dimension. The distance
+    /// carries through a tangent joint (its coincidence fixes the next
+    /// result's offset / radius), so only the first result of each run of
+    /// tangent joints has one; a result after a sharp corner has its own.
+    pub dims: Vec<bool>,
     /// `joints[i]` joins result i and i+1; a closed sequence has one more,
     /// joining the last and the first.
     pub joints: Vec<JointPlan>,
@@ -271,19 +294,19 @@ enum Curve {
 
 /// The offset curve (unbounded) of `seg` at signed distance `s * d`,
 /// and the radial change applied to an arc (`None` for a line).
-fn offset_curve(seg: &Seg, s: f64, d: f64) -> Result<(Curve, Option<f64>), String> {
+fn offset_curve(seg: &Seg, s: f64, d: f64) -> (Curve, Option<f64>) {
     match seg.geom {
         SegGeom::Line { a, b } => {
             let n = rot90(unit(b - a));
-            Ok((Curve::Line { p: a + n * (s * d), dir: unit(b - a) }, None))
+            (Curve::Line { p: a + n * (s * d), dir: unit(b - a) }, None)
         }
         SegGeom::Arc { center, ra, rb, rot, ccw_travel, is_ellipse, .. } => {
             // Travelling counter-clockwise, left is toward the center.
             let dr = if ccw_travel { -s * d } else { s * d };
             if is_ellipse {
-                Ok((Curve::Ellipse { center, ra: ra + dr, rb: rb + dr, rot }, Some(dr)))
+                (Curve::Ellipse { center, ra: ra + dr, rb: rb + dr, rot }, Some(dr))
             } else {
-                Ok((Curve::Circle { center, r: ra + dr }, Some(dr)))
+                (Curve::Circle { center, r: ra + dr }, Some(dr))
             }
         }
     }
@@ -446,35 +469,65 @@ pub fn plan(sketch: &Sketch, seq: &Sequence, params: &OffsetParams) -> Result<Of
     let mut sides = Vec::new();
     for (sign, d) in params.sides() {
         let dv = d.value;
-        // The unbounded offset curves, with the radial changes.
+        // The unbounded offset curves of the surviving segments, with the
+        // radial changes. An arc offset inward past its radius has no
+        // offset: it is dropped and its neighbours meet directly.
+        let mut sources: Vec<usize> = Vec::with_capacity(n);
+        let mut dropped: Vec<usize> = Vec::new();
         let mut curves = Vec::with_capacity(n);
-        for seg in &segs {
-            let (c, dr) = offset_curve(seg, sign, dv)?;
+        let mut vanished_radius = 0.0;
+        for (i, seg) in segs.iter().enumerate() {
+            let (c, dr) = offset_curve(seg, sign, dv);
             if let (Some(dr), SegGeom::Arc { ra, rb, is_ellipse, .. }) = (dr, seg.geom) {
                 let rmin = if is_ellipse { ra.min(rb) } else { ra };
                 if rmin + dr <= min_len {
-                    return Err(format!(
-                        "{} (radius {:.4}) cannot be offset inward by {:.4}",
-                        chain::entity_name(sketch, seg.src.entity),
-                        rmin,
-                        dv
-                    ));
+                    dropped.push(i);
+                    vanished_radius = rmin;
+                    continue;
                 }
             }
+            sources.push(i);
             curves.push(c);
         }
-        // Joint points: the offset of the source joint for tangent joints;
-        // for corners the nearest intersection of the two result curves, or
+        let m = sources.len();
+        // Nothing left, or a loop that cannot close on one segment.
+        if m == 0 || (seq.closed && m == 1 && n > 1) {
+            let first = dropped[0];
+            return Err(format!(
+                "{} (radius {:.4}) cannot be offset inward by {:.4}: nothing remains",
+                chain::entity_name(sketch, segs[first].src.entity),
+                vanished_radius,
+                dv
+            ));
+        }
+        let joint_count = match (seq.closed, m) {
+            (true, 1) => 0,
+            (true, m) => m,
+            (false, m) => m - 1,
+        };
+        // Joint points between consecutive results: the offset of the
+        // source joint where the sources are adjacent and tangent; for
+        // corners the nearest intersection of the two result curves, or
         // with `round` on the convex side an arc of the distance around
         // the source joint from the one result's end to the other's start.
         let mut joints = Vec::with_capacity(joint_count);
-        for i in 0..joint_count {
-            let (a, b) = (&segs[i], &segs[(i + 1) % n]);
+        for k in 0..joint_count {
+            let (sa, sb) = (sources[k], sources[(k + 1) % m]);
+            let (a, b) = (&segs[sa], &segs[sb]);
+            let adjacent = sb == (sa + 1) % n;
             let j = (a.end() + b.start()) * 0.5;
-            if tangent_joint[i] {
+            if adjacent && tangent_joint[sa] {
                 let p = j + a.left_normal_at_end() * (sign * dv);
-                joints.push(JointPlan { tangent: true, point: p, next_start: p, round: None });
+                joints.push(JointPlan { tangent: true, closure: false, point: p, next_start: p, round: None });
                 continue;
+            }
+            if !adjacent && dot(a.tangent_at_end(), b.tangent_at_start()) < -1.0 + 1e-9 {
+                return Err(format!(
+                    "{} and {} double back on each other once {} is gone; no offset corner exists there",
+                    chain::entity_name(sketch, a.src.entity),
+                    chain::entity_name(sketch, b.src.entity),
+                    chain::entity_name(sketch, segs[(sa + 1) % n].src.entity)
+                ));
             }
             // Convex on this side: the chain turns away from it.
             let turn = cross(a.tangent_at_end(), b.tangent_at_start());
@@ -484,18 +537,19 @@ pub fn plan(sketch: &Sketch, seq: &Sequence, params: &OffsetParams) -> Result<Of
                 let mid = j + unit((p1 - j) + (p2 - j)) * dv;
                 joints.push(JointPlan {
                     tangent: false,
+                    closure: false,
                     point: p1,
                     next_start: p2,
                     round: Some(RoundCorner { start: p1, end: p2, mid }),
                 });
                 continue;
             }
-            let cands = intersections(&curves[i], &curves[(i + 1) % n]);
+            let cands = intersections(&curves[k], &curves[(k + 1) % m]);
             let best = cands
                 .into_iter()
                 .min_by(|p, q| dist(*p, j).partial_cmp(&dist(*q, j)).unwrap());
             match best {
-                Some(p) => joints.push(JointPlan { tangent: false, point: p, next_start: p, round: None }),
+                Some(p) => joints.push(JointPlan { tangent: false, closure: false, point: p, next_start: p, round: None }),
                 None => {
                     return Err(format!(
                         "the offsets of {} and {} do not meet at distance {:.4}",
@@ -506,28 +560,29 @@ pub fn plan(sketch: &Sketch, seq: &Sequence, params: &OffsetParams) -> Result<Of
                 }
             }
         }
-        // Result geometry per segment: ends from the joints, free ends at
-        // the source ends' offsets.
-        let mut results = Vec::with_capacity(n);
-        for (i, seg) in segs.iter().enumerate() {
+        // Result geometry per surviving segment: ends from the joints, free
+        // ends at the source ends' offsets.
+        let mut results = Vec::with_capacity(m);
+        for (k, &si) in sources.iter().enumerate() {
+            let seg = &segs[si];
             // A closed single entity has no joints and no ends to place.
-            let lone_closed = seq.closed && n == 1;
+            let lone_closed = seq.closed && m == 1;
             let start_pt = if lone_closed {
                 seg.start()
-            } else if i == 0 && !seq.closed {
+            } else if k == 0 && !seq.closed {
                 seg.start() + seg.left_normal_at_start() * (sign * dv)
             } else {
-                joints[(i + n - 1) % n].next_start
+                joints[(k + m - 1) % m].next_start
             };
             let end_pt = if lone_closed {
                 seg.end()
-            } else if i + 1 == n && !seq.closed {
+            } else if k + 1 == m && !seq.closed {
                 seg.end() + seg.left_normal_at_end() * (sign * dv)
             } else {
-                joints[i].point
+                joints[k].point
             };
             let name = || chain::entity_name(sketch, seg.src.entity);
-            let geom = match (seg.geom, curves[i]) {
+            let geom = match (seg.geom, curves[k]) {
                 (SegGeom::Line { a, b }, _) => {
                     // Gone, or turned around by its neighbours' corners
                     // (an inner offset past the segment's reach).
@@ -591,26 +646,61 @@ pub fn plan(sketch: &Sketch, seq: &Sequence, params: &OffsetParams) -> Result<Of
             };
             results.push(geom);
         }
-        sides.push(SidePlan { sign, distance: d, results, joints });
+        // Dimensions: the first result of each run of tangent joints (the
+        // first of an open sequence, every result after a sharp corner).
+        // A loop whose joints are all tangent has one run and no start:
+        // the first result takes the dimension and the closing joint is
+        // made by pins, not a coincidence (a loop of coincidences is one
+        // equation redundant).
+        let mut dims: Vec<bool> = (0..m)
+            .map(|k| {
+                if seq.closed {
+                    joint_count > 0 && !joints[(k + m - 1) % m].tangent
+                } else {
+                    k == 0 || !joints[k - 1].tangent
+                }
+            })
+            .collect();
+        if !dims.iter().any(|&d| d) {
+            dims[0] = true;
+            if joint_count > 0 {
+                joints[m - 1].closure = true;
+            }
+        }
+        sides.push(SidePlan { sign, distance: d, sources, dropped, results, dims, joints });
     }
-    // Caps: from the `distance` side's free end to the other side's,
-    // around the source end.
+    // Caps: from the `distance` side's free end to the other side's. A
+    // round cap is a half circle around the source end, which needs the
+    // same end segment on both sides.
     let mut caps = Vec::new();
     if params.caps != CapKind::None && sides.len() == 2 {
         let (sa, da) = (sides[0].sign, sides[0].distance.value);
         let (sb, db) = (sides[1].sign, sides[1].distance.value);
         for at_end in [false, true] {
-            let seg = if at_end { &segs[n - 1] } else { &segs[0] };
-            let (p, nrm, t) = if at_end {
-                (seg.end(), seg.left_normal_at_end(), seg.tangent_at_end())
-            } else {
-                (seg.start(), seg.left_normal_at_start(), seg.tangent_at_start())
+            let end_source = |side: &SidePlan| if at_end { *side.sources.last().unwrap() } else { side.sources[0] };
+            let free_end = |side: &SidePlan, sign: f64, dv: f64| {
+                let seg = &segs[end_source(side)];
+                if at_end {
+                    seg.end() + seg.left_normal_at_end() * (sign * dv)
+                } else {
+                    seg.start() + seg.left_normal_at_start() * (sign * dv)
+                }
             };
-            let a = p + nrm * (sa * da);
-            let b = p + nrm * (sb * db);
+            let a = free_end(&sides[0], sa, da);
+            let b = free_end(&sides[1], sb, db);
             let geom = match params.caps {
                 CapKind::Line => CapGeom::Line { a, b },
                 CapKind::Round => {
+                    let (ea, eb) = (end_source(&sides[0]), end_source(&sides[1]));
+                    if ea != eb {
+                        let gone = if at_end { ea.max(eb) } else { ea.min(eb) };
+                        return Err(format!(
+                            "round caps need the same end segment on both sides; {} vanishes on one side",
+                            chain::entity_name(sketch, segs[gone].src.entity)
+                        ));
+                    }
+                    let seg = &segs[ea];
+                    let (p, t) = if at_end { (seg.end(), seg.tangent_at_end()) } else { (seg.start(), seg.tangent_at_start()) };
                     let away = if at_end { t } else { vect2d::new(-t.x, -t.y) };
                     CapGeom::Arc { start: a, end: b, mid: p + away * da }
                 }
@@ -635,6 +725,9 @@ pub struct OffsetOutcome {
     pub entities: Vec<Vec<String>>,
     pub constraints: Vec<String>,
     pub dims: Vec<String>,
+    /// Source segments whose offset vanished on some side (names, one
+    /// entry per side it vanished on).
+    pub dropped: Vec<String>,
     pub approximate: bool,
 }
 
@@ -734,24 +827,41 @@ fn create_result(runner: &mut dyn ActionRunner, g: &ResultGeom, src: OffsetEntit
     Ok(entity)
 }
 
+/// A side's result entities with their sources: `segs[k]` is the offset
+/// of `seq.segs[sources[k]]`.
+#[derive(Clone, Copy)]
+struct SideSegs<'a> {
+    segs: &'a [OffsetEntity],
+    sources: &'a [usize],
+}
+
+impl SideSegs<'_> {
+    fn len(&self) -> usize {
+        self.segs.len()
+    }
+    fn source<'s>(&self, seq: &'s Sequence, k: usize) -> &'s OffsetSource {
+        &seq.segs[self.sources[k]]
+    }
+}
+
 /// Pin the free ends of an open sequence's result on the source ends'
 /// normals. Returns the nids.
-fn pin_free_ends(runner: &mut dyn ActionRunner, seq: &Sequence, segs: &[OffsetEntity]) -> Result<Vec<u32>, String> {
-    let n = seq.segs.len();
+fn pin_free_ends(runner: &mut dyn ActionRunner, seq: &Sequence, side: SideSegs) -> Result<Vec<u32>, String> {
+    let m = side.len();
     let mut pins = Vec::new();
-    if seq.closed || n == 0 {
+    if seq.closed || m == 0 {
         return Ok(pins);
     }
-    let first = &seq.segs[0];
+    let first = side.source(seq, 0);
     if matches!(first.entity, OffsetEntity::Arc(a) if runner.sketch().arcs[a].closed) {
         return Ok(pins);
     }
-    let placed = endpoint_of(segs[0], !exit_is_end(first));
+    let placed = endpoint_of(side.segs[0], !exit_is_end(first));
     let reference = endpoint_of(first.entity, !exit_is_end(first));
     run_checked(runner, Action::ApplyOnNormal { placed, reference }, "on_normal")?;
     pins.push(last_nid(runner));
-    let last = &seq.segs[n - 1];
-    let placed = endpoint_of(segs[n - 1], exit_is_end(last));
+    let last = side.source(seq, m - 1);
+    let placed = endpoint_of(side.segs[m - 1], exit_is_end(last));
     let reference = endpoint_of(last.entity, exit_is_end(last));
     run_checked(runner, Action::ApplyOnNormal { placed, reference }, "on_normal")?;
     pins.push(last_nid(runner));
@@ -764,34 +874,42 @@ fn pin_free_ends(runner: &mut dyn ActionRunner, seq: &Sequence, segs: &[OffsetEn
 fn pin_side(
     runner: &mut dyn ActionRunner,
     seq: &Sequence,
-    segs: &[OffsetEntity],
+    side: SideSegs,
     joints: &[JointPlan],
     free_ends: bool,
 ) -> Result<Vec<u32>, String> {
     let mut pins = Vec::new();
-    for (i, joint) in joints.iter().enumerate() {
+    let m = side.len();
+    for (k, joint) in joints.iter().enumerate() {
         if !joint.tangent {
             continue;
         }
-        let a_src = &seq.segs[i];
-        let placed = endpoint_of(segs[i], exit_is_end(a_src));
+        let a_src = side.source(seq, k);
+        let placed = endpoint_of(side.segs[k], exit_is_end(a_src));
         let reference = endpoint_of(a_src.entity, exit_is_end(a_src));
         run_checked(runner, Action::ApplyOnNormal { placed, reference }, "on_normal")?;
         pins.push(last_nid(runner));
+        if joint.closure {
+            let b_src = side.source(seq, (k + 1) % m);
+            let placed = endpoint_of(side.segs[(k + 1) % m], !exit_is_end(b_src));
+            let reference = endpoint_of(b_src.entity, !exit_is_end(b_src));
+            run_checked(runner, Action::ApplyOnNormal { placed, reference }, "on_normal")?;
+            pins.push(last_nid(runner));
+        }
     }
     if free_ends {
-        pins.extend(pin_free_ends(runner, seq, segs)?);
+        pins.extend(pin_free_ends(runner, seq, side)?);
     }
     Ok(pins)
 }
 
 /// The free end of a side's result at the sequence's start / end.
-fn free_end_of(seq: &Sequence, segs: &[OffsetEntity], at_end: bool) -> DimensionEndpoint {
-    let n = seq.segs.len();
+fn free_end_of(seq: &Sequence, side: SideSegs, at_end: bool) -> DimensionEndpoint {
+    let m = side.len();
     if at_end {
-        endpoint_of(segs[n - 1], exit_is_end(&seq.segs[n - 1]))
+        endpoint_of(side.segs[m - 1], exit_is_end(side.source(seq, m - 1)))
     } else {
-        endpoint_of(segs[0], !exit_is_end(&seq.segs[0]))
+        endpoint_of(side.segs[0], !exit_is_end(side.source(seq, 0)))
     }
 }
 
@@ -811,12 +929,18 @@ fn apply_caps(
         return Ok(caps);
     }
     let seq = &plan.seq;
+    let n = seq.segs.len();
     let side_a = sides.iter().find(|s| s.sign == plan.sides[0].sign).ok_or("caps: the first side is missing")?;
     let side_b = sides.iter().find(|s| s.sign == plan.sides[1].sign).ok_or("caps: the second side is missing")?;
+    let (src_a, src_b) = (side_a.sources(n), side_b.sources(n));
+    let (segs_a, segs_b) = (
+        SideSegs { segs: &side_a.segs, sources: &src_a },
+        SideSegs { segs: &side_b.segs, sources: &src_b },
+    );
     let mut names = Vec::new();
     for cap in &plan.caps {
-        let end_a = free_end_of(seq, &side_a.segs, cap.at_end);
-        let end_b = free_end_of(seq, &side_b.segs, cap.at_end);
+        let end_a = free_end_of(seq, segs_a, cap.at_end);
+        let end_b = free_end_of(seq, segs_b, cap.at_end);
         let res_a = if cap.at_end { *side_a.segs.last().unwrap() } else { side_a.segs[0] };
         let res_b = if cap.at_end { *side_b.segs.last().unwrap() } else { side_b.segs[0] };
         let (entity, own_start, own_end) = match cap.geom {
@@ -854,8 +978,8 @@ fn apply_caps(
             caps.constraints.push(last_nid(runner));
             run_checked(runner, tangent_action(res_b, arc), "tangent")?;
             caps.constraints.push(last_nid(runner));
-            let n = seq.segs.len();
-            let src = if cap.at_end { &seq.segs[n - 1] } else { &seq.segs[0] };
+            // The plan made sure both sides end on the same segment.
+            let src = segs_a.source(seq, if cap.at_end { segs_a.len() - 1 } else { 0 });
             let reference = endpoint_of(src.entity, cap.at_end == exit_is_end(src));
             run_checked(runner, Action::ApplyOnNormal { placed: end_a, reference }, "on_normal")?;
             caps.constraints.push(last_nid(runner));
@@ -874,35 +998,26 @@ fn apply_side(
     out: &mut OffsetOutcome,
 ) -> Result<OffsetSideResult, String> {
     let seq = &plan.seq;
-    let n = seq.segs.len();
-    let mut segs = Vec::with_capacity(n);
+    let m = side.sources.len();
+    let mut segs = Vec::with_capacity(m);
     let mut constraints = Vec::new();
     let mut pins = Vec::new();
     let mut dims = Vec::new();
-    let mut names = Vec::with_capacity(n);
+    let mut names = Vec::with_capacity(m);
 
     // Entities first, then the per-segment relations.
-    for (i, g) in side.results.iter().enumerate() {
-        let e = create_result(runner, g, seq.segs[i].entity)?;
+    for (k, g) in side.results.iter().enumerate() {
+        let e = create_result(runner, g, seq.segs[side.sources[k]].entity)?;
         names.push(name_of(runner, e));
         segs.push(e);
     }
-    for (i, src) in seq.segs.iter().enumerate() {
-        let res = segs[i];
-        match (src.entity, res) {
+    for (k, &si) in side.sources.iter().enumerate() {
+        let (src, res) = (&seq.segs[si], segs[k]);
+        let kind = match (src.entity, res) {
             (OffsetEntity::Line(s), OffsetEntity::Line(r)) => {
                 run_checked(runner, Action::ApplyParallel { a: s, b: r }, "parallel")?;
                 constraints.push(last_nid(runner));
-                runner.run(Action::AddDimension {
-                    kind: DimensionKind::LineLineDistance(s, r),
-                    value: side.distance.value,
-                    expr: side.distance.expr.clone(),
-                    derived: false,
-                    range: None,
-                });
-                if let Some(e) = runner.take_error() { return Err(format!("distance: {}", e)); }
-                let did = last_did(runner)?;
-                dims.push(OffsetDim { did, expect: side.distance.clone() });
+                DimensionKind::LineLineDistance(s, r)
             }
             (OffsetEntity::Arc(s), OffsetEntity::Arc(r)) => {
                 run_checked(runner, Action::ApplyConcentric { a: s, b: r }, "concentric")?;
@@ -911,18 +1026,21 @@ fn apply_side(
                     run_checked(runner, Action::ApplyArcArcParallel { a: s, b: r }, "parallel")?;
                     constraints.push(last_nid(runner));
                 }
-                runner.run(Action::AddDimension {
-                    kind: DimensionKind::ConcentricDistance(s, r),
-                    value: side.distance.value,
-                    expr: side.distance.expr.clone(),
-                    derived: false,
-                    range: None,
-                });
-                if let Some(e) = runner.take_error() { return Err(format!("concentric distance: {}", e)); }
-                let did = last_did(runner)?;
-                dims.push(OffsetDim { did, expect: side.distance.clone() });
+                DimensionKind::ConcentricDistance(s, r)
             }
             _ => unreachable!("a result has its source's kind"),
+        };
+        if side.dims[k] {
+            runner.run(Action::AddDimension {
+                kind,
+                value: side.distance.value,
+                expr: side.distance.expr.clone(),
+                derived: false,
+                range: None,
+            });
+            if let Some(e) = runner.take_error() { return Err(format!("distance: {}", e)); }
+            let did = last_did(runner)?;
+            dims.push(OffsetDim { did, expect: side.distance.clone() });
         }
     }
     // Joints, in chain order: a pin on the earlier result's exit end where
@@ -931,9 +1049,10 @@ fn apply_side(
     // both ends, tangent to both, its radius a dimension; the geometry
     // puts its center on the source joint.
     let mut corners = Vec::new();
-    for (i, joint) in side.joints.iter().enumerate() {
-        let (a_src, b_src) = (&seq.segs[i], &seq.segs[(i + 1) % n]);
-        let (a_res, b_res) = (segs[i], segs[(i + 1) % n]);
+    let side_segs = SideSegs { segs: &segs, sources: &side.sources };
+    for (k, joint) in side.joints.iter().enumerate() {
+        let (a_src, b_src) = (side_segs.source(seq, k), side_segs.source(seq, (k + 1) % m));
+        let (a_res, b_res) = (segs[k], segs[(k + 1) % m]);
         let a_end = endpoint_of(a_res, exit_is_end(a_src));
         let b_start = endpoint_of(b_res, !exit_is_end(b_src));
         let a_ref = endpoint_of(a_src.entity, exit_is_end(a_src));
@@ -973,6 +1092,16 @@ fn apply_side(
             run_checked(runner, Action::ApplyOnNormal { placed: a_end, reference: a_ref }, "on_normal")?;
             pins.push(last_nid(runner));
         }
+        if joint.closure {
+            // Closing an all-tangent loop: the later result's start is
+            // pinned too; the ends meet by geometry.
+            if plan.params.pinned {
+                let b_ref = endpoint_of(b_src.entity, !exit_is_end(b_src));
+                run_checked(runner, Action::ApplyOnNormal { placed: b_start, reference: b_ref }, "on_normal")?;
+                pins.push(last_nid(runner));
+            }
+            continue;
+        }
         let action = Action::coincident(a_end, b_start).expect("endpoint pair");
         run_checked(runner, action, "coincident")?;
         constraints.push(last_nid(runner));
@@ -980,7 +1109,7 @@ fn apply_side(
     // Round caps hold the free ends themselves (tangent to a half circle
     // around the source end): no pins there.
     if plan.params.pinned && plan.params.caps != CapKind::Round {
-        pins.extend(pin_free_ends(runner, seq, &segs)?);
+        pins.extend(pin_free_ends(runner, seq, side_segs)?);
     }
     out.entities.push(names);
     out.constraints.extend(constraints.iter().chain(pins.iter()).map(|n| format!("C{}", n)));
@@ -990,13 +1119,34 @@ fn apply_side(
             out.dims.push(sketch.dimensions[i].name.clone());
         }
     }
-    Ok(OffsetSideResult { sign: side.sign, segs, corners, constraints, pins, dims })
+    Ok(OffsetSideResult {
+        sign: side.sign,
+        segs,
+        dropped: side.dropped.clone(),
+        corners,
+        constraints,
+        pins,
+        dims,
+    })
 }
 
-/// Create the planned offset and register its meta-constraint. Everything
-/// runs inside the runner's current undo group.
+/// Create the planned offset and register its meta-constraint, as one
+/// undo group; a failure half-way rolls it back, leaving nothing behind.
 pub fn apply(runner: &mut dyn ActionRunner, plan: &OffsetPlan) -> Result<OffsetOutcome, String> {
-    let mut out = OffsetOutcome { approximate: plan.approximate, ..Default::default() };
+    runner.begin_group();
+    let r = apply_inner(runner, plan);
+    if r.is_err() {
+        runner.rollback_group();
+    }
+    r
+}
+
+fn apply_inner(runner: &mut dyn ActionRunner, plan: &OffsetPlan) -> Result<OffsetOutcome, String> {
+    let mut out = OffsetOutcome {
+        approximate: plan.approximate,
+        dropped: dropped_names(runner.sketch(), plan),
+        ..Default::default()
+    };
     let mut sides = Vec::with_capacity(plan.sides.len());
     for side in &plan.sides {
         sides.push(apply_side(runner, plan, side, &mut out)?);
@@ -1093,11 +1243,11 @@ fn reseed(sketch: &mut Sketch, e: OffsetEntity, g: &ResultGeom) {
 /// result values are re-seeded and the concentric-distance signs follow
 /// the new radii, so the solver settles on the new side.
 fn reseed_side(sketch: &mut Sketch, o: &Offset, side: &OffsetSideResult, plan_side: &SidePlan) {
-    for (i, &e) in side.segs.iter().enumerate() {
-        reseed(sketch, e, &plan_side.results[i]);
+    for (k, &e) in side.segs.iter().enumerate() {
+        reseed(sketch, e, &plan_side.results[k]);
     }
-    for (i, src) in o.source.iter().enumerate() {
-        if let (OffsetEntity::Arc(s), OffsetEntity::Arc(r)) = (src.entity, side.segs[i]) {
+    for (k, &si) in side.sources(o.source.len()).iter().enumerate() {
+        if let (OffsetEntity::Arc(s), OffsetEntity::Arc(r)) = (o.source[si].entity, side.segs[k]) {
             let gap = sketch.arcs[r].radius.value - sketch.arcs[s].radius.value;
             for c in sketch.distance_concentric.iter_mut() {
                 if c.a == s && c.b == r {
@@ -1111,14 +1261,37 @@ fn reseed_side(sketch: &mut Sketch, o: &Offset, side: &OffsetSideResult, plan_si
 /// Change an offset's parameters. Distances are rewritten into the owned
 /// dimensions; a side change re-seeds the geometry on the new side; a
 /// kind change creates or removes a side chain. Returns the outcome for
-/// any side it created.
+/// any side it created. Runs as one undo group; a failure half-way rolls
+/// it back, so the offset is either edited or untouched.
 pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) -> Result<OffsetOutcome, String> {
     let (name, o) = offset_record(runner.sketch(), mid)?;
     let seq = sequence_of(&o);
     let new_plan = plan(runner.sketch(), &seq, params)?;
-    let mut out = OffsetOutcome { name, mid, approximate: new_plan.approximate, ..Default::default() };
+    let mut out = OffsetOutcome {
+        name,
+        mid,
+        approximate: new_plan.approximate,
+        dropped: dropped_names(runner.sketch(), &new_plan),
+        ..Default::default()
+    };
     runner.begin_group();
+    let r = update_inner(runner, mid, params, &o, &seq, &new_plan, &mut out);
+    if let Err(e) = r {
+        runner.rollback_group();
+        return Err(e);
+    }
+    Ok(out)
+}
 
+fn update_inner(
+    runner: &mut dyn ActionRunner,
+    mid: u32,
+    params: &OffsetParams,
+    o: &Offset,
+    seq: &Sequence,
+    new_plan: &OffsetPlan,
+    out: &mut OffsetOutcome,
+) -> Result<(), String> {
     let register = |runner: &mut dyn ActionRunner, o: Offset| -> Result<(), String> {
         let name = runner.sketch().metas[runner.sketch().meta_index(mid).expect("registered")].name.clone();
         runner.run(Action::RegisterMeta { meta: Meta { mid, name, kind: MetaKind::Offset(o) } });
@@ -1128,23 +1301,21 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) ->
     // Pair the existing sides with the wanted ones: by sign where a sign
     // survives, else an existing side takes over a wanted sign (a flip
     // moves the one side across), and whatever is left over is deleted
-    // or created. A side survives only when its round corners are the
-    // ones the new plan wants there (which joints get an arc depends on
-    // the side and on `round`); otherwise it is rebuilt.
+    // or created. A side survives only with the structure the new plan
+    // wants there: the same dropped segments and round corners (both
+    // depend on the side and the distance); otherwise it is rebuilt.
     let wanted: Vec<(f64, OffsetValue)> = params.sides();
-    let planned_corners = |sign: f64| -> usize {
-        new_plan
-            .sides
-            .iter()
-            .find(|p| p.sign == sign)
-            .map_or(0, |p| p.joints.iter().filter(|j| j.round.is_some()).count())
+    let same_structure = |s: &OffsetSideResult, sign: f64| -> bool {
+        new_plan.sides.iter().find(|p| p.sign == sign).is_some_and(|p| {
+            p.dropped == s.dropped && p.joints.iter().filter(|j| j.round.is_some()).count() == s.corners.len()
+        })
     };
     let mut remaining = wanted.clone();
     let mut kept: Vec<OffsetSideResult> = Vec::new();
     let mut unmatched: Vec<OffsetSideResult> = Vec::new();
     for s in &o.sides {
         match remaining.iter().position(|(sign, _)| *sign == s.sign) {
-            Some(pos) if s.corners.len() == planned_corners(s.sign) => {
+            Some(pos) if same_structure(s, s.sign) => {
                 remaining.remove(pos);
                 kept.push(s.clone());
             }
@@ -1153,7 +1324,9 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) ->
     }
     let mut doomed: Vec<OffsetEntity> = Vec::new();
     for mut s in unmatched {
-        let movable = !remaining.is_empty() && s.corners.is_empty() && planned_corners(remaining[0].0) == 0;
+        // Across the chain the same dropped set is the same structure
+        // only without round corners (those sit at different joints).
+        let movable = !remaining.is_empty() && s.corners.is_empty() && same_structure(&s, remaining[0].0);
         if movable {
             s.sign = remaining.remove(0).0;
             kept.push(s);
@@ -1230,7 +1403,8 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) ->
         if params.pinned {
             for s in rec.sides.iter_mut() {
                 let plan_side = new_plan.sides.iter().find(|p| p.sign == s.sign).expect("planned");
-                s.pins = pin_side(runner, &seq, &s.segs, &plan_side.joints, !round_caps(params.caps))?;
+                let side_segs = SideSegs { segs: &s.segs, sources: &plan_side.sources };
+                s.pins = pin_side(runner, &seq, side_segs, &plan_side.joints, !round_caps(params.caps))?;
                 out.constraints.extend(s.pins.iter().map(|n| format!("C{}", n)));
             }
             register(runner, rec)?;
@@ -1241,7 +1415,7 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) ->
     for (sign, _) in &wanted {
         if new_record.sides.iter().any(|s| s.sign == *sign) { continue; }
         let plan_side = new_plan.sides.iter().find(|s| s.sign == *sign).expect("planned");
-        created_sides.push(apply_side(runner, &new_plan, plan_side, &mut out)?);
+        created_sides.push(apply_side(runner, new_plan, plan_side, out)?);
     }
     if !created_sides.is_empty() {
         let (_, mut rec) = offset_record(runner.sketch(), mid)?;
@@ -1251,10 +1425,10 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) ->
     // New caps, across the final sides.
     if rebuild_caps && !new_plan.caps.is_empty() {
         let (_, mut rec) = offset_record(runner.sketch(), mid)?;
-        rec.caps = apply_caps(runner, &new_plan, &rec.sides, &mut out)?;
+        rec.caps = apply_caps(runner, new_plan, &rec.sides, out)?;
         register(runner, rec)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Which side of the sequence a point is on: +1 left of the chain
@@ -1314,6 +1488,15 @@ fn sample_three_point_arc(start: vect2d, end: vect2d, mid: vect2d, n: usize) -> 
     (0..=n).map(|i| arc_point(c, r, r, 0.0, sa + sweep * i as f64 / n as f64)).collect()
 }
 
+/// Names of the source segments whose offset vanishes on some side of
+/// the plan, each once, in chain order.
+pub fn dropped_names(sketch: &Sketch, plan: &OffsetPlan) -> Vec<String> {
+    let mut gone: Vec<usize> = plan.sides.iter().flat_map(|s| s.dropped.iter().copied()).collect();
+    gone.sort_unstable();
+    gone.dedup();
+    gone.into_iter().map(|i| chain::entity_name(sketch, plan.seq.segs[i].entity)).collect()
+}
+
 /// Every polyline of a plan's result: the segments, the round corners
 /// and the caps. For the preview.
 pub fn preview_polylines(plan: &OffsetPlan, n: usize) -> Vec<Vec<vect2d>> {
@@ -1363,7 +1546,12 @@ pub fn describe(sketch: &Sketch, o: &Offset) -> String {
         .iter()
         .map(|s| {
             let es: Vec<OffsetEntity> = s.segs.iter().chain(s.corners.iter()).copied().collect();
-            format!("{}: {}", side_name(s.sign), names_of(&es))
+            let gone: Vec<OffsetEntity> = s.dropped.iter().filter_map(|&i| o.source.get(i)).map(|src| src.entity).collect();
+            if gone.is_empty() {
+                format!("{}: {}", side_name(s.sign), names_of(&es))
+            } else {
+                format!("{}: {} ({} vanished)", side_name(s.sign), names_of(&es), names_of(&gone))
+            }
         })
         .collect();
     if o.caps.kind != CapKind::None {
@@ -1419,3 +1607,101 @@ pub fn parse_value(sketch: &Sketch, token: &str) -> Result<OffsetValue, String> 
 /// Reference helpers for callers holding a `Ref`.
 pub fn line_entity(r: Ref<Line>) -> OffsetEntity { OffsetEntity::Line(r) }
 pub fn arc_entity(r: Ref<Arc>) -> OffsetEntity { OffsetEntity::Arc(r) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::Created;
+    use crate::commands::CommandContext;
+
+    fn ctx(script: &str) -> CommandContext {
+        let mut ctx = CommandContext::new();
+        for r in crate::commands::execute(&mut ctx, script) {
+            assert!(!r.is_error, "{}", r.output);
+        }
+        ctx
+    }
+
+    /// A runner that refuses the n-th constraint application, to fail an
+    /// operation half-way.
+    struct FailAt<'a> {
+        inner: &'a mut CommandContext,
+        fail_at: usize,
+        seen: usize,
+        failed: bool,
+    }
+
+    impl ActionRunner for FailAt<'_> {
+        fn sketch(&self) -> &Sketch { self.inner.sketch() }
+        fn sketch_mut(&mut self) -> &mut Sketch { self.inner.sketch_mut() }
+        fn run(&mut self, action: Action) -> Created {
+            if action.is_constraint_action() {
+                self.seen += 1;
+                if self.seen == self.fail_at {
+                    self.failed = true;
+                    return Created::Nothing;
+                }
+            }
+            self.inner.run(action)
+        }
+        fn run_unchecked(&mut self, action: Action) -> Created { self.inner.run_unchecked(action) }
+        fn take_error(&mut self) -> Option<String> {
+            if std::mem::take(&mut self.failed) { Some("refused for the test".into()) } else { self.inner.take_error() }
+        }
+        fn begin_group(&mut self) { self.inner.begin_group() }
+        fn rollback_group(&mut self) { self.inner.rollback_group() }
+    }
+
+    fn counts(s: &Sketch) -> (usize, usize, usize, usize, usize) {
+        (s.lines.refs().count(), s.arcs.refs().count(), s.dimensions.len(), s.metas.len(), s.parallel.len())
+    }
+
+    fn params(d: f64) -> OffsetParams {
+        OffsetParams {
+            kind: OffsetKind::OneSide,
+            distance: OffsetValue { value: d, expr: None },
+            distance2: None,
+            side: 1.0,
+            pinned: true,
+            round: false,
+            caps: CapKind::None,
+        }
+    }
+
+    /// A failure while creating leaves nothing: no entities, relations,
+    /// dims or record, and no history entry to undo.
+    #[test]
+    fn a_failed_apply_leaves_nothing_behind() {
+        let mut c = ctx("add_line 0,0 4,0 4,3");
+        let before = counts(&c.sketch);
+        let history_len = c.history.actions.len();
+        let seq = chain::walk(&c.sketch, OffsetEntity::Line(crate::commands::resolve_line(&c.sketch, "L0").unwrap()));
+        let plan = plan(&c.sketch, &seq, &params(1.0)).unwrap();
+        let mut runner = FailAt { inner: &mut c, fail_at: 3, seen: 0, failed: false };
+        let e = apply(&mut runner, &plan).unwrap_err();
+        assert!(e.contains("refused for the test"), "{}", e);
+        assert_eq!(counts(&c.sketch), before);
+        assert_eq!(c.history.actions.len(), history_len);
+        assert_eq!(c.history.cursor, history_len);
+    }
+
+    /// A failure while editing leaves the offset as it was.
+    #[test]
+    fn a_failed_update_keeps_the_offset() {
+        let mut c = ctx("add_line 0,3 0,0 4,0; fillet L0 L1 1; offset L0 A0 L1 2");
+        let before = counts(&c.sketch);
+        let record = c.sketch.metas[0].clone();
+        let history_len = c.history.actions.len();
+        let mut runner = FailAt { inner: &mut c, fail_at: 4, seen: 0, failed: false };
+        // 0.5 brings the fillet back: the side is rebuilt, and that fails.
+        let e = update(&mut runner, 0, &params(0.5)).unwrap_err();
+        assert!(e.contains("refused for the test"), "{}", e);
+        assert_eq!(counts(&c.sketch), before);
+        assert_eq!(c.sketch.metas[0], record);
+        assert_eq!(c.history.actions.len(), history_len);
+        // And it still edits afterwards.
+        let out = update(&mut c, 0, &params(0.5)).unwrap();
+        assert!(out.dropped.is_empty());
+        assert_eq!(c.sketch.arcs.refs().count(), 2);
+    }
+}

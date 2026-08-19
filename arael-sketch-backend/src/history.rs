@@ -109,6 +109,26 @@ impl History {
     pub fn can_undo(&self) -> bool { self.cursor > 0 }
     pub fn can_redo(&self) -> bool { self.cursor < self.actions.len() }
 
+    /// Drop the current group's actions (an operation that failed
+    /// half-way) and return the sketch from before them, solved. None
+    /// when the group pushed nothing, or the cursor is not at its end.
+    pub fn discard_current_group(&mut self) -> Option<Sketch> {
+        if self.cursor == 0 || self.cursor != self.actions.len() || self.groups[self.cursor - 1] != self.current_group {
+            return None;
+        }
+        while self.cursor > 0 && self.groups[self.cursor - 1] == self.current_group {
+            self.cursor -= 1;
+        }
+        self.actions.truncate(self.cursor);
+        self.snapshots.truncate(self.cursor);
+        self.cursors.truncate(self.cursor);
+        self.groups.truncate(self.cursor);
+        let bytes = if self.cursor == 0 { &self.initial_snapshot } else { &self.snapshots[self.cursor - 1] };
+        let mut sketch: Sketch = bincode::deserialize(bytes).unwrap();
+        sketch.solve();
+        Some(sketch)
+    }
+
     pub fn undo(&mut self) -> Option<(Sketch, CursorState)> {
         if self.cursor == 0 { return None; }
         // The cursor state to restore is saved at the start of the group being undone

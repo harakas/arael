@@ -32,10 +32,12 @@ fn loop_orientation(sketch: &Sketch, seq: &chain::Sequence) -> f64 {
             }
             OffsetEntity::Arc(a) => {
                 let a = &sketch.arcs[a];
-                let (sa, ea) = (a.start_angle.value, a.end_angle.value);
+                // A full circle / ellipse runs a whole turn from its start.
+                let (sa, ea) = (a.start_angle.value, if a.closed { a.start_angle.value + std::f64::consts::TAU } else { a.end_angle.value });
                 let (t0, t1) = if s.reversed { (ea, sa) } else { (sa, ea) };
-                pts.push(a.point_at(t0));
-                pts.push(a.point_at(0.5 * (t0 + t1)));
+                for k in 0..4 {
+                    pts.push(a.point_at(t0 + (t1 - t0) * k as f64 / 4.0));
+                }
             }
         }
     }
@@ -129,6 +131,9 @@ fn outcome_text(ctx: &CommandContext, out: &offset::OffsetOutcome) -> String {
     if !out.dims.is_empty() {
         s += &format!("\n  dims: {}", out.dims.join(" "));
     }
+    if !out.dropped.is_empty() {
+        s += &format!("\n  vanished: {} (offset inward past the radius; the neighbours meet directly)", out.dropped.join(" "));
+    }
     if out.approximate {
         s += "\n  approximate: an ellipse's offset is not an ellipse; the result is the concentric ellipse with both semi-axes moved by the distance";
     }
@@ -212,7 +217,6 @@ pub(crate) fn cmd_offset(ctx: &mut CommandContext, args: &str) -> CmdResult {
         return Err("offset: missing the distance".into());
     }
     let plan = offset::plan(&ctx.sketch, &seq, &params)?;
-    ctx.begin_group();
     let out = offset::apply(ctx, &plan)?;
     // Name capture: `_` is the meta, `_0.._N` the result entities in order.
     ctx.session_names.insert("_".into(), out.name.clone());

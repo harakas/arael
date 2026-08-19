@@ -26,6 +26,9 @@ pub trait ActionRunner {
     /// Take the rejection message of the last `run`, if any.
     fn take_error(&mut self) -> Option<String>;
     fn begin_group(&mut self);
+    /// Undo and forget everything run since `begin_group`: an operation
+    /// that failed half-way leaves nothing behind.
+    fn rollback_group(&mut self);
 }
 
 /// A corner named by what the user pointed at: one line endpoint, or
@@ -532,5 +535,11 @@ impl ActionRunner for crate::commands::CommandContext {
     }
     fn begin_group(&mut self) {
         crate::commands::CommandContext::begin_group(self)
+    }
+    fn rollback_group(&mut self) {
+        if let Some(s) = self.history.discard_current_group() {
+            self.sketch = s.into();
+            crate::commands::prune_selection(self);
+        }
     }
 }
