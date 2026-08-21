@@ -265,6 +265,13 @@ pub trait Component {
 /// methods at the appropriate points in the optimization loop. Default
 /// implementations are no-ops, so you only override what you need.
 ///
+/// `extended` does not change the solver route by itself: a root that
+/// only syncs derived state (`extended_update` / `extended_deserialize`
+/// / `extended_cost`) keeps its static block pattern and the fast
+/// structure-based sparse routes. Only a [`TripletBlock`] anywhere in
+/// the model tree switches to compute-first pattern discovery, because
+/// its entries exist only at runtime.
+///
 /// To write custom gradient and Hessian contributions, add a
 /// [`TripletBlock`] field to the root struct. The macro automatically
 /// zeroes and accumulates it. In `extended_compute`, push residual

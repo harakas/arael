@@ -2350,6 +2350,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // one set is the normal case, not a special one -- points and lines with
     // different block sizes are simply two nodes with no edge between them.
     //
+    // TripletBlock entries exist only at runtime, so a triplet ANYWHERE in
+    // the containment tree (the root's own fields or a nested sub-model,
+    // e.g. the `[hb, parent.hbt]` form) makes the Hessian pattern knowable
+    // only after a compute pass. The derive walk above saw the root's own
+    // fields; close over the containment here.
+    let has_triplet_block = has_triplet_block
+        || (root_precision.is_some() && containment_tree_has_triplet(fields));
+
     // TripletBlock roots emit nothing: their Hessian pattern is only known
     // after a compute pass, so no static claim about coupling is possible
     // (the Schur backend refuses those models anyway).
@@ -2714,6 +2722,44 @@ fn inst_precision_of(ty: &syn::Type) -> Option<(String, String)> {
 
 /// Extract the inner type T from a generic wrapper like Ref<T> or Option<T>.
 /// Returns the inner type and the last ident of T's path (e.g. "Pose").
+/// Whether any registered struct CONTAINED under these fields declares a
+/// TripletBlock: containment closure over the registry (collections,
+/// options, direct struct fields). The caller's derive walk checks the
+/// fields themselves; this walks what they hold.
+fn containment_tree_has_triplet(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+) -> bool {
+    let mut queue: Vec<String> = Vec::new();
+    for field in fields {
+        for wrapper in ["Vec", "Deque", "Arena", "Option", "Ref"] {
+            if let Some((_, id)) = extract_wrapper_inner(&field.ty, wrapper) {
+                queue.push(id.to_string());
+            }
+        }
+        if let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last() {
+                // Unregistered names (plain data, Param, block types) fall
+                // out at the registry lookup below.
+                queue.push(seg.ident.to_string());
+            }
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(t) = queue.pop() {
+        if !seen.insert(t.clone()) { continue; }
+        let Some(l) = registry_lookup(&t) else { continue };
+        if !l.triplet_block_fields.is_empty() { return true; }
+        for (_, sft) in &l.fields {
+            match sft {
+                SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) => {
+                    queue.push(s.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn extract_wrapper_inner<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<(&'a syn::Type, &'a syn::Ident)> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last()

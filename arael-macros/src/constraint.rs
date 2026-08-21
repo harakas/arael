@@ -6468,7 +6468,12 @@ pub fn generate_root_methods(
         quote! {}
     };
 
-    let requires_compute = custom || has_triplet_block;
+    // The Hessian pattern is only knowable after a compute when a
+    // TripletBlock exists anywhere in the containment tree (its entries
+    // are runtime COO). `extended` alone does NOT force it: extended
+    // hooks can add Hessian entries only through declared block fields,
+    // and every static-shaped block is covered by the structure walks.
+    let requires_compute = has_triplet_block;
 
     let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
 

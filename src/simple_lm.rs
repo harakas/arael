@@ -1240,8 +1240,10 @@ pub trait LmProblem<T> {
     }
 
     /// Whether the Hessian pattern is only discoverable by running a
-    /// compute pass first (TripletBlock / extended-model constraints
-    /// fill their entries at runtime). The pattern itself is frozen
+    /// compute pass first (a TripletBlock anywhere in the model tree
+    /// fills its entries at runtime). An `extended` root WITHOUT
+    /// triplets keeps a static pattern: extended hooks can add Hessian
+    /// entries only through declared block fields. The pattern itself is frozen
     /// after the first iteration by contract for EVERY model -- this
     /// flag is about when it becomes knowable, not whether it changes.
     /// When `false`, the structure walks below are complete before any
@@ -3623,8 +3625,8 @@ pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblem<f64>, co
 /// compute -- see [`LmProblem::hessian_pattern_requires_compute`] -- get
 /// their CSC pattern and position map built straight from the block
 /// structure the macro exposes, with no COO pass and none of its
-/// transient memory. Everything else (TripletBlock / extended models,
-/// hand-built problems) falls back to COO discovery.
+/// transient memory. Everything else (TripletBlock models, hand-built
+/// problems) falls back to COO discovery.
 ///
 /// The fast path's pattern is tile-expanded, so it carries the blocks'
 /// structural zeros as explicit entries (~1.2% more nonzeros on
@@ -4015,8 +4017,8 @@ pub enum SolverReport {
 pub enum SchurPolicy {
     /// Never reduce: assemble the whole system as one scalar CSC and
     /// factorize that. The plain sparse Cholesky, and the only route a
-    /// model with no block structure (hand-built problems, TripletBlock /
-    /// extended constraints) can take anyway.
+    /// model with no block structure (hand-built problems, TripletBlock
+    /// models) can take anyway.
     ///
     /// A marginalize set is still honoured here -- not as a reduction, but
     /// as the factorization's ordering (see [`FaerOrdering`]): ordering
@@ -4684,9 +4686,9 @@ pub struct SchurPlan {
 /// Neither step needs anything from the caller, and a model with no
 /// marginalizable blocks (a pose graph, a localization problem) skips both
 /// and costs exactly what a plain sparse Cholesky costs. Models with no
-/// block structure at all -- hand-built [`LmProblem`]s, TripletBlock and
-/// extended-constraint models -- take the same plain route, discovering
-/// their pattern by a COO pass on the first assembly.
+/// block structure at all -- hand-built [`LmProblem`]s and TripletBlock
+/// models -- take the same plain route, discovering their pattern by a
+/// COO pass on the first assembly.
 ///
 /// [`SchurPolicy`] overrides the decision, [`FaerOrdering`] the ordering,
 /// and [`plan`](Self::plan) (or [`LmResult::solver`]) reports what
@@ -5788,9 +5790,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         // The model's block structure -- what everything below is decided
         // from. A model that has none (hand-built problems) or whose pattern
-        // only a compute can reveal (TripletBlock, extended constraints) has
-        // no blocks to marginalize either: whole system, pattern discovered
-        // the slow way.
+        // only a compute can reveal (TripletBlock) has no blocks to
+        // marginalize either: whole system, pattern discovered the slow
+        // way.
         let mut cells = std::vec::Vec::new();
         let mut spans = std::vec::Vec::new();
         if !problem.hessian_pattern_requires_compute() {
@@ -5802,8 +5804,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 !matches!(self.policy, SchurPolicy::Force),
                 "SparseFaer: SchurPolicy::Force, but this model has no block \
                  structure to marginalize -- it is hand-built, or its Hessian \
-                 pattern is only knowable after a compute (TripletBlock / \
-                 extended constraints). Use SchurPolicy::Auto or Never."
+                 pattern is only knowable after a compute (TripletBlock). \
+                 Use SchurPolicy::Auto or Never."
             );
             if vb {
                 info!("schur: not reducing -- the model has no block structure");
