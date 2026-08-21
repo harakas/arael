@@ -2105,6 +2105,12 @@
 //!   up with each other. Same scene as `slam2d_multi_demo` (which solves
 //!   everything at once), so the two results can be compared; writes
 //!   `slam2d_align.eps`.
+//! - **[`slam2d_direct_align_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_direct_align_demo.rs)**
+//!   -- the cheapest variant of the same merge: only the per-run
+//!   corrections are optimized (9 parameters), with each run pair's
+//!   landmark matches accumulating into one shared Hessian block
+//!   (`constraint(parent.hb, ...)`); the landmarks are then fused in
+//!   closed form. Same scene again; writes `slam2d_direct_align.eps`.
 //! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
 //!   -- synthetic monocular SLAM: S-curve trajectory, 20 poses,
 //!   40 landmarks, odometry + tilt + GPS + feature observations.
