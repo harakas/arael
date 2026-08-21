@@ -5,7 +5,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
-use export_models::{Beacon, Spring};
+use export_models::{Beacon, Cal, Spring};
 
 export_models::arael_import!();
 // A second import of the same bundle must be harmless (diamond imports:
@@ -44,6 +44,7 @@ pub struct World64 {
     pub biases: refs::Vec<Bias<f64>>,
     pub springs: std::vec::Vec<Spring<f64>>,
     pub links: std::vec::Vec<BiasLink<f64>>,
+    pub cals: refs::Vec<Cal<f64>>,
 }
 
 #[arael::model]
@@ -53,4 +54,5 @@ pub struct World32 {
     pub biases: refs::Vec<Bias<f32>>,
     pub springs: std::vec::Vec<Spring<f32>>,
     pub links: std::vec::Vec<BiasLink<f32>>,
+    pub cals: refs::Vec<Cal<f32>>,
 }

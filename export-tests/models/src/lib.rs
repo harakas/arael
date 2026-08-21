@@ -8,7 +8,8 @@ use arael::matrix::matrix3;
 use arael::quatern::quatern;
 use arael::refs::Ref;
 use arael::utils::Float;
-use arael::vect::{vect2, vect3};
+use arael::matrix::matrix;
+use arael::vect::{vect, vect2, vect3};
 
 #[arael::model]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -110,6 +111,27 @@ pub struct Spring<T: Float> {
     pub rest: T,
     pub w: T,
     pub hb: CrossBlock<Beacon<T>, Beacon<T>, T>,
+}
+
+/// N-dof calibration entity: a const-generic `vect` parameter and a
+/// `matrix` data field ride the export bundle. The prior rows pin every
+/// component (the projected rows alone would leave the solve
+/// underdetermined), so the optimum is exactly `t`.
+#[arael::model]
+#[arael(constraint(hb, {
+    let d = cal.v - cal.t;
+    let p = cal.h * d;
+    [d[0] * cal.wp, d[1] * cal.wp, d[2] * cal.wp, d[3] * cal.wp,
+     p[0] * cal.w, p[1] * cal.w]
+}))]
+#[derive(Clone)]
+pub struct Cal<T: Float> {
+    pub v: Param<vect<T, 4>>,
+    pub t: vect<T, 4>,
+    pub h: matrix<T, 2, 4>,
+    pub wp: T,
+    pub w: T,
+    pub hb: SelfBlock<Cal<T>, T>,
 }
 
 /// Pub struct with a private field: excluded from the bundle, imported

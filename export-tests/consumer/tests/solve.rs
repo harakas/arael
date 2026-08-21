@@ -2,9 +2,10 @@ use arael::model::{CrossBlock, Model, Param, SelfBlock};
 use arael::refs;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
 use arael::utils::Float;
-use arael::vect::{vect2, vect3, vect3d};
+use arael::matrix::matrixd;
+use arael::vect::{vect2, vect3, vect3d, vectd};
 use export_consumer::{Bias, BiasLink, World32, World64};
-use export_models::{Beacon, Dir, Kind, Spring};
+use export_models::{Beacon, Cal, Dir, Kind, Spring};
 
 fn target(k: usize) -> vect3d {
     vect3d::new(0.3, 1.0 + k as f64, -0.4 * k as f64).unit()
@@ -17,6 +18,7 @@ macro_rules! build_world {
             biases: refs::Vec::new(),
             springs: std::vec::Vec::new(),
             links: std::vec::Vec::new(),
+            cals: refs::Vec::new(),
         };
         let mut brefs = std::vec::Vec::new();
         for k in 0..3 {
@@ -41,8 +43,33 @@ macro_rules! build_world {
         }
         let bias = w.biases.push(Bias { v: Param::new(0.2 as $t), hb: SelfBlock::new() });
         w.links.push(BiasLink { bk: brefs[1], bl: bias, m: 1.1 as $t, hb: CrossBlock::new() });
+        w.cals.push(Cal {
+            v: Param::new(vectd::new([0.4, -0.1, 0.9, 0.0]).cast()),
+            t: vectd::new([0.1, 0.2, 0.5, -0.3]).cast(),
+            h: matrixd::from_array([[1.0, 0.5, 0.0, -0.2], [0.0, 1.0, 0.3, 0.4]]).cast(),
+            wp: 0.7 as $t,
+            w: 1.3 as $t,
+            hb: SelfBlock::new(),
+        });
         w
     }};
+}
+
+/// The imported const-generic entity carries its dims through the
+/// bundle: PARAM_COUNT and the converged optimum (the priors pin the
+/// vector to `t` exactly).
+#[test]
+fn imported_vectn_entity() {
+    assert_eq!(<Cal<f64> as Model>::PARAM_COUNT, 4);
+    assert_eq!(<Cal<f32> as Model>::PARAM_COUNT, 4);
+    let mut w = build_world!(World64, f64);
+    let r = w.solve_sparse(&LmConfig::default()).unwrap();
+    assert!(matches!(r.status, LmStatus::Converged { .. }), "{:?}", r.status);
+    let cal = w.cals.iter().next().unwrap();
+    for k in 0..4 {
+        assert!((cal.v.value[k] - cal.t[k]).abs() < 1e-6,
+            "cal[{k}]: {} vs {}", cal.v.value[k], cal.t[k]);
+    }
 }
 
 /// Imported params fold correctly: the component's 2 DOF inside the
