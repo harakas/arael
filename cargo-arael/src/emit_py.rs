@@ -19,36 +19,46 @@ fn ct_scalar(of: &str) -> Option<&'static str> {
     })
 }
 
-fn ct_math(of: &str) -> Option<&'static str> {
+fn ct_math(of: &str) -> Option<String> {
     Some(match of {
-        "vect2f" => "_m.vect2f",
-        "vect2d" => "_m.vect2d",
-        "vect3f" => "_m.vect3f",
-        "vect3d" => "_m.vect3d",
-        "matrix2f" => "_m.matrix2f",
-        "matrix2d" => "_m.matrix2d",
-        "matrix3f" => "_m.matrix3f",
-        "matrix3d" => "_m.matrix3d",
-        "quaternf" => "_m.quaternf",
-        "quaternd" => "_m.quaternd",
-        _ => return None,
+        "vect2f" => "_m.vect2f".to_string(),
+        "vect2d" => "_m.vect2d".to_string(),
+        "vect3f" => "_m.vect3f".to_string(),
+        "vect3d" => "_m.vect3d".to_string(),
+        "matrix2f" => "_m.matrix2f".to_string(),
+        "matrix2d" => "_m.matrix2d".to_string(),
+        "matrix3f" => "_m.matrix3f".to_string(),
+        "matrix3d" => "_m.matrix3d".to_string(),
+        "quaternf" => "_m.quaternf".to_string(),
+        "quaternd" => "_m.quaternd".to_string(),
+        _ => {
+            // N-dimensional instantiations resolve through the cached
+            // ctypes class factories in math.py.
+            let (scalar, dims) = crate::ir::ndim_math(of)?;
+            let sfx = if scalar == "f32" { "f" } else { "d" };
+            return Some(match dims.len() {
+                1 => format!("_m.vectn{}({})", sfx, dims[0]),
+                _ => format!("_m.matrixn{}({}, {})", sfx, dims[0], dims[1]),
+            });
+        }
     })
 }
 
 /// (ctypes type, needs sequence coercion) of a get/set field.
-fn value_ct(f: &Field) -> Option<(&'static str, bool)> {
+fn value_ct(f: &Field) -> Option<(String, bool)> {
     let of = f.of.as_deref().unwrap_or("");
     match f.kind.as_str() {
-        "data" | "param" => ct_scalar(of).map(|t| (t, false))
+        "data" | "param" => ct_scalar(of).map(|t| (t.to_string(), false))
             .or_else(|| ct_math(of).map(|t| (t, true))),
         "euler_param" => {
             let s = f.scalar.as_deref().unwrap_or("f64");
-            Some(match (f.variant.as_deref().unwrap_or("simple"), s) {
-                ("rotvec", "f32") => ("_m.quaternf", true),
-                ("rotvec", _) => ("_m.quaternd", true),
-                (_, "f32") => ("_m.vect3f", true),
-                (_, _) => ("_m.vect3d", true),
-            })
+            let t = match (f.variant.as_deref().unwrap_or("simple"), s) {
+                ("rotvec", "f32") => "_m.quaternf",
+                ("rotvec", _) => "_m.quaternd",
+                (_, "f32") => "_m.vect3f",
+                (_, _) => "_m.vect3d",
+            };
+            Some((t.to_string(), true))
         }
         _ => None,
     }
@@ -347,7 +357,7 @@ fn field_py(
             let Some((ct, coerce)) = value_ct(f) else {
                 return Err(format!("`{owner}.{name}`: unsupported {} of {of}", f.kind));
             };
-            prop(py, owner_cls, prefix, name, name, ct, coerce);
+            prop(py, owner_cls, prefix, name, name, &ct, coerce);
             if f.kind != "data" {
                 optimize_prop(py, owner_cls, prefix, name);
             }

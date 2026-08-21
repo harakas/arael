@@ -178,7 +178,8 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
                 }
             }
             Some(SymFieldType::Scalar) | Some(SymFieldType::Vec2) | Some(SymFieldType::Vec3)
-            | Some(SymFieldType::Mat2) | Some(SymFieldType::Mat3) | Some(SymFieldType::Quat) => {
+            | Some(SymFieldType::Mat2) | Some(SymFieldType::Mat3) | Some(SymFieldType::Quat)
+            | Some(SymFieldType::VecN(_)) | Some(SymFieldType::MatN(_, _)) => {
                 parts.push("\"kind\": \"data\"".into());
                 parts.push(format!("\"of\": {}", q(spelling)));
             }

@@ -36,6 +36,12 @@ def fill(f):
         n = f.items.push()
         n.t = t[i]
         n.w = w[i]
+    vn = f.vns.push()
+    vn.v = [0.4, -0.1, 0.9, 0.0]
+    vn.t = [0.1, 0.2, 0.5, -0.3]
+    vn.h = [[1.0, 0.5, 0.0, -0.2], [0.0, 1.0, 0.3, 0.4]]
+    vn.wp = 0.7
+    vn.w = 1.3
 
 
 # Log control crosses the FFI; WARN quiets the backend's INFO chatter
@@ -95,6 +101,10 @@ p("dense_m", f.m)
 p("dense_c", f.c)
 for i in range(3):
     p("dense_v%d" % i, f.items[i].v)
+p("vn_t2", f.vns[0].t[2])
+p("vn_h13", f.vns[0].h[1][3])
+for k in range(4):
+    p("dense_vn%d" % k, f.vns[0].v[k])
 
 # Covariance at the solution: the 1x1 marginal of the first item.
 cov = f.assemble_covariance()

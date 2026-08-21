@@ -89,6 +89,14 @@ views are named by their container's nature: `PathPosesDeque`,
 `PathLandmarksArena`, `LandmarkFrinesVec`.
 
 
+- **N-dimensional types**: a model field of `vect<T, N>` /
+  `matrix<T, R, C>` (or the `vectf/vectd/matrixf/matrixd` aliases)
+  maps to the header templates `arael::vect<double, N>` /
+  `arael::matrix<double, R, C>` (float for f32 models) -- plain
+  aggregates (`T e[N]` / `vect<T, C> rows[R]`) with the core operator
+  set (`+ - *` including dot/matvec/matmul, `[]`, `transpose`,
+  `norm`), passed by value like the fixed types.
+
 - **Math types** (`vect2/3`, `matrix2/3`, `quatern`, f/d suffixes)
   mirror the Rust types: `*` is dot, `%` is cross, euler is x=roll,
   y=pitch, z=yaw with `R = R(z)R(y)R(x)`, quaternions store the

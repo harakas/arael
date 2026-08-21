@@ -51,6 +51,12 @@ surface reference); the differences are Python idiom:
 - **Fields are properties**: `pose.pos = (0.1, -0.1, 0.05)` (any
   sequence in), `pose.pos.x` (an `arael.math` value out). Optimize
   flags: `pose.ea_optimize = False`.
+- **N-dimensional values**: `vect<T, N>` / `matrix<T, R, C>` fields
+  accept any length-matching sequence (`vn.v = [0.1, 0.2, 0.3, 0.4]`,
+  rows for matrices) and read back as `arael.math` classes from the
+  cached factories `vectnf(n)` / `vectnd(n)` / `matrixnf(r, c)` /
+  `matrixnd(r, c)` -- iterable, indexable, with the core operators
+  (`+ - *` including dot/matvec/matmul, `norm`, `transpose`).
 - **Math values** (`vect2/3`, `matrix2/3`, `quatern`, f/d variants)
   live in the vendored `arael.math`: the classes ARE the FFI structs,
   with the same operators as the C++ headers (`*` dot, `%` cross,

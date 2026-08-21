@@ -25,20 +25,81 @@ fn scalar_c(of: &str) -> Option<&'static str> {
 }
 
 /// Math type -> its `#[repr(C)]` mirror in the shim.
-fn math_mirror(of: &str) -> Option<&'static str> {
+fn math_mirror(of: &str) -> Option<String> {
     Some(match of {
-        "vect2f" => "CVec2F32",
-        "vect2d" => "CVec2F64",
-        "vect3f" => "CVec3F32",
-        "vect3d" => "CVec3F64",
-        "matrix2f" => "CMat2F32",
-        "matrix2d" => "CMat2F64",
-        "matrix3f" => "CMat3F32",
-        "matrix3d" => "CMat3F64",
-        "quaternf" => "CQuatF32",
-        "quaternd" => "CQuatF64",
-        _ => return None,
+        "vect2f" => "CVec2F32".to_string(),
+        "vect2d" => "CVec2F64".to_string(),
+        "vect3f" => "CVec3F32".to_string(),
+        "vect3d" => "CVec3F64".to_string(),
+        "matrix2f" => "CMat2F32".to_string(),
+        "matrix2d" => "CMat2F64".to_string(),
+        "matrix3f" => "CMat3F32".to_string(),
+        "matrix3d" => "CMat3F64".to_string(),
+        "quaternf" => "CQuatF32".to_string(),
+        "quaternd" => "CQuatF64".to_string(),
+        _ => return Some(ndim_mirror_name(&crate::ir::ndim_math(of)?)),
     })
+}
+
+/// Mirror struct name of an N-dimensional math instantiation:
+/// ("f64", [4]) -> CVecF64x4, ("f32", [2, 4]) -> CMatF32x2x4.
+fn ndim_mirror_name((scalar, dims): &(String, Vec<usize>)) -> String {
+    let sc = if scalar == "f32" { "F32" } else { "F64" };
+    match dims.len() {
+        1 => format!("CVec{}x{}", sc, dims[0]),
+        _ => format!("CMat{}x{}x{}", sc, dims[0], dims[1]),
+    }
+}
+
+/// Mirror definitions for every N-dimensional vect/matrix instantiation
+/// the model's fields use, deduplicated. Appended after the fixed
+/// MIRRORS block.
+fn ndim_mirrors(model: &Model) -> String {
+    let mut seen: std::collections::BTreeSet<(String, Vec<usize>)> =
+        std::collections::BTreeSet::new();
+    for ty in model.types.values() {
+        for f in &ty.fields {
+            if !matches!(f.kind.as_str(), "data" | "param") { continue; }
+            if let Some(inst) = crate::ir::ndim_math(f.of.as_deref().unwrap_or("")) {
+                seen.insert(inst);
+            }
+        }
+    }
+    let mut out = String::new();
+    for inst in &seen {
+        let name = ndim_mirror_name(inst);
+        let (scalar, dims) = inst;
+        if dims.len() == 1 {
+            let n = dims[0];
+            out.push_str(&format!(r#"#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct {name} {{ pub e: [{scalar}; {n}] }}
+impl From<arael::vect::vect<{scalar}, {n}>> for {name} {{
+    fn from(v: arael::vect::vect<{scalar}, {n}>) -> Self {{ Self {{ e: v.e }} }}
+}}
+impl From<{name}> for arael::vect::vect<{scalar}, {n}> {{
+    fn from(v: {name}) -> Self {{ arael::vect::vect {{ e: v.e }} }}
+}}
+"#));
+        } else {
+            let (r, c) = (dims[0], dims[1]);
+            out.push_str(&format!(r#"#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct {name} {{ pub m: [[{scalar}; {c}]; {r}] }}
+impl From<arael::matrix::matrix<{scalar}, {r}, {c}>> for {name} {{
+    fn from(v: arael::matrix::matrix<{scalar}, {r}, {c}>) -> Self {{
+        Self {{ m: std::array::from_fn(|i| v.rows[i].e) }}
+    }}
+}}
+impl From<{name}> for arael::matrix::matrix<{scalar}, {r}, {c}> {{
+    fn from(v: {name}) -> Self {{
+        arael::matrix::matrix {{ rows: std::array::from_fn(|i| arael::vect::vect {{ e: v.m[i] }}) }}
+    }}
+}}
+"#));
+        }
+    }
+    out
 }
 
 /// The repr(C) mirror types and their conversions, emitted once.
@@ -400,7 +461,7 @@ fn field_accessors(
                     &format!("{access}.{name}"),
                     &format!("{access}.{name} = v;"));
             } else if let Some(m) = math_mirror(of) {
-                rw(out, fn_prefix, name, ptr_ty, access, m,
+                rw(out, fn_prefix, name, ptr_ty, access, &m,
                     &format!("{access}.{name}.into()"),
                     &format!("{access}.{name} = v.into();"));
             } else {
@@ -413,7 +474,7 @@ fn field_accessors(
                     &format!("{access}.{name}.value"),
                     &format!("{access}.{name}.value = v;"));
             } else if let Some(m) = math_mirror(of) {
-                rw(out, fn_prefix, name, ptr_ty, access, m,
+                rw(out, fn_prefix, name, ptr_ty, access, &m,
                     &format!("{access}.{name}.value.into()"),
                     &format!("{access}.{name}.value = v.into();"));
             } else {
@@ -614,6 +675,7 @@ pub fn emit_body(model: &Model, model_crate: &str) -> Result<String, String> {
     used.sort();
     used.dedup();
 
+    let mirrors_all = format!("{}{}", MIRRORS, ndim_mirrors(model));
     let mut out = String::new();
     out.push_str(&format!(
 "use std::ffi::CString;
@@ -643,7 +705,7 @@ pub struct ResultDetail {{
     result: arael::simple_lm::LmResult<{fp}>,
     buf: CString,
 }}
-{MIRRORS}
+{mirrors_all}
 fn status_code(s: &LmStatus) -> i32 {{
     match s {{
         LmStatus::Converged => 0,

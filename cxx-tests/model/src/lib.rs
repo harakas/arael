@@ -12,7 +12,8 @@ use arael::model::{
     SimpleEulerAngleParam,
 };
 use arael::refs::{self, Ref};
-use arael::vect::{vect2d, vect3d};
+use arael::matrix::matrixd;
+use arael::vect::{vect2d, vect3d, vectd};
 
 /// A data-only observation of the root's line: y ~ m * x + c.
 #[arael::model]
@@ -76,6 +77,26 @@ pub struct Info {
 pub struct GpsObs {
     pub pos: vect3d,
     pub isigma: f32,
+}
+
+/// N-dof entity: a const-generic vect parameter with per-component
+/// priors plus a matrix-projected residual -- exercises the
+/// vect<T, N> / matrix<T, R, C> export surface.
+#[arael::model]
+#[arael(constraint(hb, {
+    let d = vn.v - vn.t;
+    let p = vn.h * d;
+    [d[0] * vn.wp, d[1] * vn.wp, d[2] * vn.wp, d[3] * vn.wp,
+     p[0] * vn.w, p[1] * vn.w]
+}))]
+#[derive(Default)]
+pub struct Vn {
+    pub v: Param<vectd<4>>,
+    pub t: vectd<4>,
+    pub h: matrixd<2, 4>,
+    pub wp: f64,
+    pub w: f64,
+    pub hb: SelfBlock<Vn>,
 }
 
 /// Relative-position tie between two poses.
@@ -165,5 +186,6 @@ pub struct Fit {
     pub ties: std::vec::Vec<Tie>,
     pub marks: refs::Arena<N>,
     pub rigs: refs::Vec<Rig>,
+    pub vns: refs::Vec<Vn>,
     pub hb: SelfBlock<Fit>,
 }

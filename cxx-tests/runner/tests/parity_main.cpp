@@ -28,6 +28,14 @@ static void fill(Fit& fit) {
         n.set_t(t[i]);
         n.set_w(w[i]);
     }
+    auto vn = fit.vns().push();
+    vn.set_v(vect<double, 4>{{0.4, -0.1, 0.9, 0.0}});
+    vn.set_t(vect<double, 4>{{0.1, 0.2, 0.5, -0.3}});
+    vn.set_h(matrix<double, 2, 4>{{
+        vect<double, 4>{{1.0, 0.5, 0.0, -0.2}},
+        vect<double, 4>{{0.0, 1.0, 0.3, 0.4}}}});
+    vn.set_wp(0.7);
+    vn.set_w(1.3);
 }
 
 int main() {
@@ -93,6 +101,13 @@ int main() {
         char name[16];
         std::snprintf(name, sizeof name, "dense_v%d", i);
         p(name, fit.items()[i].v());
+    }
+    p("vn_t2", fit.vns()[0].t()[2]);
+    p("vn_h13", fit.vns()[0].h()[1][3]);
+    for (int k = 0; k < 4; k++) {
+        char name[16];
+        std::snprintf(name, sizeof name, "dense_vn%d", k);
+        p(name, fit.vns()[0].v()[k]);
     }
 
     // Covariance at the solution: the 1x1 marginal of the first item.

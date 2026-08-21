@@ -136,4 +136,57 @@ using vect3d = vect3<double>;
 static_assert(sizeof(vect2f) == 8 && sizeof(vect2d) == 16, "vect2 layout");
 static_assert(sizeof(vect3f) == 12 && sizeof(vect3d) == 24, "vect3 layout");
 
+/// N-dimensional vector over T e[N] -- mirrors arael's vect<T, N>
+/// (same layout as the FFI mirror structs). `*` between vectors is the
+/// DOT product; `vect * scalar` scales; `v[i]` indexes.
+template<class T, std::size_t N>
+struct vect {
+    T e[N];
+
+    T& operator[](std::size_t i) { return e[i]; }
+    const T& operator[](std::size_t i) const { return e[i]; }
+    static constexpr std::size_t size() { return N; }
+
+    vect operator+(const vect& o) const {
+        vect r{};
+        for (std::size_t i = 0; i < N; i++) r.e[i] = e[i] + o.e[i];
+        return r;
+    }
+    vect operator-(const vect& o) const {
+        vect r{};
+        for (std::size_t i = 0; i < N; i++) r.e[i] = e[i] - o.e[i];
+        return r;
+    }
+    vect operator-() const {
+        vect r{};
+        for (std::size_t i = 0; i < N; i++) r.e[i] = -e[i];
+        return r;
+    }
+    vect operator*(T s) const {
+        vect r{};
+        for (std::size_t i = 0; i < N; i++) r.e[i] = e[i] * s;
+        return r;
+    }
+    vect operator/(T s) const {
+        vect r{};
+        for (std::size_t i = 0; i < N; i++) r.e[i] = e[i] / s;
+        return r;
+    }
+    T operator*(const vect& o) const {  // dot
+        T s = T(0);
+        for (std::size_t i = 0; i < N; i++) s += e[i] * o.e[i];
+        return s;
+    }
+    T square() const { return (*this) * (*this); }
+    T norm() const { return std::sqrt(square()); }
+};
+
+template<class T, std::size_t N>
+inline vect<T, N> operator*(T s, const vect<T, N>& v) { return v * s; }
+
+template<std::size_t N> using vectf = vect<float, N>;
+template<std::size_t N> using vectd = vect<double, N>;
+
+static_assert(sizeof(vect<double, 4>) == 32, "vect<N> layout");
+
 } // namespace arael

@@ -382,6 +382,30 @@ class TieRef:
         return "TieRef(%s)" % (self.raw if self.valid else "null")
 
 
+class VnRef:
+    """Typed handle into the collection that issued it -- the Python
+    spelling of Rust's `Ref<Vn>`. Default-constructed it is the null
+    sentinel."""
+
+    __slots__ = ("raw",)
+
+    def __init__(self, raw=0xFFFFFFFF):
+        self.raw = raw
+
+    @property
+    def valid(self):
+        return self.raw != 0xFFFFFFFF
+
+    def __eq__(self, o):
+        return isinstance(o, VnRef) and o.raw == self.raw
+
+    def __hash__(self):
+        return hash((VnRef, self.raw))
+
+    def __repr__(self):
+        return "VnRef(%s)" % (self.raw if self.valid else "null")
+
+
 class Gain:
     """A `Gain` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
@@ -811,6 +835,71 @@ class Tie:
         _f.fit_tie_set_w(self._p, v)
 
 
+class Vn:
+    """A `Vn` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
+
+    __slots__ = ("_at",)
+    param_count = 4
+
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
+
+    @property
+    def v(self):
+        return _f.fit_vn_v(self._p)
+
+    @v.setter
+    def v(self, v):
+        _f.fit_vn_set_v(self._p, v if isinstance(v, _m.vectnd(4)) else _m.vectnd(4)(v))
+
+    @property
+    def v_optimize(self):
+        return _f.fit_vn_v_optimize(self._p)
+
+    @v_optimize.setter
+    def v_optimize(self, v):
+        _f.fit_vn_v_set_optimize(self._p, bool(v))
+
+    @property
+    def t(self):
+        return _f.fit_vn_t(self._p)
+
+    @t.setter
+    def t(self, v):
+        _f.fit_vn_set_t(self._p, v if isinstance(v, _m.vectnd(4)) else _m.vectnd(4)(v))
+
+    @property
+    def h(self):
+        return _f.fit_vn_h(self._p)
+
+    @h.setter
+    def h(self, v):
+        _f.fit_vn_set_h(self._p, v if isinstance(v, _m.matrixnd(2, 4)) else _m.matrixnd(2, 4)(v))
+
+    @property
+    def wp(self):
+        return _f.fit_vn_wp(self._p)
+
+    @wp.setter
+    def wp(self, v):
+        _f.fit_vn_set_wp(self._p, v)
+
+    @property
+    def w(self):
+        return _f.fit_vn_w(self._p)
+
+    @w.setter
+    def w(self, v):
+        _f.fit_vn_set_w(self._p, v)
+
+
 def _cov_query(c, fn, p, cap):
     buf = (ctypes.c_double * cap)()
     n = fn(c, p, buf, cap)
@@ -874,6 +963,8 @@ class Covariance:
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_pose_marginal_cov, e._p, 49))
         if isinstance(e, Rig):
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_rig_marginal_cov, e._p, 49))
+        if isinstance(e, Vn):
+            return (lambda b: _shape_n(b, 4))(_cov_query(self._h, _f.fit_vn_marginal_cov, e._p, 16))
         raise TypeError("no marginal for %r" % (e,))
 
     def conditional(self, e):
@@ -884,6 +975,8 @@ class Covariance:
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_pose_conditional_cov, e._p, 49))
         if isinstance(e, Rig):
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_rig_conditional_cov, e._p, 49))
+        if isinstance(e, Vn):
+            return (lambda b: _shape_n(b, 4))(_cov_query(self._h, _f.fit_vn_conditional_cov, e._p, 16))
         raise TypeError("no conditional for %r" % (e,))
 
     def std_dev(self, e):
@@ -895,6 +988,8 @@ class Covariance:
             return list(_cov_query(self._h, _f.fit_pose_std_dev, e._p, 7))
         if isinstance(e, Rig):
             return list(_cov_query(self._h, _f.fit_rig_std_dev, e._p, 7))
+        if isinstance(e, Vn):
+            return list(_cov_query(self._h, _f.fit_vn_std_dev, e._p, 4))
         raise TypeError("no std_dev for %r" % (e,))
     def _cross_n_n(self, a, b):
         buf = (ctypes.c_double * 1)()
@@ -920,6 +1015,14 @@ class Covariance:
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
+    def _cross_n_vn(self, a, b):
+        buf = (ctypes.c_double * 4)()
+        rows = _f.fit_n_vn_cross_cov(self._h, a._p, b._p, buf, 4)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
     def _cross_pose_n(self, a, b):
         buf = (ctypes.c_double * 7)()
         rows = _f.fit_pose_n_cross_cov(self._h, a._p, b._p, buf, 7)
@@ -943,6 +1046,14 @@ class Covariance:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_pose_vn(self, a, b):
+        buf = (ctypes.c_double * 28)()
+        rows = _f.fit_pose_vn_cross_cov(self._h, a._p, b._p, buf, 28)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 4 + c] for c in range(4))
                      for r in range(rows))
     def _cross_rig_n(self, a, b):
         buf = (ctypes.c_double * 7)()
@@ -968,6 +1079,46 @@ class Covariance:
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
+    def _cross_rig_vn(self, a, b):
+        buf = (ctypes.c_double * 28)()
+        rows = _f.fit_rig_vn_cross_cov(self._h, a._p, b._p, buf, 28)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
+    def _cross_vn_n(self, a, b):
+        buf = (ctypes.c_double * 4)()
+        rows = _f.fit_vn_n_cross_cov(self._h, a._p, b._p, buf, 4)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_vn_pose(self, a, b):
+        buf = (ctypes.c_double * 28)()
+        rows = _f.fit_vn_pose_cross_cov(self._h, a._p, b._p, buf, 28)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_vn_rig(self, a, b):
+        buf = (ctypes.c_double * 28)()
+        rows = _f.fit_vn_rig_cross_cov(self._h, a._p, b._p, buf, 28)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_vn_vn(self, a, b):
+        buf = (ctypes.c_double * 16)()
+        rows = _f.fit_vn_vn_cross_cov(self._h, a._p, b._p, buf, 16)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
 
     def cross(self, a, b):
         """Row-major cross-covariance block between two entities."""
@@ -977,18 +1128,32 @@ class Covariance:
             return self._cross_n_pose(a, b)
         if isinstance(a, N) and isinstance(b, Rig):
             return self._cross_n_rig(a, b)
+        if isinstance(a, N) and isinstance(b, Vn):
+            return self._cross_n_vn(a, b)
         if isinstance(a, Pose) and isinstance(b, N):
             return self._cross_pose_n(a, b)
         if isinstance(a, Pose) and isinstance(b, Pose):
             return self._cross_pose_pose(a, b)
         if isinstance(a, Pose) and isinstance(b, Rig):
             return self._cross_pose_rig(a, b)
+        if isinstance(a, Pose) and isinstance(b, Vn):
+            return self._cross_pose_vn(a, b)
         if isinstance(a, Rig) and isinstance(b, N):
             return self._cross_rig_n(a, b)
         if isinstance(a, Rig) and isinstance(b, Pose):
             return self._cross_rig_pose(a, b)
         if isinstance(a, Rig) and isinstance(b, Rig):
             return self._cross_rig_rig(a, b)
+        if isinstance(a, Rig) and isinstance(b, Vn):
+            return self._cross_rig_vn(a, b)
+        if isinstance(a, Vn) and isinstance(b, N):
+            return self._cross_vn_n(a, b)
+        if isinstance(a, Vn) and isinstance(b, Pose):
+            return self._cross_vn_pose(a, b)
+        if isinstance(a, Vn) and isinstance(b, Rig):
+            return self._cross_vn_rig(a, b)
+        if isinstance(a, Vn) and isinstance(b, Vn):
+            return self._cross_vn_vn(a, b)
         raise TypeError("no cross-covariance for %r x %r" % (a, b))
 
 
@@ -1403,6 +1568,73 @@ class FitRigsVec:
         return RigRef(_f.fit_rigs_last_ref(self._p))
 
 
+class FitVnsVec:
+    """View of `vns` (vec of Vn); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
+
+    __slots__ = ("_p",)
+
+    def __init__(self, p):
+        self._p = p
+
+    def __len__(self):
+        return _f.fit_vns_len(self._p)
+
+    def reserve(self, additional):
+        _f.fit_vns_reserve(self._p, additional)
+
+    def __getitem__(self, i):
+        if isinstance(i, VnRef):
+            return Vn(lambda r=i.raw: _f.fit_vns_get(self._p, r))
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(i)
+        return Vn(lambda i=i: _f.fit_vns_at(self._p, i))
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield Vn(lambda i=i: _f.fit_vns_at(self._p, i))
+
+    def clear(self):
+        _f.fit_vns_clear(self._p)
+
+    def truncate(self, n):
+        _f.fit_vns_truncate(self._p, n)
+
+    def push(self):
+        _f.fit_vns_push(self._p)
+        return self[self.ref_at(len(self) - 1)]
+
+    def pop(self):
+        """Drops the last element; False when already empty."""
+        return _f.fit_vns_pop(self._p)
+
+    def get(self, r):
+        return Vn(lambda k=_raw(r): _f.fit_vns_get(self._p, k))
+
+    def __contains__(self, r):
+        return _f.fit_vns_contains(self._p, _raw(r))
+
+    def try_get(self, r):
+        """The element, or None for a stale or foreign ref."""
+        p = _f.fit_vns_try_get(self._p, _raw(r))
+        return Vn(lambda k=_raw(r): _f.fit_vns_get(self._p, k)) if p else None
+
+    def ref_at(self, i):
+        return VnRef(_f.fit_vns_ref_at(self._p, i))
+
+    def first_ref(self):
+        """Ref of the first element; null when empty."""
+        return VnRef(_f.fit_vns_first_ref(self._p))
+
+    def last_ref(self):
+        """Ref of the last element; null when empty."""
+        return VnRef(_f.fit_vns_last_ref(self._p))
+
+
 class Fit:
     """The model. Owns the underlying Rust instance; free() (or GC)
     releases it. One model, one thread."""
@@ -1577,4 +1809,8 @@ class Fit:
     @property
     def rigs(self):
         return FitRigsVec(self._p)
+
+    @property
+    def vns(self):
+        return FitVnsVec(self._p)
 

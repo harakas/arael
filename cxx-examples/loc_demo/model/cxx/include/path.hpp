@@ -20,6 +20,8 @@ using arael::vect2;
 using arael::vect3;
 using arael::matrix2;
 using arael::matrix3;
+using arael::vect;
+using arael::matrix;
 using arael::quatern;
 using arael::vect2f;
 using arael::vect2d;

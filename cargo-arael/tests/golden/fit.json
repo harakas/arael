@@ -25,6 +25,7 @@
         {"name": "ties", "kind": "collection", "container": "vec", "of": "Tie", "spelled": "std::vec::Vec<Tie>"},
         {"name": "marks", "kind": "collection", "container": "arena", "of": "N", "spelled": "refs::Arena<N>"},
         {"name": "rigs", "kind": "collection", "container": "vec", "of": "Rig", "spelled": "refs::Vec<Rig>"},
+        {"name": "vns", "kind": "collection", "container": "vec", "of": "Vn", "spelled": "refs::Vec<Vn>"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
       ]
     },
@@ -112,13 +113,27 @@
         {"name": "w", "kind": "data", "of": "f64"},
         {"name": "hb", "kind": "cross_block", "a": "Pose", "b": "Pose", "scalar": "f64"}
       ]
+    },
+    "Vn": {
+      "role": "entity",
+      "param_count": 4,
+      "self_block": "hb",
+      "fields": [
+        {"name": "v", "kind": "param", "of": "vectd<4>", "params": 4},
+        {"name": "t", "kind": "data", "of": "vectd<4>"},
+        {"name": "h", "kind": "data", "of": "matrixd<2, 4>"},
+        {"name": "wp", "kind": "data", "of": "f64"},
+        {"name": "w", "kind": "data", "of": "f64"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
     }
   },
   "constraints": [
-    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 19},
-    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 30},
-    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 46},
-    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 83},
-    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 130}
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 20},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 31},
+    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 47},
+    {"on": "Vn", "label": "Vn", "file": "model/src/lib.rs", "line": 86},
+    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 104},
+    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 151}
   ]
 }

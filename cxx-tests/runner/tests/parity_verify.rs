@@ -6,8 +6,9 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus, RootProblem, SolveFailureKind};
-use arael::vect::{vect2d, vect3d};
-use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Rig, Tie};
+use arael::matrix::matrixd;
+use arael::vect::{vect2d, vect3d, vectd};
+use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Rig, Tie, Vn};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +28,14 @@ pub fn fill(fit: &mut Fit) {
             hb: SelfBlock::new(),
         });
     }
+    fit.vns.push(Vn {
+        v: Param::new(vectd::new([0.4, -0.1, 0.9, 0.0])),
+        t: vectd::new([0.1, 0.2, 0.5, -0.3]),
+        h: matrixd::from_array([[1.0, 0.5, 0.0, -0.2], [0.0, 1.0, 0.3, 0.4]]),
+        wp: 0.7,
+        w: 1.3,
+        hb: SelfBlock::new(),
+    });
 }
 
 /// The shim's status mapping (kept in lockstep with emit_ffi).
@@ -128,6 +137,13 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     assert_eq!(g("dense_c"), fit.c.value);
     for i in 0..3 {
         assert_eq!(g(&format!("dense_v{i}")), fit.items[i].v.value, "v{i}");
+    }
+    // The N-dimensional entity crossed the FFI in both directions and
+    // solved identically.
+    assert_eq!(g("vn_t2"), fit.vns[0].t[2]);
+    assert_eq!(g("vn_h13"), fit.vns[0].h[1][3]);
+    for k in 0..4 {
+        assert_eq!(g(&format!("dense_vn{k}")), fit.vns[0].v.value[k], "vn{k}");
     }
     // And the solution is the right one (least squares of the +-0.05
     // pattern keeps m at 2, c near 1).

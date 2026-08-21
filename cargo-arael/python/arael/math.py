@@ -656,3 +656,112 @@ quaternf.is_finite = quaternd.is_finite = (
     lambda self: _pm.isfinite(self.t) and self.v.is_finite())
 matrix3f.null_space = _null_space(matrix3f)
 matrix3d.null_space = _null_space(matrix3d)
+
+
+# N-dimensional vect/matrix: cached ctypes classes per (scalar, dims),
+# mirroring arael's vect<T, N> / matrix<T, R, C> (layout: e[N] /
+# rows[R][C]). Constructors accept a length-matching sequence (rows for
+# matrices); values iterate as plain floats / row tuples.
+_ndim_cache = {}
+
+
+def _make_vectn(ct, n, name):
+    class vectn(ctypes.Structure):
+        _fields_ = [("e", ct * n)]
+
+        def __init__(self, vals=None):
+            super().__init__()
+            if vals is not None:
+                t = _seq(vals, n)
+                for i in range(n):
+                    self.e[i] = float(t[i])
+
+        def __add__(self, o): return type(self)([a + b for a, b in zip(self, o)])
+        def __sub__(self, o): return type(self)([a - b for a, b in zip(self, o)])
+        def __neg__(self): return type(self)([-a for a in self])
+
+        def __mul__(self, o):
+            if hasattr(o, "__len__"):
+                return sum(a * b for a, b in zip(self, o))  # dot
+            return type(self)([a * o for a in self])
+
+        def __rmul__(self, s): return type(self)([a * s for a in self])
+        def square(self): return sum(a * a for a in self)
+        def norm(self): return _pm.sqrt(self.square())
+
+        def __len__(self): return n
+        def __iter__(self): return iter(tuple(self.e))
+        def __getitem__(self, i): return self.e[i]
+        def __setitem__(self, i, v): self.e[i] = float(v)
+        def __repr__(self): return "%s(%r)" % (name, list(self.e))
+
+    vectn.__name__ = vectn.__qualname__ = name
+    return vectn
+
+
+def _make_matrixn(ct, r, c, name):
+    row = vectn_class(ct, c)
+
+    class matrixn(ctypes.Structure):
+        _fields_ = [("rows", row * r)]
+
+        def __init__(self, vals=None):
+            super().__init__()
+            if vals is not None:
+                t = _seq(vals, r)
+                for i in range(r):
+                    self.rows[i] = row(t[i])
+
+        def transpose(self):
+            out = matrixn_class(ct, c, r)()
+            for i in range(r):
+                for j in range(c):
+                    out.rows[j].e[i] = self.rows[i].e[j]
+            return out
+
+        def __mul__(self, o):
+            if hasattr(o, "rows"):
+                k = len(o.rows[0])
+                out = matrixn_class(ct, r, k)()
+                for i in range(r):
+                    for j in range(c):
+                        for kk in range(k):
+                            out.rows[i].e[kk] += self.rows[i].e[j] * o.rows[j].e[kk]
+                return out
+            if hasattr(o, "__len__"):
+                return vectn_class(ct, r)([self.rows[i] * o for i in range(r)])
+            out = matrixn_class(ct, r, c)()
+            for i in range(r):
+                out.rows[i] = self.rows[i] * o
+            return out
+
+        def __len__(self): return r
+        def __iter__(self): return iter(tuple(self.rows))
+        def __getitem__(self, i): return self.rows[i]
+        def __repr__(self):
+            return "%s(%r)" % (name, [list(rw.e) for rw in self.rows])
+
+    matrixn.__name__ = matrixn.__qualname__ = name
+    return matrixn
+
+
+def vectn_class(ct, n):
+    key = ("v", ct, n)
+    if key not in _ndim_cache:
+        sfx = "f" if ct is ctypes.c_float else "d"
+        _ndim_cache[key] = _make_vectn(ct, n, "vectn%s(%d)" % (sfx, n))
+    return _ndim_cache[key]
+
+
+def matrixn_class(ct, r, c):
+    key = ("m", ct, r, c)
+    if key not in _ndim_cache:
+        sfx = "f" if ct is ctypes.c_float else "d"
+        _ndim_cache[key] = _make_matrixn(ct, r, c, "matrixn%s(%d, %d)" % (sfx, r, c))
+    return _ndim_cache[key]
+
+
+def vectnf(n): return vectn_class(ctypes.c_float, n)
+def vectnd(n): return vectn_class(ctypes.c_double, n)
+def matrixnf(r, c): return matrixn_class(ctypes.c_float, r, c)
+def matrixnd(r, c): return matrixn_class(ctypes.c_double, r, c)

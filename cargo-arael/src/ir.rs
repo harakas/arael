@@ -74,26 +74,31 @@ impl Model {
         if m.schema != 1 {
             return Err(format!("sidecar schema {} not supported (want 1)", m.schema));
         }
-        // N-dimensional vect/matrix fields have no C++/Python mirror yet;
-        // a silent skip would export a model missing fields.
-        for (tname, ty) in &m.types {
-            for f in &ty.fields {
-                let head = f.of.as_deref()
-                    .or(f.spelled.as_deref())
-                    .unwrap_or("")
-                    .split('<').next().unwrap_or("");
-                if matches!(head, "vect" | "vectf" | "vectd"
-                    | "matrix" | "matrixf" | "matrixd")
-                {
-                    return Err(format!(
-                        "{}.{}: N-dimensional `vect`/`matrix` fields are not \
-                         supported by the C++/Python export yet",
-                        tname, f.name));
-                }
-            }
-        }
         Ok(m)
     }
+}
+
+/// The N-dimensional math spellings, parsed to (scalar, dims):
+/// `vect<f64, 4>` / `vectd<4>` -> ("f64", [4]);
+/// `matrix<f32, 2, 4>` / `matrixf<2, 4>` -> ("f32", [2, 4]).
+/// None for anything else.
+pub fn ndim_math(of: &str) -> Option<(String, Vec<usize>)> {
+    let (head, rest) = of.split_once('<')?;
+    let args: Vec<&str> = rest.strip_suffix('>')?.split(',').map(str::trim).collect();
+    let (scalar, dims, want) = match head.trim() {
+        "vect" => (args.first()?.to_string(), &args[1..], 1),
+        "vectf" => ("f32".to_string(), &args[..], 1),
+        "vectd" => ("f64".to_string(), &args[..], 1),
+        "matrix" => (args.first()?.to_string(), &args[1..], 2),
+        "matrixf" => ("f32".to_string(), &args[..], 2),
+        "matrixd" => ("f64".to_string(), &args[..], 2),
+        _ => return None,
+    };
+    if dims.len() != want || !matches!(scalar.as_str(), "f32" | "f64") {
+        return None;
+    }
+    let dims: Option<Vec<usize>> = dims.iter().map(|d| d.parse().ok()).collect();
+    Some((scalar, dims?))
 }
 
 /// snake_case of a CamelCase type name: PoseTie -> pose_tie.

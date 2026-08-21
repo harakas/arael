@@ -293,4 +293,57 @@ using matrix3d = matrix3<double>;
 static_assert(sizeof(matrix3f) == 36 && sizeof(matrix3d) == 72, "matrix3 layout");
 static_assert(sizeof(matrix2f) == 16 && sizeof(matrix2d) == 32, "matrix2 layout");
 
+/// R x C matrix stored as R row vectors -- mirrors arael's
+/// matrix<T, R, C> (same layout as the FFI mirror structs). `m[i]`
+/// yields the row; `m * v` and `m * m2` multiply; `transpose()` flips.
+template<class T, std::size_t R, std::size_t C>
+struct matrix {
+    vect<T, C> rows[R];
+
+    vect<T, C>& operator[](std::size_t i) { return rows[i]; }
+    const vect<T, C>& operator[](std::size_t i) const { return rows[i]; }
+
+    matrix operator+(const matrix& o) const {
+        matrix r{};
+        for (std::size_t i = 0; i < R; i++) r.rows[i] = rows[i] + o.rows[i];
+        return r;
+    }
+    matrix operator-(const matrix& o) const {
+        matrix r{};
+        for (std::size_t i = 0; i < R; i++) r.rows[i] = rows[i] - o.rows[i];
+        return r;
+    }
+    matrix operator*(T s) const {
+        matrix r{};
+        for (std::size_t i = 0; i < R; i++) r.rows[i] = rows[i] * s;
+        return r;
+    }
+    vect<T, R> operator*(const vect<T, C>& v) const {
+        vect<T, R> r{};
+        for (std::size_t i = 0; i < R; i++) r.e[i] = rows[i] * v;
+        return r;
+    }
+    template<std::size_t K>
+    matrix<T, R, K> operator*(const matrix<T, C, K>& o) const {
+        matrix<T, R, K> r{};
+        for (std::size_t i = 0; i < R; i++)
+            for (std::size_t j = 0; j < C; j++)
+                for (std::size_t k = 0; k < K; k++)
+                    r.rows[i].e[k] += rows[i].e[j] * o.rows[j].e[k];
+        return r;
+    }
+    matrix<T, C, R> transpose() const {
+        matrix<T, C, R> r{};
+        for (std::size_t i = 0; i < R; i++)
+            for (std::size_t j = 0; j < C; j++)
+                r.rows[j].e[i] = rows[i].e[j];
+        return r;
+    }
+};
+
+template<std::size_t R, std::size_t C> using matrixf = matrix<float, R, C>;
+template<std::size_t R, std::size_t C> using matrixd = matrix<double, R, C>;
+
+static_assert(sizeof(matrix<double, 2, 4>) == 64, "matrix<R, C> layout");
+
 } // namespace arael

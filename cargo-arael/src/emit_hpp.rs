@@ -21,19 +21,28 @@ fn scalar_cpp(of: &str) -> Option<&'static str> {
 
 /// Math type -> the arael C++ math type (layout-matched to the shim's
 /// repr(C) mirrors).
-fn math_cpp(of: &str) -> Option<&'static str> {
+fn math_cpp(of: &str) -> Option<String> {
     Some(match of {
-        "vect2f" => "vect2f",
-        "vect2d" => "vect2d",
-        "vect3f" => "vect3f",
-        "vect3d" => "vect3d",
-        "matrix2f" => "matrix2f",
-        "matrix2d" => "matrix2d",
-        "matrix3f" => "matrix3f",
-        "matrix3d" => "matrix3d",
-        "quaternf" => "quaternf",
-        "quaternd" => "quaternd",
-        _ => return None,
+        "vect2f" => "vect2f".to_string(),
+        "vect2d" => "vect2d".to_string(),
+        "vect3f" => "vect3f".to_string(),
+        "vect3d" => "vect3d".to_string(),
+        "matrix2f" => "matrix2f".to_string(),
+        "matrix2d" => "matrix2d".to_string(),
+        "matrix3f" => "matrix3f".to_string(),
+        "matrix3d" => "matrix3d".to_string(),
+        "quaternf" => "quaternf".to_string(),
+        "quaternd" => "quaternd".to_string(),
+        _ => {
+            // N-dimensional instantiations map to the C++ templates
+            // (layout: T e[N] / vect<T, C> rows[R], matching the mirrors).
+            let (scalar, dims) = crate::ir::ndim_math(of)?;
+            let sc = if scalar == "f32" { "float" } else { "double" };
+            return Some(match dims.len() {
+                1 => format!("vect<{}, {}>", sc, dims[0]),
+                _ => format!("matrix<{}, {}, {}>", sc, dims[0], dims[1]),
+            });
+        }
     })
 }
 
@@ -60,10 +69,10 @@ pub fn camel(field: &str) -> String {
 /// Value type of a get/set field as (C++ type, ffi decl type) --
 /// identical strings here since the extern decls use the arael math
 /// types directly.
-fn value_type(f: &Field) -> Option<&'static str> {
+fn value_type(f: &Field) -> Option<String> {
     let of = f.of.as_deref().unwrap_or("");
     match f.kind.as_str() {
-        "data" | "param" => scalar_cpp(of).or_else(|| math_cpp(of)),
+        "data" | "param" => scalar_cpp(of).map(str::to_string).or_else(|| math_cpp(of)),
         "euler_param" => {
             let s = f.scalar.as_deref().unwrap_or("f64");
             Some(match (f.variant.as_deref().unwrap_or("simple"), s) {
@@ -71,7 +80,7 @@ fn value_type(f: &Field) -> Option<&'static str> {
                 ("rotvec", _) => "quaternd",
                 (_, "f32") => "vect3f",
                 (_, _) => "vect3d",
-            })
+            }.to_string())
         }
         _ => None,
     }
@@ -803,6 +812,8 @@ using arael::vect2;
 using arael::vect3;
 using arael::matrix2;
 using arael::matrix3;
+using arael::vect;
+using arael::matrix;
 using arael::quatern;
 using arael::vect2f;
 using arael::vect2d;
