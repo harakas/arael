@@ -54,13 +54,18 @@ pub fn endpoint_name(sketch: &Sketch, e: &DimensionEndpoint) -> String {
     }
 }
 
+/// The action deleting the entity; its relations cascade.
+pub fn delete_action(e: MetaEntity) -> Action {
+    match e {
+        MetaEntity::Line(l) => Action::DeleteLine { line: l },
+        MetaEntity::Arc(a) => Action::DeleteArc { arc: a },
+        MetaEntity::Point(p) => Action::DeletePoint { point: p },
+    }
+}
+
 /// Delete the entity; its relations cascade.
 pub fn delete_entity(runner: &mut dyn ActionRunner, e: MetaEntity) {
-    match e {
-        MetaEntity::Line(l) => { runner.run(Action::DeleteLine { line: l }); }
-        MetaEntity::Arc(a) => { runner.run(Action::DeleteArc { arc: a }); }
-        MetaEntity::Point(p) => { runner.run(Action::DeletePoint { point: p }); }
-    }
+    runner.run(delete_action(e));
 }
 
 /// Why a record no longer holds, if it does not: a source or result
@@ -145,6 +150,7 @@ pub fn delete_with_result(runner: &mut dyn ActionRunner, mid: u32) -> Result<Vec
     runner.begin_group();
     runner.run(Action::UnregisterMeta { mid });
     let mut names = Vec::new();
+    let mut deletes = Vec::new();
     for e in owned {
         if !entity_exists(runner.sketch(), e) {
             continue;
@@ -153,7 +159,11 @@ pub fn delete_with_result(runner: &mut dyn ActionRunner, mid: u32) -> Result<Vec
         if !matches!(e, MetaEntity::Point(p) if runner.sketch().points[p].helper) {
             names.push(entity_name(runner.sketch(), e));
         }
-        delete_entity(runner, e);
+        deletes.push(delete_action(e));
+    }
+    // One step for all of them: a pattern can own hundreds.
+    if !deletes.is_empty() {
+        runner.run(Action::Batch { label: "Delete meta-constraint result".into(), actions: deletes });
     }
     Ok(names)
 }

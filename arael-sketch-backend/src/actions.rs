@@ -166,6 +166,12 @@ pub enum Action {
     /// Rewrite image constraints' numbers (a pattern distance / angle
     /// edit), one undo step; the references stay.
     SetImageTransforms { updates: Vec<(u32, Xf)> },
+    /// Many actions as one: applied in order without the per-action
+    /// solve and gate, one solve and one history entry at the end. For an
+    /// engine creating hundreds of entities and constraints it knows to be
+    /// consistent (a pattern's copies); `conflicts::validate_action` does
+    /// not look inside. Returns `Created::Many` in order.
+    Batch { label: String, actions: Vec<Action> },
     /// Record a meta-constraint (see `arael_sketch_solver::metas` and
     /// `crate::meta`): pushed with the next id and its `M<n>` name when
     /// it comes unnamed, otherwise it replaces the record with that mid.
@@ -290,6 +296,7 @@ impl Action {
             Action::AddArcAngles { .. } => "Add arc".into(),
             Action::ApplyImageLine { .. } | Action::ApplyImageArc { .. } | Action::ApplyImagePoint { .. } => "Image".into(),
             Action::SetImageTransforms { .. } => "Set pattern transforms".into(),
+            Action::Batch { label, .. } => label.clone(),
             Action::ApplyHorizontal { lines } => format!("Horizontal ({})", lines.len()),
             Action::ApplyVertical { lines } => format!("Vertical ({})", lines.len()),
             Action::ApplyCoincidentPP { .. } => "Coincident PP".into(),
@@ -1051,6 +1058,16 @@ impl Action {
                 for (nid, xf) in updates {
                     set_image_transform(sketch, *nid, xf);
                 }
+            }
+            Action::Batch { actions, .. } => {
+                let mut needs_expr = false;
+                let mut many = Vec::with_capacity(actions.len());
+                for a in actions {
+                    let (e, c) = a.apply_without_solve(sketch);
+                    needs_expr |= e;
+                    many.push(c);
+                }
+                return (needs_expr, Created::Many(many));
             }
             Action::ApplyHorizontal { lines } => {
                 for r in lines {

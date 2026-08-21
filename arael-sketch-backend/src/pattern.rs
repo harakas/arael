@@ -438,56 +438,25 @@ fn last_nid(runner: &dyn ActionRunner) -> u32 {
     runner.sketch().next_constraint_id.saturating_sub(1)
 }
 
-/// Create one copy entity in place, with the source's construction
-/// flag and style.
-fn create_copy(runner: &mut dyn ActionRunner, g: &CopyGeom, src: MetaEntity) -> Result<MetaEntity, String> {
-    let sketch = runner.sketch();
-    let (construction, style) = match src {
-        MetaEntity::Line(l) => (sketch.lines[l].construction, sketch.lines[l].style),
-        MetaEntity::Arc(a) => (sketch.arcs[a].construction, sketch.arcs[a].style),
-        MetaEntity::Point(_) => (false, LineStyle::Solid),
-    };
-    let created = match *g {
-        CopyGeom::Line { p1, p2 } => runner.run(Action::AddLine { p1, p2 }),
-        CopyGeom::Point { pos } => runner.run(Action::AddPoint { pos }),
+/// The creation action for one copy entity.
+fn create_action(g: &CopyGeom) -> Action {
+    match *g {
+        CopyGeom::Line { p1, p2 } => Action::AddLine { p1, p2 },
+        CopyGeom::Point { pos } => Action::AddPoint { pos },
         CopyGeom::Arc { center, radius, radius_b, rotation, start, end, ccw, closed, is_ellipse } => {
             if is_ellipse {
                 if closed {
-                    runner.run(Action::AddEllipse { center, rx: radius, ry: radius_b, rotation })
+                    Action::AddEllipse { center, rx: radius, ry: radius_b, rotation }
                 } else {
-                    runner.run(Action::AddEllipticArc { center, rx: radius, ry: radius_b, rotation, start, end, ccw })
+                    Action::AddEllipticArc { center, rx: radius, ry: radius_b, rotation, start, end, ccw }
                 }
             } else if closed {
-                runner.run(Action::AddCircle { center, edge: vect2d::new(center.x + radius, center.y) })
+                Action::AddCircle { center, edge: vect2d::new(center.x + radius, center.y) }
             } else {
-                runner.run(Action::AddArcAngles { center, radius, start, end, ccw })
+                Action::AddArcAngles { center, radius, start, end, ccw }
             }
         }
-    };
-    if let Some(e) = runner.take_error() {
-        return Err(format!("copying {}: {}", entity_name(runner.sketch(), src), e));
     }
-    let entity = match created {
-        Created::Line(l) => MetaEntity::Line(l),
-        Created::Arc(a) => MetaEntity::Arc(a),
-        Created::Point(p) => MetaEntity::Point(p),
-        _ => return Err(format!("copying {}: nothing was added", entity_name(runner.sketch(), src))),
-    };
-    if construction {
-        match entity {
-            MetaEntity::Line(l) => { runner.run(Action::SetConstructionLine { line: l, on: true }); }
-            MetaEntity::Arc(a) => { runner.run(Action::SetConstructionArc { arc: a, on: true }); }
-            MetaEntity::Point(_) => {}
-        }
-    }
-    if style != LineStyle::Solid {
-        match entity {
-            MetaEntity::Line(l) => { runner.run(Action::SetStyleLine { line: l, style }); }
-            MetaEntity::Arc(a) => { runner.run(Action::SetStyleArc { arc: a, style }); }
-            MetaEntity::Point(_) => {}
-        }
-    }
-    Ok(entity)
 }
 
 /// The copy's counterpart of a source point reference.
@@ -519,47 +488,129 @@ fn xf_of(plan: &PatternPlan, copy: &CopyPlan, center: Option<Ref<Point>>) -> Xf 
     }
 }
 
-/// Create one copy: its entities, then its image constraints and the
-/// coincidences the tie plan asks for.
-fn apply_copy(
+/// Run a batch and report its error.
+fn run_batch(runner: &mut dyn ActionRunner, label: &str, actions: Vec<Action>) -> Result<Created, String> {
+    let created = runner.run(Action::Batch { label: label.to_string(), actions });
+    match runner.take_error() {
+        Some(e) => Err(format!("{}: {}", label, e)),
+        None => Ok(created),
+    }
+}
+
+/// Every copy's entities and constraints, in two batches: all the
+/// entities (one solve), then all the image constraints, the recreated
+/// coincidences and the construction / style flags (one solve). The
+/// constraints are known to be consistent by construction, so they skip
+/// the per-constraint gate; a pattern of hundreds of entities is a
+/// handful of history entries.
+fn make_copies(
     runner: &mut dyn ActionRunner,
     plan: &PatternPlan,
-    copy: &CopyPlan,
     center: Option<Ref<Point>>,
     out: &mut PatternOutcome,
-) -> Result<PatternCopy, String> {
-    let mut entities = Vec::with_capacity(plan.sources.len());
-    let mut names = Vec::new();
-    for (k, g) in copy.geoms.iter().enumerate() {
-        let e = create_copy(runner, g, plan.sources[k])?;
-        names.push(entity_name(runner.sketch(), e));
-        entities.push(e);
+) -> Result<Vec<PatternCopy>, String> {
+    let n = plan.sources.len();
+    // Phase 1: the entities.
+    let creates: Vec<Action> = plan.copies.iter().flat_map(|c| c.geoms.iter().map(create_action)).collect();
+    let created = run_batch(runner, "Pattern copies", creates)?;
+    let Created::Many(list) = created else {
+        return Err("pattern copies: nothing was added".into());
+    };
+    if list.len() != plan.copies.len() * n {
+        return Err("pattern copies: not every entity was added".into());
     }
-    let xf = xf_of(plan, copy, center);
-    let mut constraints = Vec::new();
-    for (k, tie) in plan.ties.iter().enumerate() {
-        if tie.mask != 0 {
-            let action = match (plan.sources[k], entities[k]) {
-                (MetaEntity::Line(a), MetaEntity::Line(b)) => Action::ApplyImageLine { a, b, xf, mask: tie.mask },
-                (MetaEntity::Arc(a), MetaEntity::Arc(b)) => Action::ApplyImageArc { a, b, xf, mask: tie.mask },
-                (MetaEntity::Point(a), MetaEntity::Point(b)) => Action::ApplyImagePoint { a, b, xf },
-                _ => unreachable!("a copy has its source's kind"),
+    let mut entities_per_copy: Vec<Vec<MetaEntity>> = Vec::with_capacity(plan.copies.len());
+    let mut it = list.into_iter();
+    for copy in &plan.copies {
+        let mut entities = Vec::with_capacity(n);
+        for (k, _) in copy.geoms.iter().enumerate() {
+            let e = match it.next() {
+                Some(Created::Line(l)) => MetaEntity::Line(l),
+                Some(Created::Arc(a)) => MetaEntity::Arc(a),
+                Some(Created::Point(p)) => MetaEntity::Point(p),
+                _ => return Err(format!("copying {}: nothing was added", entity_name(runner.sketch(), plan.sources[k]))),
             };
-            run_checked(runner, action, "image")?;
-            constraints.push(last_nid(runner));
+            entities.push(e);
         }
-        for &(own, other) in &tie.ties {
-            let (Some(a), Some(b)) = (map_endpoint(own, &plan.sources, &entities), map_endpoint(other, &plan.sources, &entities)) else {
+        entities_per_copy.push(entities);
+    }
+    // Phase 2: images, coincidences, flags.
+    let n0 = runner.sketch().next_constraint_id;
+    let mut acts: Vec<Action> = Vec::new();
+    for (copy, entities) in plan.copies.iter().zip(&entities_per_copy) {
+        let xf = xf_of(plan, copy, center);
+        for (k, tie) in plan.ties.iter().enumerate() {
+            if tie.mask != 0 {
+                acts.push(match (plan.sources[k], entities[k]) {
+                    (MetaEntity::Line(a), MetaEntity::Line(b)) => Action::ApplyImageLine { a, b, xf, mask: tie.mask },
+                    (MetaEntity::Arc(a), MetaEntity::Arc(b)) => Action::ApplyImageArc { a, b, xf, mask: tie.mask },
+                    (MetaEntity::Point(a), MetaEntity::Point(b)) => Action::ApplyImagePoint { a, b, xf },
+                    _ => unreachable!("a copy has its source's kind"),
+                });
+            }
+            for &(own, other) in &tie.ties {
+                if let (Some(a), Some(b)) = (map_endpoint(own, &plan.sources, entities), map_endpoint(other, &plan.sources, entities))
+                    && let Some(action) = Action::coincident(a, b)
+                {
+                    acts.push(action);
+                }
+            }
+        }
+        for (k, &e) in entities.iter().enumerate() {
+            let sketch = runner.sketch();
+            let (construction, style) = match plan.sources[k] {
+                MetaEntity::Line(l) => (sketch.lines[l].construction, sketch.lines[l].style),
+                MetaEntity::Arc(a) => (sketch.arcs[a].construction, sketch.arcs[a].style),
+                MetaEntity::Point(_) => (false, LineStyle::Solid),
+            };
+            if construction {
+                match e {
+                    MetaEntity::Line(l) => acts.push(Action::SetConstructionLine { line: l, on: true }),
+                    MetaEntity::Arc(a) => acts.push(Action::SetConstructionArc { arc: a, on: true }),
+                    MetaEntity::Point(_) => {}
+                }
+            }
+            if style != LineStyle::Solid {
+                match e {
+                    MetaEntity::Line(l) => acts.push(Action::SetStyleLine { line: l, style }),
+                    MetaEntity::Arc(a) => acts.push(Action::SetStyleArc { arc: a, style }),
+                    MetaEntity::Point(_) => {}
+                }
+            }
+        }
+    }
+    run_batch(runner, "Pattern constraints", acts)?;
+    // The new constraints, by the copy they reference.
+    let mut owner: HashMap<MetaEntity, usize> = HashMap::new();
+    for (ci, entities) in entities_per_copy.iter().enumerate() {
+        for &e in entities {
+            owner.insert(e, ci);
+        }
+    }
+    let mut per_copy: Vec<Vec<u32>> = vec![Vec::new(); plan.copies.len()];
+    runner.sketch().for_each_constraint_collection_ref(|_, _, coll| {
+        for i in 0..coll.len() {
+            let c = coll.item(i);
+            if c.nid() < n0 {
                 continue;
-            };
-            let Some(action) = Action::coincident(a, b) else { continue };
-            run_checked(runner, action, "coincident")?;
-            constraints.push(last_nid(runner));
+            }
+            let mut hit: Option<usize> = None;
+            c.each_line_ref(&mut |l| if let Some(&ci) = owner.get(&MetaEntity::Line(l)) { hit = Some(ci); });
+            c.each_arc_ref(&mut |a| if let Some(&ci) = owner.get(&MetaEntity::Arc(a)) { hit = Some(ci); });
+            c.each_point_ref(&mut |p| if let Some(&ci) = owner.get(&MetaEntity::Point(p)) { hit = Some(ci); });
+            if let Some(ci) = hit {
+                per_copy[ci].push(c.nid());
+            }
         }
+    });
+    let mut copies = Vec::with_capacity(plan.copies.len());
+    for ((copy, entities), mut constraints) in plan.copies.iter().zip(entities_per_copy).zip(per_copy) {
+        constraints.sort_unstable();
+        out.entities.push(entities.iter().map(|e| entity_name(runner.sketch(), *e)).collect());
+        out.constraints.extend(constraints.iter().map(|n| format!("C{}", n)));
+        copies.push(PatternCopy { index: copy.index, entities, constraints });
     }
-    out.entities.push(names);
-    out.constraints.extend(constraints.iter().map(|n| format!("C{}", n)));
-    Ok(PatternCopy { index: copy.index, entities, constraints })
+    Ok(copies)
 }
 
 /// The center point of a circular pattern: the point itself, or a hidden
@@ -621,10 +672,7 @@ pub fn apply(runner: &mut dyn ActionRunner, plan: &PatternPlan) -> Result<Patter
 fn apply_inner(runner: &mut dyn ActionRunner, plan: &PatternPlan) -> Result<PatternOutcome, String> {
     let mut out = PatternOutcome::default();
     let (center, helper, constraints) = center_point(runner, plan)?;
-    let mut copies = Vec::with_capacity(plan.copies.len());
-    for copy in &plan.copies {
-        copies.push(apply_copy(runner, plan, copy, center, &mut out)?);
-    }
+    let copies = make_copies(runner, plan, center, &mut out)?;
     let pattern = Pattern { sources: plan.sources.clone(), kind: record_kind(plan, helper), copies, constraints };
     runner.run(Action::RegisterMeta { meta: Meta { mid: 0, name: String::new(), kind: MetaKind::Pattern(pattern) } });
     if let Some(e) = runner.take_error() {
@@ -766,23 +814,21 @@ fn update_inner(runner: &mut dyn ActionRunner, mid: u32, p: &Pattern, new_plan: 
     rec.constraints.clear();
     rec.kind = record_kind(new_plan, None);
     register(runner, mid, rec)?;
-    for e in doomed {
-        if entity_exists(runner.sketch(), e) {
-            crate::meta::delete_entity(runner, e);
-            if let Some(err) = runner.take_error() { return Err(err); }
-        }
-    }
+    let mut deletes: Vec<Action> = doomed
+        .into_iter()
+        .filter(|e| entity_exists(runner.sketch(), *e))
+        .map(crate::meta::delete_action)
+        .collect();
     if let Some(h) = old_helper
         && runner.sketch().points.get(h).is_some()
     {
-        runner.run(Action::DeletePoint { point: h });
-        if let Some(err) = runner.take_error() { return Err(err); }
+        deletes.push(Action::DeletePoint { point: h });
+    }
+    if !deletes.is_empty() {
+        run_batch(runner, "Delete pattern copies", deletes)?;
     }
     let (center, helper, constraints) = center_point(runner, new_plan)?;
-    let mut copies = Vec::new();
-    for copy in &new_plan.copies {
-        copies.push(apply_copy(runner, new_plan, copy, center, &mut out)?);
-    }
+    let copies = make_copies(runner, new_plan, center, &mut out)?;
     let rec = Pattern { sources: p.sources.clone(), kind: record_kind(new_plan, helper), copies, constraints };
     register(runner, mid, rec)?;
     Ok(out)
