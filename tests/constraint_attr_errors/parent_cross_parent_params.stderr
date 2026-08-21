@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_cross_parent_params.rs:18: `parent.hb`: `Pair` has its own Param fields -- the parent of a shared CrossBlock is a plain container; couple parent params through `parent.<selfblock>` or `[hb, parent.<triplet>]` instead
+  --> tests/constraint_attr_errors/parent_cross_parent_params.rs:35:1
+   |
+35 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/parent_cross_parent_params.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

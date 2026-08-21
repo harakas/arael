@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_cross_unknown_parent_field.rs:18: no field `zz` on `Pair` (in `parent.zz`) (did you mean `a`?)
+  --> tests/constraint_attr_errors/parent_cross_unknown_parent_field.rs:33:1
+   |
+33 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/parent_cross_unknown_parent_field.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

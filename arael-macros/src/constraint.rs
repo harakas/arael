@@ -2256,6 +2256,22 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
     Err(syn::Error::new_spanned(ty, "expected SelfBlock<A>, CrossBlock<A, B>, or TripletBlock"))
 }
 
+/// A `parent.<crossblock>` primary resolved against the containing parent:
+/// a shared cross accumulator for every constraint instance the parent
+/// holds.
+struct ParentCross {
+    /// The CrossBlock field on the parent.
+    field: syn::Ident,
+    parent_type: String,
+    a_type: String,
+    b_type: String,
+    /// None: the constraint declares its own `[Ref<A>, Ref<B>]` (wiring
+    /// checks that all instances under one parent agree). Some((ra, rb)):
+    /// the parent's ref fields fill the (A, B) slots -- no per-instance
+    /// refs, resolution hoisted to the parent, wired once per parent.
+    parent_refs: Option<(String, String)>,
+}
+
 /// Per-pair routing info for a multi-CrossBlock constraint. Built by
 /// `build_multi_cross_routing` from the declared block-field list and the
 /// struct's ref-field layout.
@@ -2652,6 +2668,9 @@ pub fn generate_root_methods(
         // set_indices emission to wire the parent's block once per parent
         // with a pair-agreement check; the panic message names both.
         parent_cross_desc: Option<(String, String)>,
+        // Parent-refs form: the pair comes from the parent's own refs --
+        // resolution and wiring hoisted to the parent, no agreement check.
+        parent_refs_mode: bool,
         constraint_index_field: Option<syn::Ident>,
         // Shared across all attributes on this struct (recomputed from the first attribute)
         a_idx_stmts: Vec<TokenStream2>,
@@ -3066,13 +3085,14 @@ pub fn generate_root_methods(
         // parameter-bearing entity (any depth below the root) and writes
         // into THAT entity's SelfBlock -- the non-root analog of
         // `root.<selfblock>`. (field ident, parent type name).
-        // `parent.<crossblock>`: (field ident, parent type name,
-        // A type, B type). A CrossBlock on the containing parent, shared
-        // by every constraint instance the parent holds; the constraint
-        // keeps its own two refs. All instances under one parent must
-        // reference the same (A, B) pair -- checked at wiring time.
+        // `parent.<crossblock>`: a CrossBlock on the containing parent,
+        // shared by every constraint instance the parent holds. With own
+        // Ref fields on the constraint, every instance must reference the
+        // same (A, B) pair -- checked at wiring time. With NO own Ref
+        // fields, the parent's ref fields fill the slots (bodies read
+        // `parent.<ref>.<field>`), resolved once per parent.
         let mut parent_self_primary: Option<(syn::Ident, String)> = None;
-        let mut parent_cross: Option<(syn::Ident, String, String, String)> = None;
+        let mut parent_cross: Option<ParentCross> = None;
         if let Some(rest) = constraint.primary_block_field().strip_prefix("parent.") {
             let rest = rest.to_string();
             let parent_type = find_containing_parent(&root_name.to_string(), &sc.struct_name)
@@ -3103,8 +3123,8 @@ pub fn generate_root_methods(
                 }
                 parent_self_primary = Some((
                     syn::Ident::new(&rest, proc_macro2::Span::call_site()), parent_type));
-            } else if let Some((_, ca, cb)) = playout.cross_block_fields.iter()
-                .find(|(n, _, _)| *n == rest).cloned()
+            } else if let Some((_, ca, cb, cross_over)) = playout.cross_block_fields.iter()
+                .find(|(n, _, _, _)| *n == rest).cloned()
             {
                 if constraint.block_fields.len() != 1 {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
@@ -3121,24 +3141,129 @@ pub fn generate_root_methods(
                             sc.attr_file, sc.attr_line, sc.struct_name, rest,
                             sc.struct_name, sc.struct_name)));
                 }
-                // The constraint's Ref fields, in declaration order, must be
-                // exactly [Ref<A>, Ref<B>] of the parent's CrossBlock<A, B>.
                 let ref_types: Vec<String> = fields.named.iter()
                     .filter_map(|f| extract_wrapper_inner(&f.ty, "Ref")
                         .map(|(_, id)| id.to_string()))
                     .collect();
-                if ref_types != [ca.clone(), cb.clone()] {
-                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                        format!("{}:{}: `parent.{}` is a `CrossBlock<{}, {}>` on `{}` -- \
-                                 `{}` must declare exactly two Ref fields, [Ref<{}>, Ref<{}>] \
-                                 in declaration order; found [{}]",
-                            sc.attr_file, sc.attr_line, rest, ca, cb, parent_type,
-                            sc.struct_name, ca, cb, ref_types.join(", "))));
-                }
+                let parent_refs: Option<(String, String)> = if ref_types.is_empty() {
+                    // No own refs: the parent's ref fields fill the slots.
+                    if !playout.param_fields.is_empty() {
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `parent.{}`: `{}` has its own Param fields -- \
+                                     the parent of a shared CrossBlock is a plain container; \
+                                     couple parent params through `parent.<selfblock>` or \
+                                     `[hb, parent.<triplet>]` instead",
+                                sc.attr_file, sc.attr_line, rest, parent_type)));
+                    }
+                    // The parent's Ref fields in declaration order, with types.
+                    let prefs: Vec<(String, String)> = playout.ref_paths.iter()
+                        .filter_map(|(rf, _)| {
+                            playout.fields.iter().find(|(fname, _)| fname == rf)
+                                .and_then(|(_, sft)| match sft {
+                                    SymFieldType::Struct(t) => Some((rf.clone(), t.clone())),
+                                    _ => None,
+                                })
+                        }).collect();
+                    let listing = || prefs.iter().map(|(n, t)| format!("{}: Ref<{}>", n, t))
+                        .collect::<Vec<_>>().join(", ");
+                    let chosen: (String, String) = if let Some((ra, rb)) = &cross_over {
+                        for (rn, want) in [(ra, &ca), (rb, &cb)] {
+                            match prefs.iter().find(|(n, _)| n == rn) {
+                                None => return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                    format!("{}:{}: `cross = ({}, {})` on `{}.{}`: `{}` is \
+                                             not a Ref field of `{}` (which has {})",
+                                        sc.attr_file, sc.attr_line, ra, rb, parent_type,
+                                        rest, rn, parent_type, listing()))),
+                                Some((_, t)) if t != want =>
+                                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                    format!("{}:{}: `cross = ({}, {})` on `{}.{}`: `{}` is \
+                                             `Ref<{}>` but the slot needs `Ref<{}>`",
+                                        sc.attr_file, sc.attr_line, ra, rb, parent_type,
+                                        rest, rn, t, want))),
+                                _ => {}
+                            }
+                        }
+                        if ra == rb {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: `cross = ({}, {})` aliases both slots to one \
+                                         parent ref -- aliased slots need the own-refs form \
+                                         (Ref fields on `{}`)",
+                                    sc.attr_file, sc.attr_line, ra, rb, sc.struct_name)));
+                        }
+                        (ra.clone(), rb.clone())
+                    } else if ca == cb {
+                        let c: Vec<&String> = prefs.iter()
+                            .filter(|(_, t)| *t == ca).map(|(n, _)| n).collect();
+                        if c.len() != 2 {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: `parent.{}` is a `CrossBlock<{}, {}>` and `{}` \
+                                         declares no Ref fields -- `{}` must declare exactly \
+                                         two `Ref<{}>` fields to fill the slots (it has {}); \
+                                         with more, pick two via `#[arael(cross = (a, b))]` \
+                                         on the block field",
+                                    sc.attr_file, sc.attr_line, rest, ca, cb, sc.struct_name,
+                                    parent_type, ca, listing())));
+                        }
+                        (c[0].clone(), c[1].clone())
+                    } else {
+                        let a_c: Vec<&String> = prefs.iter()
+                            .filter(|(_, t)| *t == ca).map(|(n, _)| n).collect();
+                        let b_c: Vec<&String> = prefs.iter()
+                            .filter(|(_, t)| *t == cb).map(|(n, _)| n).collect();
+                        if a_c.len() != 1 || b_c.len() != 1 {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: `parent.{}` is a `CrossBlock<{}, {}>` and `{}` \
+                                         declares no Ref fields -- `{}` must supply exactly \
+                                         one `Ref<{}>` and one `Ref<{}>` (it has {}); \
+                                         disambiguate via `#[arael(cross = (a, b))]` on the \
+                                         block field",
+                                    sc.attr_file, sc.attr_line, rest, ca, cb, sc.struct_name,
+                                    parent_type, ca, cb, listing())));
+                        }
+                        (a_c[0].clone(), b_c[0].clone())
+                    };
+                    // The chosen refs must target root collections: the
+                    // hoisted resolve indexes `self.<coll>` directly.
+                    for rn in [&chosen.0, &chosen.1] {
+                        let rp = &playout.ref_paths.iter()
+                            .find(|(n, _)| *n == **rn).unwrap().1;
+                        if !rp.starts_with("root.") {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: `{}.{}` resolves through `{}` -- parent refs \
+                                         filling a shared CrossBlock must target a root \
+                                         collection (`ref = root.<coll>`)",
+                                    sc.attr_file, sc.attr_line, parent_type, rn, rp)));
+                        }
+                    }
+                    // Guards run per instance and read match data only;
+                    // parent reads in guards come with the general parent
+                    // value binding.
+                    if constraint.guard.as_deref().is_some_and(|g| g.contains("parent.")) {
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `parent.` in a guard is not supported in the \
+                                     parent-refs form -- guard on the constraint's own \
+                                     fields",
+                                sc.attr_file, sc.attr_line)));
+                    }
+                    Some(chosen)
+                } else {
+                    // Own refs, in declaration order, must be exactly
+                    // [Ref<A>, Ref<B>] of the parent's CrossBlock<A, B>.
+                    if ref_types != [ca.clone(), cb.clone()] {
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `parent.{}` is a `CrossBlock<{}, {}>` on `{}` -- \
+                                     `{}` must declare exactly two Ref fields, [Ref<{}>, Ref<{}>] \
+                                     in declaration order; found [{}]",
+                                sc.attr_file, sc.attr_line, rest, ca, cb, parent_type,
+                                sc.struct_name, ca, cb, ref_types.join(", "))));
+                    }
+                    None
+                };
                 claimed_parent_blocks.insert((parent_type.clone(), rest.clone()));
-                parent_cross = Some((
-                    syn::Ident::new(&rest, proc_macro2::Span::call_site()),
-                    parent_type, ca, cb));
+                parent_cross = Some(ParentCross {
+                    field: syn::Ident::new(&rest, proc_macro2::Span::call_site()),
+                    parent_type, a_type: ca, b_type: cb, parent_refs,
+                });
             } else if playout.triplet_block_fields.contains(&rest) {
                 return Err(syn::Error::new(proc_macro2::Span::call_site(),
                     format!("{}:{}: `parent.{}` is a TripletBlock -- a parent-owned \
@@ -3150,7 +3275,7 @@ pub fn generate_root_methods(
                 if let Some(sb) = &playout.self_block_field {
                     have.push(format!("SelfBlock `{}`", sb));
                 }
-                for (n, a, b) in &playout.cross_block_fields {
+                for (n, a, b, _) in &playout.cross_block_fields {
                     have.push(format!("CrossBlock<{}, {}> `{}`", a, b, n));
                 }
                 for n in &playout.triplet_block_fields {
@@ -3176,10 +3301,10 @@ pub fn generate_root_methods(
             // (or the containing parent's), so there is no local block and
             // no remote Ref target.
             (sc.struct_name.clone(), None, None)
-        } else if let Some((_, _, ca, cb)) = &parent_cross {
+        } else if let Some(pc) = &parent_cross {
             // Shared parent CrossBlock: entity types from the parent's
             // block declaration (the refs were validated to match it).
-            (ca.clone(), Some(cb.clone()), None)
+            (pc.a_type.clone(), Some(pc.b_type.clone()), None)
         } else if is_remote_block {
             // Remote block: e.g. "pose.hb_pose" means the block lives on a Ref<Pose>'s field
             let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -3574,29 +3699,51 @@ pub fn generate_root_methods(
             // be contained in one of its referenced entity types (that
             // takes the frine-style path above), and its collection must
             // sit below the root.
-            if let Some((pc_field, pc_parent, _, _)) = &parent_cross {
+            if let Some(pc) = &parent_cross {
                 if !is_root_level_cross {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
                         format!("{}:{}: `parent.{}`: `{}` is contained in `{}`, an entity \
                                  the constraint references -- hold shared-cross constraints \
                                  in a plain container struct (e.g. `{}`), not in an \
                                  optimized participant",
-                            sc.attr_file, sc.attr_line, pc_field, sc.struct_name,
-                            a_type, pc_parent)));
+                            sc.attr_file, sc.attr_line, pc.field, sc.struct_name,
+                            a_type, pc.parent_type)));
                 }
                 if cross_prefix.is_empty() {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
                         format!("{}:{}: `parent.{}`: `{}`'s collection sits directly on the \
                                  root -- the shared block's parent must be a struct below \
                                  the root",
-                            sc.attr_file, sc.attr_line, pc_field, sc.struct_name)));
+                            sc.attr_file, sc.attr_line, pc.field, sc.struct_name)));
                 }
             }
 
             let struct_layout = registry_lookup(&sc.struct_name);
-            let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
+            // (ref field, resolve path, index owner expr). Own refs index
+            // through `__frine`; parent-supplied refs (the parent-refs
+            // form) through the parent prefix binding, so the index read
+            // is loop-invariant.
+            let resolve_sources: Vec<(String, String, String)> =
+                if let Some(pc) = &parent_cross
+                    && let Some((ra, rb)) = &pc.parent_refs {
+                    let owner = format!("__seg{}", cross_prefix.len() - 1);
+                    let playout = registry_lookup(&pc.parent_type);
+                    [ra, rb].iter().map(|rn| {
+                        let rp = playout.as_ref()
+                            .and_then(|l| l.ref_paths.iter()
+                                .find(|(n, _)| n == *rn).map(|(_, p)| p.clone()))
+                            .expect("parent ref validated at parse");
+                        ((*rn).clone(), rp, owner.clone())
+                    }).collect()
+                } else {
+                    struct_layout.as_ref()
+                        .map(|l| l.ref_paths.clone()).unwrap_or_default()
+                        .into_iter()
+                        .map(|(f, p)| (f, p, "__frine".to_string()))
+                        .collect()
+                };
             let mut seen_ref_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for (field_name, resolve_path) in &ref_paths {
+            for (field_name, resolve_path, idx_owner) in &resolve_sources {
                 let field_ident_inner = syn::Ident::new(field_name, proc_macro2::Span::call_site());
                 // `root.<coll>` -> `self.<coll>`. `parent.<coll>` -> the
                 // containing sub-model instance (`__seg{n-1}`) for a nested
@@ -3609,7 +3756,7 @@ pub fn generate_root_methods(
                         &format!("__seg{}.", cross_prefix.len() - 1))
                 };
                 let resolve_expr: syn::Expr = syn::parse_str(
-                    &format!("{}[__frine.{}]", adjusted_path, field_name)
+                    &format!("{}[{}.{}]", adjusted_path, idx_owner, field_name)
                 ).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
                     format!("failed to parse resolve path: {}", e)))?;
                 resolve_stmts.push(quote! { let #field_ident_inner = &#resolve_expr; });
@@ -3620,9 +3767,13 @@ pub fn generate_root_methods(
                 // reload cost otherwise).
                 if seen_ref_fields.insert(field_name.clone()) {
                     let ei_ident = syn::Ident::new(&format!("__ei_{}", field_name), proc_macro2::Span::call_site());
+                    let idx_expr: syn::Expr = syn::parse_str(
+                        &format!("{}.{}", idx_owner, field_name)
+                    ).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("failed to parse index owner: {}", e)))?;
                     entity_index_copies.push(quote! {
                         #[allow(unused_variables)]
-                        let #ei_ident = __frine.#field_ident_inner;
+                        let #ei_ident = #idx_expr;
                     });
                 }
                 let reread_expr: syn::Expr = syn::parse_str(
@@ -3670,7 +3821,9 @@ pub fn generate_root_methods(
         let root_name_str = root_name.to_string();
         let (residual_exprs, param_symbols, loss_expr, component_subs) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str,
-            parent_cross.as_ref().map(|(_, _, a, b)| (a.as_str(), b.as_str())))
+            parent_cross.as_ref(),
+            if cross_prefix.is_empty() { None }
+            else { Some(format!("__seg{}", cross_prefix.len() - 1)) })
             .map_err(|e| syn::Error::new(e.span(),
                 format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
         check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
@@ -3731,10 +3884,10 @@ pub fn generate_root_methods(
             // The parent's SelfBlock field, emitted through the prefix
             // binding (the entity has no block of its own).
             parent_hb.clone()
-        } else if let Some((pc_field, _, _, _)) = &parent_cross {
+        } else if let Some(pc) = &parent_cross {
             // The parent's shared CrossBlock field, emitted through the
             // prefix binding (`__seg{n-1}`).
-            pc_field.clone()
+            pc.field.clone()
         } else if is_remote_block {
             // For remote blocks, the actual block field name is the last segment
             let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -3883,6 +4036,11 @@ pub fn generate_root_methods(
         // Resolve the A- and B-var idents for CrossBlock's 3-call emission.
         let a_var_ident_for_block: Option<syn::Ident> = if is_self_block {
             Some(syn::Ident::new("__item", proc_macro2::Span::call_site()))
+        } else if let Some(pc) = &parent_cross
+            && let Some((ra, _)) = &pc.parent_refs {
+            // Parent-refs form: the resolved local carries the parent's
+            // ref field name.
+            Some(syn::Ident::new(ra, proc_macro2::Span::call_site()))
         } else if is_root_level_cross {
             let struct_layout = registry_lookup(&sc.struct_name);
             let a_ref_field = struct_layout.as_ref().and_then(|l| {
@@ -3899,7 +4057,10 @@ pub fn generate_root_methods(
         } else {
             Some(syn::Ident::new("__item", proc_macro2::Span::call_site()))
         };
-        let b_var_ident_for_block: Option<syn::Ident> = if let Some(ref b_type_name) = b_type {
+        let b_var_ident_for_block: Option<syn::Ident> = if let Some(pc) = &parent_cross
+            && let Some((_, rb)) = &pc.parent_refs {
+            Some(syn::Ident::new(rb, proc_macro2::Span::call_site()))
+        } else if let Some(ref b_type_name) = b_type {
             let struct_layout_b = registry_lookup(&sc.struct_name);
             let ref_paths_b = struct_layout_b.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
             let mut skip_first_match = is_root_level_cross && a_type == *b_type_name;
@@ -4538,6 +4699,9 @@ pub fn generate_root_methods(
         {
             let a_item = if is_self_block {
                 syn::Ident::new("__item", proc_macro2::Span::call_site())
+            } else if let Some(pc) = &parent_cross
+                && let Some((ra, _)) = &pc.parent_refs {
+                syn::Ident::new(ra, proc_macro2::Span::call_site())
             } else if is_root_level_cross {
                 // For root-level cross, A-type ref is the first Ref<A> field on the constraint struct
                 let struct_layout = registry_lookup(&sc.struct_name);
@@ -4568,26 +4732,32 @@ pub fn generate_root_methods(
         }
         if let Some(ref b_type_name) = b_type
             && let Some(b_layout) = registry_lookup(b_type_name) {
-                // Find ref field matching B type
+                // Find ref field matching B type. Parent-refs form: the
+                // parent's chosen B ref field directly.
                 let struct_layout_b = registry_lookup(&sc.struct_name);
                 let ref_paths_b = struct_layout_b.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
                 // For root-level cross where A==B, the first ref is used for A,
                 // so skip it to find B's ref (the second one of the same type)
                 let mut skip_first_match = is_root_level_cross && a_type == *b_type_name;
-                let b_ref_field = ref_paths_b.iter().find(|(field_name, _)| {
-                    let matches = fields.named.iter().any(|f| {
-                        f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
-                            && extract_wrapper_inner(&f.ty, "Ref")
-                                .map(|(_, id)| id.to_string() == *b_type_name)
-                                .unwrap_or(false)
-                    });
-                    if matches && skip_first_match {
-                        skip_first_match = false;
-                        return false; // skip first match (used for A)
-                    }
-                    matches
-                });
-                if let Some((b_field_name, _)) = b_ref_field {
+                let b_ref_field = if let Some(pc) = &parent_cross
+                    && let Some((_, rb)) = &pc.parent_refs {
+                    Some((rb.clone(), String::new()))
+                } else {
+                    ref_paths_b.iter().find(|(field_name, _)| {
+                        let matches = fields.named.iter().any(|f| {
+                            f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
+                                && extract_wrapper_inner(&f.ty, "Ref")
+                                    .map(|(_, id)| id.to_string() == *b_type_name)
+                                    .unwrap_or(false)
+                        });
+                        if matches && skip_first_match {
+                            skip_first_match = false;
+                            return false; // skip first match (used for A)
+                        }
+                        matches
+                    }).cloned()
+                };
+                if let Some((b_field_name, _)) = &b_ref_field {
                     let b_var_ident = syn::Ident::new(b_field_name, proc_macro2::Span::call_site());
                     let _ = &b_layout;
                     let mut offset = 0usize;
@@ -5223,7 +5393,7 @@ pub fn generate_root_methods(
             } else { None };
 
             let this_parent_cross_desc = parent_cross.as_ref()
-                .map(|(f, pt, _, _)| (sc.struct_name.clone(), format!("{}.{}", pt, f)));
+                .map(|pc| (sc.struct_name.clone(), format!("{}.{}", pc.parent_type, pc.field)));
             let group = cross_groups.entry(group_key).or_insert_with(|| {
                 let ci_field = crate::registry_lookup(&sc.struct_name)
                     .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
@@ -5236,6 +5406,8 @@ pub fn generate_root_methods(
                     b_param_count,
                     block_ident: block_ident.clone(),
                     parent_cross_desc: this_parent_cross_desc.clone(),
+                    parent_refs_mode: parent_cross.as_ref()
+                        .is_some_and(|pc| pc.parent_refs.is_some()),
                     constraint_index_field: ci_field,
                     a_idx_stmts: a_idx_stmts.clone(),
                     b_idx_stmts: b_idx_stmts.clone(),
@@ -5402,7 +5574,7 @@ pub fn generate_root_methods(
         for tn in names {
             if attr_count_per_struct.contains_key(tn.as_str()) { continue; }
             let Some(l) = registry_lookup(tn) else { continue };
-            for (fname, a, b) in &l.cross_block_fields {
+            for (fname, a, b, _) in &l.cross_block_fields {
                 if !claimed_parent_blocks.contains(&(tn.clone(), fname.clone())) {
                     return Err(syn::Error::new(root_name.span(),
                         format!("`{}` declares `{}: CrossBlock<{}, {}>` but no constraint \
@@ -5835,7 +6007,27 @@ pub fn generate_root_methods(
         }
 
         set_block_indices_loops.push(wrap_in_prefix(prefix, true,
-            if let Some((cname, pdesc)) = &group.parent_cross_desc {
+            if group.parent_refs_mode {
+                // Parent-refs form: resolve and wire once per parent (the
+                // pair is the parent's own, nothing to cross-check). An
+                // empty collection leaves the block unwired and inert. The
+                // per-instance loop only assigns constraint IDs.
+                quote! {
+                    if #ctn.#rc_ident.iter().next().is_some() {
+                        #(#resolve_stmts)*
+                        let mut __a_idx = [0u32; #a_param_count];
+                        #(#a_idx_stmts)*
+                        let mut __b_idx = [0u32; #b_param_count];
+                        #(#b_idx_stmts)*
+                        #ctn.#block_ident.set_indices(&__a_idx, &__b_idx);
+                    }
+                    for __frine in #ctn.#rc_ident.iter_mut() {
+                        let _ = &__frine;
+                        #ci_set
+                        __cid += 1;
+                    }
+                }
+            } else if let Some((cname, pdesc)) = &group.parent_cross_desc {
                 // Shared parent block: wire once per parent from the first
                 // instance's pair; every further instance must agree -- one
                 // accumulator holds exactly one (A, B) tile. Checked here
@@ -6291,26 +6483,30 @@ fn interpret_constraint_body(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     constraint: &ConstraintAttr,
     root_type_name: &str,
-    // `parent.<crossblock>` primary: the (A, B) entity types of the
-    // parent's shared CrossBlock, resolved by the caller. The symbol
-    // environment then matches a plain two-ref cross constraint.
-    parent_cross_types: Option<(&str, &str)>,
+    // `parent.<crossblock>` primary, resolved by the caller. The symbol
+    // environment matches a plain two-ref cross constraint; in the
+    // parent-refs form the entities register under `parent.<ref>` keys
+    // and the parent's data fields become readable as `parent.<field>`.
+    parent_cross: Option<&ParentCross>,
+    // The parent prefix binding (`__seg{n-1}`) parent data reads render
+    // through; Some whenever the constraint collection is nested.
+    parent_accessor: Option<String>,
 ) -> syn::Result<(Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>)> {
     // `root.<selfblock>` primary: the entity supplies only data, every param
     // is the root's. Deep validation lives in the traversal side (which sees
     // the real field types); here it only shapes the symbol environment.
     let is_root_self_primary = constraint.primary_block_field().starts_with("root.");
     // `parent.<field>` primary: the SelfBlock form binds the containing
-    // entity's params; the CrossBlock form (parent_cross_types set) is a
+    // entity's params; the CrossBlock form (parent_cross set) is a
     // plain cross constraint whose block lives on the parent.
     let is_parent_primary = constraint.primary_block_field().starts_with("parent.");
-    let is_parent_self_primary = is_parent_primary && parent_cross_types.is_none();
+    let is_parent_self_primary = is_parent_primary && parent_cross.is_none();
     let is_remote = constraint.primary_block_field().contains('.')
         && !is_root_self_primary && !is_parent_primary;
     let (a_type, b_type) = if is_root_self_primary || is_parent_self_primary {
         (struct_name.to_string(), None)
-    } else if let Some((ca, cb)) = parent_cross_types {
-        (ca.to_string(), Some(cb.to_string()))
+    } else if let Some(pc) = parent_cross {
+        (pc.a_type.clone(), Some(pc.b_type.clone()))
     } else if is_remote {
         // Remote block: e.g. "pose.hb_pose" — target type from Ref field
         let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -6350,6 +6546,19 @@ fn interpret_constraint_body(
 
     // Build var_infos
     let mut var_infos: Vec<(String, String)> = Vec::new();
+    // Parent-refs form: the entities enter var_infos under the parent's
+    // ref field names (param-symbol naming and rendered locals), but
+    // their BODY keys are `parent.<ref>` -- registered separately below,
+    // so bare `<ref>` deliberately does not bind.
+    let parent_ref_names: std::collections::HashSet<String> = parent_cross
+        .and_then(|pc| pc.parent_refs.as_ref())
+        .map(|(ra, rb)| [ra.clone(), rb.clone()].into_iter().collect())
+        .unwrap_or_default();
+    if let Some(pc) = parent_cross
+        && let Some((ra, rb)) = &pc.parent_refs {
+        var_infos.push((ra.clone(), pc.a_type.clone()));
+        var_infos.push((rb.clone(), pc.b_type.clone()));
+    }
     if !constraint.vars.is_empty() {
         for var in &constraint.vars {
             if let Some(ref tn) = var.type_name { var_infos.push((var.name.clone(), tn.clone())); }
@@ -6408,6 +6617,7 @@ fn interpret_constraint_body(
     // Setup context — recursively register all fields including nested structs
     let mut ctx = ConstraintCtx::new();
     for (var_name, type_name) in &var_infos {
+        if parent_ref_names.contains(var_name) { continue; }
         // Two variables with the same name and different types is a real
         // collision (e.g. a Ref field named `path` vs the auto-registered
         // root variable for a root type `Path`): whichever registered
@@ -6422,6 +6632,46 @@ fn interpret_constraint_body(
             }
         ctx.entity_vars.insert(var_name.clone(), type_name.clone());
         register_bindings_recursive(&mut ctx, var_name, var_name, type_name)?;
+    }
+
+    // Parent-refs form: entities bind under explicit `parent.<ref>` keys
+    // (rendered through the resolved locals named after the parent's ref
+    // fields), and the parent's plain data fields become readable as
+    // `parent.<field>` through the prefix binding. Bare `<ref>` stays
+    // unbound on purpose -- the source of every read is visible.
+    if let Some(pc) = parent_cross
+        && let Some((ra, rb)) = &pc.parent_refs {
+        if fields.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == "parent")) {
+            return Err(syn::Error::new_spanned(struct_name,
+                "a field named `parent` collides with the parent binding of the \
+                 parent-refs form -- rename the field"));
+        }
+        for (rn, tn) in [(ra, &pc.a_type), (rb, &pc.b_type)] {
+            ctx.entity_vars.insert(format!("parent.{}", rn), tn.clone());
+            register_bindings_recursive(&mut ctx, &format!("parent.{}", rn), rn, tn)?;
+        }
+        ctx.entity_vars.insert("parent".to_string(), pc.parent_type.clone());
+        if let Some(playout) = registry_lookup(&pc.parent_type) {
+            let acc = parent_accessor.as_deref().unwrap_or("__parent");
+            for (fname, sft) in &playout.fields {
+                if matches!(sft, SymFieldType::Skip) { continue; }
+                if playout.ref_paths.iter().any(|(n, _)| n == fname) { continue; }
+                if playout.collection_fields.contains(fname) { continue; }
+                let key = format!("parent.{}", fname);
+                let sym = format!("{}.{}", acc, fname);
+                match sft {
+                    SymFieldType::Struct(inner) => {
+                        register_bindings_recursive(&mut ctx, &key, &sym, inner)?;
+                    }
+                    // Optional data on the parent: read it through
+                    // per-instance data instead (kept out of this form).
+                    SymFieldType::OptionalStruct(_) => {}
+                    _ => {
+                        ctx.bindings.insert(key, ConstraintCtx::make_sym_val(&sym, sft));
+                    }
+                }
+            }
+        }
     }
 
     // `root` aliases the root variable in constraint bodies, matching the

@@ -202,6 +202,41 @@ struct PathMatch {
 - A CrossBlock declared on a plain (non-constraint) struct that no
   constraint claims is a compile error.
 
+With NO Ref fields on the constraint struct, the **parent's** ref
+fields fill the slots instead -- no per-instance ref storage, the
+same-pair contract holds by construction, resolution and wiring
+happen once per parent:
+
+```rust,ignore
+#[arael::model]
+struct PathPair {
+    #[arael(ref = root.paths)] a: Ref<PathInstance>,
+    #[arael(ref = root.paths)] b: Ref<PathInstance>,
+    gain: f32,                           // pair-level shared data
+    matches: std::vec::Vec<PathMatch>,
+    hb: CrossBlock<PathInstance, PathInstance, f32>,
+}
+
+#[arael::model]
+#[arael(constraint(parent.hb, {
+    // entities read as parent.<ref>; parent data as parent.<field>
+    [(parent.b.x - parent.a.x - pathmatch.d) * parent.gain]
+}))]
+struct PathMatch { d: f32 }
+```
+
+- Entities bind ONLY as `parent.<ref>` -- a bare ref name is an
+  error naming the available bindings. The parent's plain data
+  fields read as `parent.<field>`; guards stay on the constraint's
+  own fields.
+- The parent is a plain container: Param fields on it are a compile
+  error (couple parent params through `parent.<selfblock>` or
+  `[hb, parent.<triplet>]`).
+- Slot mapping is by declaration order of the parent's matching ref
+  fields; `#[arael(cross = (a, b))]` on the block field overrides.
+  Aliased slots (one entity in both) need the own-refs form; at
+  runtime two parent refs may still point at the same entity.
+
 ### Heap-backed blocks: `BoxedSelfBlock` / `BoxedCrossBlock`
 
 `SelfBlock` and `CrossBlock` store their Hessian **inline** as a fixed

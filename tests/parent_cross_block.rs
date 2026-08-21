@@ -93,11 +93,12 @@ struct Node {
     hb: SelfBlock<Node>,
 }
 
-// Build A: classic per-instance CrossBlock.
+// Build A: classic per-instance CrossBlock. `g` is the pair-level gain,
+// copied into every link (build C reads it off the parent instead).
 #[arael::model]
 #[arael(constraint(hb, guard = self.on, {
-    [(b.x - a.x - link.dx) * link.w,
-     (b.y + a.x - link.dy) * link.w]
+    [(b.x - a.x - link.dx) * link.w * link.g,
+     (b.y + a.x - link.dy) * link.w * link.g]
 }))]
 struct Link {
     #[arael(ref = root.nodes)] a: Ref<Node>,
@@ -105,6 +106,7 @@ struct Link {
     dx: f64,
     dy: f64,
     w: f64,
+    g: f64,
     on: bool,
     hb: CrossBlock<Node, Node>,
 }
@@ -116,11 +118,11 @@ struct NetA {
     links: std::vec::Vec<Link>,
 }
 
-// Build B: the shared parent-owned CrossBlock, one per node pair.
+// Build B: the shared parent-owned CrossBlock, constraint-held refs.
 #[arael::model]
 #[arael(constraint(parent.hb, guard = self.on, {
-    [(b.x - a.x - slink.dx) * slink.w,
-     (b.y + a.x - slink.dy) * slink.w]
+    [(b.x - a.x - slink.dx) * slink.w * slink.g,
+     (b.y + a.x - slink.dy) * slink.w * slink.g]
 }))]
 struct SLink {
     #[arael(ref = root.nodes)] a: Ref<Node>,
@@ -128,6 +130,7 @@ struct SLink {
     dx: f64,
     dy: f64,
     w: f64,
+    g: f64,
     on: bool,
 }
 
@@ -144,12 +147,43 @@ struct NetB {
     pairs: std::vec::Vec<Pair>,
 }
 
-// One data table drives both builds and the manual cost.
+// Build C: parent-held refs -- the constraint is pure data + residual,
+// entities read as `parent.a` / `parent.b`, the pair gain as
+// `parent.gain`.
+#[arael::model]
+#[arael(constraint(parent.hb, guard = self.on, {
+    [(parent.b.x - parent.a.x - plink.dx) * plink.w * parent.gain,
+     (parent.b.y + parent.a.x - plink.dy) * plink.w * parent.gain]
+}))]
+struct PLink {
+    dx: f64,
+    dy: f64,
+    w: f64,
+    on: bool,
+}
+
+#[arael::model]
+struct PPair {
+    #[arael(ref = root.nodes)] a: Ref<Node>,
+    #[arael(ref = root.nodes)] b: Ref<Node>,
+    gain: f64,
+    links: std::vec::Vec<PLink>,
+    hb: CrossBlock<Node, Node>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct NetC {
+    nodes: refs::Arena<Node>,
+    pairs: std::vec::Vec<PPair>,
+}
+
+// One data table drives every build and the manual cost.
 type NodeData = (f64, f64, f64, f64, f64); // x, y, px, py, pw
 type MatchData = (f64, f64, f64, bool); // dx, dy, w, on
 struct Data {
     nodes: Vec<NodeData>,
-    pairs: Vec<((usize, usize), Vec<MatchData>)>,
+    pairs: Vec<((usize, usize), f64, Vec<MatchData>)>, // pair, gain, matches
 }
 
 fn data() -> Data {
@@ -160,26 +194,27 @@ fn data() -> Data {
             (4.2, 0.8, 4.0, 1.0, 0.2),
         ],
         pairs: vec![
-            ((0, 1), vec![
+            ((0, 1), 1.0, vec![
                 (2.0, 1.0, 1.5, true),
                 (1.8, 0.9, 0.7, true),
                 (2.2, 1.1, 1.0, false), // guarded off
                 (1.7, 1.05, 2.0, true),
             ]),
-            ((0, 2), vec![
+            ((0, 2), 0.8, vec![
                 (4.0, 1.0, 0.8, true),
                 (3.9, 0.95, 1.1, true),
                 (4.1, 1.02, 0.6, true),
             ]),
-            ((1, 2), vec![
+            ((1, 2), 1.3, vec![
                 (2.0, 0.0, 1.2, true),
                 (2.1, -0.1, 0.9, true),
             ]),
             // Aliased pair: both slots the same node (matches the local
-            // CrossBlock aliasing semantics).
-            ((2, 2), vec![(0.0, 3.0, 0.5, true)]),
+            // CrossBlock aliasing semantics; in build C both parent refs
+            // point at the same node).
+            ((2, 2), 0.5, vec![(0.0, 3.0, 0.5, true)]),
             // An empty pair: its shared block stays unwired and inert.
-            ((0, 1), vec![]),
+            ((0, 1), 1.0, vec![]),
         ],
     }
 }
@@ -197,11 +232,11 @@ fn nodes_of(d: &Data) -> (refs::Arena<Node>, Vec<Ref<Node>>) {
 fn build_a(d: &Data) -> (NetA, Vec<Ref<Node>>) {
     let (nodes, nrefs) = nodes_of(d);
     let mut links = Vec::new();
-    for ((ia, ib), ms) in &d.pairs {
+    for ((ia, ib), g, ms) in &d.pairs {
         for &(dx, dy, w, on) in ms {
             links.push(Link {
                 a: nrefs[*ia], b: nrefs[*ib],
-                dx, dy, w, on, hb: CrossBlock::new(),
+                dx, dy, w, g: *g, on, hb: CrossBlock::new(),
             });
         }
     }
@@ -211,13 +246,27 @@ fn build_a(d: &Data) -> (NetA, Vec<Ref<Node>>) {
 fn build_b(d: &Data) -> (NetB, Vec<Ref<Node>>) {
     let (nodes, nrefs) = nodes_of(d);
     let mut pairs = Vec::new();
-    for ((ia, ib), ms) in &d.pairs {
+    for ((ia, ib), g, ms) in &d.pairs {
         let links = ms.iter().map(|&(dx, dy, w, on)| SLink {
-            a: nrefs[*ia], b: nrefs[*ib], dx, dy, w, on,
+            a: nrefs[*ia], b: nrefs[*ib], dx, dy, w, g: *g, on,
         }).collect();
         pairs.push(Pair { links, hb: CrossBlock::new() });
     }
     (NetB { nodes, pairs }, nrefs)
+}
+
+fn build_c(d: &Data) -> (NetC, Vec<Ref<Node>>) {
+    let (nodes, nrefs) = nodes_of(d);
+    let mut pairs = Vec::new();
+    for ((ia, ib), g, ms) in &d.pairs {
+        let links = ms.iter().map(|&(dx, dy, w, on)| PLink {
+            dx, dy, w, on,
+        }).collect();
+        pairs.push(PPair {
+            a: nrefs[*ia], b: nrefs[*ib], gain: *g, links, hb: CrossBlock::new(),
+        });
+    }
+    (NetC { nodes, pairs }, nrefs)
 }
 
 fn manual_cost(d: &Data) -> f64 {
@@ -225,13 +274,13 @@ fn manual_cost(d: &Data) -> f64 {
     for &(x, y, px, py, pw) in &d.nodes {
         c += ((x - px) * pw).powi(2) + ((y - py) * pw).powi(2);
     }
-    for ((ia, ib), ms) in &d.pairs {
+    for ((ia, ib), g, ms) in &d.pairs {
         let (ax, ay) = (d.nodes[*ia].0, d.nodes[*ia].1);
         let (bx, by) = (d.nodes[*ib].0, d.nodes[*ib].1);
         let _ = ay;
         for &(dx, dy, w, on) in ms {
             if !on { continue; }
-            c += ((bx - ax - dx) * w).powi(2) + ((by + ax - dy) * w).powi(2);
+            c += ((bx - ax - dx) * w * g).powi(2) + ((by + ax - dy) * w * g).powi(2);
         }
     }
     c
@@ -252,19 +301,23 @@ fn shared_parent_block_equals_per_instance_blocks() {
     let d = data();
     let (mut a, _) = build_a(&d);
     let (mut b, _) = build_b(&d);
+    let (mut c, _) = build_c(&d);
     let mc = manual_cost(&d);
     check_model("per-instance", &mut a, mc);
     check_model("parent-shared", &mut b, mc);
+    check_model("parent-refs", &mut c, mc);
 
     let (ca, ga, ha) = dense(&mut a);
-    let (cb, gb, hb) = dense(&mut b);
-    assert!(close(ca, cb, TOL), "cost mismatch {} vs {}", ca, cb);
-    assert_eq!(ga.len(), gb.len());
-    for i in 0..ga.len() {
-        assert!(close(ga[i], gb[i], TOL), "grad[{i}] {} vs {}", ga[i], gb[i]);
-    }
-    for k in 0..ha.len() {
-        assert!(close(ha[k], hb[k], TOL), "H[{k}] {} vs {}", ha[k], hb[k]);
+    for (label, m) in [("parent-shared", dense(&mut b)), ("parent-refs", dense(&mut c))] {
+        let (cx, gx, hx) = m;
+        assert!(close(ca, cx, TOL), "{label}: cost mismatch {} vs {}", ca, cx);
+        assert_eq!(ga.len(), gx.len());
+        for i in 0..ga.len() {
+            assert!(close(ga[i], gx[i], TOL), "{label}: grad[{i}] {} vs {}", ga[i], gx[i]);
+        }
+        for k in 0..ha.len() {
+            assert!(close(ha[k], hx[k], TOL), "{label}: H[{k}] {} vs {}", ha[k], hx[k]);
+        }
     }
 }
 
@@ -273,15 +326,19 @@ fn shared_parent_block_solves_to_the_same_solution() {
     let d = data();
     let (mut a, ra) = build_a(&d);
     let (mut b, rb) = build_b(&d);
+    let (mut c, rc) = build_c(&d);
     a.solve_sparse(&LmConfig::well_conditioned()).unwrap();
     b.solve_sparse(&LmConfig::well_conditioned()).unwrap();
+    c.solve_sparse(&LmConfig::well_conditioned()).unwrap();
     for i in 0..d.nodes.len() {
         let na = a.nodes.get(ra[i]).unwrap();
-        let nb = b.nodes.get(rb[i]).unwrap();
-        assert!(close(na.x.value, nb.x.value, 1e-7),
-            "node {i} x: {} vs {}", na.x.value, nb.x.value);
-        assert!(close(na.y.value, nb.y.value, 1e-7),
-            "node {i} y: {} vs {}", na.y.value, nb.y.value);
+        for (label, n) in [("parent-shared", b.nodes.get(rb[i]).unwrap()),
+                           ("parent-refs", c.nodes.get(rc[i]).unwrap())] {
+            assert!(close(na.x.value, n.x.value, 1e-7),
+                "{label}: node {i} x: {} vs {}", na.x.value, n.x.value);
+            assert!(close(na.y.value, n.y.value, 1e-7),
+                "{label}: node {i} y: {} vs {}", na.y.value, n.y.value);
+        }
     }
 }
 
@@ -290,6 +347,7 @@ fn fixed_entity_on_one_side_matches() {
     let d = data();
     let (mut a, ra) = build_a(&d);
     let (mut b, rb) = build_b(&d);
+    let (mut c, rc) = build_c(&d);
     {
         let n = a.nodes.get_mut(ra[2]).unwrap();
         n.x = Param::fixed(n.x.value);
@@ -297,15 +355,20 @@ fn fixed_entity_on_one_side_matches() {
         let n = b.nodes.get_mut(rb[2]).unwrap();
         n.x = Param::fixed(n.x.value);
         n.y = Param::fixed(n.y.value);
+        let n = c.nodes.get_mut(rc[2]).unwrap();
+        n.x = Param::fixed(n.x.value);
+        n.y = Param::fixed(n.y.value);
     }
     let (ca, ga, ha) = dense(&mut a);
-    let (cb, gb, hb) = dense(&mut b);
-    assert!(close(ca, cb, TOL));
-    for i in 0..ga.len() {
-        assert!(close(ga[i], gb[i], TOL), "grad[{i}]");
-    }
-    for k in 0..ha.len() {
-        assert!(close(ha[k], hb[k], TOL), "H[{k}]");
+    for (label, m) in [("parent-shared", dense(&mut b)), ("parent-refs", dense(&mut c))] {
+        let (cx, gx, hx) = m;
+        assert!(close(ca, cx, TOL), "{label}: cost");
+        for i in 0..ga.len() {
+            assert!(close(ga[i], gx[i], TOL), "{label}: grad[{i}]");
+        }
+        for k in 0..ha.len() {
+            assert!(close(ha[k], hx[k], TOL), "{label}: H[{k}]");
+        }
     }
 }
 

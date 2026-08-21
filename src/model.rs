@@ -1724,11 +1724,12 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
 /// per constraint instance). When many constraints couple the SAME two
 /// entities, declare ONE CrossBlock on a struct that holds the constraint
 /// collection and name it with the `constraint(parent.<field>, ...)` block
-/// spec -- every instance then accumulates into that shared tile. All
-/// instances under one parent must reference the same (A, B) pair (their
-/// Ref fields declared in `[Ref<A>, Ref<B>]` order); a mismatching
-/// instance panics at solve setup. See docs/MODEL.md, "Shared CrossBlock
-/// on a containing parent".
+/// spec -- every instance then accumulates into that shared tile. With
+/// Ref fields on the constraint (declared in `[Ref<A>, Ref<B>]` order)
+/// all instances under one parent must reference the same (A, B) pair --
+/// a mismatch panics at solve setup; with none, the parent's own ref
+/// fields fill the slots and bodies read `parent.<ref>.<field>`. See
+/// docs/MODEL.md, "Shared CrossBlock on a containing parent".
 pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],

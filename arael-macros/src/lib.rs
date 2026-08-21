@@ -134,9 +134,12 @@ struct SymLayout {
     /// name is otherwise unrecoverable from the layout).
     triplet_block_fields: Vec<String>,
     /// `CrossBlock<A, B>` / `BoxedCrossBlock<A, B>` fields on this struct:
-    /// (field name, A type, B type). Lets a child's `parent.<field>` block
-    /// spec resolve a shared cross accumulator on the containing parent.
-    cross_block_fields: Vec<(String, String, String)>,
+    /// (field name, A type, B type, `#[arael(cross = (a, b))]` ref-field
+    /// override). Lets a child's `parent.<field>` block spec resolve a
+    /// shared cross accumulator on the containing parent; the override
+    /// picks which parent ref fields fill the (A, B) slots when the
+    /// declaration-order mapping is ambiguous.
+    cross_block_fields: Vec<(String, String, String, Option<(String, String)>)>,
     /// `#[arael(root)]` struct. A root's expansion consumes the constraint
     /// stash; the registration-time ordering guard errors on any model
     /// type that registers later yet is reachable from this root -- its
@@ -663,8 +666,11 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   data-only entity writing the root's / containing parent's block.
 /// - `parent.<field>` naming a `CrossBlock<A, B>` -- a shared cross
 ///   accumulator on the containing parent; every instance the parent
-///   holds sums into it and must reference the same (A, B) pair, with
-///   its Ref fields declared in `[Ref<A>, Ref<B>]` order.
+///   holds sums into it. With Ref fields on the constraint (declared
+///   in `[Ref<A>, Ref<B>]` order) every instance must reference the
+///   same (A, B) pair; with none, the parent's own ref fields fill
+///   the slots and bodies read `parent.<ref>.<field>` (parent data as
+///   `parent.<field>`).
 /// - `[hb, root.<field>]` / `[hb, parent.<field>]` naming a
 ///   `TripletBlock` -- (entity, root/parent) cross pairs in COO form.
 ///
@@ -1296,7 +1302,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     let mut block_precision_reg: Option<(String, String)> = None;
     let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
     let mut triplet_block_fields_reg: Vec<String> = Vec::new();
-    let mut cross_block_fields_reg: Vec<(String, String, String)> = Vec::new();
+    let mut cross_block_fields_reg: Vec<(String, String, String, Option<(String, String)>)> = Vec::new();
     let mut spelled_types_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
@@ -1400,7 +1406,12 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
                         } else { None }
                     });
                     if let (Some(a), Some(b)) = (type_idents.next(), type_idents.next()) {
-                        cross_block_fields_reg.push((field_name.clone(), a, b));
+                        let over = match parse_arael_attr(&field.attrs) {
+                            Ok(Some(AraelAttr::Cross(refs))) if refs.len() == 2 =>
+                                Some((refs[0].clone(), refs[1].clone())),
+                            _ => None,
+                        };
+                        cross_block_fields_reg.push((field_name.clone(), a, b, over));
                     }
                 }
         }
