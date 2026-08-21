@@ -2647,6 +2647,11 @@ pub fn generate_root_methods(
         a_param_count: usize,
         b_param_count: usize,
         block_ident: syn::Ident,
+        // Set for a shared parent-owned CrossBlock (`parent.<field>`
+        // primary): (constraint struct name, "Parent.field"). Switches the
+        // set_indices emission to wire the parent's block once per parent
+        // with a pair-agreement check; the panic message names both.
+        parent_cross_desc: Option<(String, String)>,
         constraint_index_field: Option<syn::Ident>,
         // Shared across all attributes on this struct (recomputed from the first attribute)
         a_idx_stmts: Vec<TokenStream2>,
@@ -2922,6 +2927,11 @@ pub fn generate_root_methods(
         *attr_count_per_struct.entry(sc.struct_name.clone()).or_insert(0) += 1;
     }
     let mut attr_idx_per_struct: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // (parent type, field) pairs claimed by a `parent.<crossblock>`
+    // primary; the post-loop check rejects declared-but-unclaimed shared
+    // cross blocks (they would sit inert, looking like wired accumulators).
+    let mut claimed_parent_blocks: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
 
     for sc in &stashed {
         // Skip constraints for types not reachable from this root
@@ -3050,13 +3060,21 @@ pub fn generate_root_methods(
             Some(syn::Ident::new(&rest, proc_macro2::Span::call_site()))
         } else { None };
 
-        // `parent.<selfblock>` primary: the data-only entity is contained
-        // in a parameter-bearing entity (any depth below the root) and
-        // writes into THAT entity's SelfBlock -- the non-root analog of
+        // `parent.<field>` primary -- the field on the containing parent
+        // selects the form.
+        // `parent.<selfblock>`: the data-only entity is contained in a
+        // parameter-bearing entity (any depth below the root) and writes
+        // into THAT entity's SelfBlock -- the non-root analog of
         // `root.<selfblock>`. (field ident, parent type name).
-        let parent_self_primary: Option<(syn::Ident, String)> = if let Some(rest) =
-            constraint.primary_block_field().strip_prefix("parent.")
-        {
+        // `parent.<crossblock>`: (field ident, parent type name,
+        // A type, B type). A CrossBlock on the containing parent, shared
+        // by every constraint instance the parent holds; the constraint
+        // keeps its own two refs. All instances under one parent must
+        // reference the same (A, B) pair -- checked at wiring time.
+        let mut parent_self_primary: Option<(syn::Ident, String)> = None;
+        let mut parent_cross: Option<(syn::Ident, String, String, String)> = None;
+        if let Some(rest) = constraint.primary_block_field().strip_prefix("parent.") {
+            let rest = rest.to_string();
             let parent_type = find_containing_parent(&root_name.to_string(), &sc.struct_name)
                 .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
                     format!("{}:{}: `parent.{}`: no registered struct contains `{}`",
@@ -3071,31 +3089,86 @@ pub fn generate_root_methods(
                 .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
                     format!("{}:{}: parent type `{}` not in registry",
                         sc.attr_file, sc.attr_line, parent_type)))?;
-            if playout.self_block_field.as_deref() != Some(rest) {
-                return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: `parent.{}` does not name the `SelfBlock<Self>` field                              of the containing parent `{}` (which is {})",
-                        sc.attr_file, sc.attr_line, rest, parent_type,
-                        playout.self_block_field.as_deref()
-                            .map(|f| format!("`{}`", f))
-                            .unwrap_or_else(|| "missing".to_string()))));
-            }
-            // The constraint may touch ONLY parent params: the entity's own
-            // params would form (entity, parent) cross pairs this block
-            // cannot hold, and dropping them is never acceptable.
             let entity_has_params = registry_lookup(&sc.struct_name)
                 .map(|l| !l.param_fields.is_empty()).unwrap_or(false);
-            if entity_has_params {
+            if playout.self_block_field.as_deref() == Some(rest.as_str()) {
+                // The constraint may touch ONLY parent params: the entity's own
+                // params would form (entity, parent) cross pairs this block
+                // cannot hold, and dropping them is never acceptable.
+                if entity_has_params {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `{}` has its own Param fields, so a `parent.{}`                                  constraint would drop the (entity, parent) cross pairs --                                  declare a `SelfBlock<{}>` on `{}` and couple through a                                  CrossBlock/TripletBlock instead",
+                            sc.attr_file, sc.attr_line, sc.struct_name, rest,
+                            sc.struct_name, sc.struct_name)));
+                }
+                parent_self_primary = Some((
+                    syn::Ident::new(&rest, proc_macro2::Span::call_site()), parent_type));
+            } else if let Some((_, ca, cb)) = playout.cross_block_fields.iter()
+                .find(|(n, _, _)| *n == rest).cloned()
+            {
+                if constraint.block_fields.len() != 1 {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: a `parent.<crossblock>` primary allows no further \
+                                 block fields -- {} block fields given",
+                            sc.attr_file, sc.attr_line, constraint.block_fields.len())));
+                }
+                if entity_has_params {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `{}` has its own Param fields, so a `parent.{}` \
+                                 cross constraint would drop their cross pairs against the \
+                                 referenced entities -- declare a `SelfBlock<{}>` on `{}` \
+                                 and use local blocks instead",
+                            sc.attr_file, sc.attr_line, sc.struct_name, rest,
+                            sc.struct_name, sc.struct_name)));
+                }
+                // The constraint's Ref fields, in declaration order, must be
+                // exactly [Ref<A>, Ref<B>] of the parent's CrossBlock<A, B>.
+                let ref_types: Vec<String> = fields.named.iter()
+                    .filter_map(|f| extract_wrapper_inner(&f.ty, "Ref")
+                        .map(|(_, id)| id.to_string()))
+                    .collect();
+                if ref_types != [ca.clone(), cb.clone()] {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `parent.{}` is a `CrossBlock<{}, {}>` on `{}` -- \
+                                 `{}` must declare exactly two Ref fields, [Ref<{}>, Ref<{}>] \
+                                 in declaration order; found [{}]",
+                            sc.attr_file, sc.attr_line, rest, ca, cb, parent_type,
+                            sc.struct_name, ca, cb, ref_types.join(", "))));
+                }
+                claimed_parent_blocks.insert((parent_type.clone(), rest.clone()));
+                parent_cross = Some((
+                    syn::Ident::new(&rest, proc_macro2::Span::call_site()),
+                    parent_type, ca, cb));
+            } else if playout.triplet_block_fields.contains(&rest) {
                 return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: `{}` has its own Param fields, so a `parent.{}`                              constraint would drop the (entity, parent) cross pairs --                              declare a `SelfBlock<{}>` on `{}` and couple through a                              CrossBlock/TripletBlock instead",
-                        sc.attr_file, sc.attr_line, sc.struct_name, rest,
-                        sc.struct_name, sc.struct_name)));
+                    format!("{}:{}: `parent.{}` is a TripletBlock -- a parent-owned \
+                             TripletBlock is a secondary block: use \
+                             `constraint([<local_self_block>, parent.{}], ...)`",
+                        sc.attr_file, sc.attr_line, rest, rest)));
+            } else {
+                let mut have: Vec<String> = Vec::new();
+                if let Some(sb) = &playout.self_block_field {
+                    have.push(format!("SelfBlock `{}`", sb));
+                }
+                for (n, a, b) in &playout.cross_block_fields {
+                    have.push(format!("CrossBlock<{}, {}> `{}`", a, b, n));
+                }
+                for n in &playout.triplet_block_fields {
+                    have.push(format!("TripletBlock `{}` (secondary slot only)", n));
+                }
+                let have = if have.is_empty() { "no block fields".to_string() }
+                    else { have.join(", ") };
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `parent.{}` does not name a block field of the \
+                             containing parent `{}` -- it has {}",
+                        sc.attr_file, sc.attr_line, rest, parent_type, have)));
             }
-            Some((syn::Ident::new(rest, proc_macro2::Span::call_site()), parent_type))
-        } else { None };
+        }
 
         // Check if block_field is a dotted path (remote block, e.g. pose.hb_pose)
         let is_remote_block = constraint.primary_block_field().contains('.')
-            && root_self_primary.is_none() && parent_self_primary.is_none();
+            && root_self_primary.is_none() && parent_self_primary.is_none()
+            && parent_cross.is_none();
 
         let (a_type, b_type, remote_block_info) = if root_self_primary.is_some()
             || parent_self_primary.is_some() {
@@ -3103,6 +3176,10 @@ pub fn generate_root_methods(
             // (or the containing parent's), so there is no local block and
             // no remote Ref target.
             (sc.struct_name.clone(), None, None)
+        } else if let Some((_, _, ca, cb)) = &parent_cross {
+            // Shared parent CrossBlock: entity types from the parent's
+            // block declaration (the refs were validated to match it).
+            (ca.clone(), Some(cb.clone()), None)
         } else if is_remote_block {
             // Remote block: e.g. "pose.hb_pose" means the block lives on a Ref<Pose>'s field
             let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -3492,6 +3569,30 @@ pub fn generate_root_methods(
                 is_root_level_cross = true;
             }
 
+            // A shared parent CrossBlock needs the parent instance as a
+            // prefix binding of the nested sweep: the constraint must NOT
+            // be contained in one of its referenced entity types (that
+            // takes the frine-style path above), and its collection must
+            // sit below the root.
+            if let Some((pc_field, pc_parent, _, _)) = &parent_cross {
+                if !is_root_level_cross {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `parent.{}`: `{}` is contained in `{}`, an entity \
+                                 the constraint references -- hold shared-cross constraints \
+                                 in a plain container struct (e.g. `{}`), not in an \
+                                 optimized participant",
+                            sc.attr_file, sc.attr_line, pc_field, sc.struct_name,
+                            a_type, pc_parent)));
+                }
+                if cross_prefix.is_empty() {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `parent.{}`: `{}`'s collection sits directly on the \
+                                 root -- the shared block's parent must be a struct below \
+                                 the root",
+                            sc.attr_file, sc.attr_line, pc_field, sc.struct_name)));
+                }
+            }
+
             let struct_layout = registry_lookup(&sc.struct_name);
             let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
             let mut seen_ref_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3568,7 +3669,8 @@ pub fn generate_root_methods(
         // We need the symbolic expressions again
         let root_name_str = root_name.to_string();
         let (residual_exprs, param_symbols, loss_expr, component_subs) = interpret_constraint_body(
-            &struct_ident, &fields.named, &constraint, &root_name_str)
+            &struct_ident, &fields.named, &constraint, &root_name_str,
+            parent_cross.as_ref().map(|(_, _, a, b)| (a.as_str(), b.as_str())))
             .map_err(|e| syn::Error::new(e.span(),
                 format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
         check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
@@ -3629,6 +3731,10 @@ pub fn generate_root_methods(
             // The parent's SelfBlock field, emitted through the prefix
             // binding (the entity has no block of its own).
             parent_hb.clone()
+        } else if let Some((pc_field, _, _, _)) = &parent_cross {
+            // The parent's shared CrossBlock field, emitted through the
+            // prefix binding (`__seg{n-1}`).
+            pc_field.clone()
         } else if is_remote_block {
             // For remote blocks, the actual block field name is the last segment
             let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -4323,8 +4429,18 @@ pub fn generate_root_methods(
                 let b_call = if b_zero { quote! {} } else { quote! {
                     #b_target.#m_add(#wr, &[#(#dr_b),*], grad);
                 }};
+                // The cross tile: the constraint's own block, or the shared
+                // parent-owned block reached through the prefix binding
+                // (disjoint field from the iterated collection, so the
+                // borrow splits cleanly).
+                let cross_target: TokenStream2 = if parent_cross.is_some() {
+                    let ctn = nested_container(&cross_prefix);
+                    quote! { #ctn.#block_ident }
+                } else {
+                    quote! { __frine.#block_ident }
+                };
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
-                    __frine.#block_ident.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
+                    #cross_target.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
                 let writes = quote! {
                     #a_call
@@ -5106,6 +5222,8 @@ pub fn generate_root_methods(
                 }
             } else { None };
 
+            let this_parent_cross_desc = parent_cross.as_ref()
+                .map(|(f, pt, _, _)| (sc.struct_name.clone(), format!("{}.{}", pt, f)));
             let group = cross_groups.entry(group_key).or_insert_with(|| {
                 let ci_field = crate::registry_lookup(&sc.struct_name)
                     .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
@@ -5117,6 +5235,7 @@ pub fn generate_root_methods(
                     a_param_count,
                     b_param_count,
                     block_ident: block_ident.clone(),
+                    parent_cross_desc: this_parent_cross_desc.clone(),
                     constraint_index_field: ci_field,
                     a_idx_stmts: a_idx_stmts.clone(),
                     b_idx_stmts: b_idx_stmts.clone(),
@@ -5127,6 +5246,18 @@ pub fn generate_root_methods(
                     jac_entries: Vec::new(),
                 }
             });
+            // One collection wires one block: a later attribute naming a
+            // different primary block would leave its block silently
+            // unwired (set_indices runs per group, not per attribute).
+            if group.block_ident.to_string() != block_ident.to_string()
+                || group.parent_cross_desc != this_parent_cross_desc {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: constraint attributes on `{}` disagree on the primary \
+                             block (`{}` vs `{}`) -- all attributes of one cross-constraint \
+                             struct must name the same block",
+                        sc.attr_file, sc.attr_line, sc.struct_name,
+                        group.block_ident, block_ident)));
+            }
             if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
@@ -5256,6 +5387,29 @@ pub fn generate_root_methods(
                         }
                     }
                 });
+            }
+        }
+    }
+
+    // A CrossBlock declared on a plain (non-constraint) struct that no
+    // constraint claims via `parent.<field>` would sit inert -- dead
+    // weight that reads like a wired accumulator. Rejected here, where
+    // every constraint of this root is known. (Constraint structs own
+    // their CrossBlocks through their block-field lists instead.)
+    {
+        let mut names: Vec<&String> = reachable.iter().collect();
+        names.sort();
+        for tn in names {
+            if attr_count_per_struct.contains_key(tn.as_str()) { continue; }
+            let Some(l) = registry_lookup(tn) else { continue };
+            for (fname, a, b) in &l.cross_block_fields {
+                if !claimed_parent_blocks.contains(&(tn.clone(), fname.clone())) {
+                    return Err(syn::Error::new(root_name.span(),
+                        format!("`{}` declares `{}: CrossBlock<{}, {}>` but no constraint \
+                                 writes to it -- add a `constraint(parent.{}, ...)` on a \
+                                 struct held inside `{}`, or remove the field",
+                            tn, fname, a, b, fname, tn)));
+                }
             }
         }
     }
@@ -5680,18 +5834,56 @@ pub fn generate_root_methods(
             }));
         }
 
-        set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
-            for __frine in #ctn.#rc_ident.iter_mut() {
-                #(#resolve_stmts)*
-                let mut __a_idx = [0u32; #a_param_count];
-                #(#a_idx_stmts)*
-                let mut __b_idx = [0u32; #b_param_count];
-                #(#b_idx_stmts)*
-                __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
-                #ci_set
-                __cid += 1;
+        set_block_indices_loops.push(wrap_in_prefix(prefix, true,
+            if let Some((cname, pdesc)) = &group.parent_cross_desc {
+                // Shared parent block: wire once per parent from the first
+                // instance's pair; every further instance must agree -- one
+                // accumulator holds exactly one (A, B) tile. Checked here
+                // (once per solve setup), not per iteration.
+                let msg = syn::LitStr::new(&format!(
+                    "{}: all instances under one parent must reference the same \
+                     entity pair -- they share the CrossBlock `{}`; the first \
+                     instance wired param indices ({{:?}}, {{:?}}), a later \
+                     instance has ({{:?}}, {{:?}})",
+                    cname, pdesc), proc_macro2::Span::call_site());
+                quote! {
+                    let mut __wired: Option<([u32; #a_param_count], [u32; #b_param_count])> = None;
+                    for __frine in #ctn.#rc_ident.iter_mut() {
+                        #(#resolve_stmts)*
+                        let mut __a_idx = [0u32; #a_param_count];
+                        #(#a_idx_stmts)*
+                        let mut __b_idx = [0u32; #b_param_count];
+                        #(#b_idx_stmts)*
+                        match &__wired {
+                            None => {
+                                #ctn.#block_ident.set_indices(&__a_idx, &__b_idx);
+                                __wired = Some((__a_idx, __b_idx));
+                            }
+                            Some((__wa, __wb)) => {
+                                if *__wa != __a_idx || *__wb != __b_idx {
+                                    panic!(#msg, __wa, __wb, __a_idx, __b_idx);
+                                }
+                            }
+                        }
+                        #ci_set
+                        __cid += 1;
+                    }
+                }
+            } else {
+                quote! {
+                    for __frine in #ctn.#rc_ident.iter_mut() {
+                        #(#resolve_stmts)*
+                        let mut __a_idx = [0u32; #a_param_count];
+                        #(#a_idx_stmts)*
+                        let mut __b_idx = [0u32; #b_param_count];
+                        #(#b_idx_stmts)*
+                        __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
+                        #ci_set
+                        __cid += 1;
+                    }
+                }
             }
-        }));
+        ));
     }
 
     // Emit merged TripletBlock loops (one per collection, with set_block_indices)
@@ -6099,18 +6291,26 @@ fn interpret_constraint_body(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     constraint: &ConstraintAttr,
     root_type_name: &str,
+    // `parent.<crossblock>` primary: the (A, B) entity types of the
+    // parent's shared CrossBlock, resolved by the caller. The symbol
+    // environment then matches a plain two-ref cross constraint.
+    parent_cross_types: Option<(&str, &str)>,
 ) -> syn::Result<(Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>)> {
     // `root.<selfblock>` primary: the entity supplies only data, every param
     // is the root's. Deep validation lives in the traversal side (which sees
     // the real field types); here it only shapes the symbol environment.
     let is_root_self_primary = constraint.primary_block_field().starts_with("root.");
-    // `parent.<selfblock>` primary: like the root form, but the params
-    // belong to the entity CONTAINING this constraint struct.
-    let is_parent_self_primary = constraint.primary_block_field().starts_with("parent.");
+    // `parent.<field>` primary: the SelfBlock form binds the containing
+    // entity's params; the CrossBlock form (parent_cross_types set) is a
+    // plain cross constraint whose block lives on the parent.
+    let is_parent_primary = constraint.primary_block_field().starts_with("parent.");
+    let is_parent_self_primary = is_parent_primary && parent_cross_types.is_none();
     let is_remote = constraint.primary_block_field().contains('.')
-        && !is_root_self_primary && !is_parent_self_primary;
+        && !is_root_self_primary && !is_parent_primary;
     let (a_type, b_type) = if is_root_self_primary || is_parent_self_primary {
         (struct_name.to_string(), None)
+    } else if let Some((ca, cb)) = parent_cross_types {
+        (ca.to_string(), Some(cb.to_string()))
     } else if is_remote {
         // Remote block: e.g. "pose.hb_pose" — target type from Ref field
         let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -6172,8 +6372,9 @@ fn interpret_constraint_body(
         let has_root_triplet_block = constraint.block_fields.iter()
             .any(|bf| bf.starts_with("root."));
         // `[hb, parent.<triplet>]`: a parent-owned triplet in the
-        // SECONDARY slot (a `parent.` primary is is_parent_self_primary).
-        let has_parent_triplet_block = !is_parent_self_primary
+        // SECONDARY slot (a `parent.` primary is the selfblock or
+        // crossblock form, never a triplet).
+        let has_parent_triplet_block = !is_parent_primary
             && constraint.block_fields.iter().any(|bf| bf.starts_with("parent."));
         let is_pure_multi_cross = is_multi_cross_early && !is_remote
             && !has_root_triplet_block && !has_parent_triplet_block;

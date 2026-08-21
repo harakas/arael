@@ -1,0 +1,13 @@
+error: `Pair` declares `hb: CrossBlock<Node, Node>` but no constraint writes to it -- add a `constraint(parent.hb, ...)` on a struct held inside `Pair`, or remove the field
+  --> tests/constraint_attr_errors/parent_cross_unclaimed.rs:26:8
+   |
+26 | struct Net {
+   |        ^^^
+
+warning: unused import: `arael::refs`
+ --> tests/constraint_attr_errors/parent_cross_unclaimed.rs:6:5
+  |
+6 | use arael::refs;
+  |     ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

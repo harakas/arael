@@ -42,4 +42,12 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/root_triplet_bad_field.rs");
     t.compile_fail("tests/constraint_attr_errors/option_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/nested_after_root.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_bad_field.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_triplet_primary.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_entity_params.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_ref_mismatch.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_extra_blocks.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_root_parent.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_unclaimed.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_cross_mixed_attrs.rs");
 }

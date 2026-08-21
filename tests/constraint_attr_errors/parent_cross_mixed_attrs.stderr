@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_cross_mixed_attrs.rs:22: constraint attributes on `SLink` disagree on the primary block (`hb` vs `hb2`) -- all attributes of one cross-constraint struct must name the same block
+  --> tests/constraint_attr_errors/parent_cross_mixed_attrs.rs:38:1
+   |
+38 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/parent_cross_mixed_attrs.rs:6:19
+  |
+6 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -133,6 +133,10 @@ struct SymLayout {
     /// the containing parent (block fields are `Skip` in `fields`, so the
     /// name is otherwise unrecoverable from the layout).
     triplet_block_fields: Vec<String>,
+    /// `CrossBlock<A, B>` / `BoxedCrossBlock<A, B>` fields on this struct:
+    /// (field name, A type, B type). Lets a child's `parent.<field>` block
+    /// spec resolve a shared cross accumulator on the containing parent.
+    cross_block_fields: Vec<(String, String, String)>,
     /// `#[arael(root)]` struct. A root's expansion consumes the constraint
     /// stash; the registration-time ordering guard errors on any model
     /// type that registers later yet is reachable from this root -- its
@@ -648,6 +652,21 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// }))]
 /// struct Pose { /* ... */ }
 /// ```
+///
+/// The first argument names where the constraint's Hessian blocks live
+/// (see docs/MODEL.md for the full treatment):
+/// - `hb` -- a `SelfBlock`/`CrossBlock` field on this struct.
+/// - `[hb_ab, hb_ac, ...]` -- one CrossBlock field per entity pair
+///   (3+ refs), mapped by `#[arael(cross = (a, b))]`.
+/// - `<ref>.hb` -- the SelfBlock of the referenced entity.
+/// - `root.<field>` / `parent.<field>` naming a `SelfBlock<Self>` -- a
+///   data-only entity writing the root's / containing parent's block.
+/// - `parent.<field>` naming a `CrossBlock<A, B>` -- a shared cross
+///   accumulator on the containing parent; every instance the parent
+///   holds sums into it and must reference the same (A, B) pair, with
+///   its Ref fields declared in `[Ref<A>, Ref<B>]` order.
+/// - `[hb, root.<field>]` / `[hb, parent.<field>]` naming a
+///   `TripletBlock` -- (entity, root/parent) cross pairs in COO form.
 ///
 /// Options:
 /// - `guard = expr` -- conditional evaluation; the constraint contributes
@@ -1277,6 +1296,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     let mut block_precision_reg: Option<(String, String)> = None;
     let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
     let mut triplet_block_fields_reg: Vec<String> = Vec::new();
+    let mut cross_block_fields_reg: Vec<(String, String, String)> = Vec::new();
     let mut spelled_types_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
@@ -1369,6 +1389,19 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
                 && let Some(seg) = tp.path.segments.last()
                 && seg.ident == "TripletBlock" {
                     triplet_block_fields_reg.push(field_name.clone());
+                }
+            if let syn::Type::Path(tp) = bare
+                && let Some(seg) = tp.path.segments.last()
+                && (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock")
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let mut type_idents = args.args.iter().filter_map(|a| {
+                        if let syn::GenericArgument::Type(syn::Type::Path(atp)) = a {
+                            atp.path.segments.last().map(|s| s.ident.to_string())
+                        } else { None }
+                    });
+                    if let (Some(a), Some(b)) = (type_idents.next(), type_idents.next()) {
+                        cross_block_fields_reg.push((field_name.clone(), a, b));
+                    }
                 }
         }
         // Detect euler angle param types by type name (in addition to attribute)
@@ -1522,6 +1555,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         block_precision: block_precision_reg,
         inst_precisions: inst_precisions_reg,
         triplet_block_fields: triplet_block_fields_reg,
+        cross_block_fields: cross_block_fields_reg,
         is_root: has_struct_attr_ident(&input.attrs, "root"),
         spelled_types: spelled_types_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;

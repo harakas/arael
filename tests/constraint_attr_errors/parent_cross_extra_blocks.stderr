@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_cross_extra_blocks.rs:17: a `parent.<crossblock>` primary allows no further block fields -- 2 block fields given
+  --> tests/constraint_attr_errors/parent_cross_extra_blocks.rs:33:1
+   |
+33 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/parent_cross_extra_blocks.rs:4:19
+  |
+4 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

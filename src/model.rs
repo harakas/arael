@@ -1719,6 +1719,16 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
 /// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
 /// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
 /// `T` is the float type (f32 or f64, default f64).
+///
+/// Placement: normally a field on the constraint struct itself (one tile
+/// per constraint instance). When many constraints couple the SAME two
+/// entities, declare ONE CrossBlock on a struct that holds the constraint
+/// collection and name it with the `constraint(parent.<field>, ...)` block
+/// spec -- every instance then accumulates into that shared tile. All
+/// instances under one parent must reference the same (A, B) pair (their
+/// Ref fields declared in `[Ref<A>, Ref<B>]` order); a mismatching
+/// instance panics at solve setup. See docs/MODEL.md, "Shared CrossBlock
+/// on a containing parent".
 pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],

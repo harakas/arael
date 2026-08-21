@@ -139,7 +139,7 @@ reach:
 | Type | Stores | Pick it when |
 |---|---|---|
 | **`SelfBlock<T>`** | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block of the Hessian |
-| **`CrossBlock<A, B>`** | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock |
+| **`CrossBlock<A, B>`** | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock. When many constraints couple the SAME (A, B) pair, share one block on a containing parent via `constraint(parent.<field>, ...)` (below) |
 | **`TripletBlock<T>`** | COO across-entity pairs | **placed on the coupled co-entity** -- usually the root (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec), or on a containing parent for the `[hb, parent.<field>]` form. Canonical uses: (1) the root (or parent) has its own `Param` fields and constraints couple entity params with them -- the cross pair lives in that TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push. When the constraint touches ONLY root params (the entity is pure data), skip the triplet entirely: name the root's SelfBlock as the primary block, `constraint(root.hb, ...)` -- dense writes, no COO |
 
 `SelfBlock<Self>` is required on every Model that has parameters --
@@ -165,6 +165,42 @@ struct PosePair {
     hb: CrossBlock<Pose, Pose, f32>, // only the (prev, cur) cross block
 }
 ```
+
+### Shared CrossBlock on a containing parent
+
+When many constraint instances couple the SAME two entities, a
+per-instance CrossBlock stores and scatters one identical tile per
+instance. Move the block to a containing parent instead: the
+`parent.<field>` block spec makes every instance in the parent's
+collection accumulate into that one block.
+
+```rust,ignore
+#[arael::model]
+struct PathPair {
+    matches: std::vec::Vec<PathMatch>,
+    hb: CrossBlock<PathInstance, PathInstance, f32>, // shared by all matches
+}
+
+#[arael::model]
+#[arael(constraint(parent.hb, { /* residual over a and b */ }))]
+struct PathMatch {
+    #[arael(ref = root.paths)] a: Ref<PathInstance>,
+    #[arael(ref = root.paths)] b: Ref<PathInstance>,
+    // per-match data
+}
+```
+
+- Every instance under one parent must reference the same (A, B)
+  pair: the constraint's Ref fields must be exactly
+  `[Ref<A>, Ref<B>]` in declaration order, and an instance wired to
+  a different pair panics at solve setup, naming both index pairs.
+- Diagonal writes still land on each entity's SelfBlock; only the
+  (A, B) tile is shared. Guards and robust losses apply per
+  instance, unchanged.
+- A parent with an empty collection leaves its block unwired and
+  inert.
+- A CrossBlock declared on a plain (non-constraint) struct that no
+  constraint claims is a compile error.
 
 ### Heap-backed blocks: `BoxedSelfBlock` / `BoxedCrossBlock`
 
