@@ -9,7 +9,7 @@ use arael::refs::Ref;
 use crate::{Arc, DimensionEndpoint, Line, Point};
 
 /// Any entity a meta-constraint can own or be made from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MetaEntity {
     Line(Ref<Line>),
     Arc(Ref<Arc>),
