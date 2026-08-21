@@ -149,11 +149,12 @@ struct NetB {
 
 // Build C: parent-held refs -- the constraint is pure data + residual,
 // entities read as `parent.a` / `parent.b`, the pair gain as
-// `parent.gain`.
+// `parent.gain`. `parent = p2p` names the same binding; the body and
+// guard mix both names on purpose.
 #[arael::model]
-#[arael(constraint(parent.hb, guard = self.on && parent.gain > 0.0 && parent.b.x.value > -1.0e18, {
-    [(parent.b.x - parent.a.x - plink.dx) * plink.w * parent.gain,
-     (parent.b.y + parent.a.x - plink.dy) * plink.w * parent.gain]
+#[arael(constraint(parent.hb, parent = p2p, guard = self.on && p2p.gain > 0.0 && parent.b.x.value > -1.0e18, {
+    [(p2p.b.x - parent.a.x - plink.dx) * plink.w * p2p.gain,
+     (parent.b.y + p2p.a.x - plink.dy) * plink.w * parent.gain]
 }))]
 struct PLink {
     dx: f64,

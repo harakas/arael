@@ -61,4 +61,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/parent_value_root_held.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_value_ambiguous.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_value_guard_root_held.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_alias_field_collision.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_alias_binding_collision.rs");
 }

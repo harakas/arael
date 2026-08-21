@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_alias_field_collision.rs:17: `parent = d` collides with a field of the constraint struct -- rename the alias or the field
+  --> tests/constraint_attr_errors/parent_alias_field_collision.rs:32:1
+   |
+32 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/parent_alias_field_collision.rs:4:19
+  |
+4 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,5 +1,5 @@
-error: $DIR/tests/constraint_attr_errors/parent_cross_bare_ref_read.rs:18: unknown binding 'b' in `b.x`; available bindings: net (Net), parent (Pair), parent.a (Node), parent.b (Node), plink (PLink), root (Net)
-  --> tests/constraint_attr_errors/parent_cross_bare_ref_read.rs:33:1
+error: $DIR/tests/constraint_attr_errors/parent_alias_binding_collision.rs:18: `parent = a` collides with an existing binding of the same name -- pick another alias
+  --> tests/constraint_attr_errors/parent_alias_binding_collision.rs:33:1
    |
 33 | #[arael::model]
    | ^^^^^^^^^^^^^^^
@@ -7,7 +7,7 @@ error: $DIR/tests/constraint_attr_errors/parent_cross_bare_ref_read.rs:18: unkno
    = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: unused import: `self`
- --> tests/constraint_attr_errors/parent_cross_bare_ref_read.rs:5:19
+ --> tests/constraint_attr_errors/parent_alias_binding_collision.rs:5:19
   |
 5 | use arael::refs::{self, Ref};
   |                   ^^^^

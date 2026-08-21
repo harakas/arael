@@ -682,7 +682,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// Options:
 /// - `guard = expr` -- conditional evaluation; the constraint contributes
 ///   only when `expr` evaluates to `true` at runtime.
-/// - `parent = name` -- name the parent variable in nested constraints.
+/// - `parent = name` -- name the parent variable in nested constraints
+///   (in the shared-parent-CrossBlock forms it names the parent binding:
+///   `name.x` and `parent.x` are the same read).
 /// - `name = "label"` -- override the `JacobianRow::label` for rows emitted
 ///   by this attribute. Defaults to the struct's type name; for structs
 ///   with multiple `constraint` attributes, the default is

@@ -229,6 +229,10 @@ struct PathMatch { d: f32 }
   error naming the available bindings. The parent's plain data
   fields read as `parent.<field>`, in guards too (see "Parent
   values" under Constraint attributes).
+- In the shared-cross forms, `parent = <name>` names the parent
+  binding: `<name>.a` and `parent.a` are the same read (both stay
+  valid). A name colliding with an existing binding or a field of
+  the constraint struct is a compile error.
 - The parent is a plain container: Param fields on it are a compile
   error (couple parent params through `parent.<selfblock>` or
   `[hb, parent.<triplet>]`).

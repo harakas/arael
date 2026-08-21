@@ -2311,29 +2311,31 @@ enum ParentBinding {
     Data { type_name: String, accessor: String },
 }
 
-/// Register the `parent.<field>` data bindings for a plain containing
-/// parent: plain data fields (nested data structs included) render
-/// through `accessor`; ref fields, collections and blocks stay unbound;
-/// Param fields are poisoned with the coupling-forms message.
+/// Register the `<key_root>.<field>` data bindings for a plain
+/// containing parent: plain data fields (nested data structs included)
+/// render through `accessor`; ref fields, collections and blocks stay
+/// unbound; Param fields are poisoned with the coupling-forms message.
+/// `key_root` is `parent` or a `parent = <name>` alias.
 fn register_parent_data_bindings(
     ctx: &mut ConstraintCtx,
     type_name: &str,
     accessor: &str,
+    key_root: &str,
 ) -> syn::Result<()> {
-    ctx.entity_vars.insert("parent".to_string(), type_name.to_string());
+    ctx.entity_vars.insert(key_root.to_string(), type_name.to_string());
     let Some(playout) = registry_lookup(type_name) else { return Ok(()); };
     for (fname, sft) in &playout.fields {
         if matches!(sft, SymFieldType::Skip) { continue; }
         if playout.ref_paths.iter().any(|(n, _)| n == fname) { continue; }
         if playout.collection_fields.contains(fname) { continue; }
         if playout.param_fields.contains(fname) {
-            ctx.poisoned.push((format!("parent.{}", fname), format!(
+            ctx.poisoned.push((format!("{}.{}", key_root, fname), format!(
                 "`{}.{}` is a Param -- reading it here would drop its derivative \
                  pairs; couple parent params through `parent.<selfblock>` or \
                  `[hb, parent.<triplet>]`", type_name, fname)));
             continue;
         }
-        let key = format!("parent.{}", fname);
+        let key = format!("{}.{}", key_root, fname);
         let sym = format!("{}.{}", accessor, fname);
         match sft {
             SymFieldType::Struct(inner) => {
@@ -2350,10 +2352,13 @@ fn register_parent_data_bindings(
     Ok(())
 }
 
-/// Apply a resolved [`ParentBinding`] to the body context.
+/// Apply a resolved [`ParentBinding`] to the body context. `alias` is a
+/// `parent = <name>` second key root for the Data form (the parent-cross
+/// forms; elsewhere the attribute keeps its historical meanings).
 fn register_parent_binding(
     ctx: &mut ConstraintCtx,
     binding: &ParentBinding,
+    alias: Option<&str>,
 ) -> syn::Result<()> {
     match binding {
         ParentBinding::None => {
@@ -2374,7 +2379,10 @@ fn register_parent_binding(
                 "one `parent.` level only".to_string()));
         }
         ParentBinding::Data { type_name, accessor } => {
-            register_parent_data_bindings(ctx, type_name, accessor)?;
+            register_parent_data_bindings(ctx, type_name, accessor, "parent")?;
+            if let Some(al) = alias {
+                register_parent_data_bindings(ctx, type_name, accessor, al)?;
+            }
             ctx.poisoned.push(("parent.parent".to_string(),
                 "one `parent.` level only".to_string()));
         }
@@ -2391,17 +2399,21 @@ fn rewrite_guard_parent(
     expr: &mut syn::Expr,
     binding: &ParentBinding,
     entity_refs: Option<&(String, String)>,
+    alias: Option<&str>,
 ) -> syn::Result<()> {
     struct V<'a> {
         to: Option<&'a str>,
         entity_refs: Option<&'a (String, String)>,
+        alias: Option<&'a str>,
         bad: bool,
     }
     impl syn::visit_mut::VisitMut for V<'_> {
         fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
-            let is_parent_head = |x: &syn::Expr| matches!(x, syn::Expr::Path(p)
+            let alias = self.alias;
+            let is_parent_head = move |x: &syn::Expr| matches!(x, syn::Expr::Path(p)
                 if p.qself.is_none() && p.path.segments.len() == 1
-                    && p.path.segments[0].ident == "parent");
+                    && (p.path.segments[0].ident == "parent"
+                        || alias.is_some_and(|a| p.path.segments[0].ident == a)));
             // `parent.<ref>` -> the resolved entity local (parent-refs form).
             if let syn::Expr::Field(f) = e
                 && is_parent_head(&f.base)
@@ -2430,7 +2442,7 @@ fn rewrite_guard_parent(
         ParentBinding::Data { accessor, .. } => Some(accessor.clone()),
         ParentBinding::None | ParentBinding::Ambiguous => None,
     };
-    let mut v = V { to: to.as_deref(), entity_refs, bad: false };
+    let mut v = V { to: to.as_deref(), entity_refs, alias, bad: false };
     syn::visit_mut::VisitMut::visit_expr_mut(&mut v, expr);
     if v.bad {
         return Err(syn::Error::new_spanned(&*expr,
@@ -5070,7 +5082,10 @@ pub fn generate_root_methods(
                 // differentiation -- rewrite the head to the binding's
                 // rendering (entity alias local / prefix accessor).
                 rewrite_guard_parent(&mut e, &parent_binding,
-                    parent_cross.as_ref().and_then(|pc| pc.parent_refs.as_ref()))?;
+                    parent_cross.as_ref().and_then(|pc| pc.parent_refs.as_ref()),
+                    if parent_cross.is_some() {
+                        constraint.parent_name.as_deref()
+                    } else { None })?;
                 Ok(e)
             })
             .transpose()?;
@@ -6816,7 +6831,11 @@ fn interpret_constraint_body(
             let pvar = constraint.parent_name.clone()
                 .unwrap_or_else(|| parent_type.to_lowercase());
             var_infos.push((pvar, parent_type));
-        } else if a_type != "__triplet__" && !is_pure_multi_cross {
+        } else if a_type != "__triplet__" && !is_pure_multi_cross
+            && parent_cross.is_none() {
+            // Skipped for the parent-cross forms too: there `parent =`
+            // names the PARENT binding (registered below), and the A-type
+            // alias would be a duplicate of the ref slots anyway.
             var_infos.push((parent_name.clone(), a_type.clone()));
         }
         if has_parent_triplet_block {
@@ -6853,6 +6872,25 @@ fn interpret_constraint_body(
         register_bindings_recursive(&mut ctx, var_name, var_name, type_name)?;
     }
 
+    // In the parent-cross forms, `parent = <name>` names the parent
+    // binding: `<name>.x` and `parent.x` are the same read. (In the
+    // other forms the attribute keeps its historical meanings.)
+    let parent_alias: Option<&str> = if parent_cross.is_some() {
+        constraint.parent_name.as_deref().filter(|n| *n != "parent")
+    } else { None };
+    if let Some(al) = parent_alias {
+        if var_infos.iter().any(|(vn, _)| vn == al) {
+            return Err(syn::Error::new_spanned(struct_name,
+                format!("`parent = {}` collides with an existing binding of the \
+                         same name -- pick another alias", al)));
+        }
+        if fields.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == al)) {
+            return Err(syn::Error::new_spanned(struct_name,
+                format!("`parent = {}` collides with a field of the constraint \
+                         struct -- rename the alias or the field", al)));
+        }
+    }
+
     // Parent-refs form: entities bind under explicit `parent.<ref>` keys
     // (rendered through the resolved locals named after the parent's ref
     // fields). Bare `<ref>` stays unbound on purpose -- the source of
@@ -6868,13 +6906,17 @@ fn interpret_constraint_body(
         for (rn, tn) in [(ra, &pc.a_type), (rb, &pc.b_type)] {
             ctx.entity_vars.insert(format!("parent.{}", rn), tn.clone());
             register_bindings_recursive(&mut ctx, &format!("parent.{}", rn), rn, tn)?;
+            if let Some(al) = parent_alias {
+                ctx.entity_vars.insert(format!("{}.{}", al, rn), tn.clone());
+                register_bindings_recursive(&mut ctx, &format!("{}.{}", al, rn), rn, tn)?;
+            }
         }
     }
 
     // The general `parent.<field>` binding: an alias to the coupled
     // parent entity, a data-only binding, or a poisoned name with a
     // targeted error.
-    register_parent_binding(&mut ctx, parent_binding)?;
+    register_parent_binding(&mut ctx, parent_binding, parent_alias)?;
 
     // `root` aliases the root variable in constraint bodies, matching the
     // `root.<field>` block spec: `root.a` and `<root_lc>.a` are the same
