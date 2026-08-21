@@ -319,8 +319,9 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     (r + m, g + m, b + m)
 }
 
-// Decoupled fuse: per-run Stage-1 trajectories (one hue each) over the shared GT
-// (gray), with the consensus landmarks (red) and their error lines to GT.
+// Decoupled fuse: per-run CORRECTED trajectories (one hue each) over the shared
+// GT (gray), with the consensus landmarks (red) and their error lines to GT --
+// everything in the solved frame.
 fn write_eps(gt_poses: &[std::vec::Vec<(vect2f, f32)>], gt_lms: &[vect2f],
              run_poses: &[std::vec::Vec<(vect2f, f32)>],
              consensus: &[(vect2f, usize)],
@@ -369,7 +370,7 @@ fn write_eps(gt_poses: &[std::vec::Vec<(vect2f, f32)>], gt_lms: &[vect2f],
     }
     writeln!(f, "[] 0 setdash")?;
 
-    // Each run's independent Stage-1 trajectory, one hue.
+    // Each run's corrected trajectory, one hue.
     let n = run_poses.len();
     for (r, rp) in run_poses.iter().enumerate() {
         let (cr, cg, cb) = hsv_to_rgb(if n == 0 { 0.0 } else { r as f32 / n as f32 }, 0.85, 0.72);
@@ -500,7 +501,17 @@ fn main() {
     let scov = nalgebra::linalg::Cholesky::new(nalgebra::DMatrix::from_row_slice(sn, sn, &sh64))
         .map(|c| c.inverse() * 2.0);
 
-    let run_poses: std::vec::Vec<_> = runs.iter().map(|rm| rm.poses.clone()).collect();
+    // Plot the CORRECTED trajectories -- the frame the consensus landmarks
+    // live in (plotting the raw stage-1 paths would mix two frames in one
+    // map).
+    let run_poses: std::vec::Vec<std::vec::Vec<(vect2f, f32)>> =
+        runs.iter().zip(amap.paths.iter()).map(|(rm, fr)| {
+            let rot = matrix2f::rotation(fr.rotation.value);
+            rm.poses.iter().map(|&(p, g)| {
+                (rm.center + fr.translation.value + rot * (p - rm.center),
+                 g + fr.rotation.value)
+            }).collect()
+        }).collect();
     let mut consensus: std::vec::Vec<(vect2f, usize)> = gid_to_lm.iter()
         .map(|(&gid, &idx)| (amap.landmarks[idx].pos.value, gid)).collect();
     consensus.sort_by_key(|&(_, g)| g);
