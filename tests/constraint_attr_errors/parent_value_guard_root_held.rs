@@ -1,40 +1,35 @@
-//! `parent.` in a guard of the parent-refs form.
+//! `parent.` in the GUARD of a constraint held directly by the root.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 
 #[arael::model]
 #[arael(constraint(hb, {
-    [node.x - node.d]
+    [node.x - node.t]
 }))]
 struct Node {
     x: Param<f64>,
-    d: f64,
+    t: f64,
     hb: SelfBlock<Node>,
 }
 
 #[arael::model]
-#[arael(constraint(parent.hb, guard = parent.enabled, {
-    [parent.b.x - parent.a.x - plink.d]
+#[arael(constraint(hb, guard = parent.enabled, {
+    [b.x - a.x - link.d]
 }))]
-struct PLink {
-    d: f64,
-}
-
-#[arael::model]
-struct Pair {
+struct Link {
     #[arael(ref = root.nodes)] a: Ref<Node>,
     #[arael(ref = root.nodes)] b: Ref<Node>,
-    enabled: bool,
-    links: std::vec::Vec<PLink>,
+    d: f64,
     hb: CrossBlock<Node, Node>,
 }
 
 #[arael::model]
 #[arael(root)]
 struct Net {
+    enabled: bool,
     nodes: refs::Arena<Node>,
-    pairs: std::vec::Vec<Pair>,
+    links: std::vec::Vec<Link>,
 }
 
 fn main() {}

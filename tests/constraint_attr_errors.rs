@@ -55,6 +55,10 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/parent_cross_over_aliased.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_parent_params.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_bare_ref_read.rs");
-    t.compile_fail("tests/constraint_attr_errors/parent_cross_guard_parent.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_unknown_parent_field.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_value_param_read.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_value_two_levels.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_value_root_held.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_value_ambiguous.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_value_guard_root_held.rs");
 }

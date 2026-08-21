@@ -96,7 +96,7 @@ struct Node {
 // Build A: classic per-instance CrossBlock. `g` is the pair-level gain,
 // copied into every link (build C reads it off the parent instead).
 #[arael::model]
-#[arael(constraint(hb, guard = self.on, {
+#[arael(constraint(hb, guard = self.on && self.g > 0.0 && b.x.value > -1.0e18, {
     [(b.x - a.x - link.dx) * link.w * link.g,
      (b.y + a.x - link.dy) * link.w * link.g]
 }))]
@@ -120,7 +120,7 @@ struct NetA {
 
 // Build B: the shared parent-owned CrossBlock, constraint-held refs.
 #[arael::model]
-#[arael(constraint(parent.hb, guard = self.on, {
+#[arael(constraint(parent.hb, guard = self.on && self.g > 0.0 && b.x.value > -1.0e18, {
     [(b.x - a.x - slink.dx) * slink.w * slink.g,
      (b.y + a.x - slink.dy) * slink.w * slink.g]
 }))]
@@ -151,7 +151,7 @@ struct NetB {
 // entities read as `parent.a` / `parent.b`, the pair gain as
 // `parent.gain`.
 #[arael::model]
-#[arael(constraint(parent.hb, guard = self.on, {
+#[arael(constraint(parent.hb, guard = self.on && parent.gain > 0.0 && parent.b.x.value > -1.0e18, {
     [(parent.b.x - parent.a.x - plink.dx) * plink.w * parent.gain,
      (parent.b.y + parent.a.x - plink.dy) * plink.w * parent.gain]
 }))]

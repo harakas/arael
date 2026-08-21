@@ -227,8 +227,8 @@ struct PathMatch { d: f32 }
 
 - Entities bind ONLY as `parent.<ref>` -- a bare ref name is an
   error naming the available bindings. The parent's plain data
-  fields read as `parent.<field>`; guards stay on the constraint's
-  own fields.
+  fields read as `parent.<field>`, in guards too (see "Parent
+  values" under Constraint attributes).
 - The parent is a plain container: Param fields on it are a compile
   error (couple parent params through `parent.<selfblock>` or
   `[hb, parent.<triplet>]`).
@@ -542,6 +542,7 @@ any Model struct:
 #[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
 #[arael(constraint(root.hb, { body }))]                 // root's own SelfBlock (root params only)
 #[arael(constraint(parent.hb, { body }))]               // containing parent's SelfBlock (parent params only)
+                                                        // -- or its shared CrossBlock (see Hessian block types)
 #[arael(constraint([hb, parent.hbt], { body }))]        // self-primary + parent-owned TripletBlock
 ```
 
@@ -689,6 +690,42 @@ This contract is about reading Option DATA inside a body. Holding a
 whole ENTITY in an Option (`gps: Option<GpsObs>` -- see
 [Collection types](#collection-types)) needs no guard: the macro wraps
 that entity's sweeps itself, and a `None` contributes nothing.
+
+### Parent values (`parent.<field>`)
+
+A constraint held inside a sub-model reads the containing parent's
+plain data fields -- scalars, vectors, nested data structs -- in its
+body and guard as `parent.<field>`, instead of copying the values
+into every instance:
+
+```rust,ignore
+#[arael::model]
+#[arael(constraint(hb, guard = parent.enabled, {
+    [(cur.x - prev.x - posepair.delta) * parent.isigma]
+}))]
+struct PosePair { /* ... */ }
+
+#[arael::model]
+struct Path {
+    isigma: f64,          // shared by all pose pairs
+    enabled: bool,
+    poses: refs::Deque<Pose>,
+    pose_pairs: std::vec::Vec<PosePair>,
+}
+```
+
+- Where the containing parent is a coupled entity of the form
+  (frine-style `parent = <name>`, `parent.<selfblock>`,
+  `[hb, parent.<triplet>]`), `parent` aliases that entity binding:
+  full access, Params differentiated.
+- Otherwise the binding is data-only: reading a parent Param in a
+  BODY is a compile error naming the coupling forms (its derivative
+  pairs would be dropped). Guards read values only, so they may read
+  anything.
+- One `parent.` level only. No containing parent below the root
+  (constraint held directly by the root -- use `root.<field>`), or a
+  type held under several containment paths ("the parent" is
+  ambiguous): any `parent.` read is a targeted compile error.
 
 ### Constraint placement
 

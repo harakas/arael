@@ -1,13 +1,13 @@
-error: $DIR/tests/constraint_attr_errors/parent_cross_guard_parent.rs:17: `parent.` in a guard is not supported in the parent-refs form -- guard on the constraint's own fields
-  --> tests/constraint_attr_errors/parent_cross_guard_parent.rs:33:1
+error: `parent.` in a guard needs a containing parent below the root (single containment path)
+  --> tests/constraint_attr_errors/parent_value_guard_root_held.rs:27:1
    |
-33 | #[arael::model]
+27 | #[arael::model]
    | ^^^^^^^^^^^^^^^
    |
    = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: unused import: `self`
- --> tests/constraint_attr_errors/parent_cross_guard_parent.rs:4:19
+ --> tests/constraint_attr_errors/parent_value_guard_root_held.rs:4:19
   |
 4 | use arael::refs::{self, Ref};
   |                   ^^^^

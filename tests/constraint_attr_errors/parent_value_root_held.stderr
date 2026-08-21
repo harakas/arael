@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_value_root_held.rs:18: `parent.isigma`: the constraint is held directly by the root -- there is no containing parent; root fields read as `root.<field>`
+  --> tests/constraint_attr_errors/parent_value_root_held.rs:28:1
+   |
+28 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/parent_value_root_held.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

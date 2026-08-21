@@ -674,6 +674,11 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// - `[hb, root.<field>]` / `[hb, parent.<field>]` naming a
 ///   `TripletBlock` -- (entity, root/parent) cross pairs in COO form.
 ///
+/// In a nested constraint's body and guard, `parent.<field>` reads the
+/// containing parent's plain data fields; where the parent is already
+/// a coupled entity, `parent` aliases it with full Param access. One
+/// level only. See docs/MODEL.md, "Parent values".
+///
 /// Options:
 /// - `guard = expr` -- conditional evaluation; the constraint contributes
 ///   only when `expr` evaluates to `true` at runtime.

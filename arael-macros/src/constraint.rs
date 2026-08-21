@@ -256,6 +256,12 @@ struct ConstraintCtx {
     // (Rust semantics), so field lookup consults these before the dotted
     // binding table.
     lets: std::collections::HashSet<String>,
+    // Poisoned path prefixes: a body path equal to a prefix (or starting
+    // with `prefix.`) that resolved to no registered binding errors with
+    // the recorded message instead of the generic fallback. Carries the
+    // targeted diagnostics for `parent.` misuse: a parent Param read, a
+    // `parent.parent.` chain, or `parent.` where no parent binding exists.
+    poisoned: Vec<(String, String)>,
     // Substitutions collected while registering bindings: cached() units of
     // symbolic component fields (values and declared deriv caches), resolved
     // after differentiation to precomputed field reads -- the same pattern
@@ -269,8 +275,16 @@ impl ConstraintCtx {
             bindings: HashMap::new(),
             entity_vars: HashMap::new(),
             lets: std::collections::HashSet::new(),
+            poisoned: Vec::new(),
             subs: Vec::new(),
         }
+    }
+
+    /// The poison message for a path, if a poisoned prefix covers it.
+    fn poison_for(&self, path: &str) -> Option<&str> {
+        self.poisoned.iter()
+            .find(|(p, _)| path == p || path.starts_with(&format!("{}.", p)))
+            .map(|(_, m)| m.as_str())
     }
 
     /// The bindings a constraint body may start a path from, for error
@@ -439,6 +453,10 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     return Err(syn::Error::new_spanned(expr,
                         format!("cannot access `{}`: the path root is a local `let` binding \
                                  and the field is not a known component", path)));
+                }
+                if let Some(msg) = ctx.poison_for(path) {
+                    return Err(syn::Error::new_spanned(expr,
+                        format!("`{}`: {}", path, msg)));
                 }
                 let head = path.split('.').next().unwrap();
                 if let Some(type_name) = ctx.entity_vars.get(head).cloned() {
@@ -2272,6 +2290,156 @@ struct ParentCross {
     parent_refs: Option<(String, String)>,
 }
 
+/// How a constraint body's `parent` binding resolves, decided by the
+/// containing form's sweep shape.
+#[derive(Clone)]
+enum ParentBinding {
+    /// No containing parent below the root: any `parent.` read errors
+    /// with a `root.<field>` suggestion.
+    None,
+    /// The constraint's type is held under several containment paths --
+    /// "the parent" is ambiguous; any `parent.` read errors.
+    Ambiguous,
+    /// The containing parent is already a coupled entity bound under
+    /// `var` (frine-style, `parent.<selfblock>`, `[hb, parent.<triplet>]`,
+    /// remote primary): `parent` aliases that binding -- full access,
+    /// Params differentiated.
+    Entity { var: String, type_name: String },
+    /// Plain containing parent: data fields readable through the prefix
+    /// accessor; Param fields poisoned (their derivative pairs would be
+    /// dropped).
+    Data { type_name: String, accessor: String },
+}
+
+/// Register the `parent.<field>` data bindings for a plain containing
+/// parent: plain data fields (nested data structs included) render
+/// through `accessor`; ref fields, collections and blocks stay unbound;
+/// Param fields are poisoned with the coupling-forms message.
+fn register_parent_data_bindings(
+    ctx: &mut ConstraintCtx,
+    type_name: &str,
+    accessor: &str,
+) -> syn::Result<()> {
+    ctx.entity_vars.insert("parent".to_string(), type_name.to_string());
+    let Some(playout) = registry_lookup(type_name) else { return Ok(()); };
+    for (fname, sft) in &playout.fields {
+        if matches!(sft, SymFieldType::Skip) { continue; }
+        if playout.ref_paths.iter().any(|(n, _)| n == fname) { continue; }
+        if playout.collection_fields.contains(fname) { continue; }
+        if playout.param_fields.contains(fname) {
+            ctx.poisoned.push((format!("parent.{}", fname), format!(
+                "`{}.{}` is a Param -- reading it here would drop its derivative \
+                 pairs; couple parent params through `parent.<selfblock>` or \
+                 `[hb, parent.<triplet>]`", type_name, fname)));
+            continue;
+        }
+        let key = format!("parent.{}", fname);
+        let sym = format!("{}.{}", accessor, fname);
+        match sft {
+            SymFieldType::Struct(inner) => {
+                register_bindings_recursive(ctx, &key, &sym, inner)?;
+            }
+            // Optional data on the parent: out of scope; read it through
+            // per-instance data instead.
+            SymFieldType::OptionalStruct(_) => {}
+            _ => {
+                ctx.bindings.insert(key, ConstraintCtx::make_sym_val(&sym, sft));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply a resolved [`ParentBinding`] to the body context.
+fn register_parent_binding(
+    ctx: &mut ConstraintCtx,
+    binding: &ParentBinding,
+) -> syn::Result<()> {
+    match binding {
+        ParentBinding::None => {
+            ctx.poisoned.push(("parent".to_string(),
+                "the constraint is held directly by the root -- there is no \
+                 containing parent; root fields read as `root.<field>`".to_string()));
+        }
+        ParentBinding::Ambiguous => {
+            ctx.poisoned.push(("parent".to_string(),
+                "the constraint's type is held under several containment paths, \
+                 so `parent` is ambiguous -- hold it under a single path to \
+                 read parent fields".to_string()));
+        }
+        ParentBinding::Entity { var, type_name } => {
+            ctx.entity_vars.insert("parent".to_string(), type_name.clone());
+            register_bindings_recursive(ctx, "parent", var, type_name)?;
+            ctx.poisoned.push(("parent.parent".to_string(),
+                "one `parent.` level only".to_string()));
+        }
+        ParentBinding::Data { type_name, accessor } => {
+            register_parent_data_bindings(ctx, type_name, accessor)?;
+            ctx.poisoned.push(("parent.parent".to_string(),
+                "one `parent.` level only".to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `parent`-headed paths in a GUARD expression (guards are raw
+/// tokens, not sym-processed). `entity_refs` maps `parent.<ref>` to the
+/// resolved local for the parent-refs cross form; every other `parent`
+/// head becomes `to`. Returns Err when a `parent` path exists but the
+/// binding mode has no rendering (None / Ambiguous).
+fn rewrite_guard_parent(
+    expr: &mut syn::Expr,
+    binding: &ParentBinding,
+    entity_refs: Option<&(String, String)>,
+) -> syn::Result<()> {
+    struct V<'a> {
+        to: Option<&'a str>,
+        entity_refs: Option<&'a (String, String)>,
+        bad: bool,
+    }
+    impl syn::visit_mut::VisitMut for V<'_> {
+        fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+            let is_parent_head = |x: &syn::Expr| matches!(x, syn::Expr::Path(p)
+                if p.qself.is_none() && p.path.segments.len() == 1
+                    && p.path.segments[0].ident == "parent");
+            // `parent.<ref>` -> the resolved entity local (parent-refs form).
+            if let syn::Expr::Field(f) = e
+                && is_parent_head(&f.base)
+                && let syn::Member::Named(m) = &f.member
+                && let Some((ra, rb)) = self.entity_refs
+                && (m == ra || m == rb) {
+                    let ident = m.clone();
+                    *e = syn::parse_quote!(#ident);
+                    return;
+            }
+            if is_parent_head(e) {
+                match self.to {
+                    Some(to) => {
+                        let ident = syn::Ident::new(to, proc_macro2::Span::call_site());
+                        *e = syn::parse_quote!(#ident);
+                    }
+                    None => { self.bad = true; }
+                }
+                return;
+            }
+            syn::visit_mut::visit_expr_mut(self, e);
+        }
+    }
+    let to: Option<String> = match binding {
+        ParentBinding::Entity { var, .. } => Some(var.clone()),
+        ParentBinding::Data { accessor, .. } => Some(accessor.clone()),
+        ParentBinding::None | ParentBinding::Ambiguous => None,
+    };
+    let mut v = V { to: to.as_deref(), entity_refs, bad: false };
+    syn::visit_mut::VisitMut::visit_expr_mut(&mut v, expr);
+    if v.bad {
+        return Err(syn::Error::new_spanned(&*expr,
+            "`parent.` in a guard needs a containing parent below the root \
+             (single containment path)"));
+    }
+    Ok(())
+}
+
 /// Per-pair routing info for a multi-CrossBlock constraint. Built by
 /// `build_multi_cross_routing` from the declared block-field list and the
 /// struct's ref-field layout.
@@ -3235,16 +3403,6 @@ pub fn generate_root_methods(
                                     sc.attr_file, sc.attr_line, parent_type, rn, rp)));
                         }
                     }
-                    // Guards run per instance and read match data only;
-                    // parent reads in guards come with the general parent
-                    // value binding.
-                    if constraint.guard.as_deref().is_some_and(|g| g.contains("parent.")) {
-                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                            format!("{}:{}: `parent.` in a guard is not supported in the \
-                                     parent-refs form -- guard on the constraint's own \
-                                     fields",
-                                sc.attr_file, sc.attr_line)));
-                    }
                     Some(chosen)
                 } else {
                     // Own refs, in declaration order, must be exactly
@@ -3816,14 +3974,71 @@ pub fn generate_root_methods(
                 format!("failed to parse entity access path `{}`: {}", path, e)))
         };
 
+        // How `parent.` resolves in this constraint's body and guard:
+        // an alias to an already-coupled parent entity, a data-only
+        // binding through the prefix accessor, or a poisoned name (no
+        // parent / ambiguous containment).
+        let parent_binding: ParentBinding = if let Some((_, ptype)) = &parent_self_primary {
+            ParentBinding::Entity {
+                var: constraint.parent_name.clone()
+                    .unwrap_or_else(|| ptype.to_lowercase()),
+                type_name: ptype.clone(),
+            }
+        } else if let Some((_, ptype)) = &parent_triplet {
+            ParentBinding::Entity {
+                var: ptype.to_lowercase(),
+                type_name: ptype.clone(),
+            }
+        } else if let Some(pc) = &parent_cross {
+            ParentBinding::Data {
+                type_name: pc.parent_type.clone(),
+                accessor: format!("__seg{}", cross_prefix.len() - 1),
+            }
+        } else if frines_ident.is_some() && !is_root_level_cross && !is_self_block {
+            // Frine-style / remote: the containing parent IS the A-type
+            // entity, bound under the parent alias -- params included.
+            ParentBinding::Entity {
+                var: parent_name.clone(),
+                type_name: a_type.clone(),
+            }
+        } else if is_root_level_cross && !is_triplet && !is_multi_cross {
+            if cross_prefix.is_empty() {
+                ParentBinding::None
+            } else {
+                match find_containing_parent(&root_name.to_string(), &sc.struct_name) {
+                    Some(pt) if pt != root_name.to_string() => ParentBinding::Data {
+                        type_name: pt,
+                        accessor: format!("__seg{}", cross_prefix.len() - 1),
+                    },
+                    _ => ParentBinding::None,
+                }
+            }
+        } else if is_self_block {
+            if containing_paths.len() > 1 {
+                ParentBinding::Ambiguous
+            } else if let EntityLocation::Nested { segments } = &entity_location
+                && segments.len() >= 2
+                && segments.last().is_some_and(|s| s.collection || s.optional) {
+                match find_containing_parent(&root_name.to_string(), &sc.struct_name) {
+                    Some(pt) if pt != root_name.to_string() => ParentBinding::Data {
+                        type_name: pt,
+                        accessor: format!("__seg{}", segments.len() - 2),
+                    },
+                    _ => ParentBinding::None,
+                }
+            } else {
+                ParentBinding::None
+            }
+        } else {
+            ParentBinding::None
+        };
+
         // Re-process constraint body to get residual-only code and full code
         // We need the symbolic expressions again
         let root_name_str = root_name.to_string();
         let (residual_exprs, param_symbols, loss_expr, component_subs) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str,
-            parent_cross.as_ref(),
-            if cross_prefix.is_empty() { None }
-            else { Some(format!("__seg{}", cross_prefix.len() - 1)) })
+            parent_cross.as_ref(), &parent_binding)
             .map_err(|e| syn::Error::new(e.span(),
                 format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
         check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
@@ -4851,6 +5066,11 @@ pub fn generate_root_methods(
                     "__frine".to_string()
                 };
                 rewrite_guard_self(&mut e, &replacement);
+                // Guards read values only, so `parent.` needs no
+                // differentiation -- rewrite the head to the binding's
+                // rendering (entity alias local / prefix accessor).
+                rewrite_guard_parent(&mut e, &parent_binding,
+                    parent_cross.as_ref().and_then(|pc| pc.parent_refs.as_ref()))?;
                 Ok(e)
             })
             .transpose()?;
@@ -6485,12 +6705,11 @@ fn interpret_constraint_body(
     root_type_name: &str,
     // `parent.<crossblock>` primary, resolved by the caller. The symbol
     // environment matches a plain two-ref cross constraint; in the
-    // parent-refs form the entities register under `parent.<ref>` keys
-    // and the parent's data fields become readable as `parent.<field>`.
+    // parent-refs form the entities register under `parent.<ref>` keys.
     parent_cross: Option<&ParentCross>,
-    // The parent prefix binding (`__seg{n-1}`) parent data reads render
-    // through; Some whenever the constraint collection is nested.
-    parent_accessor: Option<String>,
+    // How `parent.` resolves in the body, decided by the caller from the
+    // containing form's sweep shape.
+    parent_binding: &ParentBinding,
 ) -> syn::Result<(Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>)> {
     // `root.<selfblock>` primary: the entity supplies only data, every param
     // is the root's. Deep validation lives in the traversal side (which sees
@@ -6636,9 +6855,9 @@ fn interpret_constraint_body(
 
     // Parent-refs form: entities bind under explicit `parent.<ref>` keys
     // (rendered through the resolved locals named after the parent's ref
-    // fields), and the parent's plain data fields become readable as
-    // `parent.<field>` through the prefix binding. Bare `<ref>` stays
-    // unbound on purpose -- the source of every read is visible.
+    // fields). Bare `<ref>` stays unbound on purpose -- the source of
+    // every read is visible. The parent's data fields come through the
+    // general parent binding below.
     if let Some(pc) = parent_cross
         && let Some((ra, rb)) = &pc.parent_refs {
         if fields.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == "parent")) {
@@ -6650,29 +6869,12 @@ fn interpret_constraint_body(
             ctx.entity_vars.insert(format!("parent.{}", rn), tn.clone());
             register_bindings_recursive(&mut ctx, &format!("parent.{}", rn), rn, tn)?;
         }
-        ctx.entity_vars.insert("parent".to_string(), pc.parent_type.clone());
-        if let Some(playout) = registry_lookup(&pc.parent_type) {
-            let acc = parent_accessor.as_deref().unwrap_or("__parent");
-            for (fname, sft) in &playout.fields {
-                if matches!(sft, SymFieldType::Skip) { continue; }
-                if playout.ref_paths.iter().any(|(n, _)| n == fname) { continue; }
-                if playout.collection_fields.contains(fname) { continue; }
-                let key = format!("parent.{}", fname);
-                let sym = format!("{}.{}", acc, fname);
-                match sft {
-                    SymFieldType::Struct(inner) => {
-                        register_bindings_recursive(&mut ctx, &key, &sym, inner)?;
-                    }
-                    // Optional data on the parent: read it through
-                    // per-instance data instead (kept out of this form).
-                    SymFieldType::OptionalStruct(_) => {}
-                    _ => {
-                        ctx.bindings.insert(key, ConstraintCtx::make_sym_val(&sym, sft));
-                    }
-                }
-            }
-        }
     }
+
+    // The general `parent.<field>` binding: an alias to the coupled
+    // parent entity, a data-only binding, or a poisoned name with a
+    // targeted error.
+    register_parent_binding(&mut ctx, parent_binding)?;
 
     // `root` aliases the root variable in constraint bodies, matching the
     // `root.<field>` block spec: `root.a` and `<root_lc>.a` are the same

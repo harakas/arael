@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/parent_value_ambiguous.rs:8: `parent.pw`: the constraint's type is held under several containment paths, so `parent` is ambiguous -- hold it under a single path to read parent fields
+  --> tests/constraint_attr_errors/parent_value_ambiguous.rs:29:1
+   |
+29 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
