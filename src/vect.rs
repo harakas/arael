@@ -383,6 +383,7 @@ impl<T: Float> ops::IndexMut<usize> for vect2<T> {
 // Re-export symbolic companion types from arael-sym
 pub use arael_sym::vect3sym;
 pub use arael_sym::vect2sym;
+pub use arael_sym::vectsym;
 
 #[cfg(test)]
 mod tests {
@@ -511,6 +512,217 @@ mod tests {
     fn test_vect3_deg_rad_roundtrip() {
         let v = vect3d::new(30.0, 45.0, 90.0);
         assert!(v.deg2rad().rad2deg().similar(v));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// vect<T, N> -- fixed-size N-dimensional vector
+// ---------------------------------------------------------------------------
+
+/// N-dimensional vector over `[T; N]` -- the generic sibling of
+/// [`vect2`] / [`vect3`]. Addition, subtraction, negation, scalar
+/// multiplication, dot product (`*` operator), `Index<usize>`. The
+/// dimension lives in the const generic; `From` converts to and from
+/// the fixed types and nalgebra's `SVector`.
+#[derive(Clone, Copy, PartialEq)]
+pub struct vect<T: Float, const N: usize> {
+    pub e: [T; N],
+}
+
+// serde has no blanket impls for const-generic arrays; serialize as a
+// sequence of exactly N components.
+impl<T: Float + serde::Serialize, const N: usize> serde::Serialize for vect<T, N> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(N))?;
+        for v in &self.e { seq.serialize_element(v)?; }
+        seq.end()
+    }
+}
+
+impl<'de, T, const N: usize> serde::Deserialize<'de> for vect<T, N>
+where
+    T: Float + serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T, const N: usize>(std::marker::PhantomData<T>);
+        impl<'de, T, const N: usize> serde::de::Visitor<'de> for V<T, N>
+        where
+            T: Float + serde::Deserialize<'de>,
+        {
+            type Value = vect<T, N>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a sequence of {} numbers", N)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self, mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut e = [T::zero(); N];
+                for (i, slot) in e.iter_mut().enumerate() {
+                    *slot = seq.next_element()?.ok_or_else(|| {
+                        serde::de::Error::invalid_length(i, &self)
+                    })?;
+                }
+                Ok(vect { e })
+            }
+        }
+        d.deserialize_seq(V::<T, N>(std::marker::PhantomData))
+    }
+}
+
+/// N-dimensional vector with f32 components.
+pub type vectf<const N: usize> = vect<f32, N>;
+/// N-dimensional vector with f64 components.
+pub type vectd<const N: usize> = vect<f64, N>;
+
+impl<T: Float, const N: usize> vect<T, N> {
+    /// Create from components.
+    pub fn new(e: [T; N]) -> Self { vect { e } }
+    /// Create from an array (same as [`new`](Self::new), named for
+    /// symmetry with the matrix constructor).
+    pub fn from_array(e: [T; N]) -> Self { vect { e } }
+    /// The zero vector.
+    pub fn zeros() -> Self { vect { e: [T::zero(); N] } }
+    /// Number of components.
+    pub const fn len(&self) -> usize { N }
+    /// True when N == 0.
+    pub const fn is_empty(&self) -> bool { N == 0 }
+    /// Squared Euclidean norm.
+    pub fn norm_squared(self) -> T {
+        let mut s = T::zero();
+        for i in 0..N { s = s + self.e[i] * self.e[i]; }
+        s
+    }
+    /// Euclidean norm.
+    pub fn norm(self) -> T { self.norm_squared().sqrt() }
+    /// Component-wise cast to another float type.
+    pub fn cast<U: Float>(self) -> vect<U, N> {
+        vect { e: std::array::from_fn(|i| U::from(self.e[i]).unwrap()) }
+    }
+}
+
+impl<T: Float, const N: usize> Default for vect<T, N> {
+    fn default() -> Self { Self::zeros() }
+}
+
+impl<T: Float, const N: usize> fmt::Debug for vect<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.e.iter()).finish()
+    }
+}
+
+impl<T: Float, const N: usize> ops::Index<usize> for vect<T, N> {
+    type Output = T;
+    fn index(&self, i: usize) -> &T { &self.e[i] }
+}
+
+impl<T: Float, const N: usize> ops::IndexMut<usize> for vect<T, N> {
+    fn index_mut(&mut self, i: usize) -> &mut T { &mut self.e[i] }
+}
+
+impl<T: Float, const N: usize> ops::Add for vect<T, N> {
+    type Output = vect<T, N>;
+    fn add(self, rhs: Self) -> Self {
+        vect { e: std::array::from_fn(|i| self.e[i] + rhs.e[i]) }
+    }
+}
+
+impl<T: Float, const N: usize> ops::Sub for vect<T, N> {
+    type Output = vect<T, N>;
+    fn sub(self, rhs: Self) -> Self {
+        vect { e: std::array::from_fn(|i| self.e[i] - rhs.e[i]) }
+    }
+}
+
+impl<T: Float, const N: usize> ops::Neg for vect<T, N> {
+    type Output = vect<T, N>;
+    fn neg(self) -> Self {
+        vect { e: std::array::from_fn(|i| -self.e[i]) }
+    }
+}
+
+/// Dot product.
+impl<T: Float, const N: usize> ops::Mul for vect<T, N> {
+    type Output = T;
+    fn mul(self, rhs: Self) -> T {
+        let mut s = T::zero();
+        for i in 0..N { s = s + self.e[i] * rhs.e[i]; }
+        s
+    }
+}
+
+impl<T: Float, const N: usize> ops::Mul<T> for vect<T, N> {
+    type Output = vect<T, N>;
+    fn mul(self, s: T) -> Self {
+        vect { e: std::array::from_fn(|i| self.e[i] * s) }
+    }
+}
+
+impl<T: Float, const N: usize> ops::Div<T> for vect<T, N> {
+    type Output = vect<T, N>;
+    fn div(self, s: T) -> Self {
+        vect { e: std::array::from_fn(|i| self.e[i] / s) }
+    }
+}
+
+impl<const N: usize> ops::Mul<vect<f32, N>> for f32 {
+    type Output = vect<f32, N>;
+    fn mul(self, rhs: vect<f32, N>) -> vect<f32, N> { rhs * self }
+}
+
+impl<const N: usize> ops::Mul<vect<f64, N>> for f64 {
+    type Output = vect<f64, N>;
+    fn mul(self, rhs: vect<f64, N>) -> vect<f64, N> { rhs * self }
+}
+
+// Conversions to and from the fixed types.
+impl<T: Float> From<vect2<T>> for vect<T, 2> {
+    fn from(v: vect2<T>) -> Self { vect { e: [v.x, v.y] } }
+}
+impl<T: Float> From<vect<T, 2>> for vect2<T> {
+    fn from(v: vect<T, 2>) -> Self { vect2 { x: v.e[0], y: v.e[1] } }
+}
+impl<T: Float> From<vect3<T>> for vect<T, 3> {
+    fn from(v: vect3<T>) -> Self { vect { e: [v.x, v.y, v.z] } }
+}
+impl<T: Float> From<vect<T, 3>> for vect3<T> {
+    fn from(v: vect<T, 3>) -> Self { vect3 { x: v.e[0], y: v.e[1], z: v.e[2] } }
+}
+
+// Mixed dot products with the fixed types.
+impl<T: Float> ops::Mul<vect2<T>> for vect<T, 2> {
+    type Output = T;
+    fn mul(self, rhs: vect2<T>) -> T { self.e[0] * rhs.x + self.e[1] * rhs.y }
+}
+impl<T: Float> ops::Mul<vect<T, 2>> for vect2<T> {
+    type Output = T;
+    fn mul(self, rhs: vect<T, 2>) -> T { self.x * rhs.e[0] + self.y * rhs.e[1] }
+}
+impl<T: Float> ops::Mul<vect3<T>> for vect<T, 3> {
+    type Output = T;
+    fn mul(self, rhs: vect3<T>) -> T {
+        self.e[0] * rhs.x + self.e[1] * rhs.y + self.e[2] * rhs.z
+    }
+}
+impl<T: Float> ops::Mul<vect<T, 3>> for vect3<T> {
+    type Output = T;
+    fn mul(self, rhs: vect<T, 3>) -> T {
+        self.x * rhs.e[0] + self.y * rhs.e[1] + self.z * rhs.e[2]
+    }
+}
+
+// Conversions to and from nalgebra, for callers doing heavy math on
+// their own side of the model boundary.
+impl<T: Float + nalgebra::Scalar, const N: usize> From<vect<T, N>>
+    for nalgebra::SVector<T, N>
+{
+    fn from(v: vect<T, N>) -> Self { nalgebra::SVector::from(v.e) }
+}
+impl<T: Float + nalgebra::Scalar, const N: usize> From<nalgebra::SVector<T, N>>
+    for vect<T, N>
+{
+    fn from(v: nalgebra::SVector<T, N>) -> Self {
+        vect { e: std::array::from_fn(|i| v[i]) }
     }
 }
 

@@ -41,6 +41,19 @@ impl<T: crate::utils::Float> ParamType for crate::vect::vect3<T> {
     fn read_from<F: crate::utils::Float>(src: &[F]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap(), T::from(src[2]).unwrap()) }
 }
 
+// No const string arrays for arbitrary N: an empty SUFFIXES list makes
+// `Param::param_symbols` fall back to indexed component names ("[i]").
+impl<T: crate::utils::Float, const N: usize> ParamType for crate::vect::vect<T, N> {
+    const SIZE: usize = N;
+    const SUFFIXES: &'static [&'static str] = &[];
+    fn write_to<F: crate::utils::Float>(&self, dst: &mut [F]) {
+        for i in 0..N { dst[i] = F::from(self.e[i]).unwrap(); }
+    }
+    fn read_from<F: crate::utils::Float>(src: &[F]) -> Self {
+        crate::vect::vect { e: std::array::from_fn(|i| T::from(src[i]).unwrap()) }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Param<T> -- wrapper for an optimizable parameter
 // ---------------------------------------------------------------------------
@@ -421,8 +434,16 @@ impl<T: ParamType> Model for Param<T> {
     const PARAM_COUNT: u32 = T::SIZE as u32;
     fn serialize_size(&self) -> u32 { if self.optimize { T::SIZE as u32 } else { 0 } }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
-        for suffix in T::SUFFIXES {
-            out.push(format!("{}{}", base, suffix));
+        if T::SUFFIXES.len() == T::SIZE {
+            for suffix in T::SUFFIXES {
+                out.push(format!("{}{}", base, suffix));
+            }
+        } else {
+            // Types without a const suffix table (vect<T, N>): indexed
+            // component names.
+            for i in 0..T::SIZE {
+                out.push(format!("{}[{}]", base, i));
+            }
         }
     }
 }
@@ -1009,6 +1030,10 @@ impl_model_noop_generic!(
     matrix::matrix3, matrix::matrix2,
     quatern::quatern,
 );
+
+impl<F: crate::utils::Float, const N: usize> Model for crate::vect::vect<F, N> {}
+impl<F: crate::utils::Float, const R: usize, const C: usize> Model
+    for crate::matrix::matrix<F, R, C> {}
 
 impl<T> Model for crate::refs::Ref<T> {}
 
@@ -2964,6 +2989,19 @@ impl_math_model_sym!(
     matrix::matrix2 => matrix2sym,
     quatern::quatern => quaternsym,
 );
+
+// The N-dimensional types: the sym twin carries the dims as runtime
+// values, taken from the const generics here.
+impl<F: crate::utils::Float, const N: usize> ModelSym for crate::vect::vect<F, N> {
+    type Sym = arael_sym::vectsym;
+    fn sym(base: &str) -> Self::Sym { arael_sym::vectsym::new(base, N) }
+}
+impl<F: crate::utils::Float, const R: usize, const C: usize> ModelSym
+    for crate::matrix::matrix<F, R, C>
+{
+    type Sym = arael_sym::matrixsym;
+    fn sym(base: &str) -> Self::Sym { arael_sym::matrixsym::new(base, R, C) }
+}
 
 impl<T: ParamType + ModelSym> ModelSym for Param<T> {
     type Sym = T::Sym;

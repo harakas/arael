@@ -1340,3 +1340,254 @@ mod tests {
             "cos(b) * sin(a) + cos(a) * sin(b)");
     }
 }
+
+// ---------------------------------------------------------------------------
+// vectsym -- symbolic N-dimensional vector
+// ---------------------------------------------------------------------------
+
+/// Symbolic N-dimensional vector: the compile-time counterpart of
+/// `vect<T, N>`. Dimensions are runtime values here (macro time), so
+/// mismatched ops are caught while interpreting the constraint body.
+/// Callers (the constraint evaluator) check dims for span-carrying
+/// errors; the ops assert as a backstop.
+#[derive(Clone)]
+pub struct vectsym {
+    /// Component expressions.
+    pub e: Vec<E>,
+}
+
+impl vectsym {
+    /// Create a symbolic vector whose component symbols are named
+    /// `{base}[i]` -- rendering as `Index` reads on the runtime type.
+    pub fn new(base: &str, n: usize) -> Self {
+        vectsym { e: (0..n).map(|i| symbol(&format!("{}[{}]", base, i))).collect() }
+    }
+
+    /// Build a vector from component expressions.
+    pub fn from_components(e: Vec<E>) -> Self {
+        vectsym { e }
+    }
+
+    /// Number of components.
+    pub fn len(&self) -> usize { self.e.len() }
+    /// True when the vector has no components.
+    pub fn is_empty(&self) -> bool { self.e.is_empty() }
+
+    /// Sum of squared components.
+    pub fn square(&self) -> E {
+        let mut s = crate::constant(0.0);
+        for c in &self.e { s = s + c.clone() * c.clone(); }
+        s
+    }
+
+    /// Euclidean norm.
+    pub fn norm(&self) -> E {
+        crate::sqrt(self.square())
+    }
+}
+
+impl ops::Add<vectsym> for vectsym {
+    type Output = vectsym;
+    fn add(self, rhs: vectsym) -> vectsym {
+        assert_eq!(self.e.len(), rhs.e.len(), "vectsym add: dims {} vs {}", self.e.len(), rhs.e.len());
+        vectsym { e: self.e.into_iter().zip(rhs.e).map(|(a, b)| a + b).collect() }
+    }
+}
+
+impl ops::Sub<vectsym> for vectsym {
+    type Output = vectsym;
+    fn sub(self, rhs: vectsym) -> vectsym {
+        assert_eq!(self.e.len(), rhs.e.len(), "vectsym sub: dims {} vs {}", self.e.len(), rhs.e.len());
+        vectsym { e: self.e.into_iter().zip(rhs.e).map(|(a, b)| a - b).collect() }
+    }
+}
+
+impl ops::Neg for vectsym {
+    type Output = vectsym;
+    fn neg(self) -> vectsym {
+        vectsym { e: self.e.into_iter().map(|a| -a).collect() }
+    }
+}
+
+impl ops::Mul<E> for vectsym {
+    type Output = vectsym;
+    fn mul(self, rhs: E) -> vectsym {
+        vectsym { e: self.e.into_iter().map(|a| a * rhs.clone()).collect() }
+    }
+}
+
+impl ops::Mul<vectsym> for E {
+    type Output = vectsym;
+    fn mul(self, rhs: vectsym) -> vectsym {
+        rhs * self
+    }
+}
+
+/// Dot product.
+impl ops::Mul<vectsym> for vectsym {
+    type Output = E;
+    fn mul(self, rhs: vectsym) -> E {
+        assert_eq!(self.e.len(), rhs.e.len(), "vectsym dot: dims {} vs {}", self.e.len(), rhs.e.len());
+        let mut s = crate::constant(0.0);
+        for (a, b) in self.e.into_iter().zip(rhs.e) { s = s + a * b; }
+        s
+    }
+}
+
+impl ops::Div<E> for vectsym {
+    type Output = vectsym;
+    fn div(self, rhs: E) -> vectsym {
+        vectsym { e: self.e.into_iter().map(|a| a / rhs.clone()).collect() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// matrixsym -- symbolic R x C matrix
+// ---------------------------------------------------------------------------
+
+/// Symbolic R x C matrix stored as row vectors: the compile-time
+/// counterpart of `matrix<T, R, C>`.
+#[derive(Clone)]
+pub struct matrixsym {
+    /// Row vectors.
+    pub rows: Vec<vectsym>,
+}
+
+impl matrixsym {
+    /// Create a symbolic matrix whose element symbols are named
+    /// `{base}[i][j]`.
+    pub fn new(base: &str, r: usize, c: usize) -> Self {
+        matrixsym {
+            rows: (0..r).map(|i| vectsym::new(&format!("{}[{}]", base, i), c)).collect(),
+        }
+    }
+
+    /// Build a matrix from row vectors (all the same length).
+    pub fn from_rows(rows: Vec<vectsym>) -> Self {
+        if let Some(first) = rows.first() {
+            let c = first.len();
+            assert!(rows.iter().all(|r| r.len() == c), "matrixsym rows of unequal length");
+        }
+        matrixsym { rows }
+    }
+
+    /// Row count.
+    pub fn nrows(&self) -> usize { self.rows.len() }
+    /// Column count.
+    pub fn ncols(&self) -> usize { self.rows.first().map_or(0, |r| r.len()) }
+
+    /// Row `index` as a vector.
+    pub fn row(&self, index: usize) -> vectsym {
+        self.rows[index].clone()
+    }
+
+    /// Transposed copy.
+    pub fn transpose(&self) -> matrixsym {
+        let (r, c) = (self.nrows(), self.ncols());
+        matrixsym {
+            rows: (0..c).map(|j| vectsym {
+                e: (0..r).map(|i| self.rows[i].e[j].clone()).collect(),
+            }).collect(),
+        }
+    }
+}
+
+impl ops::Add<matrixsym> for matrixsym {
+    type Output = matrixsym;
+    fn add(self, rhs: matrixsym) -> matrixsym {
+        assert_eq!((self.nrows(), self.ncols()), (rhs.nrows(), rhs.ncols()),
+            "matrixsym add: dims {}x{} vs {}x{}", self.nrows(), self.ncols(), rhs.nrows(), rhs.ncols());
+        matrixsym { rows: self.rows.into_iter().zip(rhs.rows).map(|(a, b)| a + b).collect() }
+    }
+}
+
+impl ops::Sub<matrixsym> for matrixsym {
+    type Output = matrixsym;
+    fn sub(self, rhs: matrixsym) -> matrixsym {
+        assert_eq!((self.nrows(), self.ncols()), (rhs.nrows(), rhs.ncols()),
+            "matrixsym sub: dims {}x{} vs {}x{}", self.nrows(), self.ncols(), rhs.nrows(), rhs.ncols());
+        matrixsym { rows: self.rows.into_iter().zip(rhs.rows).map(|(a, b)| a - b).collect() }
+    }
+}
+
+impl ops::Mul<E> for matrixsym {
+    type Output = matrixsym;
+    fn mul(self, rhs: E) -> matrixsym {
+        matrixsym { rows: self.rows.into_iter().map(|r| r * rhs.clone()).collect() }
+    }
+}
+
+impl ops::Mul<matrixsym> for E {
+    type Output = matrixsym;
+    fn mul(self, rhs: matrixsym) -> matrixsym {
+        rhs * self
+    }
+}
+
+/// Matrix-vector product.
+impl ops::Mul<vectsym> for matrixsym {
+    type Output = vectsym;
+    fn mul(self, v: vectsym) -> vectsym {
+        assert_eq!(self.ncols(), v.len(),
+            "matrixsym * vectsym: {}x{} times {}", self.nrows(), self.ncols(), v.len());
+        vectsym { e: self.rows.into_iter().map(|r| r * v.clone()).collect() }
+    }
+}
+
+/// Matrix-matrix product.
+impl ops::Mul<matrixsym> for matrixsym {
+    type Output = matrixsym;
+    fn mul(self, rhs: matrixsym) -> matrixsym {
+        assert_eq!(self.ncols(), rhs.nrows(),
+            "matrixsym * matrixsym: {}x{} times {}x{}",
+            self.nrows(), self.ncols(), rhs.nrows(), rhs.ncols());
+        let rt = rhs.transpose();
+        matrixsym {
+            rows: self.rows.into_iter().map(|r| vectsym {
+                e: rt.rows.iter().map(|c| r.clone() * c.clone()).collect(),
+            }).collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod vectsym_tests {
+    use super::*;
+
+    #[test]
+    fn symbols_render_as_index_reads() {
+        let v = vectsym::new("a.v", 3);
+        assert_eq!(format!("{}", v.e[2]), "a.v[2]");
+        let m = matrixsym::new("a.m", 2, 3);
+        assert_eq!(format!("{}", m.rows[1].e[0]), "a.m[1][0]");
+    }
+
+    #[test]
+    fn matvec_and_transpose() {
+        let m = matrixsym::new("m", 2, 3);
+        let v = vectsym::new("v", 3);
+        let r = m.clone() * v;
+        assert_eq!(r.len(), 2);
+        assert_eq!(format!("{}", r.e[0].clone().simplify()),
+            "m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2]");
+        let t = m.transpose();
+        assert_eq!((t.nrows(), t.ncols()), (3, 2));
+        assert_eq!(format!("{}", t.rows[2].e[1]), "m[1][2]");
+    }
+
+    #[test]
+    fn matmul_dims() {
+        let a = matrixsym::new("a", 2, 3);
+        let b = matrixsym::new("b", 3, 4);
+        let ab = a * b;
+        assert_eq!((ab.nrows(), ab.ncols()), (2, 4));
+    }
+
+    #[test]
+    #[should_panic(expected = "dims 3 vs 2")]
+    fn dim_mismatch_panics() {
+        let a = vectsym::new("a", 3);
+        let b = vectsym::new("b", 2);
+        let _ = a + b;
+    }
+}

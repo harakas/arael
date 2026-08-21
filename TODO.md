@@ -430,3 +430,14 @@
   covariance block enumeration, and the sidecar/export each treat entity
   fields as containers and would need to accept a directly-nested entity as
   a one-element set. `Option<Entity>` is idiomatic meanwhile.
+
+- **N-dimensional vect/matrix: C++/Python export.** `vect<T, N>` /
+  `matrix<T, R, C>` fields are rejected by cargo-arael with a clear
+  error (no repr(C) mirror types yet). Needs `std::array`-backed C++
+  mirrors per concrete dimension plus the getter/setter surface.
+- **N-dimensional vect/matrix: deferred forms.** `Param<matrix<..>>`
+  (matrices are data-only, like matrix2/3); runtime-varying component
+  indices in bodies (impossible under compile-time differentiation);
+  `#[arael(symbolic = ...)]` caching of N-dimensional values (component
+  suffixes are dynamic); component-wise transcendental functions over
+  whole vectors (write per component).

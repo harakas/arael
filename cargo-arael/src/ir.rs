@@ -74,6 +74,24 @@ impl Model {
         if m.schema != 1 {
             return Err(format!("sidecar schema {} not supported (want 1)", m.schema));
         }
+        // N-dimensional vect/matrix fields have no C++/Python mirror yet;
+        // a silent skip would export a model missing fields.
+        for (tname, ty) in &m.types {
+            for f in &ty.fields {
+                let head = f.of.as_deref()
+                    .or(f.spelled.as_deref())
+                    .unwrap_or("")
+                    .split('<').next().unwrap_or("");
+                if matches!(head, "vect" | "vectf" | "vectd"
+                    | "matrix" | "matrixf" | "matrixd")
+                {
+                    return Err(format!(
+                        "{}.{}: N-dimensional `vect`/`matrix` fields are not \
+                         supported by the C++/Python export yet",
+                        tname, f.name));
+                }
+            }
+        }
         Ok(m)
     }
 }

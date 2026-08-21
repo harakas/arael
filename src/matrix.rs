@@ -771,6 +771,7 @@ impl<T: Float> Similar for matrix2<T> {
 // Re-export symbolic companion types from arael-sym
 pub use arael_sym::matrix3sym;
 pub use arael_sym::matrix2sym;
+pub use arael_sym::matrixsym;
 
 #[cfg(test)]
 mod tests {
@@ -1141,6 +1142,268 @@ mod tests {
                 }}
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// matrix<T, R, C> -- fixed-size R x C matrix
+// ---------------------------------------------------------------------------
+
+use crate::vect::vect;
+
+/// R x C matrix stored as R row vectors -- the generic sibling of
+/// [`matrix2`] / [`matrix3`]. Addition, subtraction, scalar and
+/// matrix/vector multiplication, `transpose`, `Index<usize>` yielding a
+/// row. Dimensions live in the const generics; `From` converts to and
+/// from the fixed types and nalgebra's `SMatrix`.
+#[derive(Clone, Copy, PartialEq)]
+pub struct matrix<T: Float, const R: usize, const C: usize> {
+    pub rows: [vect<T, C>; R],
+}
+
+// serde has no blanket impls for const-generic arrays; serialize as a
+// sequence of R rows (each row a sequence of C components).
+impl<T: Float + serde::Serialize, const R: usize, const C: usize> serde::Serialize
+    for matrix<T, R, C>
+{
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(R))?;
+        for row in &self.rows { seq.serialize_element(row)?; }
+        seq.end()
+    }
+}
+
+impl<'de, T, const R: usize, const C: usize> serde::Deserialize<'de>
+    for matrix<T, R, C>
+where
+    T: Float + serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T, const R: usize, const C: usize>(std::marker::PhantomData<T>);
+        impl<'de, T, const R: usize, const C: usize> serde::de::Visitor<'de> for V<T, R, C>
+        where
+            T: Float + serde::Deserialize<'de>,
+        {
+            type Value = matrix<T, R, C>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a sequence of {} rows of {} numbers", R, C)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self, mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut rows = [vect::<T, C>::zeros(); R];
+                for (i, slot) in rows.iter_mut().enumerate() {
+                    *slot = seq.next_element()?.ok_or_else(|| {
+                        serde::de::Error::invalid_length(i, &self)
+                    })?;
+                }
+                Ok(matrix { rows })
+            }
+        }
+        d.deserialize_seq(V::<T, R, C>(std::marker::PhantomData))
+    }
+}
+
+/// R x C matrix with f32 elements.
+pub type matrixf<const R: usize, const C: usize> = matrix<f32, R, C>;
+/// R x C matrix with f64 elements.
+pub type matrixd<const R: usize, const C: usize> = matrix<f64, R, C>;
+
+impl<T: Float, const R: usize, const C: usize> matrix<T, R, C> {
+    /// Create from a row-major array.
+    pub fn from_array(a: [[T; C]; R]) -> Self {
+        matrix { rows: std::array::from_fn(|i| vect::new(a[i])) }
+    }
+    /// The zero matrix.
+    pub fn zeros() -> Self {
+        matrix { rows: [vect::zeros(); R] }
+    }
+    /// Transposed copy.
+    pub fn transpose(self) -> matrix<T, C, R> {
+        matrix { rows: std::array::from_fn(|i|
+            vect::new(std::array::from_fn(|j| self.rows[j].e[i]))) }
+    }
+    /// Element-wise cast to another float type.
+    pub fn cast<U: Float>(self) -> matrix<U, R, C> {
+        matrix { rows: std::array::from_fn(|i| self.rows[i].cast()) }
+    }
+}
+
+impl<T: Float, const N: usize> matrix<T, N, N> {
+    /// The identity matrix.
+    pub fn identity() -> Self {
+        let mut m = Self::zeros();
+        for i in 0..N { m.rows[i].e[i] = T::one(); }
+        m
+    }
+
+    /// Eigendecomposition of a SYMMETRIC matrix: `(r, d)` with the
+    /// eigenvectors as the COLUMNS of `r` and the eigenvalues in `d`,
+    /// sorted ascending -- the same contract as
+    /// [`matrix3::symmetric_eigen`]. Delegates to nalgebra at f64.
+    pub fn symmetric_eigen(self) -> (matrix<T, N, N>, vect<T, N>) {
+        let na = nalgebra::DMatrix::from_fn(N, N, |i, j|
+            self.rows[i].e[j].to_f64().unwrap());
+        let eigen = na.symmetric_eigen();
+        let mut idx: std::vec::Vec<usize> = (0..N).collect();
+        idx.sort_by(|&a, &b| eigen.eigenvalues[a].total_cmp(&eigen.eigenvalues[b]));
+        let d = vect::new(std::array::from_fn(|k|
+            T::from(eigen.eigenvalues[idx[k]]).unwrap()));
+        let r = matrix { rows: std::array::from_fn(|i|
+            vect::new(std::array::from_fn(|k|
+                T::from(eigen.eigenvectors[(i, idx[k])]).unwrap()))) };
+        (r, d)
+    }
+}
+
+impl<T: Float, const R: usize, const C: usize> Default for matrix<T, R, C> {
+    fn default() -> Self { Self::zeros() }
+}
+
+impl<T: Float, const R: usize, const C: usize> fmt::Debug for matrix<T, R, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.rows.iter()).finish()
+    }
+}
+
+impl<T: Float, const R: usize, const C: usize> ops::Index<usize> for matrix<T, R, C> {
+    type Output = vect<T, C>;
+    fn index(&self, i: usize) -> &vect<T, C> { &self.rows[i] }
+}
+
+impl<T: Float, const R: usize, const C: usize> ops::IndexMut<usize> for matrix<T, R, C> {
+    fn index_mut(&mut self, i: usize) -> &mut vect<T, C> { &mut self.rows[i] }
+}
+
+impl<T: Float, const R: usize, const C: usize> ops::Add for matrix<T, R, C> {
+    type Output = matrix<T, R, C>;
+    fn add(self, rhs: Self) -> Self {
+        matrix { rows: std::array::from_fn(|i| self.rows[i] + rhs.rows[i]) }
+    }
+}
+
+impl<T: Float, const R: usize, const C: usize> ops::Sub for matrix<T, R, C> {
+    type Output = matrix<T, R, C>;
+    fn sub(self, rhs: Self) -> Self {
+        matrix { rows: std::array::from_fn(|i| self.rows[i] - rhs.rows[i]) }
+    }
+}
+
+impl<T: Float, const R: usize, const C: usize> ops::Mul<T> for matrix<T, R, C> {
+    type Output = matrix<T, R, C>;
+    fn mul(self, s: T) -> Self {
+        matrix { rows: std::array::from_fn(|i| self.rows[i] * s) }
+    }
+}
+
+impl<const R: usize, const C: usize> ops::Mul<matrix<f32, R, C>> for f32 {
+    type Output = matrix<f32, R, C>;
+    fn mul(self, rhs: matrix<f32, R, C>) -> matrix<f32, R, C> { rhs * self }
+}
+
+impl<const R: usize, const C: usize> ops::Mul<matrix<f64, R, C>> for f64 {
+    type Output = matrix<f64, R, C>;
+    fn mul(self, rhs: matrix<f64, R, C>) -> matrix<f64, R, C> { rhs * self }
+}
+
+/// Matrix-vector product.
+impl<T: Float, const R: usize, const C: usize> ops::Mul<vect<T, C>> for matrix<T, R, C> {
+    type Output = vect<T, R>;
+    fn mul(self, v: vect<T, C>) -> vect<T, R> {
+        vect::new(std::array::from_fn(|i| self.rows[i] * v))
+    }
+}
+
+/// Matrix-matrix product. The k-innermost (axpy) loop order keeps the
+/// inner loop contiguous over the row-major storage, so it vectorizes.
+impl<T: Float, const R: usize, const C: usize, const K: usize>
+    ops::Mul<matrix<T, C, K>> for matrix<T, R, C>
+{
+    type Output = matrix<T, R, K>;
+    fn mul(self, rhs: matrix<T, C, K>) -> matrix<T, R, K> {
+        matrix { rows: std::array::from_fn(|i| {
+            let mut acc: vect<T, K> = vect::zeros();
+            for j in 0..C {
+                acc = acc + rhs.rows[j] * self.rows[i].e[j];
+            }
+            acc
+        }) }
+    }
+}
+
+// Mixed products with the fixed vector types.
+impl<T: Float, const R: usize> ops::Mul<vect2<T>> for matrix<T, R, 2> {
+    type Output = vect<T, R>;
+    fn mul(self, v: vect2<T>) -> vect<T, R> { self * vect::<T, 2>::from(v) }
+}
+impl<T: Float, const R: usize> ops::Mul<vect3<T>> for matrix<T, R, 3> {
+    type Output = vect<T, R>;
+    fn mul(self, v: vect3<T>) -> vect<T, R> { self * vect::<T, 3>::from(v) }
+}
+impl<T: Float> ops::Mul<vect<T, 2>> for matrix2<T> {
+    type Output = vect2<T>;
+    fn mul(self, v: vect<T, 2>) -> vect2<T> { self * vect2 { x: v.e[0], y: v.e[1] } }
+}
+impl<T: Float> ops::Mul<vect<T, 3>> for matrix3<T> {
+    type Output = vect3<T>;
+    fn mul(self, v: vect<T, 3>) -> vect3<T> { self * vect3 { x: v.e[0], y: v.e[1], z: v.e[2] } }
+}
+
+// Mixed products with the fixed matrix types.
+impl<T: Float, const R: usize> ops::Mul<matrix2<T>> for matrix<T, R, 2> {
+    type Output = matrix<T, R, 2>;
+    fn mul(self, rhs: matrix2<T>) -> matrix<T, R, 2> { self * matrix::<T, 2, 2>::from(rhs) }
+}
+impl<T: Float, const R: usize> ops::Mul<matrix3<T>> for matrix<T, R, 3> {
+    type Output = matrix<T, R, 3>;
+    fn mul(self, rhs: matrix3<T>) -> matrix<T, R, 3> { self * matrix::<T, 3, 3>::from(rhs) }
+}
+impl<T: Float, const C: usize> ops::Mul<matrix<T, 2, C>> for matrix2<T> {
+    type Output = matrix<T, 2, C>;
+    fn mul(self, rhs: matrix<T, 2, C>) -> matrix<T, 2, C> { matrix::<T, 2, 2>::from(self) * rhs }
+}
+impl<T: Float, const C: usize> ops::Mul<matrix<T, 3, C>> for matrix3<T> {
+    type Output = matrix<T, 3, C>;
+    fn mul(self, rhs: matrix<T, 3, C>) -> matrix<T, 3, C> { matrix::<T, 3, 3>::from(self) * rhs }
+}
+
+// Conversions to and from the fixed matrix types.
+impl<T: Float> From<matrix2<T>> for matrix<T, 2, 2> {
+    fn from(m: matrix2<T>) -> Self {
+        matrix { rows: [m.rows[0].into(), m.rows[1].into()] }
+    }
+}
+impl<T: Float> From<matrix<T, 2, 2>> for matrix2<T> {
+    fn from(m: matrix<T, 2, 2>) -> Self {
+        matrix2 { rows: [m.rows[0].into(), m.rows[1].into()] }
+    }
+}
+impl<T: Float> From<matrix3<T>> for matrix<T, 3, 3> {
+    fn from(m: matrix3<T>) -> Self {
+        matrix { rows: [m.rows[0].into(), m.rows[1].into(), m.rows[2].into()] }
+    }
+}
+impl<T: Float> From<matrix<T, 3, 3>> for matrix3<T> {
+    fn from(m: matrix<T, 3, 3>) -> Self {
+        matrix3 { rows: [m.rows[0].into(), m.rows[1].into(), m.rows[2].into()] }
+    }
+}
+
+// Conversions to and from nalgebra.
+impl<T: Float + nalgebra::Scalar, const R: usize, const C: usize>
+    From<matrix<T, R, C>> for nalgebra::SMatrix<T, R, C>
+{
+    fn from(m: matrix<T, R, C>) -> Self {
+        nalgebra::SMatrix::from_fn(|i, j| m.rows[i].e[j])
+    }
+}
+impl<T: Float + nalgebra::Scalar, const R: usize, const C: usize>
+    From<nalgebra::SMatrix<T, R, C>> for matrix<T, R, C>
+{
+    fn from(m: nalgebra::SMatrix<T, R, C>) -> Self {
+        matrix { rows: std::array::from_fn(|i|
+            vect::new(std::array::from_fn(|j| m[(i, j)]))) }
     }
 }
 

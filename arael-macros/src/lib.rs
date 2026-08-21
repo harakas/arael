@@ -58,6 +58,10 @@ enum SymFieldType {
     Mat2,
     Mat3,
     Quat,
+    /// `vect<T, N>`: N components.
+    VecN(usize),
+    /// `matrix<T, R, C>`: R x C elements, data-only.
+    MatN(usize, usize),
     Struct(String),        // reference to another registered struct
     OptionalStruct(String), // Option<T> wrapping a struct
     Skip,
@@ -164,6 +168,7 @@ fn registry_param_total(type_name: &str) -> u32 {
                 SymFieldType::Scalar => 1,
                 SymFieldType::Vec2 => 2,
                 SymFieldType::Vec3 => 3,
+                SymFieldType::VecN(k) => *k as u32,
                 _ => 0,
             };
         } else if let SymFieldType::Struct(inner) = sft
@@ -1470,11 +1475,18 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         if is_param_type(&field.ty) {
             param_count += param_type_size(&field.ty, scalar_generic.as_deref());
             param_field_names_for_reg.push(field_name.clone());
-            let sft = match param_type_size(&field.ty, scalar_generic.as_deref()) {
-                1 => SymFieldType::Scalar,
-                2 => SymFieldType::Vec2,
-                3 => SymFieldType::Vec3,
-                _ => SymFieldType::Scalar,
+            // `Param<T>` classifies by its inner type (a `vect<T, 5>`
+            // param must record VecN(5), not a size-keyed guess); the
+            // rotation param types keep the size mapping (3 -> Vec3).
+            let sft = if let Some((inner_ty, _)) = extract_wrapper_inner(&field.ty, "Param") {
+                classify_field_sym_type(inner_ty, scalar_generic.as_deref())
+            } else {
+                match param_type_size(&field.ty, scalar_generic.as_deref()) {
+                    1 => SymFieldType::Scalar,
+                    2 => SymFieldType::Vec2,
+                    3 => SymFieldType::Vec3,
+                    _ => SymFieldType::Scalar,
+                }
             };
             sym_fields.push((field_name, sft));
         } else if is_hessian_block_type(&field.ty) || is_option_hessian_block(&field.ty) {
@@ -1636,6 +1648,33 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
 /// stores shapes, not precisions, so the generic spellings (`vect2<T>`,
 /// bare `T` when `T` is the struct's scalar type parameter, passed as
 /// `scalar_generic`) classify the same as the suffixed aliases.
+/// Literal const-generic dimensions of a `vect` / `matrix` spelling.
+/// `skip` = leading type args before the dims (1 for the `T`-carrying
+/// spellings, 0 for the f32/f64 aliases); `want` = dim count. Panics
+/// with a clear message on non-literal dims (a user generic passing its
+/// parameter through) -- the dims must be knowable at expansion time.
+fn const_dims(seg: &syn::PathSegment, skip: usize, want: usize) -> Vec<usize> {
+    let name = seg.ident.to_string();
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        panic!("`{}` needs {} literal const dimension argument(s)", name, want);
+    };
+    let dims: Vec<usize> = args.args.iter().skip(skip).take(want).map(|a| match a {
+        syn::GenericArgument::Const(syn::Expr::Lit(l)) => {
+            if let syn::Lit::Int(i) = &l.lit {
+                i.base10_parse().expect("dimension literal")
+            } else {
+                panic!("`{}`: dimension must be an integer literal", name)
+            }
+        }
+        _ => panic!("`{}`: dimensions must be integer literals, not expressions or \
+                     generic parameters -- the macro reads them at expansion time", name),
+    }).collect();
+    if dims.len() != want {
+        panic!("`{}` needs {} dimension argument(s), found {}", name, want, dims.len());
+    }
+    dims
+}
+
 fn classify_field_sym_type(ty: &syn::Type, scalar_generic: Option<&str>) -> SymFieldType {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
@@ -1650,6 +1689,16 @@ fn classify_field_sym_type(ty: &syn::Type, scalar_generic: Option<&str>) -> SymF
                 "matrix3f" | "matrix3d" | "matrix3" => SymFieldType::Mat3,
                 "matrix2f" | "matrix2d" | "matrix2" => SymFieldType::Mat2,
                 "quaternf" | "quaternd" | "quatern" => SymFieldType::Quat,
+                "vect" => SymFieldType::VecN(const_dims(seg, 1, 1)[0]),
+                "vectf" | "vectd" => SymFieldType::VecN(const_dims(seg, 0, 1)[0]),
+                "matrix" => {
+                    let d = const_dims(seg, 1, 2);
+                    SymFieldType::MatN(d[0], d[1])
+                }
+                "matrixf" | "matrixd" => {
+                    let d = const_dims(seg, 0, 2);
+                    SymFieldType::MatN(d[0], d[1])
+                }
                 _ => {
                     // Check if it's a Ref<T> — extract inner type name
                     if let Some((_, inner_ident)) = extract_wrapper_inner(ty, "Ref") {
@@ -1715,6 +1764,10 @@ fn inner_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
                 "f32" | "f64" => 1,
                 "vect2f" | "vect2d" | "vect2" => 2,
                 "vect3f" | "vect3d" | "vect3" => 3,
+                "vect" => const_dims(seg, 1, 1)[0] as u32,
+                "vectf" | "vectd" => const_dims(seg, 0, 1)[0] as u32,
+                "matrix" | "matrixf" | "matrixd" =>
+                    panic!("`{}` is data-only, not a parameter type", name),
                 _ => 0,
             };
         }
@@ -2593,7 +2646,8 @@ fn is_never_model_name(name: &str) -> bool {
         | "i8" | "i16" | "i32" | "i64" | "isize" | "char" | "String" | "str"
         | "vect2f" | "vect2d" | "vect2" | "vect3f" | "vect3d" | "vect3"
         | "matrix2f" | "matrix2d" | "matrix2" | "matrix3f" | "matrix3d" | "matrix3"
-        | "quaternf" | "quaternd" | "quatern")
+        | "quaternf" | "quaternd" | "quatern"
+        | "vect" | "vectf" | "vectd" | "matrix" | "matrixf" | "matrixd")
 }
 
 /// Last-segment idents of every type mentioned in `ty`'s subtree, minus

@@ -1,0 +1,25 @@
+error: generic model `G`: exactly one type parameter is supported, bounded by `Float` (e.g. `struct G<T: Float>`)
+ --> tests/constraint_body_errors/vectn_nonliteral_dim.rs:8:9
+  |
+8 | struct G<const N: usize> {
+  |         ^^^^^^^^^^^^^^^^
+
+error: collection element type `G` has no registered #[arael::model] layout: define it (or import its crate's arael_import! bundle) BEFORE the root struct -- macro expansion is top-down file order within one crate
+  --> tests/constraint_body_errors/vectn_nonliteral_dim.rs:16:5
+   |
+16 |     gs: std::vec::Vec<G<4>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_body_errors/vectn_nonliteral_dim.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `arael::vect::vect`
+ --> tests/constraint_body_errors/vectn_nonliteral_dim.rs:5:5
+  |
+5 | use arael::vect::vect;
+  |     ^^^^^^^^^^^^^^^^^

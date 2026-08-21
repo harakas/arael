@@ -14,4 +14,8 @@ fn constraint_body_compile_errors() {
     t.compile_fail("tests/constraint_body_errors/unknown_binding.rs");
     t.compile_fail("tests/constraint_body_errors/macro_stmt.rs");
     t.compile_fail("tests/constraint_body_errors/stray_expr_stmt.rs");
+    t.compile_fail("tests/constraint_body_errors/vectn_index_range.rs");
+    t.compile_fail("tests/constraint_body_errors/vectn_dim_mismatch.rs");
+    t.compile_fail("tests/constraint_body_errors/vectn_nonliteral_index.rs");
+    t.compile_fail("tests/constraint_body_errors/vectn_nonliteral_dim.rs");
 }

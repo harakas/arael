@@ -1,0 +1,27 @@
+error: $DIR/tests/constraint_body_errors/vectn_dim_mismatch.rs:9: matrix 2x4 times vector of dim 5
+ --> tests/constraint_body_errors/vectn_dim_mismatch.rs:7:1
+  |
+7 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `arael::matrix::matrixd`
+ --> tests/constraint_body_errors/vectn_dim_mismatch.rs:3:5
+  |
+3 | use arael::matrix::matrixd;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_body_errors/vectn_dim_mismatch.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+
+warning: unused import: `arael::vect::vectd`
+ --> tests/constraint_body_errors/vectn_dim_mismatch.rs:5:5
+  |
+5 | use arael::vect::vectd;
+  |     ^^^^^^^^^^^^^^^^^^

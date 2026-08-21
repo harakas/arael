@@ -24,6 +24,12 @@ pub enum SymVal {
     Mat2(arael_sym::geo::matrix2sym),
     Mat3(matrix3sym),
     Quat(quaternsym),
+    /// N-dimensional vector. NEVER of dim 2 or 3: every production site
+    /// narrows those to Vec2/Vec3 (see `narrow_vec`), so the fixed-type
+    /// ops and `.x`/`.y` access compose.
+    VecN(arael_sym::vectsym),
+    /// R x C matrix. Never 2x2 or 3x3 (narrowed to Mat2/Mat3).
+    MatN(arael_sym::matrixsym),
     /// Universal euler angles: composed ea for .x/.y/.z, composed rotation for .rotation_matrix()
     UniversalEulerAngles {
         ea: vect3sym,       // get_euler_angles(R_ref * rotation(ea_delta))
@@ -40,9 +46,54 @@ impl SymVal {
             SymVal::Mat2(_) => "mat2",
             SymVal::Mat3(_) => "mat3",
             SymVal::Quat(_) => "quat",
+            SymVal::VecN(_) => "vect<N>",
+            SymVal::MatN(_) => "matrix<R, C>",
             SymVal::UniversalEulerAngles { .. } => "universal_euler_angles",
         }
     }
+}
+
+/// Wrap a symbolic vector, narrowing dims 2/3 to the fixed types.
+fn narrow_vec(v: arael_sym::vectsym) -> SymVal {
+    match v.e.len() {
+        2 => SymVal::Vec2(vect2sym::from_components(v.e[0].clone(), v.e[1].clone())),
+        3 => SymVal::Vec3(vect3sym::from_components(
+            v.e[0].clone(), v.e[1].clone(), v.e[2].clone())),
+        _ => SymVal::VecN(v),
+    }
+}
+
+/// Wrap a symbolic matrix, narrowing 2x2 / 3x3 to the fixed types.
+fn narrow_mat(m: arael_sym::matrixsym) -> SymVal {
+    match (m.nrows(), m.ncols()) {
+        (2, 2) => SymVal::Mat2(arael_sym::geo::matrix2sym {
+            rows: [
+                vect2sym::from_components(m.rows[0].e[0].clone(), m.rows[0].e[1].clone()),
+                vect2sym::from_components(m.rows[1].e[0].clone(), m.rows[1].e[1].clone()),
+            ],
+        }),
+        (3, 3) => SymVal::Mat3(matrix3sym {
+            rows: std::array::from_fn(|i| vect3sym::from_components(
+                m.rows[i].e[0].clone(), m.rows[i].e[1].clone(), m.rows[i].e[2].clone())),
+        }),
+        _ => SymVal::MatN(m),
+    }
+}
+
+fn widen_vec2(v: &vect2sym) -> arael_sym::vectsym {
+    arael_sym::vectsym::from_components(vec![v.x.clone(), v.y.clone()])
+}
+
+fn widen_vec3(v: &vect3sym) -> arael_sym::vectsym {
+    arael_sym::vectsym::from_components(vec![v.x.clone(), v.y.clone(), v.z.clone()])
+}
+
+fn widen_mat2(m: &arael_sym::geo::matrix2sym) -> arael_sym::matrixsym {
+    arael_sym::matrixsym::from_rows(m.rows.iter().map(widen_vec2).collect())
+}
+
+fn widen_mat3(m: &matrix3sym) -> arael_sym::matrixsym {
+    arael_sym::matrixsym::from_rows(m.rows.iter().map(widen_vec3).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +272,9 @@ fn symval_components(v: &SymVal) -> Option<Vec<(&'static str, E)>> {
             (".t", q.t.clone()),
             (".v.x", q.v.x.clone()), (".v.y", q.v.y.clone()), (".v.z", q.v.z.clone()),
         ],
+        // Dynamic dims cannot carry 'static suffixes; symbolic-field
+        // caching of N-dimensional values is unsupported.
+        SymVal::VecN(_) | SymVal::MatN(_) => return None,
         SymVal::UniversalEulerAngles { .. } => return None,
     })
 }
@@ -239,7 +293,8 @@ fn symval_from_components(shape: &SymVal, mut comps: Vec<E>) -> SymVal {
             t: c(0),
             v: vect3sym::from_components(c(1), c(2), c(3)),
         }),
-        SymVal::UniversalEulerAngles { .. } => unreachable!("guarded by symval_components"),
+        SymVal::VecN(_) | SymVal::MatN(_) | SymVal::UniversalEulerAngles { .. } =>
+            unreachable!("guarded by symval_components"),
     }
 }
 
@@ -314,6 +369,9 @@ impl ConstraintCtx {
             SymFieldType::Mat2 => SymVal::Mat2(matrix2sym::new(base)),
             SymFieldType::Mat3 => SymVal::Mat3(matrix3sym::new(base)),
             SymFieldType::Quat => SymVal::Quat(quaternsym::new(base)),
+            // Dims 2/3 narrow so the fixed-type ergonomics apply.
+            SymFieldType::VecN(n) => narrow_vec(arael_sym::vectsym::new(base, *n)),
+            SymFieldType::MatN(r, c) => narrow_mat(arael_sym::matrixsym::new(base, *r, *c)),
             SymFieldType::Struct(_) | SymFieldType::OptionalStruct(_) | SymFieldType::Skip => {
                 // Struct fields are resolved lazily via field access
                 SymVal::Scalar(arael_sym::symbol(base))
@@ -604,6 +662,10 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                         _ => Err(syn::Error::new_spanned(&mc.args[0], ".cross() argument must be Vec3")),
                     }
                 }
+                (SymVal::VecN(v), "norm") => Ok(SymVal::Scalar(v.norm())),
+                (SymVal::VecN(v), "square") => Ok(SymVal::Scalar(v.square())),
+                (SymVal::VecN(v), "norm_squared") => Ok(SymVal::Scalar(v.square())),
+                (SymVal::MatN(m), "transpose") => Ok(narrow_mat(m.transpose())),
                 _ => Err(syn::Error::new_spanned(&mc.method,
                     format!("unsupported method .{}() on {}", method, receiver.type_name()))),
             }
@@ -635,6 +697,9 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     SymVal::Mat2(m) => Ok(SymVal::Mat2(-m)),
                     SymVal::Mat3(m) => Ok(SymVal::Mat3(-m)),
                     SymVal::Quat(q) => Ok(SymVal::Quat(-q)),
+                    SymVal::VecN(v) => Ok(SymVal::VecN(-v)),
+                    SymVal::MatN(m) => Ok(SymVal::MatN(arael_sym::matrixsym::from_rows(
+                        m.rows.into_iter().map(|r| -r).collect()))),
                 },
                 _ => Err(syn::Error::new_spanned(expr, "unsupported unary operator")),
             }
@@ -709,6 +774,16 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     0 => Ok(SymVal::Scalar(v.x.clone())),
                     1 => Ok(SymVal::Scalar(v.y.clone())),
                     _ => Err(syn::Error::new_spanned(&idx.index, "vec2 index out of range")),
+                },
+                SymVal::VecN(v) => match v.e.get(i) {
+                    Some(c) => Ok(SymVal::Scalar(c.clone())),
+                    None => Err(syn::Error::new_spanned(&idx.index,
+                        format!("index {} out of range for vect of dim {}", i, v.e.len()))),
+                },
+                SymVal::MatN(m) => match m.rows.get(i) {
+                    Some(row) => Ok(narrow_vec(row.clone())),
+                    None => Err(syn::Error::new_spanned(&idx.index,
+                        format!("row {} out of range for matrix of {} rows", i, m.nrows()))),
                 },
                 _ => Err(syn::Error::new_spanned(expr,
                     format!("cannot index into {}", base.type_name()))),
@@ -1051,6 +1126,21 @@ fn sym_add(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Quat(_), SymVal::Quat(_)) => {
             if let (SymVal::Quat(a), SymVal::Quat(b)) = (left, right) { Ok(SymVal::Quat(a + b)) } else { unreachable!() }
         }
+        (SymVal::VecN(a), SymVal::VecN(b)) => {
+            if a.len() != b.len() {
+                return Err(syn::Error::new_spanned(span,
+                    format!("vector dims {} vs {} in addition", a.len(), b.len())));
+            }
+            if let (SymVal::VecN(a), SymVal::VecN(b)) = (left, right) { Ok(SymVal::VecN(a + b)) } else { unreachable!() }
+        }
+        (SymVal::MatN(a), SymVal::MatN(b)) => {
+            if (a.nrows(), a.ncols()) != (b.nrows(), b.ncols()) {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix dims {}x{} vs {}x{} in addition",
+                        a.nrows(), a.ncols(), b.nrows(), b.ncols())));
+            }
+            if let (SymVal::MatN(a), SymVal::MatN(b)) = (left, right) { Ok(SymVal::MatN(a + b)) } else { unreachable!() }
+        }
         _ => {
             if let (Some(a), Some(b)) = (as_vec3(left), as_vec3(right)) {
                 Ok(SymVal::Vec3(a + b))
@@ -1077,6 +1167,21 @@ fn sym_sub(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         }
         (SymVal::Quat(_), SymVal::Quat(_)) => {
             if let (SymVal::Quat(a), SymVal::Quat(b)) = (left, right) { Ok(SymVal::Quat(a - b)) } else { unreachable!() }
+        }
+        (SymVal::VecN(a), SymVal::VecN(b)) => {
+            if a.len() != b.len() {
+                return Err(syn::Error::new_spanned(span,
+                    format!("vector dims {} vs {} in subtraction", a.len(), b.len())));
+            }
+            if let (SymVal::VecN(a), SymVal::VecN(b)) = (left, right) { Ok(SymVal::VecN(a - b)) } else { unreachable!() }
+        }
+        (SymVal::MatN(a), SymVal::MatN(b)) => {
+            if (a.nrows(), a.ncols()) != (b.nrows(), b.ncols()) {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix dims {}x{} vs {}x{} in subtraction",
+                        a.nrows(), a.ncols(), b.nrows(), b.ncols())));
+            }
+            if let (SymVal::MatN(a), SymVal::MatN(b)) = (left, right) { Ok(SymVal::MatN(a - b)) } else { unreachable!() }
         }
         _ => {
             if let (Some(a), Some(b)) = (as_vec3(left), as_vec3(right)) {
@@ -1120,6 +1225,98 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Quat(a), SymVal::Quat(b)) => Ok(SymVal::Quat(a * b)), // Hamilton product
         (SymVal::Scalar(a), SymVal::Quat(b)) => Ok(SymVal::Quat(a * b)),
         (SymVal::Quat(a), SymVal::Scalar(b)) => Ok(SymVal::Quat(a * b)),
+        // N-dimensional arms. Results narrow (dims 2/3 become the fixed
+        // types); dims are checked here so mismatches carry the span.
+        (SymVal::Scalar(a), SymVal::VecN(b)) => Ok(SymVal::VecN(b * a)),
+        (SymVal::VecN(a), SymVal::Scalar(b)) => Ok(SymVal::VecN(a * b)),
+        (SymVal::Scalar(a), SymVal::MatN(b)) => Ok(SymVal::MatN(a * b)),
+        (SymVal::MatN(a), SymVal::Scalar(b)) => Ok(SymVal::MatN(a * b)),
+        (SymVal::VecN(a), SymVal::VecN(b)) => {
+            if a.len() != b.len() {
+                return Err(syn::Error::new_spanned(span,
+                    format!("vector dims {} vs {} in dot product", a.len(), b.len())));
+            }
+            Ok(SymVal::Scalar(a * b))
+        }
+        (SymVal::MatN(a), SymVal::VecN(b)) => {
+            if a.ncols() != b.len() {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix {}x{} times vector of dim {}", a.nrows(), a.ncols(), b.len())));
+            }
+            Ok(narrow_vec(a * b))
+        }
+        (SymVal::MatN(a), SymVal::Vec2(b)) => {
+            if a.ncols() != 2 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix {}x{} times vector of dim 2", a.nrows(), a.ncols())));
+            }
+            Ok(narrow_vec(a * widen_vec2(&b)))
+        }
+        (SymVal::MatN(a), SymVal::Vec3(b)) => {
+            if a.ncols() != 3 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix {}x{} times vector of dim 3", a.nrows(), a.ncols())));
+            }
+            Ok(narrow_vec(a * widen_vec3(&b)))
+        }
+        // v * M = M^T v, mirroring the fixed-type convention.
+        (SymVal::VecN(a), SymVal::MatN(b)) => {
+            if b.nrows() != a.len() {
+                return Err(syn::Error::new_spanned(span,
+                    format!("vector of dim {} times matrix {}x{}", a.len(), b.nrows(), b.ncols())));
+            }
+            Ok(narrow_vec(b.transpose() * a))
+        }
+        (SymVal::Vec2(a), SymVal::MatN(b)) => {
+            if b.nrows() != 2 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("vector of dim 2 times matrix {}x{}", b.nrows(), b.ncols())));
+            }
+            Ok(narrow_vec(b.transpose() * widen_vec2(&a)))
+        }
+        (SymVal::Vec3(a), SymVal::MatN(b)) => {
+            if b.nrows() != 3 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("vector of dim 3 times matrix {}x{}", b.nrows(), b.ncols())));
+            }
+            Ok(narrow_vec(b.transpose() * widen_vec3(&a)))
+        }
+        (SymVal::MatN(a), SymVal::MatN(b)) => {
+            if a.ncols() != b.nrows() {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix {}x{} times matrix {}x{}",
+                        a.nrows(), a.ncols(), b.nrows(), b.ncols())));
+            }
+            Ok(narrow_mat(a * b))
+        }
+        (SymVal::MatN(a), SymVal::Mat2(b)) => {
+            if a.ncols() != 2 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix {}x{} times matrix 2x2", a.nrows(), a.ncols())));
+            }
+            Ok(narrow_mat(a * widen_mat2(&b)))
+        }
+        (SymVal::MatN(a), SymVal::Mat3(b)) => {
+            if a.ncols() != 3 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix {}x{} times matrix 3x3", a.nrows(), a.ncols())));
+            }
+            Ok(narrow_mat(a * widen_mat3(&b)))
+        }
+        (SymVal::Mat2(a), SymVal::MatN(b)) => {
+            if b.nrows() != 2 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix 2x2 times matrix {}x{}", b.nrows(), b.ncols())));
+            }
+            Ok(narrow_mat(widen_mat2(&a) * b))
+        }
+        (SymVal::Mat3(a), SymVal::MatN(b)) => {
+            if b.nrows() != 3 {
+                return Err(syn::Error::new_spanned(span,
+                    format!("matrix 3x3 times matrix {}x{}", b.nrows(), b.ncols())));
+            }
+            Ok(narrow_mat(widen_mat3(&a) * b))
+        }
         _ => Err(syn::Error::new_spanned(span, "type mismatch in multiplication")),
     }
 }
@@ -1259,6 +1456,10 @@ fn sym_div(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Scalar(a), SymVal::Scalar(b)) => Ok(SymVal::Scalar(a / b)),
         (SymVal::Vec2(a), SymVal::Scalar(b)) => Ok(SymVal::Vec2(a / b)),
         (SymVal::Vec3(a), SymVal::Scalar(b)) => Ok(SymVal::Vec3(a / b)),
+        (SymVal::VecN(a), SymVal::Scalar(b)) => Ok(SymVal::VecN(a / b)),
+        (SymVal::MatN(a), SymVal::Scalar(b)) => Ok(SymVal::MatN(
+            arael_sym::matrixsym::from_rows(
+                a.rows.into_iter().map(|r| r / b.clone()).collect()))),
         _ => Err(syn::Error::new_spanned(span, "unsupported division types")),
     }
 }
@@ -1792,6 +1993,7 @@ fn param_slot_size(sft: &SymFieldType) -> usize {
         SymFieldType::Scalar => 1,
         SymFieldType::Vec2 => 2,
         SymFieldType::Vec3 => 3,
+        SymFieldType::VecN(n) => *n,
         _ => 0,
     }
 }
@@ -2754,6 +2956,11 @@ fn add_param_symbols(base: &str, sft: &SymFieldType, out: &mut Vec<String>) {
             out.push(format!("{}.x", base));
             out.push(format!("{}.y", base));
             out.push(format!("{}.z", base));
+        }
+        SymFieldType::VecN(n) => {
+            for i in 0..*n {
+                out.push(format!("{}[{}]", base, i));
+            }
         }
         _ => {}
     }

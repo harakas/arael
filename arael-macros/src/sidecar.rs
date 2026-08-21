@@ -80,6 +80,7 @@ fn sft_size(sft: &SymFieldType) -> u32 {
         SymFieldType::Scalar => 1,
         SymFieldType::Vec2 => 2,
         SymFieldType::Vec3 => 3,
+        SymFieldType::VecN(n) => *n as u32,
         _ => 0,
     }
 }

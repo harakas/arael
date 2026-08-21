@@ -21,6 +21,7 @@ treated as a constant.
 | `Param<f32>` / `Param<f64>` | 1 | scalar parameter |
 | `Param<vect2<T>>` | 2 | 2D point / direction |
 | `Param<vect3<T>>` | 3 | 3D position, velocity, linear vector |
+| `Param<vect<T, N>>` | N | N-dof parameter vector (calibration, biases, coefficients); components read as `v[i]` with literal indices |
 | `SimpleEulerAngleParam<T>` | 3 | three independent Euler angles (roll, pitch, yaw) stored directly |
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
 | `QuaternionParam<T>` | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised on every re-center so it never drifts off SO(3) |
@@ -775,6 +776,27 @@ struct PosePair {
     hb: CrossBlock<Pose, Pose, f32>,
 }
 ```
+
+### N-dimensional values in bodies
+
+`vect<T, N>` / `matrix<T, R, C>` fields (aliases `vectf`/`vectd`,
+`matrixf`/`matrixd`) work in bodies with literal component indices and
+dimension-checked ops:
+
+```rust,ignore
+#[arael(constraint(hb, {
+    let p = link.h * (b.v - a.v);            // matrix<2, 5> * vect<5>
+    let q = matrix2sym::rotation(link.phi) * p;  // dim-2 result IS a Vec2
+    [(q.x - link.z0) * link.iw, (q.y - link.z1) * link.iw]
+}))]
+```
+
+- Indices must be literals (`v[0]`, `m[1][2]`); a runtime index cannot
+  be differentiated at compile time and is rejected.
+- Dimension mismatches are compile errors naming both dims.
+- A result of dim 2/3 (or 2x2/3x3) IS the fixed type: `.x`/`.y`
+  access and the fixed-type ops apply directly.
+- Vectors may be `Param`s; matrices are data-only.
 
 ## Constraint-body language
 

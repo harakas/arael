@@ -192,6 +192,8 @@ Fixed-shape symbolic vectors/matrices live in `arael_sym::geo`. They're used by 
 | `vect3sym`       | `vect3f` / `vect3d`      | `.x .y .z`                         |
 | `matrix2sym`     | `matrix2f` / `matrix2d`  | `rows: [vect2sym; 2]`              |
 | `matrix3sym`     | `matrix3f` / `matrix3d`  | `rows: [vect3sym; 3]`              |
+| `vectsym`        | `vect<T, N>`             | `e: Vec<E>`, dims checked at use   |
+| `matrixsym`      | `matrix<T, R, C>`        | `rows: Vec<vectsym>`               |
 | `quaternsym`     | `quaternf` / `quaternd`  | `.t` (scalar) + `.v` (vect3sym)    |
 
 ### vect2sym / vect3sym
