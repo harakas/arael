@@ -4290,16 +4290,32 @@ pub fn generate_root_methods(
                     }
                 }
         }
-        // Check the self/parent type for euler_angles
-        if let Some(a_layout) = registry_lookup(&a_type) {
-            for ea in &a_layout.euler_angle_fields {
-                all_subs.extend(build_euler_substitutions(&self_var_name, ea));
+        // Check the coupled entity types for rotation params. The
+        // parent-refs cross form binds its entities under the parent's
+        // ref field names (stage 1 binds own refs, covered by the
+        // ref-field loop above; the parent alias binds parent DATA, so
+        // no A-type subs under it). Every other form reads the A type
+        // under the parent/self alias.
+        let mut sub_targets: Vec<(String, String)> = Vec::new();
+        if let Some(pc) = &parent_cross {
+            if let Some((ra, rb)) = &pc.parent_refs {
+                sub_targets.push((ra.clone(), pc.a_type.clone()));
+                sub_targets.push((rb.clone(), pc.b_type.clone()));
             }
-            for ea in &a_layout.universal_euler_angle_fields {
-                all_subs.extend(build_universal_euler_substitutions(&self_var_name, ea));
-            }
-            for rv in &a_layout.universal_rotvec_fields {
-                all_subs.extend(build_universal_rotvec_substitutions(&self_var_name, rv));
+        } else {
+            sub_targets.push((self_var_name.clone(), a_type.clone()));
+        }
+        for (prefix, tname) in &sub_targets {
+            if let Some(layout) = registry_lookup(tname) {
+                for ea in &layout.euler_angle_fields {
+                    all_subs.extend(build_euler_substitutions(prefix, ea));
+                }
+                for ea in &layout.universal_euler_angle_fields {
+                    all_subs.extend(build_universal_euler_substitutions(prefix, ea));
+                }
+                for rv in &layout.universal_rotvec_fields {
+                    all_subs.extend(build_universal_rotvec_substitutions(prefix, rv));
+                }
             }
         }
         // For SelfBlock, also check the struct itself (it IS the A type)
