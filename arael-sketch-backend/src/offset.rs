@@ -770,61 +770,146 @@ fn last_nid(runner: &dyn ActionRunner) -> u32 {
     runner.sketch().next_constraint_id.saturating_sub(1)
 }
 
-fn last_did(runner: &dyn ActionRunner) -> Result<u32, String> {
-    runner.sketch().dimensions.last().map(|d| d.did).ok_or_else(|| "the dimension was not added".to_string())
-}
-
 fn name_of(runner: &dyn ActionRunner, e: OffsetEntity) -> String {
     chain::entity_name(runner.sketch(), e)
 }
 
-/// Create one result entity in place.
-fn create_result(runner: &mut dyn ActionRunner, g: &ResultGeom, src: OffsetEntity) -> Result<OffsetEntity, String> {
-    let sketch = runner.sketch();
-    let (construction, style) = match src {
-        OffsetEntity::Line(l) => (sketch.lines[l].construction, sketch.lines[l].style),
-        OffsetEntity::Arc(a) => (sketch.arcs[a].construction, sketch.arcs[a].style),
-    };
-    let created = match *g {
-        ResultGeom::Line { p1, p2 } => runner.run(Action::AddLine { p1, p2 }),
+/// The creation action for one result entity.
+fn create_action(g: &ResultGeom) -> Action {
+    match *g {
+        ResultGeom::Line { p1, p2 } => Action::AddLine { p1, p2 },
         ResultGeom::Arc { center, radius, start, end, ccw, closed } => {
             if closed {
-                runner.run(Action::AddCircle { center, edge: vect2d::new(center.x + radius, center.y) })
+                Action::AddCircle { center, edge: vect2d::new(center.x + radius, center.y) }
             } else {
                 let at = |t: f64| vect2d::new(center.x + radius * t.cos(), center.y + radius * t.sin());
                 let _ = ccw;
-                runner.run(Action::AddArc { start: at(start), end: at(end), mid: at(0.5 * (start + end)) })
+                Action::AddArc { start: at(start), end: at(end), mid: at(0.5 * (start + end)) }
             }
         }
         ResultGeom::Ellipse { center, rx, ry, rotation, start, end, ccw, closed } => {
             if closed {
-                runner.run(Action::AddEllipse { center, rx, ry, rotation })
+                Action::AddEllipse { center, rx, ry, rotation }
             } else {
-                runner.run(Action::AddEllipticArc { center, rx, ry, rotation, start, end, ccw })
+                Action::AddEllipticArc { center, rx, ry, rotation, start, end, ccw }
             }
         }
-    };
-    if let Some(e) = runner.take_error() {
-        return Err(format!("creating the offset of {}: {}", name_of(runner, src), e));
     }
-    let entity = match created {
-        crate::actions::Created::Line(l) => OffsetEntity::Line(l),
-        crate::actions::Created::Arc(a) => OffsetEntity::Arc(a),
-        _ => return Err(format!("creating the offset of {}: nothing was added", name_of(runner, src))),
+}
+
+/// The actions matching the source's construction flag and style onto a
+/// result entity.
+fn flag_actions(sketch: &Sketch, src: OffsetEntity, res: OffsetEntity, acts: &mut Vec<Action>) {
+    let (construction, style) = match src {
+        OffsetEntity::Line(l) => (sketch.lines[l].construction, sketch.lines[l].style),
+        OffsetEntity::Arc(a) => (sketch.arcs[a].construction, sketch.arcs[a].style),
     };
     if construction {
-        match entity {
-            OffsetEntity::Line(l) => { runner.run(Action::SetConstructionLine { line: l, on: true }); }
-            OffsetEntity::Arc(a) => { runner.run(Action::SetConstructionArc { arc: a, on: true }); }
+        match res {
+            OffsetEntity::Line(l) => acts.push(Action::SetConstructionLine { line: l, on: true }),
+            OffsetEntity::Arc(a) => acts.push(Action::SetConstructionArc { arc: a, on: true }),
         }
     }
     if style != LineStyle::Solid {
-        match entity {
-            OffsetEntity::Line(l) => { runner.run(Action::SetStyleLine { line: l, style }); }
-            OffsetEntity::Arc(a) => { runner.run(Action::SetStyleArc { arc: a, style }); }
+        match res {
+            OffsetEntity::Line(l) => acts.push(Action::SetStyleLine { line: l, style }),
+            OffsetEntity::Arc(a) => acts.push(Action::SetStyleArc { arc: a, style }),
         }
     }
-    Ok(entity)
+}
+
+/// Run a batch and report its error.
+fn run_batch(runner: &mut dyn ActionRunner, label: &str, actions: Vec<Action>) -> Result<crate::actions::Created, String> {
+    let created = runner.run(Action::Batch { label: label.to_string(), actions });
+    match runner.take_error() {
+        Some(e) => Err(format!("{}: {}", label, e)),
+        None => Ok(created),
+    }
+}
+
+/// Create entities in one batch, returning them in order.
+fn create_entities(runner: &mut dyn ActionRunner, label: &str, creates: Vec<Action>) -> Result<Vec<OffsetEntity>, String> {
+    let count = creates.len();
+    let crate::actions::Created::Many(list) = run_batch(runner, label, creates)? else {
+        return Err(format!("{}: nothing was added", label));
+    };
+    let entities: Vec<OffsetEntity> = list
+        .into_iter()
+        .filter_map(|c| match c {
+            crate::actions::Created::Line(l) => Some(OffsetEntity::Line(l)),
+            crate::actions::Created::Arc(a) => Some(OffsetEntity::Arc(a)),
+            _ => None,
+        })
+        .collect();
+    if entities.len() != count {
+        return Err(format!("{}: not every entity was added", label));
+    }
+    Ok(entities)
+}
+
+/// Collects one constraint batch: constraint-pushing actions first (their
+/// nids predicted chronologically, see `Action::Batch`), then the
+/// dimensions, then flag actions.
+struct ConstraintBatch {
+    acts: Vec<Action>,
+    next_nid: u32,
+    dims: Vec<Action>,
+    expects: Vec<MetaValue>,
+    flags: Vec<Action>,
+}
+
+impl ConstraintBatch {
+    fn new(runner: &dyn ActionRunner) -> Self {
+        ConstraintBatch {
+            acts: Vec::new(),
+            next_nid: runner.sketch().next_constraint_id,
+            dims: Vec::new(),
+            expects: Vec::new(),
+            flags: Vec::new(),
+        }
+    }
+
+    /// Queue a constraint; returns the nid it will get.
+    fn constraint(&mut self, a: Action) -> u32 {
+        self.acts.push(a);
+        let n = self.next_nid;
+        self.next_nid += 1;
+        n
+    }
+
+    /// Queue a dimension holding `expect`.
+    fn dim(&mut self, kind: DimensionKind, expect: &MetaValue) {
+        self.dims.push(Action::AddDimension {
+            kind,
+            value: expect.value,
+            expr: expect.expr.clone(),
+            derived: false,
+            range: None,
+        });
+        self.expects.push(expect.clone());
+    }
+
+    /// Run everything as one batch; returns the dims with their dids.
+    fn run(self, runner: &mut dyn ActionRunner, label: &str) -> Result<Vec<OffsetDim>, String> {
+        let dim0 = runner.sketch().dimensions.len();
+        let predicted = self.next_nid;
+        let mut acts = self.acts;
+        acts.extend(self.dims);
+        acts.extend(self.flags);
+        run_batch(runner, label, acts)?;
+        if runner.sketch().next_constraint_id < predicted {
+            return Err(format!("{}: a constraint was not applied", label));
+        }
+        let sketch = runner.sketch();
+        if sketch.dimensions.len() != dim0 + self.expects.len() {
+            return Err(format!("{}: a dimension was not added", label));
+        }
+        Ok(sketch.dimensions[dim0..]
+            .iter()
+            .zip(self.expects)
+            .map(|(d, expect)| OffsetDim { did: d.did, expect })
+            .collect())
+    }
 }
 
 /// A side's result entities with their sources: `segs[k]` is the offset
@@ -844,27 +929,38 @@ impl SideSegs<'_> {
     }
 }
 
+/// The actions pinning the free ends of an open sequence's result on
+/// the source ends' normals.
+fn free_end_pin_actions(sketch: &Sketch, seq: &Sequence, side: SideSegs) -> Vec<Action> {
+    let m = side.len();
+    if seq.closed || m == 0 {
+        return Vec::new();
+    }
+    let first = side.source(seq, 0);
+    if matches!(first.entity, OffsetEntity::Arc(a) if sketch.arcs[a].closed) {
+        return Vec::new();
+    }
+    let last = side.source(seq, m - 1);
+    vec![
+        Action::ApplyOnNormal {
+            placed: endpoint_of(side.segs[0], !exit_is_end(first)),
+            reference: endpoint_of(first.entity, !exit_is_end(first)),
+        },
+        Action::ApplyOnNormal {
+            placed: endpoint_of(side.segs[m - 1], exit_is_end(last)),
+            reference: endpoint_of(last.entity, exit_is_end(last)),
+        },
+    ]
+}
+
 /// Pin the free ends of an open sequence's result on the source ends'
 /// normals. Returns the nids.
 fn pin_free_ends(runner: &mut dyn ActionRunner, seq: &Sequence, side: SideSegs) -> Result<Vec<u32>, String> {
-    let m = side.len();
     let mut pins = Vec::new();
-    if seq.closed || m == 0 {
-        return Ok(pins);
+    for a in free_end_pin_actions(runner.sketch(), seq, side) {
+        run_checked(runner, a, "on_normal")?;
+        pins.push(last_nid(runner));
     }
-    let first = side.source(seq, 0);
-    if matches!(first.entity, OffsetEntity::Arc(a) if runner.sketch().arcs[a].closed) {
-        return Ok(pins);
-    }
-    let placed = endpoint_of(side.segs[0], !exit_is_end(first));
-    let reference = endpoint_of(first.entity, !exit_is_end(first));
-    run_checked(runner, Action::ApplyOnNormal { placed, reference }, "on_normal")?;
-    pins.push(last_nid(runner));
-    let last = side.source(seq, m - 1);
-    let placed = endpoint_of(side.segs[m - 1], exit_is_end(last));
-    let reference = endpoint_of(last.entity, exit_is_end(last));
-    run_checked(runner, Action::ApplyOnNormal { placed, reference }, "on_normal")?;
-    pins.push(last_nid(runner));
     Ok(pins)
 }
 
@@ -913,11 +1009,11 @@ fn free_end_of(seq: &Sequence, side: SideSegs, at_end: bool) -> DimensionEndpoin
     }
 }
 
-/// Create the caps of a two-sided open offset: a line across each end,
-/// joined to both results; or a half circle around the source end,
-/// joined and tangent to both results (which makes its radius the
-/// distance) and held in place by a pin of the `distance` side's end on
-/// the source end's normal.
+/// Create the caps of a two-sided open offset, in two batches: a line
+/// across each end, joined to both results; or a half circle around the
+/// source end, joined and tangent to both results (which makes its
+/// radius the distance) and held in place by a pin of the `distance`
+/// side's end on the source end's normal.
 fn apply_caps(
     runner: &mut dyn ActionRunner,
     plan: &OffsetPlan,
@@ -937,60 +1033,52 @@ fn apply_caps(
         SideSegs { segs: &side_a.segs, sources: &src_a },
         SideSegs { segs: &side_b.segs, sources: &src_b },
     );
+    // Batch 1: the cap entities.
+    let creates: Vec<Action> = plan
+        .caps
+        .iter()
+        .map(|cap| match cap.geom {
+            CapGeom::Line { a, b } => Action::AddLine { p1: a, p2: b },
+            CapGeom::Arc { start, end, mid } => Action::AddArc { start, end, mid },
+        })
+        .collect();
+    caps.entities = create_entities(runner, "Offset caps", creates)?;
+    // Batch 2: the joints, tangents and the round cap's pin.
+    let mut batch = ConstraintBatch::new(runner);
     let mut names = Vec::new();
-    for cap in &plan.caps {
+    for (cap, &entity) in plan.caps.iter().zip(&caps.entities) {
         let end_a = free_end_of(seq, segs_a, cap.at_end);
         let end_b = free_end_of(seq, segs_b, cap.at_end);
         let res_a = if cap.at_end { *side_a.segs.last().unwrap() } else { side_a.segs[0] };
         let res_b = if cap.at_end { *side_b.segs.last().unwrap() } else { side_b.segs[0] };
-        let (entity, own_start, own_end) = match cap.geom {
-            CapGeom::Line { a, b } => {
-                let created = runner.run(Action::AddLine { p1: a, p2: b });
-                if let Some(e) = runner.take_error() {
-                    return Err(format!("cap: {}", e));
-                }
-                let crate::actions::Created::Line(l) = created else {
-                    return Err("cap: the line was not added".into());
-                };
-                (OffsetEntity::Line(l), DimensionEndpoint::LineP1(l), DimensionEndpoint::LineP2(l))
-            }
-            CapGeom::Arc { start, end, mid } => {
-                let created = runner.run(Action::AddArc { start, end, mid });
-                if let Some(e) = runner.take_error() {
-                    return Err(format!("cap: {}", e));
-                }
-                let crate::actions::Created::Arc(a) = created else {
-                    return Err("cap: the arc was not added".into());
-                };
-                (OffsetEntity::Arc(a), DimensionEndpoint::ArcStart(a), DimensionEndpoint::ArcEnd(a))
-            }
+        let (own_start, own_end) = match entity {
+            OffsetEntity::Line(l) => (DimensionEndpoint::LineP1(l), DimensionEndpoint::LineP2(l)),
+            OffsetEntity::Arc(a) => (DimensionEndpoint::ArcStart(a), DimensionEndpoint::ArcEnd(a)),
         };
-        caps.entities.push(entity);
         names.push(name_of(runner, entity));
         let c1 = Action::coincident(own_start, end_a).expect("endpoint pair");
-        run_checked(runner, c1, "coincident")?;
-        caps.constraints.push(last_nid(runner));
+        caps.constraints.push(batch.constraint(c1));
         let c2 = Action::coincident(own_end, end_b).expect("endpoint pair");
-        run_checked(runner, c2, "coincident")?;
-        caps.constraints.push(last_nid(runner));
+        caps.constraints.push(batch.constraint(c2));
         if let (CapGeom::Arc { .. }, OffsetEntity::Arc(arc)) = (cap.geom, entity) {
-            run_checked(runner, tangent_action(res_a, arc), "tangent")?;
-            caps.constraints.push(last_nid(runner));
-            run_checked(runner, tangent_action(res_b, arc), "tangent")?;
-            caps.constraints.push(last_nid(runner));
+            caps.constraints.push(batch.constraint(tangent_action(res_a, arc)));
+            caps.constraints.push(batch.constraint(tangent_action(res_b, arc)));
             // The plan made sure both sides end on the same segment.
             let src = segs_a.source(seq, if cap.at_end { segs_a.len() - 1 } else { 0 });
             let reference = endpoint_of(src.entity, cap.at_end == exit_is_end(src));
-            run_checked(runner, Action::ApplyOnNormal { placed: end_a, reference }, "on_normal")?;
-            caps.constraints.push(last_nid(runner));
+            caps.constraints.push(batch.constraint(Action::ApplyOnNormal { placed: end_a, reference }));
         }
     }
+    batch.run(runner, "Offset cap joints")?;
     out.entities.push(names);
     out.constraints.extend(caps.constraints.iter().map(|n| format!("C{}", n)));
     Ok(caps)
 }
 
-/// Create one side's result with its relations, joints and pins.
+/// Create one side's result with its relations, joints and pins, in two
+/// batches: the entities, then the constraints and dimensions (which are
+/// consistent by construction -- the plan already refused anything
+/// degenerate -- so they skip the per-constraint gate).
 fn apply_side(
     runner: &mut dyn ActionRunner,
     plan: &OffsetPlan,
@@ -999,48 +1087,49 @@ fn apply_side(
 ) -> Result<OffsetSideResult, String> {
     let seq = &plan.seq;
     let m = side.sources.len();
-    let mut segs = Vec::with_capacity(m);
+    // Batch 1: the result entities, then the round-corner arcs.
+    let mut creates: Vec<Action> = side.results.iter().map(create_action).collect();
+    let corner_joints: Vec<usize> = side
+        .joints
+        .iter()
+        .enumerate()
+        .filter_map(|(k, j)| j.round.as_ref().map(|_| k))
+        .collect();
+    for &k in &corner_joints {
+        let rc = side.joints[k].round.as_ref().expect("round joint");
+        creates.push(Action::AddArc { start: rc.start, end: rc.end, mid: rc.mid });
+    }
+    let created = create_entities(runner, "Offset result", creates)?;
+    let segs: Vec<OffsetEntity> = created[..m].to_vec();
+    let corners: Vec<OffsetEntity> = created[m..].to_vec();
+    let corner_of = |k: usize| -> OffsetEntity {
+        corners[corner_joints.iter().position(|&j| j == k).expect("a corner joint")]
+    };
+    let names: Vec<String> = created.iter().map(|&e| name_of(runner, e)).collect();
+
+    // Batch 2: relations, joints, pins, dims, flags.
+    let mut batch = ConstraintBatch::new(runner);
     let mut constraints = Vec::new();
     let mut pins = Vec::new();
-    let mut dims = Vec::new();
-    let mut names = Vec::with_capacity(m);
-
-    // Entities first, then the per-segment relations.
-    for (k, g) in side.results.iter().enumerate() {
-        let e = create_result(runner, g, seq.segs[side.sources[k]].entity)?;
-        names.push(name_of(runner, e));
-        segs.push(e);
-    }
     for (k, &si) in side.sources.iter().enumerate() {
         let (src, res) = (&seq.segs[si], segs[k]);
+        flag_actions(runner.sketch(), src.entity, res, &mut batch.flags);
         let kind = match (src.entity, res) {
             (OffsetEntity::Line(s), OffsetEntity::Line(r)) => {
-                run_checked(runner, Action::ApplyParallel { a: s, b: r }, "parallel")?;
-                constraints.push(last_nid(runner));
+                constraints.push(batch.constraint(Action::ApplyParallel { a: s, b: r }));
                 DimensionKind::LineLineDistance(s, r)
             }
             (OffsetEntity::Arc(s), OffsetEntity::Arc(r)) => {
-                run_checked(runner, Action::ApplyConcentric { a: s, b: r }, "concentric")?;
-                constraints.push(last_nid(runner));
+                constraints.push(batch.constraint(Action::ApplyConcentric { a: s, b: r }));
                 if runner.sketch().arcs[s].is_ellipse {
-                    run_checked(runner, Action::ApplyArcArcParallel { a: s, b: r }, "parallel")?;
-                    constraints.push(last_nid(runner));
+                    constraints.push(batch.constraint(Action::ApplyArcArcParallel { a: s, b: r }));
                 }
                 DimensionKind::ConcentricDistance(s, r)
             }
             _ => unreachable!("a result has its source's kind"),
         };
         if side.dims[k] {
-            runner.run(Action::AddDimension {
-                kind,
-                value: side.distance.value,
-                expr: side.distance.expr.clone(),
-                derived: false,
-                range: None,
-            });
-            if let Some(e) = runner.take_error() { return Err(format!("distance: {}", e)); }
-            let did = last_did(runner)?;
-            dims.push(OffsetDim { did, expect: side.distance.clone() });
+            batch.dim(kind, &side.distance);
         }
     }
     // Joints, in chain order: a pin on the earlier result's exit end where
@@ -1048,7 +1137,6 @@ fn apply_side(
     // fillet between the two results: an arc of the distance joined to
     // both ends, tangent to both, its radius a dimension; the geometry
     // puts its center on the source joint.
-    let mut corners = Vec::new();
     let side_segs = SideSegs { segs: &segs, sources: &side.sources };
     for (k, joint) in side.joints.iter().enumerate() {
         let (a_src, b_src) = (side_segs.source(seq, k), side_segs.source(seq, (k + 1) % m));
@@ -1056,61 +1144,40 @@ fn apply_side(
         let a_end = endpoint_of(a_res, exit_is_end(a_src));
         let b_start = endpoint_of(b_res, !exit_is_end(b_src));
         let a_ref = endpoint_of(a_src.entity, exit_is_end(a_src));
-        if let Some(rc) = &joint.round {
-            let created = runner.run(Action::AddArc { start: rc.start, end: rc.end, mid: rc.mid });
-            if let Some(e) = runner.take_error() {
-                return Err(format!("round corner: {}", e));
-            }
-            let crate::actions::Created::Arc(arc) = created else {
-                return Err("round corner: the arc was not added".into());
-            };
-            corners.push(OffsetEntity::Arc(arc));
-            names.push(name_of(runner, OffsetEntity::Arc(arc)));
+        if joint.round.is_some() {
+            let OffsetEntity::Arc(arc) = corner_of(k) else { unreachable!("a corner is an arc") };
             let c1 = Action::coincident(DimensionEndpoint::ArcStart(arc), a_end).expect("endpoint pair");
-            run_checked(runner, c1, "coincident")?;
-            constraints.push(last_nid(runner));
+            constraints.push(batch.constraint(c1));
             let c2 = Action::coincident(DimensionEndpoint::ArcEnd(arc), b_start).expect("endpoint pair");
-            run_checked(runner, c2, "coincident")?;
-            constraints.push(last_nid(runner));
-            run_checked(runner, tangent_action(a_res, arc), "tangent")?;
-            constraints.push(last_nid(runner));
-            run_checked(runner, tangent_action(b_res, arc), "tangent")?;
-            constraints.push(last_nid(runner));
-            runner.run(Action::AddDimension {
-                kind: DimensionKind::ArcRadius(arc),
-                value: side.distance.value,
-                expr: side.distance.expr.clone(),
-                derived: false,
-                range: None,
-            });
-            if let Some(e) = runner.take_error() { return Err(format!("radius: {}", e)); }
-            let did = last_did(runner)?;
-            dims.push(OffsetDim { did, expect: side.distance.clone() });
+            constraints.push(batch.constraint(c2));
+            constraints.push(batch.constraint(tangent_action(a_res, arc)));
+            constraints.push(batch.constraint(tangent_action(b_res, arc)));
+            batch.dim(DimensionKind::ArcRadius(arc), &side.distance);
             continue;
         }
         if joint.tangent && plan.params.pinned {
-            run_checked(runner, Action::ApplyOnNormal { placed: a_end, reference: a_ref }, "on_normal")?;
-            pins.push(last_nid(runner));
+            pins.push(batch.constraint(Action::ApplyOnNormal { placed: a_end, reference: a_ref }));
         }
         if joint.closure {
             // Closing an all-tangent loop: the later result's start is
             // pinned too; the ends meet by geometry.
             if plan.params.pinned {
                 let b_ref = endpoint_of(b_src.entity, !exit_is_end(b_src));
-                run_checked(runner, Action::ApplyOnNormal { placed: b_start, reference: b_ref }, "on_normal")?;
-                pins.push(last_nid(runner));
+                pins.push(batch.constraint(Action::ApplyOnNormal { placed: b_start, reference: b_ref }));
             }
             continue;
         }
         let action = Action::coincident(a_end, b_start).expect("endpoint pair");
-        run_checked(runner, action, "coincident")?;
-        constraints.push(last_nid(runner));
+        constraints.push(batch.constraint(action));
     }
     // Round caps hold the free ends themselves (tangent to a half circle
     // around the source end): no pins there.
     if plan.params.pinned && plan.params.caps != CapKind::Round {
-        pins.extend(pin_free_ends(runner, seq, side_segs)?);
+        for a in free_end_pin_actions(runner.sketch(), seq, side_segs) {
+            pins.push(batch.constraint(a));
+        }
     }
+    let dims = batch.run(runner, "Offset relations")?;
     out.entities.push(names);
     out.constraints.extend(constraints.iter().chain(pins.iter()).map(|n| format!("C{}", n)));
     let sketch = runner.sketch();
@@ -1358,19 +1425,24 @@ fn update_inner(
     // The record is written first so the deletions below do not read as
     // tampering.
     register(runner, new_record.clone())?;
-    for e in doomed.into_iter().chain(doomed_caps) {
-        match e {
-            OffsetEntity::Line(l) => { runner.run(Action::DeleteLine { line: l }); }
-            OffsetEntity::Arc(a) => { runner.run(Action::DeleteArc { arc: a }); }
-        }
-        if let Some(e) = runner.take_error() { return Err(e); }
-    }
+    let mut deletes: Vec<Action> = doomed
+        .into_iter()
+        .chain(doomed_caps)
+        .map(|e| match e {
+            OffsetEntity::Line(l) => Action::DeleteLine { line: l },
+            OffsetEntity::Arc(a) => Action::DeleteArc { arc: a },
+        })
+        .collect();
     // A cap's pin is between results and sources: it does not go with
     // the cap entity.
-    for nid in doomed_cap_constraints {
-        if !crate::meta::nid_exists(runner.sketch(), nid) { continue; }
-        runner.run(Action::DeleteConstraint { id: crate::ids::ConstraintId::Numbered(nid) });
-        if let Some(e) = runner.take_error() { return Err(e); }
+    deletes.extend(
+        doomed_cap_constraints
+            .into_iter()
+            .filter(|&nid| crate::meta::nid_exists(runner.sketch(), nid))
+            .map(|nid| Action::DeleteConstraint { id: crate::ids::ConstraintId::Numbered(nid) }),
+    );
+    if !deletes.is_empty() {
+        run_batch(runner, "Delete offset result", deletes)?;
     }
     // Surviving sides: re-seed on the (possibly new) side, then write the
     // distances and the record's expectations in one step.
@@ -1396,9 +1468,12 @@ fn update_inner(
             s.pins.clear();
         }
         register(runner, rec.clone())?;
-        for nid in old_pins {
-            runner.run(Action::DeleteConstraint { id: crate::ids::ConstraintId::Numbered(nid) });
-            if let Some(e) = runner.take_error() { return Err(e); }
+        if !old_pins.is_empty() {
+            let deletes = old_pins
+                .into_iter()
+                .map(|nid| Action::DeleteConstraint { id: crate::ids::ConstraintId::Numbered(nid) })
+                .collect();
+            run_batch(runner, "Delete offset pins", deletes)?;
         }
         if params.pinned {
             for s in rec.sides.iter_mut() {
@@ -1622,8 +1697,8 @@ mod tests {
         ctx
     }
 
-    /// A runner that refuses the n-th constraint application, to fail an
-    /// operation half-way.
+    /// A runner that refuses the n-th batch (the engine's actions all run
+    /// in batches), to fail an operation half-way.
     struct FailAt<'a> {
         inner: &'a mut CommandContext,
         fail_at: usize,
@@ -1635,7 +1710,7 @@ mod tests {
         fn sketch(&self) -> &Sketch { self.inner.sketch() }
         fn sketch_mut(&mut self) -> &mut Sketch { self.inner.sketch_mut() }
         fn run(&mut self, action: Action) -> Created {
-            if action.is_constraint_action() {
+            if matches!(action, Action::Batch { .. }) {
                 self.seen += 1;
                 if self.seen == self.fail_at {
                     self.failed = true;
@@ -1677,7 +1752,8 @@ mod tests {
         let history_len = c.history.actions.len();
         let seq = chain::walk(&c.sketch, OffsetEntity::Line(crate::commands::resolve_line(&c.sketch, "L0").unwrap()));
         let plan = plan(&c.sketch, &seq, &params(1.0)).unwrap();
-        let mut runner = FailAt { inner: &mut c, fail_at: 3, seen: 0, failed: false };
+        // Batch 1 creates the entities; batch 2 (the relations) fails.
+        let mut runner = FailAt { inner: &mut c, fail_at: 2, seen: 0, failed: false };
         let e = apply(&mut runner, &plan).unwrap_err();
         assert!(e.contains("refused for the test"), "{}", e);
         assert_eq!(counts(&c.sketch), before);
@@ -1692,8 +1768,10 @@ mod tests {
         let before = counts(&c.sketch);
         let record = c.sketch.metas[0].clone();
         let history_len = c.history.actions.len();
-        let mut runner = FailAt { inner: &mut c, fail_at: 4, seen: 0, failed: false };
-        // 0.5 brings the fillet back: the side is rebuilt, and that fails.
+        // 0.5 brings the fillet back: the side is rebuilt -- the old side
+        // is deleted (batch 1), the new entities created (batch 2), and
+        // the relation batch (3) fails.
+        let mut runner = FailAt { inner: &mut c, fail_at: 3, seen: 0, failed: false };
         let e = update(&mut runner, 0, &params(0.5)).unwrap_err();
         assert!(e.contains("refused for the test"), "{}", e);
         assert_eq!(counts(&c.sketch), before);

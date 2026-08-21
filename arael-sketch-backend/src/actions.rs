@@ -169,8 +169,13 @@ pub enum Action {
     /// Many actions as one: applied in order without the per-action
     /// solve and gate, one solve and one history entry at the end. For an
     /// engine creating hundreds of entities and constraints it knows to be
-    /// consistent (a pattern's copies); `conflicts::validate_action` does
-    /// not look inside. Returns `Created::Many` in order.
+    /// consistent (a pattern's copies, an offset's result);
+    /// `conflicts::validate_action` does not look inside. Returns
+    /// `Created::Many` in order. Constraint names are assigned after
+    /// every sub-action, so nids are chronological: an engine can
+    /// predict them as `next_constraint_id + i` over its
+    /// constraint-pushing actions, provided every `AddDimension` (whose
+    /// backing constraints also take nids) comes after them.
     Batch { label: String, actions: Vec<Action> },
     /// Record a meta-constraint (see `arael_sketch_solver::metas` and
     /// `crate::meta`): pushed with the next id and its `M<n>` name when
@@ -1064,6 +1069,8 @@ impl Action {
                 let mut many = Vec::with_capacity(actions.len());
                 for a in actions {
                     let (e, c) = a.apply_without_solve(sketch);
+                    // Chronological nids (see the variant's doc).
+                    sketch.assign_constraint_names();
                     needs_expr |= e;
                     many.push(c);
                 }
