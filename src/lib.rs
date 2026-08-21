@@ -92,8 +92,7 @@
 //! - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and
 //!   2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO
 //!   sparse). Heap-backed `BoxedSelfBlock`/`BoxedCrossBlock` variants allocate
-//!   only the active blocks and can be freed between solves -- lighter when
-//!   optimizing part of a large model tree
+//!   only the active blocks and can be freed between solves
 //! - **Jacobian computation** -- `#[arael(root, jacobian)]` generates
 //!   `calc_jacobian()` returning a sparse [`Jacobian<T>`](model::Jacobian)
 //!   matrix for DOF analysis via SVD.
