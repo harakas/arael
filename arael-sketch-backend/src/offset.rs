@@ -1204,6 +1204,8 @@ pub fn apply(runner: &mut dyn ActionRunner, plan: &OffsetPlan) -> Result<OffsetO
     let r = apply_inner(runner, plan);
     if r.is_err() {
         runner.rollback_group();
+    } else {
+        runner.end_group();
     }
     r
 }
@@ -1347,6 +1349,7 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &OffsetParams) ->
         runner.rollback_group();
         return Err(e);
     }
+    runner.end_group();
     Ok(out)
 }
 
@@ -1724,6 +1727,7 @@ mod tests {
             if std::mem::take(&mut self.failed) { Some("refused for the test".into()) } else { self.inner.take_error() }
         }
         fn begin_group(&mut self) { self.inner.begin_group() }
+        fn end_group(&mut self) { self.inner.end_group() }
         fn rollback_group(&mut self) { self.inner.rollback_group() }
     }
 

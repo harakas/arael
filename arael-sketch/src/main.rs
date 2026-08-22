@@ -144,6 +144,10 @@ pub struct EditorApp {
     /// still held: blocks the drag branch from re-grabbing at the
     /// press origin until the button is released.
     pub suppress_drag_regrab: bool,
+    /// A multi-action engine operation (pattern, offset, corner ops,
+    /// meta delete) is running: hold the per-exec DOF refresh until its
+    /// `end_group`. Never set across frames.
+    pub dof_hold: bool,
     /// Markdown render cache for the command panel. Lives on the app
     /// so parsed output is reused across frames (a per-frame cache
     /// re-parses every markdown entry every frame).
@@ -367,9 +371,15 @@ impl arael_sketch_backend::corner_ops::ActionRunner for EditorApp {
         self.status_error.take()
     }
     fn begin_group(&mut self) {
+        self.dof_hold = true;
         EditorApp::begin_group(self)
     }
+    fn end_group(&mut self) {
+        self.dof_hold = false;
+        self.refresh_dof();
+    }
     fn rollback_group(&mut self) {
+        self.dof_hold = false;
         if let Some(s) = self.history.discard_current_group() {
             self.sketch = s.into();
             self.prune_selection();
@@ -451,6 +461,7 @@ impl EditorApp {
             hovered: None,
             grab: None,
             suppress_drag_regrab: false,
+            dof_hold: false,
             md_cache: Default::default(),
             drag_apparatus: None,
             drag_offset: vect2d::new(0.0, 0.0),
@@ -1973,7 +1984,9 @@ impl EditorApp {
         }
         self.take_notices();
         self.prune_selection();
-        self.refresh_dof();
+        if !self.dof_hold {
+            self.refresh_dof();
+        }
         created
     }
 

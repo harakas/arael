@@ -26,6 +26,12 @@ pub trait ActionRunner {
     /// Take the rejection message of the last `run`, if any.
     fn take_error(&mut self) -> Option<String>;
     fn begin_group(&mut self);
+    /// The operation since `begin_group` completed: the runner may now
+    /// run once-per-operation work it deferred during the group (the
+    /// GUI refreshes its DOF display here). Every `begin_group` must be
+    /// paired with `end_group` on success or `rollback_group` on
+    /// failure.
+    fn end_group(&mut self);
     /// Undo and forget everything run since `begin_group`: an operation
     /// that failed half-way leaves nothing behind.
     fn rollback_group(&mut self);
@@ -221,6 +227,7 @@ pub fn apply_corner_ops(
             Err(e) => outcomes.push(CornerOutcome::failed(e)),
         }
     }
+    runner.end_group();
     let primary_dim_did = primary_dim_name.as_ref().and_then(|n| {
         runner.sketch().dimensions.iter().find(|d| &d.name == n).map(|d| d.did)
     });
@@ -536,6 +543,7 @@ impl ActionRunner for crate::commands::CommandContext {
     fn begin_group(&mut self) {
         crate::commands::CommandContext::begin_group(self)
     }
+    fn end_group(&mut self) {}
     fn rollback_group(&mut self) {
         if let Some(s) = self.history.discard_current_group() {
             self.sketch = s.into();

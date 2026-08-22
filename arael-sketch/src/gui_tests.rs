@@ -1847,6 +1847,34 @@ fn test_offset_tool_edit_preview_and_marker() {
 
 // -- Pattern tool ---------------------------------------------------------
 
+/// Rect pattern from the tool: the batched engine run defers the DOF
+/// refresh to its end_group, which must leave the display cache fresh
+/// (a stale cache reads as None through cached_dof).
+#[test]
+fn test_pattern_tool_apply_leaves_dof_fresh() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 1,0");
+    gui.cmd("select all");
+    gui.app.enter_pattern_tool();
+    {
+        let st = gui.app.pattern_tool.as_mut().unwrap();
+        st.kind = crate::pattern_tool::PatternToolKind::Rectangular;
+        st.quantity1 = "3".into();
+        st.distance1 = "2".into();
+        st.quantity2 = "3".into();
+        st.distance2 = "2".into();
+    }
+    gui.app.refresh_pattern_plan();
+    gui.app.apply_pattern();
+    assert!(gui.app.status_error.is_none(), "{:?}", gui.app.status_error);
+    assert_eq!(gui.sketch().metas.len(), 1);
+    assert_eq!(gui.line_count(), 9);
+    assert!(!gui.app.dof_hold, "the hold ends with the operation");
+    assert_eq!(gui.sketch().cached_dof(), Some(4),
+        "a free line keeps 4 DOF, rigid copies add none; None means end_group did not refresh");
+    gui.frames(2);
+}
+
 /// Circular pattern from the tool: the set by clicks, the center by
 /// Pick + click, the numbers in the window; Create makes it and closes
 /// the tool; every copy gets a marker; the marker opens it for editing.

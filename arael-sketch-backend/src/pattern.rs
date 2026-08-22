@@ -665,6 +665,8 @@ pub fn apply(runner: &mut dyn ActionRunner, plan: &PatternPlan) -> Result<Patter
     let r = apply_inner(runner, plan);
     if r.is_err() {
         runner.rollback_group();
+    } else {
+        runner.end_group();
     }
     r
 }
@@ -767,6 +769,7 @@ pub fn update(runner: &mut dyn ActionRunner, mid: u32, params: &PatternParams) -
     let r = update_inner(runner, mid, &p, &new_plan);
     match r {
         Ok(mut out) => {
+            runner.end_group();
             out.name = name;
             out.mid = mid;
             Ok(out)
@@ -924,3 +927,85 @@ pub fn angle_step_deg(distribution: Distribution, angle: f64, quantity: u32) -> 
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::Created;
+    use crate::commands::CommandContext;
+    use crate::corner_ops::ActionRunner;
+
+    /// Counts group lifecycle calls; optionally refuses the n-th batch
+    /// so an apply fails half-way.
+    struct Recorder<'a> {
+        inner: &'a mut CommandContext,
+        begins: usize,
+        ends: usize,
+        rollbacks: usize,
+        fail_batch: Option<usize>,
+        seen: usize,
+        failed: bool,
+    }
+
+    impl ActionRunner for Recorder<'_> {
+        fn sketch(&self) -> &Sketch { self.inner.sketch() }
+        fn sketch_mut(&mut self) -> &mut Sketch { self.inner.sketch_mut() }
+        fn run(&mut self, action: Action) -> Created {
+            if matches!(action, Action::Batch { .. }) {
+                self.seen += 1;
+                if Some(self.seen) == self.fail_batch {
+                    self.failed = true;
+                    return Created::Nothing;
+                }
+            }
+            self.inner.run(action)
+        }
+        fn run_unchecked(&mut self, action: Action) -> Created { self.inner.run_unchecked(action) }
+        fn take_error(&mut self) -> Option<String> {
+            if std::mem::take(&mut self.failed) { Some("refused for the test".into()) } else { self.inner.take_error() }
+        }
+        fn begin_group(&mut self) { self.begins += 1; self.inner.begin_group() }
+        fn end_group(&mut self) { self.ends += 1; self.inner.end_group() }
+        fn rollback_group(&mut self) { self.rollbacks += 1; self.inner.rollback_group() }
+    }
+
+    fn line_plan(ctx: &CommandContext) -> PatternPlan {
+        let sources = vec![MetaEntity::Line(ctx.sketch.lines.refs().next().unwrap())];
+        let params = PatternParams {
+            kind: PatternSpec::Rectangular {
+                frame: None,
+                extent: false,
+                axis1: PatternAxis { quantity: 3, distance: MetaValue { value: 10.0, expr: None }, symmetric: false },
+                axis2: PatternAxis { quantity: 1, distance: MetaValue { value: 0.0, expr: None }, symmetric: false },
+            },
+        };
+        plan(&ctx.sketch, &sources, &params).unwrap()
+    }
+
+    fn ctx() -> CommandContext {
+        let mut ctx = CommandContext::new();
+        for r in crate::commands::execute(&mut ctx, "add_line 0,0 1,0") {
+            assert!(!r.is_error, "{}", r.output);
+        }
+        ctx
+    }
+
+    #[test]
+    fn apply_ends_the_group_on_success() {
+        let mut ctx = ctx();
+        let p = line_plan(&ctx);
+        let mut rec = Recorder { inner: &mut ctx, begins: 0, ends: 0, rollbacks: 0, fail_batch: None, seen: 0, failed: false };
+        apply(&mut rec, &p).unwrap();
+        assert_eq!((rec.begins, rec.ends, rec.rollbacks), (1, 1, 0));
+    }
+
+    #[test]
+    fn failed_apply_rolls_back_without_end() {
+        let mut ctx = ctx();
+        let p = line_plan(&ctx);
+        let mut rec = Recorder { inner: &mut ctx, begins: 0, ends: 0, rollbacks: 0, fail_batch: Some(1), seen: 0, failed: false };
+        assert!(apply(&mut rec, &p).is_err());
+        assert_eq!((rec.begins, rec.ends, rec.rollbacks), (1, 0, 1));
+        assert_eq!(rec.inner.sketch.lines.refs().count(), 1, "rolled back to the source line");
+    }
+}

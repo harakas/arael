@@ -237,6 +237,8 @@ impl Gui {
     /// State no frame may leave behind, whatever the test does.
     fn check_invariants(&self) {
         let s: &arael_sketch_solver::Sketch = &self.app.sketch;
+        // The DOF hold is scoped to one engine call inside one frame.
+        assert!(!self.app.dof_hold, "dof_hold left set outside an engine operation");
         // Drag apparatus exists only during an active grab.
         if self.app.grab.is_none() {
             assert!(

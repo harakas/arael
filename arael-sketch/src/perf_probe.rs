@@ -257,3 +257,84 @@ fn perf_probe_robot() {
     };
     probe_scene("robot", &mut gui, None);
 }
+
+/// 11x11 symmetric rect pattern on the startup sketch, command path.
+#[test]
+#[ignore]
+fn perf_probe_pattern11() {
+    let mut gui = Gui::new();
+    // Swap in the startup sketch (EditorApp::default keeps the demo scene).
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+
+    let t = Instant::now();
+    for r in gui.app.run_commands("select all") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    println!("select all          {:9.1} us", t.elapsed().as_secs_f64() * 1e6);
+
+    let t = Instant::now();
+    for r in gui.app.run_commands("pattern rect selection 11 9 symmetric by 11 9 symmetric") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    println!("pattern cmd (gui)   {:9.1} us", t.elapsed().as_secs_f64() * 1e6);
+
+    for i in 0..10 {
+        let t = Instant::now();
+        gui.frame();
+        println!("frame {:2}            {:9.1} us", i, t.elapsed().as_secs_f64() * 1e6);
+    }
+    let (avg, max) = time_us(30, || {
+        let _ = CoincidenceGroups::build(&gui.app.sketch);
+    });
+    println!("CoincidenceGroups   avg {:9.1} us  max {:9.1} us", avg, max);
+}
+
+/// The same 11x11 pattern via the GUI tool flow (plan, apply, frames).
+#[test]
+#[ignore]
+fn perf_probe_pattern11_tool() {
+    arael_sketch_solver::set_verbose(true);
+    let mut gui = Gui::new();
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+
+    for r in gui.app.run_commands("select all") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+
+    let t = Instant::now();
+    gui.app.enter_pattern_tool();
+    println!("enter tool          {:9.1} us", t.elapsed().as_secs_f64() * 1e6);
+
+    {
+        let st = gui.app.pattern_tool.as_mut().unwrap();
+        st.kind = crate::pattern_tool::PatternToolKind::Rectangular;
+        st.quantity1 = "11".into();
+        st.distance1 = "9".into();
+        st.symmetric1 = true;
+        st.quantity2 = "11".into();
+        st.distance2 = "9".into();
+        st.symmetric2 = true;
+    }
+    let t = Instant::now();
+    gui.app.refresh_pattern_plan();
+    println!("refresh plan        {:9.1} us", t.elapsed().as_secs_f64() * 1e6);
+
+    for i in 0..5 {
+        let t = Instant::now();
+        gui.frame();
+        println!("tool frame {:2}       {:9.1} us", i, t.elapsed().as_secs_f64() * 1e6);
+    }
+
+    let t = Instant::now();
+    gui.app.apply_pattern();
+    println!("apply_pattern       {:9.1} us", t.elapsed().as_secs_f64() * 1e6);
+
+    for i in 0..10 {
+        let t = Instant::now();
+        gui.frame();
+        println!("post frame {:2}       {:9.1} us", i, t.elapsed().as_secs_f64() * 1e6);
+    }
+}
+

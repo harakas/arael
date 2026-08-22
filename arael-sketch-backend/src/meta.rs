@@ -137,6 +137,7 @@ pub fn dissolve(runner: &mut dyn ActionRunner, mid: u32) -> Result<(), String> {
     }
     runner.begin_group();
     runner.run(Action::UnregisterMeta { mid });
+    runner.end_group();
     Ok(())
 }
 
@@ -165,6 +166,7 @@ pub fn delete_with_result(runner: &mut dyn ActionRunner, mid: u32) -> Result<Vec
     if !deletes.is_empty() {
         runner.run(Action::Batch { label: "Delete meta-constraint result".into(), actions: deletes });
     }
+    runner.end_group();
     Ok(names)
 }
 
