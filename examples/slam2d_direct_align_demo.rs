@@ -137,25 +137,37 @@ struct PathInstance {
     center: vect2f,       // centre pose position (world), the correction pivot
     ccov_r: matrix3f,     // eigenvectors of the centre pose 3x3 covariance
     ccov_isigma: vect3f,  // 1/sqrt(eigenvalues)
+    landmarks: refs::Arena<RunLandmark>,  // this run's stage-1 map
     hb: SelfBlock<PathInstance, f32>,
+}
+
+// One landmark of a run's stage-1 map: mean relative to the run centre
+// plus the stage-1 whitening. No params -- pure data, stored once per
+// run and referenced by every match that uses it.
+#[arael::model]
+struct RunLandmark {
+    mu: vect2f,          // rel. to the run's centre (world axes)
+    cov_r: matrix2f,     // stage-1 conditional whitening
+    cov_isigma: vect2f,
 }
 
 // One landmark seen by both runs of the pair: its corrected world position
 // per run A must meet the one per run B. The entities come from the pair's
-// refs (`parent = pair` names the binding); the whitening folds both runs'
-// stage-1 ellipses.
+// refs (`parent = pair` names the binding); the landmark records through
+// DATA refs into each run's own arena; the pair whitening (folding both
+// runs' stage-1 ellipses) stays per match.
 #[arael::model]
 #[arael(constraint(parent.hb, parent = pair, {
     let qa = pair.a.center + pair.a.translation
-        + matrix2sym::rotation(pair.a.rotation) * pathmatch.mu_a;
+        + matrix2sym::rotation(pair.a.rotation) * lm_a.mu;
     let qb = pair.b.center + pair.b.translation
-        + matrix2sym::rotation(pair.b.rotation) * pathmatch.mu_b;
+        + matrix2sym::rotation(pair.b.rotation) * lm_b.mu;
     let w = pathmatch.cov_r.transpose() * (qa - qb);
     [w.x * pathmatch.cov_isigma.x, w.y * pathmatch.cov_isigma.y]
 }))]
 struct PathMatch {
-    mu_a: vect2f,        // landmark mean rel. to run A's centre (world axes)
-    mu_b: vect2f,
+    #[arael(ref = parent.a.landmarks)] lm_a: Ref<RunLandmark>,
+    #[arael(ref = parent.b.landmarks)] lm_b: Ref<RunLandmark>,
     cov_r: matrix2f,     // eigenvectors of S_A' + S_B'
     cov_isigma: vect2f,  // 1/sqrt(eigenvalues)
 }
@@ -489,11 +501,17 @@ fn main() {
     // Stage 2: align the paths. One PathPair per run pair; every landmark
     // both runs saw becomes a match on the pair's shared cross block.
     let mut amap = AlignMap { paths: refs::Arena::new(), pairs: std::vec::Vec::new() };
-    let path_refs: std::vec::Vec<Ref<PathInstance>> = runs.iter().map(|rm| {
-        amap.paths.push(PathInstance {
+    let mut path_refs: std::vec::Vec<Ref<PathInstance>> = std::vec::Vec::new();
+    let mut lm_refs: std::vec::Vec<std::vec::Vec<Ref<RunLandmark>>> = std::vec::Vec::new();
+    for rm in &runs {
+        let mut landmarks = refs::Arena::new();
+        lm_refs.push((0..rm.mu.len()).map(|i| landmarks.push(RunLandmark {
+            mu: rm.mu[i], cov_r: rm.cov_r[i], cov_isigma: rm.cov_isigma[i] })).collect());
+        path_refs.push(amap.paths.push(PathInstance {
             translation: Param::new(vect2f::new(0.0, 0.0)), rotation: Param::new(0.0),
-            center: rm.center, ccov_r: rm.ccov_r, ccov_isigma: rm.ccov_isigma, hb: SelfBlock::new() })
-    }).collect();
+            center: rm.center, ccov_r: rm.ccov_r, ccov_isigma: rm.ccov_isigma,
+            landmarks, hb: SelfBlock::new() }));
+    }
     for ra in 0..runs.len() {
         for rb in (ra + 1)..runs.len() {
             let (r1, r2) = (&runs[ra], &runs[rb]);
@@ -527,7 +545,8 @@ fn main() {
                 let c = matrix2f::from_elements(s[(0, 0)] as f32, s[(0, 1)] as f32,
                                                 s[(1, 0)] as f32, s[(1, 1)] as f32);
                 let (cov_r, cov_isigma) = whitening_factors2(c);
-                matches.push(PathMatch { mu_a: r1.mu[ia], mu_b: r2.mu[ib], cov_r, cov_isigma });
+                matches.push(PathMatch {
+                    lm_a: lm_refs[ra][ia], lm_b: lm_refs[rb][ib], cov_r, cov_isigma });
             }
             if matches.is_empty() { continue; }
             println!("  pair ({}, {}): {} matches on one shared block", ra, rb, matches.len());
@@ -598,9 +617,10 @@ fn main() {
         let mut lams: std::vec::Vec<nalgebra::Matrix2<f64>> = std::vec::Vec::new();
         for &(r, i) in members {
             let (rot, t) = &corr[r];
-            let mu = nalgebra::Vector2::new(runs[r].mu[i].x as f64, runs[r].mu[i].y as f64);
+            let lm = &amap.paths[path_refs[r]].landmarks[lm_refs[r][i]];
+            let mu = nalgebra::Vector2::new(lm.mu.x as f64, lm.mu.y as f64);
             let q = t + rot * mu;
-            let s = rot * cov_from_whitening(runs[r].cov_r[i], runs[r].cov_isigma[i]) * rot.transpose();
+            let s = rot * cov_from_whitening(lm.cov_r, lm.cov_isigma) * rot.transpose();
             let li = s.try_inverse().expect("stage-1 covariance invertible");
             lam += li;
             eta += li * q;
@@ -613,7 +633,8 @@ fn main() {
         for (m, &(r, i)) in members.iter().enumerate() {
             let w = cond * lams[m];
             let (rot, _) = &corr[r];
-            let mu = nalgebra::Vector2::new(runs[r].mu[i].x as f64, runs[r].mu[i].y as f64);
+            let lm = &amap.paths[path_refs[r]].landmarks[lm_refs[r][i]];
+            let mu = nalgebra::Vector2::new(lm.mu.x as f64, lm.mu.y as f64);
             let dq_dth = nalgebra::Vector2::new(-rot[(1, 0)] * mu.x - rot[(0, 0)] * mu.y,
                                                  rot[(0, 0)] * mu.x - rot[(1, 0)] * mu.y);
             let wth = w * dq_dth;
