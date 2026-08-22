@@ -566,27 +566,27 @@ impl EditorApp {
                 if let Some((host, _)) = perp_host {
                     let action = Action::ApplyPerpendicular { a: new_line, b: host };
                     if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                        self.exec(action);
+                        self.exec_quiet(action);
                     }
                 }
                 if let Some(target) = end_perp_target {
                     let action = Action::ApplyPerpendicular { a: new_line, b: target };
                     if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                        self.exec(action);
+                        self.exec_quiet(action);
                     }
                 }
                 // Auto-collinear constraint emission.
                 if let Some((host, _)) = collinear_host {
                     let action = Action::ApplyCollinear { a: new_line, b: host };
                     if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                        self.exec(action);
+                        self.exec_quiet(action);
                     }
                 }
                 // Auto-tangent constraint emission.
                 if let Some((arc, _)) = tangent_host {
                     let action = Action::ApplyTangentLA { line: new_line, arc };
                     if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                        self.exec(action);
+                        self.exec_quiet(action);
                     }
                 }
                 // Auto-H/V constraint emission in the same
@@ -598,7 +598,7 @@ impl EditorApp {
                         Action::ApplyVertical { lines: vec![new_line] }
                     };
                     if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                        self.exec(action);
+                        self.exec_quiet(action);
                     }
                 }
 
@@ -1213,7 +1213,7 @@ impl EditorApp {
                 TangentHost::Arc(other) => Action::ApplyTangentAA { a: arc, b: other },
             };
             if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                self.exec(action);
+                self.exec_quiet(action);
             }
         }
         if let Some((value, expr)) = typed {

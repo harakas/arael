@@ -199,3 +199,34 @@ fn independent_candidate_no_blocker() {
     assert!(run_analysis(&mut pre, &mut post).is_none(),
         "independent candidate should not trigger blocker analysis");
 }
+
+#[test]
+fn oversized_rowspan_svd_is_declined() {
+    // Above the flop budget the analysis must decline immediately --
+    // it runs on the GUI frame thread on every gated rejection.
+    use arael::model::{Jacobian, JacobianRow};
+    let n = 1000usize;
+    let mut rows = Vec::new();
+    for i in 0..300u32 {
+        rows.push(JacobianRow {
+            constraint: 1,
+            label: "e",
+            residual: 0.0,
+            entries: vec![(i, 1.0), (i + 1, -1.0)],
+        });
+    }
+    rows.push(JacobianRow {
+        constraint: 2,
+        label: "c",
+        residual: 0.0,
+        entries: vec![(0, 1.0), (5, -1.0)],
+    });
+    let jac = Jacobian { num_params: n, rows };
+    let cand: std::collections::HashSet<u32> = [2].into_iter().collect();
+    let t = std::time::Instant::now();
+    assert!(
+        arael_sketch_solver::blocker::analyze(&jac, &cand).is_none(),
+        "oversized analysis must decline"
+    );
+    assert!(t.elapsed().as_secs_f64() < 1.0, "declining must be immediate");
+}

@@ -1608,7 +1608,7 @@ impl EditorApp {
                         if let Some((host, _)) = perp_hint {
                             let action = Action::ApplyPerpendicular { a: line, b: host };
                             if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                                self.exec(action);
+                                self.exec_quiet(action);
                             }
                         }
                     }
@@ -1620,7 +1620,7 @@ impl EditorApp {
                     {
                         let action = Action::ApplyCollinear { a: line, b: host };
                         if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                            self.exec(action);
+                            self.exec_quiet(action);
                         }
                     }
                     // Auto-H/V: emit when the hint was active and no
@@ -1638,7 +1638,7 @@ impl EditorApp {
                             Action::ApplyVertical { lines: vec![line] }
                         };
                         if arael_sketch_backend::conflicts::validate_action(&self.sketch, &action).is_none() {
-                            self.exec(action);
+                            self.exec_quiet(action);
                         }
                     }
                 }
@@ -1946,13 +1946,25 @@ impl EditorApp {
     /// Apply an action. Returns what it added, so a caller acting on the new
     /// entity uses the ref the arena actually issued.
     pub fn exec(&mut self, action: Action) -> arael_sketch_backend::actions::Created {
-        self.exec_with_skip(action, false)
+        self.exec_inner(action, false, true)
+    }
+
+    /// `exec` without the blocker hint on rejection: auto-applied
+    /// constraints (drag / draw snaps) may be rejected on big sketches
+    /// where the hint's rowspan analysis would stall the frame.
+    fn exec_quiet(&mut self, action: Action) -> arael_sketch_backend::actions::Created {
+        self.exec_inner(action, false, false)
+    }
+
+    fn exec_with_skip(&mut self, action: Action, skip_dof_check: bool) -> arael_sketch_backend::actions::Created {
+        self.exec_inner(action, skip_dof_check, true)
     }
 
     /// `exec` with the DOF-redundancy gate optionally suppressed --
     /// the corner-op engine re-ties just-created geometry through
-    /// this, same as the command path's skip_dof_check.
-    fn exec_with_skip(&mut self, action: Action, skip_dof_check: bool) -> arael_sketch_backend::actions::Created {
+    /// this, same as the command path's skip_dof_check -- and the
+    /// rejection hint optionally skipped.
+    fn exec_inner(&mut self, action: Action, skip_dof_check: bool, explain: bool) -> arael_sketch_backend::actions::Created {
         use arael_sketch_backend::actions::Created;
         let mut created = Created::Nothing;
         self.status_error = None;
@@ -1968,7 +1980,7 @@ impl EditorApp {
 
         if action.is_constraint_action() {
             match arael_sketch_backend::commands::validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, skip_dof_check)
+                self.sketch.get_mut(), &action, skip_dof_check, explain)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -4033,30 +4045,30 @@ impl EditorApp {
     fn apply_snap_coincident(&mut self, snap: SnapTarget, line: Ref<Line>, is_p1: bool) {
         if self.has_existing_coincident_line(line, is_p1, snap) { return; }
         match (snap, is_p1) {
-            (SnapTarget::Point(p), true) => { self.exec(Action::ApplyCoincidentLP1 { line, point: p }); }
-            (SnapTarget::Point(p), false) => { self.exec(Action::ApplyCoincidentLP2 { line, point: p }); }
-            (SnapTarget::LineP1(other), true) => { self.exec(Action::ApplyCoincidentLL11 { a: line, b: other }); }
-            (SnapTarget::LineP1(other), false) => { self.exec(Action::ApplyCoincidentLL21 { a: line, b: other }); }
-            (SnapTarget::LineP2(other), true) => { self.exec(Action::ApplyCoincidentLL12 { a: line, b: other }); }
-            (SnapTarget::LineP2(other), false) => { self.exec(Action::ApplyCoincidentLL22 { a: line, b: other }); }
-            (SnapTarget::Line(other), true) => { self.exec(Action::ApplyLineP1OnLine { a: line, b: other }); }
-            (SnapTarget::Line(other), false) => { self.exec(Action::ApplyLineP2OnLine { a: line, b: other }); }
+            (SnapTarget::Point(p), true) => { self.exec_quiet(Action::ApplyCoincidentLP1 { line, point: p }); }
+            (SnapTarget::Point(p), false) => { self.exec_quiet(Action::ApplyCoincidentLP2 { line, point: p }); }
+            (SnapTarget::LineP1(other), true) => { self.exec_quiet(Action::ApplyCoincidentLL11 { a: line, b: other }); }
+            (SnapTarget::LineP1(other), false) => { self.exec_quiet(Action::ApplyCoincidentLL21 { a: line, b: other }); }
+            (SnapTarget::LineP2(other), true) => { self.exec_quiet(Action::ApplyCoincidentLL12 { a: line, b: other }); }
+            (SnapTarget::LineP2(other), false) => { self.exec_quiet(Action::ApplyCoincidentLL22 { a: line, b: other }); }
+            (SnapTarget::Line(other), true) => { self.exec_quiet(Action::ApplyLineP1OnLine { a: line, b: other }); }
+            (SnapTarget::Line(other), false) => { self.exec_quiet(Action::ApplyLineP2OnLine { a: line, b: other }); }
             // Direct line-arc constraints
-            (SnapTarget::ArcCenter(arc), true) => { self.exec(Action::ApplyCoincidentLP1ArcCenter { line, arc }); }
-            (SnapTarget::ArcCenter(arc), false) => { self.exec(Action::ApplyCoincidentLP2ArcCenter { line, arc }); }
-            (SnapTarget::ArcStart(arc), true) => { self.exec(Action::ApplyCoincidentLP1ArcStart { line, arc }); }
-            (SnapTarget::ArcStart(arc), false) => { self.exec(Action::ApplyCoincidentLP2ArcStart { line, arc }); }
-            (SnapTarget::ArcEnd(arc), true) => { self.exec(Action::ApplyCoincidentLP1ArcEnd { line, arc }); }
-            (SnapTarget::ArcEnd(arc), false) => { self.exec(Action::ApplyCoincidentLP2ArcEnd { line, arc }); }
+            (SnapTarget::ArcCenter(arc), true) => { self.exec_quiet(Action::ApplyCoincidentLP1ArcCenter { line, arc }); }
+            (SnapTarget::ArcCenter(arc), false) => { self.exec_quiet(Action::ApplyCoincidentLP2ArcCenter { line, arc }); }
+            (SnapTarget::ArcStart(arc), true) => { self.exec_quiet(Action::ApplyCoincidentLP1ArcStart { line, arc }); }
+            (SnapTarget::ArcStart(arc), false) => { self.exec_quiet(Action::ApplyCoincidentLP2ArcStart { line, arc }); }
+            (SnapTarget::ArcEnd(arc), true) => { self.exec_quiet(Action::ApplyCoincidentLP1ArcEnd { line, arc }); }
+            (SnapTarget::ArcEnd(arc), false) => { self.exec_quiet(Action::ApplyCoincidentLP2ArcEnd { line, arc }); }
             // Line endpoint on arc body (direct constraint)
-            (SnapTarget::ArcBody(arc), true) => { self.exec(Action::ApplyLineP1OnArc { line, arc }); }
-            (SnapTarget::ArcBody(arc), false) => { self.exec(Action::ApplyLineP2OnArc { line, arc }); }
+            (SnapTarget::ArcBody(arc), true) => { self.exec_quiet(Action::ApplyLineP1OnArc { line, arc }); }
+            (SnapTarget::ArcBody(arc), false) => { self.exec_quiet(Action::ApplyLineP2OnArc { line, arc }); }
             // Line endpoint at another line's midpoint
-            (SnapTarget::LineMidpoint(target), true) => { self.exec(Action::ApplyMidpointLP1 { line, target }); }
-            (SnapTarget::LineMidpoint(target), false) => { self.exec(Action::ApplyMidpointLP2 { line, target }); }
+            (SnapTarget::LineMidpoint(target), true) => { self.exec_quiet(Action::ApplyMidpointLP1 { line, target }); }
+            (SnapTarget::LineMidpoint(target), false) => { self.exec_quiet(Action::ApplyMidpointLP2 { line, target }); }
             // Line endpoint at an arc's midpoint
-            (SnapTarget::ArcMidpoint(arc), true) => { self.exec(Action::ApplyMidpointLP1Arc { line, arc }); }
-            (SnapTarget::ArcMidpoint(arc), false) => { self.exec(Action::ApplyMidpointLP2Arc { line, arc }); }
+            (SnapTarget::ArcMidpoint(arc), true) => { self.exec_quiet(Action::ApplyMidpointLP1Arc { line, arc }); }
+            (SnapTarget::ArcMidpoint(arc), false) => { self.exec_quiet(Action::ApplyMidpointLP2Arc { line, arc }); }
         }
     }
 
@@ -4076,7 +4088,7 @@ impl EditorApp {
             SnapTarget::ArcMidpoint(arc) => Action::ApplyMidpointArcPoint { point, arc },
             SnapTarget::ArcBody(arc) => Action::ApplyPointOnArc { point, arc },
         };
-        self.exec(action);
+        self.exec_quiet(action);
     }
 
 
@@ -4096,32 +4108,32 @@ impl EditorApp {
         match (&which, snap) {
             (ArcPoint::Center, SnapTarget::LineP1(line)) | (ArcPoint::Center, SnapTarget::LineP2(line)) => {
                 let is_p1 = matches!(snap, SnapTarget::LineP1(_));
-                if is_p1 { self.exec(Action::ApplyCoincidentLP1ArcCenter { line, arc }); }
-                else { self.exec(Action::ApplyCoincidentLP2ArcCenter { line, arc }); }
+                if is_p1 { self.exec_quiet(Action::ApplyCoincidentLP1ArcCenter { line, arc }); }
+                else { self.exec_quiet(Action::ApplyCoincidentLP2ArcCenter { line, arc }); }
                 return;
             }
             (ArcPoint::Start, SnapTarget::LineP1(line)) | (ArcPoint::Start, SnapTarget::LineP2(line)) => {
                 let is_p1 = matches!(snap, SnapTarget::LineP1(_));
-                if is_p1 { self.exec(Action::ApplyCoincidentLP1ArcStart { line, arc }); }
-                else { self.exec(Action::ApplyCoincidentLP2ArcStart { line, arc }); }
+                if is_p1 { self.exec_quiet(Action::ApplyCoincidentLP1ArcStart { line, arc }); }
+                else { self.exec_quiet(Action::ApplyCoincidentLP2ArcStart { line, arc }); }
                 return;
             }
             (ArcPoint::End, SnapTarget::LineP1(line)) | (ArcPoint::End, SnapTarget::LineP2(line)) => {
                 let is_p1 = matches!(snap, SnapTarget::LineP1(_));
-                if is_p1 { self.exec(Action::ApplyCoincidentLP1ArcEnd { line, arc }); }
-                else { self.exec(Action::ApplyCoincidentLP2ArcEnd { line, arc }); }
+                if is_p1 { self.exec_quiet(Action::ApplyCoincidentLP1ArcEnd { line, arc }); }
+                else { self.exec_quiet(Action::ApplyCoincidentLP2ArcEnd { line, arc }); }
                 return;
             }
             // Direct Arc <-> Arc point constraints
-            (ArcPoint::Center, SnapTarget::ArcCenter(other)) => { self.exec(Action::ApplyConcentric { a: arc, b: other }); return; }
-            (ArcPoint::Center, SnapTarget::ArcStart(other)) => { self.exec(Action::ApplyCoincidentArcCenterStart { a: arc, b: other }); return; }
-            (ArcPoint::Center, SnapTarget::ArcEnd(other)) => { self.exec(Action::ApplyCoincidentArcCenterEnd { a: arc, b: other }); return; }
-            (ArcPoint::Start, SnapTarget::ArcCenter(other)) => { self.exec(Action::ApplyCoincidentArcStartCenter { a: arc, b: other }); return; }
-            (ArcPoint::Start, SnapTarget::ArcStart(other)) => { self.exec(Action::ApplyCoincidentArcStartStart { a: arc, b: other }); return; }
-            (ArcPoint::Start, SnapTarget::ArcEnd(other)) => { self.exec(Action::ApplyCoincidentArcStartEnd { a: arc, b: other }); return; }
-            (ArcPoint::End, SnapTarget::ArcCenter(other)) => { self.exec(Action::ApplyCoincidentArcEndCenter { a: arc, b: other }); return; }
-            (ArcPoint::End, SnapTarget::ArcStart(other)) => { self.exec(Action::ApplyCoincidentArcEndStart { a: arc, b: other }); return; }
-            (ArcPoint::End, SnapTarget::ArcEnd(other)) => { self.exec(Action::ApplyCoincidentArcEndEnd { a: arc, b: other }); return; }
+            (ArcPoint::Center, SnapTarget::ArcCenter(other)) => { self.exec_quiet(Action::ApplyConcentric { a: arc, b: other }); return; }
+            (ArcPoint::Center, SnapTarget::ArcStart(other)) => { self.exec_quiet(Action::ApplyCoincidentArcCenterStart { a: arc, b: other }); return; }
+            (ArcPoint::Center, SnapTarget::ArcEnd(other)) => { self.exec_quiet(Action::ApplyCoincidentArcCenterEnd { a: arc, b: other }); return; }
+            (ArcPoint::Start, SnapTarget::ArcCenter(other)) => { self.exec_quiet(Action::ApplyCoincidentArcStartCenter { a: arc, b: other }); return; }
+            (ArcPoint::Start, SnapTarget::ArcStart(other)) => { self.exec_quiet(Action::ApplyCoincidentArcStartStart { a: arc, b: other }); return; }
+            (ArcPoint::Start, SnapTarget::ArcEnd(other)) => { self.exec_quiet(Action::ApplyCoincidentArcStartEnd { a: arc, b: other }); return; }
+            (ArcPoint::End, SnapTarget::ArcCenter(other)) => { self.exec_quiet(Action::ApplyCoincidentArcEndCenter { a: arc, b: other }); return; }
+            (ArcPoint::End, SnapTarget::ArcStart(other)) => { self.exec_quiet(Action::ApplyCoincidentArcEndStart { a: arc, b: other }); return; }
+            (ArcPoint::End, SnapTarget::ArcEnd(other)) => { self.exec_quiet(Action::ApplyCoincidentArcEndEnd { a: arc, b: other }); return; }
             _ => {}
         }
         // Convert ArcPoint to DimensionEndpoint
@@ -4132,18 +4144,18 @@ impl EditorApp {
         };
         match snap {
             SnapTarget::Line(line) => {
-                self.exec(Action::ApplyEndpointOnLine { endpoint, line });
+                self.exec_quiet(Action::ApplyEndpointOnLine { endpoint, line });
             }
             SnapTarget::ArcBody(target_arc) => {
-                self.exec(Action::ApplyEndpointOnArc { endpoint, arc: target_arc });
+                self.exec_quiet(Action::ApplyEndpointOnArc { endpoint, arc: target_arc });
             }
             _ => {
                 // Point, LineP1/P2, ArcCenter/Start/End: create helper + bridge + coincident
-                let Some(hp) = self.exec(Action::AddHelperPoint { pos }).point() else { return; };
+                let Some(hp) = self.exec_quiet(Action::AddHelperPoint { pos }).point() else { return; };
                 match which {
-                    ArcPoint::Center => self.exec(Action::ApplyCoincidentArcCenter { point: hp, arc }),
-                    ArcPoint::Start => self.exec(Action::ApplyCoincidentArcStart { point: hp, arc }),
-                    ArcPoint::End => self.exec(Action::ApplyCoincidentArcEnd { point: hp, arc }),
+                    ArcPoint::Center => self.exec_quiet(Action::ApplyCoincidentArcCenter { point: hp, arc }),
+                    ArcPoint::Start => self.exec_quiet(Action::ApplyCoincidentArcStart { point: hp, arc }),
+                    ArcPoint::End => self.exec_quiet(Action::ApplyCoincidentArcEnd { point: hp, arc }),
                 };
                 self.apply_snap_coincident_point(snap, hp);
             }

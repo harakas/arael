@@ -303,6 +303,7 @@ pub fn validate_and_apply_constraint(
     sketch: &mut Sketch,
     action: &Action,
     skip_dof_check: bool,
+    explain: bool,
 ) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
 
@@ -388,7 +389,13 @@ pub fn validate_and_apply_constraint(
         let new_dof = sketch.dof()?;
         if new_dof >= old_dof
             && let Some(ref snap) = snapshot {
-                let (blocker_hint, blocker_names) = blocker_hint_for_rejection(sketch, snap);
+                // The hint costs a rowspan analysis; auto-applied
+                // constraints (drag/draw snaps) skip it.
+                let (blocker_hint, blocker_names) = if explain {
+                    blocker_hint_for_rejection(sketch, snap)
+                } else {
+                    (String::new(), Vec::new())
+                };
                 if let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
                     *sketch = restored;
                     return Err(Rejection {
@@ -757,7 +764,7 @@ impl CommandContext {
 
         let created = if action.is_constraint_action() {
             match validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, self.skip_dof_check)
+                self.sketch.get_mut(), &action, self.skip_dof_check, true)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;

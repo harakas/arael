@@ -191,6 +191,14 @@ pub fn analyze(
     }
     let m_a = a_rows.len();
 
+    // The rowspan SVD below is dense O(m * n * min(m, n)) and runs on
+    // the frame thread; above this budget the hint would stall the
+    // GUI for minutes, so the rejection stands without a hint.
+    const SVD_FLOP_LIMIT: usize = 50_000_000;
+    if m_a.saturating_mul(n).saturating_mul(m_a.min(n)) > SVD_FLOP_LIMIT {
+        return None;
+    }
+
     stats.candidate_rows = candidate_rows.len();
     stats.existing_rows = m_a;
 

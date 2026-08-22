@@ -1847,6 +1847,27 @@ fn test_offset_tool_edit_preview_and_marker() {
 
 // -- Pattern tool ---------------------------------------------------------
 
+/// A gated rejection through the quiet exec (auto-snap path) carries
+/// no blocker hint; the normal exec still explains.
+#[test]
+fn test_quiet_exec_rejection_has_no_blocker_hint() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0; add_line 0,1 2,1 noconnect");
+    gui.cmd("horizontal L0; horizontal L1");
+    let (a, b) = {
+        let mut it = gui.sketch().lines.refs();
+        (it.next().unwrap(), it.next().unwrap())
+    };
+    gui.app.exec(arael_sketch_backend::actions::Action::ApplyParallel { a, b });
+    let err = gui.app.status_error.take().expect("rejected");
+    assert!(err.contains("Blocked by"), "explicit exec explains: {}", err);
+    gui.app.exec_quiet(arael_sketch_backend::actions::Action::ApplyParallel { a, b });
+    let err = gui.app.status_error.take().expect("rejected");
+    assert!(!err.contains("Blocked by"), "quiet exec must not explain: {}", err);
+    assert!(gui.sketch().parallel.is_empty(), "both rejected");
+    gui.frames(2);
+}
+
 /// Lock over a selection runs as one batch: a single history entry,
 /// every vertex locked, DOF cache fresh. A second apply unlocks; the
 /// shared (coincident) corner selected through both lines must not
