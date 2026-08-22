@@ -2303,6 +2303,9 @@ impl Sketch {
                 arael::rank::RankMethod::Iterative { block, grew } => {
                     format!("subspace iteration (block={} grew={})", block, grew)
                 }
+                arael::rank::RankMethod::Components { count, largest_n } => {
+                    format!("{} independent components (largest n={})", count, largest_n)
+                }
             };
             (rr.nullity, method)
         };

@@ -455,3 +455,63 @@ fn perf_probe_mirror_grid9() {
         t.elapsed().as_secs_f64() * 1e3);
     gui.frame();
 }
+
+/// Temporary probe: dense vs iterative rank cost at the pathological
+/// intermediate shape (m=3642, n=1936, nullity ~1803).
+#[test]
+#[ignore]
+fn perf_probe_rank_shape() {
+    use arael::model::{Jacobian, JacobianRow};
+    let n = 1936usize;
+    let constrained = 133usize; // params actually touched -> nullity 1803
+    let mut rng = 0x12345678u64;
+    let mut next = move || {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+        (rng as f64 / u64::MAX as f64) * 2.0 - 1.0
+    };
+    let mut rows = Vec::new();
+    for i in 0..3642usize {
+        let a = (i * 7) % constrained;
+        let b = (i * 13 + 5) % constrained;
+        rows.push(JacobianRow {
+            constraint: i as u32,
+            label: "syn",
+            residual: 0.0,
+            entries: vec![(a as u32, next()), (b as u32, next()), ((a + 1) as u32 % constrained as u32, next()), ((b + 3) as u32 % constrained as u32, next())],
+        });
+    }
+    let jac = Jacobian { num_params: n, rows };
+
+    let opts_dense = arael::rank::RankOptions { dense_cutoff: usize::MAX, ..Default::default() };
+    let t = Instant::now();
+    let r = jac.numeric_rank(&opts_dense).unwrap();
+    println!("cutoff=MAX rank={} nullity={} method={:?} in {:.3}s", r.rank, r.nullity, r.method, t.elapsed().as_secs_f64());
+
+    let opts_iter = arael::rank::RankOptions { null_hint: Some(3), ..Default::default() };
+    let t = Instant::now();
+    let r = jac.numeric_rank(&opts_iter).unwrap();
+    println!("cutoff=0   rank={} nullity={} method={:?} in {:.3}s", r.rank, r.nullity, r.method, t.elapsed().as_secs_f64());
+}
+
+/// Loose scene: many free doodle lines around one constrained part.
+#[test]
+#[ignore]
+fn perf_probe_rank_loose_scene() {
+    let mut gui = Gui::new();
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+    for i in 0..200 {
+        let y = i as f64 * 0.5;
+        for r in gui.app.run_commands(&format!(
+            "add_line {},{} {},{} noconnect nocursor", 20.0 + y, y, 25.0 + y, y + 3.0)) {
+            assert!(!r.is_error, "{}", r.output);
+        }
+    }
+    let (avg, max) = time_us(10, || {
+        gui.app.sketch.mutate_values(|s| {
+            s.clear_cached_dof();
+            let _ = s.ensure_rank();
+        });
+    });
+    println!("rank, 200 free lines + part   avg {:9.1} us  max {:9.1} us", avg, max);
+}

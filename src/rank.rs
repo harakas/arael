@@ -19,7 +19,7 @@
 //! microseconds ([`RankResult::reduces_rank`]) instead of recomputing
 //! the rank.
 
-use crate::model::Jacobian;
+use crate::model::{Jacobian, JacobianRow};
 use faer::sparse::linalg::cholesky as fchol;
 use std::mem::MaybeUninit;
 
@@ -64,6 +64,10 @@ pub enum RankMethod {
     /// Subspace iteration; `block` is the final block width, `grew`
     /// counts how many times the block had to grow.
     Iterative { block: usize, grew: usize },
+    /// Independent connected components of the param-residual graph,
+    /// each solved dense or iterative at its own size; `largest_n` is
+    /// the biggest component's parameter count.
+    Components { count: usize, largest_n: usize },
 }
 
 /// Rank computation failure.
@@ -249,10 +253,147 @@ impl Jacobian<f64> {
                 n,
             });
         }
-        if n <= opts.dense_cutoff {
-            return Ok(self.rank_dense(opts, scales));
+        let (comp, count) = partition(n, &self.rows);
+        if count == 1 {
+            if n <= opts.dense_cutoff {
+                return Ok(self.rank_dense(opts, scales));
+            }
+            return self.rank_iterative(opts, scales, warm);
         }
-        self.rank_iterative(opts, scales, warm)
+        self.rank_components(opts, scales, warm, &comp, count)
+    }
+
+    /// Solve each connected component independently: the Jacobian is
+    /// block-diagonal across components, so rank and nullity add and
+    /// the null space is the direct sum. Every component runs the
+    /// dense / iterative choice at its own size, and a component no
+    /// residual touches is free outright (identity basis columns).
+    fn rank_components(
+        &self,
+        opts: &RankOptions,
+        scales: Vec<f64>,
+        warm: Option<&RankResult>,
+        comp: &[u32],
+        count: usize,
+    ) -> Result<RankResult, RankError> {
+        let n = self.num_params;
+        // Params per component, ascending; global -> local index map.
+        let mut params: Vec<Vec<u32>> = vec![Vec::new(); count];
+        for (p, &c) in comp.iter().enumerate() {
+            params[c as usize].push(p as u32);
+        }
+        let mut local = vec![0u32; n];
+        for plist in &params {
+            for (li, &p) in plist.iter().enumerate() {
+                local[p as usize] = li as u32;
+            }
+        }
+        // Rows bucketed by component (a row's params share one by
+        // construction); a row with no entries constrains nothing and
+        // is dropped -- it does not affect rank either way.
+        let mut rows: Vec<Vec<JacobianRow<f64>>> =
+            (0..count).map(|_| Vec::new()).collect();
+        for row in &self.rows {
+            let Some(&(p0, _)) = row.entries.first() else { continue };
+            rows[comp[p0 as usize] as usize].push(JacobianRow {
+                constraint: row.constraint,
+                label: row.label,
+                residual: row.residual,
+                entries: row.entries.iter().map(|&(p, v)| (local[p as usize], v)).collect(),
+            });
+        }
+        // Previous basis columns sliced by support component; a column
+        // whose support crosses components (a pre-split result) cold-
+        // starts its component instead.
+        let mut warm_cols: Vec<Vec<Vec<f64>>> = vec![Vec::new(); count];
+        if let Some(w) = warm {
+            for cidx in 0..w.nullity {
+                let col = &w.basis[cidx * n..(cidx + 1) * n];
+                let mut owner: Option<u32> = None;
+                let mut mixed = false;
+                for (p, &x) in col.iter().enumerate() {
+                    if x.abs() > 1e-12 {
+                        match owner {
+                            None => owner = Some(comp[p]),
+                            Some(o) if o != comp[p] => {
+                                mixed = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let (Some(o), false) = (owner, mixed) {
+                    let plist = &params[o as usize];
+                    warm_cols[o as usize]
+                        .push(plist.iter().map(|&p| col[p as usize]).collect());
+                }
+            }
+        }
+
+        let mut rank = 0usize;
+        let mut nullity = 0usize;
+        let mut gap = f64::INFINITY;
+        let mut basis: Vec<f64> = Vec::new();
+        let mut largest = 0usize;
+        for c in 0..count {
+            let plist = &params[c];
+            let n_c = plist.len();
+            largest = largest.max(n_c);
+            if rows[c].is_empty() {
+                nullity += n_c;
+                for &p in plist {
+                    let base = basis.len();
+                    basis.resize(base + n, 0.0);
+                    basis[base + p as usize] = 1.0;
+                }
+                continue;
+            }
+            let sub = Jacobian { num_params: n_c, rows: std::mem::take(&mut rows[c]) };
+            let sub_opts = RankOptions { null_hint: None, ..opts.clone() };
+            let sub_warm_store;
+            let sub_warm = if warm_cols[c].is_empty() {
+                None
+            } else {
+                let k = warm_cols[c].len();
+                let mut b = vec![0.0f64; n_c * k];
+                for (ci, col) in warm_cols[c].iter().enumerate() {
+                    b[ci * n_c..(ci + 1) * n_c].copy_from_slice(col);
+                }
+                sub_warm_store = RankResult {
+                    rank: n_c.saturating_sub(k),
+                    nullity: k,
+                    gap: f64::INFINITY,
+                    method: RankMethod::Dense,
+                    row_tol: opts.row_tol,
+                    scales: Vec::new(),
+                    basis: b,
+                    n: n_c,
+                };
+                Some(&sub_warm_store)
+            };
+            let r = sub.rank_impl(&sub_opts, sub_warm)?;
+            rank += r.rank;
+            nullity += r.nullity;
+            gap = gap.min(r.gap);
+            for cidx in 0..r.nullity {
+                let base = basis.len();
+                basis.resize(base + n, 0.0);
+                for (li, &p) in plist.iter().enumerate() {
+                    basis[base + p as usize] = r.basis[cidx * n_c + li];
+                }
+            }
+        }
+        Ok(RankResult {
+            rank,
+            nullity,
+            gap,
+            method: RankMethod::Components { count, largest_n: largest },
+            row_tol: opts.row_tol,
+            scales,
+            basis,
+            n,
+        })
     }
 
     fn rank_dense(&self, opts: &RankOptions, scales: Vec<f64>) -> RankResult {
@@ -367,7 +508,11 @@ impl Jacobian<f64> {
 
 
         let hint = opts.null_hint.or(warm.map(|w| w.nullity)).unwrap_or(opts.margin);
-        let mut k = (hint + opts.margin).clamp(1, n);
+        // nullity >= n - m always: start the block at that floor so a
+        // loose system opens at its true null-space scale instead of
+        // doubling its way up.
+        let floor = n.saturating_sub(m);
+        let mut k = (hint.max(floor) + opts.margin).clamp(1, n);
         let mut grew = 0usize;
         let mut rng = 0x9e3779b97f4a7c15u64;
         loop {
@@ -571,5 +716,85 @@ fn complete_orthonormal(
                 break;
             }
         }
+    }
+}
+
+/// Connected components of the param-residual graph: two params share
+/// a component when some row touches both. Params no row touches are
+/// singleton components. Returns a component id per param (labelled by
+/// first appearance in param order) and the component count.
+fn partition(n: usize, rows: &[JacobianRow<f64>]) -> (Vec<u32>, usize) {
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            parent[x as usize] = parent[parent[x as usize] as usize];
+            x = parent[x as usize];
+        }
+        x
+    }
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    for row in rows {
+        let mut it = row.entries.iter();
+        let Some(&(first, _)) = it.next() else { continue };
+        let ra = find(&mut parent, first);
+        for &(p, _) in it {
+            let rb = find(&mut parent, p);
+            if ra != rb {
+                parent[rb as usize] = ra;
+            }
+        }
+    }
+    let mut label = vec![u32::MAX; n];
+    let mut out = vec![0u32; n];
+    let mut count = 0usize;
+    for p in 0..n {
+        let r = find(&mut parent, p as u32) as usize;
+        if label[r] == u32::MAX {
+            label[r] = count as u32;
+            count += 1;
+        }
+        out[p] = label[r];
+    }
+    (out, count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::JacobianRow;
+
+    fn row(entries: &[(u32, f64)]) -> JacobianRow<f64> {
+        JacobianRow { constraint: 0, label: "t", residual: 0.0, entries: entries.to_vec() }
+    }
+
+    #[test]
+    fn partition_labels_components_and_singletons() {
+        // Rows tie {0,1} and {1,4}; 2, 3 are free singletons.
+        let rows = vec![row(&[(0, 1.0), (1, 1.0)]), row(&[(1, 1.0), (4, 1.0)])];
+        let (comp, count) = partition(5, &rows);
+        assert_eq!(count, 3);
+        assert_eq!(comp[0], comp[1]);
+        assert_eq!(comp[1], comp[4]);
+        assert_ne!(comp[0], comp[2]);
+        assert_ne!(comp[2], comp[3]);
+        // Labels follow first appearance in param order.
+        assert_eq!(comp[0], 0);
+        assert_eq!(comp[2], 1);
+        assert_eq!(comp[3], 2);
+    }
+
+    #[test]
+    fn partition_ignores_empty_rows() {
+        let rows = vec![row(&[]), row(&[(2, 1.0)])];
+        let (comp, count) = partition(3, &rows);
+        assert_eq!(count, 3);
+        assert_eq!(comp, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn partition_all_connected() {
+        let rows: Vec<_> = (0..9u32).map(|i| row(&[(i, 1.0), (i + 1, -1.0)])).collect();
+        let (comp, count) = partition(10, &rows);
+        assert_eq!(count, 1);
+        assert!(comp.iter().all(|&c| c == 0));
     }
 }
