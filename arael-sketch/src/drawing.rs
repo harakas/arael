@@ -80,6 +80,9 @@ pub(crate) fn meta_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke:
 
 /// Pattern meta-constraint glyph: two by two small squares.
 pub(crate) fn pattern_glyph(painter: &egui::Painter, p: egui::Pos2, s: f32, stroke: egui::Stroke) {
+    // The four squares sit close together; a thinner stroke keeps
+    // them from blending into one blob.
+    let stroke = egui::Stroke::new((stroke.width * 0.6).max(0.8), stroke.color);
     let half = s * 0.38;
     let gap = s * 0.55;
     for (dx, dy) in [(-gap, -gap), (gap, -gap), (-gap, gap), (gap, gap)] {
