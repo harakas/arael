@@ -455,12 +455,7 @@ impl SketchCell {
     /// Serialize the parameters and evaluate the current cost --
     /// read-only in the gate's sense.
     pub fn current_cost(&mut self) -> f64 {
-        use arael::simple_lm::{LmProblem, RootProblem};
-        self.mutate_values(|s| {
-            let mut params = std::vec::Vec::new();
-            s.serialize(&mut params);
-            s.calc_cost(&params)
-        })
+        self.mutate_values(|s| s.current_cost())
     }
 
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
@@ -2173,6 +2168,14 @@ impl Sketch {
     /// probe module). The result is tied to the current parameter
     /// layout and geometry -- structural edits invalidate it, value
     /// drift degrades it gracefully. Updates the cached DOF.
+    /// Serialize the parameters and evaluate the current cost.
+    pub fn current_cost(&mut self) -> f64 {
+        use arael::simple_lm::{LmProblem, RootProblem};
+        let mut params = std::vec::Vec::new();
+        self.serialize(&mut params);
+        self.calc_cost(&params)
+    }
+
     pub fn rank_analysis(&mut self) -> Result<arael::rank::RankResult, String> {
         let mut timer = Timer::new();
         let (jacobian, n) = self.dof_jacobian();

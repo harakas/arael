@@ -4214,7 +4214,9 @@ fn test_mirror_circle() {
     assert!(near(mirrored.center.value.x, 5.0));
     assert!(near(mirrored.center.value.y, 3.0));
     assert!(near(mirrored.radius.value, 2.0));
-    assert_eq!(ctx.sketch.symmetry_pp.len(), 1); // center only for circles
+    // One arc symmetry holds center and radius for a circle.
+    assert_eq!(ctx.sketch.symmetry_pp.len(), 0);
+    assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
 }
 
 #[test]
@@ -6998,4 +7000,52 @@ fn test_mirror_selection_excludes_axis() {
     run_ok(&mut ctx, "select L1");
     let out = run_err(&mut ctx, "mirror selection about L1");
     assert!(out.contains("No lines, arcs, or points"), "{}", out);
+}
+
+#[test]
+fn test_mirror_circle_tied_through_coincident_corner() {
+    // A triangle with a circle centered on its apex: the circle center
+    // shares a coincidence group with the corner, so it must get a
+    // recreated tie (not a dropped symmetry), and a closed arc keeps
+    // its radius. The mirror adds no freedom.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 -1.5,-5; add_line -1.5,-5 1.5,-5; add_line 1.5,-5 0,0");
+    // add_circle at the apex auto-connects its center to the corner.
+    run_ok(&mut ctx, "add_circle 0,0 1.5");
+    assert!(!ctx.sketch.coincident_lp1_arc_center.is_empty()
+        || !ctx.sketch.coincident_lp2_arc_center.is_empty(), "center tied to the corner");
+    run_ok(&mut ctx, "add_line 20,-20 20,20 noconnect nocursor");
+    let dof0: usize = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "select L0 L1 L2 A0");
+    let out = run_ok(&mut ctx, "mirror selection about L3");
+    assert!(out.contains("coincident A1.center"), "the center ties to the corner: {}", out);
+    assert!(out.contains("equal radius A0 A1"), "{}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof0, "a mirror adds no freedom");
+}
+
+#[test]
+fn test_mirror_unconnected_same_position_endpoints_both_pinned() {
+    // Two lines touching at the same coordinates WITHOUT a coincident:
+    // each endpoint group gets its own symmetry (position dedup used
+    // to drop one, leaving a copy endpoint free).
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0; add_line 2,0 2,2 noconnect; add_line 5,-5 5,5 noconnect nocursor");
+    assert!(ctx.sketch.coincident_ll21.is_empty(), "no coincident between the lines");
+    let dof0: usize = ctx.sketch.dof().unwrap();
+    run_ok(&mut ctx, "select L0 L1");
+    let out = run_ok(&mut ctx, "mirror selection about L2");
+    assert_eq!(out.matches("symmetry ").count(), 4, "every endpoint pinned: {}", out);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof0, "a mirror adds no freedom");
+}
+
+#[test]
+fn test_mirror_lone_circle_fully_held() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_circle 2,0 1; add_line 5,-5 5,5 noconnect nocursor");
+    let dof0: usize = ctx.sketch.dof().unwrap();
+    let out = run_ok(&mut ctx, "mirror A0 about L0");
+    assert!(out.contains("symmetry A0 L0 A1"), "one arc symmetry: {}", out);
+    assert!(!out.contains("equal radius"), "covered by the arc symmetry: {}", out);
+    assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
+    assert_eq!(ctx.sketch.dof().unwrap(), dof0, "center and radius both held");
 }

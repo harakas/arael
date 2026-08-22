@@ -180,7 +180,7 @@ fn endpoint_pos(sketch: &Sketch, e: DimensionEndpoint) -> vect2d {
     crate::actions::dim_endpoint_pos_sketch(sketch, &e)
 }
 
-fn endpoint_entity(e: DimensionEndpoint) -> MetaEntity {
+pub(crate) fn endpoint_entity(e: DimensionEndpoint) -> MetaEntity {
     match e {
         DimensionEndpoint::Point(p) => MetaEntity::Point(p),
         DimensionEndpoint::LineP1(l) | DimensionEndpoint::LineP2(l) => MetaEntity::Line(l),
@@ -460,7 +460,7 @@ fn create_action(g: &CopyGeom) -> Action {
 }
 
 /// The copy's counterpart of a source point reference.
-fn map_endpoint(ep: DimensionEndpoint, sources: &[MetaEntity], copy: &[MetaEntity]) -> Option<DimensionEndpoint> {
+pub(crate) fn map_endpoint(ep: DimensionEndpoint, sources: &[MetaEntity], copy: &[MetaEntity]) -> Option<DimensionEndpoint> {
     let idx = sources.iter().position(|&s| s == endpoint_entity(ep))?;
     Some(match (ep, copy[idx]) {
         (DimensionEndpoint::Point(_), MetaEntity::Point(p)) => DimensionEndpoint::Point(p),

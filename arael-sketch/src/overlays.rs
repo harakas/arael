@@ -108,6 +108,9 @@ impl EditorApp {
         if self.tool == Tool::Pattern {
             self.draw_pattern_preview(painter);
         }
+        if self.tool == Tool::Mirror {
+            self.draw_mirror_preview(painter);
+        }
         // Scale center crosshair.
         if self.tool == Tool::Scale
             && let Some(c) = self.scale_center
@@ -791,6 +794,11 @@ impl EditorApp {
                 Some(s) if s.edit.is_some() => "Pattern: editing -- change the numbers (Enter applies) or the options in the window; Done or Escape to finish.",
                 Some(s) if s.plan.is_some() => "Pattern: the dashed preview is the result. Create or Enter makes it and closes the tool. Escape to cancel.",
                 _ => "Pattern: click or box-select lines, arcs and points; double-click walks a sequence; set the kind, the center or direction and the numbers in the window. Escape to cancel.",
+            },
+            Tool::Mirror => match self.mirror_tool.as_ref() {
+                Some(s) if s.picking => "Mirror: click the line to mirror about.",
+                Some(s) if s.plan.is_some() => "Mirror: the dashed preview is the result. Create makes it and closes the tool. Escape to cancel.",
+                _ => "Mirror: click or box-select lines, arcs and points; double-click walks a sequence; Pick the axis line in the window. Escape to cancel.",
             },
             Tool::ConstraintMode(ConstraintType::OnNormal) => if self.selection.is_empty() {
                 "On normal: click the endpoint to place, then the reference endpoint (two line ends or two arc ends). Escape to cancel."

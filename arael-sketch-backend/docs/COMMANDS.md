@@ -632,7 +632,13 @@ those constraints falls through — use the dimension name instead.
 
 ## Mirror
 
-Create mirrored copies of geometry across a mirror line. Endpoint symmetry constraints are added by default. Coincident constraints among source entities are recreated among the mirrored copies.
+Create mirrored copies of geometry across a mirror line. Every
+coincidence group of the source set gets one symmetry constraint on
+its first member; the other members are held by recreated coincidents
+(arc centers and endpoints included). An untied circle gets one arc
+symmetry (center and radius); a circle whose center ties to another
+member keeps its radius with an equal-radius constraint. The copies
+bring no freedom of their own.
 
 ```
 mirror L0 about L1                        Mirror a line
@@ -647,6 +653,9 @@ mirror L0 L1 about L2 strict               Error (and undo the mirror) if the re
 Keywords: `noconstraint` (skip all constraints), `strict` (error and
 roll the mirror back if the result cannot satisfy all constraints).
 The whole mirror is one undo step.
+
+In the GUI the Mirror tool does the same: click or box-select the set,
+Pick the axis line, Create.
 
 Variable capture works with `_0`..`_N`:
 ```

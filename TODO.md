@@ -8,13 +8,13 @@
   without a meta-constraint record (mirror is fire-and-forget); an
   offset-style `M<n>` for editable mirrors can come later.
 
-- **arael-sketch: mirrored circles end up under-constrained.** Mirror dedups
-  its symmetry entries by position, so a circle centered on a mirrored vertex
-  (the startup triangle apex) loses its center symmetry to the corner entry,
-  and arc-type coincidents (`coincident_lp1_arc_center` etc.) are not in the
-  coincident-recreation scan -- the copy's center and radius stay free.
-  Mirroring the 9x9 startup grid leaves DOF 250 instead of ~88. Review once
-  the mirror GUI tool works.
+- **arael-sketch: mirrored circles end up under-constrained** -- DONE
+  (2026-08-22). The plan now walks the source's coincidence graph
+  (`CoincidenceGroups`): one symmetry per group, recreated coincidents
+  for the rest (arc flavors and concentric included), and closed arcs
+  keep their radius with an equal-radius constraint. A mirror adds no
+  freedom; also fixed the latent case of same-position but unconnected
+  endpoints sharing one symmetry.
 
 - **arael: price `CovOrdering::Auto` without building both symbolics.** Auto
   picks between minimum degree and nested dissection by building a full

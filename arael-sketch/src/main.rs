@@ -14,6 +14,7 @@ mod overlays;
 mod dim_input;
 mod offset_tool;
 mod pattern_tool;
+mod mirror_tool;
 use arael_sketch_backend::coincide;
 #[cfg(test)]
 mod test_harness;
@@ -131,6 +132,8 @@ pub struct EditorApp {
     pub offset_tool: Option<offset_tool::OffsetToolState>,
     /// The Pattern tool's window and session (see pattern_tool.rs).
     pub pattern_tool: Option<pattern_tool::PatternToolState>,
+    /// The Mirror tool's window and session (see mirror_tool.rs).
+    pub mirror_tool: Option<crate::mirror_tool::MirrorToolState>,
     /// The canvas rectangle of the last frame (tool windows anchor to it).
     pub canvas_rect: egui::Rect,
 
@@ -456,6 +459,7 @@ impl EditorApp {
             scale_center: None,
             offset_tool: None,
             pattern_tool: None,
+            mirror_tool: None,
             canvas_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(800.0, 600.0)),
             selection: Vec::new(),
             hovered: None,

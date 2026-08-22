@@ -1957,6 +1957,69 @@ fn test_pattern_tool_apply_leaves_dof_fresh() {
     gui.frames(2);
 }
 
+/// Mirror from the tool: the set by clicks, the axis by Pick + click
+/// (which must not join the set), Create makes the copies with
+/// symmetry constraints as one undo group and refreshes the DOF cache.
+#[test]
+fn test_mirror_tool_create() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0; add_line 2,0 2,2; add_line 5,-5 5,5 noconnect nocursor");
+    gui.app.enter_mirror_tool();
+    gui.frames(2);
+    gui.click(v(1.0, 0.0));
+    gui.click(v(2.0, 1.0));
+    assert_eq!(gui.app.selection.len(), 2);
+    gui.app.mirror_tool.as_mut().unwrap().picking = true;
+    gui.frame();
+    gui.click(v(5.0, 0.0));
+    {
+        let st = gui.app.mirror_tool.as_ref().unwrap();
+        assert!(st.axis.is_some(), "axis picked");
+        assert!(!st.picking);
+        assert!(st.plan.is_some(), "{:?}", st.error);
+    }
+    assert_eq!(gui.app.selection.len(), 2, "the axis is not in the set");
+    gui.app.apply_mirror();
+    assert!(gui.app.status_error.is_none(), "{:?}", gui.app.status_error);
+    assert_eq!(gui.app.tool, Tool::Select);
+    assert!(gui.app.mirror_tool.is_none());
+    assert_eq!(gui.line_count(), 5);
+    assert_eq!(gui.sketch().symmetry_pp.len(), 3, "shared corner deduped");
+    assert_eq!(gui.app.selection.len(), 2, "the copies are selected");
+    assert!(gui.sketch().cached_dof().is_some(), "DOF cache fresh via end_group");
+    gui.frames(2);
+    gui.key_with(egui::Key::Z, egui::Modifiers::CTRL);
+    assert_eq!(gui.line_count(), 3, "one undo removes the whole mirror");
+    assert!(gui.sketch().symmetry_pp.is_empty());
+}
+
+/// Free-copies mode creates bare geometry; Escape leaves the tool with
+/// no state behind.
+#[test]
+fn test_mirror_tool_free_copies_and_escape() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0; add_line 5,-5 5,5 noconnect nocursor");
+    gui.cmd("select L0");
+    gui.app.enter_mirror_tool();
+    let axis = gui.sketch().lines.refs().nth(1).unwrap();
+    {
+        let st = gui.app.mirror_tool.as_mut().unwrap();
+        st.axis = Some(axis);
+        st.constraints = false;
+    }
+    gui.app.refresh_mirror_plan();
+    gui.app.apply_mirror();
+    assert!(gui.app.status_error.is_none(), "{:?}", gui.app.status_error);
+    assert_eq!(gui.line_count(), 3);
+    assert!(gui.sketch().symmetry_pp.is_empty(), "free copies carry no constraints");
+    gui.app.enter_mirror_tool();
+    gui.frame();
+    gui.key(egui::Key::Escape);
+    assert!(gui.app.mirror_tool.is_none());
+    assert_eq!(gui.app.tool, Tool::Select);
+    gui.frames(2);
+}
+
 /// Circular pattern from the tool: the set by clicks, the center by
 /// Pick + click, the numbers in the window; Create makes it and closes
 /// the tool; every copy gets a marker; the marker opens it for editing.

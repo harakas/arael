@@ -110,7 +110,7 @@ impl EditorApp {
 
     /// Whole-entity membership: endpoint hits resolve to their entity;
     /// constraints, dimensions and metas drop out.
-    fn pattern_set_member(sel: Selection) -> Option<Selection> {
+    pub(crate) fn pattern_set_member(sel: Selection) -> Option<Selection> {
         match sel {
             Selection::Line(r) | Selection::LineP1(r) | Selection::LineP2(r) => Some(Selection::Line(r)),
             Selection::Arc(r) | Selection::ArcCenter(r) | Selection::ArcStart(r) | Selection::ArcEnd(r) => Some(Selection::Arc(r)),
@@ -119,7 +119,7 @@ impl EditorApp {
         }
     }
 
-    fn pattern_sources(&self) -> Vec<MetaEntity> {
+    pub(crate) fn pattern_sources(&self) -> Vec<MetaEntity> {
         self.selection
             .iter()
             .filter_map(|s| match s {

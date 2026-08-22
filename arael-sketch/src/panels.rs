@@ -159,6 +159,12 @@ impl EditorApp {
                     self.enter_pattern_tool();
                 }
                 ui.end_row();
+                if ui.selectable_label(self.tool == Tool::Mirror, "Mirror")
+                    .on_hover_text("Mirrored copies across a line: click or box-select lines, arcs and points, Pick the axis line, Create. The copies follow their sources by symmetry constraints.")
+                    .clicked() {
+                    self.enter_mirror_tool();
+                }
+                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)")
                     .on_hover_text("Round a corner with a tangent arc: click a corner endpoint or two joined lines, then type the radius. F switches to Chamfer.")
                     .clicked() {

@@ -391,24 +391,6 @@ pub(crate) fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CmdResult {
                      last_nid!(symmetry_ll), "symmetry")
 }
 
-/// Reflect a point across a line defined by two points.
-pub(crate) fn mirror_point_across(pt: vect2d, lp1: vect2d, lp2: vect2d) -> vect2d {
-    let dx = lp2.x - lp1.x;
-    let dy = lp2.y - lp1.y;
-    let len2 = dx * dx + dy * dy;
-    if len2 < 1e-24 { return pt; }
-    let t = ((pt.x - lp1.x) * dx + (pt.y - lp1.y) * dy) / len2;
-    let proj = vect2d::new(lp1.x + t * dx, lp1.y + t * dy);
-    vect2d::new(2.0 * proj.x - pt.x, 2.0 * proj.y - pt.y)
-}
-
-/// Source entity to be mirrored.
-pub(crate) enum MirrorSource {
-    Line(Ref<Line>),
-    Point(Ref<Point>),
-    Arc(Ref<Arc>),
-}
-
 pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     // Find "about" keyword
@@ -433,29 +415,20 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
 
     // Collect source entities
     let source_tokens = &tokens[..about_pos];
-    let mut sources: Vec<MirrorSource> = Vec::new();
+    let mut sources: Vec<MetaEntity> = Vec::new();
     if source_tokens.len() == 1 && source_tokens[0] == "selection" {
         for sel in &ctx.selection {
-            match sel {
+            let e = match sel {
                 // The axis itself mirrors onto its own position; a
                 // selected axis (select all) is excluded, not an error.
-                Selection::Line(r) if *r == mirror_line => {}
-                Selection::Line(r) => {
-                    if !sources.iter().any(|s| matches!(s, MirrorSource::Line(l) if *l == *r)) {
-                        sources.push(MirrorSource::Line(*r));
-                    }
-                }
-                Selection::Arc(r) => {
-                    if !sources.iter().any(|s| matches!(s, MirrorSource::Arc(a) if *a == *r)) {
-                        sources.push(MirrorSource::Arc(*r));
-                    }
-                }
-                Selection::Point(r) => {
-                    if !sources.iter().any(|s| matches!(s, MirrorSource::Point(p) if *p == *r)) {
-                        sources.push(MirrorSource::Point(*r));
-                    }
-                }
-                _ => {} // skip endpoint selections, constraints, dimensions
+                Selection::Line(r) if *r == mirror_line => continue,
+                Selection::Line(r) => MetaEntity::Line(*r),
+                Selection::Arc(r) => MetaEntity::Arc(*r),
+                Selection::Point(r) => MetaEntity::Point(*r),
+                _ => continue, // skip endpoint selections, constraints, dimensions
+            };
+            if !sources.contains(&e) {
+                sources.push(e);
             }
         }
         if sources.is_empty() {
@@ -466,248 +439,37 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
             if name.starts_with('L') {
                 let r = resolve_line(&ctx.sketch, name)?;
                 if r == mirror_line { return Err(format!("Cannot mirror {} about itself", name).into()); }
-                sources.push(MirrorSource::Line(r));
+                sources.push(MetaEntity::Line(r));
             } else if is_arc_name(name) {
-                let r = resolve_arc(&ctx.sketch, name)?;
-                sources.push(MirrorSource::Arc(r));
+                sources.push(MetaEntity::Arc(resolve_arc(&ctx.sketch, name)?));
             } else if name.starts_with('P') {
-                let r = resolve_point(&ctx.sketch, name)?;
-                sources.push(MirrorSource::Point(r));
+                sources.push(MetaEntity::Point(resolve_point(&ctx.sketch, name)?));
             } else {
                 return Err(format!("Unknown entity: {}", name).into());
             }
         }
     }
 
-    let ml = &ctx.sketch.lines[mirror_line];
-    let mlp1 = ml.p1.value;
-    let mlp2 = ml.p2.value;
-
-    // The whole mirror runs as two batches (entities, then
-    // constraints): a per-item exec pays a full validation and DOF
-    // rank analysis per action.
-    let old_cost = ctx.sketch.current_cost();
-    ctx.begin_group();
-    let mut warnings: Vec<String> = Vec::new();
-    let mut applied: Vec<String> = Vec::new();
-    let mut msgs = Vec::new();
-
-    // Creation actions, one per source, computed from source values.
-    let mut creates: Vec<Action> = Vec::new();
-    for source in &sources {
-        match source {
-            MirrorSource::Line(src_ref) => {
-                let l = &ctx.sketch.lines[*src_ref];
-                creates.push(Action::AddLine {
-                    p1: mirror_point_across(l.p1.value, mlp1, mlp2),
-                    p2: mirror_point_across(l.p2.value, mlp1, mlp2),
-                });
-            }
-            MirrorSource::Point(src_ref) => {
-                let pt = &ctx.sketch.points[*src_ref];
-                creates.push(Action::AddPoint { pos: mirror_point_across(pt.pos.value, mlp1, mlp2) });
-            }
-            MirrorSource::Arc(src_ref) => {
-                let a = &ctx.sketch.arcs[*src_ref];
-                let mc = mirror_point_across(a.center.value, mlp1, mlp2);
-                let r = a.radius.value;
-                if a.closed {
-                    let edge = vect2d::new(mc.x + r, mc.y);
-                    creates.push(Action::AddCircle { center: mc, edge });
-                } else {
-                    let ms = mirror_point_across(arc_start_pos(a), mlp1, mlp2);
-                    let me = mirror_point_across(arc_end_pos(a), mlp1, mlp2);
-                    let mid_angle = (a.start_angle.value + a.end_angle.value) / 2.0;
-                    let mid_pt = vect2d::new(
-                        a.center.value.x + r * mid_angle.cos(),
-                        a.center.value.y + r * mid_angle.sin(),
-                    );
-                    creates.push(Action::AddArc { start: ms, end: me, mid: mirror_point_across(mid_pt, mlp1, mlp2) });
-                }
-            }
-        }
-    }
-    let created = ctx.exec(Action::Batch { label: "Mirror".into(), actions: creates });
-    if let Some(e) = ctx.status_error.take() {
-        return Err(e);
-    }
-    let Created::Many(created) = created else {
-        return Err("Internal: creation batch added nothing".into());
-    };
-
-    // Maps from source to mirrored refs
-    let mut line_map: Vec<(Ref<Line>, Ref<Line>)> = Vec::new();
-    let mut point_map: Vec<(Ref<Point>, Ref<Point>)> = Vec::new();
-    let mut arc_map: Vec<(Ref<Arc>, Ref<Arc>)> = Vec::new();
-    let mut mirrored_names: Vec<String> = Vec::new();
-    for (source, c) in sources.iter().zip(created) {
-        let (src_name, new_name) = match (source, c) {
-            (MirrorSource::Line(src), Created::Line(new_ref)) => {
-                line_map.push((*src, new_ref));
-                (ctx.sketch.lines[*src].name.clone(), ctx.sketch.lines[new_ref].name.clone())
-            }
-            (MirrorSource::Point(src), Created::Point(new_ref)) => {
-                point_map.push((*src, new_ref));
-                (ctx.sketch.points[*src].name.clone(), ctx.sketch.points[new_ref].name.clone())
-            }
-            (MirrorSource::Arc(src), Created::Arc(new_ref)) => {
-                arc_map.push((*src, new_ref));
-                (ctx.sketch.arcs[*src].name.clone(), ctx.sketch.arcs[new_ref].name.clone())
-            }
-            (MirrorSource::Arc(_), _) => {
-                return Err("Cannot mirror arc: degenerate mirrored geometry".into());
-            }
-            _ => return Err("Internal: creation action added no entity".into()),
-        };
-        msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
-        mirrored_names.push(new_name);
-    }
-
-    if !noconstraint {
-        // Phase 2: Recreate coincident constraints among mirrored copies
-        // Snapshot all relevant coincident pairs, then apply
-        let mut coinc_actions: Vec<(Action, String)> = Vec::new();
-        // Helper to look up mirrored line ref
-        let find_ml = |src: Ref<Line>| line_map.iter().find(|(s, _)| *s == src).map(|(_, m)| *m);
-        let find_mp = |src: Ref<Point>| point_map.iter().find(|(s, _)| *s == src).map(|(_, m)| *m);
-        // Line-line coincidents
-        macro_rules! scan_ll {
-            ($field:ident, $action:ident, $ep_a:expr, $ep_b:expr) => {
-                for c in &ctx.sketch.$field {
-                    if let (Some(ma), Some(mb)) = (find_ml(c.a), find_ml(c.b)) {
-                        let desc = format!("coincident {}.{}={}.{}",
-                            ctx.sketch.lines[ma].name, $ep_a, ctx.sketch.lines[mb].name, $ep_b);
-                        coinc_actions.push((Action::$action { a: ma, b: mb }, desc));
-                    }
-                }
-            };
-        }
-        scan_ll!(coincident_ll11, ApplyCoincidentLL11, "p1", "p1");
-        scan_ll!(coincident_ll12, ApplyCoincidentLL12, "p1", "p2");
-        scan_ll!(coincident_ll21, ApplyCoincidentLL21, "p2", "p1");
-        scan_ll!(coincident_ll22, ApplyCoincidentLL22, "p2", "p2");
-        // Point-point coincidents
-        for c in &ctx.sketch.coincident_pp {
-            if let (Some(ma), Some(mb)) = (find_mp(c.a), find_mp(c.b)) {
-                let desc = format!("coincident {} {}",
-                    ctx.sketch.points[ma].name, ctx.sketch.points[mb].name);
-                coinc_actions.push((Action::ApplyCoincidentPP { a: ma, b: mb }, desc));
-            }
-        }
-        // Line-point coincidents (LP1, LP2)
-        for c in &ctx.sketch.coincident_lp1 {
-            if let (Some(ml), Some(mp)) = (find_ml(c.line), find_mp(c.point)) {
-                let desc = format!("coincident {}.p1 {}",
-                    ctx.sketch.lines[ml].name, ctx.sketch.points[mp].name);
-                coinc_actions.push((Action::ApplyCoincidentLP1 { line: ml, point: mp }, desc));
-            }
-        }
-        for c in &ctx.sketch.coincident_lp2 {
-            if let (Some(ml), Some(mp)) = (find_ml(c.line), find_mp(c.point)) {
-                let desc = format!("coincident {}.p2 {}",
-                    ctx.sketch.lines[ml].name, ctx.sketch.points[mp].name);
-                coinc_actions.push((Action::ApplyCoincidentLP2 { line: ml, point: mp }, desc));
-            }
-        }
-        // Coincidents apply before the symmetry constraints: they
-        // merge the free copies first, so the deduped one-symmetry-
-        // per-position set below removes exactly the remaining DOF.
-        let mut constraint_actions = coinc_actions;
-
-        // Phase 3: Collect symmetry constraint info (snapshot positions before mutating)
-        struct SymEntry { src_ep: String, dst_ep: String, pos: vect2d }
-        let mut sym_entries: Vec<SymEntry> = Vec::new();
-        for &(src, dst) in &line_map {
-            let sp1 = ctx.sketch.lines[src].p1.value;
-            let sp2 = ctx.sketch.lines[src].p2.value;
-            let src_name = ctx.sketch.lines[src].name.clone();
-            let dst_name = ctx.sketch.lines[dst].name.clone();
-            sym_entries.push(SymEntry { src_ep: format!("{}.p1", src_name), dst_ep: format!("{}.p1", dst_name), pos: sp1 });
-            sym_entries.push(SymEntry { src_ep: format!("{}.p2", src_name), dst_ep: format!("{}.p2", dst_name), pos: sp2 });
-        }
-        for &(src, dst) in &point_map {
-            let sp = ctx.sketch.points[src].pos.value;
-            let src_name = ctx.sketch.points[src].name.clone();
-            let dst_name = ctx.sketch.points[dst].name.clone();
-            sym_entries.push(SymEntry { src_ep: src_name, dst_ep: dst_name, pos: sp });
-        }
-        for &(src, dst) in &arc_map {
-            let sc = ctx.sketch.arcs[src].center.value;
-            let src_name = ctx.sketch.arcs[src].name.clone();
-            let dst_name = ctx.sketch.arcs[dst].name.clone();
-            sym_entries.push(SymEntry { src_ep: format!("{}.center", src_name), dst_ep: format!("{}.center", dst_name), pos: sc });
-            if !ctx.sketch.arcs[src].closed {
-                let ss = arc_start_pos(&ctx.sketch.arcs[src]);
-                let se = arc_end_pos(&ctx.sketch.arcs[src]);
-                sym_entries.push(SymEntry { src_ep: format!("{}.start", src_name), dst_ep: format!("{}.start", dst_name), pos: ss });
-                sym_entries.push(SymEntry { src_ep: format!("{}.end", src_name), dst_ep: format!("{}.end", dst_name), pos: se });
-            }
-        }
-        // Apply symmetry with dedup
-        let mut constrained_positions: Vec<vect2d> = Vec::new();
-        for entry in &sym_entries {
-            if constrained_positions.iter().any(|p| (p.x - entry.pos.x).abs() < 1e-6 && (p.y - entry.pos.y).abs() < 1e-6) {
-                continue;
-            }
-            constrained_positions.push(entry.pos);
-            let a = match resolve_endpoint_ref(&ctx.sketch, &entry.src_ep) {
-                Ok(e) => to_dim_endpoint(e),
-                Err(e) => { warnings.push(format!("symmetry {}: {}", entry.src_ep, e)); continue }
-            };
-            let c = match resolve_endpoint_ref(&ctx.sketch, &entry.dst_ep) {
-                Ok(e) => to_dim_endpoint(e),
-                Err(e) => { warnings.push(format!("symmetry {}: {}", entry.dst_ep, e)); continue }
-            };
-            let desc = format!("symmetry {} {} {}", entry.src_ep, after_about[0], entry.dst_ep);
-            constraint_actions.push((Action::ApplySymmetryPP { a, line: mirror_line, c }, desc));
-        }
-
-        // One batch for every coincident and symmetry constraint: the
-        // mirrored geometry satisfies them exactly, so they skip the
-        // per-constraint gate, like a pattern's image constraints.
-        let watermark = ctx.sketch.next_constraint_id;
-        if !constraint_actions.is_empty() {
-            let (acts, descs): (Vec<Action>, Vec<String>) = constraint_actions.into_iter().unzip();
-            ctx.exec(Action::Batch { label: "Mirror constraints".into(), actions: acts });
-            if let Some(e) = ctx.status_error.take() {
-                return Err(e);
-            }
-            applied.extend(descs);
-            let names = constraint_names_since(ctx, watermark);
-            if !names.is_empty() {
-                applied.push(format!("constraints: {}", names.join(" ")));
-            }
-        }
-    }
-
-    // The per-constraint cost gate is gone with the batch; one
-    // whole-operation check replaces it. A mirror is exact, so a cost
-    // jump means a constraint could not be satisfied.
-    let quick = ctx.sketch.current_cost();
-    let new_cost = if quick <= old_cost + 1e-6 { quick } else { ctx.sketch.solve().end_cost };
-    if new_cost > old_cost + 1e-3 {
-        let m = format!("mirror could not satisfy all constraints (cost {:.3e} -> {:.3e})", old_cost, new_cost);
-        if strict {
-            use crate::corner_ops::ActionRunner;
-            ctx.rollback_group();
-            return Err(m);
-        }
-        warnings.push(m);
-    }
+    let params = crate::mirror::MirrorParams { axis: mirror_line, noconstraint, strict };
+    let plan = crate::mirror::plan(&ctx.sketch, &sources, &params)?;
+    let out = crate::mirror::apply(ctx, &plan)?;
 
     // Set session names
-    if let Some(first) = mirrored_names.first() {
+    if let Some((_, first)) = out.mirrored.first() {
         ctx.session_names.insert("_".into(), first.clone());
     }
-    for (i, name) in mirrored_names.iter().enumerate() {
+    for (i, (_, name)) in out.mirrored.iter().enumerate() {
         ctx.session_names.insert(format!("_{}", i), name.clone());
     }
 
-    let mut msg = msgs.join("\n");
-    for a in &applied {
+    let mut msg = out.mirrored.iter()
+        .map(|(src, dst)| format!("Mirrored {} -> {}", src, dst))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for a in &out.applied {
         msg += &format!("\n  {}", a);
     }
-    for w in &warnings {
+    for w in &out.warnings {
         msg += &format!("\n  warning: {}", w);
     }
     Ok(ok(msg))
