@@ -1,5 +1,21 @@
 # TODO
 
+- **arael-sketch: mirror GUI tool.** Refactor `cmd_mirror` into a backend
+  engine (`mirror::plan` / `mirror::apply` over `ActionRunner`, the command a
+  thin caller) -- that also gives mirror the `end_group` DOF hold. Then a
+  Pattern/Offset-style tool: the set from selection/clicks, a Pick button for
+  the axis line, dashed preview of the copies, Create applies. First cut
+  without a meta-constraint record (mirror is fire-and-forget); an
+  offset-style `M<n>` for editable mirrors can come later.
+
+- **arael-sketch: mirrored circles end up under-constrained.** Mirror dedups
+  its symmetry entries by position, so a circle centered on a mirrored vertex
+  (the startup triangle apex) loses its center symmetry to the corner entry,
+  and arc-type coincidents (`coincident_lp1_arc_center` etc.) are not in the
+  coincident-recreation scan -- the copy's center and radius stay free.
+  Mirroring the 9x9 startup grid leaves DOF 250 instead of ~88. Review once
+  the mirror GUI tool works.
+
 - **arael: price `CovOrdering::Auto` without building both symbolics.** Auto
   picks between minimum degree and nested dissection by building a full
   `SupernodalSymbolic` per candidate and reading `flops()` off it, then keeps
