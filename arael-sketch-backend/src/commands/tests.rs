@@ -6984,3 +6984,18 @@ fn test_mirror_strict_batched_undo() {
     assert_eq!(ctx.sketch.lines.refs().count(), 3, "one undo removes the whole mirror");
     assert!(ctx.sketch.symmetry_pp.is_empty());
 }
+
+#[test]
+fn test_mirror_selection_excludes_axis() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0; add_line 5,-5 5,5 noconnect nocursor");
+    run_ok(&mut ctx, "select all");
+    let out = run_ok(&mut ctx, "mirror selection about L1");
+    assert!(out.contains("Mirrored L0 ->"), "{}", out);
+    assert!(!out.contains("Mirrored L1"), "the axis is not mirrored: {}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 3);
+    run_ok(&mut ctx, "deselect");
+    run_ok(&mut ctx, "select L1");
+    let out = run_err(&mut ctx, "mirror selection about L1");
+    assert!(out.contains("No lines, arcs, or points"), "{}", out);
+}

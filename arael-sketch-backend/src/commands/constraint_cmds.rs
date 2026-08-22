@@ -437,6 +437,9 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
     if source_tokens.len() == 1 && source_tokens[0] == "selection" {
         for sel in &ctx.selection {
             match sel {
+                // The axis itself mirrors onto its own position; a
+                // selected axis (select all) is excluded, not an error.
+                Selection::Line(r) if *r == mirror_line => {}
                 Selection::Line(r) => {
                     if !sources.iter().any(|s| matches!(s, MirrorSource::Line(l) if *l == *r)) {
                         sources.push(MirrorSource::Line(*r));

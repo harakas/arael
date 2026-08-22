@@ -637,7 +637,8 @@ Create mirrored copies of geometry across a mirror line. Endpoint symmetry const
 ```
 mirror L0 about L1                        Mirror a line
 mirror L0 L1 A0 about L2                  Mirror multiple entities
-mirror selection about L0                  Mirror selected entities
+mirror selection about L0                  Mirror selected entities (a selected
+                                           axis line is excluded)
 mirror L0 L1 about L2 noconstraint         No symmetry/coincident constraints
 mirror L0 L1 about L2 strict               Error (and undo the mirror) if the result
                                            cannot satisfy all constraints
