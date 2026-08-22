@@ -300,22 +300,26 @@ impl EditorApp {
             // Delete selected entities/constraints with Backspace/Delete
             // (skip when editing dimension text — Backspace edits the text field)
             if self.grab.is_none() && !ctx.wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
-                let sel = self.selection.clone();
-                if !sel.is_empty() {
-                    self.begin_group();
-                    for s in &sel {
-                        match *s {
-                            Selection::Point(r) => { self.exec(Action::DeletePoint { point: r }); }
-                            Selection::Line(r) => { self.exec(Action::DeleteLine { line: r }); }
-                            Selection::Arc(r) => { self.exec(Action::DeleteArc { arc: r }); }
-                            Selection::Constraint(id) => { self.delete_constraint(id); }
-                            Selection::Dimension(did) => { self.exec(Action::RemoveDimension { did }); }
-                            // A meta-constraint dissolves: its geometry
-                            // stays, as plain constrained geometry.
-                            Selection::Meta(mid) => { self.exec(Action::UnregisterMeta { mid }); }
-                            _ => {} // endpoints aren't deletable on their own
-                        }
+                // One batch, one history entry, one DOF refresh: a
+                // per-item exec pays a rank analysis per delete, and the
+                // half-deleted states are pathological for it.
+                let mut acts: Vec<Action> = Vec::new();
+                for s in &self.selection {
+                    match *s {
+                        Selection::Point(r) => acts.push(Action::DeletePoint { point: r }),
+                        Selection::Line(r) => acts.push(Action::DeleteLine { line: r }),
+                        Selection::Arc(r) => acts.push(Action::DeleteArc { arc: r }),
+                        Selection::Constraint(id) => acts.push(Action::DeleteConstraint { id }),
+                        Selection::Dimension(did) => acts.push(Action::RemoveDimension { did }),
+                        // A meta-constraint dissolves: its geometry
+                        // stays, as plain constrained geometry.
+                        Selection::Meta(mid) => acts.push(Action::UnregisterMeta { mid }),
+                        _ => {} // endpoints aren't deletable on their own
                     }
+                }
+                if !acts.is_empty() {
+                    self.begin_group();
+                    self.exec(Action::Batch { label: "Delete selection".into(), actions: acts });
                     self.selection.clear();
                 }
             }

@@ -338,3 +338,36 @@ fn perf_probe_pattern11_tool() {
     }
 }
 
+
+/// Grid pattern on the startup sketch, select all, Backspace in the GUI.
+fn probe_delete_grid(n: u32) {
+    let mut gui = Gui::new();
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+    for r in gui.app.run_commands(&format!(
+        "select all; pattern rect selection {} 9 symmetric by {} 9 symmetric", n, n)) {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    for r in gui.app.run_commands("select all") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    let sel = gui.app.selection.len();
+    let t = Instant::now();
+    gui.key(egui::Key::Backspace);
+    println!("delete {:2}x{:<2} ({} selected)  {:9.1} ms", n, n, sel,
+        t.elapsed().as_secs_f64() * 1e3);
+    assert_eq!(gui.line_count(), 0);
+    assert_eq!(gui.arc_count(), 0);
+}
+
+#[test]
+#[ignore]
+fn perf_probe_delete_grid5() { probe_delete_grid(5); }
+
+#[test]
+#[ignore]
+fn perf_probe_delete_grid7() { probe_delete_grid(7); }
+
+#[test]
+#[ignore]
+fn perf_probe_delete_grid15() { probe_delete_grid(15); }

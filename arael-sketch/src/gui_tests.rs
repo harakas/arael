@@ -1847,6 +1847,41 @@ fn test_offset_tool_edit_preview_and_marker() {
 
 // -- Pattern tool ---------------------------------------------------------
 
+/// Backspace deletes the whole selection as one batch: a single
+/// history entry, stale refs inside the batch tolerated (the line's
+/// cascade removes the selected constraint first), one undo restores
+/// everything, and the DOF cache is left fresh.
+#[test]
+fn test_delete_selection_batched() {
+    let mut gui = Gui::new();
+    // The second add_line auto-connects to the first: coincident C1.
+    gui.cmd("add_line 0,0 2,0; add_line 2,0 2,2; add_point 4,4; add_circle 6,0 1");
+    gui.cmd("horizontal L0");
+    let actions0 = gui.app.history.actions.len();
+    gui.cmd("select L0 L1 P0 A0");
+    // Constraints aren't select-command addressable; push them the way
+    // a glyph click does.
+    use arael_sketch_backend::ids::ConstraintId;
+    let nid = gui.sketch().coincident_ll12.first().expect("auto coincident").nid;
+    let l0 = gui.sketch().lines.refs().next().unwrap();
+    gui.app.selection.push(Selection::Constraint(ConstraintId::Numbered(nid)));
+    gui.app.selection.push(Selection::Constraint(ConstraintId::Horizontal(l0)));
+    gui.key(egui::Key::Backspace);
+    assert_eq!(gui.line_count(), 0);
+    assert_eq!(gui.arc_count(), 0);
+    assert_eq!(gui.sketch().points.refs().count(), 0);
+    assert!(gui.app.selection.is_empty());
+    assert_eq!(gui.app.history.actions.len(), actions0 + 1,
+        "the whole delete is one history entry");
+    assert!(gui.sketch().cached_dof().is_some(), "DOF display refreshed");
+    gui.key_with(egui::Key::Z, egui::Modifiers::CTRL);
+    assert_eq!(gui.line_count(), 2, "one undo restores everything");
+    assert_eq!(gui.arc_count(), 1);
+    assert_eq!(gui.sketch().points.refs().count(), 1);
+    assert_eq!(gui.sketch().coincident_ll12.len(), 1);
+    assert!(gui.sketch().lines.iter().next().unwrap().constraints.horizontal);
+}
+
 /// Rect pattern from the tool: the batched engine run defers the DOF
 /// refresh to its end_group, which must leave the display cache fresh
 /// (a stale cache reads as None through cached_dof).

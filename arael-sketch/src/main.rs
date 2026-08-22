@@ -4180,12 +4180,6 @@ impl EditorApp {
         e
     }
 
-    fn delete_constraint(&mut self, id: ConstraintId) {
-        self.begin_group();
-        self.exec(Action::DeleteConstraint { id });
-        self.selection.clear();
-    }
-
     // Hit test for delete: returns target only if exactly one entity is in range.
     // Only standalone points and lines (body, not endpoints) are delete targets.
     #[allow(dead_code)]
