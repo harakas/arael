@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/data_ref_parent_chain_outside_form.rs:24: `ref = parent.n.tags` on `SLink.t`: chaining through the parent ref `Pair.n` needs the parent-refs shared-cross form (`constraint(parent.<crossblock>, ...)` with the refs held by the parent)
+  --> tests/constraint_attr_errors/data_ref_parent_chain_outside_form.rs:41:1
+   |
+41 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

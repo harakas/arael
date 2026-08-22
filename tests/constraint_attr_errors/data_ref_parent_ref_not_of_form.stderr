@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/data_ref_parent_ref_not_of_form.rs:24: `ref = parent.c.tags` on `PLink.t`: `c` is not a parent ref of this form -- `parent.hb` binds `a` and `b`
+  --> tests/constraint_attr_errors/data_ref_parent_ref_not_of_form.rs:42:1
+   |
+42 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

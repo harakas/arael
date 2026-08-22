@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs:18: constraint on `struct Link` references param(s) outside its hessian block: [c.x.work()] — all missing params resolve through this struct's own `Ref<T>` fields, but there are more than CrossBlock<A, B> can cover. Switch the block to `TripletBlock<T>` to include every ref-referenced entity.
+  --> tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs:29:1
+   |
+29 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

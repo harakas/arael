@@ -2029,6 +2029,14 @@ fn param_total(type_name: &str) -> usize {
     param_slots(type_name).iter().map(|s| param_slot_size(&s.sft)).sum()
 }
 
+/// A `Ref<T>` whose registered target holds no params (directly or in
+/// components) is a DATA ref: a pure read, excluded from entity/block
+/// accounting. Unregistered targets are not data refs -- they keep
+/// their existing errors.
+fn is_data_ref_target(type_name: &str) -> bool {
+    registry_lookup(type_name).is_some() && param_total(type_name) == 0
+}
+
 /// `base.dir.d` field-access tokens for a dotted slot path.
 fn slot_access(base: TokenStream2, path: &str) -> TokenStream2 {
     let mut t = base;
@@ -3063,6 +3071,9 @@ pub fn generate_root_methods(
         a_idx_stmts: Vec<TokenStream2>,
         b_idx_stmts: Vec<TokenStream2>,
         resolve_stmts: Vec<TokenStream2>,
+        // Loop-invariant resolves only (parent-supplied refs) for the
+        // once-per-parent wiring of the parent-refs form.
+        wiring_resolve_stmts: Vec<TokenStream2>,
         root_var_ident: syn::Ident,
         // Per-attribute entries (with guards baked in, matching SelfBlock pattern)
         cost_entries: Vec<TokenStream2>,
@@ -3145,6 +3156,9 @@ pub fn generate_root_methods(
         a_type_ident: syn::Ident,
         // SelfBlock: index setup + constraint entries
         self_block: Option<SelfBlockInfo>,
+        // Data-ref locals (`let t = &self.tags[__item.t];`), emitted at
+        // the top of every sweep loop.
+        resolve_stmts: Vec<TokenStream2>,
         // Cost/GH/Jacobian entries that go directly in the outer loop (SelfBlock constraints)
         cost_entries: Vec<TokenStream2>,
         ct_entries: Vec<TokenStream2>,
@@ -3528,9 +3542,13 @@ pub fn generate_root_methods(
                             sc.attr_file, sc.attr_line, sc.struct_name, rest,
                             sc.struct_name, sc.struct_name)));
                 }
+                // Param-bearing own refs only: refs to param-less types
+                // are data refs (pure reads, no block slot to fill), so
+                // they neither pick the form nor enter the slot check.
                 let ref_types: Vec<String> = fields.named.iter()
                     .filter_map(|f| extract_wrapper_inner(&f.ty, "Ref")
                         .map(|(_, id)| id.to_string()))
+                    .filter(|t| !is_data_ref_target(t))
                     .collect();
                 let parent_refs: Option<(String, String)> = if ref_types.is_empty() {
                     // No own refs: the parent's ref fields fill the slots.
@@ -3996,6 +4014,10 @@ pub fn generate_root_methods(
         // CrossBlock/remote: find frines field and build ref resolution
         let mut frines_ident = None;
         let mut resolve_stmts = Vec::new();
+        // Loop-invariant subset (parent-supplied refs): serves the
+        // once-per-parent wiring of the parent-refs form, where no
+        // `__frine` is in scope.
+        let mut wiring_resolve_stmts = Vec::new();
         // Same bindings with #[allow(unused_variables)], re-emitted after
         // each residual row's block writes: the writes take temporary
         // `&mut` into the resolved collections, ending the row's shared
@@ -4014,6 +4036,152 @@ pub fn generate_root_methods(
         // collection (empty when the constraint struct is directly on root).
         let mut cross_prefix: Vec<AccessSegment> = Vec::new();
 
+        // Validate every own `#[arael(ref = <path>)]` resolution path
+        // against the registered layouts, so a bad path errors here
+        // (naming the field and the rule) instead of surfacing as a
+        // rustc error inside the generated sweep. Anchors: `root.`,
+        // `parent.` (containing sub-model), `parent.<ref>.` (a parent
+        // ref of the parent-refs form), or another ref field of this
+        // struct. Intermediate segments must be plain struct fields;
+        // the final segment must be a collection of the ref's target
+        // type. Skip fields and unregistered types are opaque --
+        // allowed, like body reads.
+        let validate_ref_path = |field_name: &str, path: &str, target: &str| -> syn::Result<()> {
+            let perr = |msg: String| syn::Error::new(proc_macro2::Span::call_site(),
+                format!("{}:{}: `ref = {}` on `{}.{}`: {}",
+                    sc.attr_file, sc.attr_line, path, sc.struct_name, field_name, msg));
+            let own_ref_target = |name: &str| fields.named.iter()
+                .find(|f| f.ident.as_ref().is_some_and(|i| i == name))
+                .and_then(|f| extract_wrapper_inner(&f.ty, "Ref")
+                    .map(|(_, id)| id.to_string()));
+            let segs: Vec<&str> = path.split('.').collect();
+            if segs.len() < 2 {
+                return Err(perr("a resolve path needs an anchor and a collection \
+                                 (`root.<coll>`, `parent.<coll>`, `<ref>.<coll>`)".into()));
+            }
+            let (mut cur, rest): (String, &[&str]) = match segs[0] {
+                "root" => (root_name.to_string(), &segs[1..]),
+                "parent" => {
+                    let parent_ref_hit = parent_cross.as_ref()
+                        .and_then(|pc| pc.parent_refs.as_ref().map(|(ra, rb)| (pc, ra, rb)))
+                        .and_then(|(pc, ra, rb)| {
+                            if segs.len() >= 3 && segs[1] == ra { Some(pc.a_type.clone()) }
+                            else if segs.len() >= 3 && segs[1] == rb { Some(pc.b_type.clone()) }
+                            else { None }
+                        });
+                    if let Some(t) = parent_ref_hit {
+                        (t, &segs[2..])
+                    } else {
+                        let ptype = parent_cross.as_ref().map(|pc| pc.parent_type.clone())
+                            .or_else(|| find_containing_parent(
+                                &root_name.to_string(), &sc.struct_name));
+                        let Some(ptype) = ptype else {
+                            return Err(perr("no containing parent to anchor \
+                                             `parent.` at".into()));
+                        };
+                        let head_is_parent_ref = segs.len() >= 3
+                            && registry_lookup(&ptype)
+                                .is_some_and(|l| l.ref_paths.iter()
+                                    .any(|(n, _)| n == segs[1]));
+                        if head_is_parent_ref {
+                            if let Some(pc) = &parent_cross
+                                && let Some((ra, rb)) = &pc.parent_refs {
+                                return Err(perr(format!(
+                                    "`{}` is not a parent ref of this form -- \
+                                     `parent.{}` binds `{}` and `{}`",
+                                    segs[1], pc.field, ra, rb)));
+                            }
+                            return Err(perr(format!(
+                                "chaining through the parent ref `{}.{}` needs the \
+                                 parent-refs shared-cross form \
+                                 (`constraint(parent.<crossblock>, ...)` with the \
+                                 refs held by the parent)", ptype, segs[1])));
+                        }
+                        (ptype, &segs[1..])
+                    }
+                }
+                head => match own_ref_target(head) {
+                    Some(t) => (t, &segs[1..]),
+                    None => return Err(perr(format!(
+                        "`{}` is not `root`, `parent`, or a Ref field of `{}` -- \
+                         a resolve path must anchor at one of those",
+                        head, sc.struct_name))),
+                },
+            };
+            for (k, seg) in rest.iter().enumerate() {
+                let Some(layout) = registry_lookup(&cur) else { return Ok(()) };
+                let Some((_, sft)) = layout.fields.iter()
+                    .find(|(n, _)| n == seg) else {
+                    return Err(perr(format!("`{}` has no field `{}`", cur, seg)));
+                };
+                let last = k + 1 == rest.len();
+                if last {
+                    if !layout.collection_fields.contains(&seg.to_string()) {
+                        return Err(perr(format!(
+                            "`{}.{}` is not a collection (Vec/Deque/Arena) -- a ref \
+                             resolves by indexing one", cur, seg)));
+                    }
+                    if let SymFieldType::Struct(elem) = sft && elem != target {
+                        return Err(perr(format!(
+                            "`{}.{}` holds `{}`, the field is `Ref<{}>`",
+                            cur, seg, elem, target)));
+                    }
+                } else {
+                    if matches!(sft, SymFieldType::Skip) { return Ok(()); }
+                    if layout.collection_fields.contains(&seg.to_string()) {
+                        return Err(perr(format!(
+                            "`{}.{}` is a collection mid-path -- only the final \
+                             segment may be one", cur, seg)));
+                    }
+                    if layout.ref_paths.iter().any(|(n, _)| n == *seg) {
+                        return Err(perr(format!(
+                            "`{}.{}` is a Ref field mid-path -- a path may chain \
+                             through a ref only at its head", cur, seg)));
+                    }
+                    match sft {
+                        SymFieldType::Struct(t) => cur = t.clone(),
+                        _ => return Err(perr(format!(
+                            "`{}.{}` is not a struct field", cur, seg))),
+                    }
+                }
+            }
+            Ok(())
+        };
+        // Self-block constraints: DATA refs (param-less targets) resolve
+        // at the top of the entity sweep. Only `root.<coll...>` anchors
+        // are supported here (a self entity may live under several
+        // containment paths, so parent-relative anchors are ambiguous),
+        // and only collection-held entities (the single-instance shapes
+        // reject below). Param-bearing refs on a self-block struct stay
+        // untouched storage, as before.
+        let mut self_resolve_stmts: Vec<TokenStream2> = Vec::new();
+        if is_self_block && !is_remote_block {
+            let layout = registry_lookup(&sc.struct_name);
+            for (f, p) in layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default() {
+                let Some(field) = fields.named.iter().find(|fd|
+                    fd.ident.as_ref().is_some_and(|i| i == f.as_str())) else { continue };
+                let Some((_, target)) = extract_wrapper_inner(&field.ty, "Ref") else { continue };
+                let target = target.to_string();
+                if !is_data_ref_target(&target) { continue; }
+                validate_ref_path(&f, &p, &target)?;
+                if !p.starts_with("root.") {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `ref = {}` on `{}.{}`: a data ref read by a \
+                                 self-block constraint must resolve through a root \
+                                 collection (`ref = root.<coll>`)",
+                            sc.attr_file, sc.attr_line, p, sc.struct_name, f)));
+                }
+                let fi = syn::Ident::new(&f, proc_macro2::Span::call_site());
+                let access: syn::Expr = syn::parse_str(
+                    &format!("{}[__item.{}]", p.replace("root.", "self."), f))
+                    .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("failed to parse resolve path: {}", e)))?;
+                self_resolve_stmts.push(quote! {
+                    #[allow(unused_variables)]
+                    let #fi = &#access;
+                });
+            }
+        }
         if is_triplet || is_multi_cross || (!is_self_block || is_remote_block) {
             // First try: constraint struct nested under A-type (e.g. PointFrine
             // under PointLandmark). An `Option<Frine>` field works the same --
@@ -4105,13 +4273,28 @@ pub fn generate_root_methods(
                     && let Some((ra, rb)) = &pc.parent_refs {
                     let owner = format!("__seg{}", cross_prefix.len() - 1);
                     let playout = registry_lookup(&pc.parent_type);
-                    [ra, rb].iter().map(|rn| {
+                    let mut v: Vec<(String, String, String)> = [ra, rb].iter().map(|rn| {
                         let rp = playout.as_ref()
                             .and_then(|l| l.ref_paths.iter()
                                 .find(|(n, _)| n == *rn).map(|(_, p)| p.clone()))
                             .expect("parent ref validated at parse");
                         ((*rn).clone(), rp, owner.clone())
-                    }).collect()
+                    }).collect();
+                    // Own data refs ride along, resolved AFTER the parent
+                    // refs (their paths may chain through those locals).
+                    for (f, p) in struct_layout.as_ref()
+                        .map(|l| l.ref_paths.clone()).unwrap_or_default() {
+                        if f == *ra || f == *rb {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: ref field `{}` on `{}` shadows the parent \
+                                         ref of the same name filling the `parent.{}` \
+                                         slot -- rename the field",
+                                    sc.attr_file, sc.attr_line, f, sc.struct_name,
+                                    pc.field)));
+                        }
+                        v.push((f, p, "__frine".to_string()));
+                    }
+                    v
                 } else {
                     struct_layout.as_ref()
                         .map(|l| l.ref_paths.clone()).unwrap_or_default()
@@ -4121,12 +4304,30 @@ pub fn generate_root_methods(
                 };
             let mut seen_ref_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
             for (field_name, resolve_path, idx_owner) in &resolve_sources {
+                if idx_owner == "__frine"
+                    && let Some(field) = fields.named.iter().find(|f|
+                        f.ident.as_ref().is_some_and(|i| i == field_name.as_str()))
+                    && let Some((_, target)) = extract_wrapper_inner(&field.ty, "Ref") {
+                    validate_ref_path(field_name, resolve_path, &target.to_string())?;
+                }
                 let field_ident_inner = syn::Ident::new(field_name, proc_macro2::Span::call_site());
                 // `root.<coll>` -> `self.<coll>`. `parent.<coll>` -> the
                 // containing sub-model instance (`__seg{n-1}`) for a nested
                 // constraint; only reached when cross_prefix is non-empty.
+                // `parent.<ref>.<coll>` chains through a parent ref: valid
+                // only in the parent-refs cross form, where that ref is a
+                // bound local -- rewrite to it.
                 let adjusted_path = resolve_path.replace("root.", "self.");
-                let adjusted_path = if cross_prefix.is_empty() {
+                let adjusted_path = if let Some(rest) = adjusted_path.strip_prefix("parent.")
+                    && let Some(pc) = &parent_cross
+                    && let Some((ra, rb)) = &pc.parent_refs
+                    && rest.split('.').next()
+                        .is_some_and(|h| h == ra || h == rb)
+                {
+                    // Chains through a bound parent-ref local (`a.tags`);
+                    // validity checked by validate_ref_path above.
+                    rest.to_string()
+                } else if cross_prefix.is_empty() {
                     adjusted_path
                 } else {
                     adjusted_path.replace("parent.",
@@ -4137,6 +4338,9 @@ pub fn generate_root_methods(
                 ).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
                     format!("failed to parse resolve path: {}", e)))?;
                 resolve_stmts.push(quote! { let #field_ident_inner = &#resolve_expr; });
+                if idx_owner != "__frine" {
+                    wiring_resolve_stmts.push(quote! { let #field_ident_inner = &#resolve_expr; });
+                }
                 // Copy the Ref index to a local ONCE per constraint
                 // instance: rereads and block writes then index through the
                 // local, so the optimizer never has to re-load the Ref
@@ -5621,6 +5825,7 @@ pub fn generate_root_methods(
                             self_var: self_var.clone(),
                             a_type_ident: a_type_ident.clone(),
                             self_block: None,
+                            resolve_stmts: Vec::new(),
                             cost_entries: Vec::new(), ct_entries: Vec::new(),
                             gh_entries: Vec::new(),
                             jac_entries: Vec::new(),
@@ -5628,6 +5833,9 @@ pub fn generate_root_methods(
                             nested_gh_loops: Vec::new(),
                             nested_jac_loops: Vec::new(),
                         });
+                        if group.resolve_stmts.is_empty() && !self_resolve_stmts.is_empty() {
+                            group.resolve_stmts = self_resolve_stmts.clone();
+                        }
                         // A root./parent.<selfblock> constraint has no entity
                         // block: registering one would emit set_indices on a
                         // field the entity does not have. (The root's own
@@ -5650,6 +5858,16 @@ pub fn generate_root_methods(
                 EntityLocation::RootSelf
                 | EntityLocation::DirectField { .. }
                 | EntityLocation::OptionalField { .. } => {
+                    if !self_resolve_stmts.is_empty() {
+                        // The root-self sweep binds the whole root mutably,
+                        // so a sibling-collection read cannot borrow; keep
+                        // the single-instance shapes uniform and reject.
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `{}` reads data refs but is not held in a \
+                                     collection -- data refs on a self-block constraint \
+                                     need the entity in a Vec/Deque/Arena",
+                                sc.attr_file, sc.attr_line, sc.struct_name)));
+                    }
                     if root_self_primary.is_some() {
                         // The single-instance emission writes through the
                         // ENTITY's block field, which this form does not have.
@@ -5870,6 +6088,7 @@ pub fn generate_root_methods(
                     a_idx_stmts: a_idx_stmts.clone(),
                     b_idx_stmts: b_idx_stmts.clone(),
                     resolve_stmts: resolve_stmts.clone(),
+                    wiring_resolve_stmts: wiring_resolve_stmts.clone(),
                     root_var_ident: root_var_ident.clone(),
                     cost_entries: Vec::new(), ct_entries: Vec::new(),
                     gh_entries: Vec::new(),
@@ -5985,6 +6204,7 @@ pub fn generate_root_methods(
                 self_var: self_var.clone(),
                 a_type_ident: a_type_ident.clone(),
                 self_block: None,
+                resolve_stmts: Vec::new(),
                 cost_entries: Vec::new(), ct_entries: Vec::new(),
                 gh_entries: Vec::new(),
                 jac_entries: Vec::new(),
@@ -6065,12 +6285,14 @@ pub fn generate_root_methods(
         let nested_cost = &group.nested_cost_loops;
         let nested_gh = &group.nested_gh_loops;
         let nested_jac = &group.nested_jac_loops;
+        let resolve_stmts = &group.resolve_stmts;
 
         // Merged cost loop: SelfBlock entries + nested CrossBlock inner loops
         merged_cost.push(wrap_in_prefix(prefix, false, quote! {
             for __item in #ctn.#coll.iter() {
                 let #self_var = __item;
                 let #root_var_ident = &*__self_ref;
+                #(#resolve_stmts)*
                 #(#cost_entries)*
                 #(#nested_cost)*
             }
@@ -6082,6 +6304,7 @@ pub fn generate_root_methods(
                 for __item in #ctn.#coll.iter() {
                     let #self_var = __item;
                     let #root_var_ident = &*__self_ref;
+                    #(#resolve_stmts)*
                     #(#ct_entries)*
                     #(#nested_ct)*
                 }
@@ -6093,6 +6316,7 @@ pub fn generate_root_methods(
         // no alias bindings.
         merged_gh.push(wrap_in_prefix(prefix, true, quote! {
             for __item in #ctn.#coll.iter_mut() {
+                #(#resolve_stmts)*
                 #(#gh_entries)*
                 #(#nested_gh)*
             }
@@ -6107,6 +6331,7 @@ pub fn generate_root_methods(
                 for __item in #ctn.#coll.iter() {
                     let #self_var = __item;
                     let #root_var_ident = &*__self_ref;
+                    #(#resolve_stmts)*
                     let __jac_idx: std::vec::Vec<u32> = {
                         let mut __a_idx = [0u32; #a_count];
                         #(#a_idx_stmts_j)*
@@ -6409,6 +6634,7 @@ pub fn generate_root_methods(
         let a_idx_stmts = &group.a_idx_stmts;
         let b_idx_stmts = &group.b_idx_stmts;
         let resolve_stmts = &group.resolve_stmts;
+        let wiring_resolve_stmts = &group.wiring_resolve_stmts;
         let root_var = &group.root_var_ident;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
@@ -6472,7 +6698,7 @@ pub fn generate_root_methods(
                 // per-instance loop only assigns constraint IDs.
                 quote! {
                     if #ctn.#rc_ident.iter().next().is_some() {
-                        #(#resolve_stmts)*
+                        #(#wiring_resolve_stmts)*
                         let mut __a_idx = [0u32; #a_param_count];
                         #(#a_idx_stmts)*
                         let mut __b_idx = [0u32; #b_param_count];

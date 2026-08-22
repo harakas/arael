@@ -134,6 +134,14 @@ pub struct Cal<T: Float> {
     pub hb: SelfBlock<Cal<T>, T>,
 }
 
+/// Param-less record: a data-ref target riding the export bundle.
+#[arael::model]
+#[derive(Clone)]
+pub struct Mark<T: Float> {
+    pub anchor: T,
+    pub w: T,
+}
+
 /// Pub struct with a private field: excluded from the bundle, imported
 /// crates that reach for it get a tombstone error naming the field.
 #[arael::model]

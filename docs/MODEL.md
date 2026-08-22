@@ -749,7 +749,7 @@ per residual group, mixed freely.
 
 | Attribute | Applies to | Purpose |
 |---|---|---|
-| `#[arael(ref = <path>)]` | `Ref<T>` field | where to resolve the Ref: `root.<collection>` (a collection on the root), `parent.<collection>` (a collection on the immediate containing sub-model -- for a constraint nested below the root), or `<other_ref>.<sub_collection>` (chain into a nested collection) |
+| `#[arael(ref = <path>)]` | `Ref<T>` field | where to resolve the Ref: `root.<collection>` (a collection on the root), `parent.<collection>` (a collection on the immediate containing sub-model -- for a constraint nested below the root), `<other_ref>.<sub_collection>` (chain into a nested collection), or `parent.<ref>.<collection>` (through a parent ref of the parent-refs shared-cross form; data refs only) |
 | `#[arael(cross = (<refA>, <refB>))]` | `CrossBlock<T, T>` field | disambiguate *which* ref pair this CrossBlock serves when two local Refs share the same T |
 | `#[arael(compute = <expr>)]` | any data field | derived field: excluded from serialization, reassigned as `self.<field> = <expr>` on every `update()` (param names in the expression read their current working values). Example: `#[arael(compute = ea.rotation_matrix())]` caching a rotation matrix (see examples/model_demo.rs) |
 | `#[arael(constraint_index)]` | `u32` field | receives a unique row id per constraint instance, useful for building per-constraint diagnostics / logs |
@@ -776,6 +776,36 @@ struct PosePair {
     hb: CrossBlock<Pose, Pose, f32>,
 }
 ```
+
+### Data refs
+
+A `Ref<T>` whose target type has no `Param` fields is a **data ref**: a
+pure read. It fills no block slot and joins no entity accounting; the
+body and guard read the target's fields under the ref field's name.
+Store a shared record once and reference it instead of copying it into
+every constraint:
+
+```rust,ignore
+#[arael::model]
+struct Landmark { mu: vect2f, w: f32 }     // no Params: data
+
+#[arael::model]
+#[arael(constraint(hb, {
+    [(b.x - a.x - lm.mu.x) * lm.w]
+}))]
+struct Match {
+    #[arael(ref = root.poses)] a: Ref<Pose>,
+    #[arael(ref = root.poses)] b: Ref<Pose>,
+    #[arael(ref = root.landmarks)] lm: Ref<Landmark>,  // data ref
+    hb: CrossBlock<Pose, Pose>,
+}
+```
+
+All resolve-path forms apply; `parent.<ref>.<collection>` additionally
+lets a constraint in the parent-refs shared-cross form reach a
+collection owned by one of the parent's referenced entities. A data
+ref read by a self-block constraint must resolve through
+`root.<collection>`, with the entity in a collection.
 
 ### N-dimensional values in bodies
 

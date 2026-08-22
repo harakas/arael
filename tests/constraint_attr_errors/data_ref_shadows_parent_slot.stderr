@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/data_ref_shadows_parent_slot.rs:24: ref field `a` on `PLink` shadows the parent ref of the same name filling the `parent.hb` slot -- rename the field
+  --> tests/constraint_attr_errors/data_ref_shadows_parent_slot.rs:40:1
+   |
+40 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

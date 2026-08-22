@@ -4,8 +4,8 @@ use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
 use arael::utils::Float;
 use arael::matrix::matrixd;
 use arael::vect::{vect2, vect3, vect3d, vectd};
-use export_consumer::{Bias, BiasLink, World32, World64};
-use export_models::{Beacon, Cal, Dir, Kind, Spring};
+use export_consumer::{Bias, BiasLink, MarkLink, World32, World64};
+use export_models::{Beacon, Cal, Dir, Kind, Mark, Spring};
 
 fn target(k: usize) -> vect3d {
     vect3d::new(0.3, 1.0 + k as f64, -0.4 * k as f64).unit()
@@ -19,6 +19,8 @@ macro_rules! build_world {
             springs: std::vec::Vec::new(),
             links: std::vec::Vec::new(),
             cals: refs::Vec::new(),
+            marks: refs::Vec::new(),
+            mark_links: std::vec::Vec::new(),
         };
         let mut brefs = std::vec::Vec::new();
         for k in 0..3 {
@@ -43,6 +45,8 @@ macro_rules! build_world {
         }
         let bias = w.biases.push(Bias { v: Param::new(0.2 as $t), hb: SelfBlock::new() });
         w.links.push(BiasLink { bk: brefs[1], bl: bias, m: 1.1 as $t, hb: CrossBlock::new() });
+        let mk = w.marks.push(Mark { anchor: 0.9 as $t, w: 0.5 as $t });
+        w.mark_links.push(MarkLink { bk: brefs[2], bl: bias, mk, hb: CrossBlock::new() });
         w.cals.push(Cal {
             v: Param::new(vectd::new([0.4, -0.1, 0.9, 0.0]).cast()),
             t: vectd::new([0.1, 0.2, 0.5, -0.3]).cast(),
@@ -110,4 +114,24 @@ fn imported_models_solve_in_both_roots() {
     // The cross-crate BiasLink pulled the bias off its weak zero prior.
     let bias64 = w64.biases.iter().next().unwrap().v.value;
     assert!(bias64.abs() > 1e-3, "bias unmoved: {}", bias64);
+}
+
+/// The imported param-less record is a data ref: no params, no block
+/// slot, its fields read per residual. Moving the record moves the
+/// optimum -- the values really flow through the ref.
+#[test]
+fn imported_data_ref() {
+    assert_eq!(<Mark<f64> as Model>::PARAM_COUNT, 0);
+    let mut w = build_world!(World64, f64);
+    let r = w.solve_sparse(&LmConfig::default()).unwrap();
+    assert!(matches!(r.status, LmStatus::Converged), "{:?}", r.status);
+    let b1 = w.biases.iter().next().unwrap().v.value;
+
+    let mut w2 = build_world!(World64, f64);
+    w2.marks.iter_mut().next().unwrap().anchor = -0.9;
+    let r2 = w2.solve_sparse(&LmConfig::default()).unwrap();
+    assert!(matches!(r2.status, LmStatus::Converged), "{:?}", r2.status);
+    let b2 = w2.biases.iter().next().unwrap().v.value;
+    assert!((b1 - b2).abs() > 1e-3,
+        "mark data not read through the ref: {} vs {}", b1, b2);
 }

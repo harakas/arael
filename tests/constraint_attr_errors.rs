@@ -63,4 +63,10 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/parent_value_guard_root_held.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_alias_field_collision.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_alias_binding_collision.rs");
+    t.compile_fail("tests/constraint_attr_errors/data_ref_parent_ref_not_of_form.rs");
+    t.compile_fail("tests/constraint_attr_errors/data_ref_parent_chain_outside_form.rs");
+    t.compile_fail("tests/constraint_attr_errors/data_ref_bad_anchor.rs");
+    t.compile_fail("tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs");
+    t.compile_fail("tests/constraint_attr_errors/data_ref_not_collection.rs");
+    t.compile_fail("tests/constraint_attr_errors/data_ref_shadows_parent_slot.rs");
 }
