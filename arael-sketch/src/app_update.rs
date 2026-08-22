@@ -302,21 +302,9 @@ impl EditorApp {
             if self.grab.is_none() && !ctx.wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
                 // One batch, one history entry, one DOF refresh: a
                 // per-item exec pays a rank analysis per delete, and the
-                // half-deleted states are pathological for it.
-                let mut acts: Vec<Action> = Vec::new();
-                for s in &self.selection {
-                    match *s {
-                        Selection::Point(r) => acts.push(Action::DeletePoint { point: r }),
-                        Selection::Line(r) => acts.push(Action::DeleteLine { line: r }),
-                        Selection::Arc(r) => acts.push(Action::DeleteArc { arc: r }),
-                        Selection::Constraint(id) => acts.push(Action::DeleteConstraint { id }),
-                        Selection::Dimension(did) => acts.push(Action::RemoveDimension { did }),
-                        // A meta-constraint dissolves: its geometry
-                        // stays, as plain constrained geometry.
-                        Selection::Meta(mid) => acts.push(Action::UnregisterMeta { mid }),
-                        _ => {} // endpoints aren't deletable on their own
-                    }
-                }
+                // half-deleted states are pathological for it. Entities,
+                // constraints and dimensions delete; a meta dissolves.
+                let acts = arael_sketch_backend::actions::delete_selection_actions(&self.selection);
                 if !acts.is_empty() {
                     self.begin_group();
                     self.exec(Action::Batch { label: "Delete selection".into(), actions: acts });

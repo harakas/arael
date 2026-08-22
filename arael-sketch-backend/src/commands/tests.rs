@@ -6920,3 +6920,51 @@ fn test_on_normal_arcs() {
     let e = run_err(&mut ctx, "on_normal A1.start EA0.center");
     assert!(e.contains("endpoints"), "{}", e);
 }
+
+// -- delete selection --
+
+#[test]
+fn test_delete_selection_batch() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0; add_line 2,0 2,2; add_point 4,4; add_circle 6,0 1");
+    run_ok(&mut ctx, "length L0 2");
+    let actions0 = ctx.history.actions.len();
+    run_ok(&mut ctx, "select all");
+    let out = run_ok(&mut ctx, "delete selection");
+    for name in ["L0", "L1", "P0", "A0"] {
+        assert!(out.contains(name), "output must name {}: {}", name, out);
+    }
+    assert!(out.contains("cascade"), "the length dim and coincident cascade: {}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 0);
+    assert_eq!(ctx.sketch.arcs.refs().count(), 0);
+    assert_eq!(ctx.sketch.points.refs().count(), 0);
+    assert!(ctx.selection.is_empty());
+    assert_eq!(ctx.history.actions.len(), actions0 + 1, "one history entry");
+    run_ok(&mut ctx, "undo");
+    assert_eq!(ctx.sketch.lines.refs().count(), 2, "one undo restores everything");
+    assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+    assert_eq!(ctx.sketch.points.refs().count(), 1);
+    assert_eq!(ctx.sketch.dimensions.len(), 1);
+}
+
+#[test]
+fn test_delete_selection_dissolves_meta() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 1,0");
+    run_ok(&mut ctx, "select all");
+    run_ok(&mut ctx, "pattern rect selection 3 5");
+    run_ok(&mut ctx, "deselect");
+    run_ok(&mut ctx, "select M0");
+    let out = run_ok(&mut ctx, "delete selection");
+    assert!(out.contains("Dissolved M0"), "{}", out);
+    assert!(ctx.sketch.metas.is_empty());
+    assert_eq!(ctx.sketch.lines.refs().count(), 3, "the geometry stays");
+}
+
+#[test]
+fn test_delete_selection_empty_errors() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 1,0");
+    let out = run_err(&mut ctx, "delete selection");
+    assert!(out.contains("Nothing deletable"), "{}", out);
+}

@@ -1970,3 +1970,25 @@ impl Action {
         (false, created)
     }
 }
+
+/// The delete actions for a selection, in selection order: entities,
+/// constraints and dimensions delete; a meta-constraint dissolves (its
+/// geometry stays). Endpoint selections are skipped -- they are not
+/// deletable on their own. Run the result as one `Action::Batch`:
+/// every delete action tolerates refs an earlier item cascaded away.
+pub fn delete_selection_actions(selection: &[crate::ids::Selection]) -> Vec<Action> {
+    use crate::ids::Selection;
+    let mut acts = Vec::new();
+    for s in selection {
+        match *s {
+            Selection::Point(r) => acts.push(Action::DeletePoint { point: r }),
+            Selection::Line(r) => acts.push(Action::DeleteLine { line: r }),
+            Selection::Arc(r) => acts.push(Action::DeleteArc { arc: r }),
+            Selection::Constraint(id) => acts.push(Action::DeleteConstraint { id }),
+            Selection::Dimension(did) => acts.push(Action::RemoveDimension { did }),
+            Selection::Meta(mid) => acts.push(Action::UnregisterMeta { mid }),
+            _ => {}
+        }
+    }
+    acts
+}

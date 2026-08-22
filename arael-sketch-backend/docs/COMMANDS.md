@@ -435,6 +435,9 @@ delete C3                    Delete a named constraint (parallel, coincident,
 delete CL0H                  Delete a synthetic line-flag constraint
                              (CL<line>H for horizontal, CL<line>V for vertical)
 delete d0                    Delete a dimension (d0, d1, ...)
+delete selection             Delete everything selected, as one batch
+                             (one undo step); a selected meta-constraint
+                             dissolves, its geometry stays
 ```
 
 Use `list` or `info <entity>` to discover the `C<n>` / `d<n>` names

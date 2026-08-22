@@ -28,7 +28,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "add_circle2t" => "add_circle2t L0 L1 radius [noconnect] [noconstraint] [driven] [strict] — circle tangent to 2 lines",
             "add_circle3t" => "add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict] — circle tangent to 3 lines",
             "add_ellipse" => "add_ellipse cx,cy rx ry rotation_deg [noconnect] [nocursor] [driven]",
-            "delete" => "delete <L0|P0|A0|EA0|C3|CL0H|d0> | delete L0 L1 parallel | delete M0 [all]",
+            "delete" => "delete <L0|P0|A0|EA0|C3|CL0H|d0> | delete selection | delete L0 L1 parallel | delete M0 [all]",
             "horizontal" => "horizontal L0 [L1 ...]",
             "vertical" => "vertical L0 [L1 ...]",
             "parallel" => "parallel L0 L1",
@@ -237,6 +237,7 @@ pub fn complete(
         // for the trailing slot.
         "delete" => {
             if token_index == 1 {
+                add_matching(&mut results, current_word, &["selection"]);
                 add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
                 add_dimensions(sketch, &mut results, current_word);
             } else if token_index <= 3 {

@@ -1392,6 +1392,11 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
     }
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
 
+    // The whole selection as one batch, like the GUI's Backspace.
+    if tokens.len() == 1 && tokens[0] == "selection" {
+        return delete_selection(ctx);
+    }
+
     // Meta-constraint: `delete M0` dissolves it (the result stays),
     // `delete M0 all` deletes the result too.
     if tokens[0].starts_with('M') && let Some(i) = ctx.sketch.find_meta(tokens[0]) {
@@ -1496,6 +1501,85 @@ pub(crate) fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CmdResult {
         }
     }
     Ok(ok(msg))
+}
+
+/// `delete selection`: every selected entity, constraint and dimension
+/// in one batch (one history entry); selected meta-constraints
+/// dissolve. Reports what was deleted and what cascaded away.
+fn delete_selection(ctx: &mut CommandContext) -> CmdResult {
+    use crate::ids::constraint_id_name;
+    let mut direct: Vec<String> = Vec::new();
+    let mut dissolved: Vec<String> = Vec::new();
+    for sel in &ctx.selection {
+        match *sel {
+            Selection::Line(r) => { if let Some(l) = ctx.sketch.lines.get(r) { direct.push(l.name.clone()); } }
+            Selection::Point(r) => { if let Some(p) = ctx.sketch.points.get(r) { direct.push(p.name.clone()); } }
+            Selection::Arc(r) => { if let Some(a) = ctx.sketch.arcs.get(r) { direct.push(a.name.clone()); } }
+            Selection::Constraint(id) => { if let Some(n) = constraint_id_name(&ctx.sketch, id) { direct.push(n); } }
+            Selection::Dimension(did) => {
+                if let Some(i) = ctx.sketch.dimension_index_by_did(did) {
+                    direct.push(ctx.sketch.dimensions[i].name.clone());
+                }
+            }
+            Selection::Meta(mid) => {
+                if let Some(i) = ctx.sketch.meta_index(mid) {
+                    dissolved.push(ctx.sketch.metas[i].name.clone());
+                }
+            }
+            _ => {} // endpoints aren't deletable on their own
+        }
+    }
+    let acts = crate::actions::delete_selection_actions(&ctx.selection);
+    if acts.is_empty() {
+        return Err("Nothing deletable selected (endpoints cannot be deleted on their own)".into());
+    }
+
+    let before_constraints: std::collections::BTreeSet<String> =
+        ctx.sketch.list_constraints().into_iter().collect();
+    let before_dims: Vec<(String, String)> = ctx.sketch.dimensions.iter()
+        .map(|d| (d.name.clone(), dim_line(&ctx.sketch, d)))
+        .collect();
+
+    ctx.begin_group();
+    ctx.exec(Action::Batch { label: "Delete selection".into(), actions: acts });
+    if let Some(e) = ctx.status_error.take() {
+        return Err(e);
+    }
+    ctx.selection.clear();
+
+    let after_constraints: std::collections::BTreeSet<String> =
+        ctx.sketch.list_constraints().into_iter().collect();
+    let after_dim_names: std::collections::BTreeSet<String> =
+        ctx.sketch.dimensions.iter().map(|d| d.name.clone()).collect();
+    let direct_set: std::collections::BTreeSet<&str> =
+        direct.iter().map(|n| n.as_str()).collect();
+    let cascade_constraints: Vec<&String> = before_constraints
+        .difference(&after_constraints)
+        .filter(|l| l.split(':').next().is_none_or(|n| !direct_set.contains(n)))
+        .collect();
+    let cascade_dims: Vec<&String> = before_dims.iter()
+        .filter(|(n, _)| !after_dim_names.contains(n) && !direct_set.contains(n.as_str()))
+        .map(|(_, line)| line)
+        .collect();
+
+    let mut parts: Vec<String> = Vec::new();
+    if !direct.is_empty() {
+        parts.push(format!("Deleted {}", direct.join(" ")));
+    }
+    if !dissolved.is_empty() {
+        parts.push(format!("Dissolved {} (the geometry stays)", dissolved.join(" ")));
+    }
+    let mut msg = parts.join("\n");
+    if !cascade_constraints.is_empty() || !cascade_dims.is_empty() {
+        msg.push_str("\n  cascade:");
+        for c in &cascade_constraints {
+            msg.push_str(&format!("\n    {}", c));
+        }
+        for line in &cascade_dims {
+            msg.push_str(&format!("\n    {}", line));
+        }
+    }
+    Ok(ok_or_status(ctx, msg))
 }
 
 
