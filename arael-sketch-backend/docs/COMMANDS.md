@@ -639,10 +639,13 @@ mirror L0 about L1                        Mirror a line
 mirror L0 L1 A0 about L2                  Mirror multiple entities
 mirror selection about L0                  Mirror selected entities
 mirror L0 L1 about L2 noconstraint         No symmetry/coincident constraints
-mirror L0 L1 about L2 strict               Error if any constraint fails
+mirror L0 L1 about L2 strict               Error (and undo the mirror) if the result
+                                           cannot satisfy all constraints
 ```
 
-Keywords: `noconstraint` (skip all constraints), `strict` (error on constraint failure).
+Keywords: `noconstraint` (skip all constraints), `strict` (error and
+roll the mirror back if the result cannot satisfy all constraints).
+The whole mirror is one undo step.
 
 Variable capture works with `_0`..`_N`:
 ```

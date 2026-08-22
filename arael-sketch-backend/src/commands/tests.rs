@@ -6968,3 +6968,19 @@ fn test_delete_selection_empty_errors() {
     let out = run_err(&mut ctx, "delete selection");
     assert!(out.contains("Nothing deletable"), "{}", out);
 }
+
+#[test]
+fn test_mirror_strict_batched_undo() {
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 2,0; add_line 2,0 2,2; add_line 5,-5 5,5 noconnect nocursor");
+    let out = run_ok(&mut ctx, "mirror L0 L1 about L2 strict");
+    assert!(out.contains("Mirrored L0 ->"), "{}", out);
+    assert!(out.contains("constraints: C"), "constraint ids surfaced: {}", out);
+    assert!(!out.contains("warning"), "{}", out);
+    assert_eq!(ctx.sketch.lines.refs().count(), 5);
+    // Shared corner deduped: 3 unique endpoint positions -> 3 symmetry.
+    assert_eq!(ctx.sketch.symmetry_pp.len(), 3);
+    run_ok(&mut ctx, "undo");
+    assert_eq!(ctx.sketch.lines.refs().count(), 3, "one undo removes the whole mirror");
+    assert!(ctx.sketch.symmetry_pp.is_empty());
+}

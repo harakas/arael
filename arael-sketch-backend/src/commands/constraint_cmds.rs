@@ -480,73 +480,84 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let mlp1 = ml.p1.value;
     let mlp2 = ml.p2.value;
 
+    // The whole mirror runs as two batches (entities, then
+    // constraints): a per-item exec pays a full validation and DOF
+    // rank analysis per action.
+    let old_cost = ctx.sketch.current_cost();
     ctx.begin_group();
-    let mut warnings = Vec::new();
-    let mut applied = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut applied: Vec<String> = Vec::new();
     let mut msgs = Vec::new();
+
+    // Creation actions, one per source, computed from source values.
+    let mut creates: Vec<Action> = Vec::new();
+    for source in &sources {
+        match source {
+            MirrorSource::Line(src_ref) => {
+                let l = &ctx.sketch.lines[*src_ref];
+                creates.push(Action::AddLine {
+                    p1: mirror_point_across(l.p1.value, mlp1, mlp2),
+                    p2: mirror_point_across(l.p2.value, mlp1, mlp2),
+                });
+            }
+            MirrorSource::Point(src_ref) => {
+                let pt = &ctx.sketch.points[*src_ref];
+                creates.push(Action::AddPoint { pos: mirror_point_across(pt.pos.value, mlp1, mlp2) });
+            }
+            MirrorSource::Arc(src_ref) => {
+                let a = &ctx.sketch.arcs[*src_ref];
+                let mc = mirror_point_across(a.center.value, mlp1, mlp2);
+                let r = a.radius.value;
+                if a.closed {
+                    let edge = vect2d::new(mc.x + r, mc.y);
+                    creates.push(Action::AddCircle { center: mc, edge });
+                } else {
+                    let ms = mirror_point_across(arc_start_pos(a), mlp1, mlp2);
+                    let me = mirror_point_across(arc_end_pos(a), mlp1, mlp2);
+                    let mid_angle = (a.start_angle.value + a.end_angle.value) / 2.0;
+                    let mid_pt = vect2d::new(
+                        a.center.value.x + r * mid_angle.cos(),
+                        a.center.value.y + r * mid_angle.sin(),
+                    );
+                    creates.push(Action::AddArc { start: ms, end: me, mid: mirror_point_across(mid_pt, mlp1, mlp2) });
+                }
+            }
+        }
+    }
+    let created = ctx.exec(Action::Batch { label: "Mirror".into(), actions: creates });
+    if let Some(e) = ctx.status_error.take() {
+        return Err(e);
+    }
+    let Created::Many(created) = created else {
+        return Err("Internal: creation batch added nothing".into());
+    };
 
     // Maps from source to mirrored refs
     let mut line_map: Vec<(Ref<Line>, Ref<Line>)> = Vec::new();
     let mut point_map: Vec<(Ref<Point>, Ref<Point>)> = Vec::new();
     let mut arc_map: Vec<(Ref<Arc>, Ref<Arc>)> = Vec::new();
     let mut mirrored_names: Vec<String> = Vec::new();
-
-    for source in &sources {
-        match source {
-            MirrorSource::Line(src_ref) => {
-                let l = &ctx.sketch.lines[*src_ref];
-                let src_name = l.name.clone();
-                let mp1 = mirror_point_across(l.p1.value, mlp1, mlp2);
-                let mp2 = mirror_point_across(l.p2.value, mlp1, mlp2);
-                let Some(new_ref) = ctx.exec(Action::AddLine { p1: mp1, p2: mp2 }).line() else {
-                    return Err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()).into());
-                };
-                let new_name = ctx.sketch.lines[new_ref].name.clone();
-                line_map.push((*src_ref, new_ref));
-                msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
-                mirrored_names.push(new_name);
+    for (source, c) in sources.iter().zip(created) {
+        let (src_name, new_name) = match (source, c) {
+            (MirrorSource::Line(src), Created::Line(new_ref)) => {
+                line_map.push((*src, new_ref));
+                (ctx.sketch.lines[*src].name.clone(), ctx.sketch.lines[new_ref].name.clone())
             }
-            MirrorSource::Point(src_ref) => {
-                let p = &ctx.sketch.points[*src_ref];
-                let src_name = p.name.clone();
-                let mp = mirror_point_across(p.pos.value, mlp1, mlp2);
-                let Some(new_ref) = ctx.exec(Action::AddPoint { pos: mp }).point() else {
-                    return Err(ctx.status_error.take().unwrap_or_else(|| "Internal: creation action added no entity".into()).into());
-                };
-                let new_name = ctx.sketch.points[new_ref].name.clone();
-                point_map.push((*src_ref, new_ref));
-                msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
-                mirrored_names.push(new_name);
+            (MirrorSource::Point(src), Created::Point(new_ref)) => {
+                point_map.push((*src, new_ref));
+                (ctx.sketch.points[*src].name.clone(), ctx.sketch.points[new_ref].name.clone())
             }
-            MirrorSource::Arc(src_ref) => {
-                let a = &ctx.sketch.arcs[*src_ref];
-                let src_name = a.name.clone();
-                let mc = mirror_point_across(a.center.value, mlp1, mlp2);
-                let r = a.radius.value;
-                let created = if a.closed {
-                    let edge = vect2d::new(mc.x + r, mc.y);
-                    ctx.exec(Action::AddCircle { center: mc, edge })
-                } else {
-                    let ms = mirror_point_across(arc_start_pos(a), mlp1, mlp2);
-                    let me = mirror_point_across(arc_end_pos(a), mlp1, mlp2);
-                    // Compute a mid-point on the arc and mirror it
-                    let mid_angle = (a.start_angle.value + a.end_angle.value) / 2.0;
-                    let mid_pt = vect2d::new(
-                        a.center.value.x + r * mid_angle.cos(),
-                        a.center.value.y + r * mid_angle.sin(),
-                    );
-                    let mm = mirror_point_across(mid_pt, mlp1, mlp2);
-                    ctx.exec(Action::AddArc { start: ms, end: me, mid: mm })
-                };
-                let Some(new_ref) = created.arc() else {
-                    return Err("Cannot mirror arc: degenerate mirrored geometry".into());
-                };
-                let new_name = ctx.sketch.arcs[new_ref].name.clone();
-                arc_map.push((*src_ref, new_ref));
-                msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
-                mirrored_names.push(new_name);
+            (MirrorSource::Arc(src), Created::Arc(new_ref)) => {
+                arc_map.push((*src, new_ref));
+                (ctx.sketch.arcs[*src].name.clone(), ctx.sketch.arcs[new_ref].name.clone())
             }
-        }
+            (MirrorSource::Arc(_), _) => {
+                return Err("Cannot mirror arc: degenerate mirrored geometry".into());
+            }
+            _ => return Err("Internal: creation action added no entity".into()),
+        };
+        msgs.push(format!("Mirrored {} -> {}", src_name, new_name));
+        mirrored_names.push(new_name);
     }
 
     if !noconstraint {
@@ -595,12 +606,10 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
                 coinc_actions.push((Action::ApplyCoincidentLP2 { line: ml, point: mp }, desc));
             }
         }
-        // Apply collected coincident actions
-        for (action, desc) in coinc_actions {
-            if let Err(e) = rect_exec(ctx, action, strict, &desc, &mut applied, &mut warnings) {
-                return Err(e.into());
-            }
-        }
+        // Coincidents apply before the symmetry constraints: they
+        // merge the free copies first, so the deduped one-symmetry-
+        // per-position set below removes exactly the remaining DOF.
+        let mut constraint_actions = coinc_actions;
 
         // Phase 3: Collect symmetry constraint info (snapshot positions before mutating)
         struct SymEntry { src_ep: String, dst_ep: String, pos: vect2d }
@@ -647,9 +656,40 @@ pub(crate) fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CmdResult {
                 Err(e) => { warnings.push(format!("symmetry {}: {}", entry.dst_ep, e)); continue }
             };
             let desc = format!("symmetry {} {} {}", entry.src_ep, after_about[0], entry.dst_ep);
-            if let Err(e) = rect_exec(ctx, Action::ApplySymmetryPP { a, line: mirror_line, c }, strict, &desc, &mut applied, &mut warnings)
-                && strict { return Err(e.into()); }
+            constraint_actions.push((Action::ApplySymmetryPP { a, line: mirror_line, c }, desc));
         }
+
+        // One batch for every coincident and symmetry constraint: the
+        // mirrored geometry satisfies them exactly, so they skip the
+        // per-constraint gate, like a pattern's image constraints.
+        let watermark = ctx.sketch.next_constraint_id;
+        if !constraint_actions.is_empty() {
+            let (acts, descs): (Vec<Action>, Vec<String>) = constraint_actions.into_iter().unzip();
+            ctx.exec(Action::Batch { label: "Mirror constraints".into(), actions: acts });
+            if let Some(e) = ctx.status_error.take() {
+                return Err(e);
+            }
+            applied.extend(descs);
+            let names = constraint_names_since(ctx, watermark);
+            if !names.is_empty() {
+                applied.push(format!("constraints: {}", names.join(" ")));
+            }
+        }
+    }
+
+    // The per-constraint cost gate is gone with the batch; one
+    // whole-operation check replaces it. A mirror is exact, so a cost
+    // jump means a constraint could not be satisfied.
+    let quick = ctx.sketch.current_cost();
+    let new_cost = if quick <= old_cost + 1e-6 { quick } else { ctx.sketch.solve().end_cost };
+    if new_cost > old_cost + 1e-3 {
+        let m = format!("mirror could not satisfy all constraints (cost {:.3e} -> {:.3e})", old_cost, new_cost);
+        if strict {
+            use crate::corner_ops::ActionRunner;
+            ctx.rollback_group();
+            return Err(m);
+        }
+        warnings.push(m);
     }
 
     // Set session names

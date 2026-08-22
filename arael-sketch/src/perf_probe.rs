@@ -431,3 +431,27 @@ fn perf_probe_constr_grid7() { probe_constr_grid(7); }
 #[test]
 #[ignore]
 fn perf_probe_constr_grid15() { probe_constr_grid(15); }
+
+/// Grid pattern plus an axis, mirror the whole selection about it.
+#[test]
+#[ignore]
+fn perf_probe_mirror_grid9() {
+    let mut gui = Gui::new();
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+    for r in gui.app.run_commands(
+        "select all; pattern rect selection 9 9 symmetric by 9 9 symmetric") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    for r in gui.app.run_commands("add_line 60,-60 60,60 noconnect nocursor; select all") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    let n_sel = gui.app.selection.len();
+    let t = Instant::now();
+    for r in gui.app.run_commands("mirror selection about L243") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    println!("mirror 9x9 ({} selected)   {:9.1} ms", n_sel,
+        t.elapsed().as_secs_f64() * 1e3);
+    gui.frame();
+}
