@@ -1847,6 +1847,53 @@ fn test_offset_tool_edit_preview_and_marker() {
 
 // -- Pattern tool ---------------------------------------------------------
 
+/// Lock over a selection runs as one batch: a single history entry,
+/// every vertex locked, DOF cache fresh. A second apply unlocks; the
+/// shared (coincident) corner selected through both lines must not
+/// produce duplicate unlocks.
+#[test]
+fn test_lock_selection_batched() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0; add_line 2,0 2,2");
+    let lines: Vec<_> = gui.sketch().lines.refs().collect();
+    gui.app.selection = lines.iter()
+        .flat_map(|&l| [Selection::LineP1(l), Selection::LineP2(l)])
+        .collect();
+    let actions0 = gui.app.history.actions.len();
+    gui.app.apply_lock();
+    assert_eq!(gui.app.history.actions.len(), actions0 + 1, "one entry for the lock");
+    for &l in &lines {
+        assert!(!gui.sketch().lines[l].p1.optimize, "p1 locked");
+        assert!(!gui.sketch().lines[l].p2.optimize, "p2 locked");
+    }
+    assert_eq!(gui.sketch().cached_dof(), Some(0), "DOF display refreshed");
+    gui.app.apply_lock();
+    assert_eq!(gui.app.history.actions.len(), actions0 + 2, "one entry for the unlock");
+    for &l in &lines {
+        assert!(gui.sketch().lines[l].p1.optimize, "p1 unlocked");
+        assert!(gui.sketch().lines[l].p2.optimize, "p2 unlocked");
+    }
+    gui.frames(2);
+}
+
+/// Construction toggle over a selection runs as one batch with a
+/// single history entry; a second toggle restores.
+#[test]
+fn test_toggle_construction_batched() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0; add_line 2,0 2,2; add_circle 5,0 1");
+    gui.cmd("select all");
+    let actions0 = gui.app.history.actions.len();
+    gui.app.apply_toggle_construction();
+    assert_eq!(gui.app.history.actions.len(), actions0 + 1, "one entry");
+    assert!(gui.sketch().lines.iter().all(|l| l.construction));
+    assert!(gui.sketch().arcs.iter().all(|a| a.construction));
+    gui.app.apply_toggle_construction();
+    assert!(gui.sketch().lines.iter().all(|l| !l.construction));
+    assert!(gui.sketch().arcs.iter().all(|a| !a.construction));
+    gui.frames(2);
+}
+
 /// Backspace deletes the whole selection as one batch: a single
 /// history entry, stale refs inside the batch tolerated (the line's
 /// cascade removes the selected constraint first), one undo restores

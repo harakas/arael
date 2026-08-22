@@ -371,3 +371,63 @@ fn perf_probe_delete_grid7() { probe_delete_grid(7); }
 #[test]
 #[ignore]
 fn perf_probe_delete_grid15() { probe_delete_grid(15); }
+
+/// Grid pattern, every vertex selected, Lock applied over the selection.
+fn probe_lock_grid(n: u32) {
+    let mut gui = Gui::new();
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+    for r in gui.app.run_commands(&format!(
+        "select all; pattern rect selection {} 9 symmetric by {} 9 symmetric", n, n)) {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    gui.app.selection.clear();
+    let mut sel = Vec::new();
+    for r in gui.app.sketch.lines.refs() {
+        sel.push(Selection::LineP1(r));
+        sel.push(Selection::LineP2(r));
+    }
+    for r in gui.app.sketch.arcs.refs() {
+        sel.push(Selection::ArcCenter(r));
+    }
+    gui.app.selection = sel;
+    let n_sel = gui.app.selection.len();
+    let t = Instant::now();
+    gui.app.apply_lock();
+    println!("lock {:2}x{:<2} ({} selected)    {:9.1} ms", n, n, n_sel,
+        t.elapsed().as_secs_f64() * 1e3);
+    gui.frame();
+}
+
+/// Grid pattern, select all, construction toggled over the selection.
+fn probe_constr_grid(n: u32) {
+    let mut gui = Gui::new();
+    gui.app = crate::EditorApp::default();
+    gui.frame();
+    for r in gui.app.run_commands(&format!(
+        "select all; pattern rect selection {} 9 symmetric by {} 9 symmetric; select all", n, n)) {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    let n_sel = gui.app.selection.len();
+    let t = Instant::now();
+    gui.app.apply_toggle_construction();
+    println!("constr {:2}x{:<2} ({} selected)  {:9.1} ms", n, n, n_sel,
+        t.elapsed().as_secs_f64() * 1e3);
+    gui.frame();
+}
+
+#[test]
+#[ignore]
+fn perf_probe_lock_grid7() { probe_lock_grid(7); }
+
+#[test]
+#[ignore]
+fn perf_probe_lock_grid15() { probe_lock_grid(15); }
+
+#[test]
+#[ignore]
+fn perf_probe_constr_grid7() { probe_constr_grid(7); }
+
+#[test]
+#[ignore]
+fn perf_probe_constr_grid15() { probe_constr_grid(15); }

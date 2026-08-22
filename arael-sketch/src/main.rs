@@ -3522,26 +3522,24 @@ impl EditorApp {
     }
 
     fn apply_toggle_construction(&mut self) {
-        self.begin_group();
-        for sel in &self.selection.clone() {
+        // One batch: a per-item exec pays a DOF rank analysis per toggle.
+        let mut acts: Vec<Action> = Vec::new();
+        for sel in &self.selection {
             match *sel {
-                Selection::Line(r) => { self.exec(Action::ToggleConstructionLine { line: r }); }
-                Selection::Arc(r) => { self.exec(Action::ToggleConstructionArc { arc: r }); }
+                Selection::Line(r) => acts.push(Action::ToggleConstructionLine { line: r }),
+                Selection::Arc(r) => acts.push(Action::ToggleConstructionArc { arc: r }),
                 _ => {}
             }
         }
+        if !acts.is_empty() {
+            self.begin_group();
+            self.exec(Action::Batch { label: "Toggle construction".into(), actions: acts });
+        }
     }
 
-    // Find the directly locked vertex in the same transitive group as `sel`.
-    // Returns unlock actions for all directly locked vertices in the group.
-    fn find_direct_locks_in_group(&self, sel: Selection) -> Vec<Action> {
-        let mut groups = coincide::CoincidenceGroups::build(&self.sketch);
-        let sel_id = match groups.selection_id(sel) {
-            Some(id) => id,
-            None => return Vec::new(),
-        };
-        let sel_root = groups.find(sel_id);
-
+    // Unlock actions for all directly locked vertices in the coincidence
+    // group rooted at `sel_root` (from the caller's `groups`).
+    fn find_direct_locks_in_group(&self, groups: &mut coincide::CoincidenceGroups, sel_root: usize) -> Vec<Action> {
         let mut actions = Vec::new();
         // Find all directly locked vertices in the same group
         for r in self.sketch.points.refs() {
@@ -3572,9 +3570,14 @@ impl EditorApp {
     }
 
     fn apply_lock(&mut self) {
-        self.begin_group();
+        // One batch: a per-item exec pays a DOF rank analysis per lock.
+        // Unlocks are collected once per coincidence group -- a second
+        // selected vertex of an already-unlocked group adds nothing.
         let (pt_locked, l_p1_locked, l_p2_locked, arc_c_locked) = self.compute_locked_sets();
-        for sel in &self.selection.clone() {
+        let mut groups = coincide::CoincidenceGroups::build(&self.sketch);
+        let mut unlocked_roots: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut acts: Vec<Action> = Vec::new();
+        for sel in &self.selection {
             let is_locked = match *sel {
                 Selection::Point(r) => pt_locked.contains(&r.index()),
                 Selection::LineP1(r) => l_p1_locked.contains(&r.index()),
@@ -3583,32 +3586,37 @@ impl EditorApp {
                 _ => false,
             };
             if is_locked {
-                // Unlock all directly locked vertices in the transitive group
-                let unlock_actions = self.find_direct_locks_in_group(*sel);
-                for action in unlock_actions {
-                    self.exec(action);
+                if let Some(id) = groups.selection_id(*sel) {
+                    let root = groups.find(id);
+                    if unlocked_roots.insert(root) {
+                        acts.extend(self.find_direct_locks_in_group(&mut groups, root));
+                    }
                 }
             } else {
                 match *sel {
                     Selection::Point(r) => {
                         let pos = self.sketch.points[r].pos.value;
-                        self.exec(Action::LockPoint { point: r, pos });
+                        acts.push(Action::LockPoint { point: r, pos });
                     }
                     Selection::LineP1(r) => {
                         let pos = self.sketch.lines[r].p1.value;
-                        self.exec(Action::LockLineP1 { line: r, pos });
+                        acts.push(Action::LockLineP1 { line: r, pos });
                     }
                     Selection::LineP2(r) => {
                         let pos = self.sketch.lines[r].p2.value;
-                        self.exec(Action::LockLineP2 { line: r, pos });
+                        acts.push(Action::LockLineP2 { line: r, pos });
                     }
                     Selection::ArcCenter(r) => {
                         let pos = self.sketch.arcs[r].center.value;
-                        self.exec(Action::LockArcCenter { arc: r, pos });
+                        acts.push(Action::LockArcCenter { arc: r, pos });
                     }
                     _ => {}
                 }
             }
+        }
+        if !acts.is_empty() {
+            self.begin_group();
+            self.exec(Action::Batch { label: "Lock".into(), actions: acts });
         }
     }
 
