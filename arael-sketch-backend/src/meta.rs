@@ -72,7 +72,7 @@ pub fn delete_entity(runner: &mut dyn ActionRunner, e: MetaEntity) {
 /// entity gone, an owned constraint gone, an owned dimension gone, made
 /// derived, or carrying a different value / expression than was written.
 /// Soft-owned constraints are not checked.
-fn broken_reason(sketch: &Sketch, m: &Meta) -> Option<String> {
+fn broken_reason(sketch: &Sketch, m: &Meta, live_nids: &std::collections::HashSet<u32>) -> Option<String> {
     if m.source_entities().iter().any(|e| !entity_exists(sketch, *e)) {
         return Some("a source entity was deleted".into());
     }
@@ -80,7 +80,7 @@ fn broken_reason(sketch: &Sketch, m: &Meta) -> Option<String> {
         return Some("a result entity was deleted".into());
     }
     for nid in m.owned_constraints() {
-        if !nid_exists(sketch, nid) {
+        if !live_nids.contains(&nid) {
             return Some(format!("C{} was deleted", nid));
         }
     }
@@ -107,9 +107,19 @@ fn broken_reason(sketch: &Sketch, m: &Meta) -> Option<String> {
 /// Drop every meta-constraint whose result, relations or dimensions were
 /// changed behind its back, with a notice each. Runs after every action.
 pub fn reconcile(sketch: &mut Sketch) {
+    if sketch.metas.is_empty() {
+        return;
+    }
+    // One pass over the collections instead of a scan per owned nid --
+    // a pattern can own thousands.
+    let live_nids: std::collections::HashSet<u32> = sketch
+        .constraint_nid_cid_pairs()
+        .into_iter()
+        .map(|(nid, _)| nid)
+        .collect();
     let mut dropped: Vec<(u32, String)> = Vec::new();
     for m in &sketch.metas {
-        if let Some(why) = broken_reason(sketch, m) {
+        if let Some(why) = broken_reason(sketch, m, &live_nids) {
             dropped.push((m.mid, format!("{} {} dropped: {}", m.kind_name(), m.name, why)));
         }
     }

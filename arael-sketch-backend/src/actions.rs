@@ -392,6 +392,38 @@ impl Action {
         }
     }
 
+    /// Whether applying this action can invalidate a meta-constraint's
+    /// record: something it owns removed, or an owned dimension's
+    /// value / expression / derived flag rewritten. Purely additive
+    /// actions skip the reconcile walk -- on a sketch with a large
+    /// pattern the walk costs more than the action itself.
+    pub fn may_break_meta(&self) -> bool {
+        if self.is_constraint_action() {
+            // The constraint set includes the dimension writers;
+            // UpdateDimension rewrites an owned dimension a meta may
+            // pin, everything else there only adds.
+            return matches!(self, Action::UpdateDimension { .. });
+        }
+        match self {
+            Action::AddPoint { .. } | Action::AddHelperPoint { .. } | Action::AddLine { .. }
+            | Action::AddCircle { .. } | Action::AddEllipse { .. } | Action::AddArc { .. }
+            | Action::AddEllipticArc { .. } | Action::AddArcAngles { .. }
+            | Action::LockPoint { .. } | Action::LockLineP1 { .. } | Action::LockLineP2 { .. }
+            | Action::LockArcCenter { .. }
+            | Action::UnlockPoint { .. } | Action::UnlockLineP1 { .. } | Action::UnlockLineP2 { .. }
+            | Action::UnlockArcCenter { .. }
+            | Action::ToggleConstructionLine { .. } | Action::ToggleConstructionArc { .. }
+            | Action::SetStyleLine { .. } | Action::SetStyleArc { .. }
+            | Action::SetQuietPoint { .. } | Action::SetQuietLine { .. } | Action::SetQuietArc { .. }
+            | Action::SetConstructionLine { .. } | Action::SetConstructionArc { .. }
+            | Action::MoveDimension { .. }
+            | Action::AddUserParam { .. }
+            | Action::RegisterMeta { .. } => false,
+            Action::Batch { actions, .. } => actions.iter().any(|a| a.may_break_meta()),
+            _ => true,
+        }
+    }
+
     /// Returns true for constraint-adding actions that should be validated
     /// by the solver (cost check after application).
     pub fn is_constraint_action(&self) -> bool {
@@ -984,7 +1016,9 @@ impl Action {
     pub fn apply(&self, sketch: &mut Sketch) -> Created {
         let (needs_expr_update, created) = self.apply_without_solve(sketch);
         sketch.assign_constraint_names();
-        crate::meta::reconcile(sketch);
+        if self.may_break_meta() {
+            crate::meta::reconcile(sketch);
+        }
         sketch.solve();
         if needs_expr_update {
             sketch.update_expr_dim_values();
