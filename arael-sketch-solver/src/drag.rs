@@ -179,11 +179,24 @@ impl Sketch {
         self.remove_drag_auto_anchors(&apparatus.anchors);
         let h1 = apparatus.helper;
         let h2 = apparatus.helper2;
-        self.for_each_constraint_collection(|_, _, coll| {
-            coll.retain_constraints(&mut |c| {
-                !c.references_point(h1) && !h2.is_some_and(|h| c.references_point(h))
-            });
-        });
+        // The bridges live in the collection the target dictates (see
+        // install_drag); retain there instead of sweeping the whole
+        // registry -- nothing else references a drag helper.
+        match apparatus.target {
+            DragTarget::Point(_) => self.coincident_pp.retain(|c| c.a != h1 && c.b != h1),
+            DragTarget::LineP1(_) => self.coincident_lp1.retain(|c| c.point != h1),
+            DragTarget::LineP2(_) => self.coincident_lp2.retain(|c| c.point != h1),
+            DragTarget::ArcCenter(_) => self.coincident_arc_center.retain(|c| c.point != h1),
+            DragTarget::ArcStart(_) => self.coincident_arc_start.retain(|c| c.point != h1),
+            DragTarget::ArcEnd(_) => self.coincident_arc_end.retain(|c| c.point != h1),
+            DragTarget::LineBody(_) => {
+                self.coincident_lp1.retain(|c| c.point != h1);
+                if let Some(h) = h2 {
+                    self.coincident_lp2.retain(|c| c.point != h);
+                }
+            }
+            DragTarget::ArcBody(_) => self.coincident_arc_center.retain(|c| c.point != h1),
+        }
         if self.points.get(h1).is_some() {
             self.points.remove(h1);
         }

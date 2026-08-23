@@ -461,7 +461,9 @@ impl SketchCell {
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
         let cur = self.sketch.structure_gen;
         if self.prepared_gen != Some(cur) {
+            let __t = web_time::Instant::now();
             self.sketch.prepare_derived();
+            if verbose() { eprintln!("[PREPARE] {:.1} ms", __t.elapsed().as_secs_f64() * 1e3); }
             self.prepared_gen = Some(cur);
         }
         // A session that learned a different structure is not reusable.
@@ -1454,6 +1456,75 @@ impl Sketch {
     /// Rebuild expr_constraints from dimensions that have expr_str.
     /// Called at the start of every solve() since the set of optimizable
     /// params can change between solves (lock/unlock).
+    /// Entity names reachable from the sketch's expressions: prefixes
+    /// of dotted symbols from user-param expressions, dimension
+    /// expressions, range bounds and measured symbols, closed over
+    /// dim / user-param references. A symbol bag built for these
+    /// entities resolves and evaluates those expressions exactly like
+    /// the full bag, without paying for every entity in the sketch.
+    fn expr_entity_filter(&self) -> std::collections::HashSet<String> {
+        let mut syms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &self.user_params {
+            if p.expr_str.trim().parse::<f64>().is_ok() { continue; }
+            if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                syms.extend(parsed.symbols());
+            }
+        }
+        for dim in &self.dimensions {
+            let mut uses_measured = dim.derived || dim.range.is_some();
+            if let Some(ref es) = dim.expr_str {
+                uses_measured = true;
+                if let Ok(parsed) = arael_sym::parse(es) {
+                    syms.extend(parsed.symbols());
+                }
+            }
+            if let Some(rb) = &dim.range {
+                let mut add = |syms: &mut std::collections::HashSet<String>, rv: &dimensions::RangeValue| {
+                    if let dimensions::RangeValue::Live(src) = rv
+                        && let Ok(parsed) = arael_sym::parse(src) {
+                            syms.extend(parsed.symbols());
+                        }
+                };
+                match rb {
+                    dimensions::RangeBound::Min(v) | dimensions::RangeBound::Max(v) => add(&mut syms, v),
+                    dimensions::RangeBound::Between(lo, hi) => {
+                        add(&mut syms, lo);
+                        add(&mut syms, hi);
+                    }
+                }
+            }
+            if uses_measured {
+                syms.extend(dim.measured_symbol(self).symbols());
+            }
+        }
+        for _ in 0..16 {
+            let mut added = false;
+            for dim in &self.dimensions {
+                if !syms.contains(&dim.name) { continue; }
+                if let Some(ref es) = dim.expr_str {
+                    if let Ok(parsed) = arael_sym::parse(es) {
+                        for sym in parsed.symbols() { added |= syms.insert(sym); }
+                    }
+                } else if dim.derived {
+                    for sym in dim.measured_symbol(self).symbols() { added |= syms.insert(sym); }
+                }
+            }
+            for p in &self.user_params {
+                if !syms.contains(&p.name) || p.expr_str.trim().parse::<f64>().is_ok() { continue; }
+                if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                    for sym in parsed.symbols() { added |= syms.insert(sym); }
+                }
+            }
+            if !added { break; }
+        }
+        syms.iter()
+            .filter_map(|sym| {
+                let prefix = sym.split('.').next()?;
+                (prefix.len() < sym.len()).then(|| prefix.to_string())
+            })
+            .collect()
+    }
+
     fn rebuild_expr_constraints(&mut self) {
         self.expr_constraints.clear();
         let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some());
@@ -1474,7 +1545,8 @@ impl Sketch {
             let mut tmp = std::vec::Vec::new();
             self.serialize(&mut tmp);
         }
-        let mut bag = SymbolBag::build(self);
+        let filter = self.expr_entity_filter();
+        let mut bag = SymbolBag::build_filtered(self, Some(&filter));
 
         // Detect broken user params first (they feed into dimensions).
         // Process in order so earlier params that break get frozen before
@@ -2552,14 +2624,23 @@ impl Sketch {
     pub fn remove_drag_auto_anchors(&mut self, state: &DragAutoAnchorState) {
         // By identity, not truncate-to-length: anything else pushed or
         // removed during the gesture cannot desync the rollback, and
-        // the same state can roll back a deserialized clone.
+        // the same state can roll back a deserialized clone. The
+        // anchors only ever bridge through these four collections
+        // (see add_drag_auto_anchors), and nothing else can reference
+        // an invisible anchor helper during a gesture -- one pass over
+        // each beats a full registry sweep per anchor point.
+        if state.helper_points.is_empty() {
+            return;
+        }
+        let set: std::collections::HashSet<arael::refs::Ref<Point>> =
+            state.helper_points.iter().copied().collect();
+        self.coincident_lp1.retain(|c| !set.contains(&c.point));
+        self.coincident_lp2.retain(|c| !set.contains(&c.point));
+        self.coincident_arc_start.retain(|c| !set.contains(&c.point));
+        self.coincident_arc_end.retain(|c| !set.contains(&c.point));
         for p in &state.helper_points {
-            let p = *p;
-            self.for_each_constraint_collection(|_, _, coll| {
-                coll.retain_constraints(&mut |c| !c.references_point(p));
-            });
-            if self.points.get(p).is_some() {
-                self.points.remove(p);
+            if self.points.get(*p).is_some() {
+                self.points.remove(*p);
             }
         }
     }
@@ -2595,7 +2676,8 @@ impl Sketch {
         self.update_perpendicular_flags();
         self.update_line_dir_flags();
         if !self.expr_constraints.is_empty() {
-            let bag = SymbolBag::build(self);
+            let filter = self.expr_entity_filter();
+            let bag = SymbolBag::build_filtered(self, Some(&filter));
             for ec in &mut self.expr_constraints {
                 ec.resolve(&bag);
             }
@@ -2830,50 +2912,7 @@ impl Sketch {
         // expressions. Collect the entity names the expressions can
         // reach -- prefixes of dotted symbols, closed over dim and
         // user-param references -- and build the bag for those only.
-        let mut syms: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for p in &self.user_params {
-            if p.broken || p.expr_str.trim().parse::<f64>().is_ok() { continue; }
-            if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
-                syms.extend(parsed.symbols());
-            }
-        }
-        for dim in &self.dimensions {
-            if dim.broken { continue; }
-            if let Some(ref es) = dim.expr_str {
-                if let Ok(parsed) = arael_sym::parse(es) {
-                    syms.extend(parsed.symbols());
-                }
-            } else if dim.derived || dim.range.is_some() {
-                syms.extend(dim.measured_symbol(self).symbols());
-            }
-        }
-        for _ in 0..16 {
-            let mut added = false;
-            for dim in &self.dimensions {
-                if dim.broken || !syms.contains(&dim.name) { continue; }
-                if let Some(ref es) = dim.expr_str {
-                    if let Ok(parsed) = arael_sym::parse(es) {
-                        for sym in parsed.symbols() { added |= syms.insert(sym); }
-                    }
-                } else if dim.derived {
-                    for sym in dim.measured_symbol(self).symbols() { added |= syms.insert(sym); }
-                }
-            }
-            for p in &self.user_params {
-                if p.broken || !syms.contains(&p.name) { continue; }
-                if p.expr_str.trim().parse::<f64>().is_ok() { continue; }
-                if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
-                    for sym in parsed.symbols() { added |= syms.insert(sym); }
-                }
-            }
-            if !added { break; }
-        }
-        let entities: std::collections::HashSet<String> = syms.iter()
-            .filter_map(|sym| {
-                let prefix = sym.split('.').next()?;
-                (prefix.len() < sym.len()).then(|| prefix.to_string())
-            })
-            .collect();
+        let entities = self.expr_entity_filter();
         let bag = SymbolBag::build_filtered(self, Some(&entities));
         let mut params = Vec::new();
         self.serialize(&mut params);
