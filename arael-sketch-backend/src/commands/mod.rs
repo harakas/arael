@@ -316,6 +316,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "find" => cmd_find(ctx, args_str),
         "dof" => cmd_dof(ctx, args_str),
         "timing" => cmd_timing(ctx, args_str),
+        "settings" => cmd_settings(ctx, args_str),
         "cost" => {
             let cost = ctx.sketch.current_cost();
             Ok(ok(format!("Cost: {:.6}", cost)))

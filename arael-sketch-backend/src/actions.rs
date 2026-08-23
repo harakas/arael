@@ -1026,6 +1026,56 @@ impl Action {
         created
     }
 
+    /// The incremental structural-DOF plan for this action, when its
+    /// effect on the count is decidable without a rank analysis (see
+    /// [`commit_incremental_dof`]). Creation deltas are the net free parameters
+    /// the entity brings; constraint plans carry the residual row
+    /// count and every position slot whose columns appear in the rows
+    /// (arc rows list the center: its columns back every arc point).
+    /// None for everything else.
+    pub fn incremental_dof_plan(&self) -> Option<DofPlan> {
+        use FreshSlot::*;
+        let con = |rows: i64, touched: Vec<FreshSlot>| DofPlan::Constrain { rows, touched };
+        Some(match *self {
+            Action::AddPoint { .. } | Action::AddHelperPoint { .. } => DofPlan::Create(2),
+            Action::AddLine { .. } => DofPlan::Create(4),
+            Action::AddCircle { .. } => DofPlan::Create(3),
+            Action::AddArc { .. } => DofPlan::Create(5),
+            Action::AddEllipse { .. } => DofPlan::Create(5),
+            Action::ApplyCoincidentPP { a, b } => con(2, vec![Point(a), Point(b)]),
+            Action::ApplyCoincidentLL11 { a, b } => con(2, vec![LineP1(a), LineP1(b)]),
+            Action::ApplyCoincidentLL12 { a, b } => con(2, vec![LineP1(a), LineP2(b)]),
+            Action::ApplyCoincidentLL21 { a, b } => con(2, vec![LineP2(a), LineP1(b)]),
+            Action::ApplyCoincidentLL22 { a, b } => con(2, vec![LineP2(a), LineP2(b)]),
+            Action::ApplyCoincidentLP1 { line, point } => con(2, vec![LineP1(line), Point(point)]),
+            Action::ApplyCoincidentLP2 { line, point } => con(2, vec![LineP2(line), Point(point)]),
+            Action::ApplyCoincidentArcCenter { point, arc } => con(2, vec![Point(point), ArcCenter(arc)]),
+            Action::ApplyCoincidentArcStart { point, arc }
+            | Action::ApplyCoincidentArcEnd { point, arc } => con(2, vec![Point(point), ArcCenter(arc)]),
+            Action::ApplyCoincidentLP1ArcCenter { line, arc }
+            | Action::ApplyCoincidentLP1ArcStart { line, arc }
+            | Action::ApplyCoincidentLP1ArcEnd { line, arc } => con(2, vec![LineP1(line), ArcCenter(arc)]),
+            Action::ApplyCoincidentLP2ArcCenter { line, arc }
+            | Action::ApplyCoincidentLP2ArcStart { line, arc }
+            | Action::ApplyCoincidentLP2ArcEnd { line, arc } => con(2, vec![LineP2(line), ArcCenter(arc)]),
+            Action::ApplyCoincidentArcCenterStart { a, b }
+            | Action::ApplyCoincidentArcCenterEnd { a, b }
+            | Action::ApplyCoincidentArcStartCenter { a, b }
+            | Action::ApplyCoincidentArcEndCenter { a, b }
+            | Action::ApplyCoincidentArcStartStart { a, b }
+            | Action::ApplyCoincidentArcStartEnd { a, b }
+            | Action::ApplyCoincidentArcEndStart { a, b }
+            | Action::ApplyCoincidentArcEndEnd { a, b } => con(2, vec![ArcCenter(a), ArcCenter(b)]),
+            Action::ApplyLineP1OnLine { a, b } => con(1, vec![LineP1(a), LineP1(b), LineP2(b)]),
+            Action::ApplyLineP2OnLine { a, b } => con(1, vec![LineP2(a), LineP1(b), LineP2(b)]),
+            Action::ApplyLineP1OnArc { line, arc } => con(1, vec![LineP1(line), ArcCenter(arc)]),
+            Action::ApplyLineP2OnArc { line, arc } => con(1, vec![LineP2(line), ArcCenter(arc)]),
+            Action::ApplyPointOnLine { point, line } => con(1, vec![Point(point), LineP1(line), LineP2(line)]),
+            Action::ApplyPointOnArc { point, arc } => con(1, vec![Point(point), ArcCenter(arc)]),
+            _ => return None,
+        })
+    }
+
     /// Apply the action's mutation without solving. Returns whether
     /// `update_expr_dim_values` should be called after solving, and what the
     /// action added.
@@ -2010,6 +2060,50 @@ impl Action {
 /// geometry stays). Endpoint selections are skipped -- they are not
 /// deletable on their own. Run the result as one `Action::Batch`:
 /// every delete action tolerates refs an earlier item cascaded away.
+/// See [`Action::incremental_dof_plan`].
+pub enum DofPlan {
+    /// Entity creation: net new degrees of freedom.
+    Create(i64),
+    /// Constraint rows and the position slots their columns touch.
+    Constrain { rows: i64, touched: Vec<FreshSlot> },
+}
+
+/// Commit an incremental structural-DOF plan once the action and its
+/// dedup completed -- after the LAST structural-door access of the
+/// action, so the stamped generation stays current. Creations add
+/// their parameter count exactly; a constraint whose rows pivot on a
+/// fresh slot removes exactly its row count; a constraint touching no
+/// fresh slot ends the validity window (the next dof() runs the full
+/// rank).
+pub fn commit_incremental_dof(
+    sketch: &mut Sketch,
+    prior: usize,
+    plan: DofPlan,
+    created: &Created,
+) {
+    match plan {
+        DofPlan::Create(delta) => {
+            sketch.set_cached_dof((prior as i64 + delta).max(0) as usize);
+            match *created {
+                Created::Point(p) => sketch.dof_mark_fresh(FreshSlot::Point(p)),
+                Created::Line(l) => {
+                    sketch.dof_mark_fresh(FreshSlot::LineP1(l));
+                    sketch.dof_mark_fresh(FreshSlot::LineP2(l));
+                }
+                Created::Arc(a) => sketch.dof_mark_fresh(FreshSlot::ArcCenter(a)),
+                _ => {}
+            }
+        }
+        DofPlan::Constrain { rows, touched } => {
+            if sketch.dof_touch_fresh(&touched) {
+                sketch.set_cached_dof((prior as i64 - rows).max(0) as usize);
+            } else {
+                sketch.dof_clear_fresh();
+            }
+        }
+    }
+}
+
 pub fn delete_selection_actions(selection: &[crate::ids::Selection]) -> Vec<Action> {
     use crate::ids::Selection;
     let mut acts = Vec::new();

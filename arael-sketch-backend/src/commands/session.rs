@@ -718,3 +718,26 @@ pub(crate) fn cmd_timing(ctx: &mut CommandContext, args: &str) -> CmdResult {
         other => Err(format!("timing: expected on or off, got '{}'", other)),
     }
 }
+
+/// `settings [name [on|off]]`: runtime toggles. Bare `settings` lists
+/// them; a name alone reports its state.
+pub(crate) fn cmd_settings(ctx: &mut CommandContext, args: &str) -> CmdResult {
+    let state = |on: bool| if on { "on" } else { "off" };
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    match tokens.as_slice() {
+        [] => Ok(ok(format!(
+            "structural_dof: {}",
+            state(ctx.sketch.structural_dof_enabled())
+        ))),
+        ["structural_dof"] => Ok(ok(format!(
+            "structural_dof is {}",
+            state(ctx.sketch.structural_dof_enabled())
+        ))),
+        ["structural_dof", v @ ("on" | "off")] => {
+            let on = *v == "on";
+            ctx.sketch.mutate_values(|s| s.set_structural_dof(on));
+            Ok(ok(format!("structural_dof {}", v)))
+        }
+        _ => Err("Usage: settings [structural_dof [on|off]]".into()),
+    }
+}

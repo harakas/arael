@@ -7062,3 +7062,51 @@ fn test_timing_toggle() {
     assert!(!ctx.timing);
     run_err(&mut ctx, "timing maybe");
 }
+
+#[test]
+fn test_incremental_dof_matches_full_rank() {
+    // Context `a` keeps its incremental DOF window alive across the
+    // whole sequence; `b` is forced through a full rank after every
+    // command. The counts must agree at every step, covering entity
+    // creations, single and double auto-connects (the double falls
+    // back), arc-center snaps and a no-connect line.
+    let mut a = CommandContext::new();
+    let mut b = CommandContext::new();
+    run_ok(&mut b, "settings structural_dof off");
+    let cmds = [
+        "add_point 0,0",
+        "add_line 1,0 2,0",
+        "add_line 2,0 2,2",
+        "add_circle 5,0 1",
+        "add_arc 8,0 9,0 8.5,0.6 noconnect",
+        "add_line 2,2 5,0",
+        "add_line 0,5 1,5 noconnect",
+        "add_line 1,5 2,5 noconnect",
+        "add_line 1,5 4,4",
+        "add_point 9,9",
+    ];
+    for c in cmds {
+        run_ok(&mut a, c);
+        run_ok(&mut b, c);
+        let inc = a.sketch.dof().expect("incremental dof");
+        let full = b.sketch.mutate_values(|s| {
+            s.clear_cached_dof();
+            s.dof()
+        }).expect("full dof");
+        assert_eq!(inc, full, "after '{}'", c);
+    }
+}
+
+#[test]
+fn test_settings_structural_dof_toggle() {
+    let mut ctx = CommandContext::new();
+    assert!(ctx.sketch.structural_dof_enabled(), "on by default");
+    assert_eq!(run_ok(&mut ctx, "settings"), "structural_dof: on");
+    run_ok(&mut ctx, "settings structural_dof off");
+    assert!(!ctx.sketch.structural_dof_enabled());
+    assert_eq!(run_ok(&mut ctx, "settings structural_dof"), "structural_dof is off");
+    run_ok(&mut ctx, "settings structural_dof on");
+    assert!(ctx.sketch.structural_dof_enabled());
+    run_err(&mut ctx, "settings structural_dof maybe");
+    run_err(&mut ctx, "settings nonsense");
+}

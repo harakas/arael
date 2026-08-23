@@ -1183,6 +1183,9 @@ impl EditorApp {
         // The cell's cache usually has it from the last action;
         // ensure_rank recomputes only when it does not.
         let _ = self.sketch.ensure_rank();
+        // The freeness checks need the null basis, not just the count;
+        // compute it here if the incremental path left it stale.
+        let _ = self.sketch.ensure_rank();
         self.drag_rank = self.sketch.cached_rank().cloned();
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let timer = Timer::new();
@@ -1770,6 +1773,12 @@ impl EditorApp {
     /// single-digit ms typically. The display and the drag-start
     /// probes both read the cell's cache afterwards.
     pub fn refresh_dof(&mut self) {
+        // The incremental structural count serves the display; the
+        // null basis is computed on demand where it is needed (drag
+        // start, coincident probes, blocker analysis).
+        if self.sketch.cached_dof().is_some() {
+            return;
+        }
         let _ = self.sketch.ensure_rank();
     }
 
@@ -2010,9 +2019,18 @@ impl EditorApp {
             return created;
         }
 
+        // Incremental structural DOF, mirroring the command path: the
+        // prior count is read before the first structural-door access;
+        // gated constraints stamp the cache from their own DOF rank.
+        let dof_prior = self.sketch.cached_dof().filter(|_| self.sketch.structural_dof_enabled());
+        let gated = action.is_constraint_action() && !skip_dof_check;
+        let dof_plan = match dof_prior {
+            Some(prior) if !gated => action.incremental_dof_plan().map(|p| (prior, p)),
+            _ => None,
+        };
         if action.is_constraint_action() {
             match arael_sketch_backend::commands::validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, skip_dof_check, explain)
+                self.sketch.get_mut(), &action, skip_dof_check, explain, dof_plan)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -2027,8 +2045,15 @@ impl EditorApp {
             }
         } else {
             created = action.apply(self.sketch.get_mut());
-            self.sketch.get_mut().dedup_constraints();
+            let dedup_removed = self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
+            if dedup_removed == 0
+                && let Some((prior, plan)) = dof_plan {
+                    let c = &created;
+                    self.sketch.mutate_values(|s| {
+                        arael_sketch_backend::actions::commit_incremental_dof(s, prior, plan, c)
+                    });
+                }
         }
         self.take_notices();
         self.prune_selection();

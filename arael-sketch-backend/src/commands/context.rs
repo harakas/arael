@@ -309,6 +309,7 @@ pub fn validate_and_apply_constraint(
     action: &Action,
     skip_dof_check: bool,
     explain: bool,
+    incremental_dof: Option<(usize, crate::actions::DofPlan)>,
 ) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
 
@@ -342,7 +343,7 @@ pub fn validate_and_apply_constraint(
     };
 
     action.apply(sketch);
-    sketch.dedup_constraints();
+    let dedup_removed = sketch.dedup_constraints();
 
     // Quick cost check
     let quick_cost = {
@@ -413,6 +414,10 @@ pub fn validate_and_apply_constraint(
             }
     }
 
+    if dedup_removed == 0
+        && let Some((prior, plan)) = incremental_dof {
+            crate::actions::commit_incremental_dof(sketch, prior, plan, &Created::Nothing);
+        }
     Ok(new_cost)
 }
 
@@ -769,9 +774,19 @@ impl CommandContext {
             return Created::Nothing;
         }
 
+        // Incremental structural DOF: the prior count is read before
+        // the first structural-door access of this action; the gated
+        // constraint path stamps the cache from its own DOF rank
+        // instead, so only ungated applies carry a plan.
+        let dof_prior = self.sketch.cached_dof().filter(|_| self.sketch.structural_dof_enabled());
+        let gated = action.is_constraint_action() && !self.skip_dof_check;
+        let dof_plan = match dof_prior {
+            Some(prior) if !gated => action.incremental_dof_plan().map(|p| (prior, p)),
+            _ => None,
+        };
         let created = if action.is_constraint_action() {
             match validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, self.skip_dof_check, true)
+                self.sketch.get_mut(), &action, self.skip_dof_check, true, dof_plan)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -787,8 +802,14 @@ impl CommandContext {
             Created::Nothing
         } else {
             let created = action.apply(self.sketch.get_mut());
-            self.sketch.get_mut().dedup_constraints();
+            let dedup_removed = self.sketch.get_mut().dedup_constraints();
             self.history.push(action, &self.sketch, CursorState { pos: self.cursor, tangent: self.cursor_tangent });
+            if dedup_removed == 0
+                && let Some((prior, plan)) = dof_plan {
+                    self.sketch.mutate_values(|s| {
+                        crate::actions::commit_incremental_dof(s, prior, plan, &created)
+                    });
+                }
             created
         };
         let notices = self.sketch.mutate_values(|s| s.take_notices());

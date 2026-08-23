@@ -138,6 +138,19 @@ pub struct DragAutoAnchorState {
     helper_points: std::vec::Vec<arael::refs::Ref<Point>>,
 }
 
+/// A freshly created position slot whose parameter columns no
+/// constraint row has touched yet -- the currency of the incremental
+/// structural DOF count (see the backend's Action::apply). Arc start
+/// and end slots are excluded on purpose: their columns overlap the
+/// center, radius and angles, which breaks the fresh-pivot argument.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum FreshSlot {
+    Point(arael::refs::Ref<Point>),
+    LineP1(arael::refs::Ref<Line>),
+    LineP2(arael::refs::Ref<Line>),
+    ArcCenter(arael::refs::Ref<Arc>),
+}
+
 /// Result of DOF (degrees of freedom) analysis.
 pub struct DofResult {
     /// Number of unconstrained degrees of freedom.
@@ -355,6 +368,18 @@ pub struct Sketch {
     #[arael(skip)]
     #[serde(skip)]
     cached_dof: Option<(u64, usize)>,
+    /// Fresh position slots backing the incremental DOF count. Only
+    /// meaningful inside a cached-DOF validity window; a full rank
+    /// analysis clears it.
+    #[arael(skip)]
+    #[serde(skip)]
+    fresh_slots: std::collections::HashSet<FreshSlot>,
+    /// `settings structural_dof off` disables the incremental count
+    /// (every dof() then runs the full rank). Stored inverted so the
+    /// serde-skip default keeps it enabled.
+    #[arael(skip)]
+    #[serde(skip)]
+    structural_dof_disabled: bool,
     /// Rank-analysis cache (DOF plus the null-space basis the probes
     /// test against), keyed like cached_dof. Owned here so every
     /// consumer -- GUI display, drag-start probes, commands, MCP --
@@ -803,6 +828,8 @@ impl Sketch {
             symbol_bag: None,
             expr_hb: TripletBlock::new(),
             cached_dof: None,
+            fresh_slots: std::collections::HashSet::new(),
+            structural_dof_disabled: false,
             cached_rank: None,
             structure_gen: 0,
         }
@@ -844,6 +871,40 @@ impl Sketch {
     /// Store the DOF for the current structure generation.
     pub fn set_cached_dof(&mut self, dof: usize) {
         self.cached_dof = Some((self.structure_gen, dof));
+    }
+
+    /// Mark a just-created slot fresh for the incremental DOF count.
+    pub fn dof_mark_fresh(&mut self, slot: FreshSlot) {
+        self.fresh_slots.insert(slot);
+    }
+
+    /// Consume the slots a constraint's rows touch; true when at
+    /// least one was fresh (the rows then pivot on its columns and
+    /// remove exactly their row count from the DOF).
+    pub fn dof_touch_fresh(&mut self, slots: &[FreshSlot]) -> bool {
+        let mut any = false;
+        for s in slots {
+            any |= self.fresh_slots.remove(s);
+        }
+        any
+    }
+
+    /// Drop the fresh-slot bookkeeping (an action outside the
+    /// incremental table ends the validity window).
+    pub fn dof_clear_fresh(&mut self) {
+        self.fresh_slots.clear();
+    }
+
+    /// Enable / disable the incremental structural DOF count.
+    pub fn set_structural_dof(&mut self, on: bool) {
+        self.structural_dof_disabled = !on;
+        if !on {
+            self.fresh_slots.clear();
+        }
+    }
+
+    pub fn structural_dof_enabled(&self) -> bool {
+        !self.structural_dof_disabled
     }
 
     /// Drop the caches: for mutations that change the instantaneous
@@ -1142,7 +1203,7 @@ impl Sketch {
     /// collections is still a duplicate. Duplicates are bugs upstream
     /// (the validation gate rejects them); removal here is the
     /// backstop, and every removal is reported.
-    pub fn dedup_constraints(&mut self) {
+    pub fn dedup_constraints(&mut self) -> usize {
         use crate::registry::DedupKey;
         // Pass 1: detect, with readable descriptions.
         let mut dup_msgs: std::vec::Vec<String> = std::vec::Vec::new();
@@ -1164,7 +1225,7 @@ impl Sketch {
             });
         }
         if dup_msgs.is_empty() {
-            return;
+            return 0;
         }
         for m in &dup_msgs {
             eprintln!("BUG: duplicate constraint removed: {}", m);
@@ -1180,6 +1241,7 @@ impl Sketch {
                 k => local_seen.insert(k),
             });
         });
+        dup_msgs.len()
     }
 
     /// Recompute tangent_la sign fields from current geometry.
@@ -2258,6 +2320,7 @@ impl Sketch {
         };
         let rr = jacobian.numeric_rank(&opts).map_err(|e| e.to_string())?;
         self.set_cached_dof(rr.nullity);
+        self.fresh_slots.clear();
         if timer.on() {
             eprintln!("[RANK] m={} n={} method={:?} jacobian={:?} rank={:?} dof={}",
                 jacobian.num_residuals(), n, rr.method, t_jac, timer.lap(), rr.nullity);

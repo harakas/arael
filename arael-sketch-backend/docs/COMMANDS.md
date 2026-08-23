@@ -1231,6 +1231,13 @@ cost                         Show current solver cost
 timing on | off              Print each command line's wall time after it
                              completes (enter to prompt return); bare
                              `timing` reports the state
+settings                     List the runtime toggles
+settings structural_dof on | off
+                             Incremental structural DOF (default on):
+                             entity adds and their auto-connects update
+                             the DOF count exactly without a rank
+                             analysis; off forces the full computation
+                             every time
 ```
 
 ### Interpreting `dof singular`
