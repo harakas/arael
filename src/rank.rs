@@ -505,7 +505,13 @@ impl Jacobian<f64> {
             // block living entirely inside the null space produces
             // noise-to-noise ratios that can fake a gap. At k == n the
             // block is the whole space and the decision is exact.
-            let clean = cut < k && gap >= 1e3 && sorted[cut] > 1e-10;
+            // Nullity 0 is the exception: there is no boundary to
+            // certify. The sweeps amplify any true null direction into
+            // the block by 1/lambda, so a block whose smallest value
+            // reads clearly real is a rigidity certificate on its own
+            // -- without it a gapless (rigid) spectrum grows to k == n.
+            let rigid = cut == 0 && sorted[0] > 1e-10;
+            let clean = rigid || (cut < k && gap >= 1e3 && sorted[cut] > 1e-10);
             if clean || k == n {
                 let nullity = cut;
                 let rank = n - nullity;

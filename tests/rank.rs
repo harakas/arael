@@ -288,3 +288,24 @@ fn rowspan_certificate_names_the_dependency() {
     let lam = j.rowspan_certificate(&[(4, 1.0)], 1e-10).unwrap();
     assert!(lam.iter().all(|l| l.abs() < 1e-6), "{:?}", lam);
 }
+
+#[test]
+fn rigid_smooth_spectrum_terminates_at_small_block() {
+    // A rigid chain: anchor plus n-1 difference rows, rank == n. The
+    // spectrum is smooth -- no 1e3 gap anywhere -- so a boundary can
+    // never be certified. Nullity 0 needs no boundary: the whole
+    // block reads as real and the decision must not grow to k == n.
+    let n = 400;
+    let mut rows = vec![row(&[(0, 1.0)])];
+    for i in 0..(n as u32 - 1) {
+        rows.push(row(&[(i, 1.0), (i + 1, -1.0)]));
+    }
+    let j = jac(n, rows);
+    let r = j.numeric_rank(&iter_opts()).unwrap();
+    assert_eq!(r.nullity, 0);
+    assert!(
+        matches!(r.method, RankMethod::Iterative { grew: 0, .. }),
+        "{:?}",
+        r.method
+    );
+}
