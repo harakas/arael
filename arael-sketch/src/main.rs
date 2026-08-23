@@ -1463,20 +1463,16 @@ impl EditorApp {
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
 
-            // If cost is good, save a clean snapshot (without drag apparatus)
-            if self.last_cost < self.drag_saved_cost + 1e-3
-                && let Ok(snap) = bincode::serialize(&self.sketch)
-                    && let Ok(mut clean) = bincode::deserialize::<Sketch>(&snap) {
-                        // One call takes the anchors, the bridge
-                        // constraints, the helpers and the arc locks
-                        // out of the clone -- refs survive the bincode
-                        // round trip.
-                        if let Some(app) = &self.drag_apparatus {
-                            clean.remove_drag(app);
-                        }
-                        self.drag_saved_cost = self.last_cost;
-                        self.drag_saved_snapshot = bincode::serialize(&clean).ok();
-                    }
+            // If cost is good, save the state as the best snapshot.
+            // The apparatus rides along in the bytes; the rare
+            // worse-cost revert at release strips it there (refs
+            // survive the bincode round trip), so the per-move cost
+            // is one serialize instead of a round trip plus the
+            // collection sweeps of remove_drag.
+            if self.last_cost < self.drag_saved_cost + 1e-3 {
+                self.drag_saved_cost = self.last_cost;
+                self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
+            }
         }
     }
 
@@ -1546,10 +1542,13 @@ impl EditorApp {
             self.last_cost = result.end_cost;
 
             // If cost is much worse than pre-drag, revert to the best
-            // clean state
+            // state; the snapshot may carry the apparatus (per-move
+            // saves) or not (the pre-drag save) -- remove_drag
+            // tolerates both.
             if self.last_cost > self.drag_saved_cost + 1e-3
                 && let Some(snap) = exit.best_snapshot
-                    && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+                    && let Ok(mut restored) = bincode::deserialize::<Sketch>(&snap) {
+                        restored.remove_drag(&app);
                         self.sketch = restored.into();
                         let result = self.sketch.solve();
                         self.last_cost = result.end_cost;
