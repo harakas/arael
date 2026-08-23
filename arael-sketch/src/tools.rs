@@ -333,7 +333,7 @@ pub struct MetaMarker {
 pub enum ArcPoint { Center, Start, End }
 
 // What a point/endpoint snapped to
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapTarget {
     Point(Ref<Point>),
     LineP1(Ref<Line>),

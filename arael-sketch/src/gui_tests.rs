@@ -3,7 +3,7 @@
 
 use eframe::egui;
 use crate::test_harness::{Gui, v, near};
-use crate::tools::{ConstraintSymbol, ConstraintType, Tool};
+use crate::tools::{ConstraintSymbol, ConstraintType, SnapTarget, Tool};
 use arael_sketch_solver::{CapKind, CenterRef, DimensionKind, OffsetKind};
 use arael_sketch_backend::Selection;
 
@@ -2185,4 +2185,176 @@ fn test_on_normal_mode_two_endpoints() {
     // A body click is not a valid pick in this mode.
     gui.click(v(1.5, 0.0));
     assert!(gui.app.selection.is_empty());
+}
+
+// -- Snap stability during stationary drag ----------------------------
+
+// Regression: re-picking the nearest snap target every frame reads
+// geometry the snap pull itself just moved, so a stationary mouse
+// retargeted in a feedback loop -- previews flashing, sketch jiggling.
+// The decision must hold while the mouse holds still.
+#[test]
+fn test_stationary_drag_holds_one_snap_target() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 0.4,0.25");
+    gui.cmd("pattern rect L0 3 1 by 3 1");
+    // Zoom far out: the snap zone spans neighboring pattern cells.
+    gui.app.scale = 8.0;
+    gui.frame();
+    // Grab the center copy's p2, nudge past egui's drag threshold,
+    // then hold the mouse still.
+    gui.drag_moves(v(1.4, 1.25), v(2.4, 1.25));
+    assert!(gui.app.grab.is_some(), "drag should be active");
+    gui.frames(10); // settle
+    let held = gui.app.drag_snap_preview.map(|(_, t)| t);
+    assert!(held.is_some(), "a feasible snap target should be held");
+    let pos_a = gui.line(0).0;
+    for _ in 0..25 {
+        gui.frame();
+        assert_eq!(
+            gui.app.drag_snap_preview.map(|(_, t)| t),
+            held,
+            "snap decision must not change while the mouse is still"
+        );
+    }
+    let pos_b = gui.line(0).0;
+    assert!(near(pos_a, pos_b, 1e-3), "geometry must settle: {:?} vs {:?}", pos_a, pos_b);
+    gui.release(v(2.4, 1.25));
+}
+
+// A snap whose released constraint cannot reduce DOF (the target is
+// rigidly coupled to the grab -- here through pattern images of a
+// fully rigid line) must not be previewed: the release would reject
+// it, and pulling toward it just drags the whole assembly around.
+#[test]
+fn test_rigid_coupled_snap_targets_are_not_offered() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 1,0");
+    gui.cmd("horizontal L0");
+    gui.cmd("length L0 1");
+    gui.cmd("pattern rect L0 3 2 by 3 2");
+    assert_eq!(gui.app.sketch.cached_dof(), Some(2), "translation-only assembly");
+    gui.app.scale = 8.0;
+    gui.frame();
+    // Drag the center copy's p2 next to the east copy's p1 (1 unit
+    // away): without the gate this is a snap candidate in the zone.
+    gui.drag_moves(v(3.0, 2.0), v(4.0, 2.0));
+    assert!(gui.app.grab.is_some(), "drag should be active");
+    for _ in 0..20 {
+        gui.frame();
+        assert!(
+            gui.app.drag_snap_preview.is_none(),
+            "rigid-coupled target offered: {:?}",
+            gui.app.drag_snap_preview
+        );
+    }
+    gui.release(v(4.0, 2.0));
+}
+
+// Moving the mouse still retargets: the hold applies only while the
+// cursor is stationary.
+#[test]
+fn test_snap_retargets_on_mouse_move() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 4,0");
+    gui.cmd("add_line 0,2 4,2");
+    // Drag L0.p2 near L1.p2: expect a snap preview onto L1.
+    gui.drag_moves(v(4.0, 0.0), v(4.0, 1.95));
+    assert!(gui.app.grab.is_some(), "drag should be active");
+    gui.frames(5);
+    gui.move_to(v(4.0, 1.96));
+    gui.frames(2);
+    assert!(
+        matches!(gui.app.drag_snap_preview, Some((_, SnapTarget::LineP2(_)))),
+        "expected LineP2 snap, got {:?}",
+        gui.app.drag_snap_preview
+    );
+    // Move away from any candidate: the preview must clear.
+    gui.move_to(v(2.0, 1.0));
+    gui.frame();
+    assert!(gui.app.drag_snap_preview.is_none(),
+        "preview must clear after moving away: {:?}", gui.app.drag_snap_preview);
+    gui.release(v(2.0, 1.0));
+}
+
+// The gate row tests run against the pre-apparatus rank basis while
+// probe rows carry live indices; the apparatus helper points shift the
+// line params, so without index translation the verdicts are garbage.
+// The perp hint mid-drag exercises that translation end to end.
+#[test]
+fn test_drag_perp_hint_fires_mid_drag() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 2,0 3.5,1");
+    gui.drag_moves(v(3.5, 1.0), v(2.05, 1.5));
+    gui.frames(5);
+    gui.move_to(v(2.02, 1.5));
+    gui.frames(2);
+    assert!(gui.app.drag_perp_snap.is_some(), "perp hint must fire near 90 degrees");
+    gui.release(v(2.02, 1.5));
+}
+
+// A grab that shares an endpoint with another line must not snap to
+// that line's remaining slots (far endpoint, midpoint) -- the
+// constraint would collapse the line to zero length. Seen when
+// dragging a chain vertex: the hit-test grabs one twin, so only that
+// line is search-excluded and its coincident sibling surfaced its far
+// end as a candidate.
+#[test]
+fn test_no_snap_to_sibling_slots_of_connected_line() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 2,0");
+    gui.cmd("add_line 2,0 4,0"); // auto-connects at (2,0)
+    gui.cmd("add_line 3,1.5 5,3");
+    // Drag the shared vertex next to the sibling's far endpoint.
+    gui.drag_moves(v(2.0, 0.0), v(3.95, 0.0));
+    gui.frames(5);
+    gui.move_to(v(3.96, 0.0));
+    gui.frames(2);
+    assert!(gui.app.drag_snap_preview.is_none(),
+        "sibling far endpoint offered: {:?}", gui.app.drag_snap_preview);
+    // An unconnected line's endpoint is still a target.
+    gui.move_to(v(3.0, 1.45));
+    gui.frames(5);
+    gui.move_to(v(3.0, 1.48));
+    gui.frames(2);
+    assert!(matches!(gui.app.drag_snap_preview, Some((_, SnapTarget::LineP1(_)))),
+        "expected LineP1 snap on the free line, got {:?}", gui.app.drag_snap_preview);
+    gui.release(v(3.0, 1.48));
+}
+
+// Dragging a chain's free end onto the joint at its own line's other
+// end must not snap: the previous link's endpoint there would collapse
+// the dragged line to zero length. With fixed link lengths the rank
+// gate alone cannot reject it (the hinge direction still reduces DOF).
+#[test]
+fn test_free_end_does_not_snap_to_own_joint() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line 0,0 1,0");
+    gui.cmd("add_line 1,0 2,0");
+    gui.cmd("add_line 2,0 3,0");
+    gui.cmd("length L0 1");
+    gui.cmd("equal L0 L1");
+    gui.cmd("equal L1 L2");
+    gui.app.scale = 8.0;
+    gui.frame();
+    // Free end of L2 next to the joint shared by L1.p2 / L2.p1.
+    gui.drag_moves(v(3.0, 0.0), v(2.1, 0.4));
+    gui.frames(5);
+    gui.move_to(v(2.05, 0.35));
+    gui.frames(2);
+    assert!(gui.app.drag_snap_preview.is_none(),
+        "own-joint cluster offered: {:?}", gui.app.drag_snap_preview);
+    // The joint one link further belongs to L0/L1; L0's endpoint
+    // there is no anchor-mate of the dragged line and still snaps.
+    // The chain swings during the drag, so aim at its live position.
+    let joint = gui.line(0).1;
+    gui.move_to(v(joint.x + 0.05, joint.y + 0.05));
+    gui.frames(5);
+    let joint = gui.line(0).1;
+    gui.move_to(v(joint.x + 0.03, joint.y + 0.03));
+    gui.frames(2);
+    assert!(gui.app.drag_snap_preview.is_some(),
+        "joint one link away should still snap");
+    gui.release(v(1.02, 0.08));
 }

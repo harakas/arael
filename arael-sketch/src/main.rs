@@ -168,6 +168,15 @@ pub struct EditorApp {
     /// `end_drag`. Used so the preview render can show the midpoint
     /// marker without re-running find_snap_target.
     pub drag_snap_preview: Option<(vect2d, SnapTarget)>,
+    /// Mouse position of the last snap-target search during a drag.
+    /// While the mouse stays there, `update_drag` holds (or drops) the
+    /// previous decision instead of re-searching: the snap pull moves
+    /// the candidates themselves, and re-picking the nearest one every
+    /// frame retargets in a feedback loop.
+    drag_snap_eval_mouse: Option<vect2d>,
+    /// Pre-apparatus base of the line/arc param segment, captured by
+    /// start_drag for drag_rank_reduces's index translation.
+    drag_pre_la_base: Option<u32>,
     /// Auto-perpendicular hint during line-endpoint drag: the host line
     /// the drawn line will be made perpendicular to, plus the anchor
     /// (opposite endpoint) position for drawing the corner marker.
@@ -475,6 +484,8 @@ impl EditorApp {
             drag_offset2: vect2d::new(0.0, 0.0),
             drag_dimension: None,
             drag_snap_preview: None,
+            drag_snap_eval_mouse: None,
+            drag_pre_la_base: None,
             drag_perp_snap: None,
             snap_disabled: false,
             history,
@@ -1088,17 +1099,75 @@ impl EditorApp {
     /// fall back to a single rank check. Used by auto-H/V snap gating
     /// at drag-start so a line that's already axis-locked (directly or
     /// via implicit chains) doesn't flash a redundant hint.
+    // Smallest live param index owned by a line or arc: the boundary
+    // between the points segment and the line/arc segment of the
+    // param vector. None when no line/arc param is free.
+    fn line_arc_param_base(&self) -> Option<u32> {
+        let mut base = u32::MAX;
+        for r in self.sketch.lines.refs() {
+            let l = &self.sketch.lines[r];
+            for i in [l.p1.index(), l.p2.index()] {
+                if i != u32::MAX { base = base.min(i); }
+            }
+        }
+        for r in self.sketch.arcs.refs() {
+            let a = &self.sketch.arcs[r];
+            for i in [a.center.index(), a.radius.index(), a.radius_b.index(),
+                      a.rotation.index(), a.start_angle.index(), a.end_angle.index()] {
+                if i != u32::MAX { base = base.min(i); }
+            }
+        }
+        (base != u32::MAX).then_some(base)
+    }
+
+    /// Row test against the pre-drag rank basis. Probe rows carry live
+    /// param indices; once the drag apparatus is installed its helper
+    /// points sit inside the points segment and shift every line/arc
+    /// param up, so live indices no longer address the basis computed
+    /// before the apparatus. The shift is uniform (helpers only append
+    /// points; point-like drags flip no optimize flags), measured as
+    /// the live-vs-pre difference of the line/arc segment base, and
+    /// undone per entry. None: no rank, or a row entry lands inside
+    /// the helper window (layout assumption broken) -- caller picks
+    /// its conservative default.
+    fn drag_rank_reduces(&self, rows: &[Vec<(u32, f64)>]) -> Option<bool> {
+        let rank = self.drag_rank.as_ref()?;
+        let shift = match (self.drag_pre_la_base, self.line_arc_param_base()) {
+            (Some(pre), Some(live)) if live >= pre => live - pre,
+            (None, None) => 0,
+            _ => return None,
+        };
+        if shift == 0 {
+            return Some(probe::any_reduces_rank(rank, rows));
+        }
+        let pre_base = self.drag_pre_la_base.unwrap();
+        let mut translated = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut t = Vec::with_capacity(row.len());
+            for &(i, v) in row {
+                if i < pre_base {
+                    t.push((i, v));
+                } else if i >= pre_base + shift {
+                    t.push((i - shift, v));
+                } else {
+                    return None;
+                }
+            }
+            translated.push(t);
+        }
+        Some(probe::any_reduces_rank(rank, &translated))
+    }
+
     fn hv_would_reduce_dof(&self, line: Ref<Line>, horizontal: bool) -> bool {
         let l_c = &self.sketch.lines[line].constraints;
         if horizontal && l_c.horizontal { return false; }
         if !horizontal && l_c.vertical { return false; }
-        // No rank analysis (degenerate geometry): show the hint, the
-        // release-time check stays exact.
-        let Some(rank) = &self.drag_rank else { return true; };
         let timer = Timer::new();
         let l = &self.sketch.lines[line];
         let row = if horizontal { probe::horizontal_row(l) } else { probe::vertical_row(l) };
-        let reduce = rank.reduces_rank(&row);
+        // No rank analysis (degenerate geometry): show the hint, the
+        // release-time check stays exact.
+        let reduce = self.drag_rank_reduces(&[row]).unwrap_or(true);
         if timer.on() {
             eprintln!("[probe] hv({}) {}: {:?} reduce={}",
                 if horizontal { "h" } else { "v" }, l.name, timer.total(), reduce);
@@ -1112,10 +1181,9 @@ impl EditorApp {
     /// collinear hint gating at drag-start.
     fn collinear_would_reduce_dof(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
         if self.has_collinear_conflict(a, b) { return false; }
-        let Some(rank) = &self.drag_rank else { return true; };
         let timer = Timer::new();
         let rows = probe::collinear_rows(&self.sketch.lines[a], &self.sketch.lines[b]);
-        let reduce = probe::any_reduces_rank(rank, &rows);
+        let reduce = self.drag_rank_reduces(&rows).unwrap_or(true);
         if timer.on() {
             eprintln!("[probe] collinear {} {}: {:?} reduce={}",
                 self.sketch.lines[a].name, self.sketch.lines[b].name,
@@ -1147,16 +1215,132 @@ impl EditorApp {
                 return false;
             }
         }
-        let Some(rank) = &self.drag_rank else { return false; };
         let timer = Timer::new();
         let row = probe::perpendicular_row(&self.sketch.lines[a], &self.sketch.lines[b]);
-        let reduce = rank.reduces_rank(&row);
+        let reduce = self.drag_rank_reduces(&[row]).unwrap_or(false);
         if timer.on() {
             eprintln!("[probe] perp {} {}: {:?} reduce={}",
                 self.sketch.lines[a].name, self.sketch.lines[b].name,
                 timer.total(), reduce);
         }
         reduce
+    }
+
+    // Position-with-derivative of the grabbed slot, for snap gating.
+    // Body drags have no snap preview and return None.
+    fn grab_pos_jac(&self, grab: GrabTarget) -> Option<probe::PosJac> {
+        Some(match grab {
+            GrabTarget::Point(r) => {
+                let p = &self.sketch.points[r].pos;
+                probe::point_pos(p.index(), p.value)
+            }
+            GrabTarget::LineP1(r) => {
+                let p = &self.sketch.lines[r].p1;
+                probe::point_pos(p.index(), p.value)
+            }
+            GrabTarget::LineP2(r) => {
+                let p = &self.sketch.lines[r].p2;
+                probe::point_pos(p.index(), p.value)
+            }
+            GrabTarget::ArcCenter(r) =>
+                probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::Center),
+            GrabTarget::ArcStart(r) =>
+                probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::Start),
+            GrabTarget::ArcEnd(r) =>
+                probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::End),
+            GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_) => return None,
+        })
+    }
+
+    // Would the constraint a released snap applies reduce DOF? Row-
+    // tests the candidate against the pre-drag null basis, like the
+    // perp/H-V hint gates. A target rigidly coupled to the grab (e.g.
+    // pattern images) yields no reduction: the release would be
+    // rejected, so the preview must not offer it -- and pulling toward
+    // it can never close the distance, only drag the assembly around.
+    fn snap_would_reduce_dof(&self, grab: GrabTarget, target: SnapTarget) -> bool {
+        if self.drag_rank.is_none() { return true; }
+        let Some(gj) = self.grab_pos_jac(grab) else { return true; };
+        let pp = |p: &arael::model::Param<vect2d>| probe::point_pos(p.index(), p.value);
+        let rows: Vec<Vec<(u32, f64)>> = match target {
+            SnapTarget::Point(r) =>
+                probe::coincident_rows(&gj, &pp(&self.sketch.points[r].pos)).to_vec(),
+            SnapTarget::LineP1(r) =>
+                probe::coincident_rows(&gj, &pp(&self.sketch.lines[r].p1)).to_vec(),
+            SnapTarget::LineP2(r) =>
+                probe::coincident_rows(&gj, &pp(&self.sketch.lines[r].p2)).to_vec(),
+            SnapTarget::LineMidpoint(r) =>
+                probe::coincident_rows(&gj, &probe::line_midpoint_pos(&self.sketch.lines[r])).to_vec(),
+            SnapTarget::Line(r) =>
+                vec![probe::on_line_row(&self.sketch.lines[r], &gj)],
+            SnapTarget::ArcCenter(r) =>
+                probe::coincident_rows(&gj,
+                    &probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::Center)).to_vec(),
+            SnapTarget::ArcStart(r) =>
+                probe::coincident_rows(&gj,
+                    &probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::Start)).to_vec(),
+            SnapTarget::ArcEnd(r) =>
+                probe::coincident_rows(&gj,
+                    &probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::End)).to_vec(),
+            SnapTarget::ArcMidpoint(r) =>
+                probe::coincident_rows(&gj,
+                    &probe::arc_anchor_pos(&self.sketch.arcs[r], probe::ArcAnchor::Mid)).to_vec(),
+            SnapTarget::ArcBody(r) =>
+                vec![probe::on_arc_row(&self.sketch.arcs[r], &gj)],
+        };
+        self.drag_rank_reduces(&rows).unwrap_or(true)
+    }
+
+    // Live position of a held snap target: entity positions move under
+    // the drag solve, body targets re-project the cursor. None when the
+    // entity is gone.
+    fn snap_target_live_pos(&self, t: SnapTarget, cursor: vect2d) -> Option<vect2d> {
+        Some(match t {
+            SnapTarget::Point(r) => {
+                if !self.sketch.points.contains_ref(r) { return None; }
+                self.sketch.points[r].pos.value
+            }
+            SnapTarget::LineP1(r) => {
+                if !self.sketch.lines.contains_ref(r) { return None; }
+                self.sketch.lines[r].p1.value
+            }
+            SnapTarget::LineP2(r) => {
+                if !self.sketch.lines.contains_ref(r) { return None; }
+                self.sketch.lines[r].p2.value
+            }
+            SnapTarget::LineMidpoint(r) => {
+                if !self.sketch.lines.contains_ref(r) { return None; }
+                let l = &self.sketch.lines[r];
+                vect2d::new((l.p1.value.x + l.p2.value.x) * 0.5,
+                            (l.p1.value.y + l.p2.value.y) * 0.5)
+            }
+            SnapTarget::Line(r) => {
+                if !self.sketch.lines.contains_ref(r) { return None; }
+                let l = &self.sketch.lines[r];
+                project_onto_segment(cursor, l.p1.value, l.p2.value)
+            }
+            SnapTarget::ArcCenter(r) => {
+                if !self.sketch.arcs.contains_ref(r) { return None; }
+                self.sketch.arcs[r].center.value
+            }
+            SnapTarget::ArcStart(r) => {
+                if !self.sketch.arcs.contains_ref(r) { return None; }
+                arc_start_pos(&self.sketch.arcs[r])
+            }
+            SnapTarget::ArcEnd(r) => {
+                if !self.sketch.arcs.contains_ref(r) { return None; }
+                arc_end_pos(&self.sketch.arcs[r])
+            }
+            SnapTarget::ArcMidpoint(r) => {
+                if !self.sketch.arcs.contains_ref(r) { return None; }
+                let a = &self.sketch.arcs[r];
+                arc_point_at(a, (a.start_angle.value + a.end_angle.value) * 0.5)
+            }
+            SnapTarget::ArcBody(r) => {
+                if !self.sketch.arcs.contains_ref(r) { return None; }
+                point_to_arc_dist(cursor, &self.sketch.arcs[r]).1
+            }
+        })
     }
 
 
@@ -1187,6 +1371,7 @@ impl EditorApp {
         // compute it here if the incremental path left it stale.
         let _ = self.sketch.ensure_rank();
         self.drag_rank = self.sketch.cached_rank().cloned();
+        self.drag_pre_la_base = self.line_arc_param_base();
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let timer = Timer::new();
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
@@ -1282,22 +1467,54 @@ impl EditorApp {
                     None => true,
                 }
             };
+            let stationary = self.drag_snap_eval_mouse.is_some_and(|m| {
+                (m.x - mouse_pos.x).abs() < 1e-9 && (m.y - mouse_pos.y).abs() < 1e-9
+            });
             let (effective_pos, snap_preview) = match self.grab {
                 Some(grab @ (GrabTarget::Point(_)
                     | GrabTarget::LineP1(_) | GrabTarget::LineP2(_)
                     | GrabTarget::ArcCenter(_) | GrabTarget::ArcStart(_) | GrabTarget::ArcEnd(_))) => {
-                    // Filter in-loop so candidates already attached to the
-                    // dragged entity don't hide second-best unattached ones.
-                    // This matters when the dragged endpoint is coincident
-                    // with a twin: the twin sits at the cursor (dist ~= 0)
-                    // and without in-loop filtering would shadow any real
-                    // new target within threshold.
-                    match self.find_snap_target_filter(
-                        mouse_pos, hit_threshold, exclude_line, exclude_arc,
-                        |t| !self.has_existing_snap_attachment(grab, *t),
-                    ) {
-                        Some((p, t)) if reach(p) => (p, Some((p, t))),
-                        _ => (mouse_pos, None),
+                    if stationary {
+                        // The mouse has not moved since the last search:
+                        // hold the previous decision at the target's live
+                        // position, or drop it once the target leaves the
+                        // snap zone. No re-search until the mouse moves --
+                        // the solve moves the candidates, and re-picking
+                        // the nearest one every frame retargets in a
+                        // feedback loop (visible as jiggling).
+                        let zone = hit_threshold * 0.5; // find_snap_target_filter's zone
+                        match self.drag_snap_preview {
+                            Some((_, t)) if !self.snap_disabled => {
+                                match self.snap_target_live_pos(t, mouse_pos) {
+                                    Some(p) if reach(p)
+                                        && ((p.x - mouse_pos.x).powi(2)
+                                            + (p.y - mouse_pos.y).powi(2)).sqrt() < zone =>
+                                        (p, Some((p, t))),
+                                    _ => (mouse_pos, None),
+                                }
+                            }
+                            _ => (mouse_pos, None),
+                        }
+                    } else {
+                        self.drag_snap_eval_mouse = Some(mouse_pos);
+                        // Filter in-loop so candidates already attached to the
+                        // dragged entity don't hide second-best unattached ones.
+                        // This matters when the dragged endpoint is coincident
+                        // with a twin: the twin sits at the cursor (dist ~= 0)
+                        // and without in-loop filtering would shadow any real
+                        // new target within threshold. The rank gate drops
+                        // targets whose released constraint would not reduce
+                        // DOF (rigidly coupled geometry): the release would
+                        // reject them, and pulling toward them just drags
+                        // the whole assembly around.
+                        match self.find_snap_target_filter(
+                            mouse_pos, hit_threshold, exclude_line, exclude_arc,
+                            |t| !self.has_existing_snap_attachment(grab, *t)
+                                && self.snap_would_reduce_dof(grab, *t),
+                        ) {
+                            Some((p, t)) if reach(p) => (p, Some((p, t))),
+                            _ => (mouse_pos, None),
+                        }
                     }
                 }
                 _ => (mouse_pos, None),
@@ -1487,7 +1704,9 @@ impl EditorApp {
     /// the three drag-teardown bugs so far was exactly that shape.
     fn take_drag_state(&mut self) -> DragExit {
         self.drag_snap_preview = None;
+        self.drag_snap_eval_mouse = None;
         self.drag_rank = None;
+        self.drag_pre_la_base = None;
         self.drag_perp_already.clear();
         self.drag_collinear_already.clear();
         self.drag_line_locked_h = false;
@@ -2400,8 +2619,62 @@ impl EditorApp {
     fn has_existing_snap_attachment(&self, grab: GrabTarget, snap: SnapTarget) -> bool {
         let Some(grab_sel) = Self::grab_to_selection(grab) else { return false; };
 
+        // Anchors of the dragged entity: the grabbed slot plus its
+        // sibling slots. Attachment and degeneracy are judged against
+        // all of them: a snap whose target cluster touches ANY of the
+        // dragged entity's anchors is either already attached or would
+        // collapse an entity (a line to zero length, an arc to zero
+        // radius or zero sweep). The sibling side catches both
+        // directions -- the target's host sharing an anchor with the
+        // grab (its far endpoint / midpoint would collapse it), and a
+        // chain's free end dragged onto the joint at its own line's
+        // other end (the previous link's endpoint there would collapse
+        // the dragged line).
+        let mut grab_anchors = vec![grab_sel];
+        match grab {
+            GrabTarget::LineP1(r) => grab_anchors.push(Selection::LineP2(r)),
+            GrabTarget::LineP2(r) => grab_anchors.push(Selection::LineP1(r)),
+            GrabTarget::ArcCenter(r) => {
+                grab_anchors.push(Selection::ArcStart(r));
+                grab_anchors.push(Selection::ArcEnd(r));
+            }
+            GrabTarget::ArcStart(r) => {
+                grab_anchors.push(Selection::ArcEnd(r));
+                grab_anchors.push(Selection::ArcCenter(r));
+            }
+            GrabTarget::ArcEnd(r) => {
+                grab_anchors.push(Selection::ArcStart(r));
+                grab_anchors.push(Selection::ArcCenter(r));
+            }
+            _ => {}
+        }
+        let coincident_any = |s: Selection| {
+            grab_anchors.iter().any(|g| self.are_transitively_coincident(*g, s))
+        };
+
         if let Some(snap_sel) = Self::snap_to_selection(snap) {
-            return self.are_transitively_coincident(grab_sel, snap_sel);
+            if coincident_any(snap_sel) {
+                return true;
+            }
+        }
+        match snap {
+            SnapTarget::LineP1(l) | SnapTarget::LineP2(l) | SnapTarget::LineMidpoint(l) => {
+                if coincident_any(Selection::LineP1(l)) || coincident_any(Selection::LineP2(l)) {
+                    return true;
+                }
+            }
+            SnapTarget::ArcCenter(a) | SnapTarget::ArcStart(a)
+            | SnapTarget::ArcEnd(a) | SnapTarget::ArcMidpoint(a) => {
+                if coincident_any(Selection::ArcCenter(a))
+                    || coincident_any(Selection::ArcStart(a))
+                    || coincident_any(Selection::ArcEnd(a)) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        if Self::snap_to_selection(snap).is_some() {
+            return false;
         }
 
         // Body / midpoint snap targets.
@@ -2437,10 +2710,9 @@ impl EditorApp {
                     _ => false,
                 };
                 direct
-                    || self.are_transitively_coincident(grab_sel, Selection::LineP1(l))
-                    || self.are_transitively_coincident(grab_sel, Selection::LineP2(l))
-                    || self.selections_at_line_midpoint(l).iter()
-                        .any(|s| self.are_transitively_coincident(grab_sel, *s))
+                    || coincident_any(Selection::LineP1(l))
+                    || coincident_any(Selection::LineP2(l))
+                    || self.selections_at_line_midpoint(l).iter().any(|s| coincident_any(*s))
             }
             SnapTarget::ArcBody(a) => {
                 // Same arc-point-helper plumbing for point_on_arc.
@@ -2465,20 +2737,17 @@ impl EditorApp {
                     _ => false,
                 };
                 direct
-                    || self.are_transitively_coincident(grab_sel, Selection::ArcStart(a))
-                    || self.are_transitively_coincident(grab_sel, Selection::ArcEnd(a))
-                    || self.selections_at_arc_midpoint(a).iter()
-                        .any(|s| self.are_transitively_coincident(grab_sel, *s))
+                    || coincident_any(Selection::ArcStart(a))
+                    || coincident_any(Selection::ArcEnd(a))
+                    || self.selections_at_arc_midpoint(a).iter().any(|s| coincident_any(*s))
             }
             SnapTarget::LineMidpoint(l) => {
                 // Anchored to `l`'s midpoint iff transitively coincident
                 // with any entity directly constrained there.
-                self.selections_at_line_midpoint(l).iter()
-                    .any(|s| self.are_transitively_coincident(grab_sel, *s))
+                self.selections_at_line_midpoint(l).iter().any(|s| coincident_any(*s))
             }
             SnapTarget::ArcMidpoint(a) => {
-                self.selections_at_arc_midpoint(a).iter()
-                    .any(|s| self.are_transitively_coincident(grab_sel, *s))
+                self.selections_at_arc_midpoint(a).iter().any(|s| coincident_any(*s))
             }
             _ => false,
         }
