@@ -3,6 +3,73 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.8.3 - 2026-08-23
+
+### Added
+
+- **Const-generic `vect<T, N>` and `matrix<T, R, C>`** parameter types, and
+  they cross to C++ and Python.
+- **Shared parent-owned blocks**: `constraint(parent.<field>, ...)` keeps one
+  CrossBlock on the parent for the constraints that share it. With it:
+  parent-held refs, parent value reads in nested constraint bodies and
+  guards, and `parent = <name>` aliasing in the shared-cross forms.
+- **Data-only refs**: a `Ref` to a param-less type is a pure read -- shared
+  data referenced without adding parameters.
+- `slam2d_direct_align_demo`: path-only alignment on a shared parent
+  CrossBlock, landmarks stored once per run behind a data ref.
+- cargo-arael writes `capi/Cargo.toml` only once, so user edits to the
+  exported crate manifest survive a re-export.
+- **`arael::rank`**: numeric rank and null-space basis of a sparse Jacobian,
+  with candidate-row probes answering "would this row remove a degree of
+  freedom" in microseconds.
+
+### Fixed
+
+- The Hessian block pattern was condemned to COO discovery on any extended
+  root, and a parent-owned `TripletBlock` escaped detection entirely -- the
+  structure-built pattern lacked its entries and the sparse solve panicked
+  with "sparsity pattern changed between iterations". The gate is now the
+  presence of a `TripletBlock` anywhere in the containment tree.
+- A solve starting at or below `cost_threshold` never consulted it: every
+  step from there is a rejection, and the damping ladder ran to exhaustion
+  to establish there was nothing to do. The threshold is now tested against
+  the starting cost.
+- The derived `Clone` on `CrossBlock<A, B>` bounded the phantom entity types,
+  so constraint structs could not derive `Clone` unless the entities did.
+  Only the index arrays and the Hessian tile are cloned; the manual impl
+  bounds neither.
+- An empty matrix no longer panics the supernodal factorization.
+
+### arael-sketch
+
+The 2D sketch editor grew from a demo into a constraint-solving CAD tool this
+cycle; the highlights:
+
+- **Tools**: Offset (round corners, caps, per-side dimensions), Pattern
+  (rectangular and circular, editable in place), Mirror, Scale, Split and
+  Trim, Fillet and Chamfer on a typed corner engine, Ellipse and elliptic
+  arcs, tangent snaps, typed size and radius inputs.
+- **Meta-constraints** record what a tool built (offset, pattern, mirror) as
+  a named, selectable, editable object. Editing a pattern diffs its grid
+  cells: surviving copies keep their entities, so constraints attached to
+  them survive quantity and spacing changes.
+- **Structural DOF is incremental**: entity creations and constraints on
+  just-created geometry adjust the counted DOF exactly, without a rank
+  analysis -- creating and connecting geometry costs the same in a 30
+  thousand parameter sketch as in an empty one. Everything else answers
+  from a rank analysis keyed to the structure generation, and rejections
+  name the blocking constraints from a rowspan certificate.
+- **Drags are stable**: snap targets and auto-perp/collinear/H-V hints are
+  decided when the mouse moves and held while it is still, candidates whose
+  released constraint a rank test would reject are never offered, and snaps
+  that would collapse an entity (a chain link to zero length) are excluded
+  by coincidence-cluster reasoning.
+- **Interactive costs on a large scene** (30k parameters): placing a line
+  657 ms -> 41 ms, a drag frame 790 ms -> ~60 ms, creating a 7x7 pattern
+  5.7 s -> 0.04 s.
+- **A headless GUI test harness** drives the real update loop with synthetic
+  input; the GUI feature set is covered by gesture tests.
+
 ## 0.8.2 - 2026-08-06
 
 ### Added
