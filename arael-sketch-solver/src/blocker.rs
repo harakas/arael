@@ -92,6 +92,12 @@ const MAX_SETS: usize = 5;
 const K2_LIMIT: usize = 200;
 // Skip k=3 search if more existing constraints than this.
 const K3_LIMIT: usize = 40;
+/// Dense-path budget: flops of the rowspan SVD (m * n * min(m, n)).
+const SVD_FLOP_LIMIT: usize = 50_000_000;
+/// Sparse path: verify at most this many certificate-named candidates.
+const CERT_VERIFY_CAP: usize = 16;
+/// Sparse path: relative certificate weight that names a constraint.
+const CERT_SUPPORT_TOL: f64 = 1e-6;
 
 /// Run blocker analysis on a post-apply Jacobian.
 ///
@@ -103,6 +109,17 @@ const K3_LIMIT: usize = 40;
 pub fn analyze(
     jac: &Jacobian<f64>,
     candidate_cids: &HashSet<u32>,
+) -> Option<BlockerReport> {
+    analyze_with_limit(jac, candidate_cids, SVD_FLOP_LIMIT)
+}
+
+/// [`analyze`] with an explicit dense-path work budget; above it the
+/// sparse certificate path runs instead. Tests force one path or the
+/// other with 0 / usize::MAX.
+pub fn analyze_with_limit(
+    jac: &Jacobian<f64>,
+    candidate_cids: &HashSet<u32>,
+    dense_limit: usize,
 ) -> Option<BlockerReport> {
     let t_total = web_time::Instant::now();
     let mut stats = BlockerStats::default();
@@ -152,55 +169,61 @@ pub fn analyze(
     // Existing rows outside the candidate's component are also
     // skipped -- they can't possibly be blockers.
     let mut existing_cids_ordered: Vec<u32> = Vec::new();
-    let mut existing_rows_by_cid: HashMap<u32, Vec<Vec<f64>>> = HashMap::new();
-    let mut candidate_rows: Vec<Vec<f64>> = Vec::new();
+    let mut existing_rows_by_cid: HashMap<u32, Vec<Vec<(u32, f64)>>> = HashMap::new();
+    let mut candidate_sparse: Vec<Vec<(u32, f64)>> = Vec::new();
     let mut total_existing_cids: HashSet<u32> = HashSet::new();
     for row in &jac.rows {
         let nonzero = row.entries.iter().any(|&(_, v)| v != 0.0);
         if !nonzero { continue; }
         if candidate_cids.contains(&row.constraint) {
-            let mut dense = vec![0.0f64; n];
-            for &(j, v) in &row.entries { dense[j as usize] = v; }
-            candidate_rows.push(dense);
+            candidate_sparse.push(row.entries.clone());
             continue;
         }
         total_existing_cids.insert(row.constraint);
         if !in_candidate_component(row, &mut uf) { continue; }
-        let mut dense = vec![0.0f64; n];
-        for &(j, v) in &row.entries { dense[j as usize] = v; }
         if !existing_rows_by_cid.contains_key(&row.constraint) {
             existing_cids_ordered.push(row.constraint);
         }
-        existing_rows_by_cid.entry(row.constraint).or_default().push(dense);
+        existing_rows_by_cid.entry(row.constraint).or_default().push(row.entries.clone());
     }
     stats.existing_before_prune = total_existing_cids.len();
     stats.existing_after_prune = existing_cids_ordered.len();
     stats.component_prune_ms = t_prune.elapsed().as_secs_f64() * 1000.0;
-    if candidate_rows.is_empty() || existing_cids_ordered.is_empty() {
+    if candidate_sparse.is_empty() || existing_cids_ordered.is_empty() {
         return None;
     }
 
     // Flatten existing into parallel (row, cid) vectors.
-    let mut a_rows: Vec<Vec<f64>> = Vec::new();
+    let mut a_sparse: Vec<Vec<(u32, f64)>> = Vec::new();
     let mut a_row_cid: Vec<u32> = Vec::new();
     for &cid in &existing_cids_ordered {
         for row in &existing_rows_by_cid[&cid] {
-            a_rows.push(row.clone());
+            a_sparse.push(row.clone());
             a_row_cid.push(cid);
         }
     }
-    let m_a = a_rows.len();
+    let m_a = a_sparse.len();
+    stats.candidate_rows = candidate_sparse.len();
+    stats.existing_rows = m_a;
 
-    // The rowspan SVD below is dense O(m * n * min(m, n)) and runs on
-    // the frame thread; above this budget the hint would stall the
-    // GUI for minutes, so the rejection stands without a hint.
-    const SVD_FLOP_LIMIT: usize = 50_000_000;
-    if m_a.saturating_mul(n).saturating_mul(m_a.min(n)) > SVD_FLOP_LIMIT {
-        return None;
+    // The exhaustive path below runs a dense O(m * n * min(m, n))
+    // rowspan SVD on the frame thread; above the budget the sparse
+    // certificate path answers k = 1 instead.
+    if m_a.saturating_mul(n).saturating_mul(m_a.min(n)) > dense_limit {
+        return analyze_sparse(
+            n, &candidate_sparse, &existing_cids_ordered, &a_sparse, &a_row_cid,
+            stats, t_total,
+        );
     }
 
-    stats.candidate_rows = candidate_rows.len();
-    stats.existing_rows = m_a;
+    // Densify for the exhaustive path.
+    let to_dense = |entries: &Vec<(u32, f64)>| -> Vec<f64> {
+        let mut dense = vec![0.0f64; n];
+        for &(j, v) in entries { dense[j as usize] = v; }
+        dense
+    };
+    let candidate_rows: Vec<Vec<f64>> = candidate_sparse.iter().map(to_dense).collect();
+    let a_rows: Vec<Vec<f64>> = a_sparse.iter().map(to_dense).collect();
 
     // Compute SVD of A once. V_r (n x r) is an orthonormal basis for
     // rowspan(A), where r = rank(A). Project everything into that
@@ -356,6 +379,110 @@ pub fn analyze(
             existing_redundant,
             stats,
         },
+    })
+}
+
+/// The certificate path for sketches too big for the dense SVD: the
+/// candidate row is a linear combination of existing rows; the
+/// regularised minimum-norm coefficients name the rows carrying the
+/// dependency, and each named constraint is verified as a k = 1
+/// blocker with one sparse rank test. k >= 2 is not explored here
+/// (the dense path skips it beyond K2_LIMIT anyway).
+#[allow(clippy::too_many_arguments)]
+fn analyze_sparse(
+    n: usize,
+    candidate_rows: &[Vec<(u32, f64)>],
+    existing_cids_ordered: &[u32],
+    a_rows: &[Vec<(u32, f64)>],
+    a_row_cid: &[u32],
+    mut stats: BlockerStats,
+    t_total: web_time::Instant,
+) -> Option<BlockerReport> {
+    use arael::model::JacobianRow;
+    let t_rej = web_time::Instant::now();
+    let mk_jac = |skip_cid: Option<u32>| -> Jacobian<f64> {
+        Jacobian {
+            num_params: n,
+            rows: a_rows.iter().zip(a_row_cid.iter())
+                .filter(|&(_, &cid)| Some(cid) != skip_cid)
+                .map(|(r, &cid)| JacobianRow {
+                    constraint: cid,
+                    label: "",
+                    residual: 0.0,
+                    entries: r.clone(),
+                })
+                .collect(),
+        }
+    };
+    let ex_jac = mk_jac(None);
+    let opts = arael::rank::RankOptions::default();
+    let rr = ex_jac.numeric_rank(&opts).ok()?;
+    let existing_redundant = rr.rank < a_rows.len();
+    // The rejection condition: every candidate row lies in the
+    // existing rowspan; otherwise there is no blocker to find.
+    for c in candidate_rows {
+        if rr.reduces_rank(c) {
+            return None;
+        }
+    }
+
+    // Certificate support: constraints carrying the dependency.
+    let mut strength: HashMap<u32, f64> = HashMap::new();
+    for c in candidate_rows {
+        let lam = ex_jac.rowspan_certificate(c, 1e-10).ok()?;
+        let max = lam.iter().fold(0.0f64, |a, l| a.max(l.abs())).max(1e-30);
+        for (l, &cid) in lam.iter().zip(a_row_cid.iter()) {
+            let rel = l.abs() / max;
+            if rel > CERT_SUPPORT_TOL {
+                let e = strength.entry(cid).or_insert(0.0);
+                if rel > *e {
+                    *e = rel;
+                }
+            }
+        }
+    }
+    stats.rejection_check_ms = t_rej.elapsed().as_secs_f64() * 1000.0;
+
+    let mut support: Vec<(u32, f64)> = strength.into_iter().collect();
+    support.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut truncated = support.len() > CERT_VERIFY_CAP;
+    support.truncate(CERT_VERIFY_CAP);
+
+    let t_k = web_time::Instant::now();
+    let mut kstat = BlockerKStats {
+        k: 1, skipped: false, subsets_tested: 0, blockers_found: 0, time_ms: 0.0,
+    };
+    let mut found: Vec<Vec<u32>> = Vec::new();
+    for &(cid, _) in &support {
+        if found.len() >= MAX_SETS {
+            truncated = true;
+            break;
+        }
+        kstat.subsets_tested += 1;
+        let sub = mk_jac(Some(cid));
+        let Ok(sr) = sub.numeric_rank(&opts) else { continue };
+        if candidate_rows.iter().any(|c| sr.reduces_rank(c)) {
+            kstat.blockers_found += 1;
+            found.push(vec![cid]);
+        }
+    }
+    // Report in first-seen constraint order, like the dense path.
+    found.sort_by_key(|set| {
+        existing_cids_ordered.iter().position(|&c| c == set[0]).unwrap_or(usize::MAX)
+    });
+    kstat.time_ms = t_k.elapsed().as_secs_f64() * 1000.0;
+    stats.per_k.push(kstat);
+    stats.total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+    let minimum_size = if found.is_empty() { 0 } else { 1 };
+    let truncated = truncated || found.is_empty();
+    Some(BlockerReport {
+        minimum_size,
+        sets: found,
+        existing_count: existing_cids_ordered.len(),
+        truncated,
+        existing_redundant,
+        stats,
     })
 }
 

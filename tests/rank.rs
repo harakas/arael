@@ -268,3 +268,23 @@ fn loose_chain_starts_at_the_nullity_floor() {
     assert!(matches!(r.method, RankMethod::Iterative { block, grew: 0 } if block > 51),
         "{:?}", r.method);
 }
+
+#[test]
+fn rowspan_certificate_names_the_dependency() {
+    // row2 = row0 + row1; a candidate equal to that combination gets
+    // large coefficients exactly on the involved rows.
+    let j = jac(6, vec![
+        row(&[(0, 1.0)]),
+        row(&[(1, 1.0)]),
+        row(&[(2, 1.0), (3, 0.5)]),
+    ]);
+    let lam = j.rowspan_certificate(&[(0, 2.0), (1, -3.0)], 1e-10).unwrap();
+    assert_eq!(lam.len(), 3);
+    assert!(lam[0].abs() > 0.5, "{:?}", lam);
+    assert!(lam[1].abs() > 0.5, "{:?}", lam);
+    assert!(lam[2].abs() < 1e-6, "uninvolved row stays near zero: {:?}", lam);
+
+    // A candidate outside the rowspan produces no meaningful weight.
+    let lam = j.rowspan_certificate(&[(4, 1.0)], 1e-10).unwrap();
+    assert!(lam.iter().all(|l| l.abs() < 1e-6), "{:?}", lam);
+}

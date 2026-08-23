@@ -440,71 +440,7 @@ impl Jacobian<f64> {
     ) -> Result<RankResult, RankError> {
         let n = self.num_params;
         let m = self.num_residuals();
-
-        // Assemble the normalised H + lambda*I as full symmetric CSC.
-        let mut upper: std::collections::HashMap<(u32, u32), f64> = std::collections::HashMap::new();
-        for row in &self.rows {
-            for (ai, &(ia, va)) in row.entries.iter().enumerate() {
-                let van = va / scales[ia as usize];
-                for &(ib, vb) in &row.entries[ai..] {
-                    let vbn = vb / scales[ib as usize];
-                    let key = if ia <= ib { (ia, ib) } else { (ib, ia) };
-                    *upper.entry(key).or_insert(0.0) += van * vbn;
-                }
-            }
-        }
-        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-        for (&(i, j), &v) in &upper {
-            let (i, j) = (i as usize, j as usize);
-            cols[j].push((i, v));
-            if i != j {
-                cols[i].push((j, v));
-            }
-        }
-        let mut col_ptr: Vec<usize> = Vec::with_capacity(n + 1);
-        let mut row_idx: Vec<usize> = Vec::new();
-        let mut vals: Vec<f64> = Vec::new();
-        col_ptr.push(0);
-        for (j, col) in cols.iter_mut().enumerate() {
-            if !col.iter().any(|&(i, _)| i == j) {
-                col.push((j, 0.0));
-            }
-            col.sort_by_key(|&(i, _)| i);
-            for &(i, v) in col.iter() {
-                row_idx.push(i);
-                vals.push(if i == j { v + opts.lambda } else { v });
-            }
-            col_ptr.push(row_idx.len());
-        }
-
-        let sym_ref =
-            faer::sparse::SymbolicSparseColMatRef::new_checked(n, n, &col_ptr, None, &row_idx);
-        let symbolic = fchol::factorize_symbolic_cholesky(
-            sym_ref,
-            faer::Side::Upper,
-            fchol::SymmetricOrdering::Amd,
-            fchol::CholeskySymbolicParams::default(),
-        )
-        .map_err(|_| RankError::Factorization)?;
-        let mut l_vals = vec![0.0f64; symbolic.len_val()];
-        let factor_req =
-            symbolic.factorize_numeric_llt_scratch::<f64>(faer::Par::Seq, faer::Spec::default());
-        let mut factor_mem: Vec<MaybeUninit<u8>> =
-            vec![MaybeUninit::uninit(); factor_req.unaligned_bytes_required()];
-        let stack = faer::dyn_stack::MemStack::new(&mut factor_mem);
-        let mat_ref = faer::sparse::SparseColMatRef::new(sym_ref, &vals);
-        symbolic
-            .factorize_numeric_llt(
-                &mut l_vals,
-                mat_ref,
-                faer::Side::Upper,
-                faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-                faer::Par::Seq,
-                stack,
-                faer::Spec::default(),
-            )
-            .map_err(|_| RankError::Factorization)?;
-        let llt = fchol::LltRef::new(&symbolic, &l_vals);
+        let factor = NormalFactor::build(self, &scales, opts.lambda)?;
 
 
         let hint = opts.null_hint.or(warm.map(|w| w.nullity)).unwrap_or(opts.margin);
@@ -530,13 +466,8 @@ impl Jacobian<f64> {
                 *x = xorshift(&mut rng);
             }
 
-            let solve_req = symbolic.solve_in_place_scratch::<f64>(k, faer::Par::Seq);
-            let mut solve_mem: Vec<MaybeUninit<u8>> =
-                vec![MaybeUninit::uninit(); solve_req.unaligned_bytes_required()];
             for _ in 0..opts.sweeps.max(1) {
-                let stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
-                let rhs = faer::mat::MatMut::from_column_major_slice_mut(&mut v, n, k);
-                llt.solve_in_place_with_conj(faer::Conj::No, rhs, faer::Par::Seq, stack);
+                factor.solve(&mut v, k);
                 orthonormalize(&mut v, n, k);
             }
 
@@ -716,6 +647,131 @@ fn complete_orthonormal(
                 break;
             }
         }
+    }
+}
+
+/// Sparse Cholesky of the column-normalised `J^T J + lambda I`: the
+/// shift-inverted operator of the iterative rank path, also used for
+/// rowspan certificates.
+struct NormalFactor {
+    symbolic: fchol::SymbolicCholesky<usize>,
+    l_vals: Vec<f64>,
+    n: usize,
+}
+
+impl NormalFactor {
+    fn build(jac: &Jacobian<f64>, scales: &[f64], lambda: f64) -> Result<Self, RankError> {
+        let n = jac.num_params;
+        // Assemble the normalised H + lambda*I as full symmetric CSC.
+        let mut upper: std::collections::HashMap<(u32, u32), f64> = std::collections::HashMap::new();
+        for row in &jac.rows {
+            for (ai, &(ia, va)) in row.entries.iter().enumerate() {
+                let van = va / scales[ia as usize];
+                for &(ib, vb) in &row.entries[ai..] {
+                    let vbn = vb / scales[ib as usize];
+                    let key = if ia <= ib { (ia, ib) } else { (ib, ia) };
+                    *upper.entry(key).or_insert(0.0) += van * vbn;
+                }
+            }
+        }
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for (&(i, j), &v) in &upper {
+            let (i, j) = (i as usize, j as usize);
+            cols[j].push((i, v));
+            if i != j {
+                cols[i].push((j, v));
+            }
+        }
+        let mut col_ptr: Vec<usize> = Vec::with_capacity(n + 1);
+        let mut row_idx: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        col_ptr.push(0);
+        for (j, col) in cols.iter_mut().enumerate() {
+            if !col.iter().any(|&(i, _)| i == j) {
+                col.push((j, 0.0));
+            }
+            col.sort_by_key(|&(i, _)| i);
+            for &(i, v) in col.iter() {
+                row_idx.push(i);
+                vals.push(if i == j { v + lambda } else { v });
+            }
+            col_ptr.push(row_idx.len());
+        }
+
+        let sym_ref =
+            faer::sparse::SymbolicSparseColMatRef::new_checked(n, n, &col_ptr, None, &row_idx);
+        let symbolic = fchol::factorize_symbolic_cholesky(
+            sym_ref,
+            faer::Side::Upper,
+            fchol::SymmetricOrdering::Amd,
+            fchol::CholeskySymbolicParams::default(),
+        )
+        .map_err(|_| RankError::Factorization)?;
+        let mut l_vals = vec![0.0f64; symbolic.len_val()];
+        let factor_req =
+            symbolic.factorize_numeric_llt_scratch::<f64>(faer::Par::Seq, faer::Spec::default());
+        let mut factor_mem: Vec<MaybeUninit<u8>> =
+            vec![MaybeUninit::uninit(); factor_req.unaligned_bytes_required()];
+        let stack = faer::dyn_stack::MemStack::new(&mut factor_mem);
+        let mat_ref = faer::sparse::SparseColMatRef::new(sym_ref, &vals);
+        symbolic
+            .factorize_numeric_llt(
+                &mut l_vals,
+                mat_ref,
+                faer::Side::Upper,
+                faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+                faer::Par::Seq,
+                stack,
+                faer::Spec::default(),
+            )
+            .map_err(|_| RankError::Factorization)?;
+        Ok(NormalFactor { symbolic, l_vals, n })
+    }
+
+    /// Solve in place for `k` column-major right-hand sides.
+    fn solve(&self, v: &mut [f64], k: usize) {
+        let llt = fchol::LltRef::new(&self.symbolic, &self.l_vals);
+        let solve_req = self.symbolic.solve_in_place_scratch::<f64>(k, faer::Par::Seq);
+        let mut solve_mem: Vec<MaybeUninit<u8>> =
+            vec![MaybeUninit::uninit(); solve_req.unaligned_bytes_required()];
+        let stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
+        let rhs = faer::mat::MatMut::from_column_major_slice_mut(v, self.n, k);
+        llt.solve_in_place_with_conj(faer::Conj::No, rhs, faer::Par::Seq, stack);
+    }
+}
+
+impl Jacobian<f64> {
+    /// Coefficients expressing `row` as a combination of this
+    /// Jacobian's rows, one per row: the regularised minimum-norm
+    /// solution `lambda = J_n z` with `(J_n^T J_n + eps I) z = row_n`
+    /// in column-normalised space. For a row inside the rowspan the
+    /// large `|lambda[i]|` name the rows carrying the dependency; a
+    /// row outside the rowspan yields small coefficients everywhere.
+    pub fn rowspan_certificate(&self, row: &[(u32, f64)], eps: f64) -> Result<Vec<f64>, RankError> {
+        let n = self.num_params;
+        if n == 0 || self.rows.is_empty() {
+            return Ok(vec![0.0; self.rows.len()]);
+        }
+        let scales: Vec<f64> = self.column_l2_norms().iter().map(|c| c.max(1e-15)).collect();
+        let factor = NormalFactor::build(self, &scales, eps)?;
+        let mut z = vec![0.0f64; n];
+        for &(j, v) in row {
+            if (j as usize) < n {
+                z[j as usize] += v / scales[j as usize];
+            }
+        }
+        factor.solve(&mut z, 1);
+        let mut lam = Vec::with_capacity(self.rows.len());
+        for r in &self.rows {
+            let mut s = 0.0f64;
+            for &(j, v) in &r.entries {
+                if (j as usize) < n {
+                    s += (v / scales[j as usize]) * z[j as usize];
+                }
+            }
+            lam.push(s);
+        }
+        Ok(lam)
     }
 }
 

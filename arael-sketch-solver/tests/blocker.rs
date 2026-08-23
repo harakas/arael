@@ -43,6 +43,38 @@ fn run_analysis(
     arael_sketch_solver::blocker::analyze(&jac, &candidate_cids)
 }
 
+/// `run_analysis` on both paths: the exhaustive dense one and the
+/// sparse certificate one (forced with a zero dense budget).
+fn run_both_paths(
+    pre: &mut Sketch,
+    post: &mut Sketch,
+) -> (Option<BlockerReport>, Option<BlockerReport>) {
+    let mut pre_params = Vec::new();
+    pre.serialize(&mut pre_params);
+    let _ = pre.calc_jacobian(&pre_params);
+    let pre_nids: std::collections::HashSet<u32> = pre
+        .constraint_nid_cid_pairs()
+        .into_iter()
+        .map(|(nid, _)| nid)
+        .collect();
+    let saved = post.drift_isigma;
+    post.drift_isigma = 0.0;
+    let mut post_params = Vec::new();
+    post.serialize(&mut post_params);
+    let jac = post.calc_jacobian(&post_params);
+    post.drift_isigma = saved;
+    let candidate_cids: std::collections::HashSet<u32> = post
+        .constraint_nid_cid_pairs()
+        .into_iter()
+        .filter(|(nid, _)| !pre_nids.contains(nid))
+        .map(|(_, cid)| cid)
+        .collect();
+    (
+        arael_sketch_solver::blocker::analyze_with_limit(&jac, &candidate_cids, usize::MAX),
+        arael_sketch_solver::blocker::analyze_with_limit(&jac, &candidate_cids, 0),
+    )
+}
+
 #[test]
 fn coincident_pp_blocked_by_hdist_and_vdist_singly() {
     // Two points stacked via hdist=0 + vdist=0. A coincident_pp
@@ -201,9 +233,10 @@ fn independent_candidate_no_blocker() {
 }
 
 #[test]
-fn oversized_rowspan_svd_is_declined() {
-    // Above the flop budget the analysis must decline immediately --
-    // it runs on the GUI frame thread on every gated rejection.
+fn oversized_analysis_uses_the_certificate_path() {
+    // Above the dense flop budget the sparse certificate path must
+    // answer quickly -- it runs on the GUI frame thread on every
+    // gated rejection.
     use arael::model::{Jacobian, JacobianRow};
     let n = 1000usize;
     let mut rows = Vec::new();
@@ -224,9 +257,63 @@ fn oversized_rowspan_svd_is_declined() {
     let jac = Jacobian { num_params: n, rows };
     let cand: std::collections::HashSet<u32> = [2].into_iter().collect();
     let t = std::time::Instant::now();
-    assert!(
-        arael_sketch_solver::blocker::analyze(&jac, &cand).is_none(),
-        "oversized analysis must decline"
-    );
-    assert!(t.elapsed().as_secs_f64() < 1.0, "declining must be immediate");
+    let report = arael_sketch_solver::blocker::analyze(&jac, &cand)
+        .expect("the certificate path answers");
+    assert_eq!(report.minimum_size, 1);
+    assert_eq!(report.sets, vec![vec![1]], "the chain cid blocks the candidate");
+    assert!(t.elapsed().as_secs_f64() < 2.0, "must stay frame-friendly");
+}
+
+
+#[test]
+fn certificate_path_matches_dense_on_k1_blockers() {
+    // The hdist+vdist fixture: two k=1 singletons; both paths must
+    // name the same sets.
+    let mut base = Sketch::new();
+    let a = base.add_point(vect2d::new(2.0, 2.0));
+    let b = base.add_point(vect2d::new(2.0, 2.0));
+    base.hdistance_pp.push(HorizontalDistancePP {
+        a, b, distance: 0.0, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    base.vdistance_pp.push(VerticalDistancePP {
+        a, b, distance: 0.0, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    base.assign_constraint_names();
+    let snap = bincode::serialize(&base).expect("serialize");
+    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
+    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    post.coincident_pp.push(CoincidentPP { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+    post.assign_constraint_names();
+
+    let (dense, sparse) = run_both_paths(&mut pre, &mut post);
+    let dense = dense.expect("dense finds blockers");
+    let sparse = sparse.expect("sparse finds blockers");
+    assert_eq!(dense.minimum_size, 1);
+    assert_eq!(sparse.minimum_size, 1);
+    let d: std::collections::HashSet<u32> = dense.sets.iter().map(|s| s[0]).collect();
+    let p: std::collections::HashSet<u32> = sparse.sets.iter().map(|s| s[0]).collect();
+    assert_eq!(d, p, "both paths name the same k=1 blockers");
+    assert_eq!(dense.existing_redundant, sparse.existing_redundant);
+}
+
+#[test]
+fn certificate_path_no_blocker_on_independent_candidate() {
+    // An unrelated candidate is not blocked: both paths return None.
+    let mut base = Sketch::new();
+    let a = base.add_point(vect2d::new(0.0, 0.0));
+    let b = base.add_point(vect2d::new(5.0, 0.0));
+    base.hdistance_pp.push(HorizontalDistancePP {
+        a, b, distance: 5.0, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    base.assign_constraint_names();
+    let snap = bincode::serialize(&base).expect("serialize");
+    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
+    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    post.vdistance_pp.push(VerticalDistancePP {
+        a, b, distance: 0.0, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    post.assign_constraint_names();
+    let (dense, sparse) = run_both_paths(&mut pre, &mut post);
+    assert!(dense.is_none());
+    assert!(sparse.is_none());
 }
