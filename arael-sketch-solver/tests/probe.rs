@@ -6,7 +6,7 @@
 use arael::model::JacobianModel;
 use arael::simple_lm::RootProblem;
 use arael::model::CrossBlock;
-use arael_sketch_solver::{probe, Collinear, Perpendicular, Sketch};
+use arael_sketch_solver::{probe, Collinear, CoincidentArcStart, CoincidentLL11, MidpointLP1, Perpendicular, PointOnArc, PointOnLine, Sketch};
 
 // A generic two-line sketch: nothing axis-aligned, unequal lengths.
 fn two_lines() -> (Sketch, arael::refs::Ref<arael_sketch_solver::Line>, arael::refs::Ref<arael_sketch_solver::Line>) {
@@ -209,4 +209,90 @@ fn fixed_endpoints_suppress_the_hint() {
     let rank = s.rank_analysis().unwrap();
     // Both endpoints pinned: horizontal cannot remove a free direction.
     assert!(!rank.reduces_rank(&probe::horizontal_row(&s.lines[a])));
+}
+
+#[test]
+fn coincident_rows_match_the_macro() {
+    let (mut s, a, b) = two_lines();
+    s.coincident_ll11.push(CoincidentLL11 {
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    let rows = macro_rows(&mut s, "CoincidentLL11");
+    assert_eq!(rows.len(), 2);
+    let pa = probe::point_pos(s.lines[a].p1.index(), s.lines[a].p1.value);
+    let pb = probe::point_pos(s.lines[b].p1.index(), s.lines[b].p1.value);
+    let probe_rows = probe::coincident_rows(&pa, &pb);
+    for (i, pr) in probe_rows.iter().enumerate() {
+        let al = alignment(&rows[i], pr);
+        assert!(al > 1.0 - 1e-12, "row {} alignment {}", i, al);
+    }
+}
+
+#[test]
+fn midpoint_rows_match_the_macro() {
+    let (mut s, a, b) = two_lines();
+    s.midpoint_lp1.push(MidpointLP1 {
+        line: a, target: b, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    let rows = macro_rows(&mut s, "MidpointLP1");
+    assert_eq!(rows.len(), 2);
+    let pa = probe::point_pos(s.lines[a].p1.index(), s.lines[a].p1.value);
+    let mid = probe::line_midpoint_pos(&s.lines[b]);
+    let probe_rows = probe::coincident_rows(&pa, &mid);
+    for (i, pr) in probe_rows.iter().enumerate() {
+        let al = alignment(&rows[i], pr);
+        assert!(al > 1.0 - 1e-12, "row {} alignment {}", i, al);
+    }
+}
+
+#[test]
+fn on_line_row_matches_the_macro() {
+    let (mut s, a, _) = two_lines();
+    let p = s.add_point(arael::vect::vect2d::new(2.0, 1.3));
+    s.point_on_line.push(PointOnLine {
+        point: p, line: a, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    let rows = macro_rows(&mut s, "PointOnLine");
+    assert_eq!(rows.len(), 1);
+    let q = probe::point_pos(s.points[p].pos.index(), s.points[p].pos.value);
+    let pr = probe::on_line_row(&s.lines[a], &q);
+    let al = alignment(&rows[0], &pr);
+    assert!(al > 1.0 - 1e-12, "alignment {}", al);
+}
+
+#[test]
+fn on_arc_row_matches_the_macro() {
+    let mut s = Sketch::new();
+    let e = s.add_ellipse(arael::vect::vect2d::new(1.0, -0.5), 2.0, 1.2, 0.7, true);
+    let p = s.add_point(arael::vect::vect2d::new(3.4, 0.9));
+    s.point_on_arc.push(PointOnArc {
+        point: p, arc: e, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    let rows = macro_rows(&mut s, "PointOnArc");
+    assert_eq!(rows.len(), 1);
+    let q = probe::point_pos(s.points[p].pos.index(), s.points[p].pos.value);
+    let pr = probe::on_arc_row(&s.arcs[e], &q);
+    let al = alignment(&rows[0], &pr);
+    assert!(al > 1.0 - 1e-12, "alignment {}", al);
+}
+
+#[test]
+fn arc_anchor_rows_match_the_macro() {
+    // Open elliptic arc: the start-anchor derivative exercises center,
+    // radius, radius_b, rotation and the start angle at once.
+    let mut s = Sketch::new();
+    let e = s.add_ellipse(arael::vect::vect2d::new(0.4, 1.1), 1.7, 0.9, 0.5, false);
+    let p = s.add_point(arael::vect::vect2d::new(2.0, 2.0));
+    s.coincident_arc_start.push(CoincidentArcStart {
+        point: p, arc: e, nid: 0, cid: 0, hb: CrossBlock::new(),
+    });
+    let rows = macro_rows(&mut s, "CoincidentArcStart");
+    assert_eq!(rows.len(), 2);
+    let q = probe::point_pos(s.points[p].pos.index(), s.points[p].pos.value);
+    let anchor = probe::arc_anchor_pos(&s.arcs[e], probe::ArcAnchor::Start);
+    let probe_rows = probe::coincident_rows(&q, &anchor);
+    for (i, pr) in probe_rows.iter().enumerate() {
+        let al = alignment(&rows[i], pr);
+        assert!(al > 1.0 - 1e-12, "row {} alignment {}", i, al);
+    }
 }
