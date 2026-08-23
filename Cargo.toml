@@ -3,7 +3,7 @@ members = ["arael-faer", "arael-macros", "arael-sym", "arael-sym-macros", "arael
 
 [package]
 name = "arael"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 description = "Nonlinear optimization framework with compile-time symbolic differentiation"
@@ -29,9 +29,9 @@ cholmod-gpl = ["cholmod"]
 rayon = ["faer/rayon", "arael-faer/rayon"]
 
 [dependencies]
-arael-macros = { version = "0.8.3", path = "arael-macros" }
-arael-sym = { version = "0.8.3", path = "arael-sym" }
-arael-faer = { version = "0.8.3", path = "arael-faer" }
+arael-macros = { version = "0.8.4", path = "arael-macros" }
+arael-sym = { version = "0.8.4", path = "arael-sym" }
+arael-faer = { version = "0.8.4", path = "arael-faer" }
 inventory = "0.3"
 num = "0.4"
 nalgebra = "0.33"

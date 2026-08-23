@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "arael"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arael-faer",
  "arael-macros",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "arael-faer"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "faer",
  "nano-gemm",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "arael-macros"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arael-sym",
  "arael-sym-macros",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "arael-sketch"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arael",
  "arael-sketch-backend",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "arael-sketch-backend"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arael",
  "arael-sketch-solver",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "arael-sketch-solver"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arael",
  "arael-sym",
@@ -324,14 +324,14 @@ dependencies = [
 
 [[package]]
 name = "arael-sym"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arael-sym-macros",
 ]
 
 [[package]]
 name = "arael-sym-macros"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-arael"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "serde",
  "serde_json",
