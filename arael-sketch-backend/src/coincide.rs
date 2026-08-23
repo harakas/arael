@@ -72,6 +72,12 @@ impl CoincidenceGroups {
         }
     }
 
+    /// Cluster root of every slot id, in one path-compressed pass.
+    /// For callers that need many O(1) lookups without `&mut`.
+    pub fn all_roots(&mut self) -> Vec<usize> {
+        (0..self.parent.len()).map(|i| self.find(i)).collect()
+    }
+
     pub fn find(&mut self, mut x: usize) -> usize {
         while self.parent[x] != x {
             self.parent[x] = self.parent[self.parent[x]];
