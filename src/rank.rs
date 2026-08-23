@@ -748,30 +748,80 @@ impl Jacobian<f64> {
     /// large `|lambda[i]|` name the rows carrying the dependency; a
     /// row outside the rowspan yields small coefficients everywhere.
     pub fn rowspan_certificate(&self, row: &[(u32, f64)], eps: f64) -> Result<Vec<f64>, RankError> {
-        let n = self.num_params;
-        if n == 0 || self.rows.is_empty() {
+        if self.num_params == 0 || self.rows.is_empty() {
             return Ok(vec![0.0; self.rows.len()]);
         }
-        let scales: Vec<f64> = self.column_l2_norms().iter().map(|c| c.max(1e-15)).collect();
-        let factor = NormalFactor::build(self, &scales, eps)?;
+        let ana = RowspanAnalyzer::new(self, eps)?;
+        let z = ana.solve_row(row);
+        Ok(ana.matvec(&z))
+    }
+}
+
+/// Rowspan queries against one Jacobian through a single shared
+/// regularised normal-equations factor `(J_n^T J_n + eps I)^{-1}` in
+/// column-normalised space. Everything a blocker analysis needs --
+/// span-membership residuals, certificates, and low-rank row-removal
+/// (Woodbury) updates -- reduces to [`Self::solve_row`],
+/// [`Self::row_dot`] and [`Self::matvec`] against this factor.
+pub struct RowspanAnalyzer<'a> {
+    jac: &'a Jacobian<f64>,
+    scales: Vec<f64>,
+    factor: NormalFactor,
+    eps: f64,
+}
+
+impl<'a> RowspanAnalyzer<'a> {
+    pub fn new(jac: &'a Jacobian<f64>, eps: f64) -> Result<Self, RankError> {
+        let scales: Vec<f64> = jac.column_l2_norms().iter().map(|c| c.max(1e-15)).collect();
+        let factor = NormalFactor::build(jac, &scales, eps)?;
+        Ok(RowspanAnalyzer { jac, scales, factor, eps })
+    }
+
+    pub fn eps(&self) -> f64 {
+        self.eps
+    }
+
+    /// `z = (J_n^T J_n + eps I)^{-1} row_n`.
+    pub fn solve_row(&self, row: &[(u32, f64)]) -> Vec<f64> {
+        let n = self.jac.num_params;
         let mut z = vec![0.0f64; n];
         for &(j, v) in row {
             if (j as usize) < n {
-                z[j as usize] += v / scales[j as usize];
+                z[j as usize] += v / self.scales[j as usize];
             }
         }
-        factor.solve(&mut z, 1);
-        let mut lam = Vec::with_capacity(self.rows.len());
-        for r in &self.rows {
-            let mut s = 0.0f64;
-            for &(j, v) in &r.entries {
-                if (j as usize) < n {
-                    s += (v / scales[j as usize]) * z[j as usize];
-                }
+        self.factor.solve(&mut z, 1);
+        z
+    }
+
+    /// `row_n . z` for an n-vector `z`.
+    pub fn row_dot(&self, row: &[(u32, f64)], z: &[f64]) -> f64 {
+        let n = self.jac.num_params;
+        let mut s = 0.0f64;
+        for &(j, v) in row {
+            if (j as usize) < n {
+                s += (v / self.scales[j as usize]) * z[j as usize];
             }
-            lam.push(s);
         }
-        Ok(lam)
+        s
+    }
+
+    /// `J_n z`: one coefficient per Jacobian row.
+    pub fn matvec(&self, z: &[f64]) -> Vec<f64> {
+        self.jac.rows.iter().map(|r| self.row_dot(&r.entries, z)).collect()
+    }
+
+    /// Column-normalised L2 norm of a row.
+    pub fn row_norm(&self, row: &[(u32, f64)]) -> f64 {
+        let n = self.jac.num_params;
+        let mut s = 0.0f64;
+        for &(j, v) in row {
+            if (j as usize) < n {
+                let vn = v / self.scales[j as usize];
+                s += vn * vn;
+            }
+        }
+        s.sqrt()
     }
 }
 

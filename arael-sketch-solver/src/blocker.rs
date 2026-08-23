@@ -63,6 +63,10 @@ pub struct BlockerStats {
     /// Time spent verifying the rejection condition (every candidate
     /// row projected onto rowspan(A)).
     pub rejection_check_ms: f64,
+    /// Certificate path: building the shared rowspan factor.
+    pub factor_ms: f64,
+    /// Certificate path: certificate factor + solves.
+    pub certificate_ms: f64,
     /// Number of candidate rows analysed (after zero-row filtering).
     pub candidate_rows: usize,
     /// Number of existing constraint rows in the pruned problem.
@@ -92,12 +96,18 @@ const MAX_SETS: usize = 5;
 const K2_LIMIT: usize = 200;
 // Skip k=3 search if more existing constraints than this.
 const K3_LIMIT: usize = 40;
-/// Dense-path budget: flops of the rowspan SVD (m * n * min(m, n)).
-const SVD_FLOP_LIMIT: usize = 50_000_000;
 /// Sparse path: verify at most this many certificate-named candidates.
 const CERT_VERIFY_CAP: usize = 16;
 /// Sparse path: relative certificate weight that names a constraint.
 const CERT_SUPPORT_TOL: f64 = 1e-6;
+/// Regulariser of the shared rowspan factor.
+const CERT_EPS: f64 = 1e-10;
+/// Relative residual above which a row counts as outside a rowspan:
+/// in-span residuals are ~sqrt(eps), out-of-span ones are the
+/// out-of-span fraction of the row's norm.
+const CERT_OUT_TOL: f64 = 1e-4;
+/// Backstop on factor solves across the whole expansion.
+const CERT_SOLVE_BUDGET: usize = 256;
 
 /// Run blocker analysis on a post-apply Jacobian.
 ///
@@ -110,12 +120,15 @@ pub fn analyze(
     jac: &Jacobian<f64>,
     candidate_cids: &HashSet<u32>,
 ) -> Option<BlockerReport> {
-    analyze_with_limit(jac, candidate_cids, SVD_FLOP_LIMIT)
+    // The certificate path wins at every measured size (the dense
+    // k = 1 sweep runs one SVD per constraint); the dense path stays
+    // as the exhaustive oracle behind [`analyze_with_limit`].
+    analyze_with_limit(jac, candidate_cids, 0)
 }
 
 /// [`analyze`] with an explicit dense-path work budget; above it the
-/// sparse certificate path runs instead. Tests force one path or the
-/// other with 0 / usize::MAX.
+/// sparse certificate path runs instead. Production uses 0 (always
+/// certificate); tests force the dense oracle with usize::MAX.
 pub fn analyze_with_limit(
     jac: &Jacobian<f64>,
     candidate_cids: &HashSet<u32>,
@@ -382,12 +395,20 @@ pub fn analyze_with_limit(
     })
 }
 
-/// The certificate path for sketches too big for the dense SVD: the
-/// candidate row is a linear combination of existing rows; the
-/// regularised minimum-norm coefficients name the rows carrying the
-/// dependency, and each named constraint is verified as a k = 1
-/// blocker with one sparse rank test. k >= 2 is not explored here
-/// (the dense path skips it beyond K2_LIMIT anyway).
+/// The certificate path: every query runs against one shared
+/// regularised factor of the existing rows (arael::rank::
+/// RowspanAnalyzer). The candidate's rejection residual, the
+/// certificate naming the constraints that carry the dependency, and
+/// every subset test are closed-form in that factor: removing a
+/// subset's rows is a low-rank downdate, so the reduced-system
+/// residual is the base solution plus a tiny Woodbury system over the
+/// subset's rows -- no per-subset factorization or rank computation.
+/// k = 1..3 search by support expansion (a minimal set has a member
+/// in the base certificate's support; the rest of the set lies in the
+/// reduced system's support, recursively), under the same K2 / K3
+/// limits as the dense path. `existing_redundant` is not computed on
+/// this path (always false): it has no cheap equivalent and only
+/// softens the hint's wording.
 #[allow(clippy::too_many_arguments)]
 fn analyze_sparse(
     n: usize,
@@ -399,91 +420,277 @@ fn analyze_sparse(
     t_total: web_time::Instant,
 ) -> Option<BlockerReport> {
     use arael::model::JacobianRow;
+    use arael::rank::RowspanAnalyzer;
+    use std::collections::BTreeSet;
+
     let t_rej = web_time::Instant::now();
-    let mk_jac = |skip_cid: Option<u32>| -> Jacobian<f64> {
-        Jacobian {
-            num_params: n,
-            rows: a_rows.iter().zip(a_row_cid.iter())
-                .filter(|&(_, &cid)| Some(cid) != skip_cid)
-                .map(|(r, &cid)| JacobianRow {
-                    constraint: cid,
-                    label: "",
-                    residual: 0.0,
-                    entries: r.clone(),
-                })
-                .collect(),
-        }
+    let ex_jac = Jacobian {
+        num_params: n,
+        rows: a_rows.iter().zip(a_row_cid.iter())
+            .map(|(r, &cid)| JacobianRow {
+                constraint: cid,
+                label: "",
+                residual: 0.0,
+                entries: r.clone(),
+            })
+            .collect(),
     };
-    let ex_jac = mk_jac(None);
-    let opts = arael::rank::RankOptions::default();
-    let rr = ex_jac.numeric_rank(&opts).ok()?;
-    let existing_redundant = rr.rank < a_rows.len();
-    // The rejection condition: every candidate row lies in the
-    // existing rowspan; otherwise there is no blocker to find.
+    let t_factor = web_time::Instant::now();
+    let ana = RowspanAnalyzer::new(&ex_jac, CERT_EPS).ok()?;
+    stats.factor_ms = t_factor.elapsed().as_secs_f64() * 1000.0;
+
+    // Per candidate row: the factor solution z, the certificate
+    // lambda = A_n z, and the in-span residual. The regularised
+    // least-squares objective against a row set B is
+    // eps * c^T (B^T B + eps I)^{-1} c: ~eps for a row in span(B),
+    // ~|c_out|^2 for a row with an out-of-span component.
+    struct Cand {
+        lam: Vec<f64>,
+        czc: f64,
+        norm: f64,
+    }
+    let t_cert = web_time::Instant::now();
+    let mut cands: Vec<Cand> = Vec::new();
     for c in candidate_rows {
-        if rr.reduces_rank(c) {
+        let z = ana.solve_row(c);
+        let czc = ana.row_dot(c, &z).max(0.0);
+        let norm = ana.row_norm(c).max(1e-30);
+        if (CERT_EPS * czc).sqrt() > CERT_OUT_TOL * norm {
+            // Not in the existing rowspan: the rejection was not a
+            // row-dependency, nothing to explain.
             return None;
         }
+        let lam = ana.matvec(&z);
+        cands.push(Cand { lam, czc, norm });
     }
+    stats.certificate_ms = t_cert.elapsed().as_secs_f64() * 1000.0;
+    stats.rejection_check_ms = t_rej.elapsed().as_secs_f64() * 1000.0;
 
-    // Certificate support: constraints carrying the dependency.
-    let mut strength: HashMap<u32, f64> = HashMap::new();
-    for c in candidate_rows {
-        let lam = ex_jac.rowspan_certificate(c, 1e-10).ok()?;
-        let max = lam.iter().fold(0.0f64, |a, l| a.max(l.abs())).max(1e-30);
-        for (l, &cid) in lam.iter().zip(a_row_cid.iter()) {
-            let rel = l.abs() / max;
-            if rel > CERT_SUPPORT_TOL {
-                let e = strength.entry(cid).or_insert(0.0);
-                if rel > *e {
-                    *e = rel;
+    // Rows of each constraint, and the support aggregation: the cids
+    // whose rows carry weight in a certificate, strongest first.
+    let mut rows_of: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, &cid) in a_row_cid.iter().enumerate() {
+        rows_of.entry(cid).or_default().push(i);
+    }
+    let mut truncated = false;
+    let mut support_from = |lams: &[Vec<f64>], excluded: &BTreeSet<u32>| -> Vec<u32> {
+        let mut strength: HashMap<u32, f64> = HashMap::new();
+        for lam in lams {
+            let max = lam.iter().enumerate()
+                .filter(|(i, _)| !excluded.contains(&a_row_cid[*i]))
+                .fold(0.0f64, |a, (_, l)| a.max(l.abs()))
+                .max(1e-30);
+            for (l, &cid) in lam.iter().zip(a_row_cid.iter()) {
+                if excluded.contains(&cid) {
+                    continue;
+                }
+                let rel = l.abs() / max;
+                if rel > CERT_SUPPORT_TOL {
+                    let e = strength.entry(cid).or_insert(0.0);
+                    if rel > *e {
+                        *e = rel;
+                    }
                 }
             }
         }
-    }
-    stats.rejection_check_ms = t_rej.elapsed().as_secs_f64() * 1000.0;
-
-    let mut support: Vec<(u32, f64)> = strength.into_iter().collect();
-    support.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mut truncated = support.len() > CERT_VERIFY_CAP;
-    support.truncate(CERT_VERIFY_CAP);
-
-    let t_k = web_time::Instant::now();
-    let mut kstat = BlockerKStats {
-        k: 1, skipped: false, subsets_tested: 0, blockers_found: 0, time_ms: 0.0,
-    };
-    let mut found: Vec<Vec<u32>> = Vec::new();
-    for &(cid, _) in &support {
-        if found.len() >= MAX_SETS {
+        let mut support: Vec<(u32, f64)> = strength.into_iter().collect();
+        support.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        if support.len() > CERT_VERIFY_CAP {
             truncated = true;
-            break;
+            support.truncate(CERT_VERIFY_CAP);
         }
-        kstat.subsets_tested += 1;
-        let sub = mk_jac(Some(cid));
-        let Ok(sr) = sub.numeric_rank(&opts) else { continue };
-        if candidate_rows.iter().any(|c| sr.reduces_rank(c)) {
-            kstat.blockers_found += 1;
-            found.push(vec![cid]);
+        support.into_iter().map(|(c, _)| c).collect()
+    };
+
+    // Lazy per-row Woodbury pieces: w_r = M a_r and u_r = A_n w_r.
+    let mut w_cache: HashMap<usize, (Vec<f64>, Vec<f64>)> = HashMap::new();
+    let mut solves = 0usize;
+    let piece = |r: usize, w_cache: &mut HashMap<usize, (Vec<f64>, Vec<f64>)>,
+                     solves: &mut usize| {
+        if !w_cache.contains_key(&r) {
+            *solves += 1;
+            let w = ana.solve_row(&a_rows[r]);
+            let u = ana.matvec(&w);
+            w_cache.insert(r, (w, u));
         }
+    };
+
+    // Woodbury test of a cid set S with rows R: with G[i][j] =
+    // a_i^T M a_j and t = lambda*[R], the reduced objective is
+    // eps * (c^T M c + t^T (I - G)^{-1} t). Blocked when some
+    // candidate's reduced residual exceeds the span tolerance. Also
+    // returns the reduced certificates for the expansion:
+    // lambda' = lambda* + sum_r beta_r u_r.
+    let verify = |set: &BTreeSet<u32>,
+                      w_cache: &mut HashMap<usize, (Vec<f64>, Vec<f64>)>,
+                      solves: &mut usize| -> (bool, Vec<Vec<f64>>) {
+        let rows: Vec<usize> = set.iter()
+            .flat_map(|cid| rows_of.get(cid).cloned().unwrap_or_default())
+            .collect();
+        for &r in &rows {
+            piece(r, w_cache, solves);
+        }
+        let k = rows.len();
+        // G is symmetric with eigenvalues strictly below 1 (eps > 0).
+        let mut g = vec![0.0f64; k * k];
+        for (i, &ri) in rows.iter().enumerate() {
+            let wi = &w_cache[&ri].0;
+            for (j, &rj) in rows.iter().enumerate() {
+                g[i * k + j] = ana.row_dot(&a_rows[rj], wi);
+            }
+        }
+        let mut blocked = false;
+        let mut reduced: Vec<Vec<f64>> = Vec::with_capacity(cands.len());
+        for cand in &cands {
+            let t: Vec<f64> = rows.iter().map(|&r| cand.lam[r]).collect();
+            // Solve (I - G) beta = t, small dense with partial pivoting.
+            let mut m = vec![0.0f64; k * k];
+            for i in 0..k {
+                for j in 0..k {
+                    m[i * k + j] = (if i == j { 1.0 } else { 0.0 }) - g[i * k + j];
+                }
+            }
+            let mut beta = t.clone();
+            solve_small(&mut m, &mut beta, k);
+            let tb: f64 = t.iter().zip(&beta).map(|(a, b)| a * b).sum();
+            let obj = (CERT_EPS * (cand.czc + tb.max(0.0))).max(0.0);
+            if obj.sqrt() > CERT_OUT_TOL * cand.norm {
+                blocked = true;
+            }
+            let mut lam = cand.lam.clone();
+            for (bi, &r) in beta.iter().zip(rows.iter()) {
+                let u = &w_cache[&r].1;
+                for (li, ui) in lam.iter_mut().zip(u.iter()) {
+                    *li += bi * ui;
+                }
+            }
+            reduced.push(lam);
+        }
+        (blocked, reduced)
+    };
+
+    let base_lams: Vec<Vec<f64>> = cands.iter().map(|c| c.lam.clone()).collect();
+    let n_ex = existing_cids_ordered.len();
+    let pos = |cid: u32| existing_cids_ordered.iter().position(|&c| c == cid).unwrap_or(usize::MAX);
+
+    // k = 1..3 by support expansion; each level only runs when the
+    // previous found nothing, mirroring the dense path's levels.
+    let mut minimum: Option<(usize, Vec<Vec<u32>>)> = None;
+    let none: BTreeSet<u32> = BTreeSet::new();
+    // Frontier: non-blocking subsets of size k-1 with the reduced
+    // certificates of the system they leave behind.
+    let mut frontier: Vec<(BTreeSet<u32>, Vec<Vec<f64>>)> = vec![(none, base_lams)];
+    'levels: for k in 1..=3 {
+        let t_k = web_time::Instant::now();
+        let mut kstat = BlockerKStats {
+            k, skipped: false, subsets_tested: 0, blockers_found: 0, time_ms: 0.0,
+        };
+        if (k == 2 && n_ex > K2_LIMIT) || (k == 3 && n_ex > K3_LIMIT) || solves > CERT_SOLVE_BUDGET {
+            kstat.skipped = true;
+            kstat.time_ms = t_k.elapsed().as_secs_f64() * 1000.0;
+            stats.per_k.push(kstat);
+            truncated = true;
+            break 'levels;
+        }
+        let mut found: Vec<Vec<u32>> = Vec::new();
+        let mut next_frontier: Vec<(BTreeSet<u32>, Vec<Vec<f64>>)> = Vec::new();
+        let mut tested: BTreeSet<BTreeSet<u32>> = BTreeSet::new();
+        for (base, lams) in &frontier {
+            for cid in support_from(lams, base) {
+                let mut set = base.clone();
+                set.insert(cid);
+                if set.len() != k || !tested.insert(set.clone()) {
+                    continue;
+                }
+                kstat.subsets_tested += 1;
+                let (blocked, reduced) = verify(&set, &mut w_cache, &mut solves);
+                if blocked {
+                    kstat.blockers_found += 1;
+                    let mut sorted: Vec<u32> = set.iter().copied().collect();
+                    sorted.sort_by_key(|&c| pos(c));
+                    found.push(sorted);
+                } else {
+                    next_frontier.push((set, reduced));
+                }
+            }
+        }
+        kstat.time_ms = t_k.elapsed().as_secs_f64() * 1000.0;
+        stats.per_k.push(kstat);
+        if !found.is_empty() {
+            // First MAX_SETS in the dense path's enumeration order.
+            found.sort_by_key(|set| set.iter().map(|&c| pos(c)).collect::<Vec<_>>());
+            found.truncate(MAX_SETS);
+            minimum = Some((k, found));
+            break 'levels;
+        }
+        frontier = next_frontier;
     }
-    // Report in first-seen constraint order, like the dense path.
-    found.sort_by_key(|set| {
-        existing_cids_ordered.iter().position(|&c| c == set[0]).unwrap_or(usize::MAX)
-    });
-    kstat.time_ms = t_k.elapsed().as_secs_f64() * 1000.0;
-    stats.per_k.push(kstat);
     stats.total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
-    let minimum_size = if found.is_empty() { 0 } else { 1 };
-    let truncated = truncated || found.is_empty();
-    Some(BlockerReport {
-        minimum_size,
-        sets: found,
-        existing_count: existing_cids_ordered.len(),
-        truncated,
-        existing_redundant,
-        stats,
+    Some(match minimum {
+        Some((k, sets)) => BlockerReport {
+            minimum_size: k,
+            sets,
+            existing_count: existing_cids_ordered.len(),
+            truncated: false,
+            existing_redundant: false,
+            stats,
+        },
+        None => BlockerReport {
+            minimum_size: 0,
+            sets: Vec::new(),
+            existing_count: existing_cids_ordered.len(),
+            truncated,
+            existing_redundant: false,
+            stats,
+        },
     })
+}
+
+/// Gaussian elimination with partial pivoting for the tiny Woodbury
+/// systems (a handful of rows). `m` is k x k row-major, `b` the rhs,
+/// solved in place.
+fn solve_small(m: &mut [f64], b: &mut [f64], k: usize) {
+    for col in 0..k {
+        let mut p = col;
+        for r in col + 1..k {
+            if m[r * k + col].abs() > m[p * k + col].abs() {
+                p = r;
+            }
+        }
+        if p != col {
+            for j in 0..k {
+                m.swap(col * k + j, p * k + j);
+            }
+            b.swap(col, p);
+        }
+        let d = m[col * k + col];
+        if d.abs() < 1e-300 {
+            continue;
+        }
+        for r in col + 1..k {
+            let f = m[r * k + col] / d;
+            if f == 0.0 {
+                continue;
+            }
+            for j in col..k {
+                m[r * k + j] -= f * m[col * k + j];
+            }
+            b[r] -= f * b[col];
+        }
+    }
+    for col in (0..k).rev() {
+        let d = m[col * k + col];
+        if d.abs() < 1e-300 {
+            b[col] = 0.0;
+            continue;
+        }
+        let mut s = b[col];
+        for j in col + 1..k {
+            s -= m[col * k + j] * b[j];
+        }
+        b[col] = s / d;
+    }
 }
 
 fn rows_to_matrix(rows: &[Vec<f64>], n: usize) -> DMatrix<f64> {

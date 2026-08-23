@@ -317,3 +317,133 @@ fn certificate_path_no_blocker_on_independent_candidate() {
     assert!(dense.is_none());
     assert!(sparse.is_none());
 }
+
+/// Raw-jacobian helper for the path-equivalence tests.
+fn raw_both(
+    n: usize,
+    existing: &[(u32, Vec<(u32, f64)>)],
+    candidate: &[(u32, f64)],
+) -> (Option<BlockerReport>, Option<BlockerReport>) {
+    use arael::model::{Jacobian, JacobianRow};
+    let mut rows: Vec<JacobianRow<f64>> = existing.iter()
+        .map(|(cid, e)| JacobianRow { constraint: *cid, label: "e", residual: 0.0, entries: e.clone() })
+        .collect();
+    rows.push(JacobianRow { constraint: 999, label: "c", residual: 0.0, entries: candidate.to_vec() });
+    let jac = Jacobian { num_params: n, rows };
+    let cand: std::collections::HashSet<u32> = [999].into_iter().collect();
+    (
+        arael_sketch_solver::blocker::analyze_with_limit(&jac, &cand, usize::MAX),
+        arael_sketch_solver::blocker::analyze_with_limit(&jac, &cand, 0),
+    )
+}
+
+#[test]
+fn certificate_expansion_matches_dense_at_k2() {
+    // r3 = r1 + r2 makes e0 doubly available: no single removal
+    // blocks, {r1,r2} and {r1,r3} do.
+    let existing = vec![
+        (1u32, vec![(0u32, 1.0)]),
+        (2u32, vec![(1u32, 1.0)]),
+        (3u32, vec![(0u32, 1.0), (1u32, 1.0)]),
+    ];
+    let (dense, sparse) = raw_both(4, &existing, &[(0, 1.0)]);
+    let dense = dense.expect("dense");
+    let sparse = sparse.expect("sparse");
+    assert_eq!(dense.minimum_size, 2);
+    assert_eq!(sparse.minimum_size, 2);
+    let d: std::collections::BTreeSet<Vec<u32>> = dense.sets.iter().cloned().collect();
+    let p: std::collections::BTreeSet<Vec<u32>> = sparse.sets.iter().cloned().collect();
+    assert_eq!(d, p, "same k=2 sets: dense {:?} sparse {:?}", dense.sets, sparse.sets);
+}
+
+#[test]
+fn certificate_expansion_matches_dense_at_k3() {
+    // Three copies of the same row: only removing all three blocks.
+    let existing = vec![
+        (1u32, vec![(0u32, 1.0)]),
+        (2u32, vec![(0u32, 2.0)]),
+        (3u32, vec![(0u32, 3.0)]),
+    ];
+    let (dense, sparse) = raw_both(3, &existing, &[(0, 1.0)]);
+    let dense = dense.expect("dense");
+    let sparse = sparse.expect("sparse");
+    assert_eq!(dense.minimum_size, 3);
+    assert_eq!(sparse.minimum_size, 3);
+    assert_eq!(dense.sets, sparse.sets);
+    assert_eq!(sparse.sets, vec![vec![1, 2, 3]]);
+}
+
+/// Size sweep of both paths; run with:
+///   cargo test -r -p arael-sketch-solver --test blocker -- --ignored --nocapture bench_paths
+#[test]
+#[ignore]
+fn bench_paths() {
+    use arael::model::{Jacobian, JacobianRow};
+    for &m in &[50usize, 100, 200, 400] {
+        let n = m + 10;
+        // Chain rows (one cid each) + a duplicate of row 0 so the
+        // candidate has a k=1 blocker; every row shares the chain
+        // component.
+        let mut rows: Vec<JacobianRow<f64>> = (0..m as u32)
+            .map(|i| JacobianRow {
+                constraint: i,
+                label: "e",
+                residual: 0.0,
+                entries: vec![(i, 1.0), (i + 1, -0.5), ((i + 2) % n as u32, 0.25)],
+            })
+            .collect();
+        rows.push(JacobianRow {
+            constraint: 100_000,
+            label: "c",
+            residual: 0.0,
+            entries: vec![(0, 1.0), (1, -0.5), (2, 0.25)],
+        });
+        let jac = Jacobian { num_params: n, rows };
+        let cand: std::collections::HashSet<u32> = [100_000].into_iter().collect();
+
+        let t = std::time::Instant::now();
+        let dense = arael_sketch_solver::blocker::analyze_with_limit(&jac, &cand, usize::MAX);
+        let t_dense = t.elapsed().as_secs_f64() * 1e3;
+        let t = std::time::Instant::now();
+        let sparse = arael_sketch_solver::blocker::analyze_with_limit(&jac, &cand, 0);
+        let t_sparse = t.elapsed().as_secs_f64() * 1e3;
+        let dm = dense.as_ref().map(|r| (r.minimum_size, r.sets.len()));
+        let sm = sparse.as_ref().map(|r| (r.minimum_size, r.sets.len()));
+        println!(
+            "m={:5}  dense {:9.1} ms {:?}   cert {:9.1} ms {:?}",
+            m, t_dense, dm, t_sparse, sm
+        );
+        assert_eq!(dm, sm, "paths agree at m={}", m);
+    }
+}
+
+
+/// Certificate-path-only sweep for the work-budget calibration.
+#[test]
+#[ignore]
+fn bench_certificate_scaling() {
+    use arael::model::{Jacobian, JacobianRow};
+    for &m in &[400usize, 800, 1600, 3200, 6400, 12800] {
+        let n = m + 10;
+        let mut rows: Vec<JacobianRow<f64>> = (0..m as u32)
+            .map(|i| JacobianRow {
+                constraint: i,
+                label: "e",
+                residual: 0.0,
+                entries: vec![(i, 1.0), (i + 1, -0.5), ((i + 2) % n as u32, 0.25)],
+            })
+            .collect();
+        rows.push(JacobianRow {
+            constraint: 100_000,
+            label: "c",
+            residual: 0.0,
+            entries: vec![(0, 1.0), (1, -0.5), (2, 0.25)],
+        });
+        let jac = Jacobian { num_params: n, rows };
+        let cand: std::collections::HashSet<u32> = [100_000].into_iter().collect();
+        let t = std::time::Instant::now();
+        let r = arael_sketch_solver::blocker::analyze_with_limit(&jac, &cand, 0);
+        println!("m={:6}  cert {:9.1} ms  {:?}", m, t.elapsed().as_secs_f64() * 1e3,
+            r.map(|r| (r.minimum_size, r.sets.len())));
+    }
+}

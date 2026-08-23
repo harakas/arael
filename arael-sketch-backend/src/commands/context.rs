@@ -515,6 +515,8 @@ pub(crate) fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -
     };
     if arael_sketch_solver::verbose() {
         let s = &report.stats;
+        eprintln!("[BLOCKER] factor={:.3}ms certificate={:.3}ms",
+            report.stats.factor_ms, report.stats.certificate_ms);
         eprintln!("[BLOCKER] candidates={} existing_constraints {}->{} (prune {:.3}ms) existing_rows={} rej_check={:.3}ms total={:.3}ms",
             s.candidate_rows, s.existing_before_prune, s.existing_after_prune,
             s.component_prune_ms, s.existing_rows, s.rejection_check_ms, s.total_ms);
