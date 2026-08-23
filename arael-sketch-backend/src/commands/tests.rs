@@ -7110,3 +7110,23 @@ fn test_settings_structural_dof_toggle() {
     run_err(&mut ctx, "settings structural_dof maybe");
     run_err(&mut ctx, "settings nonsense");
 }
+
+#[test]
+fn test_auto_connect_one_per_cluster() {
+    let mut ctx = CommandContext::new();
+    // L0.p2 and L1.p1 are a coincident cluster at (2,0).
+    run_ok(&mut ctx, "add_line 0,0 2,0; add_line 2,0 4,0");
+    let before = ctx.sketch.constraint_nid_cid_pairs().len();
+    let out = run_ok(&mut ctx, "add_line 2,0 2,5");
+    let added = ctx.sketch.constraint_nid_cid_pairs().len() - before;
+    assert_eq!(added, 1, "one coincident for the cluster, not one per member: {}", out);
+    // A single fresh connect keeps the incremental DOF window alive
+    // and the count exact.
+    assert!(ctx.sketch.cached_dof().is_some(), "window preserved");
+    let inc = ctx.sketch.dof().unwrap();
+    let full = ctx.sketch.mutate_values(|s| {
+        s.clear_cached_dof();
+        s.dof()
+    }).unwrap();
+    assert_eq!(inc, full);
+}

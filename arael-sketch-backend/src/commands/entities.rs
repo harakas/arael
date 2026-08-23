@@ -6,6 +6,76 @@ pub(crate) fn snap_near(a: vect2d, b: vect2d) -> bool {
     (a.x - b.x).abs() < SNAP_THRESHOLD && (a.y - b.y).abs() < SNAP_THRESHOLD
 }
 
+
+/// The (own slot, target) of an auto-connect candidate action.
+/// `own_is_line`: in auto_coincident_line the line side of the shared
+/// line-arc variants is ours; in auto_coincident_arc the arc side is.
+fn connect_slots(a: &Action, own_is_line: bool) -> Option<(u8, Selection)> {
+    use Action::*;
+    Some(match *a {
+        ApplyCoincidentLL11 { b, .. } => (0, Selection::LineP1(b)),
+        ApplyCoincidentLL12 { b, .. } => (0, Selection::LineP2(b)),
+        ApplyCoincidentLL21 { b, .. } => (1, Selection::LineP1(b)),
+        ApplyCoincidentLL22 { b, .. } => (1, Selection::LineP2(b)),
+        ApplyCoincidentLP1 { point, .. } => (0, Selection::Point(point)),
+        ApplyCoincidentLP2 { point, .. } => (1, Selection::Point(point)),
+        ApplyCoincidentLP1ArcCenter { line, arc } =>
+            if own_is_line { (0, Selection::ArcCenter(arc)) } else { (0, Selection::LineP1(line)) },
+        ApplyCoincidentLP2ArcCenter { line, arc } =>
+            if own_is_line { (1, Selection::ArcCenter(arc)) } else { (0, Selection::LineP2(line)) },
+        ApplyCoincidentLP1ArcStart { line, arc } =>
+            if own_is_line { (0, Selection::ArcStart(arc)) } else { (1, Selection::LineP1(line)) },
+        ApplyCoincidentLP2ArcStart { line, arc } =>
+            if own_is_line { (1, Selection::ArcStart(arc)) } else { (1, Selection::LineP2(line)) },
+        ApplyCoincidentLP1ArcEnd { line, arc } =>
+            if own_is_line { (0, Selection::ArcEnd(arc)) } else { (2, Selection::LineP1(line)) },
+        ApplyCoincidentLP2ArcEnd { line, arc } =>
+            if own_is_line { (1, Selection::ArcEnd(arc)) } else { (2, Selection::LineP2(line)) },
+        ApplyConcentric { b, .. } => (0, Selection::ArcCenter(b)),
+        ApplyCoincidentArcCenterStart { b, .. } => (0, Selection::ArcStart(b)),
+        ApplyCoincidentArcCenterEnd { b, .. } => (0, Selection::ArcEnd(b)),
+        ApplyCoincidentArcStartCenter { b, .. } => (1, Selection::ArcCenter(b)),
+        ApplyCoincidentArcStartStart { b, .. } => (1, Selection::ArcStart(b)),
+        ApplyCoincidentArcStartEnd { b, .. } => (1, Selection::ArcEnd(b)),
+        ApplyCoincidentArcEndCenter { b, .. } => (2, Selection::ArcCenter(b)),
+        ApplyCoincidentArcEndStart { b, .. } => (2, Selection::ArcStart(b)),
+        ApplyCoincidentArcEndEnd { b, .. } => (2, Selection::ArcEnd(b)),
+        ApplyCoincidentArcCenter { point, .. } => (0, Selection::Point(point)),
+        ApplyCoincidentArcStart { point, .. } => (1, Selection::Point(point)),
+        ApplyCoincidentArcEnd { point, .. } => (2, Selection::Point(point)),
+        _ => return None,
+    })
+}
+
+/// Keep one auto-connect per (own slot, target cluster): the members
+/// of an already-coincident cluster are one point, so a second
+/// connect to the same cluster would be a redundant constraint (and
+/// would end the incremental DOF window for nothing).
+fn dedup_connects(
+    sketch: &Sketch,
+    own_is_line: bool,
+    actions: Vec<(Action, String)>,
+) -> Vec<(Action, String)> {
+    if actions.len() < 2 {
+        return actions;
+    }
+    let mut groups = crate::coincide::CoincidenceGroups::build(sketch);
+    let mut claimed: std::collections::HashSet<(u8, usize)> = std::collections::HashSet::new();
+    actions
+        .into_iter()
+        .filter(|(a, _)| match connect_slots(a, own_is_line) {
+            Some((side, target)) => match groups.selection_id(target) {
+                Some(id) => {
+                    let root = groups.find(id);
+                    claimed.insert((side, root))
+                }
+                None => true,
+            },
+            None => true,
+        })
+        .collect()
+}
+
 /// Auto-connect endpoints of the last created line to nearby existing endpoints.
 pub(crate) fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<String> {
     let mut actions: Vec<(Action, String)> = Vec::new();
@@ -74,6 +144,7 @@ pub(crate) fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>
                 format!("{}.p2={}.end", this_name, arc.name)));
         }
     }
+    let actions = dedup_connects(&ctx.sketch, true, actions);
     let mut connected = Vec::new();
     let saved = ctx.skip_dof_check;
     ctx.skip_dof_check = true; // auto-coincident is positional, don't DOF-check
@@ -199,6 +270,7 @@ pub(crate) fn auto_coincident_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>, c
         }
     }
 
+    let actions = dedup_connects(&ctx.sketch, false, actions);
     let mut connected = Vec::new();
     let saved = ctx.skip_dof_check;
     ctx.skip_dof_check = true; // auto-coincident is positional, don't DOF-check
