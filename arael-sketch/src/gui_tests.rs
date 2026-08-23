@@ -2358,3 +2358,49 @@ fn test_free_end_does_not_snap_to_own_joint() {
         "joint one link away should still snap");
     gui.release(v(1.02, 0.08));
 }
+
+// A serpentine chain of unit links, dragged at an interior joint while
+// the mouse holds still. The auto-perp hint used to be re-derived
+// every frame from geometry its own pull rotates, flip-flopping the
+// hint and folding the chain back and forth; hint decisions and their
+// pull positions are now held/frozen while the mouse is stationary.
+#[test]
+fn test_stationary_drag_hints_hold_and_geometry_settles() {
+    let mut gui = Gui::new();
+    gui.cmd("add_line -0.157,0.988 0,0");
+    gui.cmd("add_line 0,0 0.828,-0.561");
+    gui.cmd("add_line 0.828,-0.561 0.267,-1.389");
+    gui.cmd("add_line 0.267,-1.389 0.850,-0.577");
+    gui.cmd("add_line 0.850,-0.577 0.038,0.007");
+    gui.cmd("length L0 1");
+    for i in 0..4 {
+        gui.cmd(&format!("equal L{} L{}", i, i + 1));
+    }
+    gui.app.scale = 4.0;
+    gui.frame();
+    let start = v(0.267, -1.389);
+    let hold = v(start.x - 1.6, start.y - 1.2);
+    gui.drag_moves(start, hold);
+    assert!(gui.app.grab.is_some(), "drag should be active");
+    gui.frames(8); // settle
+    let hint = (
+        gui.app.drag_perp_snap.map(|(h, _)| h),
+        gui.app.drag_collinear_hint,
+        gui.app.drag_hv_hint,
+        gui.app.drag_snap_preview.map(|(_, t)| t),
+    );
+    let p2 = gui.line(2).1;
+    for _ in 0..20 {
+        gui.frame();
+        let now = (
+            gui.app.drag_perp_snap.map(|(h, _)| h),
+            gui.app.drag_collinear_hint,
+            gui.app.drag_hv_hint,
+            gui.app.drag_snap_preview.map(|(_, t)| t),
+        );
+        assert_eq!(now, hint, "hint decisions must hold while the mouse is still");
+        let q = gui.line(2).1;
+        assert!(near(p2, q, 5e-3), "geometry must stay settled: {:?} vs {:?}", p2, q);
+    }
+    gui.release(hold);
+}

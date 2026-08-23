@@ -177,6 +177,12 @@ pub struct EditorApp {
     /// Pre-apparatus base of the line/arc param segment, captured by
     /// start_drag for drag_rank_reduces's index translation.
     drag_pre_la_base: Option<u32>,
+    /// Pull position of the active perp/collinear/H-V hint, frozen at
+    /// acquisition. A hint's pull target derives from the dragged
+    /// line's own geometry (its other endpoint, the host axis), so
+    /// recomputing it live feeds the pull back into itself; while the
+    /// mouse is still the frozen position keeps the solve convergent.
+    drag_hint_pos: Option<vect2d>,
     /// Auto-perpendicular hint during line-endpoint drag: the host line
     /// the drawn line will be made perpendicular to, plus the anchor
     /// (opposite endpoint) position for drawing the corner marker.
@@ -354,6 +360,35 @@ pub struct EditorApp {
 /// Per-gesture drag state, taken whole by [`EditorApp::take_drag_state`]
 /// when a drag exits. Owning the pieces here forces every exit path
 /// through the one place that clears them all.
+/// Projection of `cursor` onto the perpendicular axis through `anchor`
+/// against the host direction `p1 -> p2`; None for a degenerate host.
+/// The unconditional core of `try_perp_snap`, used to re-apply a held
+/// perpendicular hint without its acquisition threshold.
+fn perp_axis_foot(anchor: vect2d, host_p1: vect2d, host_p2: vect2d, cursor: vect2d) -> Option<vect2d> {
+    let hdx = host_p2.x - host_p1.x;
+    let hdy = host_p2.y - host_p1.y;
+    let hlen = (hdx * hdx + hdy * hdy).sqrt();
+    if hlen < 1e-9 {
+        return None;
+    }
+    let (hx, hy) = (hdx / hlen, hdy / hlen);
+    let (px, py) = (-hy, hx);
+    let t = (cursor.x - anchor.x) * px + (cursor.y - anchor.y) * py;
+    Some(vect2d::new(anchor.x + t * px, anchor.y + t * py))
+}
+
+/// See EditorApp::snap_exclusion_ctx.
+struct SnapExclusion {
+    groups: coincide::CoincidenceGroups,
+    /// Cluster root per slot id.
+    roots: Vec<usize>,
+    /// Roots of the dragged entity's anchors, grabbed slot first.
+    grab_roots: Vec<usize>,
+    /// Roots that merging the grabbed slot's cluster with would
+    /// collapse an entity.
+    collapse_roots: Vec<usize>,
+}
+
 struct DragExit {
     grab: Option<GrabTarget>,
     apparatus: Option<arael_sketch_solver::DragApparatus>,
@@ -486,6 +521,7 @@ impl EditorApp {
             drag_snap_preview: None,
             drag_snap_eval_mouse: None,
             drag_pre_la_base: None,
+            drag_hint_pos: None,
             drag_perp_snap: None,
             snap_disabled: false,
             history,
@@ -1507,9 +1543,10 @@ impl EditorApp {
                         // DOF (rigidly coupled geometry): the release would
                         // reject them, and pulling toward them just drags
                         // the whole assembly around.
+                        let cx = self.snap_exclusion_ctx(grab);
                         match self.find_snap_target_filter(
                             mouse_pos, hit_threshold, exclude_line, exclude_arc,
-                            |t| !self.has_existing_snap_attachment(grab, *t)
+                            |t| !self.snap_excluded(&cx, grab, *t)
                                 && self.snap_would_reduce_dof(grab, *t),
                         ) {
                             Some((p, t)) if reach(p) => (p, Some((p, t))),
@@ -1525,57 +1562,84 @@ impl EditorApp {
             // snap (both project to lines, so the unique intersection
             // determines the position and BOTH constraints fire on
             // release). Suppressed for point-like / arc-like snaps that
-            // already pin the position.
+            // already pin the position. Like the snap target, the
+            // DECISION (which host, fire or not) is made only when the
+            // mouse moves: the acquisition test reads geometry the perp
+            // pull itself rotates, and re-running it every frame
+            // flip-flops the hint -- and the fold with it. While the
+            // mouse is still the held host is re-applied at live
+            // geometry.
             let mut effective_pos = effective_pos;
+            if !stationary {
+                self.drag_hint_pos = None;
+            }
+            let held_perp_host = if stationary { self.drag_perp_snap.map(|(h, _)| h) } else { None };
             self.drag_perp_snap = None;
             let perp_eligible = match snap_preview {
                 None => true,
                 Some((_, SnapTarget::Line(_))) => true,
                 _ => false,
             };
-            if perp_eligible {
+            if perp_eligible && !self.snap_disabled {
                 if let Some(grab) = self.grab {
                     if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = grab {
                         let is_p1 = matches!(grab, GrabTarget::LineP1(_));
-                        if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
-                            if arael_sketch_backend::conflicts::validate_action(
-                                &self.sketch, &Action::ApplyPerpendicular { a: line, b: host }).is_none() {
-                                let opp = if is_p1 {
-                                    self.sketch.lines[line].p2.value
-                                } else {
-                                    self.sketch.lines[line].p1.value
-                                };
+                        let opp = if is_p1 {
+                            self.sketch.lines[line].p2.value
+                        } else {
+                            self.sketch.lines[line].p1.value
+                        };
+                        let decided = match held_perp_host {
+                            Some(h) if self.sketch.lines.contains_ref(h) => Some(h),
+                            _ if stationary => None,
+                            _ => self
+                                .find_anchor_host_line_for_drag(line, is_p1)
+                                .filter(|&host| arael_sketch_backend::conflicts::validate_action(
+                                    &self.sketch,
+                                    &Action::ApplyPerpendicular { a: line, b: host }).is_none())
+                                .filter(|&host| {
+                                    let hl = &self.sketch.lines[host];
+                                    self.try_perp_snap(
+                                        opp, hl.p1.value, hl.p2.value, mouse_pos, PERP_SNAP_PX,
+                                    ).filter(|foot| reach(*foot)).is_some()
+                                })
+                                // Only propose the perpendicular hint if
+                                // applying it would actually reduce DOF.
+                                // If the candidate's row is already in the
+                                // row-span (e.g. parallel already implies
+                                // perp via the rest of the sketch) the
+                                // release would just reject it, so
+                                // suppress the preview.
+                                .filter(|&host| self.perp_would_reduce_dof(line, host)),
+                        };
+                        if let Some(host) = decided {
+                            if stationary {
+                                if let Some(fp) = self.drag_hint_pos {
+                                    self.drag_perp_snap = Some((host, opp));
+                                    effective_pos = fp;
+                                }
+                            } else {
                                 let hl = &self.sketch.lines[host];
-                                if let Some(p) = self.try_perp_snap(
-                                    opp, hl.p1.value, hl.p2.value, mouse_pos, PERP_SNAP_PX,
-                                ).filter(|foot| reach(*foot)) {
-                                    // Only propose the perpendicular hint if
-                                    // applying it would actually reduce DOF.
-                                    // If the candidate's row is already in the
-                                    // row-span (e.g. parallel already implies
-                                    // perp via the rest of the sketch) the
-                                    // release would just reject it, so
-                                    // suppress the preview.
-                                    let hl_p1 = hl.p1.value;
-                                    let hl_p2 = hl.p2.value;
-                                    if self.perp_would_reduce_dof(line, host) {
-                                        self.drag_perp_snap = Some((host, opp));
-                                        if let Some((_, SnapTarget::Line(other))) = snap_preview {
-                                            let hdx = hl_p2.x - hl_p1.x;
-                                            let hdy = hl_p2.y - hl_p1.y;
-                                            let ol = &self.sketch.lines[other];
-                                            let odx = ol.p2.value.x - ol.p1.value.x;
-                                            let ody = ol.p2.value.y - ol.p1.value.y;
-                                            let cross = (-hdy) * ody - hdx * odx;
-                                            if cross.abs() >= 1e-9 {
-                                                let perp_p2 = vect2d::new(opp.x - hdy, opp.y + hdx);
-                                                effective_pos = arael_sketch_backend::geometry::line_line_intersection(
-                                                    opp, perp_p2, ol.p1.value, ol.p2.value);
-                                            }
-                                        } else {
-                                            effective_pos = p;
+                                let hl_p1 = hl.p1.value;
+                                let hl_p2 = hl.p2.value;
+                                if let Some(foot) = perp_axis_foot(opp, hl_p1, hl_p2, mouse_pos) {
+                                    self.drag_perp_snap = Some((host, opp));
+                                    if let Some((_, SnapTarget::Line(other))) = snap_preview {
+                                        let hdx = hl_p2.x - hl_p1.x;
+                                        let hdy = hl_p2.y - hl_p1.y;
+                                        let ol = &self.sketch.lines[other];
+                                        let odx = ol.p2.value.x - ol.p1.value.x;
+                                        let ody = ol.p2.value.y - ol.p1.value.y;
+                                        let cross = (-hdy) * ody - hdx * odx;
+                                        if cross.abs() >= 1e-9 {
+                                            let perp_p2 = vect2d::new(opp.x - hdy, opp.y + hdx);
+                                            effective_pos = arael_sketch_backend::geometry::line_line_intersection(
+                                                opp, perp_p2, ol.p1.value, ol.p2.value);
                                         }
+                                    } else {
+                                        effective_pos = foot;
                                     }
+                                    self.drag_hint_pos = Some(effective_pos);
                                 }
                             }
                         }
@@ -1591,6 +1655,8 @@ impl EditorApp {
             // onto the nearest axis through it, so the user can turn
             // a free-angle line into an axis-aligned one by the same
             // motion that would otherwise drop it free-hand.
+            let held_collinear = if stationary { self.drag_collinear_hint } else { None };
+            let held_hv = if stationary { self.drag_hv_hint } else { None };
             self.drag_hv_hint = None;
             self.drag_collinear_hint = None;
             if !self.snap_disabled
@@ -1606,35 +1672,58 @@ impl EditorApp {
                         } else {
                             self.sketch.lines[line].p1.value
                         };
-                        // Auto-collinear takes priority over H/V: it's a
-                        // stronger structural constraint (same infinite
-                        // line as host). Only fire when the host isn't
-                        // already structurally collinear with the line
-                        // and the dragged-line direction points along
-                        // the host, not across it.
-                        if let Some((host, foot)) = self.find_best_collinear_host_at(
-                            anchor, effective_pos, PERP_SNAP_PX, Some(line),
-                        ) {
-                            let already = self.drag_collinear_already.iter()
-                                .any(|&(la, lb)| la == line.index() && lb == host.index());
-                            if !already && !self.has_collinear_conflict(line, host) {
-                                effective_pos = foot;
+                        let _ = anchor;
+                        if stationary {
+                            // Hold the decided hint at its frozen pull
+                            // position; no re-acquisition until the
+                            // mouse moves.
+                            if let Some((cl_line, host)) = held_collinear
+                                && cl_line == line
+                                && self.sketch.lines.contains_ref(host)
+                                && let Some(fp) = self.drag_hint_pos
+                            {
+                                effective_pos = fp;
                                 self.drag_collinear_hint = Some((line, host));
-                            }
-                        }
-                        // Fall through to H/V only if collinear didn't fire.
-                        if self.drag_collinear_hint.is_none()
-                            && let Some((horizontal, snapped)) = crate::app_update::hv_snap_from(
-                            anchor, effective_pos, self.scale, PERP_SNAP_PX,
-                        ) {
-                            let already_locked = if horizontal {
-                                self.drag_line_locked_h
-                            } else {
-                                self.drag_line_locked_v
-                            };
-                            if !already_locked {
-                                effective_pos = snapped;
+                            } else if let Some((hv_line, horizontal)) = held_hv
+                                && hv_line == line
+                                && let Some(fp) = self.drag_hint_pos
+                            {
+                                effective_pos = fp;
                                 self.drag_hv_hint = Some((line, horizontal));
+                            }
+                        } else {
+                            // Auto-collinear takes priority over H/V: it's a
+                            // stronger structural constraint (same infinite
+                            // line as host). Only fire when the host isn't
+                            // already structurally collinear with the line
+                            // and the dragged-line direction points along
+                            // the host, not across it.
+                            if let Some((host, foot)) = self.find_best_collinear_host_at(
+                                anchor, effective_pos, PERP_SNAP_PX, Some(line),
+                            ) {
+                                let already = self.drag_collinear_already.iter()
+                                    .any(|&(la, lb)| la == line.index() && lb == host.index());
+                                if !already && !self.has_collinear_conflict(line, host) {
+                                    effective_pos = foot;
+                                    self.drag_collinear_hint = Some((line, host));
+                                    self.drag_hint_pos = Some(effective_pos);
+                                }
+                            }
+                            // Fall through to H/V only if collinear didn't fire.
+                            if self.drag_collinear_hint.is_none()
+                                && let Some((horizontal, snapped)) = crate::app_update::hv_snap_from(
+                                anchor, effective_pos, self.scale, PERP_SNAP_PX,
+                            ) {
+                                let already_locked = if horizontal {
+                                    self.drag_line_locked_h
+                                } else {
+                                    self.drag_line_locked_v
+                                };
+                                if !already_locked {
+                                    effective_pos = snapped;
+                                    self.drag_hv_hint = Some((line, horizontal));
+                                    self.drag_hint_pos = Some(effective_pos);
+                                }
                             }
                         }
                     }
@@ -1707,6 +1796,7 @@ impl EditorApp {
         self.drag_snap_eval_mouse = None;
         self.drag_rank = None;
         self.drag_pre_la_base = None;
+        self.drag_hint_pos = None;
         self.drag_perp_already.clear();
         self.drag_collinear_already.clear();
         self.drag_line_locked_h = false;
@@ -2568,21 +2658,6 @@ impl EditorApp {
         }
     }
 
-    // Map a point-like GrabTarget to the Selection identifying that
-    // same entity, for use with `are_transitively_coincident`. Body
-    // drags have no single-point Selection equivalent -> None.
-    fn grab_to_selection(grab: GrabTarget) -> Option<Selection> {
-        match grab {
-            GrabTarget::Point(r) => Some(Selection::Point(r)),
-            GrabTarget::LineP1(r) => Some(Selection::LineP1(r)),
-            GrabTarget::LineP2(r) => Some(Selection::LineP2(r)),
-            GrabTarget::ArcCenter(r) => Some(Selection::ArcCenter(r)),
-            GrabTarget::ArcStart(r) => Some(Selection::ArcStart(r)),
-            GrabTarget::ArcEnd(r) => Some(Selection::ArcEnd(r)),
-            GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_) => None,
-        }
-    }
-
     // Selections currently anchored at `l`'s midpoint via any of the
     // midpoint-* constraint tables. Used to recognize transitive
     // attachment: if the dragged entity is coincident with any of
@@ -2616,58 +2691,107 @@ impl EditorApp {
     // a line endpoint that is coincident with another line's endpoint
     // would forever snap to that other line's body (cursor sits on it
     // by construction), shadowing real snap candidates.
-    fn has_existing_snap_attachment(&self, grab: GrabTarget, snap: SnapTarget) -> bool {
-        let Some(grab_sel) = Self::grab_to_selection(grab) else { return false; };
-
-        // Anchors of the dragged entity: the grabbed slot plus its
-        // sibling slots. Attachment and degeneracy are judged against
-        // all of them: a snap whose target cluster touches ANY of the
-        // dragged entity's anchors is either already attached or would
-        // collapse an entity (a line to zero length, an arc to zero
-        // radius or zero sweep). The sibling side catches both
-        // directions -- the target's host sharing an anchor with the
-        // grab (its far endpoint / midpoint would collapse it), and a
-        // chain's free end dragged onto the joint at its own line's
-        // other end (the previous link's endpoint there would collapse
-        // the dragged line).
-        let mut grab_anchors = vec![grab_sel];
+    /// Per-search snap exclusion context: one coincidence union-find,
+    /// the cluster roots of the dragged entity's anchors (grabbed slot
+    /// first, then siblings), and the roots that merging the grabbed
+    /// slot's cluster with would collapse an entity -- the other-anchor
+    /// clusters of every entity anchored in the grab's cluster. Built
+    /// once per snap search; candidates test in O(1).
+    fn snap_exclusion_ctx(&self, grab: GrabTarget) -> SnapExclusion {
+        let mut groups = coincide::CoincidenceGroups::build(&self.sketch);
+        let roots = groups.all_roots();
+        let mut grab_sels: Vec<Selection> = Vec::new();
         match grab {
-            GrabTarget::LineP1(r) => grab_anchors.push(Selection::LineP2(r)),
-            GrabTarget::LineP2(r) => grab_anchors.push(Selection::LineP1(r)),
+            GrabTarget::Point(r) => grab_sels.push(Selection::Point(r)),
+            GrabTarget::LineP1(r) => {
+                grab_sels.push(Selection::LineP1(r));
+                grab_sels.push(Selection::LineP2(r));
+            }
+            GrabTarget::LineP2(r) => {
+                grab_sels.push(Selection::LineP2(r));
+                grab_sels.push(Selection::LineP1(r));
+            }
             GrabTarget::ArcCenter(r) => {
-                grab_anchors.push(Selection::ArcStart(r));
-                grab_anchors.push(Selection::ArcEnd(r));
+                grab_sels.push(Selection::ArcCenter(r));
+                grab_sels.push(Selection::ArcStart(r));
+                grab_sels.push(Selection::ArcEnd(r));
             }
             GrabTarget::ArcStart(r) => {
-                grab_anchors.push(Selection::ArcEnd(r));
-                grab_anchors.push(Selection::ArcCenter(r));
+                grab_sels.push(Selection::ArcStart(r));
+                grab_sels.push(Selection::ArcEnd(r));
+                grab_sels.push(Selection::ArcCenter(r));
             }
             GrabTarget::ArcEnd(r) => {
-                grab_anchors.push(Selection::ArcStart(r));
-                grab_anchors.push(Selection::ArcCenter(r));
+                grab_sels.push(Selection::ArcEnd(r));
+                grab_sels.push(Selection::ArcStart(r));
+                grab_sels.push(Selection::ArcCenter(r));
             }
-            _ => {}
+            GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_) => {}
         }
-        let coincident_any = |s: Selection| {
-            grab_anchors.iter().any(|g| self.are_transitively_coincident(*g, s))
+        let grab_roots: Vec<usize> = grab_sels
+            .iter()
+            .filter_map(|s| groups.selection_id(*s).map(|id| roots[id]))
+            .collect();
+        let mut collapse_roots: Vec<usize> = Vec::new();
+        if let Some(&g0) = grab_roots.first() {
+            for r in self.sketch.lines.refs() {
+                let r1 = roots[groups.lp1(r)];
+                let r2 = roots[groups.lp2(r)];
+                if r1 == g0 { collapse_roots.push(r2); }
+                if r2 == g0 { collapse_roots.push(r1); }
+            }
+            for r in self.sketch.arcs.refs() {
+                let rc = roots[groups.arc_center(r)];
+                let rs = roots[groups.arc_start(r)];
+                let re = roots[groups.arc_end(r)];
+                if rc == g0 { collapse_roots.push(rs); collapse_roots.push(re); }
+                if rs == g0 { collapse_roots.push(rc); collapse_roots.push(re); }
+                if re == g0 { collapse_roots.push(rc); collapse_roots.push(rs); }
+            }
+        }
+        SnapExclusion { groups, roots, grab_roots, collapse_roots }
+    }
+
+    /// One-shot form for release-time re-searches; the drag search
+    /// builds the context once and calls snap_excluded directly.
+    fn has_existing_snap_attachment(&self, grab: GrabTarget, snap: SnapTarget) -> bool {
+        let cx = self.snap_exclusion_ctx(grab);
+        self.snap_excluded(&cx, grab, snap)
+    }
+
+    // Whether a snap candidate must not be offered for this grab:
+    // already attached, or degenerate. A target whose cluster touches
+    // any anchor of the dragged entity, or any collapse root, would
+    // collapse an entity on release (a line to zero length, an arc to
+    // zero radius or zero sweep) -- the collapse roots catch targets
+    // one entity away, e.g. a serpentine chain where the far joint of
+    // the adjacent link surfaces under another line's endpoint name.
+    // Slot, midpoint and body targets of an entity sharing an anchor
+    // with the dragged one are rejected for the same reason.
+    fn snap_excluded(&self, cx: &SnapExclusion, grab: GrabTarget, snap: SnapTarget) -> bool {
+        let sel_root = |s: Selection| cx.groups.selection_id(s).map(|id| cx.roots[id]);
+        let in_grab = |s: Selection| {
+            sel_root(s).is_some_and(|r| cx.grab_roots.contains(&r))
         };
 
         if let Some(snap_sel) = Self::snap_to_selection(snap) {
-            if coincident_any(snap_sel) {
-                return true;
+            if let Some(rt) = sel_root(snap_sel) {
+                if cx.grab_roots.contains(&rt) || cx.collapse_roots.contains(&rt) {
+                    return true;
+                }
             }
         }
         match snap {
             SnapTarget::LineP1(l) | SnapTarget::LineP2(l) | SnapTarget::LineMidpoint(l) => {
-                if coincident_any(Selection::LineP1(l)) || coincident_any(Selection::LineP2(l)) {
+                if in_grab(Selection::LineP1(l)) || in_grab(Selection::LineP2(l)) {
                     return true;
                 }
             }
             SnapTarget::ArcCenter(a) | SnapTarget::ArcStart(a)
             | SnapTarget::ArcEnd(a) | SnapTarget::ArcMidpoint(a) => {
-                if coincident_any(Selection::ArcCenter(a))
-                    || coincident_any(Selection::ArcStart(a))
-                    || coincident_any(Selection::ArcEnd(a)) {
+                if in_grab(Selection::ArcCenter(a))
+                    || in_grab(Selection::ArcStart(a))
+                    || in_grab(Selection::ArcEnd(a)) {
                     return true;
                 }
             }
@@ -2710,9 +2834,9 @@ impl EditorApp {
                     _ => false,
                 };
                 direct
-                    || coincident_any(Selection::LineP1(l))
-                    || coincident_any(Selection::LineP2(l))
-                    || self.selections_at_line_midpoint(l).iter().any(|s| coincident_any(*s))
+                    || in_grab(Selection::LineP1(l))
+                    || in_grab(Selection::LineP2(l))
+                    || self.selections_at_line_midpoint(l).iter().any(|s| in_grab(*s))
             }
             SnapTarget::ArcBody(a) => {
                 // Same arc-point-helper plumbing for point_on_arc.
@@ -2737,17 +2861,17 @@ impl EditorApp {
                     _ => false,
                 };
                 direct
-                    || coincident_any(Selection::ArcStart(a))
-                    || coincident_any(Selection::ArcEnd(a))
-                    || self.selections_at_arc_midpoint(a).iter().any(|s| coincident_any(*s))
+                    || in_grab(Selection::ArcStart(a))
+                    || in_grab(Selection::ArcEnd(a))
+                    || self.selections_at_arc_midpoint(a).iter().any(|s| in_grab(*s))
             }
             SnapTarget::LineMidpoint(l) => {
                 // Anchored to `l`'s midpoint iff transitively coincident
                 // with any entity directly constrained there.
-                self.selections_at_line_midpoint(l).iter().any(|s| coincident_any(*s))
+                self.selections_at_line_midpoint(l).iter().any(|s| in_grab(*s))
             }
             SnapTarget::ArcMidpoint(a) => {
-                self.selections_at_arc_midpoint(a).iter().any(|s| coincident_any(*s))
+                self.selections_at_arc_midpoint(a).iter().any(|s| in_grab(*s))
             }
             _ => false,
         }
