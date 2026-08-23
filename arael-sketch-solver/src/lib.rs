@@ -2714,6 +2714,7 @@ impl Sketch {
                 min_iters: 1,
                 //gradient_tolerance: Some(1e-6),
                 verbose: verbose(),
+                gather_timing: verbose(),
                 ..Default::default()
             };
             // The session follows the BACKEND, not a size threshold of our
@@ -2734,6 +2735,28 @@ impl Sketch {
                     result.x = r.x;
                     result.status = r.status;
                     result.final_lambda = r.final_lambda;
+                    // Accumulate phase timing across the stages.
+                    if let Some(t) = r.timing {
+                        let acc = result.timing.get_or_insert_with(Default::default);
+                        acc.total += t.total;
+                        acc.assembly += t.assembly;
+                        acc.analysis += t.analysis;
+                        acc.linear_solve += t.linear_solve;
+                        acc.cost_eval += t.cost_eval;
+                        acc.advance += t.advance;
+                        acc.assembly_count += t.assembly_count;
+                        acc.analysis_count += t.analysis_count;
+                        acc.linear_solve_count += t.linear_solve_count;
+                        acc.cost_eval_count += t.cost_eval_count;
+                        acc.advance_count += t.advance_count;
+                        if acc.steps.is_empty() {
+                            acc.first_assembly = t.first_assembly;
+                            acc.first_linear_solve = t.first_linear_solve;
+                            acc.first_cost_eval = t.first_cost_eval;
+                            acc.first_advance = t.first_advance;
+                        }
+                        acc.steps.extend(t.steps);
+                    }
                 }
                 Err(e) => {
                     // A broken stage (degenerate diagonal or setup

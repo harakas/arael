@@ -515,3 +515,103 @@ fn perf_probe_rank_loose_scene() {
     });
     println!("rank, 200 free lines + part   avg {:9.1} us  max {:9.1} us", avg, max);
 }
+
+/// Large-scene profile: DOF, add_line between endpoints, drag steps,
+/// and the solve's assembly vs linear-solve split. Loads
+/// ~/large_grid.json; skips gracefully when absent.
+#[test]
+#[ignore]
+fn perf_probe_large_grid() {
+    let path = format!("{}/large_grid.json", std::env::var("HOME").unwrap_or_default());
+    let Ok(json) = std::fs::read_to_string(&path) else {
+        eprintln!("skipping: {} not found", path);
+        return;
+    };
+    arael_sketch_solver::set_verbose(true);
+    let mut gui = Gui::new();
+    gui.app.load_from_json(&json);
+    gui.frame();
+    let s = &gui.app.sketch;
+    println!("scene: {} lines, {} points, {} arcs",
+        s.lines.refs().count(), s.points.refs().count(), s.arcs.refs().count());
+
+    // 1. DOF (cold: cache cleared each time).
+    for i in 0..3 {
+        let t = Instant::now();
+        gui.app.sketch.mutate_values(|s| {
+            s.clear_cached_dof();
+            let _ = s.ensure_rank();
+        });
+        println!("dof cold {}          {:9.1} ms", i, t.elapsed().as_secs_f64() * 1e3);
+    }
+
+    // Building blocks, standalone.
+    let (avg, max) = time_us(5, || {
+        let _ = bincode::serialize(&*gui.app.sketch).unwrap();
+    });
+    println!("bincode snapshot     avg {:9.1} ms  max {:9.1} ms", avg / 1e3, max / 1e3);
+    let (avg, max) = time_us(5, || {
+        let _ = gui.app.sketch.current_cost();
+    });
+    println!("current_cost         avg {:9.1} ms  max {:9.1} ms", avg / 1e3, max / 1e3);
+
+    // 2. add_line between two existing endpoints (auto-connect snaps).
+    let lines: Vec<_> = gui.app.sketch.lines.refs().collect();
+    for (i, (a, b)) in [(lines[7], lines[lines.len() / 2]), (lines[13], lines[lines.len() - 3])]
+        .iter().enumerate()
+    {
+        let (p1, p2) = {
+            let s = &gui.app.sketch;
+            (s.lines[*a].p1.value, s.lines[*b].p2.value)
+        };
+        let t = Instant::now();
+        for r in gui.app.run_commands(&format!("add_line {},{} {},{}", p1.x, p1.y, p2.x, p2.y)) {
+            assert!(!r.is_error, "{}", r.output);
+        }
+        println!("add_line {}           {:9.1} ms", i, t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        for r in gui.app.run_commands("undo") {
+            assert!(!r.is_error, "{}", r.output);
+        }
+        println!("undo                 {:9.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    }
+
+    // 3. drag steps + the per-frame suspects, via the shared scene probe.
+    let target = {
+        let s = &gui.app.sketch;
+        s.lines[lines[lines.len() / 3]].p1.value
+    };
+    gui.app.scale = 40.0;
+    gui.app.offset = egui::Vec2::new(
+        400.0 - (target.x * 40.0) as f32,
+        300.0 + (target.y * 40.0) as f32,
+    );
+    gui.frame();
+    probe_scene("large_grid", &mut gui, Some((target.x, target.y)));
+
+    // 4. solve: assembly vs optimization. Displace a point, solve with
+    // timing gathered (verbose wires gather_timing).
+    gui.app.sketch.mutate_values(|s| {
+        let r = s.lines.refs().next().unwrap();
+        s.lines[r].p1.value.x += 3.0;
+        s.lines[r].p1.value.y += 2.0;
+    });
+    let t = Instant::now();
+    let result = gui.app.sketch.solve();
+    let total = t.elapsed().as_secs_f64() * 1e3;
+    println!("solve: {:.1} ms total, {} iters ({} accepted), cost {:.3e} -> {:.3e}",
+        total, result.iterations, result.accepted_iterations, result.start_cost, result.end_cost);
+    if let Some(tm) = &result.timing {
+        println!("  assembly       {:9.1} ms ({} calls, first {:.1} ms)",
+            tm.assembly.as_secs_f64() * 1e3, tm.assembly_count,
+            tm.first_assembly.as_secs_f64() * 1e3);
+        println!("  analysis       {:9.1} ms", tm.analysis.as_secs_f64() * 1e3);
+        println!("  linear_solve   {:9.1} ms (first {:.1} ms)",
+            tm.linear_solve.as_secs_f64() * 1e3, tm.first_linear_solve.as_secs_f64() * 1e3);
+        println!("  cost_eval      {:9.1} ms", tm.cost_eval.as_secs_f64() * 1e3);
+        println!("  advance        {:9.1} ms", tm.advance.as_secs_f64() * 1e3);
+        println!("  lm total       {:9.1} ms", tm.total.as_secs_f64() * 1e3);
+    } else {
+        println!("  (no timing gathered)");
+    }
+}
