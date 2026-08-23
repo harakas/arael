@@ -503,25 +503,57 @@ fn run_batch(runner: &mut dyn ActionRunner, label: &str, actions: Vec<Action>) -
 /// constraints are known to be consistent by construction, so they skip
 /// the per-constraint gate; a pattern of hundreds of entities is a
 /// handful of history entries.
+/// A copy surviving a pattern edit: its entities, and its constraint
+/// nids when they are kept as-is (`SetImageTransforms` retargets them);
+/// `None` means the old constraints were deleted and phase 2 re-emits
+/// them (the transform variant changed).
+struct ReusedCopy {
+    entities: Vec<MetaEntity>,
+    kept_constraints: Option<Vec<u32>>,
+}
+
 fn make_copies(
     runner: &mut dyn ActionRunner,
     plan: &PatternPlan,
     center: Option<Ref<Point>>,
+    reused: &HashMap<(i32, i32), ReusedCopy>,
     out: &mut PatternOutcome,
 ) -> Result<Vec<PatternCopy>, String> {
     let n = plan.sources.len();
-    // Phase 1: the entities.
-    let creates: Vec<Action> = plan.copies.iter().flat_map(|c| c.geoms.iter().map(create_action)).collect();
-    let created = run_batch(runner, "Pattern copies", creates)?;
-    let Created::Many(list) = created else {
-        return Err("pattern copies: nothing was added".into());
+    // Phase 1: the entities. Cells in `reused` keep their existing
+    // entities (and whatever the user attached to them); only the
+    // rest are created.
+    let creates: Vec<Action> = plan
+        .copies
+        .iter()
+        .filter(|c| !reused.contains_key(&c.index))
+        .flat_map(|c| c.geoms.iter().map(create_action))
+        .collect();
+    let expected = creates.len();
+    let list: Vec<Created> = if expected == 0 {
+        Vec::new()
+    } else {
+        let Created::Many(list) = run_batch(runner, "Pattern copies", creates)? else {
+            return Err("pattern copies: nothing was added".into());
+        };
+        list
     };
-    if list.len() != plan.copies.len() * n {
+    if list.len() != expected {
         return Err("pattern copies: not every entity was added".into());
     }
     let mut entities_per_copy: Vec<Vec<MetaEntity>> = Vec::with_capacity(plan.copies.len());
     let mut it = list.into_iter();
     for copy in &plan.copies {
+        if let Some(r) = reused.get(&copy.index) {
+            // Seed the surviving entities at the cell's new geometry
+            // so the solve settles there.
+            let sketch = runner.sketch_mut();
+            for (e, g) in r.entities.iter().zip(&copy.geoms) {
+                reseed(sketch, *e, g);
+            }
+            entities_per_copy.push(r.entities.clone());
+            continue;
+        }
         let mut entities = Vec::with_capacity(n);
         for (k, _) in copy.geoms.iter().enumerate() {
             let e = match it.next() {
@@ -538,6 +570,9 @@ fn make_copies(
     let n0 = runner.sketch().next_constraint_id;
     let mut acts: Vec<Action> = Vec::new();
     for (copy, entities) in plan.copies.iter().zip(&entities_per_copy) {
+        if reused.get(&copy.index).is_some_and(|r| r.kept_constraints.is_some()) {
+            continue; // constraints kept, SetImageTransforms retargets them
+        }
         let xf = xf_of(plan, copy, center);
         for (k, tie) in plan.ties.iter().enumerate() {
             if tie.mask != 0 {
@@ -555,6 +590,9 @@ fn make_copies(
                     acts.push(action);
                 }
             }
+        }
+        if reused.contains_key(&copy.index) {
+            continue; // surviving entities already carry their flags
         }
         for (k, &e) in entities.iter().enumerate() {
             let sketch = runner.sketch();
@@ -605,6 +643,9 @@ fn make_copies(
     });
     let mut copies = Vec::with_capacity(plan.copies.len());
     for ((copy, entities), mut constraints) in plan.copies.iter().zip(entities_per_copy).zip(per_copy) {
+        if let Some(kept) = reused.get(&copy.index).and_then(|r| r.kept_constraints.clone()) {
+            constraints = kept;
+        }
         constraints.sort_unstable();
         out.entities.push(entities.iter().map(|e| entity_name(runner.sketch(), *e)).collect());
         out.constraints.extend(constraints.iter().map(|n| format!("C{}", n)));
@@ -674,7 +715,7 @@ pub fn apply(runner: &mut dyn ActionRunner, plan: &PatternPlan) -> Result<Patter
 fn apply_inner(runner: &mut dyn ActionRunner, plan: &PatternPlan) -> Result<PatternOutcome, String> {
     let mut out = PatternOutcome::default();
     let (center, helper, constraints) = center_point(runner, plan)?;
-    let copies = make_copies(runner, plan, center, &mut out)?;
+    let copies = make_copies(runner, plan, center, &HashMap::new(), &mut out)?;
     let pattern = Pattern { sources: plan.sources.clone(), kind: record_kind(plan, helper), copies, constraints };
     runner.run(Action::RegisterMeta { meta: Meta { mid: 0, name: String::new(), kind: MetaKind::Pattern(pattern) } });
     if let Some(e) = runner.take_error() {
@@ -808,21 +849,80 @@ fn update_inner(runner: &mut dyn ActionRunner, mid: u32, p: &Pattern, new_plan: 
         register(runner, mid, rec)?;
         return Ok(out);
     }
-    // Rebuild: forget the copies (record first, so the deletions are not
-    // tampering), delete them and the helper, make the new ones.
+    // Rebuild as a diff over the grid cells: a copy present in both
+    // plans keeps its entities -- and whatever the user attached to
+    // them -- while its pattern-owned constraints are re-made for the
+    // new transform. Removed cells are deleted, new cells created.
     let mut rec = p.clone();
-    let doomed: Vec<MetaEntity> = rec.copies.iter().flat_map(|c| c.entities.iter().copied()).collect();
     let old_helper = rec.helper();
-    rec.copies.clear();
-    rec.constraints.clear();
-    rec.kind = record_kind(new_plan, None);
-    register(runner, mid, rec)?;
-    let mut deletes: Vec<Action> = doomed
-        .into_iter()
+    let mut old_by_index: HashMap<(i32, i32), PatternCopy> = HashMap::new();
+    for c in rec.copies.drain(..) {
+        old_by_index.insert(c.index, c);
+    }
+    let kinds_match = |old: &PatternCopy, cplan: &CopyPlan| {
+        old.entities.len() == cplan.geoms.len()
+            && old.entities.iter().zip(&cplan.geoms).all(|(e, g)| matches!(
+                (e, g),
+                (MetaEntity::Line(_), CopyGeom::Line { .. })
+                    | (MetaEntity::Point(_), CopyGeom::Point { .. })
+                    | (MetaEntity::Arc(_), CopyGeom::Arc { .. })
+            ))
+            && old.entities.iter().all(|e| entity_exists(runner.sketch(), *e))
+    };
+    // When the transform variant is unchanged (translate stays
+    // translate, rotate stays rotate), a surviving copy keeps its
+    // constraints and SetImageTransforms retargets them -- this also
+    // keeps the circular center helper's purposes alive. A variant
+    // change (a frame added or removed) deletes and re-emits them.
+    let same_variant = match (&p.kind, &new_plan.params.kind) {
+        (PatternKind::Circular { .. }, PatternSpec::Circular { .. }) => true,
+        (
+            PatternKind::Rectangular { frame: f1, .. },
+            PatternSpec::Rectangular { frame: f2, .. },
+        ) => f1.is_some() == f2.is_some(),
+        _ => false,
+    };
+    let mut reused: HashMap<(i32, i32), ReusedCopy> = HashMap::new();
+    let mut dead_constraints: Vec<u32> = Vec::new();
+    for cplan in &new_plan.copies {
+        if old_by_index.get(&cplan.index).is_some_and(|old| kinds_match(old, cplan)) {
+            let old = old_by_index.remove(&cplan.index).unwrap();
+            let kept_constraints = if same_variant {
+                Some(old.constraints)
+            } else {
+                dead_constraints.extend(old.constraints);
+                None
+            };
+            reused.insert(cplan.index, ReusedCopy { entities: old.entities, kept_constraints });
+        }
+    }
+    // The circular helper survives when the center reference did.
+    let same_center = matches!(
+        (&p.kind, &new_plan.params.kind),
+        (
+            PatternKind::Circular { center: c1, .. },
+            PatternSpec::Circular { center: c2, .. },
+        ) if c1 == c2
+    );
+
+    // Record first, so the deletions are not tampering.
+    rec.kind = record_kind(new_plan, if same_center { old_helper } else { None });
+    if !same_center {
+        rec.constraints.clear();
+    }
+    register(runner, mid, rec.clone())?;
+
+    let mut deletes: Vec<Action> = old_by_index
+        .values()
+        .flat_map(|c| c.entities.iter().copied())
         .filter(|e| entity_exists(runner.sketch(), *e))
         .map(crate::meta::delete_action)
         .collect();
-    if let Some(h) = old_helper
+    deletes.extend(dead_constraints.into_iter().map(|nid| Action::DeleteConstraint {
+        id: crate::ids::ConstraintId::Numbered(nid),
+    }));
+    if !same_center
+        && let Some(h) = old_helper
         && runner.sketch().points.get(h).is_some()
     {
         deletes.push(Action::DeletePoint { point: h });
@@ -830,8 +930,38 @@ fn update_inner(runner: &mut dyn ActionRunner, mid: u32, p: &Pattern, new_plan: 
     if !deletes.is_empty() {
         run_batch(runner, "Delete pattern copies", deletes)?;
     }
-    let (center, helper, constraints) = center_point(runner, new_plan)?;
-    let copies = make_copies(runner, new_plan, center, &mut out)?;
+    let (center, helper, constraints) = if same_center {
+        let center = old_helper.or(match &new_plan.params.kind {
+            PatternSpec::Circular { center: CenterRef::Point(pt), .. } => Some(*pt),
+            _ => None,
+        });
+        (center, old_helper, rec.constraints)
+    } else {
+        center_point(runner, new_plan)?
+    };
+    // Retarget the kept constraints to the new cell transforms.
+    // Re-seed those copies first, as the in-place path does: solving
+    // the transform swap from the old positions leaves large image
+    // residuals that drag the free source along.
+    let mut updates = Vec::new();
+    for cplan in &new_plan.copies {
+        if let Some(r) = reused.get(&cplan.index) {
+            let Some(kept) = r.kept_constraints.as_ref() else { continue };
+            let sketch = runner.sketch_mut();
+            for (e, g) in r.entities.iter().zip(&cplan.geoms) {
+                reseed(sketch, *e, g);
+            }
+            let xf = xf_of(new_plan, cplan, center);
+            updates.extend(kept.iter().map(|&nid| (nid, xf)));
+        }
+    }
+    if !updates.is_empty() {
+        runner.run(Action::SetImageTransforms { updates });
+        if let Some(e) = runner.take_error() {
+            return Err(e);
+        }
+    }
+    let copies = make_copies(runner, new_plan, center, &reused, &mut out)?;
     let rec = Pattern { sources: p.sources.clone(), kind: record_kind(new_plan, helper), copies, constraints };
     register(runner, mid, rec)?;
     Ok(out)

@@ -829,7 +829,7 @@ direction line inside the set.
 **Editing.** The meta-constraint keeps the parameters:
 
 ```
-pattern M0 8                      new quantity: the copies are made again
+pattern M0 8                      new quantity: surviving cells keep their copies, new cells are added
 pattern M0 partial 90 | full      distribution; a new angle moves the copies in place
 pattern M0 3 12 | by 2 6          new quantity / distance on an axis (a distance alone moves in place)
 pattern M0 along L2 | noalong | extent | spacing | symmetric | one
@@ -838,6 +838,11 @@ info M0 | list metas | select M0 | pattern selection 6
 delete M0                         dissolve: the copies stay, still images of the source
 delete M0 all                     delete the copies too
 ```
+
+A copy present before and after an edit keeps its entities, so
+constraints attached to it (a line end held coincident to a copy, for
+example) survive quantity and spacing changes. Copies whose grid cell
+is removed are deleted together with their attachments.
 
 A distance or angle change rewrites the image constraints and moves
 the copies in place (their names stay); anything else -- quantity,

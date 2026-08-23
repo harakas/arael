@@ -5745,6 +5745,21 @@ fn solve_cost(ctx: &mut CommandContext) -> f64 {
     ctx.sketch.get_mut().solve().end_cost
 }
 
+/// Like assert_solved, at the solver's own convergence contract: each
+/// stage exits at per-parameter cost 1e-8, so an operation may leave
+/// the total just under n * 1e-8 (geometric error ~1e-7 units).
+fn assert_solved_within_contract(ctx: &mut CommandContext) {
+    let c = solve_cost(ctx);
+    let n = ctx.sketch.mutate_values(|s| {
+        use arael::simple_lm::RootProblem;
+        let mut params = Vec::new();
+        s.serialize(&mut params);
+        params.len()
+    });
+    assert!(c < n as f64 * 1e-8, "cost {:e} above the solve contract for n={}\n{}",
+        c, n, ctx.sketch.list_constraints().join("\n"));
+}
+
 /// The sketch is consistent: every hard constraint holds after a solve.
 fn assert_solved(ctx: &mut CommandContext) {
     let c = solve_cost(ctx);
@@ -7140,4 +7155,88 @@ fn test_auto_connect_one_per_cluster() {
         s.dof()
     }).unwrap();
     assert_eq!(inc, full);
+}
+
+
+#[test]
+fn test_pattern_resize_keeps_attachments() {
+    // Quantity changes diff the grid cells: surviving copies keep
+    // their entities, so constraints the user attached to them stay.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 1,0");
+    run_ok(&mut ctx, "pattern rect L0 3 2");
+    run_ok(&mut ctx, "add_line 2,0.5 2,2 noconnect");
+    run_ok(&mut ctx, "coincident L3.p1 L1.p2");
+    let coincident_count = |ctx: &CommandContext| ctx.sketch.coincident_ll12.len()
+        + ctx.sketch.coincident_ll11.len() + ctx.sketch.coincident_ll21.len()
+        + ctx.sketch.coincident_ll22.len();
+    let attached = coincident_count(&ctx);
+    let dof = ctx.sketch.dof().unwrap();
+
+    // Enlarge: L1/L2 survive with the attachment, one new copy.
+    run_ok(&mut ctx, "pattern M0 4 2");
+    assert_eq!(ctx.sketch.lines.refs().count(), 5);
+    assert!(ctx.sketch.lines.refs().any(|l| ctx.sketch.lines[l].name == "L1"), "L1 must survive");
+    assert_eq!(coincident_count(&ctx), attached, "attachment must survive the enlarge");
+    assert_eq!(ctx.sketch.dof().unwrap(), dof, "one rigid copy added");
+    let full = ctx.sketch.mutate_values(|s| { s.clear_cached_dof(); s.dof() }).unwrap();
+    assert_eq!(ctx.sketch.dof().unwrap(), full, "incremental DOF matches full");
+    assert_solved(&mut ctx);
+
+    // Shrink below the attached cell: L1 survives, the others go;
+    // the attachment stays.
+    run_ok(&mut ctx, "pattern M0 2 2");
+    assert_eq!(ctx.sketch.lines.refs().count(), 3);
+    assert_eq!(coincident_count(&ctx), attached, "attachment must survive the shrink");
+    assert_solved(&mut ctx);
+
+    // Extent mode moves the surviving copy; the attached line follows.
+    run_ok(&mut ctx, "pattern M0 3 2 extent");
+    let p = ctx.sketch.metas[0].as_pattern().unwrap();
+    let MetaEntity::Line(l1) = p.copies[0].entities[0] else { panic!() };
+    let pos = ctx.sketch.lines[l1].p1.value;
+    assert!((pos.x - 1.0).abs() < 0.01 && pos.y.abs() < 0.01, "{:?}", pos);
+    assert_eq!(coincident_count(&ctx), attached, "attachment must survive the respacing");
+    assert_solved_within_contract(&mut ctx);
+
+    // An attachment on a removed cell cascades away with it.
+    run_ok(&mut ctx, "pattern M0 3 2");
+    let p = ctx.sketch.metas[0].as_pattern().unwrap();
+    let MetaEntity::Line(l2) = p.copies[1].entities[0] else { panic!() };
+    let l2_name = ctx.sketch.lines[l2].name.clone();
+    let out = run_ok(&mut ctx, "add_line 4.5,1 5,3 noconnect");
+    let new_name = out.trim_start_matches("Added ").split(':').next().unwrap().to_string();
+    run_ok(&mut ctx, &format!("coincident {}.p1 {}.p2", new_name, l2_name));
+    assert_eq!(coincident_count(&ctx), attached + 1);
+    run_ok(&mut ctx, "pattern M0 2 2");
+    assert_eq!(coincident_count(&ctx), attached, "removed cell takes its attachment");
+    assert_solved_within_contract(&mut ctx);
+}
+
+#[test]
+fn test_pattern_circular_resize_keeps_attachments() {
+    // Circular quantity change rewrites the surviving copies'
+    // rotations in place; an endpoint center keeps its helper.
+    let mut ctx = CommandContext::new();
+    run_ok(&mut ctx, "add_line 0,0 0,1");
+    run_ok(&mut ctx, "add_line 2,0 3,0");
+    run_ok(&mut ctx, "pattern circular L1 about L0.p1 4");
+    run_ok(&mut ctx, "add_line -3.05,0.05 -4,1 noconnect");
+    run_ok(&mut ctx, "coincident L5.p1 L3.p2");
+    let coincident_count = |ctx: &CommandContext| ctx.sketch.coincident_ll12.len()
+        + ctx.sketch.coincident_ll11.len() + ctx.sketch.coincident_ll21.len()
+        + ctx.sketch.coincident_ll22.len();
+    let attached = coincident_count(&ctx);
+    let helpers = ctx.sketch.points.refs().filter(|r| ctx.sketch.points[*r].helper).count();
+    run_ok(&mut ctx, "pattern M0 6");
+    assert!(ctx.sketch.lines.refs().any(|l| ctx.sketch.lines[l].name == "L3"), "L3 must survive");
+    assert_eq!(coincident_count(&ctx), attached, "attachment must survive");
+    assert_eq!(
+        ctx.sketch.points.refs().filter(|r| ctx.sketch.points[*r].helper).count(),
+        helpers,
+        "the center helper is reused, not remade"
+    );
+    let full = ctx.sketch.mutate_values(|s| { s.clear_cached_dof(); s.dof() }).unwrap();
+    assert_eq!(ctx.sketch.dof().unwrap(), full, "incremental DOF matches full");
+    assert_solved_within_contract(&mut ctx);
 }
