@@ -1541,7 +1541,7 @@ impl Sketch {
                 }
             }
             if let Some(rb) = &dim.range {
-                let mut add = |syms: &mut std::collections::HashSet<String>, rv: &dimensions::RangeValue| {
+                let add = |syms: &mut std::collections::HashSet<String>, rv: &dimensions::RangeValue| {
                     if let dimensions::RangeValue::Live(src) = rv
                         && let Ok(parsed) = arael_sym::parse(src) {
                             syms.extend(parsed.symbols());
