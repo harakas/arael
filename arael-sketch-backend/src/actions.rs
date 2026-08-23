@@ -1072,6 +1072,18 @@ impl Action {
             Action::ApplyLineP2OnArc { line, arc } => con(1, vec![LineP2(line), ArcCenter(arc)]),
             Action::ApplyPointOnLine { point, line } => con(1, vec![Point(point), LineP1(line), LineP2(line)]),
             Action::ApplyPointOnArc { point, arc } => con(1, vec![Point(point), ArcCenter(arc)]),
+            Action::ApplyMidpoint { point, line } => con(2, vec![Point(point), LineP1(line), LineP2(line)]),
+            Action::ApplyMidpointLP1 { line, target } => con(2, vec![LineP1(line), LineP1(target), LineP2(target)]),
+            Action::ApplyMidpointLP2 { line, target } => con(2, vec![LineP2(line), LineP1(target), LineP2(target)]),
+            Action::ApplyMidpointArcPoint { point, arc } => con(2, vec![Point(point), ArcCenter(arc)]),
+            Action::ApplyMidpointLP1Arc { line, arc } => con(2, vec![LineP1(line), ArcCenter(arc)]),
+            Action::ApplyMidpointLP2Arc { line, arc } => con(2, vec![LineP2(line), ArcCenter(arc)]),
+            // H/V: one row on the line's endpoint columns. Only the
+            // single-line form -- with several lines the reduction is
+            // per-line and a mixed fresh/stale batch is not `rows`.
+            Action::ApplyHorizontal { ref lines } | Action::ApplyVertical { ref lines }
+                if lines.len() == 1 =>
+                con(1, vec![LineP1(lines[0]), LineP2(lines[0])]),
             _ => return None,
         })
     }

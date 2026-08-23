@@ -7084,6 +7084,17 @@ fn test_incremental_dof_matches_full_rank() {
         "add_line 1,5 2,5 noconnect",
         "add_line 1,5 4,4",
         "add_point 9,9",
+        // Gated constraints on fresh slots: the gate's incremental
+        // fast path must agree with the full rank.
+        "add_line 20,0 21,1 noconnect",
+        "horizontal L6",
+        "add_line 23,0 24,2 noconnect",
+        "add_point 23.4,1.1",
+        "midpoint P2 L7",
+        "coincident L7.p1 L6.p2",
+        // Gated constraint on stale slots: falls back to the rank
+        // gate, seeded with the cached prior count.
+        "vertical L0",
     ];
     for c in cmds {
         run_ok(&mut a, c);

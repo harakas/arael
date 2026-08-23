@@ -309,6 +309,7 @@ pub fn validate_and_apply_constraint(
     action: &Action,
     skip_dof_check: bool,
     explain: bool,
+    prior_dof: Option<usize>,
     incremental_dof: Option<(usize, crate::actions::DofPlan)>,
 ) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
@@ -336,8 +337,23 @@ pub fn validate_and_apply_constraint(
         _ => true,
     };
 
-    let old_dof = if should_check_dof {
-        Some(sketch.dof()?)
+    // Incremental fast path: rows pivoting on a fresh slot reduce the
+    // DOF by exactly their row count, so the gate needs no rank at
+    // all -- neither before nor after. The tail commit consumes the
+    // slots and stamps the cache.
+    let fresh_fast = incremental_dof.as_ref().is_some_and(|(_, plan)| {
+        matches!(plan, crate::actions::DofPlan::Constrain { touched, .. }
+            if sketch.dof_any_fresh(touched))
+    });
+
+    let old_dof = if should_check_dof && !fresh_fast {
+        // The caller's cached count is the same number a fresh rank
+        // would produce; computing it here would pay a full rank just
+        // because the structure generation was bumped on the way in.
+        Some(match prior_dof {
+            Some(d) => d,
+            None => sketch.dof()?,
+        })
     } else {
         None
     };
@@ -775,18 +791,18 @@ impl CommandContext {
         }
 
         // Incremental structural DOF: the prior count is read before
-        // the first structural-door access of this action; the gated
-        // constraint path stamps the cache from its own DOF rank
-        // instead, so only ungated applies carry a plan.
+        // the first structural-door access of this action. Gated
+        // constraints take the fresh-slot fast path inside the gate
+        // when the plan applies, and fall back to their own DOF rank
+        // (which stamps the cache) otherwise.
         let dof_prior = self.sketch.cached_dof().filter(|_| self.sketch.structural_dof_enabled());
-        let gated = action.is_constraint_action() && !self.skip_dof_check;
         let dof_plan = match dof_prior {
-            Some(prior) if !gated => action.incremental_dof_plan().map(|p| (prior, p)),
-            _ => None,
+            Some(prior) => action.incremental_dof_plan().map(|p| (prior, p)),
+            None => None,
         };
         let created = if action.is_constraint_action() {
             match validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, self.skip_dof_check, true, dof_plan)
+                self.sketch.get_mut(), &action, self.skip_dof_check, true, dof_prior, dof_plan)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;

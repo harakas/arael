@@ -2332,14 +2332,13 @@ impl EditorApp {
         // prior count is read before the first structural-door access;
         // gated constraints stamp the cache from their own DOF rank.
         let dof_prior = self.sketch.cached_dof().filter(|_| self.sketch.structural_dof_enabled());
-        let gated = action.is_constraint_action() && !skip_dof_check;
         let dof_plan = match dof_prior {
-            Some(prior) if !gated => action.incremental_dof_plan().map(|p| (prior, p)),
-            _ => None,
+            Some(prior) => action.incremental_dof_plan().map(|p| (prior, p)),
+            None => None,
         };
         if action.is_constraint_action() {
             match arael_sketch_backend::commands::validate_and_apply_constraint(
-                self.sketch.get_mut(), &action, skip_dof_check, explain, dof_plan)
+                self.sketch.get_mut(), &action, skip_dof_check, explain, dof_prior, dof_plan)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;

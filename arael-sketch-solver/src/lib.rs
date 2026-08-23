@@ -878,6 +878,12 @@ impl Sketch {
         self.fresh_slots.insert(slot);
     }
 
+    /// Non-consuming preview of [`Self::dof_touch_fresh`]: would any
+    /// of these slots count as fresh right now?
+    pub fn dof_any_fresh(&self, slots: &[FreshSlot]) -> bool {
+        slots.iter().any(|s| self.fresh_slots.contains(s))
+    }
+
     /// Consume the slots a constraint's rows touch; true when at
     /// least one was fresh (the rows then pivot on its columns and
     /// remove exactly their row count from the DOF).
