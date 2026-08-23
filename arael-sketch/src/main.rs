@@ -4011,15 +4011,18 @@ impl EditorApp {
             return best.map(|(_, pos, target)| (pos, target));
         }
 
-        // Second pass: check line bodies and arc/circle curves (lower priority)
+        // Second pass: check line bodies and arc/circle curves (lower
+        // priority). Distance first, `keep` only for candidates that
+        // could win: the attachment filter costs coincidence-group
+        // walks and must not run for every entity in the sketch.
         for r in self.sketch.lines.refs() {
             if exclude_line == Some(r) { continue; }
-            let t = SnapTarget::Line(r);
-            if !keep(&t) { continue; }
             let l = &self.sketch.lines[r];
             let d = point_to_segment_dist(sketch_pos, l.p1.value, l.p2.value);
             if d < threshold
                 && (best.is_none() || d < best.unwrap().0) {
+                    let t = SnapTarget::Line(r);
+                    if !keep(&t) { continue; }
                     let proj = project_onto_segment(sketch_pos, l.p1.value, l.p2.value);
                     best = Some((d, proj, t));
                 }
@@ -4027,12 +4030,12 @@ impl EditorApp {
 
         for r in self.sketch.arcs.refs() {
             if exclude_arc == Some(r) { continue; }
-            let t = SnapTarget::ArcBody(r);
-            if !keep(&t) { continue; }
             let a = &self.sketch.arcs[r];
             let (d, proj) = point_to_arc_dist(sketch_pos, a);
             if d < threshold
                 && (best.is_none() || d < best.unwrap().0) {
+                    let t = SnapTarget::ArcBody(r);
+                    if !keep(&t) { continue; }
                     best = Some((d, proj, t));
                 }
         }
