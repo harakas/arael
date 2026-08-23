@@ -701,3 +701,20 @@ pub(crate) fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CmdResult 
 // DOF analysis
 // ---------------------------------------------------------------------------
 
+
+/// `timing on|off`: print each command line's wall time (enter to
+/// prompt return) after it completes; bare `timing` reports the state.
+pub(crate) fn cmd_timing(ctx: &mut CommandContext, args: &str) -> CmdResult {
+    match args.trim() {
+        "on" => {
+            ctx.timing = true;
+            Ok(ok("timing on"))
+        }
+        "off" => {
+            ctx.timing = false;
+            Ok(ok("timing off"))
+        }
+        "" => Ok(ok(format!("timing is {}", if ctx.timing { "on" } else { "off" }))),
+        other => Err(format!("timing: expected on or off, got '{}'", other)),
+    }
+}

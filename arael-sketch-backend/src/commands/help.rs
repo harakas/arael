@@ -29,6 +29,7 @@ pub(crate) fn cmd_help(args: &str) -> CmdResult {
             "add_circle3t" => "add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict] — circle tangent to 3 lines",
             "add_ellipse" => "add_ellipse cx,cy rx ry rotation_deg [noconnect] [nocursor] [driven]",
             "delete" => "delete <L0|P0|A0|EA0|C3|CL0H|d0> | delete selection | delete L0 L1 parallel | delete M0 [all]",
+            "timing" => "timing [on|off] — print each command line's wall time",
             "horizontal" => "horizontal L0 [L1 ...]",
             "vertical" => "vertical L0 [L1 ...]",
             "parallel" => "parallel L0 L1",
@@ -124,7 +125,7 @@ pub(crate) const COMMAND_NAMES: &[&str] = &[
     "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style", "quiet", "constr", "drag",
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
-    "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
+    "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom", "timing",
     "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
     "explain", "exit", "quit",
 ];

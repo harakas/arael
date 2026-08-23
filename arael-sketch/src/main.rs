@@ -151,6 +151,8 @@ pub struct EditorApp {
     /// meta delete) is running: hold the per-exec DOF refresh until its
     /// `end_group`. Never set across frames.
     pub dof_hold: bool,
+    /// `timing on`: print each command line's wall time after it runs.
+    pub timing: bool,
     /// Markdown render cache for the command panel. Lives on the app
     /// so parsed output is reused across frames (a per-frame cache
     /// re-parses every markdown entry every frame).
@@ -466,6 +468,7 @@ impl EditorApp {
             grab: None,
             suppress_drag_regrab: false,
             dof_hold: false,
+            timing: false,
             md_cache: Default::default(),
             drag_apparatus: None,
             drag_offset: vect2d::new(0.0, 0.0),
@@ -1801,8 +1804,10 @@ impl EditorApp {
             exit_requested: false,
             drag_raw: self.drag_raw,
             echo_stdout: self.echo_stdout,
+            timing: self.timing,
         };
-        let results = arael_sketch_backend::commands::execute(&mut ctx, input);
+        let t_command = web_time::Instant::now();
+        let mut results = arael_sketch_backend::commands::execute(&mut ctx, input);
         // Sync back
         self.sketch = ctx.sketch;
         self.history = ctx.history;
@@ -1828,7 +1833,20 @@ impl EditorApp {
         self.pending_fit = ctx.pending_fit;
         if ctx.exit_requested { self.exit_requested = true; }
         self.show_hints = false;
+        self.timing = ctx.timing;
         self.refresh_dof();
+        if self.timing {
+            let line = format!("time: {:.1} ms", t_command.elapsed().as_secs_f64() * 1e3);
+            if self.echo_stdout {
+                println!("{}", line);
+            }
+            results.push(arael_sketch_backend::commands::CommandResult {
+                output: line,
+                is_error: false,
+                no_echo: true,
+                markdown: false,
+            });
+        }
         results
     }
 
@@ -1911,8 +1929,10 @@ impl EditorApp {
             exit_requested: false,
             drag_raw: self.drag_raw,
             echo_stdout: self.echo_stdout,
+            timing: self.timing,
         };
-        let results = arael_sketch_backend::commands::execute(&mut ctx, input);
+        let t_command = web_time::Instant::now();
+        let mut results = arael_sketch_backend::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
         self.history = ctx.history;
         self.selection = ctx.selection;
@@ -1936,7 +1956,20 @@ impl EditorApp {
         self.offset.y = ctx.offset_y;
         self.pending_fit = ctx.pending_fit;
         self.show_hints = false;
+        self.timing = ctx.timing;
         self.refresh_dof();
+        if self.timing {
+            let line = format!("time: {:.1} ms", t_command.elapsed().as_secs_f64() * 1e3);
+            if self.echo_stdout {
+                println!("{}", line);
+            }
+            results.push(arael_sketch_backend::commands::CommandResult {
+                output: line,
+                is_error: false,
+                no_echo: true,
+                markdown: false,
+            });
+        }
         results
     }
 

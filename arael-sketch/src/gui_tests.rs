@@ -1847,6 +1847,25 @@ fn test_offset_tool_edit_preview_and_marker() {
 
 // -- Pattern tool ---------------------------------------------------------
 
+/// `timing on` appends a wall-time line to every command run and
+/// survives across run_commands calls; `timing off` stops it.
+#[test]
+fn test_timing_line_appended() {
+    let mut gui = Gui::new();
+    for r in gui.app.run_commands("timing on") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    let results = gui.app.run_commands("add_line 0,0 1,0");
+    let last = results.last().expect("results");
+    assert!(last.output.starts_with("time: "), "{:?}", last.output);
+    assert!(last.no_echo);
+    for r in gui.app.run_commands("timing off") {
+        assert!(!r.is_error, "{}", r.output);
+    }
+    let results = gui.app.run_commands("add_line 2,0 3,0");
+    assert!(!results.last().unwrap().output.starts_with("time: "));
+}
+
 /// A gated rejection through the quiet exec (auto-snap path) carries
 /// no blocker hint; the normal exec still explains.
 #[test]

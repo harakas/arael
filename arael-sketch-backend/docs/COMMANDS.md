@@ -1228,6 +1228,9 @@ dof eigenvalues              Show Hessian eigenvalue spectrum (one per parameter
 dof singular                 Show Jacobian singular values with their parameter directions
 dof jacobian                 Show full Jacobian rows (residual + partial derivatives)
 cost                         Show current solver cost
+timing on | off              Print each command line's wall time after it
+                             completes (enter to prompt return); bare
+                             `timing` reports the state
 ```
 
 ### Interpreting `dof singular`

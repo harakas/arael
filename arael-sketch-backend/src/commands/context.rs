@@ -50,6 +50,9 @@ pub struct CommandContext {
     /// flushing line by line. Lets `eprintln!` LM verbose traces and
     /// `println!` command echo interleave chronologically when piped.
     pub echo_stdout: bool,
+    /// Print the wall time of every command line after it completes
+    /// (the `timing on|off` command).
+    pub timing: bool,
 }
 
 #[allow(dead_code)]
@@ -79,6 +82,7 @@ impl CommandContext {
             exit_requested: false,
             drag_raw: false,
             echo_stdout: false,
+            timing: false,
         }
     }
 
@@ -106,6 +110,7 @@ impl CommandContext {
             exit_requested: false,
             drag_raw: false,
             echo_stdout: false,
+            timing: false,
         }
     }
 

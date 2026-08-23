@@ -7049,3 +7049,16 @@ fn test_mirror_lone_circle_fully_held() {
     assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
     assert_eq!(ctx.sketch.dof().unwrap(), dof0, "center and radius both held");
 }
+
+#[test]
+fn test_timing_toggle() {
+    let mut ctx = CommandContext::new();
+    assert!(!ctx.timing);
+    let out = run_ok(&mut ctx, "timing on");
+    assert!(ctx.timing);
+    assert_eq!(out, "timing on");
+    assert_eq!(run_ok(&mut ctx, "timing"), "timing is on");
+    run_ok(&mut ctx, "timing off");
+    assert!(!ctx.timing);
+    run_err(&mut ctx, "timing maybe");
+}
