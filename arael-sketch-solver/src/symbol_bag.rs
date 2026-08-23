@@ -23,6 +23,16 @@ impl SymbolBag {
     /// Build a symbol bag from the current sketch state.
     /// Must be called after `serialize()` so parameter indices are assigned.
     pub fn build(sketch: &Sketch) -> Self {
+        Self::build_filtered(sketch, None)
+    }
+
+    /// [`build`] restricted to the entities named in `only`; dims and
+    /// user parameters are always included (they are few). Callers
+    /// evaluating a handful of expressions pass the entity names the
+    /// expressions can reach, so a large sketch does not pay for tens
+    /// of thousands of unreferenced symbols.
+    pub fn build_filtered(sketch: &Sketch, only: Option<&std::collections::HashSet<String>>) -> Self {
+        let keep = |name: &str| only.is_none_or(|s| s.contains(name));
         let mut param_indices = HashMap::new();
         let mut dim_values = HashMap::new();
         let mut derived = HashMap::new();
@@ -31,6 +41,7 @@ impl SymbolBag {
         for r in sketch.points.refs() {
             let p = &sketch.points[r];
             let name = &p.name;
+            if !keep(name) { continue; }
             if p.pos.optimize {
                 let idx = p.pos.index();
                 param_indices.insert(format!("{}.pos.x", name), idx);
@@ -49,6 +60,7 @@ impl SymbolBag {
         for r in sketch.lines.refs() {
             let l = &sketch.lines[r];
             let name = &l.name;
+            if !keep(name) { continue; }
             if l.p1.optimize {
                 let idx = l.p1.index();
                 param_indices.insert(format!("{}.p1.x", name), idx);
@@ -82,6 +94,7 @@ impl SymbolBag {
         for r in sketch.arcs.refs() {
             let a = &sketch.arcs[r];
             let name = &a.name;
+            if !keep(name) { continue; }
             if a.center.optimize {
                 let idx = a.center.index();
                 param_indices.insert(format!("{}.center.x", name), idx);

@@ -2825,7 +2825,56 @@ impl Sketch {
         let has_work = self.dimensions.iter().any(|d| d.expr_str.is_some() || d.derived || d.range.is_some())
             || self.user_params.iter().any(|p| !p.broken);
         if !has_work { return; }
-        let bag = SymbolBag::build(self);
+        // The full bag walks every entity (tens of thousands of
+        // formatted symbols on a big sketch) to evaluate a handful of
+        // expressions. Collect the entity names the expressions can
+        // reach -- prefixes of dotted symbols, closed over dim and
+        // user-param references -- and build the bag for those only.
+        let mut syms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &self.user_params {
+            if p.broken || p.expr_str.trim().parse::<f64>().is_ok() { continue; }
+            if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                syms.extend(parsed.symbols());
+            }
+        }
+        for dim in &self.dimensions {
+            if dim.broken { continue; }
+            if let Some(ref es) = dim.expr_str {
+                if let Ok(parsed) = arael_sym::parse(es) {
+                    syms.extend(parsed.symbols());
+                }
+            } else if dim.derived || dim.range.is_some() {
+                syms.extend(dim.measured_symbol(self).symbols());
+            }
+        }
+        for _ in 0..16 {
+            let mut added = false;
+            for dim in &self.dimensions {
+                if dim.broken || !syms.contains(&dim.name) { continue; }
+                if let Some(ref es) = dim.expr_str {
+                    if let Ok(parsed) = arael_sym::parse(es) {
+                        for sym in parsed.symbols() { added |= syms.insert(sym); }
+                    }
+                } else if dim.derived {
+                    for sym in dim.measured_symbol(self).symbols() { added |= syms.insert(sym); }
+                }
+            }
+            for p in &self.user_params {
+                if p.broken || !syms.contains(&p.name) { continue; }
+                if p.expr_str.trim().parse::<f64>().is_ok() { continue; }
+                if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                    for sym in parsed.symbols() { added |= syms.insert(sym); }
+                }
+            }
+            if !added { break; }
+        }
+        let entities: std::collections::HashSet<String> = syms.iter()
+            .filter_map(|sym| {
+                let prefix = sym.split('.').next()?;
+                (prefix.len() < sym.len()).then(|| prefix.to_string())
+            })
+            .collect();
+        let bag = SymbolBag::build_filtered(self, Some(&entities));
         let mut params = Vec::new();
         self.serialize(&mut params);
         let vars = bag.eval_vars(&params);
