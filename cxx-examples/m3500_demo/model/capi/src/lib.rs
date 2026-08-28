@@ -1604,20 +1604,28 @@ pub unsafe extern "C" fn graph_edge_set_dth(p: *mut Edge, v: f64) {
     (*p).dth = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_edge_wt(p: *const Edge) -> f64 {
-    (*p).wt
+pub unsafe extern "C" fn graph_edge_s0(p: *const Edge) -> CVec3F64 {
+    (*p).s0.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_edge_set_wt(p: *mut Edge, v: f64) {
-    (*p).wt = v;
+pub unsafe extern "C" fn graph_edge_set_s0(p: *mut Edge, v: CVec3F64) {
+    (*p).s0 = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_edge_wr(p: *const Edge) -> f64 {
-    (*p).wr
+pub unsafe extern "C" fn graph_edge_s1(p: *const Edge) -> CVec3F64 {
+    (*p).s1.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_edge_set_wr(p: *mut Edge, v: f64) {
-    (*p).wr = v;
+pub unsafe extern "C" fn graph_edge_set_s1(p: *mut Edge, v: CVec3F64) {
+    (*p).s1 = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_edge_s2(p: *const Edge) -> CVec3F64 {
+    (*p).s2.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_edge_set_s2(p: *mut Edge, v: CVec3F64) {
+    (*p).s2 = v.into();
 }
 #[no_mangle]
 pub unsafe extern "C" fn graph_pose2_pos(p: *const Pose2) -> CVec2F64 {

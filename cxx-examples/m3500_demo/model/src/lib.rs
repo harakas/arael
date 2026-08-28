@@ -8,7 +8,7 @@
 use arael::angle::AngleParam;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
-use arael::vect::vect2d;
+use arael::vect::{vect2d, vect3d};
 
 /// A 2D pose. `rot` is an `AngleParam`: the heading is optimized directly,
 /// and its rotation matrix is built from cached sin/cos so the edge
@@ -41,16 +41,19 @@ pub struct Prior {
     pub th: f64,
 }
 
-/// One relative SE2 measurement between two poses. wt/wr are the
-/// square roots of the (diagonal) information matrix entries -- 1.0 in
-/// unweighted mode.
+/// One relative SE2 measurement between two poses, in the g2o
+/// convention: the residual is expressed in pose a's (the
+/// measurement's) frame. s0/s1/s2 are the rows of the sqrt-information
+/// factor diag(w) * R^T from the information matrix eigendecomposition
+/// (info = R diag(w)^2 R^T) -- identity rows in unweighted mode.
 #[arael::model]
 #[arael(constraint(hb, {
-    let local = b.rot.rotation_matrix.transpose()
-        * (a.pos + a.rot.rotation_matrix * edge.delta - b.pos);
-    [local.x * edge.wt,
-     local.y * edge.wt,
-     rad_diff(a.rot.angle + edge.dth, b.rot.angle) * edge.wr]
+    let local = a.rot.rotation_matrix.transpose() * (b.pos - a.pos)
+        - edge.delta;
+    let rr = rad_diff(b.rot.angle, a.rot.angle + edge.dth);
+    [edge.s0.x * local.x + edge.s0.y * local.y + edge.s0.z * rr,
+     edge.s1.x * local.x + edge.s1.y * local.y + edge.s1.z * rr,
+     edge.s2.x * local.x + edge.s2.y * local.y + edge.s2.z * rr]
 }))]
 #[derive(Default)]
 pub struct Edge {
@@ -60,8 +63,9 @@ pub struct Edge {
     pub b: Ref<Pose2>,
     pub delta: vect2d,
     pub dth: f64,
-    pub wt: f64,
-    pub wr: f64,
+    pub s0: vect3d,
+    pub s1: vect3d,
+    pub s2: vect3d,
     pub hb: CrossBlock<Pose2, Pose2>,
 }
 

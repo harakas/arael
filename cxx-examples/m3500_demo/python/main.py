@@ -51,18 +51,24 @@ def load_g2o(path, weighted, graph):
             prior.pos = p.t
             prior.th = p.th
     for d in ds.deltas:
-        wt, wr = (1.0, 1.0)
+        # Exact whitening for any symmetric information matrix: rows of
+        # diag(w) * R^T from its eigendecomposition.
+        s0 = g2o.vect3d(1.0, 0.0, 0.0)
+        s1 = g2o.vect3d(0.0, 1.0, 0.0)
+        s2 = g2o.vect3d(0.0, 0.0, 1.0)
         if weighted:
-            iso = d.iso_sqrt_info()
-            assert iso is not None, "only isotropic information supported"
-            wt, wr = iso
+            r, w = d.eigen_sqrt_info()
+            s0 = g2o.vect3d(r[0].x * w.x, r[1].x * w.x, r[2].x * w.x)
+            s1 = g2o.vect3d(r[0].y * w.y, r[1].y * w.y, r[2].y * w.y)
+            s2 = g2o.vect3d(r[0].z * w.z, r[1].z * w.z, r[2].z * w.z)
         e = graph.edges.push()
         e.a = graph.poses.ref_at(d.a)
         e.b = graph.poses.ref_at(d.b)
         e.delta = d.dt
         e.dth = d.dth
-        e.wt = wt
-        e.wr = wr
+        e.s0 = s0
+        e.s1 = s1
+        e.s2 = s2
 
 
 def metrics(graph):
@@ -81,13 +87,16 @@ def metrics(graph):
         a = graph.poses.get(e.a)
         b = graph.poses.get(e.b)
         sa, ca = math.sin(a.rot_angle), math.cos(a.rot_angle)
-        sb, cb = math.sin(b.rot_angle), math.cos(b.rot_angle)
         delta = e.delta
-        gx = a.pos.x + ca * delta.x - sa * delta.y - b.pos.x
-        gy = a.pos.y + sa * delta.x + ca * delta.y - b.pos.y
-        block((cb * gx + sb * gy) * e.wt,
-              (-sb * gx + cb * gy) * e.wt,
-              rad_diff(a.rot_angle + e.dth, b.rot_angle) * e.wr)
+        dx = b.pos.x - a.pos.x
+        dy = b.pos.y - a.pos.y
+        lx = ca * dx + sa * dy - delta.x
+        ly = -sa * dx + ca * dy - delta.y
+        rr = rad_diff(b.rot_angle, a.rot_angle + e.dth)
+        s0, s1, s2 = e.s0, e.s1, e.s2
+        block(s0.x * lx + s0.y * ly + s0.z * rr,
+              s1.x * lx + s1.y * ly + s1.z * rr,
+              s2.x * lx + s2.y * ly + s2.z * rr)
     prior = graph.prior
     if prior is not None:
         p = graph.poses.get(prior.p)

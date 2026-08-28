@@ -4,10 +4,12 @@
 // classic pose-graph problem: 3500 poses (x, y, theta), ~5450 relative
 // SE2 measurements between them, gauge fixed by a soft prior on pose 0.
 //
-// The residual matches the standard between-factor
-//   r = [ R_b^T (p_a + R_a t_d - p_b) ; wrap(th_a + dth - th_b) ]
-// with unit weights (the dataset's information matrices are ignored to
-// stay comparable with other minimal solvers that do the same).
+// The residual is the g2o convention, expressed in the measurement
+// frame (pose a):
+//   r = [ R_a^T (p_b - p_a) - t_d ; wrap(th_b - th_a - dth) ]
+// with unit weights by default (the dataset's information matrices are
+// ignored to stay comparable with other minimal solvers that do the
+// same); --weighted applies the full information matrices.
 //
 // Reads the dataset vendored under benchmarks/pgo/datasets by default;
 // pass a path to run any other 2D g2o file:
@@ -16,7 +18,7 @@
 use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
-use arael::vect::vect2d;
+use arael::vect::{vect2d, vect3d};
 
 // A 2D pose.
 #[arael::model]
@@ -45,16 +47,18 @@ struct Prior {
     th: f64,
 }
 
-// One relative SE2 measurement between two poses. wt/wr are the
-// square roots of the (diagonal) information matrix entries -- 1.0 in
-// unweighted mode.
+// One relative SE2 measurement between two poses. s0/s1/s2 are the
+// rows of the sqrt-information factor diag(w) * R^T from the
+// information matrix eigendecomposition (info = R diag(w)^2 R^T) --
+// identity rows in unweighted mode.
 #[arael::model]
 #[arael(constraint(hb, {
-    let local = matrix2sym::rotation(b.th).transpose()
-        * (a.pos + matrix2sym::rotation(a.th) * edge.delta - b.pos);
-    [local.x * edge.wt,
-     local.y * edge.wt,
-     rad_diff(a.th + edge.dth, b.th) * edge.wr]
+    let local = matrix2sym::rotation(a.th).transpose() * (b.pos - a.pos)
+        - edge.delta;
+    let rr = rad_diff(b.th, a.th + edge.dth);
+    [edge.s0.x * local.x + edge.s0.y * local.y + edge.s0.z * rr,
+     edge.s1.x * local.x + edge.s1.y * local.y + edge.s1.z * rr,
+     edge.s2.x * local.x + edge.s2.y * local.y + edge.s2.z * rr]
 }))]
 struct Edge {
     #[arael(ref = root.poses)]
@@ -63,8 +67,9 @@ struct Edge {
     b: Ref<Pose2>,
     delta: vect2d,
     dth: f64,
-    wt: f64,
-    wr: f64,
+    s0: vect3d,
+    s1: vect3d,
+    s2: vect3d,
     hb: CrossBlock<Pose2, Pose2>,
 }
 
@@ -95,20 +100,30 @@ fn load_g2o(path: &str, weighted: bool) -> Graph {
         }
     }
     for d in &ds.deltas {
-        // M3500 is diagonal with I11 == I22; sqrt-info weighting then
-        // reduces to two per-edge row scales.
-        let (wt, wr) = if weighted {
-            d.iso_sqrt_info().expect("only diagonal isotropic information matrices are supported")
+        // Exact whitening for any symmetric information matrix: rows of
+        // diag(w) * R^T from its eigendecomposition.
+        let [s0, s1, s2] = if weighted {
+            let (r, w) = d.eigen_sqrt_info();
+            [
+                vect3d::new(r[0].x * w.x, r[1].x * w.x, r[2].x * w.x),
+                vect3d::new(r[0].y * w.y, r[1].y * w.y, r[2].y * w.y),
+                vect3d::new(r[0].z * w.z, r[1].z * w.z, r[2].z * w.z),
+            ]
         } else {
-            (1.0, 1.0)
+            [
+                vect3d::new(1.0, 0.0, 0.0),
+                vect3d::new(0.0, 1.0, 0.0),
+                vect3d::new(0.0, 0.0, 1.0),
+            ]
         };
         graph.edges.push(Edge {
             a: graph.poses.ref_at(d.a),
             b: graph.poses.ref_at(d.b),
             delta: d.dt,
             dth: d.dth,
-            wt,
-            wr,
+            s0,
+            s1,
+            s2,
             hb: CrossBlock::new(),
         });
     }
@@ -131,13 +146,15 @@ fn metrics(graph: &Graph) -> (f64, f64) {
         let a = &graph.poses[e.a];
         let b = &graph.poses[e.b];
         let (sa, ca) = a.th.value.sin_cos();
-        let (sb, cb) = b.th.value.sin_cos();
-        let gx = a.pos.value.x + ca * e.delta.x - sa * e.delta.y - b.pos.value.x;
-        let gy = a.pos.value.y + sa * e.delta.x + ca * e.delta.y - b.pos.value.y;
+        let dx = b.pos.value.x - a.pos.value.x;
+        let dy = b.pos.value.y - a.pos.value.y;
+        let lx = ca * dx + sa * dy - e.delta.x;
+        let ly = -sa * dx + ca * dy - e.delta.y;
+        let rr = arael::utils::rad_diff(b.th.value, a.th.value + e.dth);
         block([
-            (cb * gx + sb * gy) * e.wt,
-            (-sb * gx + cb * gy) * e.wt,
-            arael::utils::rad_diff(a.th.value + e.dth, b.th.value) * e.wr,
+            e.s0.x * lx + e.s0.y * ly + e.s0.z * rr,
+            e.s1.x * lx + e.s1.y * ly + e.s1.z * rr,
+            e.s2.x * lx + e.s2.y * ly + e.s2.z * rr,
         ]);
     }
     if let Some(prior) = &graph.prior {

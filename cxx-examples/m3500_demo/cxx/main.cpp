@@ -52,18 +52,25 @@ static void load_g2o(const char* path, bool weighted, Graph& graph) {
         }
     }
     for (const auto& d : ds.deltas) {
-        // M3500 is diagonal with I11 == I22; sqrt-info weighting then
-        // reduces to two per-edge row scales.
-        double wt = 1.0, wr = 1.0;
-        if (weighted)
-            arael_assert_true(d.iso_sqrt_info(wt, wr));
+        // Exact whitening for any symmetric information matrix: rows of
+        // diag(w) * R^T from its eigendecomposition.
+        vect3d s0{1.0, 0.0, 0.0}, s1{0.0, 1.0, 0.0}, s2{0.0, 0.0, 1.0};
+        if (weighted) {
+            auto rw = d.eigen_sqrt_info();
+            const matrix3d& r = rw.first;
+            const vect3d& w = rw.second;
+            s0 = {r.rows[0].x * w.x, r.rows[1].x * w.x, r.rows[2].x * w.x};
+            s1 = {r.rows[0].y * w.y, r.rows[1].y * w.y, r.rows[2].y * w.y};
+            s2 = {r.rows[0].z * w.z, r.rows[1].z * w.z, r.rows[2].z * w.z};
+        }
         auto e = graph.edges().push();
         e.set_a(graph.poses().ref_at(d.a));
         e.set_b(graph.poses().ref_at(d.b));
         e.set_delta(d.dt);
         e.set_dth(d.dth);
-        e.set_wt(wt);
-        e.set_wr(wr);
+        e.set_s0(s0);
+        e.set_s1(s1);
+        e.set_s2(s2);
     }
 }
 
@@ -82,13 +89,16 @@ static void metrics(Graph& graph, double& ls, double& huber) {
         auto a = graph.poses().get(e.a());
         auto b = graph.poses().get(e.b());
         double sa = std::sin(a.rot_angle()), ca = std::cos(a.rot_angle());
-        double sb = std::sin(b.rot_angle()), cb = std::cos(b.rot_angle());
         vect2d delta = e.delta();
-        double gx = a.pos().x + ca * delta.x - sa * delta.y - b.pos().x;
-        double gy = a.pos().y + sa * delta.x + ca * delta.y - b.pos().y;
-        block((cb * gx + sb * gy) * e.wt(),
-              (-sb * gx + cb * gy) * e.wt(),
-              rad_diff(a.rot_angle() + e.dth(), b.rot_angle()) * e.wr());
+        double dx = b.pos().x - a.pos().x;
+        double dy = b.pos().y - a.pos().y;
+        double lx = ca * dx + sa * dy - delta.x;
+        double ly = -sa * dx + ca * dy - delta.y;
+        double rr = rad_diff(b.rot_angle(), a.rot_angle() + e.dth());
+        vect3d s0 = e.s0(), s1 = e.s1(), s2 = e.s2();
+        block(s0.x * lx + s0.y * ly + s0.z * rr,
+              s1.x * lx + s1.y * ly + s1.z * rr,
+              s2.x * lx + s2.y * ly + s2.z * rr);
     }
     if (graph.has_prior()) {
         auto prior = graph.prior().value();

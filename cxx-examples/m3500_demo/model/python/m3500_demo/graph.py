@@ -311,20 +311,28 @@ class Edge:
         _f.graph_edge_set_dth(self._p, v)
 
     @property
-    def wt(self):
-        return _f.graph_edge_wt(self._p)
+    def s0(self):
+        return _f.graph_edge_s0(self._p)
 
-    @wt.setter
-    def wt(self, v):
-        _f.graph_edge_set_wt(self._p, v)
+    @s0.setter
+    def s0(self, v):
+        _f.graph_edge_set_s0(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
     @property
-    def wr(self):
-        return _f.graph_edge_wr(self._p)
+    def s1(self):
+        return _f.graph_edge_s1(self._p)
 
-    @wr.setter
-    def wr(self, v):
-        _f.graph_edge_set_wr(self._p, v)
+    @s1.setter
+    def s1(self, v):
+        _f.graph_edge_set_s1(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def s2(self):
+        return _f.graph_edge_s2(self._p)
+
+    @s2.setter
+    def s2(self, v):
+        _f.graph_edge_set_s2(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
 
 class Pose2:

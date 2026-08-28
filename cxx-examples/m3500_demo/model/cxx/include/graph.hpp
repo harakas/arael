@@ -120,10 +120,12 @@ vect2d graph_edge_delta(const Edge*);
 void graph_edge_set_delta(Edge*, vect2d);
 double graph_edge_dth(const Edge*);
 void graph_edge_set_dth(Edge*, double);
-double graph_edge_wt(const Edge*);
-void graph_edge_set_wt(Edge*, double);
-double graph_edge_wr(const Edge*);
-void graph_edge_set_wr(Edge*, double);
+vect3d graph_edge_s0(const Edge*);
+void graph_edge_set_s0(Edge*, vect3d);
+vect3d graph_edge_s1(const Edge*);
+void graph_edge_set_s1(Edge*, vect3d);
+vect3d graph_edge_s2(const Edge*);
+void graph_edge_set_s2(Edge*, vect3d);
 vect2d graph_pose2_pos(const Pose2*);
 void graph_pose2_set_pos(Pose2*, vect2d);
 bool graph_pose2_pos_optimize(const Pose2*);
@@ -290,10 +292,12 @@ public:
     void set_delta(vect2d v) { ffi::graph_edge_set_delta(h_, v); }
     double dth() const { return ffi::graph_edge_dth(h_); }
     void set_dth(double v) { ffi::graph_edge_set_dth(h_, v); }
-    double wt() const { return ffi::graph_edge_wt(h_); }
-    void set_wt(double v) { ffi::graph_edge_set_wt(h_, v); }
-    double wr() const { return ffi::graph_edge_wr(h_); }
-    void set_wr(double v) { ffi::graph_edge_set_wr(h_, v); }
+    vect3d s0() const { return ffi::graph_edge_s0(h_); }
+    void set_s0(vect3d v) { ffi::graph_edge_set_s0(h_, v); }
+    vect3d s1() const { return ffi::graph_edge_s1(h_); }
+    void set_s1(vect3d v) { ffi::graph_edge_set_s1(h_, v); }
+    vect3d s2() const { return ffi::graph_edge_s2(h_); }
+    void set_s2(vect3d v) { ffi::graph_edge_set_s2(h_, v); }
 private:
     ffi::Edge* h_;
 };
