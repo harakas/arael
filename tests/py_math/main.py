@@ -182,7 +182,8 @@ ds = g2o.Dataset2.parse(
     "VERTEX_SE2 0 0.25 -1.5 0.125\n"
     "VERTEX_SE2 1 1.75 0.5 -0.25\n"
     "FIX 0\n"
-    "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n")
+    "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n"
+    "EDGE_SE2 1 0 0.1 0.2 0.05 1.78 0.027 0.0 3.85 0.0 388.7\n")
 p("g2o_n_poses", float(len(ds.poses)))
 p("g2o_n_deltas", float(len(ds.deltas)))
 pv2("g2o_p1_t", ds.poses[1].t)
@@ -193,6 +194,13 @@ iso = ds.deltas[0].iso_sqrt_info()
 p("g2o_d0_iso", 1.0 if iso is not None else 0.0)
 p("g2o_d0_wt", iso[0])
 p("g2o_d0_wr", iso[1])
+# Correlated info: sqrt eigenvalues directly, eigenvectors through the
+# reconstruction (sign/algorithm independent)
+er, ew = ds.deltas[1].eigen_sqrt_info()
+pv3("g2o_d1_ew", ew)
+pm3("g2o_d1_erec", er * matrix3d.from_elements(
+    ew.x * ew.x, 0.0, 0.0, 0.0, ew.y * ew.y, 0.0, 0.0, 0.0, ew.z * ew.z)
+    * er.transpose())
 
 # g2o SE3 parsing: quaternion normalization, the symmetric information
 # matrix, and its Cholesky blocks.
@@ -226,7 +234,14 @@ def fnv32(s):
     return float(h)
 
 
-txt = ds.to_g2o()
+# the save test round-trips the original one-edge graph, like the Rust
+# golden's separate parse
+ds_save = g2o.Dataset2.parse(
+    "VERTEX_SE2 0 0.25 -1.5 0.125\n"
+    "VERTEX_SE2 1 1.75 0.5 -0.25\n"
+    "FIX 0\n"
+    "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n")
+txt = ds_save.to_g2o()
 p("g2o_save_len", float(len(txt)))
 p("g2o_save_fnv", fnv32(txt))
 rt = g2o.Dataset2.parse(txt)

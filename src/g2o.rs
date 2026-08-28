@@ -81,6 +81,28 @@ impl DeltaPose2 {
             None
         }
     }
+
+    /// Eigen factors `(r, w)` of the information matrix for exact
+    /// whitening of any symmetric information matrix:
+    /// `info = r * diag(w)^2 * r^T`, so the weighted residual is
+    /// `diag(w) * r^T * res`. Eigenvalues below zero (numerically
+    /// indefinite input) clamp to zero weight, so near-singular
+    /// matrices lose the degenerate direction instead of failing a
+    /// factorization.
+    pub fn eigen_sqrt_info(&self) -> (matrix3d, vect3d) {
+        let [i11, i12, i13, i22, i23, i33] = self.info;
+        let m = matrix3d::from_array([
+            [i11, i12, i13],
+            [i12, i22, i23],
+            [i13, i23, i33],
+        ]);
+        let (r, d) = m.symmetric_eigen();
+        (r, vect3d::new(
+            d.x.max(0.0).sqrt(),
+            d.y.max(0.0).sqrt(),
+            d.z.max(0.0).sqrt(),
+        ))
+    }
 }
 
 /// A 2D pose graph: poses and the relative measurements between them.
@@ -422,6 +444,39 @@ EDGE_SE2 0 1 1.0 0.5 0.1 100 0 0 100 0 400
         d.info[1] = 0.0;
         d.info[3] = 50.0; // anisotropic translation
         assert_eq!(d.iso_sqrt_info(), None);
+    }
+
+    #[test]
+    fn eigen_sqrt_info_reconstructs_correlated_info() {
+        let mut d = Dataset2::parse(TEXT2).unwrap().deltas[0];
+        // MIT-like: anisotropic with off-diagonal couplings
+        d.info = [1.78, 0.027, 0.0, 3.85, 0.0, 388.7];
+        let (r, w) = d.eigen_sqrt_info();
+        // info == r * diag(w)^2 * r^T
+        let full = [
+            [d.info[0], d.info[1], d.info[2]],
+            [d.info[1], d.info[3], d.info[4]],
+            [d.info[2], d.info[4], d.info[5]],
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut v = 0.0;
+                for k in 0..3 {
+                    v += r[i][k] * w[k] * w[k] * r[j][k];
+                }
+                assert!((v - full[i][j]).abs() < 1e-9, "({i},{j}): {v} vs {}", full[i][j]);
+            }
+        }
+    }
+
+    #[test]
+    fn eigen_sqrt_info_clamps_indefinite() {
+        let mut d = Dataset2::parse(TEXT2).unwrap().deltas[0];
+        // numerically indefinite (off-diagonal above the PSD bound)
+        d.info = [1.0, 1.001, 0.0, 1.0, 0.0, 4.0];
+        let (_, w) = d.eigen_sqrt_info();
+        assert!(w.x >= 0.0 && w.y >= 0.0 && w.z >= 0.0);
+        assert!(w.x == 0.0, "negative eigenvalue must clamp to zero weight");
     }
 
     #[test]

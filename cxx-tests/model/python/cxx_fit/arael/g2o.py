@@ -51,6 +51,19 @@ class DeltaPose2:
             return i11 ** 0.5, i33 ** 0.5
         return None
 
+    def eigen_sqrt_info(self):
+        """Eigen factors (r, w) of the information matrix for exact
+        whitening of any symmetric information matrix:
+        info = r * diag(w)^2 * r^T, so the weighted residual is
+        diag(w) * r^T * res. Eigenvalues below zero (numerically
+        indefinite input) clamp to zero weight."""
+        i11, i12, i13, i22, i23, i33 = self.info
+        m = matrix3d(((i11, i12, i13), (i12, i22, i23), (i13, i23, i33)))
+        r, d = m.symmetric_eigen()
+        w = vect3d(tuple(v ** 0.5 if v > 0.0 else 0.0
+                         for v in (d.x, d.y, d.z)))
+        return r, w
+
 
 class Dataset2:
     """A 2D pose graph: poses and the relative measurements between

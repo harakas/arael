@@ -108,7 +108,8 @@ views are named by their container's nature: `PathPosesDeque`,
   bits. `arael/geometry.hpp` carries the pinhole camera
   (`cameraf` / `camerad`; `Camera` is a legacy alias of `cameraf`);
   `arael/g2o.hpp` the pose-graph file I/O (`Dataset2` for
-  VERTEX_SE2/EDGE_SE2, `Dataset3` for VERTEX_SE3:QUAT/EDGE_SE3:QUAT
+  VERTEX_SE2/EDGE_SE2 with `iso_sqrt_info`/`eigen_sqrt_info`
+  whitening accessors, `Dataset3` for VERTEX_SE3:QUAT/EDGE_SE3:QUAT
   with sqrt-information Cholesky blocks; `to_g2o()`/`save(path)`
   write the graph back out, byte-identical to the Rust writer).
 - **Params** read/write their value; `set_<p>_optimize(false)` fixes

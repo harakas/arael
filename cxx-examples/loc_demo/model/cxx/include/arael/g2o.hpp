@@ -89,6 +89,25 @@ struct DeltaPose2 {
         }
         return false;
     }
+
+    /// Eigen factors (r, w) of the information matrix for exact
+    /// whitening of any symmetric information matrix:
+    /// info = r * diag(w)^2 * r^T, so the weighted residual is
+    /// diag(w) * r^T * res. Eigenvalues below zero (numerically
+    /// indefinite input) clamp to zero weight, so near-singular
+    /// matrices lose the degenerate direction instead of failing a
+    /// factorization.
+    std::pair<matrix3d, vect3d> eigen_sqrt_info() const {
+        matrix3d m;
+        m.rows[0] = {info[0], info[1], info[2]};
+        m.rows[1] = {info[1], info[3], info[4]};
+        m.rows[2] = {info[2], info[4], info[5]};
+        auto rd = m.symmetric_eigen();
+        vect3d w{rd.second.x > 0.0 ? std::sqrt(rd.second.x) : 0.0,
+                 rd.second.y > 0.0 ? std::sqrt(rd.second.y) : 0.0,
+                 rd.second.z > 0.0 ? std::sqrt(rd.second.z) : 0.0};
+        return {rd.first, w};
+    }
 };
 
 /// A 2D pose graph: poses and the relative measurements between them.

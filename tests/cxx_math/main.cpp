@@ -175,7 +175,8 @@ int main() {
             "VERTEX_SE2 0 0.25 -1.5 0.125\n"
             "VERTEX_SE2 1 1.75 0.5 -0.25\n"
             "FIX 0\n"
-            "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n");
+            "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n"
+            "EDGE_SE2 1 0 0.1 0.2 0.05 1.78 0.027 0.0 3.85 0.0 388.7\n");
         p("g2o_n_poses", double(ds.poses.size()));
         p("g2o_n_deltas", double(ds.deltas.size()));
         pv2("g2o_p1_t", ds.poses[1].t);
@@ -186,6 +187,13 @@ int main() {
         p("g2o_d0_iso", ds.deltas[0].iso_sqrt_info(wt, wr) ? 1.0 : 0.0);
         p("g2o_d0_wt", wt);
         p("g2o_d0_wr", wr);
+        // Correlated info: sqrt eigenvalues directly, eigenvectors
+        // through the reconstruction (sign/algorithm independent)
+        auto [er, ew] = ds.deltas[1].eigen_sqrt_info();
+        pv3("g2o_d1_ew", ew);
+        pm3("g2o_d1_erec", er * matrix3d::from_elements(
+            ew.x * ew.x, 0.0, 0.0, 0.0, ew.y * ew.y, 0.0, 0.0, 0.0, ew.z * ew.z)
+            * er.transpose());
     }
 
     // g2o SE3 parsing: quaternion normalization, the symmetric
