@@ -26,6 +26,7 @@ treated as a constant.
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
 | `QuaternionParam<T>` | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised on every re-center so it never drifts off SO(3) |
 | `TransformParam<T>` | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it. Clear `optimize_translation` or `optimize_rotation` to hold either half |
+| `ScaledTransformParam<T>` | 7 | a similarity transform (Sim(3)): `TransformParam` plus a uniform scale, acting on a point as `s * (R * x) + t` -- the state of monocular loop closing. Bodies read `scale_factor`; the scale is optimized as its logarithm, so it stays positive and a scale-difference residual is linear. Clear `optimize_scale` to fix the scale (stereo/RGB-D) |
 | `UnitVecParam<T>` | 2 | a direction on the unit sphere, such as the normal of a mapped plane landmark: read and write `unit`, which stays unit length because the two parameters rotate a reference direction rather than move its components |
 
 The three SO(3) parameterizations reach the same optimum; they differ only in

@@ -494,3 +494,268 @@ where
         d.deserialize_map(V(std::marker::PhantomData))
     }
 }
+
+// ---------------------------------------------------------------------------
+// ScaledTransformParam: a similarity transform (Sim(3) state)
+// ---------------------------------------------------------------------------
+
+/// A similarity transform: [`TransformParam`]'s coupled pose step plus a
+/// uniform scale, acting on a point as `s * (R * x) + t`. The Sim(3)
+/// state of monocular loop closing.
+///
+/// Set `translation`, `rotation` and `scale` before a solve, read them
+/// after. Constraint bodies read `rotation_matrix`, `translation` and
+/// `scale_factor` (the cached scale). The scale is optimized as its
+/// logarithm, so positivity is structural and a scale-difference
+/// residual `log_s_a - log_s_b - log(s_ab)` is linear; freeze it alone
+/// with `optimize_scale` (the fix-scale mode of stereo/RGB-D loop
+/// closing).
+#[derive(Clone)]
+pub struct ScaledTransformParam<T: Float = f64>
+where
+    vect3<T>: ParamType,
+{
+    /// Translation: set it before a solve, read it after.
+    pub translation: vect3<T>,
+    /// Rotation: set it before a solve, read it after.
+    pub rotation: quatern<T>,
+    /// Scale: set it before a solve, read it after. Must be positive.
+    pub scale: T,
+    /// Whether the translation is optimized.
+    pub optimize_translation: bool,
+    /// Whether the rotation is optimized.
+    pub optimize_rotation: bool,
+    /// Whether the scale is optimized.
+    pub optimize_scale: bool,
+
+    /// The rotation as a matrix -- what constraint bodies read.
+    #[doc(hidden)]
+    pub rotation_matrix: matrix3<T>,
+    /// The scale -- what constraint bodies read. Refreshed with the
+    /// transform; treat as read-only.
+    #[doc(hidden)]
+    pub scale_factor: T,
+
+    // --- solver-internal (see TransformParam)
+    #[doc(hidden)]
+    pub ref_translation: vect3<T>,
+    #[doc(hidden)]
+    pub ref_rotation: matrix3<T>,
+    #[doc(hidden)]
+    pub w: Param<vect3<T>>,
+    #[doc(hidden)]
+    pub d: Param<vect3<T>>,
+    /// The log-scale parameter (absolute, not a delta).
+    #[doc(hidden)]
+    pub log_s: Param<T>,
+    #[doc(hidden)]
+    pub rotation_matrix_dw: [matrix3<T>; 3],
+    #[doc(hidden)]
+    pub translation_dd: [vect3<T>; 3],
+    #[doc(hidden)]
+    pub translation_dw: [vect3<T>; 3],
+
+    ref_value: quatern<T>,
+}
+
+/// Shorthand for the f32 instantiation.
+pub type ScaledTransformParamF = ScaledTransformParam<f32>;
+
+impl<T: Float> ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+    Param<vect3<T>>: Model,
+{
+    /// A similarity starting at `translation` / `rotation` / `scale`,
+    /// fully optimized.
+    pub fn new(translation: vect3<T>, rotation: quatern<T>, scale: T) -> ScaledTransformParam<T> {
+        let zero = vect3::new(T::zero(), T::zero(), T::zero());
+        let mut p = ScaledTransformParam {
+            translation,
+            rotation,
+            scale,
+            optimize_translation: true,
+            optimize_rotation: true,
+            optimize_scale: true,
+            rotation_matrix: rotation.rotation_matrix(),
+            scale_factor: scale,
+            ref_translation: translation,
+            ref_rotation: matrix3::identity(),
+            w: Param::new(zero),
+            d: Param::new(zero),
+            log_s: Param::new(scale.ln()),
+            rotation_matrix_dw: [matrix3::identity(); 3],
+            translation_dd: [zero; 3],
+            translation_dw: [zero; 3],
+            ref_value: rotation,
+        };
+        Component::start(&mut p);
+        p.__precompute_symbolic();
+        p
+    }
+
+    /// A similarity frozen where it starts (nothing optimized).
+    pub fn fixed(translation: vect3<T>, rotation: quatern<T>, scale: T) -> ScaledTransformParam<T> {
+        let mut p = ScaledTransformParam::new(translation, rotation, scale);
+        p.optimize_translation = false;
+        p.optimize_rotation = false;
+        p.optimize_scale = false;
+        Component::start(&mut p);
+        p
+    }
+
+    fn refresh(&mut self) {
+        self.ref_rotation = self.ref_value.rotation_matrix();
+    }
+
+    /// The hand-written twin of the generated symbolic precompute: the
+    /// pose caches as in [`TransformParam`], plus the scale.
+    #[doc(hidden)]
+    pub fn __precompute_symbolic(&mut self) {
+        let (w, d) = (self.w.work(), self.d.work());
+        self.rotation_matrix = self.ref_rotation * matrix3::<T>::from_rotation_vector_small(w);
+        self.translation = self.ref_translation + self.ref_rotation * carry(w, d);
+        self.scale_factor = self.log_s.work().exp();
+        if self.w.index() != u32::MAX {
+            let dr = matrix3::<T>::from_rotation_vector_small_deriv(w);
+            self.rotation_matrix_dw = [self.ref_rotation * dr[0],
+                            self.ref_rotation * dr[1],
+                            self.ref_rotation * dr[2]];
+            let wxd = w % d;
+            for k in 0..3 {
+                let e = basis::<T>(k);
+                let t = (e % d) * cf::<T>(0.5)
+                    + ((e % wxd) + (w % (e % d))) * cf::<T>(1.0 / 6.0);
+                self.translation_dw[k] = self.ref_rotation * t;
+            }
+        }
+        if self.d.index() != u32::MAX {
+            for k in 0..3 {
+                self.translation_dd[k] = self.ref_rotation * carry(w, basis::<T>(k));
+            }
+        }
+    }
+}
+
+impl<T: Float> Default for ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+    Param<vect3<T>>: Model,
+{
+    fn default() -> Self {
+        ScaledTransformParam::new(
+            vect3::new(T::zero(), T::zero(), T::zero()),
+            quatern::identity(),
+            T::one(),
+        )
+    }
+}
+
+impl<T: Float> Component for ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+    Param<vect3<T>>: Model,
+{
+    fn start(&mut self) {
+        self.ref_value = self.rotation.unit();
+        self.ref_translation = self.translation;
+        self.refresh();
+        let zero = vect3::new(T::zero(), T::zero(), T::zero());
+        self.w.value = zero;
+        self.d.value = zero;
+        self.log_s.value = self.scale.ln();
+        self.scale_factor = self.scale;
+        self.d.optimize = self.optimize_translation;
+        self.w.optimize = self.optimize_rotation;
+        self.log_s.optimize = self.optimize_scale;
+    }
+
+    fn update(&mut self) {
+        let (t, q) = se3::new(self.d.value, self.w.value).translation_rotation();
+        self.ref_translation = self.ref_translation + self.ref_rotation * t;
+        self.ref_value = (self.ref_value * q).unit();
+        self.refresh();
+        let zero = vect3::new(T::zero(), T::zero(), T::zero());
+        self.w.value = zero;
+        self.d.value = zero;
+        self.scale_factor = self.log_s.value.exp();
+    }
+
+    fn finish(&mut self) {
+        let (t, q) = se3::new(self.d.value, self.w.value).translation_rotation();
+        self.translation = self.ref_translation + self.ref_rotation * t;
+        self.rotation = (self.ref_value * q).unit();
+        self.rotation_matrix = self.rotation.rotation_matrix();
+        self.scale = self.log_s.value.exp();
+        self.scale_factor = self.scale;
+    }
+}
+
+impl<T: Float> Model for ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+    Param<vect3<T>>: Model,
+{
+    const PARAM_COUNT: u32 = 7;
+
+    fn serialize_params<F: Float>(&mut self, data: &mut std::vec::Vec<F>) {
+        Component::start(self);
+        Model::serialize_params(&mut self.w, data);
+        Model::serialize_params(&mut self.d, data);
+        Model::serialize_params(&mut self.log_s, data);
+    }
+    fn deserialize_params<F: Float>(&mut self, data: &[F]) {
+        Model::deserialize_params(&mut self.w, data);
+        Model::deserialize_params(&mut self.d, data);
+        Model::deserialize_params(&mut self.log_s, data);
+        Component::finish(self);
+        Model::update_self(self);
+    }
+    fn update_params<F: Float>(&mut self, data: &[F]) {
+        Model::update_params(&mut self.w, data);
+        Model::update_params(&mut self.d, data);
+        Model::update_params(&mut self.log_s, data);
+        self.__precompute_symbolic();
+    }
+    fn update_self(&mut self) {
+        Model::update_self(&mut self.w);
+        Model::update_self(&mut self.d);
+        Model::update_self(&mut self.log_s);
+        self.__precompute_symbolic();
+    }
+
+    fn serialize_size(&self) -> u32 {
+        Model::serialize_size(&self.w)
+            + Model::serialize_size(&self.d)
+            + Model::serialize_size(&self.log_s)
+    }
+    fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
+        <Param<vect3<T>> as Model>::param_symbols(&format!("{}.w", base), out);
+        <Param<vect3<T>> as Model>::param_symbols(&format!("{}.d", base), out);
+        <Param<T> as Model>::param_symbols(&format!("{}.log_s", base), out);
+    }
+
+    fn advance_params<F: Float>(&mut self, params: &mut [F]) {
+        // w/d re-center on the chart; log_s is absolute and needs none.
+        Model::deserialize_params(&mut self.w, params);
+        Model::deserialize_params(&mut self.d, params);
+        Model::deserialize_params(&mut self.log_s, params);
+        Component::update(self);
+        for p in [&self.w, &self.d] {
+            if p.index() != u32::MAX {
+                let i = p.index() as usize;
+                ParamType::write_to(&p.value, &mut params[i..i + 3]);
+            }
+        }
+    }
+}
+
+impl<T: Float> crate::model::ModelSym for ScaledTransformParam<T>
+where
+    vect3<T>: ParamType,
+{
+    type Sym = <vect3<f64> as crate::model::ModelSym>::Sym;
+    fn sym(base: &str) -> Self::Sym {
+        <vect3<f64> as crate::model::ModelSym>::sym(base)
+    }
+}

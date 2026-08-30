@@ -60,6 +60,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Parameter covariance** -- `assemble_covariance` recovers `Sigma = 2 H^-1` at the solution without forming the dense inverse; per-entity marginal / conditional / cross blocks and std devs, with a `PerQuery` / `AllMarginals` (selected inverse) / `TriDiagonal` (band, no factorization) mode per workload
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
 - **Rigid transforms** -- `TransformParam` optimizes a translation and a rotation as one 6-DOF parameter. The optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it
+- **Similarity transforms** -- `ScaledTransformParam` adds a uniform scale to the rigid transform (Sim(3), the state of monocular loop closing), optimized as its logarithm; the scale can be fixed on its own
 - **Unit directions** -- `UnitVecParam` optimizes a direction with 2 degrees of freedom
 - **2D rotations** -- `AngleParam` optimizes a heading angle directly and caches its rotation matrix, so 2D pose constraints read a cached constant instead of rebuilding sin/cos per observation
 - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every atan/atan2 in the generated code for polynomial approximations (max error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site. Derivatives stay the exact rational forms

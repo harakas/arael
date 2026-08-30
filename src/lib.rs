@@ -110,6 +110,10 @@
 //!   rotation as one 6-DOF parameter. The optimized delta is represented
 //!   as a twist (se(3)), so a rotation correction carries the translation
 //!   with it
+//! - **Similarity transforms** -- `ScaledTransformParam` adds a uniform
+//!   scale to the rigid transform (Sim(3), the state of monocular loop
+//!   closing), optimized as its logarithm; the scale can be fixed on its
+//!   own
 //! - **Unit directions** -- `UnitVecParam` optimizes a direction with 2
 //!   degrees of freedom
 //! - **2D rotations** -- `AngleParam` optimizes a heading angle directly and
@@ -444,6 +448,7 @@
 //! | [`EulerAngleParam<T>`](model::EulerAngleParam) | 3 | "universal" delta composed with a fixed reference rotation; avoids parameterisation singularities for large-angle motion |
 //! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised each re-center so it never drifts off SO(3) |
 //! | [`TransformParam<T>`](transform::TransformParam) | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it |
+//! | [`ScaledTransformParam<T>`](transform::ScaledTransformParam) | 7 | a similarity transform (Sim(3)): `TransformParam` plus a uniform scale acting as `s * (R * x) + t` -- monocular loop closing's state. The scale is optimized as its logarithm; clear `optimize_scale` to fix it |
 //! | [`UnitVecParam<T>`](unitvec::UnitVecParam) | 2 | a direction on the unit sphere, such as the normal of a mapped plane landmark: read and write `unit`, which stays unit length because the two parameters rotate a reference direction rather than move its components |
 //!
 //! ```ignore
@@ -2333,7 +2338,7 @@ pub mod prelude {
         RootProblem,
     };
     pub use crate::angle::{AngleParam, AngleParamF};
-    pub use crate::transform::{TransformParam, TransformParamF};
+    pub use crate::transform::{ScaledTransformParam, ScaledTransformParamF, TransformParam, TransformParamF};
     pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
     pub use crate::quatern::{quaternd, quaternf};

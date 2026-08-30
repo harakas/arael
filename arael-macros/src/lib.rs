@@ -496,6 +496,47 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             component: true,
             ..Default::default()
         }),
+        // A similarity transform: the rigid step above plus a log-scale
+        // parameter. `scale_factor` = exp(log_s) is what bodies read; its
+        // derivative by log_s is itself, so the value cache serves both
+        // and no deriv cache is declared.
+        "ScaledTransformParam" | "ScaledTransformParamF" => Some(SymLayout {
+            fields: vec![
+                ("ref_rotation".to_string(), SymFieldType::Mat3),
+                ("ref_translation".to_string(), SymFieldType::Vec3),
+                ("w".to_string(), SymFieldType::Vec3),
+                ("d".to_string(), SymFieldType::Vec3),
+                ("log_s".to_string(), SymFieldType::Scalar),
+                ("rotation_matrix".to_string(), SymFieldType::Mat3),
+                ("translation".to_string(), SymFieldType::Vec3),
+                ("scale_factor".to_string(), SymFieldType::Scalar),
+                ("rotation_matrix_dw".to_string(), SymFieldType::Skip),
+                ("translation_dd".to_string(), SymFieldType::Skip),
+                ("translation_dw".to_string(), SymFieldType::Skip),
+            ],
+            collection_fields: Vec::new(),
+            param_fields: vec!["w".to_string(), "d".to_string(), "log_s".to_string()],
+            ref_paths: Vec::new(),
+            euler_angle_fields: Vec::new(),
+            universal_euler_angle_fields: Vec::new(),
+            universal_rotvec_fields: Vec::new(),
+            symbolic_fields: vec![
+                ("rotation_matrix".to_string(),
+                 "ref_rotation * matrix3sym::from_rotation_vector_small(w)".to_string()),
+                ("translation".to_string(),
+                 "{ let carried = d + (w % d) * 0.5 \
+                    + (w % (w % d)) * 0.16666666666666666; \
+                    ref_translation + ref_rotation * carried }".to_string()),
+                ("scale_factor".to_string(), "exp(log_s)".to_string()),
+            ],
+            deriv_fields: vec![
+                ("rotation_matrix_dw".to_string(), "rotation_matrix".to_string(), "w".to_string()),
+                ("translation_dd".to_string(), "translation".to_string(), "d".to_string()),
+                ("translation_dw".to_string(), "translation".to_string(), "w".to_string()),
+            ],
+            component: true,
+            ..Default::default()
+        }),
         // 2D angle: optimized directly (no reference frame -- there is no
         // gimbal lock in one dimension), with the rotation matrix and its
         // derivative cached so a body that rotates through the angle reads
