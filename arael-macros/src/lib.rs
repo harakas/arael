@@ -1988,6 +1988,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // The per-Param slice writeback the component's advance needs after
     // Component::update reset the values.
     let mut comp_writeback: Vec<TokenStream2> = Vec::new();
+    let mut comp_pull: Vec<TokenStream2> = Vec::new();
 
     // Pass 1: identify Param<T> fields
     let mut param_field_names: HashSet<String> = HashSet::new();
@@ -2103,6 +2104,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         );
                     });
                     if is_component_struct && is_euler_angle_param_type(ty).is_none() {
+                        comp_pull.push(quote! {
+                            arael::model::Model::deserialize_params(&mut self.#ident, params);
+                        });
                         comp_writeback.push(quote! {
                             if self.#ident.index() != u32::MAX {
                                 let __i = self.#ident.index() as usize;
@@ -2206,9 +2210,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let comp_finish = if is_component_struct {
         quote! { arael::model::Component::finish(self); }
     } else { quote! {} };
+    // Advance pulls only the component's own plain params (a raw,
+    // side-effect-free read), re-centers once, and pushes the reset
+    // values back. The previous whole-self deserialize also ran
+    // Component::finish and update_self -- an extra step fold plus a
+    // full symbolic-cache rebuild that the next update_params redoes,
+    // measured at ~11% of pose-graph solve time per entity-iteration.
     let comp_advance = if is_component_struct {
         quote! {
-            arael::model::Model::deserialize_params(self, params);
+            #(#comp_pull)*
             arael::model::Component::update(self);
             #(#comp_writeback)*
         }
