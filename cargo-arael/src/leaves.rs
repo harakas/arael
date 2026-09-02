@@ -166,19 +166,27 @@ pub fn leaves(model: &Model, t: &Type) -> Vec<Leaf> {
                               &format!("{name}.optimize"), LeafTy::Bool));
             }
             "component" => match of {
-                "TransformParam" | "TransformParamF" => {
-                    let (v3, q) = if of == "TransformParamF" {
-                        ("vect3f", "quaternf")
-                    } else {
-                        ("vect3d", "quaternd")
-                    };
+                "TransformParam" | "TransformParamF"
+                | "ScaledTransformParam" | "ScaledTransformParamF" => {
+                    let f32 = of.ends_with('F');
+                    let scaled = of.starts_with("Scaled");
+                    let (v3, q) = if f32 { ("vect3f", "quaternf") } else { ("vect3d", "quaternd") };
                     out.push(leaf(&format!("{name}_translation"),
                                   &format!("{name}.translation"),
                                   math_ty(v3).expect("builtin")));
                     out.push(leaf(&format!("{name}_rotation"),
                                   &format!("{name}.rotation"),
                                   math_ty(q).expect("builtin")));
-                    for flag in ["optimize_translation", "optimize_rotation"] {
+                    if scaled {
+                        out.push(leaf(&format!("{name}_scale"), &format!("{name}.scale"),
+                                      if f32 { LeafTy::F32 } else { LeafTy::F64 }));
+                    }
+                    let flags: &[&str] = if scaled {
+                        &["optimize_translation", "optimize_rotation", "optimize_scale"]
+                    } else {
+                        &["optimize_translation", "optimize_rotation"]
+                    };
+                    for flag in flags {
                         out.push(leaf(&format!("{name}_{flag}"),
                                       &format!("{name}.{flag}"), LeafTy::Bool));
                     }
@@ -246,6 +254,7 @@ mod tests {
             ea,
             rv,
             field("pose", "component", Some("TransformParamF")),
+            field("st", "component", Some("ScaledTransformParam")),
             field("dir", "component", Some("UnitVecParam")),
             field("heading", "component", Some("AngleParam")),
             field("gain", "component", Some("Gain")),      // user component: no leaves
@@ -270,6 +279,12 @@ mod tests {
             ("pose_rotation".into(), "pose.rotation".into(), 4),
             ("pose_optimize_translation".into(), "pose.optimize_translation".into(), 1),
             ("pose_optimize_rotation".into(), "pose.optimize_rotation".into(), 1),
+            ("st_translation".into(), "st.translation".into(), 3),
+            ("st_rotation".into(), "st.rotation".into(), 4),
+            ("st_scale".into(), "st.scale".into(), 1),
+            ("st_optimize_translation".into(), "st.optimize_translation".into(), 1),
+            ("st_optimize_rotation".into(), "st.optimize_rotation".into(), 1),
+            ("st_optimize_scale".into(), "st.optimize_scale".into(), 1),
             ("dir_unit".into(), "dir.unit".into(), 3),
             ("heading_angle".into(), "heading.angle.value".into(), 1),
             ("heading_angle_optimize".into(), "heading.angle.optimize".into(), 1),
@@ -282,11 +297,14 @@ mod tests {
             if scalar == "f32" && mirror == "CQuatF32"));
         assert!(matches!(&lv[8].ty, LeafTy::Math { scalar, n: 3, mirror }
             if scalar == "f32" && mirror == "CVec3F32"));
-        assert!(matches!(&lv[16].ty, LeafTy::Math { scalar, n: 8, mirror }
+        assert!(matches!(&lv[13].ty, LeafTy::Math { scalar, n: 4, mirror }
+            if scalar == "f64" && mirror == "CQuatF64"));
+        assert_eq!(lv[14].ty, LeafTy::F64);
+        assert!(matches!(&lv[22].ty, LeafTy::Math { scalar, n: 8, mirror }
             if scalar == "f32" && mirror == "CMatF32x2x4"));
-        assert_eq!(lv[15].ty, LeafTy::Ref);
-        // 1 mask word + 38 slots.
-        assert_eq!(record_slots(&lv), 39);
+        assert_eq!(lv[21].ty, LeafTy::Ref);
+        // 1 mask word + 49 slots.
+        assert_eq!(record_slots(&lv), 50);
     }
 
     #[test]

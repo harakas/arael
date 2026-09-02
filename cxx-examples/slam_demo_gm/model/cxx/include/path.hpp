@@ -726,6 +726,10 @@ public:
     void set_r2w_optimize_translation(bool v) { ffi::path_pose_r2w_set_optimize_translation(h_, v); }
     bool r2w_optimize_rotation() const { return ffi::path_pose_r2w_optimize_rotation(h_); }
     void set_r2w_optimize_rotation(bool v) { ffi::path_pose_r2w_set_optimize_rotation(h_, v); }
+    /// `r2w` as a live transform: `r2w().translation()`, `r2w().set_rotation(q)`, `r2w() * x`, `r2w().inv()`.
+    arael::TransformParamView<ffi::Pose, double> r2w() const {
+        return {h_, ffi::path_pose_r2w_translation, ffi::path_pose_r2w_set_translation, ffi::path_pose_r2w_rotation, ffi::path_pose_r2w_set_rotation, ffi::path_pose_r2w_optimize_translation, ffi::path_pose_r2w_set_optimize_translation, ffi::path_pose_r2w_optimize_rotation, ffi::path_pose_r2w_set_optimize_rotation};
+    }
     PoseInfo info() { return PoseInfo(ffi::path_pose_info_ptr(h_)); }
 private:
     ffi::Pose* h_;

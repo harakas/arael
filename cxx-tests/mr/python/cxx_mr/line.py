@@ -12,6 +12,7 @@ import struct
 from . import _line_ffi as _f
 from .arael import columns as _cols
 from .arael import math as _m
+from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,

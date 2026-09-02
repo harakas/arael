@@ -639,5 +639,49 @@ int main() {
     pi("bad_fault", rb.is_err() ? long(rb.error().failure.fault) : -99);
     pi("bad_param", rb.is_err() ? long(rb.error().failure.param) : -99);
 
+    // The transform views on a pose field and the value types behind
+    // them, against Rust's transform3 / scaled_transform3.
+    Fit ft;
+    ft.frames().reserve(2);
+    quaternd qa = quaternd::from_euler_angles({0.1, 0.2, 0.3});
+    quaternd qb = quaternd::from_euler_angles({0.4, -0.1, 0.2});
+    quaternd qc = quaternd::from_euler_angles({0.0, 0.3, 0.1});
+    auto fa = ft.frames().push();
+    fa.pose().set_translation({0.3, -0.2, 0.5});
+    fa.pose().set_rotation(qa);
+    fa.st().set_translation({1.0, 2.0, 3.0});
+    fa.st().set_rotation(qa);
+    fa.st().set_scale(1.3);
+    auto fb = ft.frames().push();
+    fb.pose().set_translation({1.1, 0.4, 0.2});
+    fb.pose().set_rotation(qb);
+    fb.st().set_translation({0.5, 0.5, 0.5});
+    fb.st().set_rotation(qc);
+    fb.st().set_scale(0.8);
+    vect3d tx{1.0, 0.4, -0.3};
+    vect3d v = fa.pose() * tx;
+    p("tf_px", v.x); p("tf_py", v.y); p("tf_pz", v.z);
+    v = fa.pose().inv() * tx;
+    p("tf_ix", v.x); p("tf_iy", v.y); p("tf_iz", v.z);
+    v = (fa.pose().inv() * fb.pose()).translation;
+    p("tf_relx", v.x); p("tf_rely", v.y); p("tf_relz", v.z);
+    v = fa.st() * tx;
+    p("tf_sx", v.x); p("tf_sy", v.y); p("tf_sz", v.z);
+    v = fa.st().inv() * tx;
+    p("tf_six", v.x); p("tf_siy", v.y); p("tf_siz", v.z);
+    p("tf_srel_s", (fa.st().inv() * fb.st()).scale);
+    v = (fa.pose() * fb.st()) * tx;
+    p("tf_mixx", v.x); p("tf_mixy", v.y); p("tf_mixz", v.z);
+    v = fa.pose().rotate(tx);
+    p("tf_rx", v.x); p("tf_ry", v.y); p("tf_rz", v.z);
+    // writes through the view land on the flat accessor, and the reverse
+    fa.pose().set_translation({9.0, 8.0, 7.0});
+    fa.st().set_scale(2.0);
+    fa.pose().set_optimize_rotation(false);
+    pi("tf_write", (fa.pose_translation().x == 9.0 && fa.st_scale() == 2.0
+                    && !fa.pose_optimize_rotation()) ? 1 : 0);
+    fa.set_pose_translation({0.3, -0.2, 0.5});
+    p("tf_read_back", fa.pose().translation().y);
+
     return 0;
 }

@@ -377,13 +377,20 @@ fn field_cpp(
             }
         }
         "component" => match of {
-            "TransformParam" | "TransformParamF" => {
-                let (v3, q) = if of == "TransformParamF" {
-                    ("vect3f", "quaternf")
+            "TransformParam" | "TransformParamF"
+            | "ScaledTransformParam" | "ScaledTransformParamF" => {
+                let f32 = of.ends_with('F');
+                let scaled = of.starts_with("Scaled");
+                let (v3, q, sc) = if f32 {
+                    ("vect3f", "quaternf", "float")
                 } else {
-                    ("vect3d", "quaternd")
+                    ("vect3d", "quaternd", "double")
                 };
-                for (part, t) in [("translation", v3), ("rotation", q)] {
+                let mut parts = vec![("translation", v3), ("rotation", q)];
+                if scaled {
+                    parts.push(("scale", sc));
+                }
+                for (part, t) in &parts {
                     cpp.ffi.push_str(&format!(
                         "{t} {prefix}_{name}_{part}(const {owner}*);\n\
                          void {prefix}_{name}_set_{part}({owner}*, {t});\n"));
@@ -391,7 +398,12 @@ fn field_cpp(
                         "    {t} {name}_{part}() const {{ return ffi::{prefix}_{name}_{part}(h_); }}\n\
                          \x20   void set_{name}_{part}({t} v) {{ ffi::{prefix}_{name}_set_{part}(h_, v); }}\n"));
                 }
-                for flag in ["optimize_translation", "optimize_rotation"] {
+                let flags: &[&str] = if scaled {
+                    &["optimize_translation", "optimize_rotation", "optimize_scale"]
+                } else {
+                    &["optimize_translation", "optimize_rotation"]
+                };
+                for flag in flags {
                     cpp.ffi.push_str(&format!(
                         "bool {prefix}_{name}_{flag}(const {owner}*);\n\
                          void {prefix}_{name}_set_{flag}({owner}*, bool);\n"));
@@ -399,6 +411,24 @@ fn field_cpp(
                         "    bool {name}_{flag}() const {{ return ffi::{prefix}_{name}_{flag}(h_); }}\n\
                          \x20   void set_{name}_{flag}(bool v) {{ ffi::{prefix}_{name}_set_{flag}(h_, v); }}\n"));
                 }
+                // The field as a live transform view: the parts read and
+                // write through, and it acts like a transform (`*`, inv()).
+                let view = if scaled { "ScaledTransformParamView" } else { "TransformParamView" };
+                let mut fns: Vec<String> = Vec::new();
+                for (part, _) in &parts {
+                    fns.push(format!("ffi::{prefix}_{name}_{part}"));
+                    fns.push(format!("ffi::{prefix}_{name}_set_{part}"));
+                }
+                for flag in flags {
+                    fns.push(format!("ffi::{prefix}_{name}_{flag}"));
+                    fns.push(format!("ffi::{prefix}_{name}_set_{flag}"));
+                }
+                owner_methods.push_str(&format!(
+                    "    /// `{name}` as a live transform: `{name}().translation()`, \
+                     `{name}().set_rotation(q)`, `{name}() * x`, `{name}().inv()`.\n\
+                     \x20   arael::{view}<ffi::{owner}, {sc}> {name}() const {{\n\
+                     \x20       return {{h_, {}}};\n\
+                     \x20   }}\n", fns.join(", ")));
             }
             "UnitVecParam" | "UnitVecParamF" => {
                 let v3 = if of == "UnitVecParamF" { "vect3f" } else { "vect3d" };

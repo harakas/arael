@@ -5322,7 +5322,7 @@ pub unsafe extern "C" fn fit_frames_try_get(p: *mut FitHandle, r: u32) -> *mut F
         None => std::ptr::null_mut(),
     }
 }
-/// Appends `n` elements built from `n` slot records of 18 u64 each (mask
+/// Appends `n` elements built from `n` slot records of 29 u64 each (mask
 /// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
 /// Returns the first new element's key: its packed ref on a refs::Vec,
 /// its index on a std::vec::Vec.
@@ -5334,7 +5334,7 @@ pub unsafe extern "C" fn fit_frames_push_n(p: *mut FitHandle, slots: *const u64,
     for i in 0..n as usize {
         let mut e: Frame = Default::default();
         if !slots.is_null() {
-            assign_slots_frame(&mut e, slots.add(i * 18));
+            assign_slots_frame(&mut e, slots.add(i * 29));
         }
         m.push(e);
     }
@@ -5467,6 +5467,200 @@ pub unsafe extern "C" fn fit_frames_get_pose_optimize_rotation_n(
     for i in 0..n {
         let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
         std::ptr::write_unaligned(dst, m[start + i].pose.optimize_rotation as u8);
+    }
+    true
+}
+/// Sets `st_translation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_st_translation_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].st.translation = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `st_translation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_st_translation_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].st.translation.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `st_rotation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_st_rotation_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].st.rotation = std::mem::transmute::<[f64; 4], CQuatF64>(std::ptr::read_unaligned(src as *const [f64; 4])).into();
+    }
+    true
+}
+/// Reads `st_rotation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_st_rotation_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CQuatF64 = m[start + i].st.rotation.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 4], std::mem::transmute::<CQuatF64, [f64; 4]>(mv));
+    }
+    true
+}
+/// Sets `st_scale` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_st_scale_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].st.scale = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `st_scale` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_st_scale_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].st.scale);
+    }
+    true
+}
+/// Sets `st_optimize_translation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_st_optimize_translation_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].st.optimize_translation = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `st_optimize_translation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_st_optimize_translation_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].st.optimize_translation as u8);
+    }
+    true
+}
+/// Sets `st_optimize_rotation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_st_optimize_rotation_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].st.optimize_rotation = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `st_optimize_rotation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_st_optimize_rotation_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].st.optimize_rotation as u8);
+    }
+    true
+}
+/// Sets `st_optimize_scale` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_st_optimize_scale_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].st.optimize_scale = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `st_optimize_scale` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_st_optimize_scale_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].st.optimize_scale as u8);
     }
     true
 }
@@ -5646,6 +5840,54 @@ pub unsafe extern "C" fn fit_frame_pose_optimize_rotation(p: *const Frame) -> bo
 #[no_mangle]
 pub unsafe extern "C" fn fit_frame_pose_set_optimize_rotation(p: *mut Frame, v: bool) {
     (*p).pose.optimize_rotation = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_translation(p: *const Frame) -> CVec3F64 {
+    (*p).st.translation.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_set_translation(p: *mut Frame, v: CVec3F64) {
+    (*p).st.translation = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_rotation(p: *const Frame) -> CQuatF64 {
+    (*p).st.rotation.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_set_rotation(p: *mut Frame, v: CQuatF64) {
+    (*p).st.rotation = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_scale(p: *const Frame) -> f64 {
+    (*p).st.scale
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_set_scale(p: *mut Frame, v: f64) {
+    (*p).st.scale = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_optimize_translation(p: *const Frame) -> bool {
+    (*p).st.optimize_translation
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_set_optimize_translation(p: *mut Frame, v: bool) {
+    (*p).st.optimize_translation = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_optimize_rotation(p: *const Frame) -> bool {
+    (*p).st.optimize_rotation
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_set_optimize_rotation(p: *mut Frame, v: bool) {
+    (*p).st.optimize_rotation = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_optimize_scale(p: *const Frame) -> bool {
+    (*p).st.optimize_scale
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_st_set_optimize_scale(p: *mut Frame, v: bool) {
+    (*p).st.optimize_scale = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_frame_dir_unit(p: *const Frame) -> CVec3F64 {
@@ -6053,7 +6295,7 @@ pub unsafe extern "C" fn fit_wrap_gain_ptr(p: *mut Wrap) -> *mut Gain {
 }
 
 /// Assigns a slot record's masked leaves onto a `Frame`: 1 mask
-/// word(s), then 17 slot(s), one per leaf in field order.
+/// word(s), then 28 slot(s), one per leaf in field order.
 #[allow(dead_code)]
 unsafe fn assign_slots_frame(e: &mut Frame, s: *const u64) {
     if *s.add(0) & (1u64 << 0) != 0 {
@@ -6069,16 +6311,34 @@ unsafe fn assign_slots_frame(e: &mut Frame, s: *const u64) {
         e.pose.optimize_rotation = *s.add(9) != 0;
     }
     if *s.add(0) & (1u64 << 4) != 0 {
-        e.dir.unit = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12))]).into();
+        e.st.translation = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12))]).into();
     }
     if *s.add(0) & (1u64 << 5) != 0 {
-        e.anchor = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15))]).into();
+        e.st.rotation = std::mem::transmute::<[f64; 4], CQuatF64>([f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15)), f64::from_bits(*s.add(16))]).into();
     }
     if *s.add(0) & (1u64 << 6) != 0 {
-        e.tag = *s.add(16) as i32;
+        e.st.scale = f64::from_bits(*s.add(17));
     }
     if *s.add(0) & (1u64 << 7) != 0 {
-        e.scale = f64::from_bits(*s.add(17)) as f32;
+        e.st.optimize_translation = *s.add(18) != 0;
+    }
+    if *s.add(0) & (1u64 << 8) != 0 {
+        e.st.optimize_rotation = *s.add(19) != 0;
+    }
+    if *s.add(0) & (1u64 << 9) != 0 {
+        e.st.optimize_scale = *s.add(20) != 0;
+    }
+    if *s.add(0) & (1u64 << 10) != 0 {
+        e.dir.unit = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(21)), f64::from_bits(*s.add(22)), f64::from_bits(*s.add(23))]).into();
+    }
+    if *s.add(0) & (1u64 << 11) != 0 {
+        e.anchor = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(24)), f64::from_bits(*s.add(25)), f64::from_bits(*s.add(26))]).into();
+    }
+    if *s.add(0) & (1u64 << 12) != 0 {
+        e.tag = *s.add(27) as i32;
+    }
+    if *s.add(0) & (1u64 << 13) != 0 {
+        e.scale = f64::from_bits(*s.add(28)) as f32;
     }
 }
 

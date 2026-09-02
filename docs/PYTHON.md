@@ -304,6 +304,35 @@ vn.h = [[1.0, 0.5, 0.0, -0.2], [0.0, 1.0, 0.3, 0.4]]
 vn.h[1][3]                   # 0.4
 ```
 
+### Transforms
+
+A `TransformParam` or `ScaledTransformParam` field is reachable two
+ways. The flat properties, `frame.pose_translation`,
+`frame.pose_rotation`, `frame.pose_optimize_translation`, and for the
+scaled one `frame.st_scale` and `frame.st_optimize_scale`, are what
+`push` keywords and columns use. The field itself, `frame.pose`, is a
+live view: its parts read and write through, and it acts like a
+transform, with the frame convention `r2w` reading as "robot to
+world":
+
+```python
+frame.pose.translation = (0.3, -0.2, 0.5)
+frame.pose.rotation = quaternd.from_euler_angles((0.1, 0.2, 0.3))
+frame.pose.optimize_rotation = False
+x_w = frame.pose * x_r                 # R x + t
+x_r = frame.pose.inv() * x_w           # R^T (x_w - t)
+d_w = frame.pose.rotate(d_r)           # a vector: R d_r, no translation
+b2a = a.pose.inv() * b.pose            # composition: b's pose seen from a
+c2w = frame.pose * frame.st            # rigid times scaled is scaled
+```
+
+`inv()` and compositions are plain values, `arael.transform3d` for a
+rigid result and `arael.scaled_transform3d` when a scale is involved
+(`f` variants for `f32` fields), with the same methods and `*`;
+`frame.pose.to_transform()` and `frame.st.to_scaled_transform()` are
+the snapshots. A scaled transform acts as `s (R x) + t` and its
+inverse as `R^T (x - t) / s`; `rotate` never scales.
+
 ## Solving
 
 `LmConfig` starts from a preset with the actual Rust values filled

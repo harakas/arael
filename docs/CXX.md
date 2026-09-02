@@ -115,13 +115,34 @@ views are named by their container's nature: `PathPosesDeque`,
 - **Params** read/write their value; `set_<p>_optimize(false)` fixes
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
-  and per-half optimize flags; `UnitVecParam` exposes `unit` and the
+  and per-half optimize flags, `ScaledTransformParam` those plus
+  `scale` and `optimize_scale`; `UnitVecParam` exposes `unit` and the
   read-only chart basis `unit_d0`/`unit_d1` (for covariance
   Jacobians); `AngleParam` exposes `<f>_angle` (read/write + optimize)
   and the read-only `<f>_rotation_matrix`. User `#[arael(component)]` structs surface like nested
   sub-models: their fields (set-before / read-after values included)
   behind an accessor. Entity wrappers carry
   `static constexpr param_count`.
+- **Transforms**: a `TransformParam` / `ScaledTransformParam` field is
+  also a live view, `frame.pose()`, whose parts read and write through
+  (`translation()`, `set_rotation(q)`, `set_optimize_scale(false)`)
+  and which acts like a transform, with `r2w` reading as "robot to
+  world":
+
+  ```cpp
+  vect3d x_w = frame.pose() * x_r;                 // R x + t
+  vect3d x_r = frame.pose().inv() * x_w;           // R^T (x_w - t)
+  vect3d d_w = frame.pose().rotate(d_r);           // a vector: no translation
+  transform3d b2a = a.pose().inv() * b.pose();     // composition: b's pose seen from a
+  scaled_transform3d c2w = frame.pose() * frame.st();   // rigid times scaled is scaled
+  ```
+
+  `inv()` and compositions are the plain values `arael::transform3<T>`
+  and `arael::scaled_transform3<T>` (`transform3d` / `f`,
+  `scaled_transform3d` / `f`, in `arael/transform.hpp`), with the same
+  methods and `operator*`; `to_transform()` / `to_scaled_transform()`
+  are the snapshots. A scaled transform acts as `s (R x) + t`, its
+  inverse as `R^T (x - t) / s`; `rotate` never scales.
 - **Collections**: `push` (deque: `push_back`/`push_front`) returns an
   element wrapper; `refs::`-backed containers also give `ref_at(i)` /
   `get(ref)` / `contains(ref)` / `try_get(ref)` (an `option`, empty

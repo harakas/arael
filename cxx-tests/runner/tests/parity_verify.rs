@@ -861,4 +861,42 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("fr_col_q_reset"), 1.0);
         assert_eq!(g("misc_ok"), 1.0);
     }
+
+    // The transform views and value types of both skins against the
+    // Rust transform3 / scaled_transform3 on the same inputs. The
+    // skins run the same formulas in their own arithmetic, so this
+    // compares to a relative 1e-12, not bit for bit.
+    if got.contains_key("tf_px") {
+        use arael::quatern::quaternd;
+        use arael::transform::{scaled_transform3, transform3};
+        let near = |n: &str, v: f64| {
+            let got = g(n);
+            assert!((got - v).abs() <= 1e-12 * (1.0 + v.abs()), "{n}: {got} vs {v}");
+        };
+        let qa = quaternd::from_euler_angles(vect3d::new(0.1, 0.2, 0.3));
+        let qb = quaternd::from_euler_angles(vect3d::new(0.4, -0.1, 0.2));
+        let qc = quaternd::from_euler_angles(vect3d::new(0.0, 0.3, 0.1));
+        let pa = transform3::new(vect3d::new(0.3, -0.2, 0.5), qa);
+        let pb = transform3::new(vect3d::new(1.1, 0.4, 0.2), qb);
+        let sa = scaled_transform3::new(vect3d::new(1.0, 2.0, 3.0), qa, 1.3);
+        let sb = scaled_transform3::new(vect3d::new(0.5, 0.5, 0.5), qc, 0.8);
+        let tx = vect3d::new(1.0, 0.4, -0.3);
+        let v = pa * tx;
+        near("tf_px", v.x); near("tf_py", v.y); near("tf_pz", v.z);
+        let v = pa.inv() * tx;
+        near("tf_ix", v.x); near("tf_iy", v.y); near("tf_iz", v.z);
+        let v = (pa.inv() * pb).translation;
+        near("tf_relx", v.x); near("tf_rely", v.y); near("tf_relz", v.z);
+        let v = sa * tx;
+        near("tf_sx", v.x); near("tf_sy", v.y); near("tf_sz", v.z);
+        let v = sa.inv() * tx;
+        near("tf_six", v.x); near("tf_siy", v.y); near("tf_siz", v.z);
+        near("tf_srel_s", (sa.inv() * sb).scale);
+        let v = (pa * sb) * tx;
+        near("tf_mixx", v.x); near("tf_mixy", v.y); near("tf_mixz", v.z);
+        let v = pa.rotate(tx);
+        near("tf_rx", v.x); near("tf_ry", v.y); near("tf_rz", v.z);
+        assert_eq!(g("tf_write"), 1.0);
+        assert_eq!(g("tf_read_back"), -0.2);
+    }
 }

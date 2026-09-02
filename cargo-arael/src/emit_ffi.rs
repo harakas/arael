@@ -764,11 +764,14 @@ fn field_accessors(
                 &format!("{access}.{name}.optimize = v;"));
         }
         "component" => match of {
-            "TransformParam" | "TransformParamF" => {
-                let (v3, q) = if of == "TransformParamF" {
-                    ("CVec3F32", "CQuatF32")
+            "TransformParam" | "TransformParamF"
+            | "ScaledTransformParam" | "ScaledTransformParamF" => {
+                let f32 = of.ends_with('F');
+                let scaled = of.starts_with("Scaled");
+                let (v3, q, sc) = if f32 {
+                    ("CVec3F32", "CQuatF32", "f32")
                 } else {
-                    ("CVec3F64", "CQuatF64")
+                    ("CVec3F64", "CQuatF64", "f64")
                 };
                 rw(out, &format!("{fn_prefix}_{name}"), "translation", ptr_ty, access, v3,
                     &format!("{access}.{name}.translation.into()"),
@@ -776,7 +779,17 @@ fn field_accessors(
                 rw(out, &format!("{fn_prefix}_{name}"), "rotation", ptr_ty, access, q,
                     &format!("{access}.{name}.rotation.into()"),
                     &format!("{access}.{name}.rotation = v.into();"));
-                for flag in ["optimize_translation", "optimize_rotation"] {
+                if scaled {
+                    rw(out, &format!("{fn_prefix}_{name}"), "scale", ptr_ty, access, sc,
+                        &format!("{access}.{name}.scale"),
+                        &format!("{access}.{name}.scale = v;"));
+                }
+                let flags: &[&str] = if scaled {
+                    &["optimize_translation", "optimize_rotation", "optimize_scale"]
+                } else {
+                    &["optimize_translation", "optimize_rotation"]
+                };
+                for flag in flags {
                     rw(out, &format!("{fn_prefix}_{name}"), flag, ptr_ty, access, "bool",
                         &format!("{access}.{name}.{flag}"),
                         &format!("{access}.{name}.{flag} = v;"));

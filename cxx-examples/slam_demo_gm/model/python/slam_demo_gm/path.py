@@ -12,6 +12,7 @@ import struct
 from . import _path_ffi as _f
 from .arael import columns as _cols
 from .arael import math as _m
+from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
@@ -1177,6 +1178,13 @@ class Pose:
     @r2w_optimize_rotation.setter
     def r2w_optimize_rotation(self, v):
         _f.path_pose_r2w_set_optimize_rotation(self._p, v)
+
+    @property
+    def r2w(self):
+        """`r2w` as a live transform: `.translation`, `.rotation` and
+        the optimize flags read and write through, and it acts like a
+        transform (`r2w * x`, `r2w.inv() * y`, `a.r2w.inv() * b.r2w`)."""
+        return _tf.TransformParamView(self, "r2w", _tf.transform3d)
 
     @property
     def info(self):

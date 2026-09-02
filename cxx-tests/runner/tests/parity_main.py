@@ -860,3 +860,38 @@ for call, exc in ((lambda: fq.obs.push(z=1.0), TypeError),
     except exc:
         pass
 pi("misc_ok", misc)
+
+# The transform views on a pose field and the value types behind them,
+# against the Rust transform3 / scaled_transform3 in parity_verify.
+ft = fit.Fit()
+qa = quaternd.from_euler_angles((0.1, 0.2, 0.3))
+qb = quaternd.from_euler_angles((0.4, -0.1, 0.2))
+qc = quaternd.from_euler_angles((0.0, 0.3, 0.1))
+fa = ft.frames.push(pose_translation=(0.3, -0.2, 0.5), pose_rotation=qa,
+                    st_translation=(1.0, 2.0, 3.0), st_rotation=qa, st_scale=1.3)
+fb = ft.frames.push(pose_translation=(1.1, 0.4, 0.2), pose_rotation=qb,
+                    st_translation=(0.5, 0.5, 0.5), st_rotation=qc, st_scale=0.8)
+tx = vect3d(1.0, 0.4, -0.3)
+v = fa.pose * tx
+p("tf_px", v.x); p("tf_py", v.y); p("tf_pz", v.z)
+v = fa.pose.inv() * tx
+p("tf_ix", v.x); p("tf_iy", v.y); p("tf_iz", v.z)
+v = (fa.pose.inv() * fb.pose).translation
+p("tf_relx", v.x); p("tf_rely", v.y); p("tf_relz", v.z)
+v = fa.st * tx
+p("tf_sx", v.x); p("tf_sy", v.y); p("tf_sz", v.z)
+v = fa.st.inv() * tx
+p("tf_six", v.x); p("tf_siy", v.y); p("tf_siz", v.z)
+p("tf_srel_s", (fa.st.inv() * fb.st).scale)
+v = (fa.pose * fb.st) * tx
+p("tf_mixx", v.x); p("tf_mixy", v.y); p("tf_mixz", v.z)
+v = fa.pose.rotate(tx)
+p("tf_rx", v.x); p("tf_ry", v.y); p("tf_rz", v.z)
+# writes through the view land on the flat property, and the reverse
+fa.pose.translation = (9.0, 8.0, 7.0)
+fa.st.scale = 2.0
+fa.pose.optimize_rotation = False
+pi("tf_write", 1 if (fa.pose_translation.x == 9.0 and fa.st_scale == 2.0
+                     and not fa.pose_optimize_rotation) else 0)
+fa.pose_translation = (0.3, -0.2, 0.5)
+p("tf_read_back", fa.pose.translation.y)

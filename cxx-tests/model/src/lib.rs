@@ -13,7 +13,7 @@ use arael::model::{
 };
 use arael::refs::{self, Ref};
 use arael::matrix::matrixd;
-use arael::transform::TransformParam;
+use arael::transform::{ScaledTransformParam, TransformParam};
 use arael::unitvec::UnitVecParam;
 use arael::vect::{vect2d, vect3d, vectd};
 
@@ -181,14 +181,16 @@ pub struct Rig {
     pub hb: SelfBlock<Rig>,
 }
 
-/// The pose builtins -- a rigid transform and a unit direction -- with
-/// an `i32` and an `f32` beside them: the leaf kinds the keyword and
-/// column calls must carry. Unconstrained; the parity suite builds and
-/// reads it back without solving.
+/// The pose builtins -- a rigid transform, its scaled sister and a unit
+/// direction -- with an `i32` and an `f32` beside them: the leaf kinds
+/// the keyword and column calls must carry, and the fields the C++ and
+/// Python transform views wrap. Unconstrained; the parity suite builds
+/// and reads it back without solving.
 #[arael::model]
 #[derive(Default)]
 pub struct Frame {
     pub pose: TransformParam<f64>,
+    pub st: ScaledTransformParam<f64>,
     pub dir: UnitVecParam<f64>,
     pub anchor: vect3d,
     pub tag: i32,

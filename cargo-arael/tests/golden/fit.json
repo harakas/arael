@@ -33,10 +33,11 @@
     },
     "Frame": {
       "role": "entity",
-      "param_count": 8,
+      "param_count": 15,
       "self_block": "hb",
       "fields": [
         {"name": "pose", "kind": "component", "of": "TransformParam"},
+        {"name": "st", "kind": "component", "of": "ScaledTransformParam"},
         {"name": "dir", "kind": "component", "of": "UnitVecParam"},
         {"name": "anchor", "kind": "data", "of": "vect3d"},
         {"name": "tag", "kind": "data", "of": "i32"},
@@ -117,6 +118,12 @@
         {"name": "target_g", "kind": "data", "of": "f64"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
       ]
+    },
+    "ScaledTransformParam": {
+      "role": "component",
+      "param_count": 7,
+      "builtin": true,
+      "fields": []
     },
     "Tie": {
       "role": "entity",

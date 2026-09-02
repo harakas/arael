@@ -185,6 +185,18 @@ bool fit_frame_pose_optimize_translation(const Frame*);
 void fit_frame_pose_set_optimize_translation(Frame*, bool);
 bool fit_frame_pose_optimize_rotation(const Frame*);
 void fit_frame_pose_set_optimize_rotation(Frame*, bool);
+vect3d fit_frame_st_translation(const Frame*);
+void fit_frame_st_set_translation(Frame*, vect3d);
+quaternd fit_frame_st_rotation(const Frame*);
+void fit_frame_st_set_rotation(Frame*, quaternd);
+double fit_frame_st_scale(const Frame*);
+void fit_frame_st_set_scale(Frame*, double);
+bool fit_frame_st_optimize_translation(const Frame*);
+void fit_frame_st_set_optimize_translation(Frame*, bool);
+bool fit_frame_st_optimize_rotation(const Frame*);
+void fit_frame_st_set_optimize_rotation(Frame*, bool);
+bool fit_frame_st_optimize_scale(const Frame*);
+void fit_frame_st_set_optimize_scale(Frame*, bool);
 vect3d fit_frame_dir_unit(const Frame*);
 void fit_frame_dir_set_unit(Frame*, vect3d);
 vect3d fit_frame_dir_unit_d0(const Frame*);
@@ -564,7 +576,7 @@ using SolveResult = result<LmResult, SolveError>;
 class Frame {
 public:
     /// Optimized parameters this entity contributes to the solve.
-    static constexpr uint32_t param_count = 8;
+    static constexpr uint32_t param_count = 15;
     Frame() : h_(nullptr) {}
     explicit Frame(ffi::Frame* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -579,6 +591,26 @@ public:
     void set_pose_optimize_translation(bool v) { ffi::fit_frame_pose_set_optimize_translation(h_, v); }
     bool pose_optimize_rotation() const { return ffi::fit_frame_pose_optimize_rotation(h_); }
     void set_pose_optimize_rotation(bool v) { ffi::fit_frame_pose_set_optimize_rotation(h_, v); }
+    /// `pose` as a live transform: `pose().translation()`, `pose().set_rotation(q)`, `pose() * x`, `pose().inv()`.
+    arael::TransformParamView<ffi::Frame, double> pose() const {
+        return {h_, ffi::fit_frame_pose_translation, ffi::fit_frame_pose_set_translation, ffi::fit_frame_pose_rotation, ffi::fit_frame_pose_set_rotation, ffi::fit_frame_pose_optimize_translation, ffi::fit_frame_pose_set_optimize_translation, ffi::fit_frame_pose_optimize_rotation, ffi::fit_frame_pose_set_optimize_rotation};
+    }
+    vect3d st_translation() const { return ffi::fit_frame_st_translation(h_); }
+    void set_st_translation(vect3d v) { ffi::fit_frame_st_set_translation(h_, v); }
+    quaternd st_rotation() const { return ffi::fit_frame_st_rotation(h_); }
+    void set_st_rotation(quaternd v) { ffi::fit_frame_st_set_rotation(h_, v); }
+    double st_scale() const { return ffi::fit_frame_st_scale(h_); }
+    void set_st_scale(double v) { ffi::fit_frame_st_set_scale(h_, v); }
+    bool st_optimize_translation() const { return ffi::fit_frame_st_optimize_translation(h_); }
+    void set_st_optimize_translation(bool v) { ffi::fit_frame_st_set_optimize_translation(h_, v); }
+    bool st_optimize_rotation() const { return ffi::fit_frame_st_optimize_rotation(h_); }
+    void set_st_optimize_rotation(bool v) { ffi::fit_frame_st_set_optimize_rotation(h_, v); }
+    bool st_optimize_scale() const { return ffi::fit_frame_st_optimize_scale(h_); }
+    void set_st_optimize_scale(bool v) { ffi::fit_frame_st_set_optimize_scale(h_, v); }
+    /// `st` as a live transform: `st().translation()`, `st().set_rotation(q)`, `st() * x`, `st().inv()`.
+    arael::ScaledTransformParamView<ffi::Frame, double> st() const {
+        return {h_, ffi::fit_frame_st_translation, ffi::fit_frame_st_set_translation, ffi::fit_frame_st_rotation, ffi::fit_frame_st_set_rotation, ffi::fit_frame_st_scale, ffi::fit_frame_st_set_scale, ffi::fit_frame_st_optimize_translation, ffi::fit_frame_st_set_optimize_translation, ffi::fit_frame_st_optimize_rotation, ffi::fit_frame_st_set_optimize_rotation, ffi::fit_frame_st_optimize_scale, ffi::fit_frame_st_set_optimize_scale};
+    }
     vect3d dir_unit() const { return ffi::fit_frame_dir_unit(h_); }
     void set_dir_unit(vect3d v) { ffi::fit_frame_dir_set_unit(h_, v); }
     /// Chart tangent basis: d unit / d chart, per chart param.

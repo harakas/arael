@@ -564,21 +564,46 @@ fn field_py(
             }
         }
         "component" => match of {
-            "TransformParam" | "TransformParamF" => {
-                let (v3, q) = if of == "TransformParamF" {
-                    ("_m.vect3f", "_m.quaternf")
+            "TransformParam" | "TransformParamF"
+            | "ScaledTransformParam" | "ScaledTransformParamF" => {
+                let f32 = of.ends_with('F');
+                let scaled = of.starts_with("Scaled");
+                let (v3, q, sc, val) = if f32 {
+                    ("_m.vect3f", "_m.quaternf", "ctypes.c_float", "f")
                 } else {
-                    ("_m.vect3d", "_m.quaternd")
+                    ("_m.vect3d", "_m.quaternd", "ctypes.c_double", "d")
                 };
                 let p2 = format!("{prefix}_{name}");
                 prop(py, owner_cls, &p2, "translation",
                      &format!("{name}_translation"), v3, true);
                 prop(py, owner_cls, &p2, "rotation",
                      &format!("{name}_rotation"), q, true);
-                for flag in ["optimize_translation", "optimize_rotation"] {
+                if scaled {
+                    prop(py, owner_cls, &p2, "scale", &format!("{name}_scale"), sc, false);
+                }
+                let flags: &[&str] = if scaled {
+                    &["optimize_translation", "optimize_rotation", "optimize_scale"]
+                } else {
+                    &["optimize_translation", "optimize_rotation"]
+                };
+                for flag in flags {
                     prop(py, owner_cls, &p2, flag,
                          &format!("{name}_{flag}"), "ctypes.c_bool", false);
                 }
+                let (view, value) = if scaled {
+                    ("ScaledTransformParamView", format!("_tf.scaled_transform3{val}"))
+                } else {
+                    ("TransformParamView", format!("_tf.transform3{val}"))
+                };
+                owner_cls.push_str(&format!(
+"    @property
+    def {name}(self):
+        \"\"\"`{name}` as a live transform: `.translation`, `.rotation` and
+        the optimize flags read and write through, and it acts like a
+        transform (`{name} * x`, `{name}.inv() * y`, `a.{name}.inv() * b.{name}`).\"\"\"
+        return _tf.{view}(self, \"{name}\", {value})
+
+"));
             }
             "UnitVecParam" | "UnitVecParamF" => {
                 let v3 = if of == "UnitVecParamF" { "_m.vect3f" } else { "_m.vect3d" };
@@ -1329,6 +1354,7 @@ import struct
 from . import _{root_sn}_ffi as _f
 from .arael import columns as _cols
 from .arael import math as _m
+from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,

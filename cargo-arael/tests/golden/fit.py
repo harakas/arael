@@ -12,6 +12,7 @@ import struct
 from . import _fit_ffi as _f
 from .arael import columns as _cols
 from .arael import math as _m
+from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
@@ -462,8 +463,8 @@ _Z4 = (0.0,) * 4
 _Z8 = (0.0,) * 8
 
 
-_frame_rec = struct.Struct("=QdddddddQQddddddqd")
-_frame_slots = (ctypes.c_uint64 * 18)()
+_frame_rec = struct.Struct("=QdddddddQQddddddddQQQddddddqd")
+_frame_slots = (ctypes.c_uint64 * 29)()
 
 
 class Frame:
@@ -472,7 +473,7 @@ class Frame:
     collection cannot leave this wrapper dangling."""
 
     __slots__ = ("_at", "_key")
-    param_count = 8
+    param_count = 15
 
     def __init__(self, at, key=None):
         # Zero-argument callable returning a currently-valid pointer, and
@@ -534,6 +535,68 @@ class Frame:
     @pose_optimize_rotation.setter
     def pose_optimize_rotation(self, v):
         _f.fit_frame_pose_set_optimize_rotation(self._p, v)
+
+    @property
+    def pose(self):
+        """`pose` as a live transform: `.translation`, `.rotation` and
+        the optimize flags read and write through, and it acts like a
+        transform (`pose * x`, `pose.inv() * y`, `a.pose.inv() * b.pose`)."""
+        return _tf.TransformParamView(self, "pose", _tf.transform3d)
+
+    @property
+    def st_translation(self):
+        return _f.fit_frame_st_translation(self._p)
+
+    @st_translation.setter
+    def st_translation(self, v):
+        _f.fit_frame_st_set_translation(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def st_rotation(self):
+        return _f.fit_frame_st_rotation(self._p)
+
+    @st_rotation.setter
+    def st_rotation(self, v):
+        _f.fit_frame_st_set_rotation(self._p, v if isinstance(v, _m.quaternd) else _m.quaternd(v))
+
+    @property
+    def st_scale(self):
+        return _f.fit_frame_st_scale(self._p)
+
+    @st_scale.setter
+    def st_scale(self, v):
+        _f.fit_frame_st_set_scale(self._p, v)
+
+    @property
+    def st_optimize_translation(self):
+        return _f.fit_frame_st_optimize_translation(self._p)
+
+    @st_optimize_translation.setter
+    def st_optimize_translation(self, v):
+        _f.fit_frame_st_set_optimize_translation(self._p, v)
+
+    @property
+    def st_optimize_rotation(self):
+        return _f.fit_frame_st_optimize_rotation(self._p)
+
+    @st_optimize_rotation.setter
+    def st_optimize_rotation(self, v):
+        _f.fit_frame_st_set_optimize_rotation(self._p, v)
+
+    @property
+    def st_optimize_scale(self):
+        return _f.fit_frame_st_optimize_scale(self._p)
+
+    @st_optimize_scale.setter
+    def st_optimize_scale(self, v):
+        _f.fit_frame_st_set_optimize_scale(self._p, v)
+
+    @property
+    def st(self):
+        """`st` as a live transform: `.translation`, `.rotation` and
+        the optimize flags read and write through, and it acts like a
+        transform (`st * x`, `st.inv() * y`, `a.st.inv() * b.st`)."""
+        return _tf.ScaledTransformParamView(self, "st", _tf.scaled_transform3d)
 
     @property
     def dir_unit(self):
@@ -1413,7 +1476,7 @@ class Covariance:
     def marginal(self, e):
         """The entity's marginal covariance block."""
         if isinstance(e, Frame):
-            return (lambda b: _shape_n(b, 8))(_cov_query(self._h, _f.fit_frame_marginal_cov, e._p, 64))
+            return (lambda b: _shape_n(b, 15))(_cov_query(self._h, _f.fit_frame_marginal_cov, e._p, 225))
         if isinstance(e, N):
             return (_shape_1)(_cov_query(self._h, _f.fit_n_marginal_cov, e._p, 1))
         if isinstance(e, Pose):
@@ -1429,7 +1492,7 @@ class Covariance:
     def conditional(self, e):
         """Conditional covariance (all other parameters fixed)."""
         if isinstance(e, Frame):
-            return (lambda b: _shape_n(b, 8))(_cov_query(self._h, _f.fit_frame_conditional_cov, e._p, 64))
+            return (lambda b: _shape_n(b, 15))(_cov_query(self._h, _f.fit_frame_conditional_cov, e._p, 225))
         if isinstance(e, N):
             return (_shape_1)(_cov_query(self._h, _f.fit_n_conditional_cov, e._p, 1))
         if isinstance(e, Pose):
@@ -1446,7 +1509,7 @@ class Covariance:
         """Per-parameter standard deviations (every CovMode, incl.
         TriDiagonal)."""
         if isinstance(e, Frame):
-            return list(_cov_query(self._h, _f.fit_frame_std_dev, e._p, 8))
+            return list(_cov_query(self._h, _f.fit_frame_std_dev, e._p, 15))
         if isinstance(e, N):
             return list(_cov_query(self._h, _f.fit_n_std_dev, e._p, 1))
         if isinstance(e, Pose):
@@ -1459,60 +1522,60 @@ class Covariance:
             return list(_cov_query(self._h, _f.fit_wrap_std_dev, e._p, 1))
         raise TypeError("no std_dev for %r" % (e,))
     def _cross_frame_frame(self, a, b):
-        buf = (ctypes.c_double * 64)()
-        rows = _f.fit_frame_frame_cross_cov(self._h, a._p, b._p, buf, 64)
+        buf = (ctypes.c_double * 225)()
+        rows = _f.fit_frame_frame_cross_cov(self._h, a._p, b._p, buf, 225)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
-        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+        return tuple(tuple(buf[r * 15 + c] for c in range(15))
                      for r in range(rows))
     def _cross_frame_n(self, a, b):
-        buf = (ctypes.c_double * 8)()
-        rows = _f.fit_frame_n_cross_cov(self._h, a._p, b._p, buf, 8)
+        buf = (ctypes.c_double * 15)()
+        rows = _f.fit_frame_n_cross_cov(self._h, a._p, b._p, buf, 15)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_frame_pose(self, a, b):
-        buf = (ctypes.c_double * 56)()
-        rows = _f.fit_frame_pose_cross_cov(self._h, a._p, b._p, buf, 56)
+        buf = (ctypes.c_double * 105)()
+        rows = _f.fit_frame_pose_cross_cov(self._h, a._p, b._p, buf, 105)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
     def _cross_frame_rig(self, a, b):
-        buf = (ctypes.c_double * 56)()
-        rows = _f.fit_frame_rig_cross_cov(self._h, a._p, b._p, buf, 56)
+        buf = (ctypes.c_double * 105)()
+        rows = _f.fit_frame_rig_cross_cov(self._h, a._p, b._p, buf, 105)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
     def _cross_frame_vn(self, a, b):
-        buf = (ctypes.c_double * 32)()
-        rows = _f.fit_frame_vn_cross_cov(self._h, a._p, b._p, buf, 32)
+        buf = (ctypes.c_double * 60)()
+        rows = _f.fit_frame_vn_cross_cov(self._h, a._p, b._p, buf, 60)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 4 + c] for c in range(4))
                      for r in range(rows))
     def _cross_frame_wrap(self, a, b):
-        buf = (ctypes.c_double * 8)()
-        rows = _f.fit_frame_wrap_cross_cov(self._h, a._p, b._p, buf, 8)
+        buf = (ctypes.c_double * 15)()
+        rows = _f.fit_frame_wrap_cross_cov(self._h, a._p, b._p, buf, 15)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_n_frame(self, a, b):
-        buf = (ctypes.c_double * 8)()
-        rows = _f.fit_n_frame_cross_cov(self._h, a._p, b._p, buf, 8)
+        buf = (ctypes.c_double * 15)()
+        rows = _f.fit_n_frame_cross_cov(self._h, a._p, b._p, buf, 15)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
-        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+        return tuple(tuple(buf[r * 15 + c] for c in range(15))
                      for r in range(rows))
     def _cross_n_n(self, a, b):
         buf = (ctypes.c_double * 1)()
@@ -1555,12 +1618,12 @@ class Covariance:
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_pose_frame(self, a, b):
-        buf = (ctypes.c_double * 56)()
-        rows = _f.fit_pose_frame_cross_cov(self._h, a._p, b._p, buf, 56)
+        buf = (ctypes.c_double * 105)()
+        rows = _f.fit_pose_frame_cross_cov(self._h, a._p, b._p, buf, 105)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
-        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+        return tuple(tuple(buf[r * 15 + c] for c in range(15))
                      for r in range(rows))
     def _cross_pose_n(self, a, b):
         buf = (ctypes.c_double * 7)()
@@ -1603,12 +1666,12 @@ class Covariance:
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_rig_frame(self, a, b):
-        buf = (ctypes.c_double * 56)()
-        rows = _f.fit_rig_frame_cross_cov(self._h, a._p, b._p, buf, 56)
+        buf = (ctypes.c_double * 105)()
+        rows = _f.fit_rig_frame_cross_cov(self._h, a._p, b._p, buf, 105)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
-        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+        return tuple(tuple(buf[r * 15 + c] for c in range(15))
                      for r in range(rows))
     def _cross_rig_n(self, a, b):
         buf = (ctypes.c_double * 7)()
@@ -1651,12 +1714,12 @@ class Covariance:
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_vn_frame(self, a, b):
-        buf = (ctypes.c_double * 32)()
-        rows = _f.fit_vn_frame_cross_cov(self._h, a._p, b._p, buf, 32)
+        buf = (ctypes.c_double * 60)()
+        rows = _f.fit_vn_frame_cross_cov(self._h, a._p, b._p, buf, 60)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
-        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+        return tuple(tuple(buf[r * 15 + c] for c in range(15))
                      for r in range(rows))
     def _cross_vn_n(self, a, b):
         buf = (ctypes.c_double * 4)()
@@ -1699,12 +1762,12 @@ class Covariance:
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_wrap_frame(self, a, b):
-        buf = (ctypes.c_double * 8)()
-        rows = _f.fit_wrap_frame_cross_cov(self._h, a._p, b._p, buf, 8)
+        buf = (ctypes.c_double * 15)()
+        rows = _f.fit_wrap_frame_cross_cov(self._h, a._p, b._p, buf, 15)
         if rows < 0:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
-        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+        return tuple(tuple(buf[r * 15 + c] for c in range(15))
                      for r in range(rows))
     def _cross_wrap_n(self, a, b):
         buf = (ctypes.c_double * 1)()
@@ -3443,7 +3506,10 @@ class FitFramesVec:
 
     def push(self, *, pose_translation=None, pose_rotation=None,
                  pose_optimize_translation=None, pose_optimize_rotation=None,
-                 dir_unit=None, anchor=None, tag=None, scale=None):
+                 st_translation=None, st_rotation=None, st_scale=None,
+                 st_optimize_translation=None, st_optimize_rotation=None,
+                 st_optimize_scale=None, dir_unit=None, anchor=None,
+                 tag=None, scale=None):
         """Appends one element and returns it; each keyword sets that
         field in the same call, an omitted one keeps the Rust default."""
         m = 0
@@ -3459,21 +3525,39 @@ class FitFramesVec:
         else: m |= 1 << 2; pose_optimize_translation = 1 if pose_optimize_translation else 0
         if pose_optimize_rotation is None: pose_optimize_rotation = 0
         else: m |= 1 << 3; pose_optimize_rotation = 1 if pose_optimize_rotation else 0
+        if st_translation is None: st_translation = _Z3
+        else:
+            m |= 1 << 4; st_translation = tuple(st_translation)
+            if len(st_translation) != 3: st_translation = _cols.flat(st_translation, 3)
+        if st_rotation is None: st_rotation = _Z4
+        else:
+            m |= 1 << 5; st_rotation = tuple(st_rotation)
+            if len(st_rotation) != 4: st_rotation = _cols.flat(st_rotation, 4)
+        if st_scale is None: st_scale = 0.0
+        else: m |= 1 << 6
+        if st_optimize_translation is None: st_optimize_translation = 0
+        else: m |= 1 << 7; st_optimize_translation = 1 if st_optimize_translation else 0
+        if st_optimize_rotation is None: st_optimize_rotation = 0
+        else: m |= 1 << 8; st_optimize_rotation = 1 if st_optimize_rotation else 0
+        if st_optimize_scale is None: st_optimize_scale = 0
+        else: m |= 1 << 9; st_optimize_scale = 1 if st_optimize_scale else 0
         if dir_unit is None: dir_unit = _Z3
         else:
-            m |= 1 << 4; dir_unit = tuple(dir_unit)
+            m |= 1 << 10; dir_unit = tuple(dir_unit)
             if len(dir_unit) != 3: dir_unit = _cols.flat(dir_unit, 3)
         if anchor is None: anchor = _Z3
         else:
-            m |= 1 << 5; anchor = tuple(anchor)
+            m |= 1 << 11; anchor = tuple(anchor)
             if len(anchor) != 3: anchor = _cols.flat(anchor, 3)
         if tag is None: tag = 0
-        else: m |= 1 << 6
+        else: m |= 1 << 12
         if scale is None: scale = 0.0
-        else: m |= 1 << 7
+        else: m |= 1 << 13
         _frame_rec.pack_into(_frame_slots, 0,
             m, *pose_translation, *pose_rotation, pose_optimize_translation,
-            pose_optimize_rotation, *dir_unit, *anchor, tag, scale)
+            pose_optimize_rotation, *st_translation, *st_rotation, st_scale,
+            st_optimize_translation, st_optimize_rotation, st_optimize_scale,
+            *dir_unit, *anchor, tag, scale)
         r = FrameRef(_f.fit_frames_push_n(self._p, _frame_slots, 1))
         return Frame(lambda k=r.raw: _f.fit_frames_get(self._p, k), r)
 
@@ -3483,7 +3567,10 @@ class FitFramesVec:
 
     def push_many(self, n=None, *, pose_translation=None, pose_rotation=None,
                   pose_optimize_translation=None,
-                  pose_optimize_rotation=None, dir_unit=None, anchor=None,
+                  pose_optimize_rotation=None, st_translation=None,
+                  st_rotation=None, st_scale=None,
+                  st_optimize_translation=None, st_optimize_rotation=None,
+                  st_optimize_scale=None, dir_unit=None, anchor=None,
                   tag=None, scale=None):
         """Appends `n` elements in one call. Each keyword is one value
         for all of them or a sequence with one per element (a numpy
@@ -3494,6 +3581,11 @@ class FitFramesVec:
                         ("pose_rotation", pose_rotation),
                         ("pose_optimize_translation", pose_optimize_translation),
                         ("pose_optimize_rotation", pose_optimize_rotation),
+                        ("st_translation", st_translation),
+                        ("st_rotation", st_rotation), ("st_scale", st_scale),
+                        ("st_optimize_translation", st_optimize_translation),
+                        ("st_optimize_rotation", st_optimize_rotation),
+                        ("st_optimize_scale", st_optimize_scale),
                         ("dir_unit", dir_unit), ("anchor", anchor),
                         ("tag", tag), ("scale", scale)))
         i0 = len(self)
@@ -3506,6 +3598,18 @@ class FitFramesVec:
             self._set_pose_optimize_translation(i0, n, pose_optimize_translation)
         if pose_optimize_rotation is not None:
             self._set_pose_optimize_rotation(i0, n, pose_optimize_rotation)
+        if st_translation is not None:
+            self._set_st_translation(i0, n, st_translation)
+        if st_rotation is not None:
+            self._set_st_rotation(i0, n, st_rotation)
+        if st_scale is not None:
+            self._set_st_scale(i0, n, st_scale)
+        if st_optimize_translation is not None:
+            self._set_st_optimize_translation(i0, n, st_optimize_translation)
+        if st_optimize_rotation is not None:
+            self._set_st_optimize_rotation(i0, n, st_optimize_rotation)
+        if st_optimize_scale is not None:
+            self._set_st_optimize_scale(i0, n, st_optimize_scale)
         if dir_unit is not None:
             self._set_dir_unit(i0, n, dir_unit)
         if anchor is not None:
@@ -3590,6 +3694,120 @@ class FitFramesVec:
         n = len(self)
         buf, ptr, stride = _cols.column_out("B", 1, n)
         _f.fit_frames_get_pose_optimize_rotation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_st_translation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "st_translation")
+        if not _f.fit_frames_set_st_translation_n(self._p, start, ptr, n, stride):
+            raise IndexError("st_translation: %d + %d exceeds the collection" % (start, n))
+
+    def set_st_translation(self, v):
+        """Sets `st_translation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_st_translation(0, len(self), v)
+
+    def get_st_translation(self):
+        """`st_translation` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_frames_get_st_translation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_st_rotation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 4, n, "st_rotation")
+        if not _f.fit_frames_set_st_rotation_n(self._p, start, ptr, n, stride):
+            raise IndexError("st_rotation: %d + %d exceeds the collection" % (start, n))
+
+    def set_st_rotation(self, v):
+        """Sets `st_rotation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_st_rotation(0, len(self), v)
+
+    def get_st_rotation(self):
+        """`st_rotation` of every element in one call, as an (n, 4) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 4, n)
+        _f.fit_frames_get_st_rotation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 4, n)
+
+    def _set_st_scale(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "st_scale")
+        if not _f.fit_frames_set_st_scale_n(self._p, start, ptr, n, stride):
+            raise IndexError("st_scale: %d + %d exceeds the collection" % (start, n))
+
+    def set_st_scale(self, v):
+        """Sets `st_scale` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_st_scale(0, len(self), v)
+
+    def get_st_scale(self):
+        """`st_scale` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_frames_get_st_scale_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_st_optimize_translation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "st_optimize_translation")
+        if not _f.fit_frames_set_st_optimize_translation_n(self._p, start, ptr, n, stride):
+            raise IndexError("st_optimize_translation: %d + %d exceeds the collection" % (start, n))
+
+    def set_st_optimize_translation(self, v):
+        """Sets `st_optimize_translation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_st_optimize_translation(0, len(self), v)
+
+    def get_st_optimize_translation(self):
+        """`st_optimize_translation` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_frames_get_st_optimize_translation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_st_optimize_rotation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "st_optimize_rotation")
+        if not _f.fit_frames_set_st_optimize_rotation_n(self._p, start, ptr, n, stride):
+            raise IndexError("st_optimize_rotation: %d + %d exceeds the collection" % (start, n))
+
+    def set_st_optimize_rotation(self, v):
+        """Sets `st_optimize_rotation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_st_optimize_rotation(0, len(self), v)
+
+    def get_st_optimize_rotation(self):
+        """`st_optimize_rotation` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_frames_get_st_optimize_rotation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_st_optimize_scale(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "st_optimize_scale")
+        if not _f.fit_frames_set_st_optimize_scale_n(self._p, start, ptr, n, stride):
+            raise IndexError("st_optimize_scale: %d + %d exceeds the collection" % (start, n))
+
+    def set_st_optimize_scale(self, v):
+        """Sets `st_optimize_scale` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_st_optimize_scale(0, len(self), v)
+
+    def get_st_optimize_scale(self):
+        """`st_optimize_scale` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_frames_get_st_optimize_scale_n(self._p, 0, ptr, n, stride)
         return _cols.column_finish(buf, "B", 1, n)
 
     def _set_dir_unit(self, start, n, v):

@@ -1,0 +1,260 @@
+# arael Python transforms: rigid and scaled transforms as plain values,
+# mirroring arael's Rust `transform3` / `scaled_transform3`, and the
+# live views a generated wrapper hands out for a TransformParam /
+# ScaledTransformParam field. A view reads and writes the field's
+# parts through the wrapper's properties; the transform algebra (`*`,
+# inv(), compose ...) runs here in Python on the current parts. A rigid
+# transform acts on a point as R x + t, a scaled one as s (R x) + t.
+
+from . import math as _m
+
+
+def _make_transform3(name, vec, quat):
+    class transform3:
+        """A rigid transform: rotation matrix and translation, acting on
+        a point as R x + t. Construct from a translation and a quaternion
+        rotation; `inv()` and compositions return the same type."""
+
+        __slots__ = ("rotation_matrix", "translation")
+
+        def __init__(self, translation=(0.0, 0.0, 0.0), rotation=None):
+            q = rotation if rotation is not None else quat.identity()
+            self.rotation_matrix = q.rotation_matrix()
+            self.translation = translation if isinstance(translation, vec) else vec(translation)
+
+        @classmethod
+        def from_parts(cls, rotation_matrix, translation):
+            """From a rotation matrix and a translation, as they are."""
+            t = cls.__new__(cls)
+            t.rotation_matrix = rotation_matrix
+            t.translation = translation if isinstance(translation, vec) else vec(translation)
+            return t
+
+        @classmethod
+        def identity(cls):
+            return cls()
+
+        def rotation(self):
+            """The rotation as a quaternion."""
+            return quat.from_rotation_matrix(self.rotation_matrix)
+
+        def transform(self, x):
+            """The action on a point: R x + t."""
+            return self.rotation_matrix * _v(x, vec) + self.translation
+
+        def inverse_transform(self, y):
+            """The action of the inverse: R^T (y - t)."""
+            return self.rotation_matrix.transpose() * (_v(y, vec) - self.translation)
+
+        def rotate(self, v):
+            """The rotation alone: R v."""
+            return self.rotation_matrix * _v(v, vec)
+
+        def inverse_rotate(self, v):
+            """The inverse rotation alone: R^T v."""
+            return self.rotation_matrix.transpose() * _v(v, vec)
+
+        def inv(self):
+            """The inverse transform."""
+            rt = self.rotation_matrix.transpose()
+            return transform3.from_parts(rt, -(rt * self.translation))
+
+        def compose(self, rhs):
+            """`self * rhs`: rhs applied first, then self."""
+            rhs = _value(rhs)
+            if isinstance(rhs, transform3):
+                return transform3.from_parts(
+                    self.rotation_matrix * rhs.rotation_matrix,
+                    self.rotation_matrix * rhs.translation + self.translation)
+            return self._scaled().compose(rhs)
+
+        def _scaled(self):
+            return _SCALED[name].from_parts(self.rotation_matrix, self.translation, 1.0)
+
+        def __mul__(self, o):
+            o = _value(o)
+            if isinstance(o, (transform3, _SCALED[name])):
+                return self.compose(o)
+            return self.transform(o)
+
+        def __repr__(self):
+            return "%s(translation=%r, rotation=%r)" % (name, self.translation, self.rotation())
+
+    transform3.__name__ = transform3.__qualname__ = name
+    return transform3
+
+
+def _make_scaled_transform3(name, rigid, vec, quat):
+    class scaled_transform3:
+        """A scaled transform: rotation matrix, translation and a uniform
+        scale, acting on a point as s (R x) + t. Construct from a
+        translation, a quaternion rotation and the scale; compositions
+        with a rigid transform, from either side, are scaled."""
+
+        __slots__ = ("rotation_matrix", "translation", "scale")
+
+        def __init__(self, translation=(0.0, 0.0, 0.0), rotation=None, scale=1.0):
+            q = rotation if rotation is not None else quat.identity()
+            self.rotation_matrix = q.rotation_matrix()
+            self.translation = translation if isinstance(translation, vec) else vec(translation)
+            self.scale = float(scale)
+
+        @classmethod
+        def from_parts(cls, rotation_matrix, translation, scale):
+            t = cls.__new__(cls)
+            t.rotation_matrix = rotation_matrix
+            t.translation = translation if isinstance(translation, vec) else vec(translation)
+            t.scale = float(scale)
+            return t
+
+        @classmethod
+        def identity(cls):
+            return cls()
+
+        def rotation(self):
+            """The rotation as a quaternion."""
+            return quat.from_rotation_matrix(self.rotation_matrix)
+
+        def transform(self, x):
+            """The action on a point: s (R x) + t."""
+            return self.rotation_matrix * _v(x, vec) * self.scale + self.translation
+
+        def inverse_transform(self, y):
+            """The action of the inverse: R^T (y - t) / s."""
+            k = 1.0 / self.scale
+            return self.rotation_matrix.transpose() * (_v(y, vec) - self.translation) * k
+
+        def rotate(self, v):
+            """The rotation alone: R v, never scaled."""
+            return self.rotation_matrix * _v(v, vec)
+
+        def inverse_rotate(self, v):
+            """The inverse rotation alone: R^T v, never scaled."""
+            return self.rotation_matrix.transpose() * _v(v, vec)
+
+        def inv(self):
+            """The inverse transform: (R^T, -R^T t / s, 1 / s)."""
+            rt = self.rotation_matrix.transpose()
+            k = 1.0 / self.scale
+            return scaled_transform3.from_parts(rt, -(rt * self.translation) * k, k)
+
+        def compose(self, rhs):
+            """`self * rhs`: rhs applied first, then self."""
+            rhs = _value(rhs)
+            if isinstance(rhs, rigid):
+                rhs = rhs._scaled()
+            return scaled_transform3.from_parts(
+                self.rotation_matrix * rhs.rotation_matrix,
+                self.rotation_matrix * rhs.translation * self.scale + self.translation,
+                self.scale * rhs.scale)
+
+        def __mul__(self, o):
+            o = _value(o)
+            if isinstance(o, (rigid, scaled_transform3)):
+                return self.compose(o)
+            return self.transform(o)
+
+        def __repr__(self):
+            return "%s(translation=%r, rotation=%r, scale=%r)" % (
+                name, self.translation, self.rotation(), self.scale)
+
+    scaled_transform3.__name__ = scaled_transform3.__qualname__ = name
+    return scaled_transform3
+
+
+def _v(x, vec):
+    return x if isinstance(x, vec) else vec(x)
+
+
+def _value(o):
+    # A view stands in for its current value.
+    as_value = getattr(o, "_as_value", None)
+    return as_value() if as_value is not None else o
+
+
+transform3d = _make_transform3("transform3d", _m.vect3d, _m.quaternd)
+transform3f = _make_transform3("transform3f", _m.vect3f, _m.quaternf)
+scaled_transform3d = _make_scaled_transform3("scaled_transform3d", transform3d, _m.vect3d, _m.quaternd)
+scaled_transform3f = _make_scaled_transform3("scaled_transform3f", transform3f, _m.vect3f, _m.quaternf)
+_SCALED = {"transform3d": scaled_transform3d, "transform3f": scaled_transform3f}
+
+
+class TransformParamView:
+    """A TransformParam field of a wrapper, live: `translation`,
+    `rotation`, `optimize_translation`, `optimize_rotation` read and
+    write through the wrapper, `rotation_matrix` is computed, and the
+    transform algebra (`*`, `inv()`, `transform` ...) runs on the
+    current parts. `to_transform()` is the snapshot as a value."""
+
+    __slots__ = ("_o", "_f", "_val")
+
+    def __init__(self, owner, field, value):
+        self._o = owner
+        self._f = field
+        self._val = value
+
+    def _get(self, part):
+        return getattr(self._o, self._f + "_" + part)
+
+    def _set(self, part, v):
+        setattr(self._o, self._f + "_" + part, v)
+
+    translation = property(lambda s: s._get("translation"), lambda s, v: s._set("translation", v))
+    rotation = property(lambda s: s._get("rotation"), lambda s, v: s._set("rotation", v))
+    optimize_translation = property(lambda s: s._get("optimize_translation"),
+                                    lambda s, v: s._set("optimize_translation", v))
+    optimize_rotation = property(lambda s: s._get("optimize_rotation"),
+                                 lambda s, v: s._set("optimize_rotation", v))
+
+    @property
+    def rotation_matrix(self):
+        return self.rotation.rotation_matrix()
+
+    def to_transform(self):
+        """The current pose as a transform value."""
+        return self._val(self.translation, self.rotation)
+
+    _as_value = to_transform
+
+    def transform(self, x):
+        return self.to_transform().transform(x)
+
+    def inverse_transform(self, y):
+        return self.to_transform().inverse_transform(y)
+
+    def rotate(self, v):
+        return self.to_transform().rotate(v)
+
+    def inverse_rotate(self, v):
+        return self.to_transform().inverse_rotate(v)
+
+    def inv(self):
+        return self.to_transform().inv()
+
+    def compose(self, rhs):
+        return self.to_transform().compose(rhs)
+
+    def __mul__(self, o):
+        return self.to_transform() * o
+
+    def __repr__(self):
+        return "%s view: %r" % (self._f, self.to_transform())
+
+
+class ScaledTransformParamView(TransformParamView):
+    """A ScaledTransformParam field of a wrapper, live, with `scale` and
+    `optimize_scale` beside the rigid parts. `to_scaled_transform()` is
+    the snapshot as a value."""
+
+    __slots__ = ()
+
+    scale = property(lambda s: s._get("scale"), lambda s, v: s._set("scale", v))
+    optimize_scale = property(lambda s: s._get("optimize_scale"),
+                              lambda s, v: s._set("optimize_scale", v))
+
+    def to_scaled_transform(self):
+        """The current pose as a scaled transform value."""
+        return self._val(self.translation, self.rotation, self.scale)
+
+    to_transform = to_scaled_transform
+    _as_value = to_scaled_transform

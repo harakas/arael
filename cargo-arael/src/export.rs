@@ -47,12 +47,14 @@ const PY_SUPPORT: &[(&str, &str)] = &[
     ("g2o.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/g2o.py"))),
     ("solver.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/solver.py"))),
     ("columns.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/columns.py"))),
+    ("transform.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/transform.py"))),
 ];
 
 const MATH_HEADERS: &[(&str, &str)] = &[
     ("vect.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/vect.hpp"))),
     ("matrix.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/matrix.hpp"))),
     ("quatern.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/quatern.hpp"))),
+    ("transform.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/transform.hpp"))),
     ("geometry.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/geometry.hpp"))),
     ("g2o.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/g2o.hpp"))),
     ("math.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/math.hpp"))),
