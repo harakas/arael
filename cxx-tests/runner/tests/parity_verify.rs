@@ -8,7 +8,7 @@ use arael::refs::Ref;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus, RootProblem, SolveFailureKind};
 use arael::matrix::matrixd;
 use arael::vect::{vect2d, vect3d, vectd};
-use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Rig, Tie, Vn};
+use cxx_fit::{Fit, Frame, GpsObs, N, Obs, Pose, Rig, Tie, Vn};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -772,5 +772,93 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("bad_kind"), 9.0);
         assert_eq!(g("bad_fault"), fault);
         assert_eq!(g("bad_param"), param);
+    }
+
+    // The one-call construction paths (push(**fields); push_many plus
+    // column setters) build fill()'s problem and solve to the digits
+    // the per-property path did (dense_* above, already pinned to
+    // Rust); the column getters read the solution back.
+    if got.contains_key("kw_end") {
+        assert_eq!(g("kw_clean"), 1.0);
+        assert_eq!(g("kw_end"), g("dense_end"));
+        assert_eq!(g("kw_m"), g("dense_m"));
+        assert_eq!(g("kw_c"), g("dense_c"));
+        assert_eq!(g("cols_first"), 0.0);
+        assert_eq!(g("cols_clean"), 1.0);
+        assert_eq!(g("cols_end"), g("dense_end"));
+        assert_eq!(g("cols_m"), g("dense_m"));
+        assert_eq!(g("cols_c"), g("dense_c"));
+        for i in 0..3 {
+            assert_eq!(g(&format!("kw_v{i}")), g(&format!("dense_v{i}")), "kw v{i}");
+            assert_eq!(g(&format!("cols_v{i}")), g(&format!("dense_v{i}")), "cols v{i}");
+        }
+        assert_eq!(g("kw_get_v_sum"), g("dense_v0") + g("dense_v1") + g("dense_v2"));
+        assert_eq!(g("kw_get_w_sum"), 1.0 + 2.0 + 0.5);
+        assert_eq!(g("kw_get_h13"), g("vn_h13"));
+        assert_eq!(g("kw_get_vn2"), g("dense_vn2"));
+        assert_eq!(g("cols_obs3_y"), g("obs3_y"));
+        assert_eq!(g("cols_item1_t"), g("item1_t"));
+        assert_eq!(g("cols_vn_h13"), g("vn_h13"));
+        assert_eq!(g("cols_dtype_raises"), 1.0);
+        // A keyword-less push is exactly the Rust Default.
+        let d = N::default();
+        assert_eq!(g("kw_default_w"), d.w);
+        assert_eq!(g("kw_default_opt"), d.v.optimize as u8 as f64);
+        assert_eq!(g("kw_default_w2"), d.w);
+        assert_eq!(g("kw_default_w3"), d.w);
+        assert_eq!(g("kw_ref_ok"), 1.0);
+        assert_eq!(g("kw_index_ok"), 1.0);
+        assert_eq!(g("kw_deque_front_x"), -1.0);
+        assert_eq!(g("kw_deque_back_z"), 3.0);
+        assert_eq!(g("kw_deque_back_h"), 0.25);
+        assert_eq!(g("kw_deque_refs"), 1.0);
+        assert_eq!(g("kw_arena_t"), 0.4);
+        assert_eq!(g("kw_arena_w"), 2.0);
+        assert_eq!(g("kw_deque_get_x0"), -1.0);
+        assert_eq!(g("kw_deque_get_z1"), 3.0);
+        assert_eq!(g("kw_noleaf_len"), 3.0);
+        assert_eq!(g("kw_noleaf_g"), 0.5);
+        assert_eq!(g("refs_items_ok"), 1.0);
+        assert_eq!(g("refs_poses_ok"), 1.0);
+        assert_eq!(g("refs_poses_front"), 1.0);
+        assert_eq!(g("opt_kw_y"), 8.0);
+        assert_eq!(g("opt_kw_isigma"), 2.5);
+        assert_eq!(g("opt_default_isigma"), GpsObs::default().isigma as f64);
+        assert_eq!(g("opt_cleared"), 1.0);
+        // Ref keywords, rotation-param keywords, nested component, matrix rows.
+        assert_eq!(g("kw_tie_refs"), 1.0);
+        assert_eq!(g("kw_tie_d_y"), 0.4);
+        assert_eq!(g("kw_heading_frozen"), 1.0);
+        assert_eq!(g("kw_rig_q_roundtrip"), 1.0);
+        assert_eq!(g("kw_rig_ea_u_z"), 0.6);
+        assert_eq!(g("kw_rig_ea_u_frozen"), 1.0);
+        assert_eq!(g("kw_rig_q4_t"), 1.0);
+        assert_eq!(g("kw_rig_q4_z"), 0.0);
+        assert_eq!(g("kw_rig_gain"), 0.25);
+        assert_eq!(g("kw_vn_h_13"), 7.0);
+        // The pose builtins and the i32 / f32 leaves, against the Rust values.
+        let fd = Frame::default();
+        assert_eq!(g("fr_tx"), 1.0);
+        assert_eq!(g("fr_tz"), 3.0);
+        assert_eq!(g("fr_q_roundtrip"), 1.0);
+        assert_eq!(g("fr_opt_t"), 0.0);
+        assert_eq!(g("fr_opt_r"), fd.pose.optimize_rotation as u8 as f64);
+        assert_eq!(g("fr_dir_z"), 1.0);
+        assert_eq!(g("fr_tag"), -7.0);
+        assert_eq!(g("fr_scale"), 0.5);
+        assert_eq!(g("fr_def_q_t"), fd.pose.rotation.t);
+        assert_eq!(g("fr_def_q_x"), fd.pose.rotation.v.x);
+        assert_eq!(g("fr_def_opt_r"), fd.pose.optimize_rotation as u8 as f64);
+        assert_eq!(g("fr_col_t_31"), 2.0);
+        assert_eq!(g("fr_col_q_10"), fd.pose.rotation.t);
+        assert_eq!(g("fr_col_tag_0"), -7.0);
+        assert_eq!(g("fr_col_tag_2"), -1.0);
+        assert_eq!(g("fr_col_scale_3"), 0.75);
+        assert_eq!(g("fr_col_optr_any"), 0.0);
+        assert_eq!(g("fr_col_scale_all"), 1.5);
+        assert_eq!(g("fr_col_tag_all"), -3.0);
+        assert_eq!(g("fr_col_dir_0z"), 1.0);
+        assert_eq!(g("fr_col_q_reset"), 1.0);
+        assert_eq!(g("misc_ok"), 1.0);
     }
 }

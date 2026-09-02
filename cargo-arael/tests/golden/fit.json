@@ -26,6 +26,21 @@
         {"name": "marks", "kind": "collection", "container": "arena", "of": "N", "spelled": "refs::Arena<N>"},
         {"name": "rigs", "kind": "collection", "container": "vec", "of": "Rig", "spelled": "refs::Vec<Rig>"},
         {"name": "vns", "kind": "collection", "container": "vec", "of": "Vn", "spelled": "refs::Vec<Vn>"},
+        {"name": "wraps", "kind": "collection", "container": "vec", "of": "Wrap", "spelled": "std::vec::Vec<Wrap>"},
+        {"name": "frames", "kind": "collection", "container": "vec", "of": "Frame", "spelled": "refs::Vec<Frame>"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
+    "Frame": {
+      "role": "entity",
+      "param_count": 8,
+      "self_block": "hb",
+      "fields": [
+        {"name": "pose", "kind": "component", "of": "TransformParam"},
+        {"name": "dir", "kind": "component", "of": "UnitVecParam"},
+        {"name": "anchor", "kind": "data", "of": "vect3d"},
+        {"name": "tag", "kind": "data", "of": "i32"},
+        {"name": "scale", "kind": "data", "of": "f32"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
       ]
     },
@@ -114,6 +129,18 @@
         {"name": "hb", "kind": "cross_block", "a": "Pose", "b": "Pose", "scalar": "f64"}
       ]
     },
+    "TransformParam": {
+      "role": "component",
+      "param_count": 6,
+      "builtin": true,
+      "fields": []
+    },
+    "UnitVecParam": {
+      "role": "component",
+      "param_count": 2,
+      "builtin": true,
+      "fields": []
+    },
     "Vn": {
       "role": "entity",
       "param_count": 4,
@@ -126,14 +153,23 @@
         {"name": "w", "kind": "data", "of": "f64"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
       ]
+    },
+    "Wrap": {
+      "role": "entity",
+      "param_count": 1,
+      "self_block": "hb",
+      "fields": [
+        {"name": "gain", "kind": "component", "of": "Gain"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
     }
   },
   "constraints": [
-    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 20},
-    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 31},
-    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 47},
-    {"on": "Vn", "label": "Vn", "file": "model/src/lib.rs", "line": 86},
-    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 104},
-    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 151}
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 22},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 35},
+    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 56},
+    {"on": "Vn", "label": "Vn", "file": "model/src/lib.rs", "line": 95},
+    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 113},
+    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 160}
   ]
 }

@@ -1518,6 +1518,168 @@ pub unsafe extern "C" fn graph_poses_try_get(p: *mut GraphHandle, r: u32) -> *mu
         None => std::ptr::null_mut(),
     }
 }
+/// Appends `n` elements built from `n` slot records of 6 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_push_n(p: *mut GraphHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.poses;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Pose2 = Default::default();
+        if !slots.is_null() {
+            assign_slots_pose2(&mut e, slots.add(i * 6));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `pos` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_set_pos_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].pos.value = std::mem::transmute::<[f64; 2], CVec2F64>(std::ptr::read_unaligned(src as *const [f64; 2])).into();
+    }
+    true
+}
+/// Reads `pos` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_get_pos_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec2F64 = m[start + i].pos.value.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 2], std::mem::transmute::<CVec2F64, [f64; 2]>(mv));
+    }
+    true
+}
+/// Sets `pos_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_set_pos_optimize_n(
+    p: *mut GraphHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].pos.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `pos_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_get_pos_optimize_n(
+    p: *const GraphHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].pos.optimize as u8);
+    }
+    true
+}
+/// Sets `rot_angle` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_set_rot_angle_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].rot.angle.value = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `rot_angle` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_get_rot_angle_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].rot.angle.value);
+    }
+    true
+}
+/// Sets `rot_angle_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_set_rot_angle_optimize_n(
+    p: *mut GraphHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].rot.angle.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `rot_angle_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_get_rot_angle_optimize_n(
+    p: *const GraphHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].rot.angle.optimize as u8);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_poses_get_refs_n(
+    p: *const GraphHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn graph_edges_len(p: *const GraphHandle) -> u32 {
     (*p).model.edges.len() as u32
@@ -1550,6 +1712,252 @@ pub unsafe extern "C" fn graph_edges_clear(p: *mut GraphHandle) {
 pub unsafe extern "C" fn graph_edges_truncate(p: *mut GraphHandle, len: u32) {
     (*p).model.edges.truncate(len as usize);
 }
+/// Appends `n` elements built from `n` slot records of 15 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_push_n(p: *mut GraphHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.edges;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Edge = Default::default();
+        if !slots.is_null() {
+            assign_slots_edge(&mut e, slots.add(i * 15));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `a` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_a_n(
+    p: *mut GraphHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].a = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `a` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_a_n(
+    p: *const GraphHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].a.to_raw());
+    }
+    true
+}
+/// Sets `b` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_b_n(
+    p: *mut GraphHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].b = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `b` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_b_n(
+    p: *const GraphHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].b.to_raw());
+    }
+    true
+}
+/// Sets `delta` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_delta_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].delta = std::mem::transmute::<[f64; 2], CVec2F64>(std::ptr::read_unaligned(src as *const [f64; 2])).into();
+    }
+    true
+}
+/// Reads `delta` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_delta_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec2F64 = m[start + i].delta.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 2], std::mem::transmute::<CVec2F64, [f64; 2]>(mv));
+    }
+    true
+}
+/// Sets `dth` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_dth_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].dth = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `dth` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_dth_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].dth);
+    }
+    true
+}
+/// Sets `s0` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_s0_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].s0 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `s0` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_s0_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].s0.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `s1` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_s1_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].s1 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `s1` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_s1_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].s1.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `s2` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_set_s2_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].s2 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `s2` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_edges_get_s2_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.edges;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].s2.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn graph_has_prior(p: *const GraphHandle) -> bool {
     (*p).model.prior.is_some()
@@ -1570,6 +1978,18 @@ pub unsafe extern "C" fn graph_prior(p: *mut GraphHandle) -> *mut Prior {
         Some(e) => e as *mut Prior,
         None => std::ptr::null_mut(),
     }
+}
+/// make_prior from one slot record (mask word(s), then one slot per leaf;
+/// null for the plain default).
+#[no_mangle]
+pub unsafe extern "C" fn graph_make_prior_slots(p: *mut GraphHandle, slots: *const u64) -> *mut Prior {
+    let mut e: Prior = Default::default();
+    if !slots.is_null() {
+        assign_slots_prior(&mut e, slots);
+    }
+    let a = &mut (*p).model.prior;
+    *a = Some(e);
+    a.as_mut().unwrap() as *mut Prior
 }
 #[no_mangle]
 pub unsafe extern "C" fn graph_edge_a(p: *const Edge) -> u32 {
@@ -1686,4 +2106,64 @@ pub unsafe extern "C" fn graph_prior_th(p: *const Prior) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn graph_prior_set_th(p: *mut Prior, v: f64) {
     (*p).th = v;
+}
+
+/// Assigns a slot record's masked leaves onto a `Edge`: 1 mask
+/// word(s), then 14 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_edge(e: &mut Edge, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.a = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.b = arael::refs::Ref::from_raw(*s.add(2) as u32);
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.delta = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(3)), f64::from_bits(*s.add(4))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.dth = f64::from_bits(*s.add(5));
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.s0 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8))]).into();
+    }
+    if *s.add(0) & (1u64 << 5) != 0 {
+        e.s1 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(9)), f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11))]).into();
+    }
+    if *s.add(0) & (1u64 << 6) != 0 {
+        e.s2 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(12)), f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14))]).into();
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Pose2`: 1 mask
+/// word(s), then 5 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_pose2(e: &mut Pose2, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.pos.value = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.pos.optimize = *s.add(3) != 0;
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.rot.angle.value = f64::from_bits(*s.add(4));
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.rot.angle.optimize = *s.add(5) != 0;
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Prior`: 1 mask
+/// word(s), then 4 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_prior(e: &mut Prior, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.p = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.pos = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.th = f64::from_bits(*s.add(4));
+    }
 }

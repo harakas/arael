@@ -10,7 +10,7 @@ use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
 };
-use cxx_fit::{Fit, Gain, GpsObs, Info, N, Obs, Pose, Rig, Tie, Vn};
+use cxx_fit::{Fit, Frame, Gain, GpsObs, Info, N, Obs, Pose, Rig, Tie, Vn, Wrap};
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the
@@ -1489,6 +1489,113 @@ pub unsafe extern "C" fn fit_assemble_covariance_with(
     }
 }
 
+/// Row-major dim x dim marginal covariance (f64) of one `Frame`; returns
+/// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_marginal_cov(
+    c: *mut FitCov,
+    p: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.marginal_cov(&*p))) {
+        Ok(Ok(m)) => {
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {
+                cov_text(cc, "marginal_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..dim {
+                for c in 0..dim {
+                    *out.add(r * dim + c) = m[(r, c)];
+                }
+            }
+            dim as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+/// Row-major dim x dim conditional covariance (f64) of one `Frame`
+/// (all other parameters held fixed); returns dim, or -1 (error) /
+/// -2 (panic) / -3 (no assembly or buffer too small), text via
+/// fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_conditional_cov(
+    c: *mut FitCov,
+    p: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.conditional_cov(&*p))) {
+        Ok(Ok(m)) => {
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {
+                cov_text(cc, "conditional_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..dim {
+                for c in 0..dim {
+                    *out.add(r * dim + c) = m[(r, c)];
+                }
+            }
+            dim as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+/// Per-parameter standard deviations (sqrt of the marginal diagonal)
+/// of one `Frame`; returns the count, or -1 (error) / -2 (panic) / -3
+/// (no assembly or buffer too small), text via fit_cov_error.
+/// Works on every CovMode, including TriDiagonal.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_std_dev(
+    c: *mut FitCov,
+    p: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.std_dev(&*p))) {
+        Ok(Ok(sd)) => {
+            if sd.len() as u32 > cap {
+                cov_text(cc, "std_dev: buffer too small");
+                return -3;
+            }
+            for (i, v) in sd.iter().enumerate() {
+                *out.add(i) = *v;
+            }
+            sd.len() as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
 /// Row-major dim x dim marginal covariance (f64) of one `N`; returns
 /// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
@@ -1917,6 +2024,372 @@ pub unsafe extern "C" fn fit_vn_std_dev(
     }
 }
 
+/// Row-major dim x dim marginal covariance (f64) of one `Wrap`; returns
+/// dim, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_marginal_cov(
+    c: *mut FitCov,
+    p: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.marginal_cov(&*p))) {
+        Ok(Ok(m)) => {
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {
+                cov_text(cc, "marginal_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..dim {
+                for c in 0..dim {
+                    *out.add(r * dim + c) = m[(r, c)];
+                }
+            }
+            dim as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+/// Row-major dim x dim conditional covariance (f64) of one `Wrap`
+/// (all other parameters held fixed); returns dim, or -1 (error) /
+/// -2 (panic) / -3 (no assembly or buffer too small), text via
+/// fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_conditional_cov(
+    c: *mut FitCov,
+    p: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.conditional_cov(&*p))) {
+        Ok(Ok(m)) => {
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {
+                cov_text(cc, "conditional_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..dim {
+                for c in 0..dim {
+                    *out.add(r * dim + c) = m[(r, c)];
+                }
+            }
+            dim as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+/// Per-parameter standard deviations (sqrt of the marginal diagonal)
+/// of one `Wrap`; returns the count, or -1 (error) / -2 (panic) / -3
+/// (no assembly or buffer too small), text via fit_cov_error.
+/// Works on every CovMode, including TriDiagonal.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_std_dev(
+    c: *mut FitCov,
+    p: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.std_dev(&*p))) {
+        Ok(Ok(sd)) => {
+            if sd.len() as u32 > cap {
+                cov_text(cc, "std_dev: buffer too small");
+                return -3;
+            }
+            for (i, v) in sd.iter().enumerate() {
+                *out.add(i) = *v;
+            }
+            sd.len() as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Frame` and a
+/// `Frame`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_frame_cross_cov(
+    c: *mut FitCov,
+    a: *const Frame,
+    b: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Frame` and a
+/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_n_cross_cov(
+    c: *mut FitCov,
+    a: *const Frame,
+    b: *const N,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Frame` and a
+/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_cross_cov(
+    c: *mut FitCov,
+    a: *const Frame,
+    b: *const Pose,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Frame` and a
+/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_rig_cross_cov(
+    c: *mut FitCov,
+    a: *const Frame,
+    b: *const Rig,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Frame` and a
+/// `Vn`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_vn_cross_cov(
+    c: *mut FitCov,
+    a: *const Frame,
+    b: *const Vn,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Frame` and a
+/// `Wrap`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_wrap_cross_cov(
+    c: *mut FitCov,
+    a: *const Frame,
+    b: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `N` and a
+/// `Frame`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_n_frame_cross_cov(
+    c: *mut FitCov,
+    a: *const N,
+    b: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
 /// Row-major pa x pb cross-covariance (f64) between a `N` and a
 /// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
@@ -2035,6 +2508,80 @@ pub unsafe extern "C" fn fit_n_vn_cross_cov(
     c: *mut FitCov,
     a: *const N,
     b: *const Vn,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `N` and a
+/// `Wrap`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_n_wrap_cross_cov(
+    c: *mut FitCov,
+    a: *const N,
+    b: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
+/// `Frame`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_frame_cross_cov(
+    c: *mut FitCov,
+    a: *const Pose,
+    b: *const Frame,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
@@ -2213,6 +2760,80 @@ pub unsafe extern "C" fn fit_pose_vn_cross_cov(
     }
 }
 
+/// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
+/// `Wrap`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_wrap_cross_cov(
+    c: *mut FitCov,
+    a: *const Pose,
+    b: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Rig` and a
+/// `Frame`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rig_frame_cross_cov(
+    c: *mut FitCov,
+    a: *const Rig,
+    b: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
 /// Row-major pa x pb cross-covariance (f64) between a `Rig` and a
 /// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
 #[no_mangle]
@@ -2331,6 +2952,80 @@ pub unsafe extern "C" fn fit_rig_vn_cross_cov(
     c: *mut FitCov,
     a: *const Rig,
     b: *const Vn,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Rig` and a
+/// `Wrap`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rig_wrap_cross_cov(
+    c: *mut FitCov,
+    a: *const Rig,
+    b: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Vn` and a
+/// `Frame`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vn_frame_cross_cov(
+    c: *mut FitCov,
+    a: *const Vn,
+    b: *const Frame,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
@@ -2508,6 +3203,265 @@ pub unsafe extern "C" fn fit_vn_vn_cross_cov(
         }
     }
 }
+
+/// Row-major pa x pb cross-covariance (f64) between a `Vn` and a
+/// `Wrap`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vn_wrap_cross_cov(
+    c: *mut FitCov,
+    a: *const Vn,
+    b: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Wrap` and a
+/// `Frame`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_frame_cross_cov(
+    c: *mut FitCov,
+    a: *const Wrap,
+    b: *const Frame,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Wrap` and a
+/// `N`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_n_cross_cov(
+    c: *mut FitCov,
+    a: *const Wrap,
+    b: *const N,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Wrap` and a
+/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_pose_cross_cov(
+    c: *mut FitCov,
+    a: *const Wrap,
+    b: *const Pose,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Wrap` and a
+/// `Rig`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_rig_cross_cov(
+    c: *mut FitCov,
+    a: *const Wrap,
+    b: *const Rig,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Wrap` and a
+/// `Vn`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_vn_cross_cov(
+    c: *mut FitCov,
+    a: *const Wrap,
+    b: *const Vn,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major pa x pb cross-covariance (f64) between a `Wrap` and a
+/// `Wrap`; returns the row count, or -1 (error) / -2 (panic) / -3 (buffer too small), text via fit_cov_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_wrap_cross_cov(
+    c: *mut FitCov,
+    a: *const Wrap,
+    b: *const Wrap,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let cc = &mut *c;
+    match catch_unwind(AssertUnwindSafe(|| cc.cov.cross_cov(&*a, &*b))) {
+        Ok(Ok(m)) => {
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {
+                cov_text(cc, "cross_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..rows {
+                for c in 0..cols {
+                    *out.add(r * cols + c) = m[(r, c)];
+                }
+            }
+            rows as i32
+        }
+        Ok(Err(e)) => {
+            cov_text(cc, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            cov_text(cc, &msg);
+            -2
+        }
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_m(p: *const FitHandle) -> f64 {
     (*p).model.m.value
@@ -2580,6 +3534,88 @@ pub unsafe extern "C" fn fit_obs_clear(p: *mut FitHandle) {
 pub unsafe extern "C" fn fit_obs_truncate(p: *mut FitHandle, len: u32) {
     (*p).model.obs.truncate(len as usize);
 }
+/// Appends `n` elements built from `n` slot records of 3 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.obs;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Obs = Default::default();
+        if !slots.is_null() {
+            assign_slots_obs(&mut e, slots.add(i * 3));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `x` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_set_x_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].x = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `x` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_get_x_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].x);
+    }
+    true
+}
+/// Sets `y` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_set_y_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].y = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `y` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_get_y_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].y);
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_items_len(p: *const FitHandle) -> u32 {
     (*p).model.items.len() as u32
@@ -2649,6 +3685,167 @@ pub unsafe extern "C" fn fit_items_try_get(p: *mut FitHandle, r: u32) -> *mut N 
         Some(e) => e as *mut N,
         None => std::ptr::null_mut(),
     }
+}
+/// Appends `n` elements built from `n` slot records of 5 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.items;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: N = Default::default();
+        if !slots.is_null() {
+            assign_slots_n(&mut e, slots.add(i * 5));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `v` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_set_v_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].v.value = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `v` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_get_v_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].v.value);
+    }
+    true
+}
+/// Sets `v_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_set_v_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].v.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `v_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_get_v_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].v.optimize as u8);
+    }
+    true
+}
+/// Sets `t` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_set_t_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].t = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `t` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_get_t_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].t);
+    }
+    true
+}
+/// Sets `w` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_set_w_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].w = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `w` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_get_w_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].w);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_get_refs_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.items;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_poses_len(p: *const FitHandle) -> u32 {
@@ -2731,6 +3928,313 @@ pub unsafe extern "C" fn fit_poses_try_get(p: *mut FitHandle, r: u32) -> *mut Po
         None => std::ptr::null_mut(),
     }
 }
+/// Appends `n` elements built from `n` slot records of 16 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the packed ref of the first new element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_push_back_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.poses;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Pose = Default::default();
+        if !slots.is_null() {
+            assign_slots_pose(&mut e, slots.add(i * 16));
+        }
+        m.push_back(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Like push_back_n at the front: record `i` ends up at index `n - 1 - i`.
+/// Returns the packed ref of the first record's element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_push_front_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.poses;
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Pose = Default::default();
+        if !slots.is_null() {
+            assign_slots_pose(&mut e, slots.add(i * 16));
+        }
+        m.push_front(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(n as usize - 1).to_raw() }
+}
+/// Sets `ea` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_ea_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].ea.value = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `ea` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_ea_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].ea.value.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `ea_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_ea_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].ea.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `ea_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_ea_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].ea.optimize as u8);
+    }
+    true
+}
+/// Sets `heading_angle` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_heading_angle_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].heading.angle.value = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `heading_angle` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_heading_angle_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].heading.angle.value);
+    }
+    true
+}
+/// Sets `heading_angle_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_heading_angle_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].heading.angle.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `heading_angle_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_heading_angle_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].heading.angle.optimize as u8);
+    }
+    true
+}
+/// Sets `pos` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_pos_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].pos.value = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `pos` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_pos_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].pos.value.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `pos_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_pos_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].pos.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `pos_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_pos_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].pos.optimize as u8);
+    }
+    true
+}
+/// Sets `target` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_target_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `target` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_target_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].target.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `target_dir` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_set_target_dir_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target_dir = std::mem::transmute::<[f64; 2], CVec2F64>(std::ptr::read_unaligned(src as *const [f64; 2])).into();
+    }
+    true
+}
+/// Reads `target_dir` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_target_dir_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec2F64 = m[start + i].target_dir.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 2], std::mem::transmute::<CVec2F64, [f64; 2]>(mv));
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get_refs_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_ties_len(p: *const FitHandle) -> u32 {
     (*p).model.ties.len() as u32
@@ -2762,6 +4266,153 @@ pub unsafe extern "C" fn fit_ties_clear(p: *mut FitHandle) {
 #[no_mangle]
 pub unsafe extern "C" fn fit_ties_truncate(p: *mut FitHandle, len: u32) {
     (*p).model.ties.truncate(len as usize);
+}
+/// Appends `n` elements built from `n` slot records of 7 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.ties;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Tie = Default::default();
+        if !slots.is_null() {
+            assign_slots_tie(&mut e, slots.add(i * 7));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `a` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_set_a_n(
+    p: *mut FitHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].a = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `a` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_get_a_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].a.to_raw());
+    }
+    true
+}
+/// Sets `b` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_set_b_n(
+    p: *mut FitHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].b = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `b` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_get_b_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].b.to_raw());
+    }
+    true
+}
+/// Sets `d` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_set_d_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].d = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `d` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_get_d_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].d.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `w` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_set_w_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].w = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `w` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_get_w_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.ties;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].w);
+    }
+    true
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_marks_len(p: *const FitHandle) -> u32 {
@@ -2836,6 +4487,26 @@ pub unsafe extern "C" fn fit_marks_prev(p: *const FitHandle, r: u32) -> u32 {
         None => u32::MAX,
     }
 }
+/// Appends `n` elements built from `n` slot records of 5 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the packed ref of the first new element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.marks;
+    m.reserve(n as usize);
+    let mut first = u32::MAX;
+    for i in 0..n as usize {
+        let mut e: N = Default::default();
+        if !slots.is_null() {
+            assign_slots_n(&mut e, slots.add(i * 5));
+        }
+        let r = m.push(e);
+        if i == 0 {
+            first = r.to_raw();
+        }
+    }
+    first
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_rigs_len(p: *const FitHandle) -> u32 {
     (*p).model.rigs.len() as u32
@@ -2905,6 +4576,333 @@ pub unsafe extern "C" fn fit_rigs_try_get(p: *mut FitHandle, r: u32) -> *mut Rig
         Some(e) => e as *mut Rig,
         None => std::ptr::null_mut(),
     }
+}
+/// Appends `n` elements built from `n` slot records of 23 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.rigs;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Rig = Default::default();
+        if !slots.is_null() {
+            assign_slots_rig(&mut e, slots.add(i * 23));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `ea_u` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_ea_u_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].ea_u.value = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `ea_u` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_ea_u_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].ea_u.value.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `ea_u_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_ea_u_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].ea_u.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `ea_u_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_ea_u_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].ea_u.optimize as u8);
+    }
+    true
+}
+/// Sets `q` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_q_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].q.value = std::mem::transmute::<[f64; 4], CQuatF64>(std::ptr::read_unaligned(src as *const [f64; 4])).into();
+    }
+    true
+}
+/// Reads `q` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_q_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CQuatF64 = m[start + i].q.value.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 4], std::mem::transmute::<CQuatF64, [f64; 4]>(mv));
+    }
+    true
+}
+/// Sets `q_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_q_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].q.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `q_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_q_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].q.optimize as u8);
+    }
+    true
+}
+/// Sets `target_u0` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_target_u0_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target_u0 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `target_u0` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_target_u0_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].target_u0.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `target_u2` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_target_u2_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target_u2 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `target_u2` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_target_u2_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].target_u2.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `target_q0` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_target_q0_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target_q0 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `target_q0` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_target_q0_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].target_q0.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `target_q2` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_target_q2_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target_q2 = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `target_q2` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_target_q2_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].target_q2.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `target_g` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_set_target_g_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].target_g = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `target_g` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_target_g_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].target_g);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_rigs_get_refs_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.rigs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_vns_len(p: *const FitHandle) -> u32 {
@@ -2976,6 +4974,719 @@ pub unsafe extern "C" fn fit_vns_try_get(p: *mut FitHandle, r: u32) -> *mut Vn {
         None => std::ptr::null_mut(),
     }
 }
+/// Appends `n` elements built from `n` slot records of 20 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.vns;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Vn = Default::default();
+        if !slots.is_null() {
+            assign_slots_vn(&mut e, slots.add(i * 20));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `v` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_set_v_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].v.value = std::mem::transmute::<[f64; 4], CVecF64x4>(std::ptr::read_unaligned(src as *const [f64; 4])).into();
+    }
+    true
+}
+/// Reads `v` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_v_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVecF64x4 = m[start + i].v.value.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 4], std::mem::transmute::<CVecF64x4, [f64; 4]>(mv));
+    }
+    true
+}
+/// Sets `v_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_set_v_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].v.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `v_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_v_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].v.optimize as u8);
+    }
+    true
+}
+/// Sets `t` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_set_t_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].t = std::mem::transmute::<[f64; 4], CVecF64x4>(std::ptr::read_unaligned(src as *const [f64; 4])).into();
+    }
+    true
+}
+/// Reads `t` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_t_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVecF64x4 = m[start + i].t.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 4], std::mem::transmute::<CVecF64x4, [f64; 4]>(mv));
+    }
+    true
+}
+/// Sets `h` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_set_h_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].h = std::mem::transmute::<[f64; 8], CMatF64x2x4>(std::ptr::read_unaligned(src as *const [f64; 8])).into();
+    }
+    true
+}
+/// Reads `h` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_h_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CMatF64x2x4 = m[start + i].h.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 8], std::mem::transmute::<CMatF64x2x4, [f64; 8]>(mv));
+    }
+    true
+}
+/// Sets `wp` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_set_wp_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].wp = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `wp` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_wp_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].wp);
+    }
+    true
+}
+/// Sets `w` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_set_w_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].w = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `w` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_w_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].w);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_vns_get_refs_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.vns;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_len(p: *const FitHandle) -> u32 {
+    (*p).model.wraps.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.wraps.reserve(additional as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_push(p: *mut FitHandle) -> *mut Wrap {
+    let m = &mut (*p).model.wraps;
+    m.push(Default::default());
+    m.last_mut().unwrap() as *mut Wrap
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_at(p: *mut FitHandle, i: u32) -> *mut Wrap {
+    let m = &mut (*p).model.wraps;
+    &mut m[i as usize] as *mut Wrap
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_pop(p: *mut FitHandle) -> bool {
+    (*p).model.wraps.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_clear(p: *mut FitHandle) {
+    (*p).model.wraps.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_truncate(p: *mut FitHandle, len: u32) {
+    (*p).model.wraps.truncate(len as usize);
+}
+/// Appends `n` elements built from `n` slot records of 1 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_wraps_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.wraps;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Wrap = Default::default();
+        if !slots.is_null() {
+            assign_slots_wrap(&mut e, slots.add(i * 1));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_len(p: *const FitHandle) -> u32 {
+    (*p).model.frames.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.frames.reserve(additional as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_push(p: *mut FitHandle) -> *mut Frame {
+    let m = &mut (*p).model.frames;
+    let r = m.push(Default::default());
+    &mut m[r] as *mut Frame
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_at(p: *mut FitHandle, i: u32) -> *mut Frame {
+    let m = &mut (*p).model.frames;
+    &mut m[i as usize] as *mut Frame
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_pop(p: *mut FitHandle) -> bool {
+    (*p).model.frames.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_clear(p: *mut FitHandle) {
+    (*p).model.frames.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_truncate(p: *mut FitHandle, len: u32) {
+    (*p).model.frames.truncate(len as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_ref_at(p: *const FitHandle, i: u32) -> u32 {
+    (*p).model.frames.ref_at(i as usize).to_raw()
+}
+/// Ref of the first/last element, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_first_ref(p: *const FitHandle) -> u32 {
+    match (*p).model.frames.first_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_last_ref(p: *const FitHandle) -> u32 {
+    match (*p).model.frames.last_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get(p: *mut FitHandle, r: u32) -> *mut Frame {
+    let m = &mut (*p).model.frames;
+    &mut m[arael::refs::Ref::from_raw(r)] as *mut Frame
+}
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_contains(p: *const FitHandle, r: u32) -> bool {
+    (*p).model.frames.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_try_get(p: *mut FitHandle, r: u32) -> *mut Frame {
+    let m = &mut (*p).model.frames;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut Frame,
+        None => std::ptr::null_mut(),
+    }
+}
+/// Appends `n` elements built from `n` slot records of 18 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_push_n(p: *mut FitHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.frames;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Frame = Default::default();
+        if !slots.is_null() {
+            assign_slots_frame(&mut e, slots.add(i * 18));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `pose_translation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_pose_translation_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].pose.translation = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `pose_translation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_pose_translation_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].pose.translation.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `pose_rotation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_pose_rotation_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].pose.rotation = std::mem::transmute::<[f64; 4], CQuatF64>(std::ptr::read_unaligned(src as *const [f64; 4])).into();
+    }
+    true
+}
+/// Reads `pose_rotation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_pose_rotation_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CQuatF64 = m[start + i].pose.rotation.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 4], std::mem::transmute::<CQuatF64, [f64; 4]>(mv));
+    }
+    true
+}
+/// Sets `pose_optimize_translation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_pose_optimize_translation_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].pose.optimize_translation = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `pose_optimize_translation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_pose_optimize_translation_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].pose.optimize_translation as u8);
+    }
+    true
+}
+/// Sets `pose_optimize_rotation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_pose_optimize_rotation_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].pose.optimize_rotation = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `pose_optimize_rotation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_pose_optimize_rotation_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].pose.optimize_rotation as u8);
+    }
+    true
+}
+/// Sets `dir_unit` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_dir_unit_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].dir.unit = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `dir_unit` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_dir_unit_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].dir.unit.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `anchor` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_anchor_n(
+    p: *mut FitHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].anchor = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `anchor` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_anchor_n(
+    p: *const FitHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].anchor.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `tag` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_tag_n(
+    p: *mut FitHandle, start: u32, v: *const i32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const i32;
+        m[start + i].tag = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `tag` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_tag_n(
+    p: *const FitHandle, start: u32, out: *mut i32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut i32;
+        std::ptr::write_unaligned(dst, m[start + i].tag);
+    }
+    true
+}
+/// Sets `scale` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_scale_n(
+    p: *mut FitHandle, start: u32, v: *const f32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f32;
+        m[start + i].scale = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `scale` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_scale_n(
+    p: *const FitHandle, start: u32, out: *mut f32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f32;
+        std::ptr::write_unaligned(dst, m[start + i].scale);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_refs_n(
+    p: *const FitHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_translation(p: *const Frame) -> CVec3F64 {
+    (*p).pose.translation.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_set_translation(p: *mut Frame, v: CVec3F64) {
+    (*p).pose.translation = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_rotation(p: *const Frame) -> CQuatF64 {
+    (*p).pose.rotation.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_set_rotation(p: *mut Frame, v: CQuatF64) {
+    (*p).pose.rotation = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_optimize_translation(p: *const Frame) -> bool {
+    (*p).pose.optimize_translation
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_set_optimize_translation(p: *mut Frame, v: bool) {
+    (*p).pose.optimize_translation = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_optimize_rotation(p: *const Frame) -> bool {
+    (*p).pose.optimize_rotation
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_pose_set_optimize_rotation(p: *mut Frame, v: bool) {
+    (*p).pose.optimize_rotation = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_dir_unit(p: *const Frame) -> CVec3F64 {
+    (*p).dir.unit.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_dir_set_unit(p: *mut Frame, v: CVec3F64) {
+    (*p).dir.unit = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_dir_unit_d0(p: *const Frame) -> CVec3F64 {
+    (*p).dir.unit_d[0].into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_dir_unit_d1(p: *const Frame) -> CVec3F64 {
+    (*p).dir.unit_d[1].into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_anchor(p: *const Frame) -> CVec3F64 {
+    (*p).anchor.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_set_anchor(p: *mut Frame, v: CVec3F64) {
+    (*p).anchor = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_tag(p: *const Frame) -> i32 {
+    (*p).tag
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_set_tag(p: *mut Frame, v: i32) {
+    (*p).tag = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_scale(p: *const Frame) -> f32 {
+    (*p).scale
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_set_scale(p: *mut Frame, v: f32) {
+    (*p).scale = v;
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_gain_ref_g(p: *const Gain) -> f64 {
     (*p).ref_g
@@ -3044,6 +5755,18 @@ pub unsafe extern "C" fn fit_info_gps(p: *mut Info) -> *mut GpsObs {
         Some(e) => e as *mut GpsObs,
         None => std::ptr::null_mut(),
     }
+}
+/// make_gps from one slot record (mask word(s), then one slot per leaf;
+/// null for the plain default).
+#[no_mangle]
+pub unsafe extern "C" fn fit_info_make_gps_slots(p: *mut Info, slots: *const u64) -> *mut GpsObs {
+    let mut e: GpsObs = Default::default();
+    if !slots.is_null() {
+        assign_slots_gps_obs(&mut e, slots);
+    }
+    let a = &mut (*p).gps;
+    *a = Some(e);
+    a.as_mut().unwrap() as *mut GpsObs
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_n_v(p: *const N) -> f64 {
@@ -3322,4 +6045,218 @@ pub unsafe extern "C" fn fit_vn_w(p: *const Vn) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn fit_vn_set_w(p: *mut Vn, v: f64) {
     (*p).w = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_wrap_gain_ptr(p: *mut Wrap) -> *mut Gain {
+    let a = &mut (*p).gain;
+    a as *mut Gain
+}
+
+/// Assigns a slot record's masked leaves onto a `Frame`: 1 mask
+/// word(s), then 17 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_frame(e: &mut Frame, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.pose.translation = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.pose.rotation = std::mem::transmute::<[f64; 4], CQuatF64>([f64::from_bits(*s.add(4)), f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.pose.optimize_translation = *s.add(8) != 0;
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.pose.optimize_rotation = *s.add(9) != 0;
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.dir.unit = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12))]).into();
+    }
+    if *s.add(0) & (1u64 << 5) != 0 {
+        e.anchor = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15))]).into();
+    }
+    if *s.add(0) & (1u64 << 6) != 0 {
+        e.tag = *s.add(16) as i32;
+    }
+    if *s.add(0) & (1u64 << 7) != 0 {
+        e.scale = f64::from_bits(*s.add(17)) as f32;
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Gain`: 1 mask
+/// word(s), then 4 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_gain(e: &mut Gain, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.ref_g = f64::from_bits(*s.add(1));
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.d.value = f64::from_bits(*s.add(2));
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.d.optimize = *s.add(3) != 0;
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.g = f64::from_bits(*s.add(4));
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `GpsObs`: 1 mask
+/// word(s), then 4 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_gps_obs(e: &mut GpsObs, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.pos = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.isigma = f64::from_bits(*s.add(4)) as f32;
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Info`: 1 mask
+/// word(s), then 0 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_info(e: &mut Info, s: *const u64) {
+    let _ = (e, s);
+}
+
+/// Assigns a slot record's masked leaves onto a `N`: 1 mask
+/// word(s), then 4 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_n(e: &mut N, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.v.value = f64::from_bits(*s.add(1));
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.v.optimize = *s.add(2) != 0;
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.t = f64::from_bits(*s.add(3));
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.w = f64::from_bits(*s.add(4));
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Obs`: 1 mask
+/// word(s), then 2 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_obs(e: &mut Obs, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.x = f64::from_bits(*s.add(1));
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.y = f64::from_bits(*s.add(2));
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Pose`: 1 mask
+/// word(s), then 15 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_pose(e: &mut Pose, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.ea.value = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.ea.optimize = *s.add(4) != 0;
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.heading.angle.value = f64::from_bits(*s.add(5));
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.heading.angle.optimize = *s.add(6) != 0;
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.pos.value = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8)), f64::from_bits(*s.add(9))]).into();
+    }
+    if *s.add(0) & (1u64 << 5) != 0 {
+        e.pos.optimize = *s.add(10) != 0;
+    }
+    if *s.add(0) & (1u64 << 6) != 0 {
+        e.target = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12)), f64::from_bits(*s.add(13))]).into();
+    }
+    if *s.add(0) & (1u64 << 7) != 0 {
+        e.target_dir = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15))]).into();
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Rig`: 1 mask
+/// word(s), then 22 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_rig(e: &mut Rig, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.ea_u.value = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.ea_u.optimize = *s.add(4) != 0;
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.q.value = std::mem::transmute::<[f64; 4], CQuatF64>([f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.q.optimize = *s.add(9) != 0;
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.target_u0 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12))]).into();
+    }
+    if *s.add(0) & (1u64 << 5) != 0 {
+        e.target_u2 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15))]).into();
+    }
+    if *s.add(0) & (1u64 << 6) != 0 {
+        e.target_q0 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(16)), f64::from_bits(*s.add(17)), f64::from_bits(*s.add(18))]).into();
+    }
+    if *s.add(0) & (1u64 << 7) != 0 {
+        e.target_q2 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(19)), f64::from_bits(*s.add(20)), f64::from_bits(*s.add(21))]).into();
+    }
+    if *s.add(0) & (1u64 << 8) != 0 {
+        e.target_g = f64::from_bits(*s.add(22));
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Tie`: 1 mask
+/// word(s), then 6 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_tie(e: &mut Tie, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.a = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.b = arael::refs::Ref::from_raw(*s.add(2) as u32);
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.d = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(3)), f64::from_bits(*s.add(4)), f64::from_bits(*s.add(5))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.w = f64::from_bits(*s.add(6));
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Vn`: 1 mask
+/// word(s), then 19 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_vn(e: &mut Vn, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.v.value = std::mem::transmute::<[f64; 4], CVecF64x4>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3)), f64::from_bits(*s.add(4))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.v.optimize = *s.add(5) != 0;
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.t = std::mem::transmute::<[f64; 4], CVecF64x4>([f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8)), f64::from_bits(*s.add(9))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.h = std::mem::transmute::<[f64; 8], CMatF64x2x4>([f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12)), f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15)), f64::from_bits(*s.add(16)), f64::from_bits(*s.add(17))]).into();
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.wp = f64::from_bits(*s.add(18));
+    }
+    if *s.add(0) & (1u64 << 5) != 0 {
+        e.w = f64::from_bits(*s.add(19));
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Wrap`: 1 mask
+/// word(s), then 0 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_wrap(e: &mut Wrap, s: *const u64) {
+    let _ = (e, s);
 }

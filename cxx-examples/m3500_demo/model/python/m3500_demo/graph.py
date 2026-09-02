@@ -7,8 +7,10 @@ C++ classes one-to-one)."""
 
 import ctypes
 import os
+import struct
 
 from . import _graph_ffi as _f
+from .arael import columns as _cols
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
@@ -262,21 +264,50 @@ class PriorRef:
         return "PriorRef(%s)" % (self.raw if self.valid else "null")
 
 
+_Z2 = (0.0,) * 2
+_Z3 = (0.0,) * 3
+
+
+_edge_rec = struct.Struct("=QQQdddddddddddd")
+_edge_slots = (ctypes.c_uint64 * 15)()
+
+
 class Edge:
     """A `Edge` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a EdgeRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The EdgeRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, EdgeRef):
+            return k
+        raise TypeError("Edge addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a EdgeRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Edge addressed by ref, not by index")
 
     @property
     def a(self):
@@ -335,21 +366,46 @@ class Edge:
         _f.graph_edge_set_s2(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
 
 
+_pose2_rec = struct.Struct("=QddQdQ")
+_pose2_slots = (ctypes.c_uint64 * 6)()
+
+
 class Pose2:
     """A `Pose2` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 3
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a Pose2Ref or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The Pose2Ref this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, Pose2Ref):
+            return k
+        raise TypeError("Pose2 addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a Pose2Ref)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Pose2 addressed by ref, not by index")
 
     @property
     def pos(self):
@@ -389,21 +445,46 @@ class Pose2:
         return _f.graph_pose2_rot_rotation_matrix(self._p)
 
 
+_prior_rec = struct.Struct("=QQddd")
+_prior_slots = (ctypes.c_uint64 * 5)()
+
+
 class Prior:
     """A `Prior` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a PriorRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The PriorRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, PriorRef):
+            return k
+        raise TypeError("Prior addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a PriorRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Prior addressed by ref, not by index")
 
     @property
     def p(self):
@@ -522,7 +603,12 @@ class Covariance:
 class GraphPosesVec:
     """View of `poses` (vec of Pose2); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -537,17 +623,17 @@ class GraphPosesVec:
 
     def __getitem__(self, i):
         if isinstance(i, Pose2Ref):
-            return Pose2(lambda r=i.raw: _f.graph_poses_get(self._p, r))
+            return Pose2(lambda r=i.raw: _f.graph_poses_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Pose2(lambda i=i: _f.graph_poses_at(self._p, i))
+        return Pose2(lambda i=i: _f.graph_poses_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Pose2(lambda i=i: _f.graph_poses_at(self._p, i))
+            yield Pose2(lambda i=i: _f.graph_poses_at(self._p, i), i)
 
     def clear(self):
         _f.graph_poses_clear(self._p)
@@ -555,24 +641,140 @@ class GraphPosesVec:
     def truncate(self, n):
         _f.graph_poses_truncate(self._p, n)
 
-    def push(self):
-        _f.graph_poses_push(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push(self, *, pos=None, pos_optimize=None, rot_angle=None,
+                 rot_angle_optimize=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if pos is None: pos = _Z2
+        else:
+            m |= 1 << 0; pos = tuple(pos)
+            if len(pos) != 2: pos = _cols.flat(pos, 2)
+        if pos_optimize is None: pos_optimize = 0
+        else: m |= 1 << 1; pos_optimize = 1 if pos_optimize else 0
+        if rot_angle is None: rot_angle = 0.0
+        else: m |= 1 << 2
+        if rot_angle_optimize is None: rot_angle_optimize = 0
+        else: m |= 1 << 3; rot_angle_optimize = 1 if rot_angle_optimize else 0
+        _pose2_rec.pack_into(_pose2_slots, 0,
+            m, *pos, pos_optimize, rot_angle, rot_angle_optimize)
+        r = Pose2Ref(_f.graph_poses_push_n(self._p, _pose2_slots, 1))
+        return Pose2(lambda k=r.raw: _f.graph_poses_get(self._p, k), r)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.graph_poses_pop(self._p)
 
+    def push_many(self, n=None, *, pos=None, pos_optimize=None, rot_angle=None,
+                  rot_angle_optimize=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("pos", pos), ("pos_optimize", pos_optimize),
+                        ("rot_angle", rot_angle),
+                        ("rot_angle_optimize", rot_angle_optimize)))
+        i0 = len(self)
+        _f.graph_poses_push_n(self._p, None, n)
+        if pos is not None:
+            self._set_pos(i0, n, pos)
+        if pos_optimize is not None:
+            self._set_pos_optimize(i0, n, pos_optimize)
+        if rot_angle is not None:
+            self._set_rot_angle(i0, n, rot_angle)
+        if rot_angle_optimize is not None:
+            self._set_rot_angle_optimize(i0, n, rot_angle_optimize)
+        return i0
+
+    def _set_pos(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 2, n, "pos")
+        if not _f.graph_poses_set_pos_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos(self, v):
+        """Sets `pos` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos(0, len(self), v)
+
+    def get_pos(self):
+        """`pos` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 2, n)
+        _f.graph_poses_get_pos_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 2, n)
+
+    def _set_pos_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "pos_optimize")
+        if not _f.graph_poses_set_pos_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos_optimize(self, v):
+        """Sets `pos_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos_optimize(0, len(self), v)
+
+    def get_pos_optimize(self):
+        """`pos_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.graph_poses_get_pos_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_rot_angle(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "rot_angle")
+        if not _f.graph_poses_set_rot_angle_n(self._p, start, ptr, n, stride):
+            raise IndexError("rot_angle: %d + %d exceeds the collection" % (start, n))
+
+    def set_rot_angle(self, v):
+        """Sets `rot_angle` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_rot_angle(0, len(self), v)
+
+    def get_rot_angle(self):
+        """`rot_angle` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.graph_poses_get_rot_angle_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_rot_angle_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "rot_angle_optimize")
+        if not _f.graph_poses_set_rot_angle_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("rot_angle_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_rot_angle_optimize(self, v):
+        """Sets `rot_angle_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_rot_angle_optimize(0, len(self), v)
+
+    def get_rot_angle_optimize(self):
+        """`rot_angle_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.graph_poses_get_rot_angle_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
     def get(self, r):
-        return Pose2(lambda k=_raw(r): _f.graph_poses_get(self._p, k))
+        r = r if isinstance(r, Pose2Ref) else Pose2Ref(int(r))
+        return Pose2(lambda k=r.raw: _f.graph_poses_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.graph_poses_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.graph_poses_try_get(self._p, _raw(r))
-        return Pose2(lambda k=_raw(r): _f.graph_poses_get(self._p, k)) if p else None
+        r = r if isinstance(r, Pose2Ref) else Pose2Ref(int(r))
+        p = _f.graph_poses_try_get(self._p, r.raw)
+        return Pose2(lambda k=r.raw: _f.graph_poses_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return Pose2Ref(_f.graph_poses_ref_at(self._p, i))
@@ -585,11 +787,25 @@ class GraphPosesVec:
         """Ref of the last element; null when empty."""
         return Pose2Ref(_f.graph_poses_last_ref(self._p))
 
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.graph_poses_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
+
 
 class GraphEdgesVec:
     """View of `edges` (vec of Edge); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -608,11 +824,11 @@ class GraphEdgesVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Edge(lambda i=i: _f.graph_edges_at(self._p, i))
+        return Edge(lambda i=i: _f.graph_edges_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Edge(lambda i=i: _f.graph_edges_at(self._p, i))
+            yield Edge(lambda i=i: _f.graph_edges_at(self._p, i), i)
 
     def clear(self):
         _f.graph_edges_clear(self._p)
@@ -620,13 +836,201 @@ class GraphEdgesVec:
     def truncate(self, n):
         _f.graph_edges_truncate(self._p, n)
 
-    def push(self):
-        _f.graph_edges_push(self._p)
-        return self[len(self) - 1]
+    def push(self, *, a=None, b=None, delta=None, dth=None, s0=None, s1=None,
+                 s2=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if a is None: a = 0
+        else: m |= 1 << 0; a = getattr(a, "raw", a)
+        if b is None: b = 0
+        else: m |= 1 << 1; b = getattr(b, "raw", b)
+        if delta is None: delta = _Z2
+        else:
+            m |= 1 << 2; delta = tuple(delta)
+            if len(delta) != 2: delta = _cols.flat(delta, 2)
+        if dth is None: dth = 0.0
+        else: m |= 1 << 3
+        if s0 is None: s0 = _Z3
+        else:
+            m |= 1 << 4; s0 = tuple(s0)
+            if len(s0) != 3: s0 = _cols.flat(s0, 3)
+        if s1 is None: s1 = _Z3
+        else:
+            m |= 1 << 5; s1 = tuple(s1)
+            if len(s1) != 3: s1 = _cols.flat(s1, 3)
+        if s2 is None: s2 = _Z3
+        else:
+            m |= 1 << 6; s2 = tuple(s2)
+            if len(s2) != 3: s2 = _cols.flat(s2, 3)
+        _edge_rec.pack_into(_edge_slots, 0,
+            m, a, b, *delta, dth, *s0, *s1, *s2)
+        i = _f.graph_edges_push_n(self._p, _edge_slots, 1)
+        return Edge(lambda i=i: _f.graph_edges_at(self._p, i), i)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.graph_edges_pop(self._p)
+
+    def push_many(self, n=None, *, a=None, b=None, delta=None, dth=None, s0=None,
+                  s1=None, s2=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("a", a), ("b", b), ("delta", delta),
+                        ("dth", dth), ("s0", s0), ("s1", s1), ("s2", s2)))
+        i0 = len(self)
+        _f.graph_edges_push_n(self._p, None, n)
+        if a is not None:
+            self._set_a(i0, n, a)
+        if b is not None:
+            self._set_b(i0, n, b)
+        if delta is not None:
+            self._set_delta(i0, n, delta)
+        if dth is not None:
+            self._set_dth(i0, n, dth)
+        if s0 is not None:
+            self._set_s0(i0, n, s0)
+        if s1 is not None:
+            self._set_s1(i0, n, s1)
+        if s2 is not None:
+            self._set_s2(i0, n, s2)
+        return i0
+
+    def _set_a(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "a")
+        if not _f.graph_edges_set_a_n(self._p, start, ptr, n, stride):
+            raise IndexError("a: %d + %d exceeds the collection" % (start, n))
+
+    def set_a(self, v):
+        """Sets `a` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_a(0, len(self), v)
+
+    def get_a(self):
+        """`a` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.graph_edges_get_a_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_b(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "b")
+        if not _f.graph_edges_set_b_n(self._p, start, ptr, n, stride):
+            raise IndexError("b: %d + %d exceeds the collection" % (start, n))
+
+    def set_b(self, v):
+        """Sets `b` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_b(0, len(self), v)
+
+    def get_b(self):
+        """`b` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.graph_edges_get_b_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_delta(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 2, n, "delta")
+        if not _f.graph_edges_set_delta_n(self._p, start, ptr, n, stride):
+            raise IndexError("delta: %d + %d exceeds the collection" % (start, n))
+
+    def set_delta(self, v):
+        """Sets `delta` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_delta(0, len(self), v)
+
+    def get_delta(self):
+        """`delta` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 2, n)
+        _f.graph_edges_get_delta_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 2, n)
+
+    def _set_dth(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "dth")
+        if not _f.graph_edges_set_dth_n(self._p, start, ptr, n, stride):
+            raise IndexError("dth: %d + %d exceeds the collection" % (start, n))
+
+    def set_dth(self, v):
+        """Sets `dth` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_dth(0, len(self), v)
+
+    def get_dth(self):
+        """`dth` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.graph_edges_get_dth_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_s0(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "s0")
+        if not _f.graph_edges_set_s0_n(self._p, start, ptr, n, stride):
+            raise IndexError("s0: %d + %d exceeds the collection" % (start, n))
+
+    def set_s0(self, v):
+        """Sets `s0` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_s0(0, len(self), v)
+
+    def get_s0(self):
+        """`s0` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.graph_edges_get_s0_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_s1(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "s1")
+        if not _f.graph_edges_set_s1_n(self._p, start, ptr, n, stride):
+            raise IndexError("s1: %d + %d exceeds the collection" % (start, n))
+
+    def set_s1(self, v):
+        """Sets `s1` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_s1(0, len(self), v)
+
+    def get_s1(self):
+        """`s1` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.graph_edges_get_s1_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_s2(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "s2")
+        if not _f.graph_edges_set_s2_n(self._p, start, ptr, n, stride):
+            raise IndexError("s2: %d + %d exceeds the collection" % (start, n))
+
+    def set_s2(self, v):
+        """Sets `s2` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_s2(0, len(self), v)
+
+    def get_s2(self):
+        """`s2` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.graph_edges_get_s2_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
 
 
 class Graph:
@@ -729,8 +1133,22 @@ class Graph:
             return None
         return Prior(lambda: _f.graph_prior(self._p))
 
-    def make_prior(self):
-        _f.graph_make_prior(self._p)
+    def make_prior(self, *, p=None, pos=None, th=None):
+        """Creates the `Prior` (replacing one already there) and returns
+        it; each keyword sets that field in the same call, an omitted one
+        keeps the Rust default."""
+        m = 0
+        if p is None: p = 0
+        else: m |= 1 << 0; p = getattr(p, "raw", p)
+        if pos is None: pos = _Z2
+        else:
+            m |= 1 << 1; pos = tuple(pos)
+            if len(pos) != 2: pos = _cols.flat(pos, 2)
+        if th is None: th = 0.0
+        else: m |= 1 << 2
+        _prior_rec.pack_into(_prior_slots, 0,
+            m, p, *pos, th)
+        _f.graph_make_prior_slots(self._p, _prior_slots)
         return Prior(lambda: _f.graph_prior(self._p))
 
     def clear_prior(self):

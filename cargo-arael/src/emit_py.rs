@@ -7,6 +7,7 @@
 
 use crate::emit_ffi::surfaced_types;
 use crate::ir::{Field, Model, Type, snake};
+use crate::leaves::{Leaf, LeafTy, leaves, mask_words, record_slots};
 
 fn ct_scalar(of: &str) -> Option<&'static str> {
     Some(match of {
@@ -114,9 +115,146 @@ fn optimize_prop(py: &mut Py, cls: &mut String, prefix: &str, name: &str) {
 "));
 }
 
+/// Joins `items` with ", ", breaking lines past `width` columns; the
+/// first line starts at column `col`, continuation lines at `cont`.
+fn wrap_items(items: &[String], col: usize, width: usize, cont: &str) -> String {
+    let mut out = String::new();
+    let mut col = col;
+    for (k, it) in items.iter().enumerate() {
+        if k == 0 {
+            out.push_str(it);
+            col += it.len();
+        } else if col + 2 + it.len() > width {
+            out.push_str(",\n");
+            out.push_str(cont);
+            out.push_str(it);
+            col = cont.len() + it.len();
+        } else {
+            out.push_str(", ");
+            out.push_str(it);
+            col += 2 + it.len();
+        }
+    }
+    out
+}
+
+/// The `push(**fields)` pieces of one element type: the keyword
+/// parameter list (`a=None, b=None`), the prelude turning absent
+/// keywords into defaults and present ones into mask bits, and the
+/// `pack_into` arguments (mask words first).
+fn push_parts(lv: &[Leaf], col: usize, cont: &str) -> (String, String, String) {
+    let params: Vec<String> = lv.iter().map(|l| format!("{}=None", l.name)).collect();
+    let mut prelude = String::new();
+    let mut args: Vec<String> = Vec::new();
+    let words = mask_words(lv.len());
+    if words == 1 {
+        args.push("m".to_string());
+    } else {
+        for w in 0..words {
+            args.push(format!("(m >> {}) & 0xFFFFFFFFFFFFFFFF", w * 64));
+        }
+    }
+    for (i, l) in lv.iter().enumerate() {
+        let n = &l.name;
+        // The coercions stay inline: a helper call per keyword would
+        // cost as much as the crossing itself.
+        match &l.ty {
+            LeafTy::Math { n: k, .. } => prelude.push_str(&format!(
+"        if {n} is None: {n} = _Z{k}
+        else:
+            m |= 1 << {i}; {n} = tuple({n})
+            if len({n}) != {k}: {n} = _cols.flat({n}, {k})
+")),
+            _ => {
+                let (dflt, coerce) = match &l.ty {
+                    LeafTy::F64 | LeafTy::F32 => ("0.0", String::new()),
+                    LeafTy::Bool => ("0", format!("; {n} = 1 if {n} else 0")),
+                    LeafTy::Ref => ("0", format!("; {n} = getattr({n}, \"raw\", {n})")),
+                    _ => ("0", String::new()),
+                };
+                prelude.push_str(&format!(
+"        if {n} is None: {n} = {dflt}
+        else: m |= 1 << {i}{coerce}
+"));
+            }
+        }
+        args.push(match l.ty {
+            LeafTy::Math { .. } => format!("*{n}"),
+            _ => n.clone(),
+        });
+    }
+    (wrap_items(&params, col, 76, cont), prelude, wrap_items(&args, 12, 76, "            "))
+}
+
+/// The per-leaf column methods of an index-addressable collection view.
+fn column_methods(py: &mut Py, cls: &mut String, prefix: &str, lv: &[Leaf]) {
+    for l in lv {
+        let leaf = &l.name;
+        let code = l.ty.column_code();
+        let k = l.ty.slots();
+        sig(py, &format!("{prefix}_set_{leaf}_n"),
+            &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.c_void_p",
+              "ctypes.c_uint32", "ctypes.c_int64"], "ctypes.c_bool");
+        sig(py, &format!("{prefix}_get_{leaf}_n"),
+            &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.c_void_p",
+              "ctypes.c_uint32", "ctypes.c_int64"], "ctypes.c_bool");
+        let shape = if k == 1 { "an (n,) array".to_string() } else { format!("an (n, {k}) array") };
+        cls.push_str(&format!(
+"    def _set_{leaf}(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, \"{code}\", {k}, n, \"{leaf}\")
+        if not _f.{prefix}_set_{leaf}_n(self._p, start, ptr, n, stride):
+            raise IndexError(\"{leaf}: %d + %d exceeds the collection\" % (start, n))
+
+    def set_{leaf}(self, v):
+        \"\"\"Sets `{leaf}` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place).\"\"\"
+        self._set_{leaf}(0, len(self), v)
+
+    def get_{leaf}(self):
+        \"\"\"`{leaf}` of every element in one call, as {shape}
+        (numpy when importable, else a flat ctypes array).\"\"\"
+        n = len(self)
+        buf, ptr, stride = _cols.column_out(\"{code}\", {k}, n)
+        _f.{prefix}_get_{leaf}_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, \"{code}\", {k}, n)
+
+"));
+    }
+}
+
+/// `push_many` over `push_fn` (the shim's n-element push) for an
+/// index-addressable collection view.
+fn push_many_method(cls: &mut String, prefix: &str, push_fn: &str, lv: &[Leaf]) {
+    let (params, _, _) = push_parts(lv, 30, "                  ");
+    let pairs: Vec<String> = lv.iter().map(|l| format!("(\"{0}\", {0})", l.name)).collect();
+    let mut sets = String::new();
+    for l in lv {
+        sets.push_str(&format!(
+"        if {0} is not None:
+            self._set_{0}(i0, n, {0})
+", l.name));
+    }
+    let params = if lv.is_empty() { String::new() } else { format!(", *, {params}") };
+    cls.push_str(&format!(
+"    def push_many(self, n=None{params}):
+        \"\"\"Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element.\"\"\"
+        n = _cols.count(n, ({}))
+        i0 = len(self)
+        _f.{prefix}_{push_fn}(self._p, None, n)
+{sets}        return i0
+
+", wrap_items(&pairs, 27, 76, "                        ")));
+}
+
 /// One collection field's view class + the owner property line.
 fn collection_py(
     py: &mut Py,
+    model: &Model,
     owner: &str,
     sym_prefix: &str,
     owner_cls: &mut String,
@@ -129,6 +267,12 @@ fn collection_py(
     let refs_flavor = f.spelled.as_deref().unwrap_or("").contains("refs::");
     let kind = match container { "deque" => "Deque", "arena" => "Arena", _ => "Vec" };
     let view = format!("{owner}{}{kind}", crate::emit_hpp::camel(field));
+    let elem_ty = model.types.get(elem)
+        .ok_or_else(|| format!("collection `{field}`: element type `{elem}` not in sidecar"))?;
+    let lv = leaves(model, elem_ty);
+    let elem_sn = snake(elem);
+    let slots = format!("_{elem_sn}_slots");
+    let rec = format!("_{elem_sn}_rec");
 
     sig(py, &format!("{prefix}_len"), &["ctypes.c_void_p"], "ctypes.c_uint32");
     sig(py, &format!("{prefix}_reserve"),
@@ -138,7 +282,12 @@ fn collection_py(
 "class {view}:
     \"\"\"View of `{field}` ({} of {elem}); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined.\"\"\"
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection.\"\"\"
 
     __slots__ = (\"_p\",)
 
@@ -153,6 +302,39 @@ fn collection_py(
 
 ", container);
 
+    // The keyed push: one crossing carrying every given field, returning
+    // the wrapper built from the key the shim hands back.
+    let push_method = |cls: &mut String, name: &str, shim: &str, doc: &str| {
+        // A type with no scalar leaves has nothing to name: no bare `*`.
+        let head = if lv.is_empty() {
+            format!("    def {name}(self")
+        } else {
+            format!("    def {name}(self, *, ")
+        };
+        let (params, prelude, args) = push_parts(&lv, head.len(), "                 ");
+        let ret = if container == "arena" {
+            format!("        return {elem}Ref(_f.{prefix}_{shim}(self._p, {slots}, 1))\n")
+        } else if refs_flavor {
+            format!(
+"        r = {elem}Ref(_f.{prefix}_{shim}(self._p, {slots}, 1))
+        return {elem}(lambda k=r.raw: _f.{prefix}_get(self._p, k), r)
+")
+        } else {
+            format!(
+"        i = _f.{prefix}_{shim}(self._p, {slots}, 1)
+        return {elem}(lambda i=i: _f.{prefix}_at(self._p, i), i)
+")
+        };
+        cls.push_str(&format!(
+"{head}{params}):
+        \"\"\"{doc}\"\"\"
+        m = 0
+{prelude}        {rec}.pack_into({slots}, 0,
+            {args})
+{ret}
+"));
+    };
+
     match container {
         "vec" | "deque" => {
             sig(py, &format!("{prefix}_at"),
@@ -160,19 +342,10 @@ fn collection_py(
             sig(py, &format!("{prefix}_clear"), &["ctypes.c_void_p"], "None");
             sig(py, &format!("{prefix}_truncate"),
                 &["ctypes.c_void_p", "ctypes.c_uint32"], "None");
-            // Key the freshly pushed element: a Ref where the collection
-            // has generations (so a later removal invalidates it loudly),
-            // otherwise its index.
-            let new_key = if refs_flavor {
-                "self.ref_at(len(self) - 1)"
-            } else {
-                "len(self) - 1"
-            };
-            let front_key = if refs_flavor { "self.ref_at(0)" } else { "0" };
             let getitem_ref = if refs_flavor {
                 format!(
 "        if isinstance(i, {elem}Ref):
-            return {elem}(lambda r=i.raw: _f.{prefix}_get(self._p, r))
+            return {elem}(lambda r=i.raw: _f.{prefix}_get(self._p, r), i)
 ")
             } else {
                 String::new()
@@ -184,11 +357,11 @@ fn collection_py(
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return {elem}(lambda i=i: _f.{prefix}_at(self._p, i))
+        return {elem}(lambda i=i: _f.{prefix}_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield {elem}(lambda i=i: _f.{prefix}_at(self._p, i))
+            yield {elem}(lambda i=i: _f.{prefix}_at(self._p, i), i)
 
     def clear(self):
         _f.{prefix}_clear(self._p)
@@ -197,32 +370,38 @@ fn collection_py(
         _f.{prefix}_truncate(self._p, n)
 
 "));
+            let slot_args = &["ctypes.c_void_p", "ctypes.POINTER(ctypes.c_uint64)",
+                              "ctypes.c_uint32"];
             if container == "vec" {
                 sig(py, &format!("{prefix}_push"), &["ctypes.c_void_p"],
                     "ctypes.c_void_p");
                 sig(py, &format!("{prefix}_pop"), &["ctypes.c_void_p"],
                     "ctypes.c_bool");
+                sig(py, &format!("{prefix}_push_n"), slot_args, "ctypes.c_uint32");
+                push_method(&mut cls, "push", "push_n",
+                    "Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default.");
                 cls.push_str(&format!(
-"    def push(self):
-        _f.{prefix}_push(self._p)
-        return self[{new_key}]
-
-    def pop(self):
+"    def pop(self):
         \"\"\"Drops the last element; False when already empty.\"\"\"
         return _f.{prefix}_pop(self._p)
 
 "));
+                push_many_method(&mut cls, &prefix, "push_n", &lv);
             } else {
-                for (m, new_key) in [("push_back", new_key), ("push_front", front_key)] {
+                for m in ["push_back", "push_front"] {
                     sig(py, &format!("{prefix}_{m}"), &["ctypes.c_void_p"],
                         "ctypes.c_void_p");
-                    cls.push_str(&format!(
-"    def {m}(self):
-        _f.{prefix}_{m}(self._p)
-        return self[{new_key}]
-
-"));
+                    sig(py, &format!("{prefix}_{m}_n"), slot_args, "ctypes.c_uint32");
                 }
+                push_method(&mut cls, "push_back", "push_back_n",
+                    "Appends one element at the back and returns it; each keyword
+        sets that field in the same call, an omitted one keeps the Rust
+        default.");
+                push_method(&mut cls, "push_front", "push_front_n",
+                    "Inserts one element at the front and returns it; each keyword
+        sets that field in the same call, an omitted one keeps the Rust
+        default.");
                 for m in ["pop_back", "pop_front"] {
                     sig(py, &format!("{prefix}_{m}"), &["ctypes.c_void_p"],
                         "ctypes.c_bool");
@@ -233,11 +412,16 @@ fn collection_py(
 
 "));
                 }
+                push_many_method(&mut cls, &prefix, "push_back_n", &lv);
             }
+            column_methods(py, &mut cls, &prefix, &lv);
         }
         "arena" => {
             sig(py, &format!("{prefix}_push"), &["ctypes.c_void_p"],
                 "ctypes.c_uint32");
+            sig(py, &format!("{prefix}_push_n"),
+                &["ctypes.c_void_p", "ctypes.POINTER(ctypes.c_uint64)",
+                  "ctypes.c_uint32"], "ctypes.c_uint32");
             sig(py, &format!("{prefix}_remove"),
                 &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_bool");
             sig(py, &format!("{prefix}_clear"), &["ctypes.c_void_p"], "None");
@@ -249,26 +433,27 @@ fn collection_py(
                 };
                 sig(py, &format!("{prefix}_{m}"), args, "ctypes.c_uint32");
             }
+            push_method(&mut cls, "push", "push_n",
+                "New element's ref (get()/[] take it back); each keyword sets
+        that field in the same call, an omitted one keeps the Rust
+        default.");
             cls.push_str(&format!(
-"    def push(self):
-        \"\"\"New element's ref (get()/[] take it back).\"\"\"
-        return {elem}Ref(_f.{prefix}_push(self._p))
-
-    def remove(self, r):
+"    def remove(self, r):
         return _f.{prefix}_remove(self._p, _raw(r))
 
     def clear(self):
         _f.{prefix}_clear(self._p)
 
     def __getitem__(self, r):
-        return {elem}(lambda k=_raw(r): _f.{prefix}_get(self._p, k))
+        r = r if isinstance(r, {elem}Ref) else {elem}Ref(int(r))
+        return {elem}(lambda k=r.raw: _f.{prefix}_get(self._p, k), r)
 
     def __iter__(self):
         \"\"\"Live slots in order; yields element wrappers (refs() for
         the refs).\"\"\"
         r = _f.{prefix}_first(self._p)
         while r != 0xFFFFFFFF:
-            yield {elem}(lambda k=r: _f.{prefix}_get(self._p, k))
+            yield {elem}(lambda k=r: _f.{prefix}_get(self._p, k), {elem}Ref(r))
             r = _f.{prefix}_next(self._p, r)
 
     def refs(self):
@@ -291,15 +476,17 @@ fn collection_py(
             &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_void_p");
         cls.push_str(&format!(
 "    def get(self, r):
-        return {elem}(lambda k=_raw(r): _f.{prefix}_get(self._p, k))
+        r = r if isinstance(r, {elem}Ref) else {elem}Ref(int(r))
+        return {elem}(lambda k=r.raw: _f.{prefix}_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.{prefix}_contains(self._p, _raw(r))
 
     def try_get(self, r):
         \"\"\"The element, or None for a stale or foreign ref.\"\"\"
-        p = _f.{prefix}_try_get(self._p, _raw(r))
-        return {elem}(lambda k=_raw(r): _f.{prefix}_get(self._p, k)) if p else None
+        r = r if isinstance(r, {elem}Ref) else {elem}Ref(int(r))
+        p = _f.{prefix}_try_get(self._p, r.raw)
+        return {elem}(lambda k=r.raw: _f.{prefix}_get(self._p, k), r) if p else None
 
 "));
         if container != "arena" {
@@ -325,6 +512,20 @@ fn collection_py(
     def {last}(self):
         \"\"\"Ref of the last element; null when empty.\"\"\"
         return {elem}Ref(_f.{prefix}_{last}(self._p))
+
+"));
+            sig(py, &format!("{prefix}_get_refs_n"),
+                &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.c_void_p",
+                  "ctypes.c_uint32"], "ctypes.c_bool");
+            cls.push_str(&format!(
+"    def get_refs(self):
+        \"\"\"The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take.\"\"\"
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out(\"I\", 1, n)
+        _f.{prefix}_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, \"I\", 1, n)
 
 "));
         }
@@ -460,6 +661,21 @@ fn field_py(
                 "None");
             sig(py, &format!("{prefix}_{name}"), &["ctypes.c_void_p"],
                 "ctypes.c_void_p");
+            sig(py, &format!("{prefix}_make_{name}_slots"),
+                &["ctypes.c_void_p", "ctypes.POINTER(ctypes.c_uint64)"],
+                "ctypes.c_void_p");
+            // make_<name>(**fields): the option's entity from one slot
+            // record, like push(**fields).
+            let of_ty = model.types.get(of)
+                .ok_or_else(|| format!("`{owner}.{name}`: unknown option type {of}"))?;
+            let lv = leaves(model, of_ty);
+            let of_sn = snake(of);
+            let head = if lv.is_empty() {
+                format!("    def make_{name}(self")
+            } else {
+                format!("    def make_{name}(self, *, ")
+            };
+            let (params, prelude, args) = push_parts(&lv, head.len(), "                 ");
             owner_cls.push_str(&format!(
 "    @property
     def {name}(self):
@@ -468,8 +684,14 @@ fn field_py(
             return None
         return {of}(lambda: _f.{prefix}_{name}(self._p))
 
-    def make_{name}(self):
-        _f.{prefix}_make_{name}(self._p)
+{head}{params}):
+        \"\"\"Creates the `{of}` (replacing one already there) and returns
+        it; each keyword sets that field in the same call, an omitted one
+        keeps the Rust default.\"\"\"
+        m = 0
+{prelude}        _{of_sn}_rec.pack_into(_{of_sn}_slots, 0,
+            {args})
+        _f.{prefix}_make_{name}_slots(self._p, _{of_sn}_slots)
         return {of}(lambda: _f.{prefix}_{name}(self._p))
 
     def clear_{name}(self):
@@ -493,7 +715,7 @@ fn field_py(
 
 "));
         }
-        "collection" => collection_py(py, owner, prefix, owner_cls, f)?,
+        "collection" => collection_py(py, model, owner, prefix, owner_cls, f)?,
         "opaque" => {
             owner_cls.push_str(&format!(
                 "    # field `{name}`: {of} -- opaque, no accessor generated\n\n"));
@@ -543,6 +765,23 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
 "));
     }
 
+    // Zero tuples standing in for absent math keywords in push(**fields),
+    // one per component count in use.
+    let mut zs = std::collections::BTreeSet::new();
+    for (_, t) in &surfaced {
+        for l in leaves(model, t) {
+            if let LeafTy::Math { n, .. } = l.ty {
+                zs.insert(n);
+            }
+        }
+    }
+    for n in &zs {
+        py.body.push_str(&format!("_Z{n} = (0.0,) * {n}\n"));
+    }
+    if !zs.is_empty() {
+        py.body.push_str("\n\n");
+    }
+
     // Entity/component classes, children-first (same order rule as C++).
     let emitted: Vec<&str> = surfaced.iter().map(|(tn, _)| tn.as_str()).collect();
     let mut remaining: Vec<(&String, &Type)> = surfaced.clone();
@@ -558,24 +797,64 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
         };
         let (tn, t) = remaining.remove(pos);
         let prefix = format!("{root_sn}_{}", snake(tn));
+        // The slot record push(**fields) packs for this type: mask
+        // word(s) then one slot per leaf, and the scratch it packs into.
+        let lv = leaves(model, t);
+        let codes: String = "Q".repeat(mask_words(lv.len()))
+            + &lv.iter().map(|l| l.ty.pack_code()).collect::<String>();
+        py.body.push_str(&format!(
+"_{0}_rec = struct.Struct(\"={codes}\")
+_{0}_slots = (ctypes.c_uint64 * {1})()
+
+
+", snake(tn), record_slots(&lv)));
+        // `.index` steps aside for a field of that name; `ref` cannot be
+        // a field (a Rust keyword).
+        let index_prop = if t.fields.iter().any(|f| f.name == "index") {
+            "    # field `index` takes the name the index accessor would have\n\n".to_string()
+        } else {
+            format!(
+"    @property
+    def index(self):
+        \"\"\"The index this wrapper was looked up by (TypeError when it
+        was a {tn}Ref).\"\"\"
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError(\"{tn} addressed by ref, not by index\")
+
+")
+        };
         let mut cls = format!(
 "class {tn}:
     \"\"\"A `{tn}` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling.\"\"\"
 
-    __slots__ = (\"_at\",)
+    __slots__ = (\"_at\", \"_key\")
     param_count = {}
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a {tn}Ref or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
 
-", t.param_count);
+    @property
+    def ref(self):
+        \"\"\"The {tn}Ref this wrapper was looked up by (TypeError when it
+        was an index).\"\"\"
+        k = self._key
+        if isinstance(k, {tn}Ref):
+            return k
+        raise TypeError(\"{tn} addressed by index, not by ref\")
+
+{index_prop}", t.param_count);
         for f in &t.fields {
             field_py(&mut py, model, tn, &prefix, &mut cls, f)?;
         }
@@ -1045,8 +1324,10 @@ C++ classes one-to-one).\"\"\"
 
 import ctypes
 import os
+import struct
 
 from . import _{root_sn}_ffi as _f
+from .arael import columns as _cols
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,

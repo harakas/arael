@@ -463,6 +463,11 @@ def _make_quatern(name, vec, ct, eps):
         def rotate(self, p):
             return (self * type(self)(0.0, p) * self.conj()).v
 
+        # Component order t, x, y, z (scalar part first), as stored.
+        def __len__(self): return 4
+        def __iter__(self): return iter((self.t, self.v.x, self.v.y, self.v.z))
+        def __getitem__(self, i): return (self.t, self.v.x, self.v.y, self.v.z)[i]
+
         def rotation_matrix(self):
             m3 = matrix3f if vec is vect3f else matrix3d
             t, x, y, z = (float(self.t), float(self.v.x), float(self.v.y),

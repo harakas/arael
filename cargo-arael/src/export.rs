@@ -46,6 +46,7 @@ const PY_SUPPORT: &[(&str, &str)] = &[
     ("geometry.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/geometry.py"))),
     ("g2o.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/g2o.py"))),
     ("solver.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/solver.py"))),
+    ("columns.py", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/arael/columns.py"))),
 ];
 
 const MATH_HEADERS: &[(&str, &str)] = &[

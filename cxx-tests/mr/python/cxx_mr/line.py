@@ -7,8 +7,10 @@ C++ classes one-to-one)."""
 
 import ctypes
 import os
+import struct
 
 from . import _line_ffi as _f
+from .arael import columns as _cols
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
@@ -214,21 +216,46 @@ class ObRef:
         return "ObRef(%s)" % (self.raw if self.valid else "null")
 
 
+_ob_rec = struct.Struct("=Qdd")
+_ob_slots = (ctypes.c_uint64 * 3)()
+
+
 class Ob:
     """A `Ob` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a ObRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The ObRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, ObRef):
+            return k
+        raise TypeError("Ob addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a ObRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Ob addressed by ref, not by index")
 
     @property
     def x(self):
@@ -323,7 +350,12 @@ class Covariance:
 class LineObsVec:
     """View of `obs` (vec of Ob); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -342,11 +374,11 @@ class LineObsVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Ob(lambda i=i: _f.line_obs_at(self._p, i))
+        return Ob(lambda i=i: _f.line_obs_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Ob(lambda i=i: _f.line_obs_at(self._p, i))
+            yield Ob(lambda i=i: _f.line_obs_at(self._p, i), i)
 
     def clear(self):
         _f.line_obs_clear(self._p)
@@ -354,13 +386,75 @@ class LineObsVec:
     def truncate(self, n):
         _f.line_obs_truncate(self._p, n)
 
-    def push(self):
-        _f.line_obs_push(self._p)
-        return self[len(self) - 1]
+    def push(self, *, x=None, y=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if x is None: x = 0.0
+        else: m |= 1 << 0
+        if y is None: y = 0.0
+        else: m |= 1 << 1
+        _ob_rec.pack_into(_ob_slots, 0,
+            m, x, y)
+        i = _f.line_obs_push_n(self._p, _ob_slots, 1)
+        return Ob(lambda i=i: _f.line_obs_at(self._p, i), i)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.line_obs_pop(self._p)
+
+    def push_many(self, n=None, *, x=None, y=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("x", x), ("y", y)))
+        i0 = len(self)
+        _f.line_obs_push_n(self._p, None, n)
+        if x is not None:
+            self._set_x(i0, n, x)
+        if y is not None:
+            self._set_y(i0, n, y)
+        return i0
+
+    def _set_x(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "x")
+        if not _f.line_obs_set_x_n(self._p, start, ptr, n, stride):
+            raise IndexError("x: %d + %d exceeds the collection" % (start, n))
+
+    def set_x(self, v):
+        """Sets `x` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_x(0, len(self), v)
+
+    def get_x(self):
+        """`x` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.line_obs_get_x_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_y(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "y")
+        if not _f.line_obs_set_y_n(self._p, start, ptr, n, stride):
+            raise IndexError("y: %d + %d exceeds the collection" % (start, n))
+
+    def set_y(self, v):
+        """Sets `y` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_y(0, len(self), v)
+
+    def get_y(self):
+        """`y` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.line_obs_get_y_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
 
 
 class Line:

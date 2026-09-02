@@ -34,7 +34,7 @@ pub struct Type {
     pub fields: Vec<Field>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct Field {
     pub name: String,
     pub kind: String,

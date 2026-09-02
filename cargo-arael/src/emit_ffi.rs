@@ -10,8 +10,16 @@
 //! sub-models (pointer accessors + their own field surface), refs
 //! (packed u32 transport), Option entities, and vec / deque / arena
 //! collections at any depth.
+//!
+//! Every collection also carries the fast construction path: `push_n`
+//! (`push_back_n` / `push_front_n` on a deque) appending elements from
+//! slot records, and per-leaf `set_<leaf>_n` / `get_<leaf>_n` moving
+//! one column of a contiguous index range through a strided pointer.
+//! The leaf list comes from `crate::leaves`, shared with the Python
+//! emitter.
 
 use crate::ir::{Field, Model, Type, snake};
+use crate::leaves::{Leaf, LeafTy, leaves, mask_words, record_slots};
 
 fn scalar_c(of: &str) -> Option<&'static str> {
     Some(match of {
@@ -43,7 +51,7 @@ fn math_mirror(of: &str) -> Option<String> {
 
 /// Mirror struct name of an N-dimensional math instantiation:
 /// ("f64", [4]) -> CVecF64x4, ("f32", [2, 4]) -> CMatF32x2x4.
-fn ndim_mirror_name((scalar, dims): &(String, Vec<usize>)) -> String {
+pub(crate) fn ndim_mirror_name((scalar, dims): &(String, Vec<usize>)) -> String {
     let sc = if scalar == "f32" { "F32" } else { "F64" };
     match dims.len() {
         1 => format!("CVec{}x{}", sc, dims[0]),
@@ -235,10 +243,263 @@ pub unsafe extern \"C\" fn {prefix}_set_{name}(p: *mut {ptr_ty}, v: {c_ty}) {{
     let _ = access;
 }
 
+/// Slot value `j` of a record read as `ty` (f64 bits, or the integer
+/// in the low bytes).
+fn slot_expr(ty: &LeafTy, j: usize) -> String {
+    match ty {
+        LeafTy::F64 => format!("f64::from_bits(*s.add({j}))"),
+        LeafTy::F32 => format!("f64::from_bits(*s.add({j})) as f32"),
+        LeafTy::U32 => format!("*s.add({j}) as u32"),
+        LeafTy::I32 => format!("*s.add({j}) as i32"),
+        LeafTy::Bool => format!("*s.add({j}) != 0"),
+        LeafTy::Ref => format!("arael::refs::Ref::from_raw(*s.add({j}) as u32)"),
+        LeafTy::Math { scalar, n, mirror } => {
+            let cast = if scalar == "f32" { " as f32" } else { "" };
+            let comps: Vec<String> = (0..*n)
+                .map(|k| format!("f64::from_bits(*s.add({})){cast}", j + k))
+                .collect();
+            format!("std::mem::transmute::<[{scalar}; {n}], {mirror}>([{}]).into()",
+                comps.join(", "))
+        }
+    }
+}
+
+/// The slot-record assigner of one surfaced type: `push_n` calls it
+/// per record over a `Default::default()` element, so an unmasked leaf
+/// keeps the value the Rust type defines.
+fn assign_slots_fn(out: &mut String, model: &Model, tn: &str, t: &Type) {
+    let lv = leaves(model, t);
+    let words = mask_words(lv.len());
+    let mut body = String::new();
+    let mut j = words;
+    for (i, l) in lv.iter().enumerate() {
+        body.push_str(&format!(
+"    if *s.add({}) & (1u64 << {}) != 0 {{
+        e.{} = {};
+    }}
+", i / 64, i % 64, l.access, slot_expr(&l.ty, j)));
+        j += l.ty.slots();
+    }
+    if lv.is_empty() {
+        body.push_str("    let _ = (e, s);\n");
+    }
+    out.push_str(&format!(
+"
+/// Assigns a slot record's masked leaves onto a `{tn}`: {words} mask
+/// word(s), then {} slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_{}(e: &mut {tn}, s: *const u64) {{
+{body}}}
+", j - words, snake(tn)));
+}
+
+/// Column write of one leaf from `src: *const T`.
+fn column_set_expr(ty: &LeafTy) -> String {
+    match ty {
+        LeafTy::F64 | LeafTy::F32 | LeafTy::U32 | LeafTy::I32 =>
+            "std::ptr::read_unaligned(src)".to_string(),
+        LeafTy::Bool => "std::ptr::read_unaligned(src) != 0".to_string(),
+        LeafTy::Ref => "arael::refs::Ref::from_raw(std::ptr::read_unaligned(src))".to_string(),
+        LeafTy::Math { scalar, n, mirror } => format!(
+            "std::mem::transmute::<[{scalar}; {n}], {mirror}>(\
+             std::ptr::read_unaligned(src as *const [{scalar}; {n}])).into()"),
+    }
+}
+
+/// Column read of one leaf (`value`) into `dst: *mut T`.
+fn column_get_stmt(ty: &LeafTy, value: &str) -> String {
+    match ty {
+        LeafTy::F64 | LeafTy::F32 | LeafTy::U32 | LeafTy::I32 =>
+            format!("std::ptr::write_unaligned(dst, {value});"),
+        LeafTy::Bool => format!("std::ptr::write_unaligned(dst, {value} as u8);"),
+        LeafTy::Ref => format!("std::ptr::write_unaligned(dst, {value}.to_raw());"),
+        LeafTy::Math { scalar, n, mirror } => format!(
+            "let mv: {mirror} = {value}.into();
+        std::ptr::write_unaligned(dst as *mut [{scalar}; {n}], \
+             std::mem::transmute::<{mirror}, [{scalar}; {n}]>(mv));"),
+    }
+}
+
+/// The per-leaf column functions of an index-addressable collection.
+fn column_fns(out: &mut String, fn_prefix: &str, owner: &str, access: &str,
+              field: &str, lv: &[Leaf]) {
+    for l in lv {
+        let t = l.ty.column_c();
+        let leaf = &l.name;
+        let value = format!("m[start + i].{}", l.access);
+        out.push_str(&format!(
+"/// Sets `{leaf}` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_set_{leaf}_n(
+    p: *mut {owner}, start: u32, v: *const {t}, n: u32, stride: i64) -> bool {{
+    let m = &mut {access}.{field};
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {{
+        return false;
+    }}
+    for i in 0..n {{
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const {t};
+        m[start + i].{} = {};
+    }}
+    true
+}}
+/// Reads `{leaf}` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_get_{leaf}_n(
+    p: *const {owner}, start: u32, out: *mut {t}, n: u32, stride: i64) -> bool {{
+    let m = &{access}.{field};
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {{
+        return false;
+    }}
+    for i in 0..n {{
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut {t};
+        {}
+    }}
+    true
+}}
+", l.access, column_set_expr(&l.ty), column_get_stmt(&l.ty, &value)));
+    }
+}
+
+/// `get_refs_n` of a refs-flavoured, index-addressable collection: the
+/// packed refs of an index range in one call.
+fn refs_fn(out: &mut String, fn_prefix: &str, owner: &str, access: &str, field: &str) {
+    out.push_str(&format!(
+"/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_get_refs_n(
+    p: *const {owner}, start: u32, out: *mut u32, n: u32) -> bool {{
+    let m = &{access}.{field};
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {{
+        return false;
+    }}
+    for i in 0..n {{
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }}
+    true
+}}
+"));
+}
+
+/// The fast construction path of one collection: the slot-record push
+/// and, where elements are index-addressable, the column functions.
+fn collection_fast_fns(
+    out: &mut String,
+    model: &Model,
+    fn_prefix: &str,
+    owner: &str,
+    access: &str,
+    f: &Field,
+) -> Result<(), String> {
+    let field = &f.name;
+    let elem = f.of.as_deref().ok_or("collection without element")?;
+    let elem_ty = model.types.get(elem)
+        .ok_or_else(|| format!("collection `{field}`: element type `{elem}` not in sidecar"))?;
+    let lv = leaves(model, elem_ty);
+    let slots = record_slots(&lv);
+    let assign = format!("assign_slots_{}", snake(elem));
+    let container = f.container.as_deref().unwrap_or("vec");
+    let build = format!(
+"        let mut e: {elem} = Default::default();
+        if !slots.is_null() {{
+            {assign}(&mut e, slots.add(i * {slots}));
+        }}");
+    let doc = format!(
+"/// Appends `n` elements built from `n` slot records of {slots} u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.");
+    match container {
+        "vec" => {
+            let key = match vec_flavor(f)? {
+                Flavor::Refs => "if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }",
+                Flavor::Std => "first as u32",
+            };
+            out.push_str(&format!(
+"{doc}
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_push_n(p: *mut {owner}, slots: *const u64, n: u32) -> u32 {{
+    let m = &mut {access}.{field};
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {{
+{build}
+        m.push(e);
+    }}
+    {key}
+}}
+"));
+            column_fns(out, fn_prefix, owner, access, field, &lv);
+            if matches!(vec_flavor(f)?, Flavor::Refs) {
+                refs_fn(out, fn_prefix, owner, access, field);
+            }
+        }
+        "deque" => {
+            out.push_str(&format!(
+"{doc}
+/// Returns the packed ref of the first new element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_push_back_n(p: *mut {owner}, slots: *const u64, n: u32) -> u32 {{
+    let m = &mut {access}.{field};
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {{
+{build}
+        m.push_back(e);
+    }}
+    if n == 0 {{ u32::MAX }} else {{ m.ref_at(first).to_raw() }}
+}}
+/// Like push_back_n at the front: record `i` ends up at index `n - 1 - i`.
+/// Returns the packed ref of the first record's element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_push_front_n(p: *mut {owner}, slots: *const u64, n: u32) -> u32 {{
+    let m = &mut {access}.{field};
+    m.reserve(n as usize);
+    for i in 0..n as usize {{
+{build}
+        m.push_front(e);
+    }}
+    if n == 0 {{ u32::MAX }} else {{ m.ref_at(n as usize - 1).to_raw() }}
+}}
+"));
+            column_fns(out, fn_prefix, owner, access, field, &lv);
+            refs_fn(out, fn_prefix, owner, access, field);
+        }
+        "arena" => {
+            out.push_str(&format!(
+"{doc}
+/// Returns the packed ref of the first new element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_push_n(p: *mut {owner}, slots: *const u64, n: u32) -> u32 {{
+    let m = &mut {access}.{field};
+    m.reserve(n as usize);
+    let mut first = u32::MAX;
+    for i in 0..n as usize {{
+{build}
+        let r = m.push(e);
+        if i == 0 {{
+            first = r.to_raw();
+        }}
+    }}
+    first
+}}
+"));
+        }
+        other => return Err(format!("`{field}`: unknown container `{other}`")),
+    }
+    Ok(())
+}
+
 /// One collection's function family; `owner` is the pointer type the
 /// functions take, `access` the expression reaching the model struct.
 fn collection_fns(
     out: &mut String,
+    model: &Model,
     fn_prefix: &str,
     owner: &str,
     access: &str,
@@ -438,7 +699,7 @@ pub unsafe extern \"C\" fn {fn_prefix}_prev(p: *const {owner}, r: u32) -> u32 {{
         }
         other => return Err(format!("`{type_name}.{field}`: unknown container `{other}`")),
     }
-    Ok(())
+    collection_fast_fns(out, model, fn_prefix, owner, access, f)
 }
 
 /// All accessor functions for one field, over `access` (an expression
@@ -611,7 +872,19 @@ pub unsafe extern \"C\" fn {fn_prefix}_{name}(p: *mut {ptr_ty}) -> *mut {of} {{
         None => std::ptr::null_mut(),
     }}
 }}
-"));
+/// make_{name} from one slot record (mask word(s), then one slot per leaf;
+/// null for the plain default).
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_make_{name}_slots(p: *mut {ptr_ty}, slots: *const u64) -> *mut {of} {{
+    let mut e: {of} = Default::default();
+    if !slots.is_null() {{
+        assign_slots_{}(&mut e, slots);
+    }}
+    let a = &mut {access}.{name};
+    *a = Some(e);
+    a.as_mut().unwrap() as *mut {of}
+}}
+", snake(of)));
         }
         "ref" => {
             rw(out, fn_prefix, name, ptr_ty, access, "u32",
@@ -619,7 +892,8 @@ pub unsafe extern \"C\" fn {fn_prefix}_{name}(p: *mut {ptr_ty}) -> *mut {of} {{
                 &format!("{access}.{name} = arael::refs::Ref::from_raw(v);"));
         }
         "collection" => {
-            collection_fns(out, &format!("{fn_prefix}_{name}"), ptr_ty, access, type_name, f)?;
+            collection_fns(out, model, &format!("{fn_prefix}_{name}"), ptr_ty, access,
+                           type_name, f)?;
         }
         "self_block" | "cross_block" | "triplet_block" | "skip" | "opaque" => {}
         _ => return Err(unsupported(type_name, f)),
@@ -2261,6 +2535,12 @@ pub unsafe extern \"C\" fn {root_sn}_{a_sn}_{b_sn}_cross_cov(
         for f in &t.fields {
             field_accessors(&mut out, model, &sn, tn, "(*p)", tn, f)?;
         }
+    }
+
+    // The slot-record assigners behind every `push_n`, one per
+    // surfaced type.
+    for (tn, t) in surfaced_types(model) {
+        assign_slots_fn(&mut out, model, tn, t);
     }
 
     Ok(out)

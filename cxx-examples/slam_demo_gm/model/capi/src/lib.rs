@@ -1909,6 +1909,183 @@ pub unsafe extern "C" fn path_poses_try_get(p: *mut PathHandle, r: u32) -> *mut 
         None => std::ptr::null_mut(),
     }
 }
+/// Appends `n` elements built from `n` slot records of 10 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the packed ref of the first new element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_push_back_n(p: *mut PathHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.poses;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Pose = Default::default();
+        if !slots.is_null() {
+            assign_slots_pose(&mut e, slots.add(i * 10));
+        }
+        m.push_back(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Like push_back_n at the front: record `i` ends up at index `n - 1 - i`.
+/// Returns the packed ref of the first record's element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_push_front_n(p: *mut PathHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.poses;
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Pose = Default::default();
+        if !slots.is_null() {
+            assign_slots_pose(&mut e, slots.add(i * 10));
+        }
+        m.push_front(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(n as usize - 1).to_raw() }
+}
+/// Sets `r2w_translation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_set_r2w_translation_n(
+    p: *mut PathHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].r2w.translation = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `r2w_translation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_get_r2w_translation_n(
+    p: *const PathHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].r2w.translation.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `r2w_rotation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_set_r2w_rotation_n(
+    p: *mut PathHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].r2w.rotation = std::mem::transmute::<[f64; 4], CQuatF64>(std::ptr::read_unaligned(src as *const [f64; 4])).into();
+    }
+    true
+}
+/// Reads `r2w_rotation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_get_r2w_rotation_n(
+    p: *const PathHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CQuatF64 = m[start + i].r2w.rotation.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 4], std::mem::transmute::<CQuatF64, [f64; 4]>(mv));
+    }
+    true
+}
+/// Sets `r2w_optimize_translation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_set_r2w_optimize_translation_n(
+    p: *mut PathHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].r2w.optimize_translation = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `r2w_optimize_translation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_get_r2w_optimize_translation_n(
+    p: *const PathHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].r2w.optimize_translation as u8);
+    }
+    true
+}
+/// Sets `r2w_optimize_rotation` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_set_r2w_optimize_rotation_n(
+    p: *mut PathHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].r2w.optimize_rotation = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `r2w_optimize_rotation` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_get_r2w_optimize_rotation_n(
+    p: *const PathHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].r2w.optimize_rotation as u8);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_get_refs_n(
+    p: *const PathHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.poses;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_landmarks_len(p: *const PathHandle) -> u32 {
     (*p).model.landmarks.len() as u32
@@ -1982,6 +2159,26 @@ pub unsafe extern "C" fn path_landmarks_prev(p: *const PathHandle, r: u32) -> u3
         None => u32::MAX,
     }
 }
+/// Appends `n` elements built from `n` slot records of 10 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the packed ref of the first new element, or u32::MAX for n = 0.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_push_n(p: *mut PathHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.landmarks;
+    m.reserve(n as usize);
+    let mut first = u32::MAX;
+    for i in 0..n as usize {
+        let mut e: PointLandmark = Default::default();
+        if !slots.is_null() {
+            assign_slots_point_landmark(&mut e, slots.add(i * 10));
+        }
+        let r = m.push(e);
+        if i == 0 {
+            first = r.to_raw();
+        }
+    }
+    first
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pairs_len(p: *const PathHandle) -> u32 {
     (*p).model.pose_pairs.len() as u32
@@ -2013,6 +2210,88 @@ pub unsafe extern "C" fn path_pose_pairs_clear(p: *mut PathHandle) {
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pairs_truncate(p: *mut PathHandle, len: u32) {
     (*p).model.pose_pairs.truncate(len as usize);
+}
+/// Appends `n` elements built from `n` slot records of 3 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_push_n(p: *mut PathHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.pose_pairs;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: PosePair = Default::default();
+        if !slots.is_null() {
+            assign_slots_pose_pair(&mut e, slots.add(i * 3));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `prev` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_set_prev_n(
+    p: *mut PathHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.pose_pairs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].prev = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `prev` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_get_prev_n(
+    p: *const PathHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.pose_pairs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].prev.to_raw());
+    }
+    true
+}
+/// Sets `cur` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_set_cur_n(
+    p: *mut PathHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.pose_pairs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].cur = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `cur` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_get_cur_n(
+    p: *const PathHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.pose_pairs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].cur.to_raw());
+    }
+    true
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_drift_rho_isigma(p: *const PathHandle) -> f64 {
@@ -2214,6 +2493,88 @@ pub unsafe extern "C" fn path_point_landmark_frines_clear(p: *mut PointLandmark)
 pub unsafe extern "C" fn path_point_landmark_frines_truncate(p: *mut PointLandmark, len: u32) {
     (*p).frines.truncate(len as usize);
 }
+/// Appends `n` elements built from `n` slot records of 3 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_push_n(p: *mut PointLandmark, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).frines;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: PointFrine = Default::default();
+        if !slots.is_null() {
+            assign_slots_point_frine(&mut e, slots.add(i * 3));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `pose` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_set_pose_n(
+    p: *mut PointLandmark, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).frines;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].pose = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `pose` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_get_pose_n(
+    p: *const PointLandmark, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).frines;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].pose.to_raw());
+    }
+    true
+}
+/// Sets `feature` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_set_feature_n(
+    p: *mut PointLandmark, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).frines;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].feature = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `feature` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_get_feature_n(
+    p: *const PointLandmark, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).frines;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].feature.to_raw());
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_r2w_translation(p: *const Pose) -> CVec3F64 {
     (*p).r2w.translation.into()
@@ -2320,6 +2681,18 @@ pub unsafe extern "C" fn path_pose_info_gps(p: *mut PoseInfo) -> *mut GpsData {
         None => std::ptr::null_mut(),
     }
 }
+/// make_gps from one slot record (mask word(s), then one slot per leaf;
+/// null for the plain default).
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_make_gps_slots(p: *mut PoseInfo, slots: *const u64) -> *mut GpsData {
+    let mut e: GpsData = Default::default();
+    if !slots.is_null() {
+        assign_slots_gps_data(&mut e, slots);
+    }
+    let a = &mut (*p).gps;
+    *a = Some(e);
+    a.as_mut().unwrap() as *mut GpsData
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_info_tilt_g(p: *const PoseInfo) -> CVec3F64 {
     (*p).tilt_g.into()
@@ -2398,6 +2771,171 @@ pub unsafe extern "C" fn path_pose_info_features_try_get(p: *mut PoseInfo, r: u3
         None => std::ptr::null_mut(),
     }
 }
+/// Appends `n` elements built from `n` slot records of 17 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_push_n(p: *mut PoseInfo, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).features;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: PointFeature = Default::default();
+        if !slots.is_null() {
+            assign_slots_point_feature(&mut e, slots.add(i * 17));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `pixel` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_set_pixel_n(
+    p: *mut PoseInfo, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].pixel = std::mem::transmute::<[f64; 2], CVec2F64>(std::ptr::read_unaligned(src as *const [f64; 2])).into();
+    }
+    true
+}
+/// Reads `pixel` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_get_pixel_n(
+    p: *const PoseInfo, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec2F64 = m[start + i].pixel.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 2], std::mem::transmute::<CVec2F64, [f64; 2]>(mv));
+    }
+    true
+}
+/// Sets `mf2r` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_set_mf2r_n(
+    p: *mut PoseInfo, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].mf2r = std::mem::transmute::<[f64; 9], CMat3F64>(std::ptr::read_unaligned(src as *const [f64; 9])).into();
+    }
+    true
+}
+/// Reads `mf2r` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_get_mf2r_n(
+    p: *const PoseInfo, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CMat3F64 = m[start + i].mf2r.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 9], std::mem::transmute::<CMat3F64, [f64; 9]>(mv));
+    }
+    true
+}
+/// Sets `camera_pos` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_set_camera_pos_n(
+    p: *mut PoseInfo, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].camera_pos = std::mem::transmute::<[f64; 3], CVec3F64>(std::ptr::read_unaligned(src as *const [f64; 3])).into();
+    }
+    true
+}
+/// Reads `camera_pos` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_get_camera_pos_n(
+    p: *const PoseInfo, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec3F64 = m[start + i].camera_pos.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 3], std::mem::transmute::<CVec3F64, [f64; 3]>(mv));
+    }
+    true
+}
+/// Sets `isigma` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_set_isigma_n(
+    p: *mut PoseInfo, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].isigma = std::mem::transmute::<[f64; 2], CVec2F64>(std::ptr::read_unaligned(src as *const [f64; 2])).into();
+    }
+    true
+}
+/// Reads `isigma` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_get_isigma_n(
+    p: *const PoseInfo, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec2F64 = m[start + i].isigma.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 2], std::mem::transmute::<CVec2F64, [f64; 2]>(mv));
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_get_refs_n(
+    p: *const PoseInfo, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).features;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pair_prev(p: *const PosePair) -> u32 {
     (*p).prev.to_raw()
@@ -2413,4 +2951,127 @@ pub unsafe extern "C" fn path_pose_pair_cur(p: *const PosePair) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pair_set_cur(p: *mut PosePair, v: u32) {
     (*p).cur = arael::refs::Ref::from_raw(v);
+}
+
+/// Assigns a slot record's masked leaves onto a `GpsData`: 1 mask
+/// word(s), then 15 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_gps_data(e: &mut GpsData, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.pos = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.cov_r = std::mem::transmute::<[f64; 9], CMat3F64>([f64::from_bits(*s.add(4)), f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8)), f64::from_bits(*s.add(9)), f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.cov_isigma = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15))]).into();
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `PointFeature`: 1 mask
+/// word(s), then 16 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_point_feature(e: &mut PointFeature, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.pixel = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.mf2r = std::mem::transmute::<[f64; 9], CMat3F64>([f64::from_bits(*s.add(3)), f64::from_bits(*s.add(4)), f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8)), f64::from_bits(*s.add(9)), f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.camera_pos = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(12)), f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.isigma = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(15)), f64::from_bits(*s.add(16))]).into();
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `PointFrine`: 1 mask
+/// word(s), then 2 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_point_frine(e: &mut PointFrine, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.pose = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.feature = arael::refs::Ref::from_raw(*s.add(2) as u32);
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `PointLandmark`: 1 mask
+/// word(s), then 9 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_point_landmark(e: &mut PointLandmark, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.anchor = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.anchor_pose = arael::refs::Ref::from_raw(*s.add(4) as u32);
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.dir.unit = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.rho.value = f64::from_bits(*s.add(8));
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.rho.optimize = *s.add(9) != 0;
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Pose`: 1 mask
+/// word(s), then 9 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_pose(e: &mut Pose, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.r2w.translation = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.r2w.rotation = std::mem::transmute::<[f64; 4], CQuatF64>([f64::from_bits(*s.add(4)), f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.r2w.optimize_translation = *s.add(8) != 0;
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.r2w.optimize_rotation = *s.add(9) != 0;
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `PoseInfo`: 1 mask
+/// word(s), then 39 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_pose_info(e: &mut PoseInfo, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.delta_pos = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(1)), f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.delta_rot = std::mem::transmute::<[f64; 9], CMat3F64>([f64::from_bits(*s.add(4)), f64::from_bits(*s.add(5)), f64::from_bits(*s.add(6)), f64::from_bits(*s.add(7)), f64::from_bits(*s.add(8)), f64::from_bits(*s.add(9)), f64::from_bits(*s.add(10)), f64::from_bits(*s.add(11)), f64::from_bits(*s.add(12))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.delta_pos_cov_r = std::mem::transmute::<[f64; 9], CMat3F64>([f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14)), f64::from_bits(*s.add(15)), f64::from_bits(*s.add(16)), f64::from_bits(*s.add(17)), f64::from_bits(*s.add(18)), f64::from_bits(*s.add(19)), f64::from_bits(*s.add(20)), f64::from_bits(*s.add(21))]).into();
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.delta_pos_cov_isigma = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(22)), f64::from_bits(*s.add(23)), f64::from_bits(*s.add(24))]).into();
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.delta_rot_cov_r = std::mem::transmute::<[f64; 9], CMat3F64>([f64::from_bits(*s.add(25)), f64::from_bits(*s.add(26)), f64::from_bits(*s.add(27)), f64::from_bits(*s.add(28)), f64::from_bits(*s.add(29)), f64::from_bits(*s.add(30)), f64::from_bits(*s.add(31)), f64::from_bits(*s.add(32)), f64::from_bits(*s.add(33))]).into();
+    }
+    if *s.add(0) & (1u64 << 5) != 0 {
+        e.delta_rot_cov_isigma = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(34)), f64::from_bits(*s.add(35)), f64::from_bits(*s.add(36))]).into();
+    }
+    if *s.add(0) & (1u64 << 6) != 0 {
+        e.tilt_g = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(37)), f64::from_bits(*s.add(38)), f64::from_bits(*s.add(39))]).into();
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `PosePair`: 1 mask
+/// word(s), then 2 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_pose_pair(e: &mut PosePair, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.prev = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.cur = arael::refs::Ref::from_raw(*s.add(2) as u32);
+    }
 }

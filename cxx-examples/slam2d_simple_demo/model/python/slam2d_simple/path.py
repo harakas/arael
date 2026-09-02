@@ -7,8 +7,10 @@ C++ classes one-to-one)."""
 
 import ctypes
 import os
+import struct
 
 from . import _path_ffi as _f
+from .arael import columns as _cols
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
@@ -286,21 +288,49 @@ class PosePairRef:
         return "PosePairRef(%s)" % (self.raw if self.valid else "null")
 
 
+_Z2 = (0.0,) * 2
+
+
+_frine_rec = struct.Struct("=QQdd")
+_frine_slots = (ctypes.c_uint64 * 4)()
+
+
 class Frine:
     """A `Frine` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a FrineRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The FrineRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, FrineRef):
+            return k
+        raise TypeError("Frine addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a FrineRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Frine addressed by ref, not by index")
 
     @property
     def pose(self):
@@ -327,10 +357,19 @@ class Frine:
         _f.path_frine_set_isigma(self._p, v)
 
 
+_landmark_rec = struct.Struct("=QddQ")
+_landmark_slots = (ctypes.c_uint64 * 4)()
+
+
 class LandmarkFrinesVec:
     """View of `frines` (vec of Frine); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -349,11 +388,11 @@ class LandmarkFrinesVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i))
+        return Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i))
+            yield Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i), i)
 
     def clear(self):
         _f.path_landmark_frines_clear(self._p)
@@ -361,13 +400,99 @@ class LandmarkFrinesVec:
     def truncate(self, n):
         _f.path_landmark_frines_truncate(self._p, n)
 
-    def push(self):
-        _f.path_landmark_frines_push(self._p)
-        return self[len(self) - 1]
+    def push(self, *, pose=None, bearing=None, isigma=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if pose is None: pose = 0
+        else: m |= 1 << 0; pose = getattr(pose, "raw", pose)
+        if bearing is None: bearing = 0.0
+        else: m |= 1 << 1
+        if isigma is None: isigma = 0.0
+        else: m |= 1 << 2
+        _frine_rec.pack_into(_frine_slots, 0,
+            m, pose, bearing, isigma)
+        i = _f.path_landmark_frines_push_n(self._p, _frine_slots, 1)
+        return Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i), i)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.path_landmark_frines_pop(self._p)
+
+    def push_many(self, n=None, *, pose=None, bearing=None, isigma=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("pose", pose), ("bearing", bearing),
+                        ("isigma", isigma)))
+        i0 = len(self)
+        _f.path_landmark_frines_push_n(self._p, None, n)
+        if pose is not None:
+            self._set_pose(i0, n, pose)
+        if bearing is not None:
+            self._set_bearing(i0, n, bearing)
+        if isigma is not None:
+            self._set_isigma(i0, n, isigma)
+        return i0
+
+    def _set_pose(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "pose")
+        if not _f.path_landmark_frines_set_pose_n(self._p, start, ptr, n, stride):
+            raise IndexError("pose: %d + %d exceeds the collection" % (start, n))
+
+    def set_pose(self, v):
+        """Sets `pose` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pose(0, len(self), v)
+
+    def get_pose(self):
+        """`pose` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.path_landmark_frines_get_pose_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_bearing(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "bearing")
+        if not _f.path_landmark_frines_set_bearing_n(self._p, start, ptr, n, stride):
+            raise IndexError("bearing: %d + %d exceeds the collection" % (start, n))
+
+    def set_bearing(self, v):
+        """Sets `bearing` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_bearing(0, len(self), v)
+
+    def get_bearing(self):
+        """`bearing` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.path_landmark_frines_get_bearing_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_isigma(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "isigma")
+        if not _f.path_landmark_frines_set_isigma_n(self._p, start, ptr, n, stride):
+            raise IndexError("isigma: %d + %d exceeds the collection" % (start, n))
+
+    def set_isigma(self, v):
+        """Sets `isigma` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_isigma(0, len(self), v)
+
+    def get_isigma(self):
+        """`isigma` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.path_landmark_frines_get_isigma_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
 
 
 class Landmark:
@@ -375,16 +500,37 @@ class Landmark:
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 2
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a LandmarkRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The LandmarkRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, LandmarkRef):
+            return k
+        raise TypeError("Landmark addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a LandmarkRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Landmark addressed by ref, not by index")
 
     @property
     def pos(self):
@@ -407,21 +553,46 @@ class Landmark:
         return LandmarkFrinesVec(self._p)
 
 
+_pose_rec = struct.Struct("=QddQdQddddd")
+_pose_slots = (ctypes.c_uint64 * 11)()
+
+
 class Pose:
     """A `Pose` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 3
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a PoseRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The PoseRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, PoseRef):
+            return k
+        raise TypeError("Pose addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a PoseRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Pose addressed by ref, not by index")
 
     @property
     def pos(self):
@@ -488,21 +659,46 @@ class Pose:
         _f.path_pose_set_delta_gamma_isigma(self._p, v)
 
 
+_pose_pair_rec = struct.Struct("=QQQ")
+_pose_pair_slots = (ctypes.c_uint64 * 3)()
+
+
 class PosePair:
     """A `PosePair` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a PosePairRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The PosePairRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, PosePairRef):
+            return k
+        raise TypeError("PosePair addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a PosePairRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("PosePair addressed by ref, not by index")
 
     @property
     def prev(self):
@@ -649,7 +845,12 @@ class Covariance:
 class PathPosesDeque:
     """View of `poses` (deque of Pose); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -664,17 +865,17 @@ class PathPosesDeque:
 
     def __getitem__(self, i):
         if isinstance(i, PoseRef):
-            return Pose(lambda r=i.raw: _f.path_poses_get(self._p, r))
+            return Pose(lambda r=i.raw: _f.path_poses_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Pose(lambda i=i: _f.path_poses_at(self._p, i))
+        return Pose(lambda i=i: _f.path_poses_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Pose(lambda i=i: _f.path_poses_at(self._p, i))
+            yield Pose(lambda i=i: _f.path_poses_at(self._p, i), i)
 
     def clear(self):
         _f.path_poses_clear(self._p)
@@ -682,13 +883,71 @@ class PathPosesDeque:
     def truncate(self, n):
         _f.path_poses_truncate(self._p, n)
 
-    def push_back(self):
-        _f.path_poses_push_back(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push_back(self, *, pos=None, pos_optimize=None, gamma=None,
+                 gamma_optimize=None, delta_pos=None, delta_gamma=None,
+                 delta_pos_isigma=None, delta_gamma_isigma=None):
+        """Appends one element at the back and returns it; each keyword
+        sets that field in the same call, an omitted one keeps the Rust
+        default."""
+        m = 0
+        if pos is None: pos = _Z2
+        else:
+            m |= 1 << 0; pos = tuple(pos)
+            if len(pos) != 2: pos = _cols.flat(pos, 2)
+        if pos_optimize is None: pos_optimize = 0
+        else: m |= 1 << 1; pos_optimize = 1 if pos_optimize else 0
+        if gamma is None: gamma = 0.0
+        else: m |= 1 << 2
+        if gamma_optimize is None: gamma_optimize = 0
+        else: m |= 1 << 3; gamma_optimize = 1 if gamma_optimize else 0
+        if delta_pos is None: delta_pos = _Z2
+        else:
+            m |= 1 << 4; delta_pos = tuple(delta_pos)
+            if len(delta_pos) != 2: delta_pos = _cols.flat(delta_pos, 2)
+        if delta_gamma is None: delta_gamma = 0.0
+        else: m |= 1 << 5
+        if delta_pos_isigma is None: delta_pos_isigma = 0.0
+        else: m |= 1 << 6
+        if delta_gamma_isigma is None: delta_gamma_isigma = 0.0
+        else: m |= 1 << 7
+        _pose_rec.pack_into(_pose_slots, 0,
+            m, *pos, pos_optimize, gamma, gamma_optimize, *delta_pos,
+            delta_gamma, delta_pos_isigma, delta_gamma_isigma)
+        r = PoseRef(_f.path_poses_push_back_n(self._p, _pose_slots, 1))
+        return Pose(lambda k=r.raw: _f.path_poses_get(self._p, k), r)
 
-    def push_front(self):
-        _f.path_poses_push_front(self._p)
-        return self[self.ref_at(0)]
+    def push_front(self, *, pos=None, pos_optimize=None, gamma=None,
+                 gamma_optimize=None, delta_pos=None, delta_gamma=None,
+                 delta_pos_isigma=None, delta_gamma_isigma=None):
+        """Inserts one element at the front and returns it; each keyword
+        sets that field in the same call, an omitted one keeps the Rust
+        default."""
+        m = 0
+        if pos is None: pos = _Z2
+        else:
+            m |= 1 << 0; pos = tuple(pos)
+            if len(pos) != 2: pos = _cols.flat(pos, 2)
+        if pos_optimize is None: pos_optimize = 0
+        else: m |= 1 << 1; pos_optimize = 1 if pos_optimize else 0
+        if gamma is None: gamma = 0.0
+        else: m |= 1 << 2
+        if gamma_optimize is None: gamma_optimize = 0
+        else: m |= 1 << 3; gamma_optimize = 1 if gamma_optimize else 0
+        if delta_pos is None: delta_pos = _Z2
+        else:
+            m |= 1 << 4; delta_pos = tuple(delta_pos)
+            if len(delta_pos) != 2: delta_pos = _cols.flat(delta_pos, 2)
+        if delta_gamma is None: delta_gamma = 0.0
+        else: m |= 1 << 5
+        if delta_pos_isigma is None: delta_pos_isigma = 0.0
+        else: m |= 1 << 6
+        if delta_gamma_isigma is None: delta_gamma_isigma = 0.0
+        else: m |= 1 << 7
+        _pose_rec.pack_into(_pose_slots, 0,
+            m, *pos, pos_optimize, gamma, gamma_optimize, *delta_pos,
+            delta_gamma, delta_pos_isigma, delta_gamma_isigma)
+        r = PoseRef(_f.path_poses_push_front_n(self._p, _pose_slots, 1))
+        return Pose(lambda k=r.raw: _f.path_poses_get(self._p, k), r)
 
     def pop_back(self):
         """Drops one end; False when already empty."""
@@ -698,16 +957,204 @@ class PathPosesDeque:
         """Drops one end; False when already empty."""
         return _f.path_poses_pop_front(self._p)
 
+    def push_many(self, n=None, *, pos=None, pos_optimize=None, gamma=None,
+                  gamma_optimize=None, delta_pos=None, delta_gamma=None,
+                  delta_pos_isigma=None, delta_gamma_isigma=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("pos", pos), ("pos_optimize", pos_optimize),
+                        ("gamma", gamma), ("gamma_optimize", gamma_optimize),
+                        ("delta_pos", delta_pos),
+                        ("delta_gamma", delta_gamma),
+                        ("delta_pos_isigma", delta_pos_isigma),
+                        ("delta_gamma_isigma", delta_gamma_isigma)))
+        i0 = len(self)
+        _f.path_poses_push_back_n(self._p, None, n)
+        if pos is not None:
+            self._set_pos(i0, n, pos)
+        if pos_optimize is not None:
+            self._set_pos_optimize(i0, n, pos_optimize)
+        if gamma is not None:
+            self._set_gamma(i0, n, gamma)
+        if gamma_optimize is not None:
+            self._set_gamma_optimize(i0, n, gamma_optimize)
+        if delta_pos is not None:
+            self._set_delta_pos(i0, n, delta_pos)
+        if delta_gamma is not None:
+            self._set_delta_gamma(i0, n, delta_gamma)
+        if delta_pos_isigma is not None:
+            self._set_delta_pos_isigma(i0, n, delta_pos_isigma)
+        if delta_gamma_isigma is not None:
+            self._set_delta_gamma_isigma(i0, n, delta_gamma_isigma)
+        return i0
+
+    def _set_pos(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 2, n, "pos")
+        if not _f.path_poses_set_pos_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos(self, v):
+        """Sets `pos` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos(0, len(self), v)
+
+    def get_pos(self):
+        """`pos` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 2, n)
+        _f.path_poses_get_pos_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 2, n)
+
+    def _set_pos_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "pos_optimize")
+        if not _f.path_poses_set_pos_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos_optimize(self, v):
+        """Sets `pos_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos_optimize(0, len(self), v)
+
+    def get_pos_optimize(self):
+        """`pos_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.path_poses_get_pos_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_gamma(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "gamma")
+        if not _f.path_poses_set_gamma_n(self._p, start, ptr, n, stride):
+            raise IndexError("gamma: %d + %d exceeds the collection" % (start, n))
+
+    def set_gamma(self, v):
+        """Sets `gamma` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_gamma(0, len(self), v)
+
+    def get_gamma(self):
+        """`gamma` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.path_poses_get_gamma_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_gamma_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "gamma_optimize")
+        if not _f.path_poses_set_gamma_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("gamma_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_gamma_optimize(self, v):
+        """Sets `gamma_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_gamma_optimize(0, len(self), v)
+
+    def get_gamma_optimize(self):
+        """`gamma_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.path_poses_get_gamma_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_delta_pos(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 2, n, "delta_pos")
+        if not _f.path_poses_set_delta_pos_n(self._p, start, ptr, n, stride):
+            raise IndexError("delta_pos: %d + %d exceeds the collection" % (start, n))
+
+    def set_delta_pos(self, v):
+        """Sets `delta_pos` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_delta_pos(0, len(self), v)
+
+    def get_delta_pos(self):
+        """`delta_pos` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 2, n)
+        _f.path_poses_get_delta_pos_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 2, n)
+
+    def _set_delta_gamma(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "delta_gamma")
+        if not _f.path_poses_set_delta_gamma_n(self._p, start, ptr, n, stride):
+            raise IndexError("delta_gamma: %d + %d exceeds the collection" % (start, n))
+
+    def set_delta_gamma(self, v):
+        """Sets `delta_gamma` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_delta_gamma(0, len(self), v)
+
+    def get_delta_gamma(self):
+        """`delta_gamma` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.path_poses_get_delta_gamma_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_delta_pos_isigma(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "delta_pos_isigma")
+        if not _f.path_poses_set_delta_pos_isigma_n(self._p, start, ptr, n, stride):
+            raise IndexError("delta_pos_isigma: %d + %d exceeds the collection" % (start, n))
+
+    def set_delta_pos_isigma(self, v):
+        """Sets `delta_pos_isigma` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_delta_pos_isigma(0, len(self), v)
+
+    def get_delta_pos_isigma(self):
+        """`delta_pos_isigma` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.path_poses_get_delta_pos_isigma_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_delta_gamma_isigma(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "delta_gamma_isigma")
+        if not _f.path_poses_set_delta_gamma_isigma_n(self._p, start, ptr, n, stride):
+            raise IndexError("delta_gamma_isigma: %d + %d exceeds the collection" % (start, n))
+
+    def set_delta_gamma_isigma(self, v):
+        """Sets `delta_gamma_isigma` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_delta_gamma_isigma(0, len(self), v)
+
+    def get_delta_gamma_isigma(self):
+        """`delta_gamma_isigma` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.path_poses_get_delta_gamma_isigma_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
     def get(self, r):
-        return Pose(lambda k=_raw(r): _f.path_poses_get(self._p, k))
+        r = r if isinstance(r, PoseRef) else PoseRef(int(r))
+        return Pose(lambda k=r.raw: _f.path_poses_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.path_poses_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.path_poses_try_get(self._p, _raw(r))
-        return Pose(lambda k=_raw(r): _f.path_poses_get(self._p, k)) if p else None
+        r = r if isinstance(r, PoseRef) else PoseRef(int(r))
+        p = _f.path_poses_try_get(self._p, r.raw)
+        return Pose(lambda k=r.raw: _f.path_poses_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return PoseRef(_f.path_poses_ref_at(self._p, i))
@@ -720,11 +1167,25 @@ class PathPosesDeque:
         """Ref of the last element; null when empty."""
         return PoseRef(_f.path_poses_back_ref(self._p))
 
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.path_poses_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
+
 
 class PathPosePairsVec:
     """View of `pose_pairs` (vec of PosePair); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -743,11 +1204,11 @@ class PathPosePairsVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i))
+        return PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i))
+            yield PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i), i)
 
     def clear(self):
         _f.path_pose_pairs_clear(self._p)
@@ -755,19 +1216,86 @@ class PathPosePairsVec:
     def truncate(self, n):
         _f.path_pose_pairs_truncate(self._p, n)
 
-    def push(self):
-        _f.path_pose_pairs_push(self._p)
-        return self[len(self) - 1]
+    def push(self, *, prev=None, cur=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if prev is None: prev = 0
+        else: m |= 1 << 0; prev = getattr(prev, "raw", prev)
+        if cur is None: cur = 0
+        else: m |= 1 << 1; cur = getattr(cur, "raw", cur)
+        _pose_pair_rec.pack_into(_pose_pair_slots, 0,
+            m, prev, cur)
+        i = _f.path_pose_pairs_push_n(self._p, _pose_pair_slots, 1)
+        return PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i), i)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.path_pose_pairs_pop(self._p)
 
+    def push_many(self, n=None, *, prev=None, cur=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("prev", prev), ("cur", cur)))
+        i0 = len(self)
+        _f.path_pose_pairs_push_n(self._p, None, n)
+        if prev is not None:
+            self._set_prev(i0, n, prev)
+        if cur is not None:
+            self._set_cur(i0, n, cur)
+        return i0
+
+    def _set_prev(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "prev")
+        if not _f.path_pose_pairs_set_prev_n(self._p, start, ptr, n, stride):
+            raise IndexError("prev: %d + %d exceeds the collection" % (start, n))
+
+    def set_prev(self, v):
+        """Sets `prev` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_prev(0, len(self), v)
+
+    def get_prev(self):
+        """`prev` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.path_pose_pairs_get_prev_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_cur(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "cur")
+        if not _f.path_pose_pairs_set_cur_n(self._p, start, ptr, n, stride):
+            raise IndexError("cur: %d + %d exceeds the collection" % (start, n))
+
+    def set_cur(self, v):
+        """Sets `cur` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_cur(0, len(self), v)
+
+    def get_cur(self):
+        """`cur` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.path_pose_pairs_get_cur_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
 
 class PathLandmarksArena:
     """View of `landmarks` (arena of Landmark); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -780,9 +1308,20 @@ class PathLandmarksArena:
     def reserve(self, additional):
         _f.path_landmarks_reserve(self._p, additional)
 
-    def push(self):
-        """New element's ref (get()/[] take it back)."""
-        return LandmarkRef(_f.path_landmarks_push(self._p))
+    def push(self, *, pos=None, pos_optimize=None):
+        """New element's ref (get()/[] take it back); each keyword sets
+        that field in the same call, an omitted one keeps the Rust
+        default."""
+        m = 0
+        if pos is None: pos = _Z2
+        else:
+            m |= 1 << 0; pos = tuple(pos)
+            if len(pos) != 2: pos = _cols.flat(pos, 2)
+        if pos_optimize is None: pos_optimize = 0
+        else: m |= 1 << 1; pos_optimize = 1 if pos_optimize else 0
+        _landmark_rec.pack_into(_landmark_slots, 0,
+            m, *pos, pos_optimize)
+        return LandmarkRef(_f.path_landmarks_push_n(self._p, _landmark_slots, 1))
 
     def remove(self, r):
         return _f.path_landmarks_remove(self._p, _raw(r))
@@ -791,14 +1330,15 @@ class PathLandmarksArena:
         _f.path_landmarks_clear(self._p)
 
     def __getitem__(self, r):
-        return Landmark(lambda k=_raw(r): _f.path_landmarks_get(self._p, k))
+        r = r if isinstance(r, LandmarkRef) else LandmarkRef(int(r))
+        return Landmark(lambda k=r.raw: _f.path_landmarks_get(self._p, k), r)
 
     def __iter__(self):
         """Live slots in order; yields element wrappers (refs() for
         the refs)."""
         r = _f.path_landmarks_first(self._p)
         while r != 0xFFFFFFFF:
-            yield Landmark(lambda k=r: _f.path_landmarks_get(self._p, k))
+            yield Landmark(lambda k=r: _f.path_landmarks_get(self._p, k), LandmarkRef(r))
             r = _f.path_landmarks_next(self._p, r)
 
     def refs(self):
@@ -808,15 +1348,17 @@ class PathLandmarksArena:
             r = _f.path_landmarks_next(self._p, r)
 
     def get(self, r):
-        return Landmark(lambda k=_raw(r): _f.path_landmarks_get(self._p, k))
+        r = r if isinstance(r, LandmarkRef) else LandmarkRef(int(r))
+        return Landmark(lambda k=r.raw: _f.path_landmarks_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.path_landmarks_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.path_landmarks_try_get(self._p, _raw(r))
-        return Landmark(lambda k=_raw(r): _f.path_landmarks_get(self._p, k)) if p else None
+        r = r if isinstance(r, LandmarkRef) else LandmarkRef(int(r))
+        p = _f.path_landmarks_try_get(self._p, r.raw)
+        return Landmark(lambda k=r.raw: _f.path_landmarks_get(self._p, k), r) if p else None
 
 
 class Path:

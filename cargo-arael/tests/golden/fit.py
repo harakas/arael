@@ -7,8 +7,10 @@ C++ classes one-to-one)."""
 
 import ctypes
 import os
+import struct
 
 from . import _fit_ffi as _f
+from .arael import columns as _cols
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
@@ -188,6 +190,30 @@ class LmResult(_f.LmResultRaw):
                 _f.fit_result_free(d)
             except Exception:
                 pass
+
+
+class FrameRef:
+    """Typed handle into the collection that issued it -- the Python
+    spelling of Rust's `Ref<Frame>`. Default-constructed it is the null
+    sentinel."""
+
+    __slots__ = ("raw",)
+
+    def __init__(self, raw=0xFFFFFFFF):
+        self.raw = raw
+
+    @property
+    def valid(self):
+        return self.raw != 0xFFFFFFFF
+
+    def __eq__(self, o):
+        return isinstance(o, FrameRef) and o.raw == self.raw
+
+    def __hash__(self):
+        return hash((FrameRef, self.raw))
+
+    def __repr__(self):
+        return "FrameRef(%s)" % (self.raw if self.valid else "null")
 
 
 class GainRef:
@@ -406,21 +432,192 @@ class VnRef:
         return "VnRef(%s)" % (self.raw if self.valid else "null")
 
 
+class WrapRef:
+    """Typed handle into the collection that issued it -- the Python
+    spelling of Rust's `Ref<Wrap>`. Default-constructed it is the null
+    sentinel."""
+
+    __slots__ = ("raw",)
+
+    def __init__(self, raw=0xFFFFFFFF):
+        self.raw = raw
+
+    @property
+    def valid(self):
+        return self.raw != 0xFFFFFFFF
+
+    def __eq__(self, o):
+        return isinstance(o, WrapRef) and o.raw == self.raw
+
+    def __hash__(self):
+        return hash((WrapRef, self.raw))
+
+    def __repr__(self):
+        return "WrapRef(%s)" % (self.raw if self.valid else "null")
+
+
+_Z2 = (0.0,) * 2
+_Z3 = (0.0,) * 3
+_Z4 = (0.0,) * 4
+_Z8 = (0.0,) * 8
+
+
+_frame_rec = struct.Struct("=QdddddddQQddddddqd")
+_frame_slots = (ctypes.c_uint64 * 18)()
+
+
+class Frame:
+    """A `Frame` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
+
+    __slots__ = ("_at", "_key")
+    param_count = 8
+
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a FrameRef or an index; None for a
+        # nested element).
+        self._at = at
+        self._key = key
+
+    @property
+    def _p(self):
+        return self._at()
+
+    @property
+    def ref(self):
+        """The FrameRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, FrameRef):
+            return k
+        raise TypeError("Frame addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a FrameRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Frame addressed by ref, not by index")
+
+    @property
+    def pose_translation(self):
+        return _f.fit_frame_pose_translation(self._p)
+
+    @pose_translation.setter
+    def pose_translation(self, v):
+        _f.fit_frame_pose_set_translation(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def pose_rotation(self):
+        return _f.fit_frame_pose_rotation(self._p)
+
+    @pose_rotation.setter
+    def pose_rotation(self, v):
+        _f.fit_frame_pose_set_rotation(self._p, v if isinstance(v, _m.quaternd) else _m.quaternd(v))
+
+    @property
+    def pose_optimize_translation(self):
+        return _f.fit_frame_pose_optimize_translation(self._p)
+
+    @pose_optimize_translation.setter
+    def pose_optimize_translation(self, v):
+        _f.fit_frame_pose_set_optimize_translation(self._p, v)
+
+    @property
+    def pose_optimize_rotation(self):
+        return _f.fit_frame_pose_optimize_rotation(self._p)
+
+    @pose_optimize_rotation.setter
+    def pose_optimize_rotation(self, v):
+        _f.fit_frame_pose_set_optimize_rotation(self._p, v)
+
+    @property
+    def dir_unit(self):
+        return _f.fit_frame_dir_unit(self._p)
+
+    @dir_unit.setter
+    def dir_unit(self, v):
+        _f.fit_frame_dir_set_unit(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def dir_unit_d0(self):
+        """Chart tangent basis (read-only)."""
+        return _f.fit_frame_dir_unit_d0(self._p)
+
+    @property
+    def dir_unit_d1(self):
+        """Chart tangent basis (read-only)."""
+        return _f.fit_frame_dir_unit_d1(self._p)
+
+    @property
+    def anchor(self):
+        return _f.fit_frame_anchor(self._p)
+
+    @anchor.setter
+    def anchor(self, v):
+        _f.fit_frame_set_anchor(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def tag(self):
+        return _f.fit_frame_tag(self._p)
+
+    @tag.setter
+    def tag(self, v):
+        _f.fit_frame_set_tag(self._p, v)
+
+    @property
+    def scale(self):
+        return _f.fit_frame_scale(self._p)
+
+    @scale.setter
+    def scale(self, v):
+        _f.fit_frame_set_scale(self._p, v)
+
+
+_gain_rec = struct.Struct("=QddQd")
+_gain_slots = (ctypes.c_uint64 * 5)()
+
+
 class Gain:
     """A `Gain` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 1
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a GainRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The GainRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, GainRef):
+            return k
+        raise TypeError("Gain addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a GainRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Gain addressed by ref, not by index")
 
     @property
     def ref_g(self):
@@ -455,21 +652,46 @@ class Gain:
         _f.fit_gain_set_g(self._p, v)
 
 
+_gps_obs_rec = struct.Struct("=Qdddd")
+_gps_obs_slots = (ctypes.c_uint64 * 5)()
+
+
 class GpsObs:
     """A `GpsObs` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a GpsObsRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The GpsObsRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, GpsObsRef):
+            return k
+        raise TypeError("GpsObs addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a GpsObsRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("GpsObs addressed by ref, not by index")
 
     @property
     def pos(self):
@@ -488,21 +710,46 @@ class GpsObs:
         _f.fit_gps_obs_set_isigma(self._p, v)
 
 
+_info_rec = struct.Struct("=Q")
+_info_slots = (ctypes.c_uint64 * 1)()
+
+
 class Info:
     """A `Info` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a InfoRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The InfoRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, InfoRef):
+            return k
+        raise TypeError("Info addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a InfoRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Info addressed by ref, not by index")
 
     @property
     def gps(self):
@@ -511,8 +758,20 @@ class Info:
             return None
         return GpsObs(lambda: _f.fit_info_gps(self._p))
 
-    def make_gps(self):
-        _f.fit_info_make_gps(self._p)
+    def make_gps(self, *, pos=None, isigma=None):
+        """Creates the `GpsObs` (replacing one already there) and returns
+        it; each keyword sets that field in the same call, an omitted one
+        keeps the Rust default."""
+        m = 0
+        if pos is None: pos = _Z3
+        else:
+            m |= 1 << 0; pos = tuple(pos)
+            if len(pos) != 3: pos = _cols.flat(pos, 3)
+        if isigma is None: isigma = 0.0
+        else: m |= 1 << 1
+        _gps_obs_rec.pack_into(_gps_obs_slots, 0,
+            m, *pos, isigma)
+        _f.fit_info_make_gps_slots(self._p, _gps_obs_slots)
         return GpsObs(lambda: _f.fit_info_gps(self._p))
 
     def clear_gps(self):
@@ -521,21 +780,46 @@ class Info:
     # field `note`: String -- opaque, no accessor generated
 
 
+_n_rec = struct.Struct("=QdQdd")
+_n_slots = (ctypes.c_uint64 * 5)()
+
+
 class N:
     """A `N` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 1
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a NRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The NRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, NRef):
+            return k
+        raise TypeError("N addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a NRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("N addressed by ref, not by index")
 
     @property
     def v(self):
@@ -570,21 +854,46 @@ class N:
         _f.fit_n_set_w(self._p, v)
 
 
+_obs_rec = struct.Struct("=Qdd")
+_obs_slots = (ctypes.c_uint64 * 3)()
+
+
 class Obs:
     """A `Obs` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a ObsRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The ObsRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, ObsRef):
+            return k
+        raise TypeError("Obs addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a ObsRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Obs addressed by ref, not by index")
 
     @property
     def x(self):
@@ -603,21 +912,46 @@ class Obs:
         _f.fit_obs_set_y(self._p, v)
 
 
+_pose_rec = struct.Struct("=QdddQdQdddQddddd")
+_pose_slots = (ctypes.c_uint64 * 16)()
+
+
 class Pose:
     """A `Pose` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 7
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a PoseRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The PoseRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, PoseRef):
+            return k
+        raise TypeError("Pose addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a PoseRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Pose addressed by ref, not by index")
 
     @property
     def ea(self):
@@ -693,21 +1027,46 @@ class Pose:
         return Info(lambda: _f.fit_pose_info_ptr(self._p))
 
 
+_rig_rec = struct.Struct("=QdddQddddQddddddddddddd")
+_rig_slots = (ctypes.c_uint64 * 23)()
+
+
 class Rig:
     """A `Rig` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 7
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a RigRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The RigRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, RigRef):
+            return k
+        raise TypeError("Rig addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a RigRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Rig addressed by ref, not by index")
 
     @property
     def ea_u(self):
@@ -786,21 +1145,46 @@ class Rig:
         _f.fit_rig_set_target_g(self._p, v)
 
 
+_tie_rec = struct.Struct("=QQQdddd")
+_tie_slots = (ctypes.c_uint64 * 7)()
+
+
 class Tie:
     """A `Tie` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 0
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a TieRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The TieRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, TieRef):
+            return k
+        raise TypeError("Tie addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a TieRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Tie addressed by ref, not by index")
 
     @property
     def a(self):
@@ -835,21 +1219,46 @@ class Tie:
         _f.fit_tie_set_w(self._p, v)
 
 
+_vn_rec = struct.Struct("=QddddQdddddddddddddd")
+_vn_slots = (ctypes.c_uint64 * 20)()
+
+
 class Vn:
     """A `Vn` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 4
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a VnRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The VnRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, VnRef):
+            return k
+        raise TypeError("Vn addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a VnRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Vn addressed by ref, not by index")
 
     @property
     def v(self):
@@ -898,6 +1307,52 @@ class Vn:
     @w.setter
     def w(self, v):
         _f.fit_vn_set_w(self._p, v)
+
+
+_wrap_rec = struct.Struct("=Q")
+_wrap_slots = (ctypes.c_uint64 * 1)()
+
+
+class Wrap:
+    """A `Wrap` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
+
+    __slots__ = ("_at", "_key")
+    param_count = 1
+
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a WrapRef or an index; None for a
+        # nested element).
+        self._at = at
+        self._key = key
+
+    @property
+    def _p(self):
+        return self._at()
+
+    @property
+    def ref(self):
+        """The WrapRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, WrapRef):
+            return k
+        raise TypeError("Wrap addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a WrapRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Wrap addressed by ref, not by index")
+
+    @property
+    def gain(self):
+        return Gain(lambda: _f.fit_wrap_gain_ptr(self._p))
 
 
 def _cov_query(c, fn, p, cap):
@@ -957,6 +1412,8 @@ class Covariance:
 
     def marginal(self, e):
         """The entity's marginal covariance block."""
+        if isinstance(e, Frame):
+            return (lambda b: _shape_n(b, 8))(_cov_query(self._h, _f.fit_frame_marginal_cov, e._p, 64))
         if isinstance(e, N):
             return (_shape_1)(_cov_query(self._h, _f.fit_n_marginal_cov, e._p, 1))
         if isinstance(e, Pose):
@@ -965,10 +1422,14 @@ class Covariance:
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_rig_marginal_cov, e._p, 49))
         if isinstance(e, Vn):
             return (lambda b: _shape_n(b, 4))(_cov_query(self._h, _f.fit_vn_marginal_cov, e._p, 16))
+        if isinstance(e, Wrap):
+            return (_shape_1)(_cov_query(self._h, _f.fit_wrap_marginal_cov, e._p, 1))
         raise TypeError("no marginal for %r" % (e,))
 
     def conditional(self, e):
         """Conditional covariance (all other parameters fixed)."""
+        if isinstance(e, Frame):
+            return (lambda b: _shape_n(b, 8))(_cov_query(self._h, _f.fit_frame_conditional_cov, e._p, 64))
         if isinstance(e, N):
             return (_shape_1)(_cov_query(self._h, _f.fit_n_conditional_cov, e._p, 1))
         if isinstance(e, Pose):
@@ -977,11 +1438,15 @@ class Covariance:
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_rig_conditional_cov, e._p, 49))
         if isinstance(e, Vn):
             return (lambda b: _shape_n(b, 4))(_cov_query(self._h, _f.fit_vn_conditional_cov, e._p, 16))
+        if isinstance(e, Wrap):
+            return (_shape_1)(_cov_query(self._h, _f.fit_wrap_conditional_cov, e._p, 1))
         raise TypeError("no conditional for %r" % (e,))
 
     def std_dev(self, e):
         """Per-parameter standard deviations (every CovMode, incl.
         TriDiagonal)."""
+        if isinstance(e, Frame):
+            return list(_cov_query(self._h, _f.fit_frame_std_dev, e._p, 8))
         if isinstance(e, N):
             return list(_cov_query(self._h, _f.fit_n_std_dev, e._p, 1))
         if isinstance(e, Pose):
@@ -990,7 +1455,65 @@ class Covariance:
             return list(_cov_query(self._h, _f.fit_rig_std_dev, e._p, 7))
         if isinstance(e, Vn):
             return list(_cov_query(self._h, _f.fit_vn_std_dev, e._p, 4))
+        if isinstance(e, Wrap):
+            return list(_cov_query(self._h, _f.fit_wrap_std_dev, e._p, 1))
         raise TypeError("no std_dev for %r" % (e,))
+    def _cross_frame_frame(self, a, b):
+        buf = (ctypes.c_double * 64)()
+        rows = _f.fit_frame_frame_cross_cov(self._h, a._p, b._p, buf, 64)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+                     for r in range(rows))
+    def _cross_frame_n(self, a, b):
+        buf = (ctypes.c_double * 8)()
+        rows = _f.fit_frame_n_cross_cov(self._h, a._p, b._p, buf, 8)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_frame_pose(self, a, b):
+        buf = (ctypes.c_double * 56)()
+        rows = _f.fit_frame_pose_cross_cov(self._h, a._p, b._p, buf, 56)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_frame_rig(self, a, b):
+        buf = (ctypes.c_double * 56)()
+        rows = _f.fit_frame_rig_cross_cov(self._h, a._p, b._p, buf, 56)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_frame_vn(self, a, b):
+        buf = (ctypes.c_double * 32)()
+        rows = _f.fit_frame_vn_cross_cov(self._h, a._p, b._p, buf, 32)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
+    def _cross_frame_wrap(self, a, b):
+        buf = (ctypes.c_double * 8)()
+        rows = _f.fit_frame_wrap_cross_cov(self._h, a._p, b._p, buf, 8)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_n_frame(self, a, b):
+        buf = (ctypes.c_double * 8)()
+        rows = _f.fit_n_frame_cross_cov(self._h, a._p, b._p, buf, 8)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+                     for r in range(rows))
     def _cross_n_n(self, a, b):
         buf = (ctypes.c_double * 1)()
         rows = _f.fit_n_n_cross_cov(self._h, a._p, b._p, buf, 1)
@@ -1022,6 +1545,22 @@ class Covariance:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
+    def _cross_n_wrap(self, a, b):
+        buf = (ctypes.c_double * 1)()
+        rows = _f.fit_n_wrap_cross_cov(self._h, a._p, b._p, buf, 1)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_pose_frame(self, a, b):
+        buf = (ctypes.c_double * 56)()
+        rows = _f.fit_pose_frame_cross_cov(self._h, a._p, b._p, buf, 56)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 8 + c] for c in range(8))
                      for r in range(rows))
     def _cross_pose_n(self, a, b):
         buf = (ctypes.c_double * 7)()
@@ -1055,6 +1594,22 @@ class Covariance:
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 4 + c] for c in range(4))
                      for r in range(rows))
+    def _cross_pose_wrap(self, a, b):
+        buf = (ctypes.c_double * 7)()
+        rows = _f.fit_pose_wrap_cross_cov(self._h, a._p, b._p, buf, 7)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_rig_frame(self, a, b):
+        buf = (ctypes.c_double * 56)()
+        rows = _f.fit_rig_frame_cross_cov(self._h, a._p, b._p, buf, 56)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+                     for r in range(rows))
     def _cross_rig_n(self, a, b):
         buf = (ctypes.c_double * 7)()
         rows = _f.fit_rig_n_cross_cov(self._h, a._p, b._p, buf, 7)
@@ -1086,6 +1641,22 @@ class Covariance:
             raise AraelError(
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
+    def _cross_rig_wrap(self, a, b):
+        buf = (ctypes.c_double * 7)()
+        rows = _f.fit_rig_wrap_cross_cov(self._h, a._p, b._p, buf, 7)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_vn_frame(self, a, b):
+        buf = (ctypes.c_double * 32)()
+        rows = _f.fit_vn_frame_cross_cov(self._h, a._p, b._p, buf, 32)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 8 + c] for c in range(8))
                      for r in range(rows))
     def _cross_vn_n(self, a, b):
         buf = (ctypes.c_double * 4)()
@@ -1119,9 +1690,79 @@ class Covariance:
                 rows, (_f.fit_cov_error(self._h) or b"").decode())
         return tuple(tuple(buf[r * 4 + c] for c in range(4))
                      for r in range(rows))
+    def _cross_vn_wrap(self, a, b):
+        buf = (ctypes.c_double * 4)()
+        rows = _f.fit_vn_wrap_cross_cov(self._h, a._p, b._p, buf, 4)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_wrap_frame(self, a, b):
+        buf = (ctypes.c_double * 8)()
+        rows = _f.fit_wrap_frame_cross_cov(self._h, a._p, b._p, buf, 8)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 8 + c] for c in range(8))
+                     for r in range(rows))
+    def _cross_wrap_n(self, a, b):
+        buf = (ctypes.c_double * 1)()
+        rows = _f.fit_wrap_n_cross_cov(self._h, a._p, b._p, buf, 1)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
+    def _cross_wrap_pose(self, a, b):
+        buf = (ctypes.c_double * 7)()
+        rows = _f.fit_wrap_pose_cross_cov(self._h, a._p, b._p, buf, 7)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_wrap_rig(self, a, b):
+        buf = (ctypes.c_double * 7)()
+        rows = _f.fit_wrap_rig_cross_cov(self._h, a._p, b._p, buf, 7)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
+                     for r in range(rows))
+    def _cross_wrap_vn(self, a, b):
+        buf = (ctypes.c_double * 4)()
+        rows = _f.fit_wrap_vn_cross_cov(self._h, a._p, b._p, buf, 4)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 4 + c] for c in range(4))
+                     for r in range(rows))
+    def _cross_wrap_wrap(self, a, b):
+        buf = (ctypes.c_double * 1)()
+        rows = _f.fit_wrap_wrap_cross_cov(self._h, a._p, b._p, buf, 1)
+        if rows < 0:
+            raise AraelError(
+                rows, (_f.fit_cov_error(self._h) or b"").decode())
+        return tuple(tuple(buf[r * 1 + c] for c in range(1))
+                     for r in range(rows))
 
     def cross(self, a, b):
         """Row-major cross-covariance block between two entities."""
+        if isinstance(a, Frame) and isinstance(b, Frame):
+            return self._cross_frame_frame(a, b)
+        if isinstance(a, Frame) and isinstance(b, N):
+            return self._cross_frame_n(a, b)
+        if isinstance(a, Frame) and isinstance(b, Pose):
+            return self._cross_frame_pose(a, b)
+        if isinstance(a, Frame) and isinstance(b, Rig):
+            return self._cross_frame_rig(a, b)
+        if isinstance(a, Frame) and isinstance(b, Vn):
+            return self._cross_frame_vn(a, b)
+        if isinstance(a, Frame) and isinstance(b, Wrap):
+            return self._cross_frame_wrap(a, b)
+        if isinstance(a, N) and isinstance(b, Frame):
+            return self._cross_n_frame(a, b)
         if isinstance(a, N) and isinstance(b, N):
             return self._cross_n_n(a, b)
         if isinstance(a, N) and isinstance(b, Pose):
@@ -1130,6 +1771,10 @@ class Covariance:
             return self._cross_n_rig(a, b)
         if isinstance(a, N) and isinstance(b, Vn):
             return self._cross_n_vn(a, b)
+        if isinstance(a, N) and isinstance(b, Wrap):
+            return self._cross_n_wrap(a, b)
+        if isinstance(a, Pose) and isinstance(b, Frame):
+            return self._cross_pose_frame(a, b)
         if isinstance(a, Pose) and isinstance(b, N):
             return self._cross_pose_n(a, b)
         if isinstance(a, Pose) and isinstance(b, Pose):
@@ -1138,6 +1783,10 @@ class Covariance:
             return self._cross_pose_rig(a, b)
         if isinstance(a, Pose) and isinstance(b, Vn):
             return self._cross_pose_vn(a, b)
+        if isinstance(a, Pose) and isinstance(b, Wrap):
+            return self._cross_pose_wrap(a, b)
+        if isinstance(a, Rig) and isinstance(b, Frame):
+            return self._cross_rig_frame(a, b)
         if isinstance(a, Rig) and isinstance(b, N):
             return self._cross_rig_n(a, b)
         if isinstance(a, Rig) and isinstance(b, Pose):
@@ -1146,6 +1795,10 @@ class Covariance:
             return self._cross_rig_rig(a, b)
         if isinstance(a, Rig) and isinstance(b, Vn):
             return self._cross_rig_vn(a, b)
+        if isinstance(a, Rig) and isinstance(b, Wrap):
+            return self._cross_rig_wrap(a, b)
+        if isinstance(a, Vn) and isinstance(b, Frame):
+            return self._cross_vn_frame(a, b)
         if isinstance(a, Vn) and isinstance(b, N):
             return self._cross_vn_n(a, b)
         if isinstance(a, Vn) and isinstance(b, Pose):
@@ -1154,6 +1807,20 @@ class Covariance:
             return self._cross_vn_rig(a, b)
         if isinstance(a, Vn) and isinstance(b, Vn):
             return self._cross_vn_vn(a, b)
+        if isinstance(a, Vn) and isinstance(b, Wrap):
+            return self._cross_vn_wrap(a, b)
+        if isinstance(a, Wrap) and isinstance(b, Frame):
+            return self._cross_wrap_frame(a, b)
+        if isinstance(a, Wrap) and isinstance(b, N):
+            return self._cross_wrap_n(a, b)
+        if isinstance(a, Wrap) and isinstance(b, Pose):
+            return self._cross_wrap_pose(a, b)
+        if isinstance(a, Wrap) and isinstance(b, Rig):
+            return self._cross_wrap_rig(a, b)
+        if isinstance(a, Wrap) and isinstance(b, Vn):
+            return self._cross_wrap_vn(a, b)
+        if isinstance(a, Wrap) and isinstance(b, Wrap):
+            return self._cross_wrap_wrap(a, b)
         raise TypeError("no cross-covariance for %r x %r" % (a, b))
 
 
@@ -1221,7 +1888,12 @@ class Jacobian:
 class FitObsVec:
     """View of `obs` (vec of Obs); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1240,11 +1912,11 @@ class FitObsVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Obs(lambda i=i: _f.fit_obs_at(self._p, i))
+        return Obs(lambda i=i: _f.fit_obs_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Obs(lambda i=i: _f.fit_obs_at(self._p, i))
+            yield Obs(lambda i=i: _f.fit_obs_at(self._p, i), i)
 
     def clear(self):
         _f.fit_obs_clear(self._p)
@@ -1252,19 +1924,86 @@ class FitObsVec:
     def truncate(self, n):
         _f.fit_obs_truncate(self._p, n)
 
-    def push(self):
-        _f.fit_obs_push(self._p)
-        return self[len(self) - 1]
+    def push(self, *, x=None, y=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if x is None: x = 0.0
+        else: m |= 1 << 0
+        if y is None: y = 0.0
+        else: m |= 1 << 1
+        _obs_rec.pack_into(_obs_slots, 0,
+            m, x, y)
+        i = _f.fit_obs_push_n(self._p, _obs_slots, 1)
+        return Obs(lambda i=i: _f.fit_obs_at(self._p, i), i)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_obs_pop(self._p)
 
+    def push_many(self, n=None, *, x=None, y=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("x", x), ("y", y)))
+        i0 = len(self)
+        _f.fit_obs_push_n(self._p, None, n)
+        if x is not None:
+            self._set_x(i0, n, x)
+        if y is not None:
+            self._set_y(i0, n, y)
+        return i0
+
+    def _set_x(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "x")
+        if not _f.fit_obs_set_x_n(self._p, start, ptr, n, stride):
+            raise IndexError("x: %d + %d exceeds the collection" % (start, n))
+
+    def set_x(self, v):
+        """Sets `x` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_x(0, len(self), v)
+
+    def get_x(self):
+        """`x` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_obs_get_x_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_y(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "y")
+        if not _f.fit_obs_set_y_n(self._p, start, ptr, n, stride):
+            raise IndexError("y: %d + %d exceeds the collection" % (start, n))
+
+    def set_y(self, v):
+        """Sets `y` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_y(0, len(self), v)
+
+    def get_y(self):
+        """`y` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_obs_get_y_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
 
 class FitItemsVec:
     """View of `items` (vec of N); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1279,17 +2018,17 @@ class FitItemsVec:
 
     def __getitem__(self, i):
         if isinstance(i, NRef):
-            return N(lambda r=i.raw: _f.fit_items_get(self._p, r))
+            return N(lambda r=i.raw: _f.fit_items_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return N(lambda i=i: _f.fit_items_at(self._p, i))
+        return N(lambda i=i: _f.fit_items_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield N(lambda i=i: _f.fit_items_at(self._p, i))
+            yield N(lambda i=i: _f.fit_items_at(self._p, i), i)
 
     def clear(self):
         _f.fit_items_clear(self._p)
@@ -1297,24 +2036,135 @@ class FitItemsVec:
     def truncate(self, n):
         _f.fit_items_truncate(self._p, n)
 
-    def push(self):
-        _f.fit_items_push(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push(self, *, v=None, v_optimize=None, t=None, w=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if v is None: v = 0.0
+        else: m |= 1 << 0
+        if v_optimize is None: v_optimize = 0
+        else: m |= 1 << 1; v_optimize = 1 if v_optimize else 0
+        if t is None: t = 0.0
+        else: m |= 1 << 2
+        if w is None: w = 0.0
+        else: m |= 1 << 3
+        _n_rec.pack_into(_n_slots, 0,
+            m, v, v_optimize, t, w)
+        r = NRef(_f.fit_items_push_n(self._p, _n_slots, 1))
+        return N(lambda k=r.raw: _f.fit_items_get(self._p, k), r)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_items_pop(self._p)
 
+    def push_many(self, n=None, *, v=None, v_optimize=None, t=None, w=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("v", v), ("v_optimize", v_optimize), ("t", t),
+                        ("w", w)))
+        i0 = len(self)
+        _f.fit_items_push_n(self._p, None, n)
+        if v is not None:
+            self._set_v(i0, n, v)
+        if v_optimize is not None:
+            self._set_v_optimize(i0, n, v_optimize)
+        if t is not None:
+            self._set_t(i0, n, t)
+        if w is not None:
+            self._set_w(i0, n, w)
+        return i0
+
+    def _set_v(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "v")
+        if not _f.fit_items_set_v_n(self._p, start, ptr, n, stride):
+            raise IndexError("v: %d + %d exceeds the collection" % (start, n))
+
+    def set_v(self, v):
+        """Sets `v` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_v(0, len(self), v)
+
+    def get_v(self):
+        """`v` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_items_get_v_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_v_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "v_optimize")
+        if not _f.fit_items_set_v_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("v_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_v_optimize(self, v):
+        """Sets `v_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_v_optimize(0, len(self), v)
+
+    def get_v_optimize(self):
+        """`v_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_items_get_v_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_t(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "t")
+        if not _f.fit_items_set_t_n(self._p, start, ptr, n, stride):
+            raise IndexError("t: %d + %d exceeds the collection" % (start, n))
+
+    def set_t(self, v):
+        """Sets `t` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_t(0, len(self), v)
+
+    def get_t(self):
+        """`t` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_items_get_t_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_w(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "w")
+        if not _f.fit_items_set_w_n(self._p, start, ptr, n, stride):
+            raise IndexError("w: %d + %d exceeds the collection" % (start, n))
+
+    def set_w(self, v):
+        """Sets `w` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_w(0, len(self), v)
+
+    def get_w(self):
+        """`w` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_items_get_w_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
     def get(self, r):
-        return N(lambda k=_raw(r): _f.fit_items_get(self._p, k))
+        r = r if isinstance(r, NRef) else NRef(int(r))
+        return N(lambda k=r.raw: _f.fit_items_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.fit_items_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.fit_items_try_get(self._p, _raw(r))
-        return N(lambda k=_raw(r): _f.fit_items_get(self._p, k)) if p else None
+        r = r if isinstance(r, NRef) else NRef(int(r))
+        p = _f.fit_items_try_get(self._p, r.raw)
+        return N(lambda k=r.raw: _f.fit_items_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return NRef(_f.fit_items_ref_at(self._p, i))
@@ -1327,11 +2177,25 @@ class FitItemsVec:
         """Ref of the last element; null when empty."""
         return NRef(_f.fit_items_last_ref(self._p))
 
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.fit_items_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
+
 
 class FitPosesDeque:
     """View of `poses` (deque of Pose); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1346,17 +2210,17 @@ class FitPosesDeque:
 
     def __getitem__(self, i):
         if isinstance(i, PoseRef):
-            return Pose(lambda r=i.raw: _f.fit_poses_get(self._p, r))
+            return Pose(lambda r=i.raw: _f.fit_poses_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Pose(lambda i=i: _f.fit_poses_at(self._p, i))
+        return Pose(lambda i=i: _f.fit_poses_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Pose(lambda i=i: _f.fit_poses_at(self._p, i))
+            yield Pose(lambda i=i: _f.fit_poses_at(self._p, i), i)
 
     def clear(self):
         _f.fit_poses_clear(self._p)
@@ -1364,13 +2228,79 @@ class FitPosesDeque:
     def truncate(self, n):
         _f.fit_poses_truncate(self._p, n)
 
-    def push_back(self):
-        _f.fit_poses_push_back(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push_back(self, *, ea=None, ea_optimize=None, heading_angle=None,
+                 heading_angle_optimize=None, pos=None, pos_optimize=None,
+                 target=None, target_dir=None):
+        """Appends one element at the back and returns it; each keyword
+        sets that field in the same call, an omitted one keeps the Rust
+        default."""
+        m = 0
+        if ea is None: ea = _Z3
+        else:
+            m |= 1 << 0; ea = tuple(ea)
+            if len(ea) != 3: ea = _cols.flat(ea, 3)
+        if ea_optimize is None: ea_optimize = 0
+        else: m |= 1 << 1; ea_optimize = 1 if ea_optimize else 0
+        if heading_angle is None: heading_angle = 0.0
+        else: m |= 1 << 2
+        if heading_angle_optimize is None: heading_angle_optimize = 0
+        else: m |= 1 << 3; heading_angle_optimize = 1 if heading_angle_optimize else 0
+        if pos is None: pos = _Z3
+        else:
+            m |= 1 << 4; pos = tuple(pos)
+            if len(pos) != 3: pos = _cols.flat(pos, 3)
+        if pos_optimize is None: pos_optimize = 0
+        else: m |= 1 << 5; pos_optimize = 1 if pos_optimize else 0
+        if target is None: target = _Z3
+        else:
+            m |= 1 << 6; target = tuple(target)
+            if len(target) != 3: target = _cols.flat(target, 3)
+        if target_dir is None: target_dir = _Z2
+        else:
+            m |= 1 << 7; target_dir = tuple(target_dir)
+            if len(target_dir) != 2: target_dir = _cols.flat(target_dir, 2)
+        _pose_rec.pack_into(_pose_slots, 0,
+            m, *ea, ea_optimize, heading_angle, heading_angle_optimize, *pos,
+            pos_optimize, *target, *target_dir)
+        r = PoseRef(_f.fit_poses_push_back_n(self._p, _pose_slots, 1))
+        return Pose(lambda k=r.raw: _f.fit_poses_get(self._p, k), r)
 
-    def push_front(self):
-        _f.fit_poses_push_front(self._p)
-        return self[self.ref_at(0)]
+    def push_front(self, *, ea=None, ea_optimize=None, heading_angle=None,
+                 heading_angle_optimize=None, pos=None, pos_optimize=None,
+                 target=None, target_dir=None):
+        """Inserts one element at the front and returns it; each keyword
+        sets that field in the same call, an omitted one keeps the Rust
+        default."""
+        m = 0
+        if ea is None: ea = _Z3
+        else:
+            m |= 1 << 0; ea = tuple(ea)
+            if len(ea) != 3: ea = _cols.flat(ea, 3)
+        if ea_optimize is None: ea_optimize = 0
+        else: m |= 1 << 1; ea_optimize = 1 if ea_optimize else 0
+        if heading_angle is None: heading_angle = 0.0
+        else: m |= 1 << 2
+        if heading_angle_optimize is None: heading_angle_optimize = 0
+        else: m |= 1 << 3; heading_angle_optimize = 1 if heading_angle_optimize else 0
+        if pos is None: pos = _Z3
+        else:
+            m |= 1 << 4; pos = tuple(pos)
+            if len(pos) != 3: pos = _cols.flat(pos, 3)
+        if pos_optimize is None: pos_optimize = 0
+        else: m |= 1 << 5; pos_optimize = 1 if pos_optimize else 0
+        if target is None: target = _Z3
+        else:
+            m |= 1 << 6; target = tuple(target)
+            if len(target) != 3: target = _cols.flat(target, 3)
+        if target_dir is None: target_dir = _Z2
+        else:
+            m |= 1 << 7; target_dir = tuple(target_dir)
+            if len(target_dir) != 2: target_dir = _cols.flat(target_dir, 2)
+        _pose_rec.pack_into(_pose_slots, 0,
+            m, *ea, ea_optimize, heading_angle, heading_angle_optimize, *pos,
+            pos_optimize, *target, *target_dir)
+        r = PoseRef(_f.fit_poses_push_front_n(self._p, _pose_slots, 1))
+        return Pose(lambda k=r.raw: _f.fit_poses_get(self._p, k), r)
 
     def pop_back(self):
         """Drops one end; False when already empty."""
@@ -1380,16 +2310,203 @@ class FitPosesDeque:
         """Drops one end; False when already empty."""
         return _f.fit_poses_pop_front(self._p)
 
+    def push_many(self, n=None, *, ea=None, ea_optimize=None, heading_angle=None,
+                  heading_angle_optimize=None, pos=None, pos_optimize=None,
+                  target=None, target_dir=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("ea", ea), ("ea_optimize", ea_optimize),
+                        ("heading_angle", heading_angle),
+                        ("heading_angle_optimize", heading_angle_optimize),
+                        ("pos", pos), ("pos_optimize", pos_optimize),
+                        ("target", target), ("target_dir", target_dir)))
+        i0 = len(self)
+        _f.fit_poses_push_back_n(self._p, None, n)
+        if ea is not None:
+            self._set_ea(i0, n, ea)
+        if ea_optimize is not None:
+            self._set_ea_optimize(i0, n, ea_optimize)
+        if heading_angle is not None:
+            self._set_heading_angle(i0, n, heading_angle)
+        if heading_angle_optimize is not None:
+            self._set_heading_angle_optimize(i0, n, heading_angle_optimize)
+        if pos is not None:
+            self._set_pos(i0, n, pos)
+        if pos_optimize is not None:
+            self._set_pos_optimize(i0, n, pos_optimize)
+        if target is not None:
+            self._set_target(i0, n, target)
+        if target_dir is not None:
+            self._set_target_dir(i0, n, target_dir)
+        return i0
+
+    def _set_ea(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "ea")
+        if not _f.fit_poses_set_ea_n(self._p, start, ptr, n, stride):
+            raise IndexError("ea: %d + %d exceeds the collection" % (start, n))
+
+    def set_ea(self, v):
+        """Sets `ea` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_ea(0, len(self), v)
+
+    def get_ea(self):
+        """`ea` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_poses_get_ea_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_ea_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "ea_optimize")
+        if not _f.fit_poses_set_ea_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("ea_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_ea_optimize(self, v):
+        """Sets `ea_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_ea_optimize(0, len(self), v)
+
+    def get_ea_optimize(self):
+        """`ea_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_poses_get_ea_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_heading_angle(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "heading_angle")
+        if not _f.fit_poses_set_heading_angle_n(self._p, start, ptr, n, stride):
+            raise IndexError("heading_angle: %d + %d exceeds the collection" % (start, n))
+
+    def set_heading_angle(self, v):
+        """Sets `heading_angle` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_heading_angle(0, len(self), v)
+
+    def get_heading_angle(self):
+        """`heading_angle` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_poses_get_heading_angle_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_heading_angle_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "heading_angle_optimize")
+        if not _f.fit_poses_set_heading_angle_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("heading_angle_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_heading_angle_optimize(self, v):
+        """Sets `heading_angle_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_heading_angle_optimize(0, len(self), v)
+
+    def get_heading_angle_optimize(self):
+        """`heading_angle_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_poses_get_heading_angle_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_pos(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "pos")
+        if not _f.fit_poses_set_pos_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos(self, v):
+        """Sets `pos` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos(0, len(self), v)
+
+    def get_pos(self):
+        """`pos` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_poses_get_pos_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_pos_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "pos_optimize")
+        if not _f.fit_poses_set_pos_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos_optimize(self, v):
+        """Sets `pos_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos_optimize(0, len(self), v)
+
+    def get_pos_optimize(self):
+        """`pos_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_poses_get_pos_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_target(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "target")
+        if not _f.fit_poses_set_target_n(self._p, start, ptr, n, stride):
+            raise IndexError("target: %d + %d exceeds the collection" % (start, n))
+
+    def set_target(self, v):
+        """Sets `target` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target(0, len(self), v)
+
+    def get_target(self):
+        """`target` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_poses_get_target_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_target_dir(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 2, n, "target_dir")
+        if not _f.fit_poses_set_target_dir_n(self._p, start, ptr, n, stride):
+            raise IndexError("target_dir: %d + %d exceeds the collection" % (start, n))
+
+    def set_target_dir(self, v):
+        """Sets `target_dir` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target_dir(0, len(self), v)
+
+    def get_target_dir(self):
+        """`target_dir` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 2, n)
+        _f.fit_poses_get_target_dir_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 2, n)
+
     def get(self, r):
-        return Pose(lambda k=_raw(r): _f.fit_poses_get(self._p, k))
+        r = r if isinstance(r, PoseRef) else PoseRef(int(r))
+        return Pose(lambda k=r.raw: _f.fit_poses_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.fit_poses_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.fit_poses_try_get(self._p, _raw(r))
-        return Pose(lambda k=_raw(r): _f.fit_poses_get(self._p, k)) if p else None
+        r = r if isinstance(r, PoseRef) else PoseRef(int(r))
+        p = _f.fit_poses_try_get(self._p, r.raw)
+        return Pose(lambda k=r.raw: _f.fit_poses_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return PoseRef(_f.fit_poses_ref_at(self._p, i))
@@ -1402,11 +2519,25 @@ class FitPosesDeque:
         """Ref of the last element; null when empty."""
         return PoseRef(_f.fit_poses_back_ref(self._p))
 
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.fit_poses_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
+
 
 class FitTiesVec:
     """View of `ties` (vec of Tie); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1425,11 +2556,11 @@ class FitTiesVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Tie(lambda i=i: _f.fit_ties_at(self._p, i))
+        return Tie(lambda i=i: _f.fit_ties_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Tie(lambda i=i: _f.fit_ties_at(self._p, i))
+            yield Tie(lambda i=i: _f.fit_ties_at(self._p, i), i)
 
     def clear(self):
         _f.fit_ties_clear(self._p)
@@ -1437,19 +2568,134 @@ class FitTiesVec:
     def truncate(self, n):
         _f.fit_ties_truncate(self._p, n)
 
-    def push(self):
-        _f.fit_ties_push(self._p)
-        return self[len(self) - 1]
+    def push(self, *, a=None, b=None, d=None, w=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if a is None: a = 0
+        else: m |= 1 << 0; a = getattr(a, "raw", a)
+        if b is None: b = 0
+        else: m |= 1 << 1; b = getattr(b, "raw", b)
+        if d is None: d = _Z3
+        else:
+            m |= 1 << 2; d = tuple(d)
+            if len(d) != 3: d = _cols.flat(d, 3)
+        if w is None: w = 0.0
+        else: m |= 1 << 3
+        _tie_rec.pack_into(_tie_slots, 0,
+            m, a, b, *d, w)
+        i = _f.fit_ties_push_n(self._p, _tie_slots, 1)
+        return Tie(lambda i=i: _f.fit_ties_at(self._p, i), i)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_ties_pop(self._p)
 
+    def push_many(self, n=None, *, a=None, b=None, d=None, w=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("a", a), ("b", b), ("d", d), ("w", w)))
+        i0 = len(self)
+        _f.fit_ties_push_n(self._p, None, n)
+        if a is not None:
+            self._set_a(i0, n, a)
+        if b is not None:
+            self._set_b(i0, n, b)
+        if d is not None:
+            self._set_d(i0, n, d)
+        if w is not None:
+            self._set_w(i0, n, w)
+        return i0
+
+    def _set_a(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "a")
+        if not _f.fit_ties_set_a_n(self._p, start, ptr, n, stride):
+            raise IndexError("a: %d + %d exceeds the collection" % (start, n))
+
+    def set_a(self, v):
+        """Sets `a` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_a(0, len(self), v)
+
+    def get_a(self):
+        """`a` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.fit_ties_get_a_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_b(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "b")
+        if not _f.fit_ties_set_b_n(self._p, start, ptr, n, stride):
+            raise IndexError("b: %d + %d exceeds the collection" % (start, n))
+
+    def set_b(self, v):
+        """Sets `b` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_b(0, len(self), v)
+
+    def get_b(self):
+        """`b` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.fit_ties_get_b_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_d(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "d")
+        if not _f.fit_ties_set_d_n(self._p, start, ptr, n, stride):
+            raise IndexError("d: %d + %d exceeds the collection" % (start, n))
+
+    def set_d(self, v):
+        """Sets `d` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_d(0, len(self), v)
+
+    def get_d(self):
+        """`d` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_ties_get_d_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_w(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "w")
+        if not _f.fit_ties_set_w_n(self._p, start, ptr, n, stride):
+            raise IndexError("w: %d + %d exceeds the collection" % (start, n))
+
+    def set_w(self, v):
+        """Sets `w` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_w(0, len(self), v)
+
+    def get_w(self):
+        """`w` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_ties_get_w_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
 
 class FitMarksArena:
     """View of `marks` (arena of N); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1462,9 +2708,22 @@ class FitMarksArena:
     def reserve(self, additional):
         _f.fit_marks_reserve(self._p, additional)
 
-    def push(self):
-        """New element's ref (get()/[] take it back)."""
-        return NRef(_f.fit_marks_push(self._p))
+    def push(self, *, v=None, v_optimize=None, t=None, w=None):
+        """New element's ref (get()/[] take it back); each keyword sets
+        that field in the same call, an omitted one keeps the Rust
+        default."""
+        m = 0
+        if v is None: v = 0.0
+        else: m |= 1 << 0
+        if v_optimize is None: v_optimize = 0
+        else: m |= 1 << 1; v_optimize = 1 if v_optimize else 0
+        if t is None: t = 0.0
+        else: m |= 1 << 2
+        if w is None: w = 0.0
+        else: m |= 1 << 3
+        _n_rec.pack_into(_n_slots, 0,
+            m, v, v_optimize, t, w)
+        return NRef(_f.fit_marks_push_n(self._p, _n_slots, 1))
 
     def remove(self, r):
         return _f.fit_marks_remove(self._p, _raw(r))
@@ -1473,14 +2732,15 @@ class FitMarksArena:
         _f.fit_marks_clear(self._p)
 
     def __getitem__(self, r):
-        return N(lambda k=_raw(r): _f.fit_marks_get(self._p, k))
+        r = r if isinstance(r, NRef) else NRef(int(r))
+        return N(lambda k=r.raw: _f.fit_marks_get(self._p, k), r)
 
     def __iter__(self):
         """Live slots in order; yields element wrappers (refs() for
         the refs)."""
         r = _f.fit_marks_first(self._p)
         while r != 0xFFFFFFFF:
-            yield N(lambda k=r: _f.fit_marks_get(self._p, k))
+            yield N(lambda k=r: _f.fit_marks_get(self._p, k), NRef(r))
             r = _f.fit_marks_next(self._p, r)
 
     def refs(self):
@@ -1490,21 +2750,28 @@ class FitMarksArena:
             r = _f.fit_marks_next(self._p, r)
 
     def get(self, r):
-        return N(lambda k=_raw(r): _f.fit_marks_get(self._p, k))
+        r = r if isinstance(r, NRef) else NRef(int(r))
+        return N(lambda k=r.raw: _f.fit_marks_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.fit_marks_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.fit_marks_try_get(self._p, _raw(r))
-        return N(lambda k=_raw(r): _f.fit_marks_get(self._p, k)) if p else None
+        r = r if isinstance(r, NRef) else NRef(int(r))
+        p = _f.fit_marks_try_get(self._p, r.raw)
+        return N(lambda k=r.raw: _f.fit_marks_get(self._p, k), r) if p else None
 
 
 class FitRigsVec:
     """View of `rigs` (vec of Rig); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1519,17 +2786,17 @@ class FitRigsVec:
 
     def __getitem__(self, i):
         if isinstance(i, RigRef):
-            return Rig(lambda r=i.raw: _f.fit_rigs_get(self._p, r))
+            return Rig(lambda r=i.raw: _f.fit_rigs_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Rig(lambda i=i: _f.fit_rigs_at(self._p, i))
+        return Rig(lambda i=i: _f.fit_rigs_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Rig(lambda i=i: _f.fit_rigs_at(self._p, i))
+            yield Rig(lambda i=i: _f.fit_rigs_at(self._p, i), i)
 
     def clear(self):
         _f.fit_rigs_clear(self._p)
@@ -1537,24 +2804,270 @@ class FitRigsVec:
     def truncate(self, n):
         _f.fit_rigs_truncate(self._p, n)
 
-    def push(self):
-        _f.fit_rigs_push(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push(self, *, ea_u=None, ea_u_optimize=None, q=None, q_optimize=None,
+                 target_u0=None, target_u2=None, target_q0=None,
+                 target_q2=None, target_g=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if ea_u is None: ea_u = _Z3
+        else:
+            m |= 1 << 0; ea_u = tuple(ea_u)
+            if len(ea_u) != 3: ea_u = _cols.flat(ea_u, 3)
+        if ea_u_optimize is None: ea_u_optimize = 0
+        else: m |= 1 << 1; ea_u_optimize = 1 if ea_u_optimize else 0
+        if q is None: q = _Z4
+        else:
+            m |= 1 << 2; q = tuple(q)
+            if len(q) != 4: q = _cols.flat(q, 4)
+        if q_optimize is None: q_optimize = 0
+        else: m |= 1 << 3; q_optimize = 1 if q_optimize else 0
+        if target_u0 is None: target_u0 = _Z3
+        else:
+            m |= 1 << 4; target_u0 = tuple(target_u0)
+            if len(target_u0) != 3: target_u0 = _cols.flat(target_u0, 3)
+        if target_u2 is None: target_u2 = _Z3
+        else:
+            m |= 1 << 5; target_u2 = tuple(target_u2)
+            if len(target_u2) != 3: target_u2 = _cols.flat(target_u2, 3)
+        if target_q0 is None: target_q0 = _Z3
+        else:
+            m |= 1 << 6; target_q0 = tuple(target_q0)
+            if len(target_q0) != 3: target_q0 = _cols.flat(target_q0, 3)
+        if target_q2 is None: target_q2 = _Z3
+        else:
+            m |= 1 << 7; target_q2 = tuple(target_q2)
+            if len(target_q2) != 3: target_q2 = _cols.flat(target_q2, 3)
+        if target_g is None: target_g = 0.0
+        else: m |= 1 << 8
+        _rig_rec.pack_into(_rig_slots, 0,
+            m, *ea_u, ea_u_optimize, *q, q_optimize, *target_u0, *target_u2,
+            *target_q0, *target_q2, target_g)
+        r = RigRef(_f.fit_rigs_push_n(self._p, _rig_slots, 1))
+        return Rig(lambda k=r.raw: _f.fit_rigs_get(self._p, k), r)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_rigs_pop(self._p)
 
+    def push_many(self, n=None, *, ea_u=None, ea_u_optimize=None, q=None,
+                  q_optimize=None, target_u0=None, target_u2=None,
+                  target_q0=None, target_q2=None, target_g=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("ea_u", ea_u), ("ea_u_optimize", ea_u_optimize),
+                        ("q", q), ("q_optimize", q_optimize),
+                        ("target_u0", target_u0), ("target_u2", target_u2),
+                        ("target_q0", target_q0), ("target_q2", target_q2),
+                        ("target_g", target_g)))
+        i0 = len(self)
+        _f.fit_rigs_push_n(self._p, None, n)
+        if ea_u is not None:
+            self._set_ea_u(i0, n, ea_u)
+        if ea_u_optimize is not None:
+            self._set_ea_u_optimize(i0, n, ea_u_optimize)
+        if q is not None:
+            self._set_q(i0, n, q)
+        if q_optimize is not None:
+            self._set_q_optimize(i0, n, q_optimize)
+        if target_u0 is not None:
+            self._set_target_u0(i0, n, target_u0)
+        if target_u2 is not None:
+            self._set_target_u2(i0, n, target_u2)
+        if target_q0 is not None:
+            self._set_target_q0(i0, n, target_q0)
+        if target_q2 is not None:
+            self._set_target_q2(i0, n, target_q2)
+        if target_g is not None:
+            self._set_target_g(i0, n, target_g)
+        return i0
+
+    def _set_ea_u(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "ea_u")
+        if not _f.fit_rigs_set_ea_u_n(self._p, start, ptr, n, stride):
+            raise IndexError("ea_u: %d + %d exceeds the collection" % (start, n))
+
+    def set_ea_u(self, v):
+        """Sets `ea_u` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_ea_u(0, len(self), v)
+
+    def get_ea_u(self):
+        """`ea_u` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_rigs_get_ea_u_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_ea_u_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "ea_u_optimize")
+        if not _f.fit_rigs_set_ea_u_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("ea_u_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_ea_u_optimize(self, v):
+        """Sets `ea_u_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_ea_u_optimize(0, len(self), v)
+
+    def get_ea_u_optimize(self):
+        """`ea_u_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_rigs_get_ea_u_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_q(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 4, n, "q")
+        if not _f.fit_rigs_set_q_n(self._p, start, ptr, n, stride):
+            raise IndexError("q: %d + %d exceeds the collection" % (start, n))
+
+    def set_q(self, v):
+        """Sets `q` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_q(0, len(self), v)
+
+    def get_q(self):
+        """`q` of every element in one call, as an (n, 4) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 4, n)
+        _f.fit_rigs_get_q_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 4, n)
+
+    def _set_q_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "q_optimize")
+        if not _f.fit_rigs_set_q_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("q_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_q_optimize(self, v):
+        """Sets `q_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_q_optimize(0, len(self), v)
+
+    def get_q_optimize(self):
+        """`q_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_rigs_get_q_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_target_u0(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "target_u0")
+        if not _f.fit_rigs_set_target_u0_n(self._p, start, ptr, n, stride):
+            raise IndexError("target_u0: %d + %d exceeds the collection" % (start, n))
+
+    def set_target_u0(self, v):
+        """Sets `target_u0` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target_u0(0, len(self), v)
+
+    def get_target_u0(self):
+        """`target_u0` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_rigs_get_target_u0_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_target_u2(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "target_u2")
+        if not _f.fit_rigs_set_target_u2_n(self._p, start, ptr, n, stride):
+            raise IndexError("target_u2: %d + %d exceeds the collection" % (start, n))
+
+    def set_target_u2(self, v):
+        """Sets `target_u2` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target_u2(0, len(self), v)
+
+    def get_target_u2(self):
+        """`target_u2` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_rigs_get_target_u2_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_target_q0(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "target_q0")
+        if not _f.fit_rigs_set_target_q0_n(self._p, start, ptr, n, stride):
+            raise IndexError("target_q0: %d + %d exceeds the collection" % (start, n))
+
+    def set_target_q0(self, v):
+        """Sets `target_q0` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target_q0(0, len(self), v)
+
+    def get_target_q0(self):
+        """`target_q0` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_rigs_get_target_q0_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_target_q2(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "target_q2")
+        if not _f.fit_rigs_set_target_q2_n(self._p, start, ptr, n, stride):
+            raise IndexError("target_q2: %d + %d exceeds the collection" % (start, n))
+
+    def set_target_q2(self, v):
+        """Sets `target_q2` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target_q2(0, len(self), v)
+
+    def get_target_q2(self):
+        """`target_q2` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_rigs_get_target_q2_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_target_g(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "target_g")
+        if not _f.fit_rigs_set_target_g_n(self._p, start, ptr, n, stride):
+            raise IndexError("target_g: %d + %d exceeds the collection" % (start, n))
+
+    def set_target_g(self, v):
+        """Sets `target_g` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_target_g(0, len(self), v)
+
+    def get_target_g(self):
+        """`target_g` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_rigs_get_target_g_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
     def get(self, r):
-        return Rig(lambda k=_raw(r): _f.fit_rigs_get(self._p, k))
+        r = r if isinstance(r, RigRef) else RigRef(int(r))
+        return Rig(lambda k=r.raw: _f.fit_rigs_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.fit_rigs_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.fit_rigs_try_get(self._p, _raw(r))
-        return Rig(lambda k=_raw(r): _f.fit_rigs_get(self._p, k)) if p else None
+        r = r if isinstance(r, RigRef) else RigRef(int(r))
+        p = _f.fit_rigs_try_get(self._p, r.raw)
+        return Rig(lambda k=r.raw: _f.fit_rigs_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return RigRef(_f.fit_rigs_ref_at(self._p, i))
@@ -1567,11 +3080,25 @@ class FitRigsVec:
         """Ref of the last element; null when empty."""
         return RigRef(_f.fit_rigs_last_ref(self._p))
 
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.fit_rigs_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
+
 
 class FitVnsVec:
     """View of `vns` (vec of Vn); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -1586,17 +3113,17 @@ class FitVnsVec:
 
     def __getitem__(self, i):
         if isinstance(i, VnRef):
-            return Vn(lambda r=i.raw: _f.fit_vns_get(self._p, r))
+            return Vn(lambda r=i.raw: _f.fit_vns_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Vn(lambda i=i: _f.fit_vns_at(self._p, i))
+        return Vn(lambda i=i: _f.fit_vns_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Vn(lambda i=i: _f.fit_vns_at(self._p, i))
+            yield Vn(lambda i=i: _f.fit_vns_at(self._p, i), i)
 
     def clear(self):
         _f.fit_vns_clear(self._p)
@@ -1604,24 +3131,189 @@ class FitVnsVec:
     def truncate(self, n):
         _f.fit_vns_truncate(self._p, n)
 
-    def push(self):
-        _f.fit_vns_push(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push(self, *, v=None, v_optimize=None, t=None, h=None, wp=None,
+                 w=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if v is None: v = _Z4
+        else:
+            m |= 1 << 0; v = tuple(v)
+            if len(v) != 4: v = _cols.flat(v, 4)
+        if v_optimize is None: v_optimize = 0
+        else: m |= 1 << 1; v_optimize = 1 if v_optimize else 0
+        if t is None: t = _Z4
+        else:
+            m |= 1 << 2; t = tuple(t)
+            if len(t) != 4: t = _cols.flat(t, 4)
+        if h is None: h = _Z8
+        else:
+            m |= 1 << 3; h = tuple(h)
+            if len(h) != 8: h = _cols.flat(h, 8)
+        if wp is None: wp = 0.0
+        else: m |= 1 << 4
+        if w is None: w = 0.0
+        else: m |= 1 << 5
+        _vn_rec.pack_into(_vn_slots, 0,
+            m, *v, v_optimize, *t, *h, wp, w)
+        r = VnRef(_f.fit_vns_push_n(self._p, _vn_slots, 1))
+        return Vn(lambda k=r.raw: _f.fit_vns_get(self._p, k), r)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_vns_pop(self._p)
 
+    def push_many(self, n=None, *, v=None, v_optimize=None, t=None, h=None,
+                  wp=None, w=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("v", v), ("v_optimize", v_optimize), ("t", t),
+                        ("h", h), ("wp", wp), ("w", w)))
+        i0 = len(self)
+        _f.fit_vns_push_n(self._p, None, n)
+        if v is not None:
+            self._set_v(i0, n, v)
+        if v_optimize is not None:
+            self._set_v_optimize(i0, n, v_optimize)
+        if t is not None:
+            self._set_t(i0, n, t)
+        if h is not None:
+            self._set_h(i0, n, h)
+        if wp is not None:
+            self._set_wp(i0, n, wp)
+        if w is not None:
+            self._set_w(i0, n, w)
+        return i0
+
+    def _set_v(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 4, n, "v")
+        if not _f.fit_vns_set_v_n(self._p, start, ptr, n, stride):
+            raise IndexError("v: %d + %d exceeds the collection" % (start, n))
+
+    def set_v(self, v):
+        """Sets `v` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_v(0, len(self), v)
+
+    def get_v(self):
+        """`v` of every element in one call, as an (n, 4) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 4, n)
+        _f.fit_vns_get_v_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 4, n)
+
+    def _set_v_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "v_optimize")
+        if not _f.fit_vns_set_v_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("v_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_v_optimize(self, v):
+        """Sets `v_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_v_optimize(0, len(self), v)
+
+    def get_v_optimize(self):
+        """`v_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_vns_get_v_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_t(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 4, n, "t")
+        if not _f.fit_vns_set_t_n(self._p, start, ptr, n, stride):
+            raise IndexError("t: %d + %d exceeds the collection" % (start, n))
+
+    def set_t(self, v):
+        """Sets `t` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_t(0, len(self), v)
+
+    def get_t(self):
+        """`t` of every element in one call, as an (n, 4) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 4, n)
+        _f.fit_vns_get_t_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 4, n)
+
+    def _set_h(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 8, n, "h")
+        if not _f.fit_vns_set_h_n(self._p, start, ptr, n, stride):
+            raise IndexError("h: %d + %d exceeds the collection" % (start, n))
+
+    def set_h(self, v):
+        """Sets `h` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_h(0, len(self), v)
+
+    def get_h(self):
+        """`h` of every element in one call, as an (n, 8) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 8, n)
+        _f.fit_vns_get_h_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 8, n)
+
+    def _set_wp(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "wp")
+        if not _f.fit_vns_set_wp_n(self._p, start, ptr, n, stride):
+            raise IndexError("wp: %d + %d exceeds the collection" % (start, n))
+
+    def set_wp(self, v):
+        """Sets `wp` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_wp(0, len(self), v)
+
+    def get_wp(self):
+        """`wp` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_vns_get_wp_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_w(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "w")
+        if not _f.fit_vns_set_w_n(self._p, start, ptr, n, stride):
+            raise IndexError("w: %d + %d exceeds the collection" % (start, n))
+
+    def set_w(self, v):
+        """Sets `w` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_w(0, len(self), v)
+
+    def get_w(self):
+        """`w` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.fit_vns_get_w_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
     def get(self, r):
-        return Vn(lambda k=_raw(r): _f.fit_vns_get(self._p, k))
+        r = r if isinstance(r, VnRef) else VnRef(int(r))
+        return Vn(lambda k=r.raw: _f.fit_vns_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.fit_vns_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.fit_vns_try_get(self._p, _raw(r))
-        return Vn(lambda k=_raw(r): _f.fit_vns_get(self._p, k)) if p else None
+        r = r if isinstance(r, VnRef) else VnRef(int(r))
+        p = _f.fit_vns_try_get(self._p, r.raw)
+        return Vn(lambda k=r.raw: _f.fit_vns_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return VnRef(_f.fit_vns_ref_at(self._p, i))
@@ -1633,6 +3325,381 @@ class FitVnsVec:
     def last_ref(self):
         """Ref of the last element; null when empty."""
         return VnRef(_f.fit_vns_last_ref(self._p))
+
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.fit_vns_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
+
+
+class FitWrapsVec:
+    """View of `wraps` (vec of Wrap); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
+
+    __slots__ = ("_p",)
+
+    def __init__(self, p):
+        self._p = p
+
+    def __len__(self):
+        return _f.fit_wraps_len(self._p)
+
+    def reserve(self, additional):
+        _f.fit_wraps_reserve(self._p, additional)
+
+    def __getitem__(self, i):
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(i)
+        return Wrap(lambda i=i: _f.fit_wraps_at(self._p, i), i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield Wrap(lambda i=i: _f.fit_wraps_at(self._p, i), i)
+
+    def clear(self):
+        _f.fit_wraps_clear(self._p)
+
+    def truncate(self, n):
+        _f.fit_wraps_truncate(self._p, n)
+
+    def push(self):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        _wrap_rec.pack_into(_wrap_slots, 0,
+            m)
+        i = _f.fit_wraps_push_n(self._p, _wrap_slots, 1)
+        return Wrap(lambda i=i: _f.fit_wraps_at(self._p, i), i)
+
+    def pop(self):
+        """Drops the last element; False when already empty."""
+        return _f.fit_wraps_pop(self._p)
+
+    def push_many(self, n=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, ())
+        i0 = len(self)
+        _f.fit_wraps_push_n(self._p, None, n)
+        return i0
+
+
+class FitFramesVec:
+    """View of `frames` (vec of Frame); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
+
+    __slots__ = ("_p",)
+
+    def __init__(self, p):
+        self._p = p
+
+    def __len__(self):
+        return _f.fit_frames_len(self._p)
+
+    def reserve(self, additional):
+        _f.fit_frames_reserve(self._p, additional)
+
+    def __getitem__(self, i):
+        if isinstance(i, FrameRef):
+            return Frame(lambda r=i.raw: _f.fit_frames_get(self._p, r), i)
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(i)
+        return Frame(lambda i=i: _f.fit_frames_at(self._p, i), i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield Frame(lambda i=i: _f.fit_frames_at(self._p, i), i)
+
+    def clear(self):
+        _f.fit_frames_clear(self._p)
+
+    def truncate(self, n):
+        _f.fit_frames_truncate(self._p, n)
+
+    def push(self, *, pose_translation=None, pose_rotation=None,
+                 pose_optimize_translation=None, pose_optimize_rotation=None,
+                 dir_unit=None, anchor=None, tag=None, scale=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if pose_translation is None: pose_translation = _Z3
+        else:
+            m |= 1 << 0; pose_translation = tuple(pose_translation)
+            if len(pose_translation) != 3: pose_translation = _cols.flat(pose_translation, 3)
+        if pose_rotation is None: pose_rotation = _Z4
+        else:
+            m |= 1 << 1; pose_rotation = tuple(pose_rotation)
+            if len(pose_rotation) != 4: pose_rotation = _cols.flat(pose_rotation, 4)
+        if pose_optimize_translation is None: pose_optimize_translation = 0
+        else: m |= 1 << 2; pose_optimize_translation = 1 if pose_optimize_translation else 0
+        if pose_optimize_rotation is None: pose_optimize_rotation = 0
+        else: m |= 1 << 3; pose_optimize_rotation = 1 if pose_optimize_rotation else 0
+        if dir_unit is None: dir_unit = _Z3
+        else:
+            m |= 1 << 4; dir_unit = tuple(dir_unit)
+            if len(dir_unit) != 3: dir_unit = _cols.flat(dir_unit, 3)
+        if anchor is None: anchor = _Z3
+        else:
+            m |= 1 << 5; anchor = tuple(anchor)
+            if len(anchor) != 3: anchor = _cols.flat(anchor, 3)
+        if tag is None: tag = 0
+        else: m |= 1 << 6
+        if scale is None: scale = 0.0
+        else: m |= 1 << 7
+        _frame_rec.pack_into(_frame_slots, 0,
+            m, *pose_translation, *pose_rotation, pose_optimize_translation,
+            pose_optimize_rotation, *dir_unit, *anchor, tag, scale)
+        r = FrameRef(_f.fit_frames_push_n(self._p, _frame_slots, 1))
+        return Frame(lambda k=r.raw: _f.fit_frames_get(self._p, k), r)
+
+    def pop(self):
+        """Drops the last element; False when already empty."""
+        return _f.fit_frames_pop(self._p)
+
+    def push_many(self, n=None, *, pose_translation=None, pose_rotation=None,
+                  pose_optimize_translation=None,
+                  pose_optimize_rotation=None, dir_unit=None, anchor=None,
+                  tag=None, scale=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("pose_translation", pose_translation),
+                        ("pose_rotation", pose_rotation),
+                        ("pose_optimize_translation", pose_optimize_translation),
+                        ("pose_optimize_rotation", pose_optimize_rotation),
+                        ("dir_unit", dir_unit), ("anchor", anchor),
+                        ("tag", tag), ("scale", scale)))
+        i0 = len(self)
+        _f.fit_frames_push_n(self._p, None, n)
+        if pose_translation is not None:
+            self._set_pose_translation(i0, n, pose_translation)
+        if pose_rotation is not None:
+            self._set_pose_rotation(i0, n, pose_rotation)
+        if pose_optimize_translation is not None:
+            self._set_pose_optimize_translation(i0, n, pose_optimize_translation)
+        if pose_optimize_rotation is not None:
+            self._set_pose_optimize_rotation(i0, n, pose_optimize_rotation)
+        if dir_unit is not None:
+            self._set_dir_unit(i0, n, dir_unit)
+        if anchor is not None:
+            self._set_anchor(i0, n, anchor)
+        if tag is not None:
+            self._set_tag(i0, n, tag)
+        if scale is not None:
+            self._set_scale(i0, n, scale)
+        return i0
+
+    def _set_pose_translation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "pose_translation")
+        if not _f.fit_frames_set_pose_translation_n(self._p, start, ptr, n, stride):
+            raise IndexError("pose_translation: %d + %d exceeds the collection" % (start, n))
+
+    def set_pose_translation(self, v):
+        """Sets `pose_translation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pose_translation(0, len(self), v)
+
+    def get_pose_translation(self):
+        """`pose_translation` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_frames_get_pose_translation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_pose_rotation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 4, n, "pose_rotation")
+        if not _f.fit_frames_set_pose_rotation_n(self._p, start, ptr, n, stride):
+            raise IndexError("pose_rotation: %d + %d exceeds the collection" % (start, n))
+
+    def set_pose_rotation(self, v):
+        """Sets `pose_rotation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pose_rotation(0, len(self), v)
+
+    def get_pose_rotation(self):
+        """`pose_rotation` of every element in one call, as an (n, 4) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 4, n)
+        _f.fit_frames_get_pose_rotation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 4, n)
+
+    def _set_pose_optimize_translation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "pose_optimize_translation")
+        if not _f.fit_frames_set_pose_optimize_translation_n(self._p, start, ptr, n, stride):
+            raise IndexError("pose_optimize_translation: %d + %d exceeds the collection" % (start, n))
+
+    def set_pose_optimize_translation(self, v):
+        """Sets `pose_optimize_translation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pose_optimize_translation(0, len(self), v)
+
+    def get_pose_optimize_translation(self):
+        """`pose_optimize_translation` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_frames_get_pose_optimize_translation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_pose_optimize_rotation(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "pose_optimize_rotation")
+        if not _f.fit_frames_set_pose_optimize_rotation_n(self._p, start, ptr, n, stride):
+            raise IndexError("pose_optimize_rotation: %d + %d exceeds the collection" % (start, n))
+
+    def set_pose_optimize_rotation(self, v):
+        """Sets `pose_optimize_rotation` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pose_optimize_rotation(0, len(self), v)
+
+    def get_pose_optimize_rotation(self):
+        """`pose_optimize_rotation` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_frames_get_pose_optimize_rotation_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_dir_unit(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "dir_unit")
+        if not _f.fit_frames_set_dir_unit_n(self._p, start, ptr, n, stride):
+            raise IndexError("dir_unit: %d + %d exceeds the collection" % (start, n))
+
+    def set_dir_unit(self, v):
+        """Sets `dir_unit` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_dir_unit(0, len(self), v)
+
+    def get_dir_unit(self):
+        """`dir_unit` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_frames_get_dir_unit_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_anchor(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "anchor")
+        if not _f.fit_frames_set_anchor_n(self._p, start, ptr, n, stride):
+            raise IndexError("anchor: %d + %d exceeds the collection" % (start, n))
+
+    def set_anchor(self, v):
+        """Sets `anchor` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_anchor(0, len(self), v)
+
+    def get_anchor(self):
+        """`anchor` of every element in one call, as an (n, 3) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 3, n)
+        _f.fit_frames_get_anchor_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_tag(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "i", 1, n, "tag")
+        if not _f.fit_frames_set_tag_n(self._p, start, ptr, n, stride):
+            raise IndexError("tag: %d + %d exceeds the collection" % (start, n))
+
+    def set_tag(self, v):
+        """Sets `tag` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_tag(0, len(self), v)
+
+    def get_tag(self):
+        """`tag` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("i", 1, n)
+        _f.fit_frames_get_tag_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "i", 1, n)
+
+    def _set_scale(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "scale")
+        if not _f.fit_frames_set_scale_n(self._p, start, ptr, n, stride):
+            raise IndexError("scale: %d + %d exceeds the collection" % (start, n))
+
+    def set_scale(self, v):
+        """Sets `scale` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_scale(0, len(self), v)
+
+    def get_scale(self):
+        """`scale` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.fit_frames_get_scale_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def get(self, r):
+        r = r if isinstance(r, FrameRef) else FrameRef(int(r))
+        return Frame(lambda k=r.raw: _f.fit_frames_get(self._p, k), r)
+
+    def __contains__(self, r):
+        return _f.fit_frames_contains(self._p, _raw(r))
+
+    def try_get(self, r):
+        """The element, or None for a stale or foreign ref."""
+        r = r if isinstance(r, FrameRef) else FrameRef(int(r))
+        p = _f.fit_frames_try_get(self._p, r.raw)
+        return Frame(lambda k=r.raw: _f.fit_frames_get(self._p, k), r) if p else None
+
+    def ref_at(self, i):
+        return FrameRef(_f.fit_frames_ref_at(self._p, i))
+
+    def first_ref(self):
+        """Ref of the first element; null when empty."""
+        return FrameRef(_f.fit_frames_first_ref(self._p))
+
+    def last_ref(self):
+        """Ref of the last element; null when empty."""
+        return FrameRef(_f.fit_frames_last_ref(self._p))
+
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.fit_frames_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
 
 
 class Fit:
@@ -1813,4 +3880,12 @@ class Fit:
     @property
     def vns(self):
         return FitVnsVec(self._p)
+
+    @property
+    def wraps(self):
+        return FitWrapsVec(self._p)
+
+    @property
+    def frames(self):
+        return FitFramesVec(self._p)
 

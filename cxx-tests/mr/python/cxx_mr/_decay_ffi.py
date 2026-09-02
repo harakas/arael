@@ -59,12 +59,22 @@ SIGS = [
     ("decay_cells_truncate", [ctypes.c_void_p, ctypes.c_uint32], None),
     ("decay_cells_push", [ctypes.c_void_p], ctypes.c_void_p),
     ("decay_cells_pop", [ctypes.c_void_p], ctypes.c_bool),
+    ("decay_cells_push_n", [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32], ctypes.c_uint32),
+    ("decay_cells_set_v_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_get_v_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_set_v_optimize_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_get_v_optimize_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_set_t_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_get_t_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_set_w_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("decay_cells_get_w_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
     ("decay_cells_get", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_void_p),
     ("decay_cells_contains", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_bool),
     ("decay_cells_try_get", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_void_p),
     ("decay_cells_ref_at", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_uint32),
     ("decay_cells_first_ref", [ctypes.c_void_p], ctypes.c_uint32),
     ("decay_cells_last_ref", [ctypes.c_void_p], ctypes.c_uint32),
+    ("decay_cells_get_refs_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32], ctypes.c_bool),
 ]
 
 

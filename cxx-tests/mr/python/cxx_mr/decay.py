@@ -7,8 +7,10 @@ C++ classes one-to-one)."""
 
 import ctypes
 import os
+import struct
 
 from . import _decay_ffi as _f
+from .arael import columns as _cols
 from .arael import math as _m
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
@@ -214,21 +216,46 @@ class CellRef:
         return "CellRef(%s)" % (self.raw if self.valid else "null")
 
 
+_cell_rec = struct.Struct("=QdQdd")
+_cell_slots = (ctypes.c_uint64 * 5)()
+
+
 class Cell:
     """A `Cell` in its owner's storage, addressed by key rather than by
     pointer: the pointer is re-resolved on every access, so growing the
     collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_at",)
+    __slots__ = ("_at", "_key")
     param_count = 1
 
-    def __init__(self, at):
-        # Zero-argument callable returning a currently-valid pointer.
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a CellRef or an index; None for a
+        # nested element).
         self._at = at
+        self._key = key
 
     @property
     def _p(self):
         return self._at()
+
+    @property
+    def ref(self):
+        """The CellRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, CellRef):
+            return k
+        raise TypeError("Cell addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a CellRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Cell addressed by ref, not by index")
 
     @property
     def v(self):
@@ -355,7 +382,12 @@ class Covariance:
 class DecayCellsVec:
     """View of `cells` (vec of Cell); element wrappers re-resolve
     their pointer by key on every access, so growing the collection
-    cannot leave them dangling. Mutating while iterating is undefined."""
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
 
     __slots__ = ("_p",)
 
@@ -370,17 +402,17 @@ class DecayCellsVec:
 
     def __getitem__(self, i):
         if isinstance(i, CellRef):
-            return Cell(lambda r=i.raw: _f.decay_cells_get(self._p, r))
+            return Cell(lambda r=i.raw: _f.decay_cells_get(self._p, r), i)
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Cell(lambda i=i: _f.decay_cells_at(self._p, i))
+        return Cell(lambda i=i: _f.decay_cells_at(self._p, i), i)
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Cell(lambda i=i: _f.decay_cells_at(self._p, i))
+            yield Cell(lambda i=i: _f.decay_cells_at(self._p, i), i)
 
     def clear(self):
         _f.decay_cells_clear(self._p)
@@ -388,24 +420,135 @@ class DecayCellsVec:
     def truncate(self, n):
         _f.decay_cells_truncate(self._p, n)
 
-    def push(self):
-        _f.decay_cells_push(self._p)
-        return self[self.ref_at(len(self) - 1)]
+    def push(self, *, v=None, v_optimize=None, t=None, w=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if v is None: v = 0.0
+        else: m |= 1 << 0
+        if v_optimize is None: v_optimize = 0
+        else: m |= 1 << 1; v_optimize = 1 if v_optimize else 0
+        if t is None: t = 0.0
+        else: m |= 1 << 2
+        if w is None: w = 0.0
+        else: m |= 1 << 3
+        _cell_rec.pack_into(_cell_slots, 0,
+            m, v, v_optimize, t, w)
+        r = CellRef(_f.decay_cells_push_n(self._p, _cell_slots, 1))
+        return Cell(lambda k=r.raw: _f.decay_cells_get(self._p, k), r)
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.decay_cells_pop(self._p)
 
+    def push_many(self, n=None, *, v=None, v_optimize=None, t=None, w=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("v", v), ("v_optimize", v_optimize), ("t", t),
+                        ("w", w)))
+        i0 = len(self)
+        _f.decay_cells_push_n(self._p, None, n)
+        if v is not None:
+            self._set_v(i0, n, v)
+        if v_optimize is not None:
+            self._set_v_optimize(i0, n, v_optimize)
+        if t is not None:
+            self._set_t(i0, n, t)
+        if w is not None:
+            self._set_w(i0, n, w)
+        return i0
+
+    def _set_v(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "v")
+        if not _f.decay_cells_set_v_n(self._p, start, ptr, n, stride):
+            raise IndexError("v: %d + %d exceeds the collection" % (start, n))
+
+    def set_v(self, v):
+        """Sets `v` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_v(0, len(self), v)
+
+    def get_v(self):
+        """`v` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.decay_cells_get_v_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_v_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "v_optimize")
+        if not _f.decay_cells_set_v_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("v_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_v_optimize(self, v):
+        """Sets `v_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_v_optimize(0, len(self), v)
+
+    def get_v_optimize(self):
+        """`v_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.decay_cells_get_v_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+    def _set_t(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "t")
+        if not _f.decay_cells_set_t_n(self._p, start, ptr, n, stride):
+            raise IndexError("t: %d + %d exceeds the collection" % (start, n))
+
+    def set_t(self, v):
+        """Sets `t` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_t(0, len(self), v)
+
+    def get_t(self):
+        """`t` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.decay_cells_get_t_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
+    def _set_w(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "f", 1, n, "w")
+        if not _f.decay_cells_set_w_n(self._p, start, ptr, n, stride):
+            raise IndexError("w: %d + %d exceeds the collection" % (start, n))
+
+    def set_w(self, v):
+        """Sets `w` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_w(0, len(self), v)
+
+    def get_w(self):
+        """`w` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("f", 1, n)
+        _f.decay_cells_get_w_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "f", 1, n)
+
     def get(self, r):
-        return Cell(lambda k=_raw(r): _f.decay_cells_get(self._p, k))
+        r = r if isinstance(r, CellRef) else CellRef(int(r))
+        return Cell(lambda k=r.raw: _f.decay_cells_get(self._p, k), r)
 
     def __contains__(self, r):
         return _f.decay_cells_contains(self._p, _raw(r))
 
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
-        p = _f.decay_cells_try_get(self._p, _raw(r))
-        return Cell(lambda k=_raw(r): _f.decay_cells_get(self._p, k)) if p else None
+        r = r if isinstance(r, CellRef) else CellRef(int(r))
+        p = _f.decay_cells_try_get(self._p, r.raw)
+        return Cell(lambda k=r.raw: _f.decay_cells_get(self._p, k), r) if p else None
 
     def ref_at(self, i):
         return CellRef(_f.decay_cells_ref_at(self._p, i))
@@ -417,6 +560,15 @@ class DecayCellsVec:
     def last_ref(self):
         """Ref of the last element; null when empty."""
         return CellRef(_f.decay_cells_last_ref(self._p))
+
+    def get_refs(self):
+        """The ref of every element in one call, as a uint32 array of
+        raw handles in index order (numpy when importable, else a ctypes
+        array) -- what the ref keywords of push_many take."""
+        n = len(self)
+        buf, ptr, _stride = _cols.column_out("I", 1, n)
+        _f.decay_cells_get_refs_n(self._p, 0, ptr, n)
+        return _cols.column_finish(buf, "I", 1, n)
 
 
 class Decay:

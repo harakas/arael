@@ -623,3 +623,240 @@ for _ in range(200):
 f11.rigs[0].target_g = 9.99          # write through a fresh lookup
 assert held.target_g == 9.99, (
     "wrapper went stale after the collection grew: %r" % held.target_g)
+
+# The one-call construction paths build fill()'s problem: push(**fields)
+# per element, then push_many plus column setters; both must solve to
+# the same digits, and the column getters must read the solution back.
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
+
+def col(a, i, ncomp=1, k=0):
+    # Element i (component k) of a column: numpy shape, or the flat
+    # ctypes array returned without numpy.
+    if hasattr(a, "shape"):
+        return float(a[i][k]) if ncomp > 1 else float(a[i])
+    return float(a[i * ncomp + k])
+
+
+def fill_kw(f):
+    f.obs.reserve(6)
+    for i in range(6):
+        f.obs.push(x=float(i), y=2.0 * i + 1.0 + (0.05 if i % 2 == 0 else -0.05))
+    t = [1.5, -0.3, 0.7]
+    w = [1.0, 2.0, 0.5]
+    for i in range(3):
+        f.items.push(t=t[i], w=w[i])
+    f.vns.push(v=[0.4, -0.1, 0.9, 0.0], t=[0.1, 0.2, 0.5, -0.3],
+               h=[[1.0, 0.5, 0.0, -0.2], [0.0, 1.0, 0.3, 0.4]], wp=0.7, w=1.3)
+
+
+def fill_cols(f):
+    xs = [float(i) for i in range(6)]
+    ys = [2.0 * i + 1.0 + (0.05 if i % 2 == 0 else -0.05) for i in range(6)]
+    if _np is not None:
+        xs, ys = _np.array(xs), _np.array(ys)
+    pi("cols_first", f.obs.push_many(x=xs, y=ys))
+    f.items.push_many(n=3)
+    f.items.set_t([1.5, -0.3, 0.7])
+    f.items.set_w([1.0, 2.0, 0.5])
+    f.vns.push_many(v=[[0.4, -0.1, 0.9, 0.0]], t=[[0.1, 0.2, 0.5, -0.3]],
+                    h=[[[1.0, 0.5, 0.0, -0.2], [0.0, 1.0, 0.3, 0.4]]],
+                    wp=0.7, w=1.3)
+
+
+fk = fit.Fit()
+fill_kw(fk)
+pi("kw_clean", 1 if len(fk.validate()) == 0 else 0)
+rk = fk.solve_dense(cfg)
+p("kw_end", rk.end_cost)
+p("kw_m", fk.m)
+p("kw_c", fk.c)
+for i in range(3):
+    p("kw_v%d" % i, fk.items[i].v)
+vk = fk.items.get_v()
+p("kw_get_v_sum", col(vk, 0) + col(vk, 1) + col(vk, 2))
+p("kw_get_w_sum", col(fk.items.get_w(), 0) + col(fk.items.get_w(), 1)
+  + col(fk.items.get_w(), 2))
+p("kw_get_h13", col(fk.vns.get_h(), 0, 8, 7))
+p("kw_get_vn2", col(fk.vns.get_v(), 0, 4, 2))
+
+fc = fit.Fit()
+fill_cols(fc)
+pi("cols_clean", 1 if len(fc.validate()) == 0 else 0)
+rc = fc.solve_dense(cfg)
+p("cols_end", rc.end_cost)
+p("cols_m", fc.m)
+p("cols_c", fc.c)
+for i in range(3):
+    p("cols_v%d" % i, fc.items[i].v)
+p("cols_obs3_y", fc.obs[3].y)
+p("cols_item1_t", fc.items[1].t)
+p("cols_vn_h13", fc.vns[0].h[1][3])
+# A column of the wrong dtype raises instead of converting.
+if _np is None:
+    pi("cols_dtype_raises", 1)
+else:
+    try:
+        fc.obs.set_x(_np.arange(6))
+        pi("cols_dtype_raises", 0)
+    except TypeError:
+        pi("cols_dtype_raises", 1)
+
+# A keyword-less push keeps the Rust Default (N's hand-written unit
+# weight, Param's optimize flag) through every push form.
+fd = fit.Fit()
+nd = fd.items.push()
+p("kw_default_w", nd.w)
+pi("kw_default_opt", 1 if nd.v_optimize else 0)
+p("kw_default_w2", fd.items.push(t=0.5).w)
+fd.items.push_many(n=2)
+p("kw_default_w3", fd.items[3].w)
+# The wrapper knows the key it was looked up by.
+pi("kw_ref_ok", 1 if nd.ref == fd.items.ref_at(0) else 0)
+pi("kw_index_ok", 1 if fd.obs.push(x=1.0).index == 0 else 0)
+# Deque and arena keyword pushes land where their plain forms do.
+pd0 = fd.poses.push_back(pos=(1.0, 2.0, 3.0), heading_angle=0.25)
+pd1 = fd.poses.push_front(pos=(-1.0, 0.0, 0.5))
+p("kw_deque_front_x", fd.poses[0].pos.x)
+p("kw_deque_back_z", fd.poses[1].pos.z)
+p("kw_deque_back_h", fd.poses[1].heading_angle)
+pi("kw_deque_refs", 1 if (pd1.ref == fd.poses.front_ref()
+                          and pd0.ref == fd.poses.back_ref()) else 0)
+md = fd.marks.push(t=0.4, w=2.0)
+p("kw_arena_t", fd.marks[md].t)
+p("kw_arena_w", fd.marks[md].w)
+gp = fd.poses.get_pos()
+p("kw_deque_get_x0", col(gp, 0, 3, 0))
+p("kw_deque_get_z1", col(gp, 1, 3, 2))
+# An element with no scalar leaves still pushes (nothing to name) and
+# reaches its component through the wrapper.
+wd = fd.wraps.push()
+wd.gain.g = 0.5
+fd.wraps.push_many(n=2)
+pi("kw_noleaf_len", len(fd.wraps))
+p("kw_noleaf_g", fd.wraps[0].gain.g)
+# Every ref in one call, on a vector and on a deque, in index order.
+fd.items.push_many(n=3)
+ri = fd.items.get_refs()
+pi("refs_items_ok", 1 if [int(x) for x in ri]
+   == [fd.items.ref_at(i).raw for i in range(len(fd.items))] else 0)
+rp = fd.poses.get_refs()
+pi("refs_poses_ok", 1 if [int(x) for x in rp]
+   == [fd.poses.ref_at(i).raw for i in range(len(fd.poses))] else 0)
+pi("refs_poses_front", 1 if fit.PoseRef(int(rp[0])) == fd.poses.front_ref() else 0)
+# An option made with keywords, and one made plain (the Rust default).
+gk = fd.poses[0].info.make_gps(pos=(7.0, 8.0, 9.0), isigma=2.5)
+p("opt_kw_y", fd.poses[0].info.gps.pos.y)
+p("opt_kw_isigma", gk.isigma)
+p("opt_default_isigma", fd.poses[1].info.make_gps().isigma)
+fd.poses[1].info.clear_gps()
+pi("opt_cleared", 1 if fd.poses[1].info.gps is None else 0)
+
+# Ref keywords on push; every rotation-param keyword form; a nested
+# component through the pushed wrapper; a matrix from rows.
+fq = fit.Fit()
+pa = fq.poses.push_back(pos=(0.0, 0.0, 0.0), heading_angle_optimize=False)
+pb = fq.poses.push_back(pos=(1.0, 0.5, 0.0))
+tq = fq.ties.push(a=pa.ref, b=pb.ref, d=(1.0, 0.4, 0.0), w=3.0)
+pi("kw_tie_refs", 1 if tq.a == fq.poses.ref_at(0) and tq.b == fq.poses.ref_at(1) else 0)
+p("kw_tie_d_y", tq.d.y)
+pi("kw_heading_frozen", 0 if pa.heading_angle_optimize else 1)
+qe = quaternd.from_euler_angles((0.1, 0.2, 0.3))
+rq = fq.rigs.push(q=qe, ea_u=(0.15, -0.25, 0.6), ea_u_optimize=False, target_g=1.75)
+pi("kw_rig_q_roundtrip", 1 if tuple(rq.q) == tuple(qe) else 0)
+p("kw_rig_ea_u_z", rq.ea_u.z)
+pi("kw_rig_ea_u_frozen", 0 if rq.ea_u_optimize else 1)
+rq2 = fq.rigs.push(q=(1.0, 0.0, 0.0, 0.0))
+p("kw_rig_q4_t", rq2.q.t)
+p("kw_rig_q4_z", rq2.q.v.z)
+rq2.gain.g = 0.25
+p("kw_rig_gain", rq2.gain.g)
+hv = fq.vns.push(h=[[0, 1, 2, 3], [4, 5, 6, 7]])
+p("kw_vn_h_13", hv.h[1][3])
+
+# The pose builtins (TransformParam, UnitVecParam) plus i32 / f32
+# leaves: keywords, defaults, columns both ways.
+ff = fit.Fit()
+fr = ff.frames.push(pose_translation=(1.0, 2.0, 3.0), pose_rotation=qe,
+                    pose_optimize_translation=False, dir_unit=(0.0, 0.0, 1.0),
+                    anchor=(0.5, 0.5, 0.5), tag=-7, scale=0.5)
+p("fr_tx", fr.pose_translation.x)
+p("fr_tz", fr.pose_translation.z)
+pi("fr_q_roundtrip", 1 if tuple(fr.pose_rotation) == tuple(qe) else 0)
+pi("fr_opt_t", 1 if fr.pose_optimize_translation else 0)
+pi("fr_opt_r", 1 if fr.pose_optimize_rotation else 0)
+p("fr_dir_z", fr.dir_unit.z)
+pi("fr_tag", fr.tag)
+p("fr_scale", fr.scale)
+fr0 = ff.frames.push()
+p("fr_def_q_t", fr0.pose_rotation.t)
+p("fr_def_q_x", fr0.pose_rotation.v.x)
+pi("fr_def_opt_r", 1 if fr0.pose_optimize_rotation else 0)
+tags = [-1, 5] if _np is None else _np.array([-1, 5], dtype=_np.int32)
+scales = [0.25, 0.75] if _np is None else _np.array([0.25, 0.75], dtype=_np.float32)
+ff.frames.push_many(n=2, pose_translation=[(1, 1, 1), (2, 2, 2)], tag=tags, scale=scales)
+T = ff.frames.get_pose_translation()
+p("fr_col_t_31", col(T, 3, 3, 1))
+Q = ff.frames.get_pose_rotation()
+p("fr_col_q_10", col(Q, 1, 4, 0))
+pi("fr_col_tag_0", int(col(ff.frames.get_tag(), 0)))
+pi("fr_col_tag_2", int(col(ff.frames.get_tag(), 2)))
+p("fr_col_scale_3", col(ff.frames.get_scale(), 3))
+ff.frames.set_pose_optimize_rotation(False)
+pi("fr_col_optr_any", 1 if any(bool(x) for x in ff.frames.get_pose_optimize_rotation()) else 0)
+ff.frames.set_scale(1.5)
+p("fr_col_scale_all", col(ff.frames.get_scale(), 1))
+ff.frames.set_tag(-3)
+pi("fr_col_tag_all", int(col(ff.frames.get_tag(), 3)))
+p("fr_col_dir_0z", col(ff.frames.get_dir_unit(), 0, 3, 2))
+ff.frames.set_pose_rotation((1.0, 0.0, 0.0, 0.0))
+pi("fr_col_q_reset", 1 if tuple(ff.frames[0].pose_rotation) == (1.0, 0.0, 0.0, 0.0) else 0)
+
+# Deque push_many with rows and a broadcast scalar; ref arrays from
+# get_refs into push_many with a broadcast math value; bool columns;
+# a strided numpy view; keys from lookups; empty collections; the
+# refusals. One flag: everything here is Python-side behaviour.
+misc = 1
+fq.poses.push_many(pos=[(3, 0, 0), (4, 0, 0)], heading_angle=0.5)
+if fq.poses[3].pos.x != 4.0 or fq.poses[2].heading_angle != 0.5:
+    misc = 0
+refs_all = fq.poses.get_refs()
+fq.ties.push_many(a=refs_all[:-1], b=refs_all[1:], d=(1.0, 0.5, 0.0), w=3.0)
+if len(fq.ties) != 4 or fq.ties[2].a != fq.poses.ref_at(1) or fq.ties[3].b != fq.poses.ref_at(3):
+    misc = 0
+if tuple(fq.ties[3].d) != (1.0, 0.5, 0.0):
+    misc = 0
+fq.items.push_many(t=[1.0, 2.0, 3.0])
+fq.items.set_v_optimize([True, False, True] if _np is None
+                        else _np.array([True, False, True]))
+if [bool(x) for x in fq.items.get_v_optimize()] != [True, False, True]:
+    misc = 0
+if _np is not None:
+    X = _np.arange(6.0).reshape(3, 2)
+    fq.items.set_t(X[:, 1])
+    if [i.t for i in fq.items] != [1.0, 3.0, 5.0]:
+        misc = 0
+if fq.poses[1].index != 1 or fq.poses[fq.poses.ref_at(1)].ref != fq.poses.ref_at(1):
+    misc = 0
+if [t.index for t in fq.ties] != [0, 1, 2, 3]:
+    misc = 0
+if fq.items.get(fq.items.ref_at(2)).ref != fq.items.ref_at(2):
+    misc = 0
+fe = fit.Fit()
+if len(fe.obs.get_x()) != 0 or len(fe.items.get_refs()) != 0:
+    misc = 0
+fe.obs.set_x(1.0)
+fe.obs.set_x([])
+for call, exc in ((lambda: fq.obs.push(z=1.0), TypeError),
+                  (lambda: fq.obs.push_many(x=1.0), TypeError),
+                  (lambda: fq.poses.set_pos([(0, 0)] * len(fq.poses)), (TypeError, ValueError)),
+                  (lambda: fq.obs.push_many(x=[1.0, 2.0], y=[1.0]), ValueError)):
+    try:
+        call()
+        misc = 0
+    except exc:
+        pass
+pi("misc_ok", misc)

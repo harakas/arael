@@ -55,6 +55,11 @@ SIGS = [
     ("line_obs_truncate", [ctypes.c_void_p, ctypes.c_uint32], None),
     ("line_obs_push", [ctypes.c_void_p], ctypes.c_void_p),
     ("line_obs_pop", [ctypes.c_void_p], ctypes.c_bool),
+    ("line_obs_push_n", [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32], ctypes.c_uint32),
+    ("line_obs_set_x_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("line_obs_get_x_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("line_obs_set_y_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
+    ("line_obs_get_y_n", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64], ctypes.c_bool),
 ]
 
 

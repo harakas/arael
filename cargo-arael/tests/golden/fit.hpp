@@ -85,6 +85,13 @@ struct SparseOptions : SparseOptionsT {
 };
 
 /// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Frame>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct FrameRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
+/// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Gain>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
 struct GainRef {
@@ -147,9 +154,17 @@ struct VnRef {
     uint32_t raw = UINT32_MAX;
     bool valid() const { return raw != UINT32_MAX; }
 };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Wrap>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct WrapRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 
 namespace ffi {
 struct Fit;
+struct Frame;
 struct Gain;
 struct GpsObs;
 struct Info;
@@ -159,8 +174,27 @@ struct Pose;
 struct Rig;
 struct Tie;
 struct Vn;
+struct Wrap;
 
 extern "C" {
+vect3d fit_frame_pose_translation(const Frame*);
+void fit_frame_pose_set_translation(Frame*, vect3d);
+quaternd fit_frame_pose_rotation(const Frame*);
+void fit_frame_pose_set_rotation(Frame*, quaternd);
+bool fit_frame_pose_optimize_translation(const Frame*);
+void fit_frame_pose_set_optimize_translation(Frame*, bool);
+bool fit_frame_pose_optimize_rotation(const Frame*);
+void fit_frame_pose_set_optimize_rotation(Frame*, bool);
+vect3d fit_frame_dir_unit(const Frame*);
+void fit_frame_dir_set_unit(Frame*, vect3d);
+vect3d fit_frame_dir_unit_d0(const Frame*);
+vect3d fit_frame_dir_unit_d1(const Frame*);
+vect3d fit_frame_anchor(const Frame*);
+void fit_frame_set_anchor(Frame*, vect3d);
+int32_t fit_frame_tag(const Frame*);
+void fit_frame_set_tag(Frame*, int32_t);
+float fit_frame_scale(const Frame*);
+void fit_frame_set_scale(Frame*, float);
 double fit_gain_ref_g(const Gain*);
 void fit_gain_set_ref_g(Gain*, double);
 double fit_gain_d(const Gain*);
@@ -246,12 +280,16 @@ double fit_vn_wp(const Vn*);
 void fit_vn_set_wp(Vn*, double);
 double fit_vn_w(const Vn*);
 void fit_vn_set_w(Vn*, double);
+Gain* fit_wrap_gain_ptr(Wrap*);
 struct FitCov;
 int32_t fit_assemble_covariance(Fit*, uint32_t, FitCov**);
 int32_t fit_assemble_covariance_with(Fit*, uint32_t, uint32_t, uint32_t, FitCov**);
 const char* fit_cov_error(const FitCov*);
 void fit_cov_plan(const FitCov*, CovPlan*);
 void fit_cov_free(FitCov*);
+int32_t fit_frame_marginal_cov(FitCov*, const Frame*, double*, uint32_t);
+int32_t fit_frame_conditional_cov(FitCov*, const Frame*, double*, uint32_t);
+int32_t fit_frame_std_dev(FitCov*, const Frame*, double*, uint32_t);
 int32_t fit_n_marginal_cov(FitCov*, const N*, double*, uint32_t);
 int32_t fit_n_conditional_cov(FitCov*, const N*, double*, uint32_t);
 int32_t fit_n_std_dev(FitCov*, const N*, double*, uint32_t);
@@ -264,22 +302,45 @@ int32_t fit_rig_std_dev(FitCov*, const Rig*, double*, uint32_t);
 int32_t fit_vn_marginal_cov(FitCov*, const Vn*, double*, uint32_t);
 int32_t fit_vn_conditional_cov(FitCov*, const Vn*, double*, uint32_t);
 int32_t fit_vn_std_dev(FitCov*, const Vn*, double*, uint32_t);
+int32_t fit_wrap_marginal_cov(FitCov*, const Wrap*, double*, uint32_t);
+int32_t fit_wrap_conditional_cov(FitCov*, const Wrap*, double*, uint32_t);
+int32_t fit_wrap_std_dev(FitCov*, const Wrap*, double*, uint32_t);
+int32_t fit_frame_frame_cross_cov(FitCov*, const Frame*, const Frame*, double*, uint32_t);
+int32_t fit_frame_n_cross_cov(FitCov*, const Frame*, const N*, double*, uint32_t);
+int32_t fit_frame_pose_cross_cov(FitCov*, const Frame*, const Pose*, double*, uint32_t);
+int32_t fit_frame_rig_cross_cov(FitCov*, const Frame*, const Rig*, double*, uint32_t);
+int32_t fit_frame_vn_cross_cov(FitCov*, const Frame*, const Vn*, double*, uint32_t);
+int32_t fit_frame_wrap_cross_cov(FitCov*, const Frame*, const Wrap*, double*, uint32_t);
+int32_t fit_n_frame_cross_cov(FitCov*, const N*, const Frame*, double*, uint32_t);
 int32_t fit_n_n_cross_cov(FitCov*, const N*, const N*, double*, uint32_t);
 int32_t fit_n_pose_cross_cov(FitCov*, const N*, const Pose*, double*, uint32_t);
 int32_t fit_n_rig_cross_cov(FitCov*, const N*, const Rig*, double*, uint32_t);
 int32_t fit_n_vn_cross_cov(FitCov*, const N*, const Vn*, double*, uint32_t);
+int32_t fit_n_wrap_cross_cov(FitCov*, const N*, const Wrap*, double*, uint32_t);
+int32_t fit_pose_frame_cross_cov(FitCov*, const Pose*, const Frame*, double*, uint32_t);
 int32_t fit_pose_n_cross_cov(FitCov*, const Pose*, const N*, double*, uint32_t);
 int32_t fit_pose_pose_cross_cov(FitCov*, const Pose*, const Pose*, double*, uint32_t);
 int32_t fit_pose_rig_cross_cov(FitCov*, const Pose*, const Rig*, double*, uint32_t);
 int32_t fit_pose_vn_cross_cov(FitCov*, const Pose*, const Vn*, double*, uint32_t);
+int32_t fit_pose_wrap_cross_cov(FitCov*, const Pose*, const Wrap*, double*, uint32_t);
+int32_t fit_rig_frame_cross_cov(FitCov*, const Rig*, const Frame*, double*, uint32_t);
 int32_t fit_rig_n_cross_cov(FitCov*, const Rig*, const N*, double*, uint32_t);
 int32_t fit_rig_pose_cross_cov(FitCov*, const Rig*, const Pose*, double*, uint32_t);
 int32_t fit_rig_rig_cross_cov(FitCov*, const Rig*, const Rig*, double*, uint32_t);
 int32_t fit_rig_vn_cross_cov(FitCov*, const Rig*, const Vn*, double*, uint32_t);
+int32_t fit_rig_wrap_cross_cov(FitCov*, const Rig*, const Wrap*, double*, uint32_t);
+int32_t fit_vn_frame_cross_cov(FitCov*, const Vn*, const Frame*, double*, uint32_t);
 int32_t fit_vn_n_cross_cov(FitCov*, const Vn*, const N*, double*, uint32_t);
 int32_t fit_vn_pose_cross_cov(FitCov*, const Vn*, const Pose*, double*, uint32_t);
 int32_t fit_vn_rig_cross_cov(FitCov*, const Vn*, const Rig*, double*, uint32_t);
 int32_t fit_vn_vn_cross_cov(FitCov*, const Vn*, const Vn*, double*, uint32_t);
+int32_t fit_vn_wrap_cross_cov(FitCov*, const Vn*, const Wrap*, double*, uint32_t);
+int32_t fit_wrap_frame_cross_cov(FitCov*, const Wrap*, const Frame*, double*, uint32_t);
+int32_t fit_wrap_n_cross_cov(FitCov*, const Wrap*, const N*, double*, uint32_t);
+int32_t fit_wrap_pose_cross_cov(FitCov*, const Wrap*, const Pose*, double*, uint32_t);
+int32_t fit_wrap_rig_cross_cov(FitCov*, const Wrap*, const Rig*, double*, uint32_t);
+int32_t fit_wrap_vn_cross_cov(FitCov*, const Wrap*, const Vn*, double*, uint32_t);
+int32_t fit_wrap_wrap_cross_cov(FitCov*, const Wrap*, const Wrap*, double*, uint32_t);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
 bool fit_m_optimize(const Fit*);
@@ -370,6 +431,26 @@ uint32_t fit_vns_last_ref(const Fit*);
 Vn* fit_vns_get(Fit*, uint32_t);
 bool fit_vns_contains(const Fit*, uint32_t);
 Vn* fit_vns_try_get(Fit*, uint32_t);
+uint32_t fit_wraps_len(const Fit*);
+void fit_wraps_reserve(Fit*, uint32_t);
+Wrap* fit_wraps_push(Fit*);
+Wrap* fit_wraps_at(Fit*, uint32_t);
+bool fit_wraps_pop(Fit*);
+void fit_wraps_clear(Fit*);
+void fit_wraps_truncate(Fit*, uint32_t);
+uint32_t fit_frames_len(const Fit*);
+void fit_frames_reserve(Fit*, uint32_t);
+Frame* fit_frames_push(Fit*);
+Frame* fit_frames_at(Fit*, uint32_t);
+bool fit_frames_pop(Fit*);
+void fit_frames_clear(Fit*);
+void fit_frames_truncate(Fit*, uint32_t);
+uint32_t fit_frames_ref_at(const Fit*, uint32_t);
+uint32_t fit_frames_first_ref(const Fit*);
+uint32_t fit_frames_last_ref(const Fit*);
+Frame* fit_frames_get(Fit*, uint32_t);
+bool fit_frames_contains(const Fit*, uint32_t);
+Frame* fit_frames_try_get(Fit*, uint32_t);
 int32_t fit_cost_table(Fit*);
 const char* fit_cost_table_name(const Fit*, uint32_t);
 double fit_cost_table_value(const Fit*, uint32_t);
@@ -477,6 +558,41 @@ struct SolveError {
 };
 
 using SolveResult = result<LmResult, SolveError>;
+
+/// A `Frame` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Frame {
+public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 8;
+    Frame() : h_(nullptr) {}
+    explicit Frame(ffi::Frame* p) : h_(p) {}
+    /// False when default-constructed (e.g. inside an empty option).
+    bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer -- the relaxed escape hatch.
+    ffi::Frame* raw() const { return h_; }
+    vect3d pose_translation() const { return ffi::fit_frame_pose_translation(h_); }
+    void set_pose_translation(vect3d v) { ffi::fit_frame_pose_set_translation(h_, v); }
+    quaternd pose_rotation() const { return ffi::fit_frame_pose_rotation(h_); }
+    void set_pose_rotation(quaternd v) { ffi::fit_frame_pose_set_rotation(h_, v); }
+    bool pose_optimize_translation() const { return ffi::fit_frame_pose_optimize_translation(h_); }
+    void set_pose_optimize_translation(bool v) { ffi::fit_frame_pose_set_optimize_translation(h_, v); }
+    bool pose_optimize_rotation() const { return ffi::fit_frame_pose_optimize_rotation(h_); }
+    void set_pose_optimize_rotation(bool v) { ffi::fit_frame_pose_set_optimize_rotation(h_, v); }
+    vect3d dir_unit() const { return ffi::fit_frame_dir_unit(h_); }
+    void set_dir_unit(vect3d v) { ffi::fit_frame_dir_set_unit(h_, v); }
+    /// Chart tangent basis: d unit / d chart, per chart param.
+    vect3d dir_unit_d0() const { return ffi::fit_frame_dir_unit_d0(h_); }
+    vect3d dir_unit_d1() const { return ffi::fit_frame_dir_unit_d1(h_); }
+    vect3d anchor() const { return ffi::fit_frame_anchor(h_); }
+    void set_anchor(vect3d v) { ffi::fit_frame_set_anchor(h_, v); }
+    int32_t tag() const { return ffi::fit_frame_tag(h_); }
+    void set_tag(int32_t v) { ffi::fit_frame_set_tag(h_, v); }
+    float scale() const { return ffi::fit_frame_scale(h_); }
+    void set_scale(float v) { ffi::fit_frame_set_scale(h_, v); }
+private:
+    ffi::Frame* h_;
+};
 
 /// A `Gain` in its owner's storage; a thin pointer wrapper (validity
 /// follows the storage -- see the owning container).
@@ -712,6 +828,23 @@ private:
     ffi::Vn* h_;
 };
 
+/// A `Wrap` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Wrap {
+public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 1;
+    Wrap() : h_(nullptr) {}
+    explicit Wrap(ffi::Wrap* p) : h_(p) {}
+    /// False when default-constructed (e.g. inside an empty option).
+    bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer -- the relaxed escape hatch.
+    ffi::Wrap* raw() const { return h_; }
+    Gain gain() { return Gain(ffi::fit_wrap_gain_ptr(h_)); }
+private:
+    ffi::Wrap* h_;
+};
+
 /// An assembled covariance (root.assemble_covariance), OWNED: copies
 /// share it, the last copy releases it, and later assemblies are
 /// independent. Entity arguments must come from the live model.
@@ -728,6 +861,20 @@ public:
         CovPlan p;
         ffi::fit_cov_plan(c_, &p);
         return p;
+    }
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const Frame& e, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_std_dev(c_, e.raw(), out, cap));
+    }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const Frame& e, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_conditional_cov(c_, e.raw(), out, cap));
+    }
+    /// Row-major dim x dim into out; returns dim or a negative code.
+    int32_t marginal(const Frame& e, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_marginal_cov(c_, e.raw(), out, cap));
     }
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
@@ -786,6 +933,56 @@ public:
     int32_t marginal(const Vn& e, double* out, uint32_t cap) {
         return ck_(ffi::fit_vn_marginal_cov(c_, e.raw(), out, cap));
     }
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const Wrap& e, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_std_dev(c_, e.raw(), out, cap));
+    }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const Wrap& e, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_conditional_cov(c_, e.raw(), out, cap));
+    }
+    result<double, CovError> marginal(const Wrap& e) {
+        double b[1];
+        if (ck_(ffi::fit_wrap_marginal_cov(c_, e.raw(), b, 1)) < 0) return fail<double>();
+        return result<double, CovError>::ok(b[0]);
+    }
+    /// Row-major Frame::param_count x Frame::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Frame& a, const Frame& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_frame_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Frame::param_count x N::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Frame& a, const N& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_n_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Frame::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Frame& a, const Pose& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_pose_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Frame::param_count x Rig::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Frame& a, const Rig& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_rig_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Frame::param_count x Vn::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Frame& a, const Vn& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_vn_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Frame::param_count x Wrap::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Frame& a, const Wrap& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_frame_wrap_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major N::param_count x Frame::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const N& a, const Frame& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_n_frame_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
     /// Row-major N::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const N& a, const N& b, double* out, uint32_t cap) {
@@ -805,6 +1002,16 @@ public:
     /// into out; returns the row count or a negative code.
     int32_t cross(const N& a, const Vn& b, double* out, uint32_t cap) {
         return ck_(ffi::fit_n_vn_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major N::param_count x Wrap::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const N& a, const Wrap& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_n_wrap_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Pose::param_count x Frame::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const Frame& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_pose_frame_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
     /// Row-major Pose::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
@@ -826,6 +1033,16 @@ public:
     int32_t cross(const Pose& a, const Vn& b, double* out, uint32_t cap) {
         return ck_(ffi::fit_pose_vn_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
+    /// Row-major Pose::param_count x Wrap::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const Wrap& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_pose_wrap_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Rig::param_count x Frame::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Rig& a, const Frame& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_rig_frame_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
     /// Row-major Rig::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Rig& a, const N& b, double* out, uint32_t cap) {
@@ -846,6 +1063,16 @@ public:
     int32_t cross(const Rig& a, const Vn& b, double* out, uint32_t cap) {
         return ck_(ffi::fit_rig_vn_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
+    /// Row-major Rig::param_count x Wrap::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Rig& a, const Wrap& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_rig_wrap_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Vn::param_count x Frame::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Vn& a, const Frame& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_vn_frame_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
     /// Row-major Vn::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Vn& a, const N& b, double* out, uint32_t cap) {
@@ -865,6 +1092,41 @@ public:
     /// into out; returns the row count or a negative code.
     int32_t cross(const Vn& a, const Vn& b, double* out, uint32_t cap) {
         return ck_(ffi::fit_vn_vn_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Vn::param_count x Wrap::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Vn& a, const Wrap& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_vn_wrap_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Wrap::param_count x Frame::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Wrap& a, const Frame& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_frame_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Wrap::param_count x N::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Wrap& a, const N& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_n_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Wrap::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Wrap& a, const Pose& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_pose_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Wrap::param_count x Rig::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Wrap& a, const Rig& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_rig_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Wrap::param_count x Vn::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Wrap& a, const Vn& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_vn_cross_cov(c_, a.raw(), b.raw(), out, cap));
+    }
+    /// Row-major Wrap::param_count x Wrap::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Wrap& a, const Wrap& b, double* out, uint32_t cap) {
+        return ck_(ffi::fit_wrap_wrap_cross_cov(c_, a.raw(), b.raw(), out, cap));
     }
 private:
     /// A caught Rust panic (-2) throws; other codes pass through.
@@ -1502,6 +1764,182 @@ private:
     ffi::Fit* h_;
 };
 
+/// `Fit.wraps`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
+class FitWrapsVec {
+public:
+    explicit FitWrapsVec(ffi::Fit* h) : h_(h) {}
+    uint32_t size() const { return ffi::fit_wraps_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::fit_wraps_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
+    Wrap push() { return Wrap(ffi::fit_wraps_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
+    Wrap operator[](uint32_t i) { return Wrap(ffi::fit_wraps_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    Wrap front() { return (*this)[0]; }
+    Wrap back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::fit_wraps_pop(h_); }
+    void clear() { ffi::fit_wraps_clear(h_); }
+    void truncate(uint32_t n) { ffi::fit_wraps_truncate(h_, n); }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Wrap), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Wrap;
+        using difference_type = std::ptrdiff_t;
+        using reference = Wrap;
+        struct arrow { Wrap v; Wrap* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Fit* h, uint32_t i) : h_(h), i_(i) {}
+        Wrap operator*() const { return Wrap(ffi::fit_wraps_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Fit* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Wrap;
+        using difference_type = std::ptrdiff_t;
+        using reference = Wrap;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Wrap operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+private:
+    ffi::Fit* h_;
+};
+
+/// `Fit.frames`. Element pointers are STABLE across pushes (chunked storage).
+class FitFramesVec {
+public:
+    explicit FitFramesVec(ffi::Fit* h) : h_(h) {}
+    uint32_t size() const { return ffi::fit_frames_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::fit_frames_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
+    Frame push() { return Frame(ffi::fit_frames_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
+    Frame operator[](uint32_t i) { return Frame(ffi::fit_frames_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    Frame front() { return (*this)[0]; }
+    Frame back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::fit_frames_pop(h_); }
+    void clear() { ffi::fit_frames_clear(h_); }
+    void truncate(uint32_t n) { ffi::fit_frames_truncate(h_, n); }
+    FrameRef ref_at(uint32_t i) const { return FrameRef{ffi::fit_frames_ref_at(h_, i)}; }
+    /// Ref of the first/last element; null when empty.
+    FrameRef first_ref() const { return FrameRef{ffi::fit_frames_first_ref(h_)}; }
+    FrameRef last_ref() const { return FrameRef{ffi::fit_frames_last_ref(h_)}; }
+    Frame get(FrameRef r) { return Frame(ffi::fit_frames_get(h_, r.raw)); }
+    /// True while r addresses a live element here.
+    bool contains(FrameRef r) const { return ffi::fit_frames_contains(h_, r.raw); }
+    /// Like get, but empty for a stale or foreign ref.
+    option<Frame> try_get(FrameRef r) {
+        ffi::Frame* p = ffi::fit_frames_try_get(h_, r.raw);
+        return p ? option<Frame>(Frame(p)) : option<Frame>();
+    }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Frame), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Frame;
+        using difference_type = std::ptrdiff_t;
+        using reference = Frame;
+        struct arrow { Frame v; Frame* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Fit* h, uint32_t i) : h_(h), i_(i) {}
+        Frame operator*() const { return Frame(ffi::fit_frames_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Fit* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Frame;
+        using difference_type = std::ptrdiff_t;
+        using reference = Frame;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Frame operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+private:
+    ffi::Fit* h_;
+};
+
 /// A computed Jacobian (root.calc_jacobian), OWNED: copies share
 /// it, the last copy releases it. A snapshot of the parameters at
 /// the call; later solves or edits do not touch it.
@@ -1589,6 +2027,8 @@ public:
     FitMarksArena marks() { return FitMarksArena(h_); }
     FitRigsVec rigs() { return FitRigsVec(h_); }
     FitVnsVec vns() { return FitVnsVec(h_); }
+    FitWrapsVec wraps() { return FitWrapsVec(h_); }
+    FitFramesVec frames() { return FitFramesVec(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1); a caught Rust panic throws PanicError.

@@ -13,6 +13,8 @@ use arael::model::{
 };
 use arael::refs::{self, Ref};
 use arael::matrix::matrixd;
+use arael::transform::TransformParam;
+use arael::unitvec::UnitVecParam;
 use arael::vect::{vect2d, vect3d, vectd};
 
 /// A data-only observation of the root's line: y ~ m * x + c.
@@ -26,17 +28,24 @@ pub struct Obs {
     pub y: f64,
 }
 
-/// An entity with its own parameter pulled to its target.
+/// An entity with its own parameter pulled to its target. Its
+/// hand-written `Default` (unit weight) is what a keyword-less
+/// `push()` must reproduce through every interface.
 #[arael::model]
 #[arael(constraint(hb, {
     [(n.v - n.t) * n.w]
 }))]
-#[derive(Default)]
 pub struct N {
     pub v: Param<f64>,
     pub t: f64,
     pub w: f64,
     pub hb: SelfBlock<N>,
+}
+
+impl Default for N {
+    fn default() -> Self {
+        N { v: Param::default(), t: 0.0, w: 1.0, hb: SelfBlock::new() }
+    }
 }
 
 /// A pose with an optimized position, a FIXED rotation (storage only:
@@ -172,6 +181,30 @@ pub struct Rig {
     pub hb: SelfBlock<Rig>,
 }
 
+/// The pose builtins -- a rigid transform and a unit direction -- with
+/// an `i32` and an `f32` beside them: the leaf kinds the keyword and
+/// column calls must carry. Unconstrained; the parity suite builds and
+/// reads it back without solving.
+#[arael::model]
+#[derive(Default)]
+pub struct Frame {
+    pub pose: TransformParam<f64>,
+    pub dir: UnitVecParam<f64>,
+    pub anchor: vect3d,
+    pub tag: i32,
+    pub scale: f32,
+    pub hb: SelfBlock<Frame>,
+}
+
+/// An entity with no scalar surface of its own -- a user component
+/// and its block only -- so a keyword-less push has nothing to name.
+#[arael::model]
+#[derive(Default)]
+pub struct Wrap {
+    pub gain: Gain,
+    pub hb: SelfBlock<Wrap>,
+}
+
 #[arael::model]
 #[arael(root, jacobian)]
 #[derive(Default)]
@@ -187,5 +220,7 @@ pub struct Fit {
     pub marks: refs::Arena<N>,
     pub rigs: refs::Vec<Rig>,
     pub vns: refs::Vec<Vn>,
+    pub wraps: std::vec::Vec<Wrap>,
+    pub frames: refs::Vec<Frame>,
     pub hb: SelfBlock<Fit>,
 }

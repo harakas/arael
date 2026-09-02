@@ -1520,6 +1520,167 @@ pub unsafe extern "C" fn decay_cells_try_get(p: *mut DecayHandle, r: u32) -> *mu
         None => std::ptr::null_mut(),
     }
 }
+/// Appends `n` elements built from `n` slot records of 5 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_push_n(p: *mut DecayHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.cells;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Cell = Default::default();
+        if !slots.is_null() {
+            assign_slots_cell(&mut e, slots.add(i * 5));
+        }
+        m.push(e);
+    }
+    if n == 0 { u32::MAX } else { m.ref_at(first).to_raw() }
+}
+/// Sets `v` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_set_v_n(
+    p: *mut DecayHandle, start: u32, v: *const f32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f32;
+        m[start + i].v.value = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `v` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_get_v_n(
+    p: *const DecayHandle, start: u32, out: *mut f32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f32;
+        std::ptr::write_unaligned(dst, m[start + i].v.value);
+    }
+    true
+}
+/// Sets `v_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_set_v_optimize_n(
+    p: *mut DecayHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].v.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `v_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_get_v_optimize_n(
+    p: *const DecayHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].v.optimize as u8);
+    }
+    true
+}
+/// Sets `t` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_set_t_n(
+    p: *mut DecayHandle, start: u32, v: *const f32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f32;
+        m[start + i].t = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `t` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_get_t_n(
+    p: *const DecayHandle, start: u32, out: *mut f32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f32;
+        std::ptr::write_unaligned(dst, m[start + i].t);
+    }
+    true
+}
+/// Sets `w` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_set_w_n(
+    p: *mut DecayHandle, start: u32, v: *const f32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f32;
+        m[start + i].w = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `w` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_get_w_n(
+    p: *const DecayHandle, start: u32, out: *mut f32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f32;
+        std::ptr::write_unaligned(dst, m[start + i].w);
+    }
+    true
+}
+/// Packed refs of elements `start..start + n`, in index order; false when
+/// the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn decay_cells_get_refs_n(
+    p: *const DecayHandle, start: u32, out: *mut u32, n: u32) -> bool {
+    let m = &(*p).model.cells;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        *out.add(i) = m.ref_at(start + i).to_raw();
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn decay_cell_v(p: *const Cell) -> f32 {
     (*p).v.value
@@ -1551,6 +1712,24 @@ pub unsafe extern "C" fn decay_cell_w(p: *const Cell) -> f32 {
 #[no_mangle]
 pub unsafe extern "C" fn decay_cell_set_w(p: *mut Cell, v: f32) {
     (*p).w = v;
+}
+
+/// Assigns a slot record's masked leaves onto a `Cell`: 1 mask
+/// word(s), then 4 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_cell(e: &mut Cell, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.v.value = f64::from_bits(*s.add(1)) as f32;
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.v.optimize = *s.add(2) != 0;
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.t = f64::from_bits(*s.add(3)) as f32;
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.w = f64::from_bits(*s.add(4)) as f32;
+    }
 }
 
 } // mod decay
@@ -2907,6 +3086,88 @@ pub unsafe extern "C" fn line_obs_clear(p: *mut LineHandle) {
 pub unsafe extern "C" fn line_obs_truncate(p: *mut LineHandle, len: u32) {
     (*p).model.obs.truncate(len as usize);
 }
+/// Appends `n` elements built from `n` slot records of 3 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn line_obs_push_n(p: *mut LineHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.obs;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Ob = Default::default();
+        if !slots.is_null() {
+            assign_slots_ob(&mut e, slots.add(i * 3));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `x` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn line_obs_set_x_n(
+    p: *mut LineHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].x = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `x` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn line_obs_get_x_n(
+    p: *const LineHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].x);
+    }
+    true
+}
+/// Sets `y` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn line_obs_set_y_n(
+    p: *mut LineHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].y = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `y` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn line_obs_get_y_n(
+    p: *const LineHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.obs;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].y);
+    }
+    true
+}
 #[no_mangle]
 pub unsafe extern "C" fn line_ob_x(p: *const Ob) -> f64 {
     (*p).x
@@ -2922,6 +3183,18 @@ pub unsafe extern "C" fn line_ob_y(p: *const Ob) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn line_ob_set_y(p: *mut Ob, v: f64) {
     (*p).y = v;
+}
+
+/// Assigns a slot record's masked leaves onto a `Ob`: 1 mask
+/// word(s), then 2 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_ob(e: &mut Ob, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.x = f64::from_bits(*s.add(1));
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.y = f64::from_bits(*s.add(2));
+    }
 }
 
 } // mod line
