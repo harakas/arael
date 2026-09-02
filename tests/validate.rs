@@ -181,3 +181,79 @@ fn numeric_gradient_matches_a_healthy_assembly() {
     // And the packaged comparison agrees.
     assert!(c.check_gradients(&params).is_clean());
 }
+
+// --- validate() leaves the model as it found it ---
+
+use arael::quatern::quaternd;
+use arael::simple_lm::LmConfig;
+use arael::transform::TransformParam;
+use arael::vect::vect3d;
+
+/// A pose seeing three world points in its own frame.
+#[arael::model]
+#[arael(constraint(hb, {
+    let r = frame.r2w.rotation_matrix;
+    let t = frame.r2w.translation;
+    let p1 = r.transpose() * (frame.x1 - t) - frame.m1;
+    let p2 = r.transpose() * (frame.x2 - t) - frame.m2;
+    let p3 = r.transpose() * (frame.x3 - t) - frame.m3;
+    [p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p3.x, p3.y, p3.z]
+}))]
+struct Frame {
+    r2w: TransformParam<f64>,
+    x1: vect3d, m1: vect3d,
+    x2: vect3d, m2: vect3d,
+    x3: vect3d, m3: vect3d,
+    hb: SelfBlock<Frame>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct Frames {
+    frames: refs::Vec<Frame>,
+}
+
+fn frames() -> Frames {
+    let mut w = Frames { frames: refs::Vec::new() };
+    let xs = [vect3d::new(1.0, 0.4, -0.3), vect3d::new(-0.5, 0.9, 0.2), vect3d::new(0.2, -0.7, 0.8)];
+    for k in 0..2 {
+        let t = vect3d::new(0.3 * k as f64, -0.2, 0.5);
+        let q = quaternd::from_axis_angle(vect3d::new(0.2, 0.5, 1.0).unit(), 0.4 + 0.3 * k as f64);
+        let r = q.rotation_matrix();
+        // measurements off the truth, so the cost is nonzero and moves with the pose
+        let m = |x: vect3d| r.transpose() * (x - t) + vect3d::new(0.01, -0.02, 0.03);
+        w.frames.push(Frame {
+            r2w: TransformParam::new(t, q),
+            x1: xs[0], m1: m(xs[0]), x2: xs[1], m2: m(xs[1]), x3: xs[2], m3: m(xs[2]),
+            hb: SelfBlock::new(),
+        });
+    }
+    w
+}
+
+/// The finite-difference pass used to leave the model at its last
+/// perturbation: a re-centring component's precomputed fields follow
+/// the working values, and the next `start()` adopted that perturbed
+/// translation as the pose's reference, moving the pose by one step.
+#[test]
+fn validate_does_not_move_the_model() {
+    let cfg = LmConfig { max_iters: 1, ..Default::default() };
+    let mut plain = frames();
+    let c0 = plain.solve_dense(&cfg).unwrap().start_cost;
+    let mut checked = frames();
+    let d = checked.validate();
+    assert!(d.is_clean(), "unexpected issues:\n{}", d);
+    let c1 = checked.solve_dense(&cfg).unwrap().start_cost;
+    assert_eq!(c0, c1, "validate() moved the model");
+
+    // numeric_gradient by itself: the pose reads the same before and after.
+    let mut w = frames();
+    let mut x = Vec::new();
+    w.serialize(&mut x);
+    let before = w.frames[1].r2w.translation;
+    let _ = w.numeric_gradient(&x);
+    let after = w.frames[1].r2w.translation;
+    assert_eq!((before.x, before.y, before.z), (after.x, after.y, after.z));
+    let c2 = w.solve_dense(&cfg).unwrap().start_cost;
+    assert_eq!(c0, c2, "numeric_gradient() moved the model");
+}

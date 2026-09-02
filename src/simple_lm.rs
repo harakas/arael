@@ -1106,6 +1106,11 @@ pub trait LmProblem<T> {
             x[i] = params[i];
             out.push((cp - cm) / (h + h));
         }
+        // Leave the problem evaluated at `params`, not at the last
+        // perturbation: a component's precomputed fields follow the working
+        // values, and a later `start()` would otherwise adopt the
+        // perturbed pose as its reference.
+        self.calc_cost(&x);
         out
     }
 
