@@ -1,0 +1,21 @@
+error: $DIR/tests/constraint_body_errors/transform_scale_on_rigid.rs:8: `.scale_factor` on a rigid transform (a TransformParam); only a ScaledTransformParam carries a scale
+ --> tests/constraint_body_errors/transform_scale_on_rigid.rs:6:1
+  |
+6 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `arael::model::SelfBlock`
+ --> tests/constraint_body_errors/transform_scale_on_rigid.rs:3:5
+  |
+3 | use arael::model::SelfBlock;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `arael::transform::TransformParam`
+ --> tests/constraint_body_errors/transform_scale_on_rigid.rs:4:5
+  |
+4 | use arael::transform::TransformParam;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

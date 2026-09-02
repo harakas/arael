@@ -35,6 +35,11 @@ pub enum SymVal {
         ea: vect3sym,       // get_euler_angles(R_ref * rotation(ea_delta))
         rot: matrix3sym,    // R_ref * rotation(ea_delta)
     },
+    /// A `TransformParam` / `ScaledTransformParam` field read as a value:
+    /// `*` acts on a point or composes, `inv()` inverts (lazily), and the
+    /// parts read back. Built from the field's already-bound parts, so
+    /// every derivative through it redirects to the Jacobian caches.
+    Transform(arael_sym::geo::transform3sym),
 }
 
 impl SymVal {
@@ -49,6 +54,7 @@ impl SymVal {
             SymVal::VecN(_) => "vect<N>",
             SymVal::MatN(_) => "matrix<R, C>",
             SymVal::UniversalEulerAngles { .. } => "universal_euler_angles",
+            SymVal::Transform(_) => "transform",
         }
     }
 }
@@ -275,7 +281,7 @@ fn symval_components(v: &SymVal) -> Option<Vec<(&'static str, E)>> {
         // Dynamic dims cannot carry 'static suffixes; symbolic-field
         // caching of N-dimensional values is unsupported.
         SymVal::VecN(_) | SymVal::MatN(_) => return None,
-        SymVal::UniversalEulerAngles { .. } => return None,
+        SymVal::UniversalEulerAngles { .. } | SymVal::Transform(_) => return None,
     })
 }
 
@@ -293,9 +299,63 @@ fn symval_from_components(shape: &SymVal, mut comps: Vec<E>) -> SymVal {
             t: c(0),
             v: vect3sym::from_components(c(1), c(2), c(3)),
         }),
-        SymVal::VecN(_) | SymVal::MatN(_) | SymVal::UniversalEulerAngles { .. } =>
+        SymVal::VecN(_) | SymVal::MatN(_) | SymVal::UniversalEulerAngles { .. }
+        | SymVal::Transform(_) =>
             unreachable!("guarded by symval_components"),
     }
+}
+
+/// `pose.tr2w` read as a value: when a dotted body path lands on a field
+/// of one of the transform builtins, the transform built from that
+/// field's already-bound parts (`rotation_matrix`, `translation`,
+/// `scale_factor`). Those bindings are the `cached()`-wrapped values the
+/// seeding pass made, so a derivative through the transform redirects to
+/// the `deriv =` caches exactly as a hand-written body's does. `None`
+/// for any other path.
+fn transform_at_path(ctx: &ConstraintCtx, path: &str) -> syn::Result<Option<SymVal>> {
+    let mut segs = path.split('.');
+    let head = segs.next().unwrap_or("");
+    let Some(mut cur) = ctx.entity_vars.get(head).cloned() else { return Ok(None) };
+    let mut leaf: Option<String> = None;
+    for seg in segs {
+        let Some(layout) = registry_lookup(&cur) else { return Ok(None) };
+        let Some((_, sft)) = layout.fields.iter().find(|(n, _)| n == seg) else {
+            return Ok(None);
+        };
+        match sft {
+            SymFieldType::Struct(inner) | SymFieldType::OptionalStruct(inner) => {
+                cur = inner.clone();
+                leaf = Some(inner.clone());
+            }
+            _ => return Ok(None),
+        }
+    }
+    let scaled = match leaf.as_deref() {
+        Some("TransformParam") | Some("TransformParamF") => false,
+        Some("ScaledTransformParam") | Some("ScaledTransformParamF") => true,
+        _ => return Ok(None),
+    };
+    let part = |name: &str| -> syn::Result<SymVal> {
+        ctx.bindings.get(&format!("{}.{}", path, name)).cloned().ok_or_else(|| {
+            syn::Error::new(proc_macro2::Span::call_site(),
+                format!("internal: transform part `{}.{}` is not bound", path, name))
+        })
+    };
+    let (SymVal::Mat3(rot), SymVal::Vec3(t)) = (part("rotation_matrix")?, part("translation")?)
+    else {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+            format!("internal: transform parts of `{}` have the wrong shapes", path)));
+    };
+    let v = if scaled {
+        let SymVal::Scalar(s) = part("scale_factor")? else {
+            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                format!("internal: `{}.scale_factor` is not a scalar", path)));
+        };
+        arael_sym::geo::transform3sym::scaled(rot, t, s)
+    } else {
+        arael_sym::geo::transform3sym::rigid(rot, t)
+    };
+    Ok(Some(SymVal::Transform(v)))
 }
 
 struct ConstraintCtx {
@@ -479,9 +539,30 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     return Ok(val.clone());
                 }
 
+            // A transform builtin named as a whole is a value of its own.
+            if !head_is_let
+                && let Some(ref path) = dotted
+                && let Some(val) = transform_at_path(ctx, path)? {
+                    return Ok(val);
+                }
+
             // Try evaluating the base for component access on known types
             if let Ok(base) = eval_expr(&ef.base, ctx) {
                 match (&base, field_name.as_str()) {
+                    // The parts of a transform value (an inverted one
+                    // materializes them here).
+                    (SymVal::Transform(t), "rotation_matrix") =>
+                        return Ok(SymVal::Mat3(t.rotation_matrix())),
+                    (SymVal::Transform(t), "translation") =>
+                        return Ok(SymVal::Vec3(t.translation())),
+                    (SymVal::Transform(t), "scale_factor") => {
+                        return match t.scale_factor() {
+                            Some(s) => Ok(SymVal::Scalar(s)),
+                            None => Err(syn::Error::new_spanned(expr,
+                                "`.scale_factor` on a rigid transform (a TransformParam); \
+                                 only a ScaledTransformParam carries a scale")),
+                        };
+                    }
                     // Vec3 component access
                     (SymVal::Vec3(v), "x") => return Ok(SymVal::Scalar(v.x.clone())),
                     (SymVal::Vec3(v), "y") => return Ok(SymVal::Scalar(v.y.clone())),
@@ -544,6 +625,31 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             let receiver = eval_expr(&mc.receiver, ctx)?;
             let method = mc.method.to_string();
             match (&receiver, method.as_str()) {
+                (SymVal::Transform(t), "inv") => {
+                    if !mc.args.is_empty() {
+                        return Err(syn::Error::new_spanned(&mc.method,
+                            ".inv() takes no arguments"));
+                    }
+                    Ok(SymVal::Transform(t.clone().inv()))
+                }
+                (SymVal::Transform(t),
+                 "transform" | "inverse_transform" | "rotate" | "inverse_rotate") => {
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method,
+                            format!(".{}() requires 1 argument", method)));
+                    }
+                    match eval_expr(&mc.args[0], ctx)? {
+                        SymVal::Vec3(v) => Ok(SymVal::Vec3(match method.as_str() {
+                            "transform" => t.transform(&v),
+                            "inverse_transform" => t.inverse_transform(&v),
+                            "rotate" => t.rotate(&v),
+                            _ => t.inverse_rotate(&v),
+                        })),
+                        other => Err(syn::Error::new_spanned(&mc.args[0],
+                            format!(".{}() on a transform requires a vec3 argument, got {}",
+                                method, other.type_name()))),
+                    }
+                }
                 (SymVal::Vec3(v), "rotation_matrix") => {
                     // cached() so the SimpleEulerAngleParam precompute substitution
                     // matches the entries (CSE still dedupes the shared sin/cos
@@ -700,6 +806,8 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     SymVal::VecN(v) => Ok(SymVal::VecN(-v)),
                     SymVal::MatN(m) => Ok(SymVal::MatN(arael_sym::matrixsym::from_rows(
                         m.rows.into_iter().map(|r| -r).collect()))),
+                    SymVal::Transform(_) => Err(syn::Error::new_spanned(expr,
+                        "a transform has no negation; `.inv()` is its inverse")),
                 },
                 _ => Err(syn::Error::new_spanned(expr, "unsupported unary operator")),
             }
@@ -1225,6 +1333,15 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Quat(a), SymVal::Quat(b)) => Ok(SymVal::Quat(a * b)), // Hamilton product
         (SymVal::Scalar(a), SymVal::Quat(b)) => Ok(SymVal::Quat(a * b)),
         (SymVal::Quat(a), SymVal::Scalar(b)) => Ok(SymVal::Quat(a * b)),
+        // A transform acts on a point and composes with a transform.
+        (SymVal::Transform(a), SymVal::Vec3(b)) => Ok(SymVal::Vec3(a * b)),
+        (SymVal::Transform(a), SymVal::Transform(b)) => Ok(SymVal::Transform(a * b)),
+        (SymVal::Vec3(_), SymVal::Transform(_)) => Err(syn::Error::new_spanned(span,
+            "a transform acts from the left: write `transform * point`")),
+        (SymVal::Transform(_), other) | (other, SymVal::Transform(_)) =>
+            Err(syn::Error::new_spanned(span,
+                format!("a transform multiplies a vec3 or another transform, not {}",
+                    other.type_name()))),
         // N-dimensional arms. Results narrow (dims 2/3 become the fixed
         // types); dims are checked here so mismatches carry the span.
         (SymVal::Scalar(a), SymVal::VecN(b)) => Ok(SymVal::VecN(b * a)),

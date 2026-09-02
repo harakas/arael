@@ -2338,7 +2338,11 @@ pub mod prelude {
         RootProblem,
     };
     pub use crate::angle::{AngleParam, AngleParamF};
-    pub use crate::transform::{ScaledTransformParam, ScaledTransformParamF, TransformParam, TransformParamF};
+    pub use crate::transform::{
+        ScaledTransformParam, ScaledTransformParamF, TransformParam, TransformParamF,
+        scaled_transform3, scaled_transform3d, scaled_transform3f,
+        transform3, transform3d, transform3f,
+    };
     pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
     pub use crate::quatern::{quaternd, quaternf};

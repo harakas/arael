@@ -54,10 +54,9 @@ struct PlaneLm<T: Float> {
 // M[1][0]) -- the c1/c2/c3 column arithmetic in the body.
 #[arael::model]
 #[arael(constraint(hb, {
-    let ra = a.r2w.rotation_matrix;
-    let rb = b.r2w.rotation_matrix;
-    let dt = ra.transpose() * (b.r2w.translation - a.r2w.translation) - odov.measured_translation;
-    let dr = odov.measured_rotation_transposed * (ra.transpose() * rb);
+    let rel = a.r2w.inv() * b.r2w;
+    let dt = rel.translation - odov.measured_translation;
+    let dr = odov.measured_rotation_transposed * rel.rotation_matrix;
     let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
     let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
     let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);

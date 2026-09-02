@@ -18,4 +18,8 @@ fn constraint_body_compile_errors() {
     t.compile_fail("tests/constraint_body_errors/vectn_dim_mismatch.rs");
     t.compile_fail("tests/constraint_body_errors/vectn_nonliteral_index.rs");
     t.compile_fail("tests/constraint_body_errors/vectn_nonliteral_dim.rs");
+    t.compile_fail("tests/constraint_body_errors/transform_neg.rs");
+    t.compile_fail("tests/constraint_body_errors/transform_right_mul.rs");
+    t.compile_fail("tests/constraint_body_errors/transform_residual.rs");
+    t.compile_fail("tests/constraint_body_errors/transform_scale_on_rigid.rs");
 }

@@ -195,6 +195,7 @@ Fixed-shape symbolic vectors/matrices live in `arael_sym::geo`. They're used by 
 | `vectsym`        | `vect<T, N>`             | `e: Vec<E>`, dims checked at use   |
 | `matrixsym`      | `matrix<T, R, C>`        | `rows: Vec<vectsym>`               |
 | `quaternsym`     | `quaternf` / `quaternd`  | `.t` (scalar) + `.v` (vect3sym)    |
+| `transform3sym`  | `TransformParam` / `ScaledTransformParam` | `rot`, `t`, optional `scale`, lazy inverse |
 
 ### vect2sym / vect3sym
 
@@ -287,6 +288,31 @@ runtime operations (`pow`, `log`, `exp`, `slerp`, `from_two_vectors`,
 `get_axis_angle`) are deliberately absent: constraint expressions must
 stay continuous (see TODO.md). `get_euler_angles` uses `safe_asin` for
 the pitch instead of the runtime's boundary branches.
+
+### transform3sym
+
+A rigid or similarity transform acting on a point as `s (R x) + t`
+(`s = 1` when rigid):
+
+```rust
+let a = transform3sym::rigid(matrix3sym::new("ra"), vect3sym::new("ta"));
+let b = transform3sym::scaled(matrix3sym::new("rb"), vect3sym::new("tb"), symbol("s"));
+let x = vect3sym::new("x");
+let y = a.clone() * x.clone();                 // ra * x + ta
+let z = a.clone().inv() * x.clone();           // ra^T * (x - ta)
+let ab = a.clone() * b.clone();                // composition: b first, then a
+let (r, t, s) = ab.parts();                    // (ra * rb, ra * tb + ta, Some(s))
+let p = a.transform(&x);                       // the named forms
+let q = a.inverse_transform(&x);
+let v = a.rotate(&x);                          // ra * x, never scaled
+let w = a.inverse_rotate(&x);
+```
+
+`inv()` is lazy: it flips a flag, and an inverted value acts as
+`R^T (x - t) / s` directly, the form a hand-written body has. Only
+`compose` (and the part accessors `rotation_matrix`, `translation`,
+`scale_factor` on an inverted value) materialize `R^T`, `-R^T t / s`,
+`1 / s`. `inv().inv()` is the original at no cost.
 
 ### Use in constraint bodies
 

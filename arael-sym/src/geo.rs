@@ -1342,6 +1342,270 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+// transform3sym
+// ---------------------------------------------------------------------------
+
+/// Symbolic rigid or similarity transform: acts on a point as
+/// `s (R x) + t`, with `s = 1` when there is no scale.
+///
+/// The inverse is lazy. `inv()` only flips a flag; an inverted value
+/// applies as `R^T (x - t) / s`, the form a body writes by hand, so the
+/// operator spelling costs exactly what the hand-written one does. Only
+/// composition materializes an inverted operand into forward parts.
+#[derive(Clone)]
+pub struct transform3sym {
+    /// Rotation of the forward transform.
+    pub rot: matrix3sym,
+    /// Translation of the forward transform.
+    pub t: vect3sym,
+    /// Uniform scale of the forward transform; `None` for a rigid one.
+    pub scale: Option<E>,
+    inverted: bool,
+}
+
+impl transform3sym {
+    /// A rigid transform `x -> R x + t`.
+    pub fn rigid(rot: matrix3sym, t: vect3sym) -> Self {
+        transform3sym { rot, t, scale: None, inverted: false }
+    }
+
+    /// A similarity transform `x -> s (R x) + t`.
+    pub fn scaled(rot: matrix3sym, t: vect3sym, scale: E) -> Self {
+        transform3sym { rot, t, scale: Some(scale), inverted: false }
+    }
+
+    /// Whether the value carries a scale.
+    pub fn is_scaled(&self) -> bool {
+        self.scale.is_some()
+    }
+
+    /// Whether the value is the lazy inverse of its stored parts.
+    pub fn is_inverted(&self) -> bool {
+        self.inverted
+    }
+
+    /// The inverse transform. Free: it flips a flag; `inv().inv()` is the
+    /// original.
+    pub fn inv(mut self) -> Self {
+        self.inverted = !self.inverted;
+        self
+    }
+
+    /// The forward parts `(R, t, s)` of the value as it stands: the stored
+    /// ones, or for an inverted value `R^T`, `-R^T t / s`, `1 / s`.
+    pub fn parts(&self) -> (matrix3sym, vect3sym, Option<E>) {
+        if !self.inverted {
+            return (self.rot.clone(), self.t.clone(), self.scale.clone());
+        }
+        let rt = self.rot.transpose();
+        let rtt = rt.clone() * self.t.clone();
+        match &self.scale {
+            None => (rt, -rtt, None),
+            Some(s) => (rt, -(rtt / s.clone()), Some(crate::constant(1.0) / s.clone())),
+        }
+    }
+
+    /// The rotation matrix of the value as it stands.
+    pub fn rotation_matrix(&self) -> matrix3sym {
+        if self.inverted { self.rot.transpose() } else { self.rot.clone() }
+    }
+
+    /// The translation of the value as it stands.
+    pub fn translation(&self) -> vect3sym {
+        self.parts().1
+    }
+
+    /// The scale of the value as it stands; `None` for a rigid one.
+    pub fn scale_factor(&self) -> Option<E> {
+        self.parts().2
+    }
+
+    /// The action on a point: `s (R x) + t`, or `R^T (x - t) / s` for an
+    /// inverted value.
+    pub fn transform(&self, x: &vect3sym) -> vect3sym {
+        if !self.inverted {
+            let rx = self.rot.clone() * x.clone();
+            let srx = match &self.scale {
+                None => rx,
+                Some(s) => rx * s.clone(),
+            };
+            srx + self.t.clone()
+        } else {
+            let rtd = self.rot.transpose() * (x.clone() - self.t.clone());
+            match &self.scale {
+                None => rtd,
+                Some(s) => rtd / s.clone(),
+            }
+        }
+    }
+
+    /// The action of the inverse on a point.
+    pub fn inverse_transform(&self, y: &vect3sym) -> vect3sym {
+        self.clone().inv().transform(y)
+    }
+
+    /// The rotation alone applied to a direction: `R v`, never scaled.
+    pub fn rotate(&self, v: &vect3sym) -> vect3sym {
+        self.rotation_matrix() * v.clone()
+    }
+
+    /// The inverse rotation alone: `R^T v`, never scaled.
+    pub fn inverse_rotate(&self, v: &vect3sym) -> vect3sym {
+        self.clone().inv().rotate(v)
+    }
+
+    /// Composition `self * rhs`: applying `rhs` first, then `self`.
+    /// `(R_a R_b, s_a (R_a t_b) + t_a, s_a s_b)`; a rigid operand
+    /// composes as scale one.
+    ///
+    /// The relative pose `a.inv() * b` is written in its factored form,
+    /// `(R_a^T R_b, R_a^T (t_b - t_a) / s_a, s_b / s_a)`: one matrix-vector
+    /// product, as a body spells it by hand, instead of the two the
+    /// materialized inverse would give.
+    pub fn compose(&self, rhs: &transform3sym) -> transform3sym {
+        if self.inverted && !rhs.inverted {
+            let rt = self.rot.transpose();
+            let rot = rt.clone() * rhs.rot.clone();
+            let d = rt * (rhs.t.clone() - self.t.clone());
+            let (t, scale) = match (&self.scale, &rhs.scale) {
+                (None, None) => (d, None),
+                (None, Some(b)) => (d, Some(b.clone())),
+                (Some(a), None) => (d / a.clone(), Some(crate::constant(1.0) / a.clone())),
+                (Some(a), Some(b)) => (d / a.clone(), Some(b.clone() / a.clone())),
+            };
+            return transform3sym { rot, t, scale, inverted: false };
+        }
+        let (ra, ta, sa) = self.parts();
+        let (rb, tb, sb) = rhs.parts();
+        let rot = ra.clone() * rb;
+        let ratb = ra * tb;
+        let t = match &sa {
+            None => ratb,
+            Some(s) => ratb * s.clone(),
+        } + ta;
+        let scale = match (sa, sb) {
+            (None, None) => None,
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (Some(a), Some(b)) => Some(a * b),
+        };
+        transform3sym { rot, t, scale, inverted: false }
+    }
+}
+
+impl ops::Mul<vect3sym> for transform3sym {
+    type Output = vect3sym;
+    fn mul(self, rhs: vect3sym) -> vect3sym {
+        self.transform(&rhs)
+    }
+}
+
+impl ops::Mul<transform3sym> for transform3sym {
+    type Output = transform3sym;
+    fn mul(self, rhs: transform3sym) -> transform3sym {
+        self.compose(&rhs)
+    }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+
+    fn same(a: &E, b: &E) -> bool {
+        format!("{}", a.clone().simplify()) == format!("{}", b.clone().simplify())
+    }
+
+    fn same_vec(a: &vect3sym, b: &vect3sym) {
+        assert!(same(&a.x, &b.x) && same(&a.y, &b.y) && same(&a.z, &b.z),
+            "\n  got  ({}, {}, {})\n  want ({}, {}, {})",
+            a.x.clone().simplify(), a.y.clone().simplify(), a.z.clone().simplify(),
+            b.x.clone().simplify(), b.y.clone().simplify(), b.z.clone().simplify());
+    }
+
+    fn same_mat(a: &matrix3sym, b: &matrix3sym) {
+        for i in 0..3 {
+            same_vec(&a.rows[i], &b.rows[i]);
+        }
+    }
+
+    /// The operator forms build the expressions a body writes by hand.
+    #[test]
+    fn actions_match_the_hand_written_forms() {
+        let r = matrix3sym::new("r");
+        let t = vect3sym::new("t");
+        let x = vect3sym::new("x");
+        let s = symbol("s");
+        let rigid = transform3sym::rigid(r.clone(), t.clone());
+        same_vec(&(rigid.clone() * x.clone()), &(r.clone() * x.clone() + t.clone()));
+        same_vec(&rigid.transform(&x), &(r.clone() * x.clone() + t.clone()));
+        same_vec(&(rigid.clone().inv() * x.clone()),
+                 &(r.transpose() * (x.clone() - t.clone())));
+        same_vec(&rigid.inverse_transform(&x), &(r.transpose() * (x.clone() - t.clone())));
+        same_vec(&rigid.rotate(&x), &(r.clone() * x.clone()));
+        same_vec(&rigid.inverse_rotate(&x), &(r.transpose() * x.clone()));
+        let sim = transform3sym::scaled(r.clone(), t.clone(), s.clone());
+        same_vec(&(sim.clone() * x.clone()), &(r.clone() * x.clone() * s.clone() + t.clone()));
+        same_vec(&(sim.clone().inv() * x.clone()),
+                 &(r.transpose() * (x.clone() - t.clone()) / s.clone()));
+        same_vec(&sim.rotate(&x), &(r.clone() * x.clone()));
+    }
+
+    /// `inv()` is free and self-cancelling; parts of an inverted value
+    /// materialize on demand.
+    #[test]
+    fn inverse_is_lazy() {
+        let r = matrix3sym::new("r");
+        let t = vect3sym::new("t");
+        let s = symbol("s");
+        let sim = transform3sym::scaled(r.clone(), t.clone(), s.clone());
+        assert!(sim.clone().inv().is_inverted());
+        assert!(!sim.clone().inv().inv().is_inverted());
+        same_mat(&sim.clone().inv().rotation_matrix(), &r.transpose());
+        same_vec(&sim.clone().inv().translation(),
+                 &(-(r.transpose() * t.clone() / s.clone())));
+        assert!(same(&sim.inv().scale_factor().unwrap(), &(crate::constant(1.0) / s)));
+    }
+
+    /// Composition: the relative pose `a^-1 b` as the plane and pgo
+    /// benchmarks spell it by hand.
+    #[test]
+    fn composition_matches_the_relative_pose_form() {
+        let ra = matrix3sym::new("ra");
+        let ta = vect3sym::new("ta");
+        let rb = matrix3sym::new("rb");
+        let tb = vect3sym::new("tb");
+        let a = transform3sym::rigid(ra.clone(), ta.clone());
+        let b = transform3sym::rigid(rb.clone(), tb.clone());
+        // The relative pose keeps the factored, hand-written form.
+        let rel = a.clone().inv() * b.clone();
+        same_mat(&rel.rotation_matrix(), &(ra.transpose() * rb.clone()));
+        same_vec(&rel.translation(), &(ra.transpose() * (tb.clone() - ta.clone())));
+        let s = symbol("s");
+        let srel = transform3sym::scaled(ra.clone(), ta.clone(), s.clone()).inv()
+            * transform3sym::scaled(rb.clone(), tb.clone(), symbol("u"));
+        same_vec(&srel.translation(), &(ra.transpose() * (tb.clone() - ta.clone()) / s.clone()));
+        assert!(same(&srel.scale_factor().unwrap(), &(symbol("u") / s.clone())));
+        // The other inverse placements materialize.
+        let bia = b.clone() * a.clone().inv();
+        same_vec(&bia.translation(), &(rb.clone() * (-(ra.transpose() * ta.clone())) + tb.clone()));
+        // Forward composition and a scaled operand.
+        let ab = a.clone() * b.clone();
+        same_mat(&ab.rotation_matrix(), &(ra.clone() * rb.clone()));
+        same_vec(&ab.translation(), &(ra.clone() * tb.clone() + ta.clone()));
+        assert!(!ab.is_scaled());
+        let s = symbol("s");
+        let sb = transform3sym::scaled(rb.clone(), tb.clone(), s.clone());
+        let asb = a * sb;
+        same_vec(&asb.translation(), &(ra.clone() * tb.clone() + ta.clone()));
+        assert!(same(&asb.scale_factor().unwrap(), &s));
+        let sa = transform3sym::scaled(ra.clone(), ta.clone(), s.clone());
+        let sab = sa * b;
+        same_vec(&sab.translation(), &(ra * tb * s.clone() + ta));
+        assert!(same(&sab.scale_factor().unwrap(), &s));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // vectsym -- symbolic N-dimensional vector
 // ---------------------------------------------------------------------------
 

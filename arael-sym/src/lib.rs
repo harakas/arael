@@ -1931,7 +1931,7 @@ fn fast_atan2_eval(y: f64, x: f64) -> f64 {
 // Re-export linalg types
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use parse::{parse, parse_with_functions, ParseError};
-pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym, vectsym, matrixsym};
+pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym, transform3sym, vectsym, matrixsym};
 pub use cse::cse;
 pub use arael_sym_macros::sym;
 

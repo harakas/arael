@@ -874,6 +874,31 @@ code. The dialect:
   path suffix, so any spelling ending in `matrix3sym::rotation_from_
   axis_angle` works. Full surface: [SYM.md](SYM.md), "Geometric
   Primitives".
+- **Transforms**: a `TransformParam` or `ScaledTransformParam` field
+  named as a whole is a value with the transform's algebra. With the
+  frame convention `tr2w` (robot to world), `pose.tr2w * pos_r` is
+  `pos_w`:
+
+  | spelling | meaning |
+  |---|---|
+  | `tr2w * x`, `tr2w.transform(x)` | `R x + t`; `s (R x) + t` for a similarity |
+  | `tr2w.inv() * y`, `tr2w.inverse_transform(y)` | `R^T (y - t)`; `/ s` for a similarity |
+  | `tr2w.rotate(v)`, `tr2w.inverse_rotate(v)` | `R v`, `R^T v`, never scaled |
+  | `a.r2w.inv() * b.r2w` | composition: b's frame expressed in a's |
+  | `.rotation_matrix`, `.translation`, `.scale_factor` | the parts of any transform value |
+
+  `*` is left-associative, so `a * b * x` is `(a * b) * x`. The
+  generated code is the same as the hand-written composition (the
+  transform reads the same cached parts and Jacobian caches), and
+  `inv()` is lazy, so `tr2w.inv() * y` emits `R^T (y - t)` as written
+  by hand. A transform cannot be a residual, a `symbolic =` field, a
+  function argument, negated, or multiplied from the right.
+  The same names exist at runtime on the params, reading the cached
+  parts a body reads: `pose.r2w.transform(x)`, `&pose.r2w * x`,
+  `pose.r2w.inv() * &other.r2w`. `inv()` and compositions return the
+  plain values `arael::transform::transform3` (rigid) and
+  `scaled_transform3` (with a scale); a rigid result stays rigid, so
+  it never pays for a scale it does not have.
 - **Option fields**: reading through an `Option` struct field is an
   unwrap -- the constraint must be guarded so the body never evaluates
   when the field is `None`, or the first `None` panics at solve time.
