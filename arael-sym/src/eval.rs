@@ -54,6 +54,13 @@ impl Expr {
                 // evaluated, matching the generated if/else.
                 if q.eval(vars)? >= 0.0 { a.eval(vars) } else { b.eval(vars) }
             }
+            Expr::Select { index, arms, default } => {
+                // Only the taken arm is evaluated, matching the generated match.
+                match select_arm(index.eval(vars)?, arms.len(), default.is_some())? {
+                    Some(i) => arms[i].eval(vars),
+                    None => default.as_ref().unwrap().eval(vars),
+                }
+            }
             Expr::Func { params, kind, args, .. } => {
                 if let Some(f) = kind.eval_fn() {
                     let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
@@ -106,6 +113,11 @@ impl Expr {
             Expr::Heaviside(a) => E::new(Expr::Heaviside(a.subs_by_name(var, replacement))),
             Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs_by_name(var, replacement), lo.subs_by_name(var, replacement), hi.subs_by_name(var, replacement))),
             Expr::Branch(q, a, b) => E::new(Expr::Branch(q.subs_by_name(var, replacement), a.subs_by_name(var, replacement), b.subs_by_name(var, replacement))),
+            Expr::Select { index, arms, default } => E::new(Expr::Select {
+                index: index.subs_by_name(var, replacement),
+                arms: arms.iter().map(|a| a.subs_by_name(var, replacement)).collect(),
+                default: default.as_ref().map(|d| d.subs_by_name(var, replacement)),
+            }),
             Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.subs_by_name(var, replacement)).collect();
                 // Captured symbols: substitute inside the body/derivs too,
@@ -161,6 +173,11 @@ impl Expr {
                 lo.collect_vars(set);
                 hi.collect_vars(set);
             }
+            Expr::Select { index, arms, default } => {
+                index.collect_vars(set);
+                for a in arms { a.collect_vars(set); }
+                if let Some(d) = default { d.collect_vars(set); }
+            }
             Expr::Func { name: _, params, kind, args } => {
                 for arg in args { arg.collect_vars(set); }
                 // Captured symbols: body may reference symbols beyond its
@@ -181,5 +198,23 @@ impl Expr {
     /// Equivalent to calling [`Expr::diff`] for each variable in order.
     pub fn diff_all(&self, vars: &[&str]) -> Vec<E> {
         vars.iter().map(|v| self.diff(v)).collect()
+    }
+}
+
+/// Resolve a select index the way the generated `match` does: the value
+/// must be an exact integer (a NaN or fractional index is an error, as the
+/// runtime `SelectIndex` conversion panics on it); `0..n` names an arm, any
+/// other value takes the default (`None`) or is an error when there is none.
+pub(crate) fn select_arm(v: f64, n: usize, has_default: bool) -> Result<Option<usize>, String> {
+    if !v.is_finite() || v.fract() != 0.0 {
+        return Err(format!("select index {v} is not an integer"));
+    }
+    if v >= 0.0 && v < n as f64 {
+        return Ok(Some(v as usize));
+    }
+    if has_default {
+        Ok(None)
+    } else {
+        Err(format!("select index {v} out of range 0..{n}"))
     }
 }

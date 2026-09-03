@@ -198,7 +198,7 @@ pub(crate) fn generate_symbolic_precompute(
         }
     }
     let exprs: Vec<E> = assigns.iter().map(|(_, e, _)| e.clone()).collect();
-    let (inters, outs) = arael_sym::cse(&exprs);
+    let (inters, outs) = arael_sym::cse_scoped(&exprs);
     // In a generic `T: Float` struct an unsuffixed literal cannot infer
     // its type; emit every literal through a local conversion closure.
     // The closure's explicit return type pins each `__c(lit)` to the
@@ -216,11 +216,8 @@ pub(crate) fn generate_symbolic_precompute(
             let __c = |v: f64| -> #sg { #sg::from(v).unwrap() };
         });
     }
-    for (iname, e) in &inters {
-        let id = syn::Ident::new(iname, sp);
-        let code = emit(e)?;
-        stmts.push(quote! { let #id = #code; });
-    }
+    stmts.push(quote! { use arael::utils::{Float as _, SelectIndex as _}; });
+    stmts.extend(cse_stmts(&inters, if generic { None } else { Some("") })?);
     // Values unconditionally; deriv-cache stores grouped per `by` param and
     // guarded on it being optimized -- a fixed param's Jacobian entries are
     // never read, so filling its cache would be pure waste.
@@ -2576,6 +2573,26 @@ fn parse_sym_code(code: &str) -> syn::Result<Expr> {
     })
 }
 
+/// The statements of a CSE result: plain `let`s and the fused select
+/// matches. `float_type` is `None` for the generic `T: Float` form, else
+/// the literal suffix (`""` for none).
+pub(crate) fn cse_stmts(
+    inters: &[arael_sym::cse::Intermediate],
+    float_type: Option<&str>,
+) -> syn::Result<Vec<TokenStream2>> {
+    inters.iter().map(|it| {
+        let code = match float_type {
+            Some(ft) => it.to_rust(ft),
+            None => it.to_rust_generic(),
+        };
+        let stmt: syn::Stmt = syn::parse_str(&code).map_err(|e| {
+            syn::Error::new(proc_macro2::Span::call_site(),
+                format!("failed to parse generated code: {}\ncode: {}", e, &code[..code.len().min(200)]))
+        })?;
+        Ok(quote! { #stmt })
+    }).collect()
+}
+
 fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String>)> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
@@ -4880,13 +4897,8 @@ pub fn generate_root_methods(
             if want_weight { exprs.push(loss_e.diff(LOSS_ARG_SYM)); }
             apply_substitutions(&mut exprs, &all_subs);
             if fast_atan { replace_atan_fast(&mut exprs); }
-            let (ints, simplified) = arael_sym::cse(&exprs);
-            let mut stmts = Vec::new();
-            for (name, expr) in &ints {
-                let ni = syn::Ident::new(name, proc_macro2::Span::call_site());
-                let code: Expr = parse_sym_code(&expr.to_rust(""))?;
-                stmts.push(quote! { let #ni = #code; });
-            }
+            let (ints, simplified) = arael_sym::cse_scoped(&exprs);
+            let stmts = cse_stmts(&ints, Some(""))?;
             let rho_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
             let weight_stmt = if want_weight {
                 let w_code: Expr = parse_sym_code(&simplified[1].to_rust(""))?;
@@ -4930,14 +4942,10 @@ pub fn generate_root_methods(
         let mut cost_exprs = residual_exprs.clone();
         apply_substitutions(&mut cost_exprs, &all_subs);
         if fast_atan { replace_atan_fast(&mut cost_exprs); }
-        let (cost_intermediates, cost_simplified) = arael_sym::cse(&cost_exprs);
+        let (cost_intermediates, cost_simplified) = arael_sym::cse_scoped(&cost_exprs);
         let mut cost_stmts = Vec::new();
         cost_stmts.push(block_cost_decl.clone());
-        for (name, expr) in &cost_intermediates {
-            let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
-            let code: Expr = parse_sym_code(&expr.to_rust(""))?;
-            cost_stmts.push(quote! { let #name_ident= #code; });
-        }
+        cost_stmts.extend(cse_stmts(&cost_intermediates, Some(""))?);
         for (ri, r) in cost_simplified.iter().enumerate() {
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&r.to_rust(""))?;
@@ -4961,7 +4969,7 @@ pub fn generate_root_methods(
         // Apply substitutions AFTER differentiation, BEFORE CSE
         apply_substitutions(&mut all_gh_exprs, &all_subs);
         if fast_atan { replace_atan_fast(&mut all_gh_exprs); }
-        let (gh_intermediates, gh_simplified) = arael_sym::cse(&all_gh_exprs);
+        let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
 
         let mut gh_stmts = Vec::new();
         gh_stmts.push(block_cost_decl.clone());
@@ -5014,11 +5022,7 @@ pub fn generate_root_methods(
             Some(quote! { #access.#block_ident })
         } else { None };
 
-        for (name, expr) in &gh_intermediates {
-            let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
-            let code: Expr = parse_sym_code(&expr.to_rust(""))?;
-            gh_stmts.push(quote! { let #name_ident= #code; });
-        }
+        gh_stmts.extend(cse_stmts(&gh_intermediates, Some(""))?);
 
         // Pre-residual setup for the owned-triplet forms ([hb, root.hbt]
         // and [hb, parent.hbt]): build __all_idx (concatenation of entity
@@ -5394,11 +5398,7 @@ pub fn generate_root_methods(
         let mut jac_stmts = Vec::new();
         if jacobian {
             // Reuse the same CSE'd expressions
-            for (name, expr) in &gh_intermediates {
-                let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
-                let code: Expr = parse_sym_code(&expr.to_rust(""))?;
-                jac_stmts.push(quote! { let #name_ident= #code; });
-            }
+            jac_stmts.extend(cse_stmts(&gh_intermediates, Some(""))?);
             // Under a robust loss, rows and entries are scaled by
             // sqrt(rho'(s)) -- the same weight the gradient/Hessian
             // assembly applies -- so J^T J and 2 J^T r reproduce the
@@ -5409,13 +5409,8 @@ pub fn generate_root_methods(
                 let mut exprs = vec![loss_e.diff(LOSS_ARG_SYM)];
                 apply_substitutions(&mut exprs, &all_subs);
                 if fast_atan { replace_atan_fast(&mut exprs); }
-                let (ints, simplified) = arael_sym::cse(&exprs);
-                let mut stmts = Vec::new();
-                for (name, expr) in &ints {
-                    let ni = syn::Ident::new(name, proc_macro2::Span::call_site());
-                    let code: Expr = parse_sym_code(&expr.to_rust(""))?;
-                    stmts.push(quote! { let #ni = #code; });
-                }
+                let (ints, simplified) = arael_sym::cse_scoped(&exprs);
+                let stmts = cse_stmts(&ints, Some(""))?;
                 let w_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
                 (
                     quote! {
@@ -7081,7 +7076,7 @@ pub fn generate_root_methods(
             fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
-                use arael::utils::Float as _;
+                use arael::utils::{Float as _, SelectIndex as _};
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
                 arael::model::Model::zero_blocks(self);
@@ -7116,7 +7111,7 @@ pub fn generate_root_methods(
                     // The robustified per-label cost: each constraint's
                     // cost pass (rho(s) under a loss) shadowed into its
                     // label's slot, so the table sums to calc_cost.
-                    use arael::utils::Float as _;
+                    use arael::utils::{Float as _, SelectIndex as _};
                     arael::model::Model::update_params(self, params);
                     #ext_update
                     #[allow(unused_variables)]
@@ -7131,7 +7126,7 @@ pub fn generate_root_methods(
                 fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
                     // Generated expressions may call Float trait methods
                     // (e.g. heaviside from safe-function derivatives).
-                    use arael::utils::Float as _;
+                    use arael::utils::{Float as _, SelectIndex as _};
                     arael::model::Model::update_params(self, params);
                     #ext_update
                     // Read-only traversal: a plain shared reborrow suffices.
@@ -7192,7 +7187,7 @@ pub fn generate_root_methods(
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
-                use arael::utils::Float as _;
+                use arael::utils::{Float as _, SelectIndex as _};
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
                 // Read-only traversal: a plain shared reborrow suffices.

@@ -3794,13 +3794,9 @@ fn generate_fit_impl(
         if want_weight {
             exprs.push(rho.diff(constraint::LOSS_ARG_SYM));
         }
-        let (ints, simplified) = arael_sym::cse(&exprs);
+        let (ints, simplified) = arael_sym::cse_scoped(&exprs);
         let mut stmts = vec![quote! { let #loss_arg_id: #prec_type = __r * __r; }];
-        for (nm, e) in &ints {
-            let id = proc_macro2::Ident::new(nm, proc_macro2::Span::call_site());
-            let code: Expr = syn::parse_str(&e.to_rust(prec))?;
-            stmts.push(quote! { let #id = #code; });
-        }
+        stmts.extend(constraint::cse_stmts(&ints, Some(prec))?);
         if want_weight {
             let w_code: Expr = syn::parse_str(&simplified[1].to_rust(prec))?;
             stmts.push(quote! { let __w: #prec_type = #w_code; });
@@ -3868,6 +3864,7 @@ fn generate_fit_impl(
     Ok(quote! {
         impl arael::simple_lm::LmProblem<#prec_type> for #name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
+                use arael::utils::{Float as _, SelectIndex as _};
                 #(#param_unpack)*
                 #(#constant_bind)*
                 let mut __cost = (0.0 as #prec_type);
@@ -3886,6 +3883,7 @@ fn generate_fit_impl(
                 grad: &mut [#prec_type],
                 hessian: &mut [#prec_type],
             ) -> #prec_type {
+                use arael::utils::{Float as _, SelectIndex as _};
                 #(#param_unpack)*
                 #(#constant_bind)*
                 grad.iter_mut().for_each(|g| *g = 0.0);

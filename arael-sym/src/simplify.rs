@@ -823,6 +823,33 @@ impl Expr {
                     E::new(Expr::Branch(q2, a2, b2))
                 }
             }
+            Expr::Select { index, arms, default } => {
+                let index2 = index.simplify_once();
+                let arms2: Vec<E> = arms.iter().map(|a| a.simplify_once()).collect();
+                let default2 = default.as_ref().map(|d| d.simplify_once());
+                // A constant index folds to the taken arm. An out-of-range
+                // constant without a default stays a node and panics at
+                // runtime, as the generated match would.
+                if let Expr::Const(v) = index2.as_ref()
+                    && let Ok(taken) = crate::eval::select_arm(*v, arms2.len(), default2.is_some()) {
+                        return match taken {
+                            Some(i) => arms2[i].clone(),
+                            None => default2.unwrap(),
+                        };
+                    }
+                let same = std::rc::Rc::ptr_eq(&index2.0, &index.0)
+                    && arms2.iter().zip(arms).all(|(n, o)| std::rc::Rc::ptr_eq(&n.0, &o.0))
+                    && match (&default2, default) {
+                        (Some(n), Some(o)) => std::rc::Rc::ptr_eq(&n.0, &o.0),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                if same {
+                    orig.clone()
+                } else {
+                    E::new(Expr::Select { index: index2, arms: arms2, default: default2 })
+                }
+            }
             Expr::Atan2(y, x) => {
                 let y2 = y.simplify_once();
                 let x2 = x.simplify_once();
@@ -925,6 +952,11 @@ impl Expr {
             Expr::Heaviside(a) => E::new(Expr::Heaviside(a.expand_inner())),
             Expr::Clamp(val, lo, hi) => E::new(Expr::Clamp(val.expand_inner(), lo.expand_inner(), hi.expand_inner())),
             Expr::Branch(q, a, b) => E::new(Expr::Branch(q.expand_inner(), a.expand_inner(), b.expand_inner())),
+            Expr::Select { index, arms, default } => E::new(Expr::Select {
+                index: index.expand_inner(),
+                arms: arms.iter().map(|a| a.expand_inner()).collect(),
+                default: default.as_ref().map(|d| d.expand_inner()),
+            }),
             Expr::Func { name, params, kind, args } => {
                 let expanded_args: Vec<E> = args.iter().map(|a| a.expand_inner()).collect();
                 if let Some(body) = kind.body() {

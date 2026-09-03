@@ -4,7 +4,7 @@
 ///
 /// Extends `num::Float` with degree/radian conversions, angle normalization,
 /// numeric constants, and a fast approximate atan.
-pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAssign + std::ops::MulAssign + crate::model::ParamType + 'static {
+pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAssign + std::ops::MulAssign + crate::model::ParamType + SelectIndex + 'static {
     /// Convert degrees to radians.
     fn deg2rad(self) -> Self {
         self.to_radians()
@@ -171,6 +171,39 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
     }
 }
 
+/// The integer a generated `match` switches on for a select index (a
+/// `match` in a constraint body, `loss_select`). Exact for integer and
+/// `bool` fields. A float index must be a finite integer value; anything
+/// else is a model bug and panics rather than silently taking arm 0.
+pub trait SelectIndex {
+    fn select_index(self) -> i64;
+}
+
+macro_rules! select_index_int {
+    ($($t:ty),*) => { $(
+        impl SelectIndex for $t {
+            #[inline]
+            fn select_index(self) -> i64 { self as i64 }
+        }
+    )* };
+}
+select_index_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, bool);
+
+macro_rules! select_index_float {
+    ($($t:ty),*) => { $(
+        impl SelectIndex for $t {
+            #[inline]
+            fn select_index(self) -> i64 {
+                if !self.is_finite() || self.fract() != 0.0 {
+                    panic!("select index {} is not an integer", self);
+                }
+                self as i64
+            }
+        }
+    )* };
+}
+select_index_float!(f32, f64);
+
 impl Float for f32 {
     fn pi() -> f32 { std::f32::consts::PI }
     fn two() -> f32 { 2.0f32 }
@@ -268,6 +301,30 @@ pub(crate) use left_side_scalar_multiplication;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_index_exact_for_integers_and_bool() {
+        assert_eq!(3u32.select_index(), 3);
+        assert_eq!((-2i32).select_index(), -2);
+        assert_eq!(7usize.select_index(), 7);
+        assert_eq!(u64::MAX.select_index(), -1);
+        assert_eq!(true.select_index(), 1);
+        assert_eq!(false.select_index(), 0);
+        assert_eq!(2.0f64.select_index(), 2);
+        assert_eq!((-1.0f32).select_index(), -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "select index NaN is not an integer")]
+    fn select_index_nan_panics() {
+        let _ = f64::NAN.select_index();
+    }
+
+    #[test]
+    #[should_panic(expected = "select index 1.5 is not an integer")]
+    fn select_index_fraction_panics() {
+        let _ = 1.5f64.select_index();
+    }
 
     fn equal<T: Float>(a: T, b: T) -> bool {
         (a - b).abs() < T::from(10).unwrap() * (a.abs() + b.abs() + T::epsilon()) * T::epsilon()

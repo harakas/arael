@@ -395,6 +395,49 @@ let df_dy = 200.0_f64 * __x0;
 
 `y - x*x` and `1 - x` each appear once, as `__x0` and `__x1`, rather than being recomputed at every use. CSE is applied automatically by `arael`'s constraint code-generation macro, where batches grow much larger -- one SLAM constraint went from 47000 ops to ~400 after CSE.
 
+### `cse_scoped`: CSE when the batch contains `select`
+
+`select(i, a0, a1, ...)` picks one of several expressions by an integer at runtime (see Switching and Clamping below). The candidates `a0, a1, ...` are its arms, and only the chosen arm is evaluated. Plain `cse` does not know that: an expression that repeats inside the arms is hoisted above the `select` like any other, so it runs whether or not its arm is chosen. That is harmless for a few operations and wasteful when the arms are whole formulas, such as a robust loss kernel picked per solve.
+
+`cse_scoped` is `cse` with two extra rules for `select`:
+
+- work used only inside arms stays inside the arm that uses it, so it runs only when that arm is chosen; work also used outside the `select` is hoisted once and reused inside;
+- every `select` on the same index in the batch becomes one `match` that yields one value per `select`, so expressions that switch together (a loss and its derivative, say) share their work inside the arm. A `select` nested in an arm gets the same treatment inside that arm.
+
+A `match` with work inside it is a statement, not an expression, so `cse_scoped` returns `Vec<Intermediate>` instead of `(name, expr)` pairs: an `Intermediate` is a `Let` (`name`, `expr`) or a `Match`. `to_rust` / `to_rust_generic` render either as Rust; `as_let()` reads a plain `let`. Everything else is as for `cse`, and a batch without `select` gives the same intermediates.
+
+Example: a robust loss picked by `k` from three kernels, and its weight `rho'(s)`. Both select on `k`, so they come out as one `match`; the Huber square root is computed inside the Huber arm only and the Cauchy reciprocal inside the Cauchy arm only:
+
+```rust
+sym! {
+    let (k, s, k2) = symbols!(k, s, k2);
+    let rho = select(k, vec![
+        s,                       // k = 0: plain least squares
+        loss_huber(s, k2),       // k = 1
+        loss_cauchy(s, k2),      // k = 2
+    ], None);                    // no default: any other k panics
+    let w = rho.diff(s);
+    let (intermediates, simplified) = cse_scoped(&[rho, w]);
+    for stmt in &intermediates {
+        println!("{}", stmt.to_rust("f64"));
+    }
+    println!("{} {}", simplified[0], simplified[1]);
+}
+```
+
+```text
+let (__m0, __m1) = { let __sel = k.select_index(); match __sel {
+    0 => (s, 1.0_f64),
+    1 => { let __x3 = k2 - s; let __x2 = (k2 * s).sqrt();
+           ((if __x3 >= 0.0 { s } else { -k2 + 2.0_f64 * __x2 }),
+            (if __x3 >= 0.0 { 1.0_f64 } else { k2 / __x2 })) },
+    2 => { let __x4 = s / k2 + 1.0_f64; (k2 * __x4.ln(), 1.0_f64 / __x4) },
+    _ => panic!("select index {} out of range 0..3", __sel) } };
+__m0 __m1
+```
+
+(Line breaks added; the statement is emitted on one line.) `.select_index()` converts the index to the integer the `match` switches on; arael provides it as a trait on integer, `bool` and float values, and generated code needs it in scope. `branch` is not treated this way: work shared by its two sides, or by a side and the rest of the batch, is hoisted above the `if` as before.
+
 ## Custom Functions
 
 The library can build named function nodes (`Expr::Func`) that carry a body, formal parameters, and a behavioural kind. Use these when you want a function that participates in differentiation and code generation but stays distinct in the expression tree (e.g., to avoid CSE across the call boundary, or to call out to an extern Rust function at eval time).
@@ -508,7 +551,7 @@ the exact rational forms. Usable directly in constraint bodies by
 name; the `#[arael(root, fast_atan)]` macro keyword rewrites every
 plain `atan`/`atan2` in a model onto them via `replace_function`.
 
-## Switching and Clamping: `heaviside`, `clamp`, `branch`, `min`, `max`, `sign`
+## Switching and Clamping: `heaviside`, `clamp`, `branch`, `select`, `min`, `max`, `sign`
 
 ### `heaviside(x)`
 
@@ -517,6 +560,10 @@ The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`, and 0 for NaN (inter
 ### `branch(q, a, b)`
 
 Selects between two subexpressions on the sign of a third: `branch(q, a, b) = q >= 0 ? a : b`, with the same `>= 0` / NaN sense as `heaviside` (a NaN condition selects `b`). It compiles to `if q >= 0.0 { a } else { b }` and interprets the same way, so **only the taken side is evaluated** -- the untaken arm may be undefined (a division by zero, a `ln` of a negative) without poisoning the result. Differentiation selects the taken side's derivative: `d/dvar branch(q, a, b) = branch(q, d a/dvar, d b/dvar)`. The switch `q` contributes nothing (the jump at `q = 0` is dropped, as with `heaviside`), so `branch` gives a piecewise residual the correct one-sided gradient with no spurious boundary term. Use it for asymmetric penalties, one-sided barriers, or guarding an inner computation valid on only one side of a condition.
+
+### `select(i, a0, a1, ...)`, `select_or(i, a0, ..., default)`
+
+An N-way switch on an integer index: `select(i, a0, a1, ...)` is `a0` for `i = 0`, `a1` for `i = 1`, and so on. Any other value takes the default when there is one (`select_or`, default last) and otherwise panics in generated code and errors in `eval`. The index must be an integer value: integer and `bool` fields convert exactly, a float index that is NaN or has a fraction panics rather than silently taking arm 0. It compiles to a `match`, so **only the taken arm is evaluated**, and differentiation selects the taken arm's derivative, the index contributing nothing, as with `branch`. In Rust the constructor is `select(index, arms, default)` with `arms: Vec<E>` and `default: Option<E>`; the parser accepts both spellings above. Use it where a body has to pick one of several formulas at runtime, such as a robust loss chosen per solve (`loss_select`). `cse_scoped` (see Common Subexpression Elimination above) keeps each arm's work inside the arm.
 
 ### `min(a, b)`, `max(a, b)`, `sign(x)`
 

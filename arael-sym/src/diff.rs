@@ -176,6 +176,14 @@ impl E {
             Expr::Branch(q, a, b) => {
                 branch(q.clone(), a.diff_var(var), b.diff_var(var))
             }
+            Expr::Select { index, arms, default } => {
+                // The index is piecewise constant: the derivative is the
+                // taken arm's, selected by the same index.
+                crate::select(
+                    index.clone(),
+                    arms.iter().map(|a| a.diff_var(var)).collect(),
+                    default.as_ref().map(|d| d.diff_var(var)))
+            }
             Expr::Func { name, params, kind, args } => {
                 // cached() is a STICKY barrier: d(cached(g))/dx = cached(dg/dx).
                 if name == "cached" && args.len() == 1 {

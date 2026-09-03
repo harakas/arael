@@ -187,6 +187,17 @@ impl fmt::Display for Expr {
                 fmt::Display::fmt(b.as_ref(), f)?;
                 write!(f, ")")
             }
+            Expr::Select { index, arms, default } => {
+                // `select(i, a0, ...)`, or `select_or(i, a0, ..., default)`:
+                // two names so the default is never ambiguous with an arm.
+                write!(f, "{}(", if default.is_some() { "select_or" } else { "select" })?;
+                fmt::Display::fmt(index.as_ref(), f)?;
+                for a in arms.iter().chain(default.iter()) {
+                    write!(f, ", ")?;
+                    fmt::Display::fmt(a.as_ref(), f)?;
+                }
+                write!(f, ")")
+            }
             Expr::Func { name, args, .. } => {
                 write!(f, "{name}(")?;
                 for (i, arg) in args.iter().enumerate() {
@@ -357,6 +368,22 @@ impl Expr {
                 buf.push_str(", ");
                 b.write_latex(buf);
                 buf.push_str("\\right)");
+            }
+            Expr::Select { index, arms, default } => {
+                buf.push_str("\\begin{cases}");
+                for (k, a) in arms.iter().enumerate() {
+                    if k > 0 { buf.push_str(" \\\\ "); }
+                    a.write_latex(buf);
+                    buf.push_str(" & ");
+                    index.write_latex(buf);
+                    buf.push_str(&format!(" = {k}"));
+                }
+                if let Some(d) = default {
+                    buf.push_str(" \\\\ ");
+                    d.write_latex(buf);
+                    buf.push_str(" & \\text{otherwise}");
+                }
+                buf.push_str("\\end{cases}");
             }
             Expr::Func { name, args, .. } => {
                 let escaped = name.replace('_', "\\_");
@@ -551,6 +578,26 @@ impl Expr {
                 b.write_rust(buf, ft, 0);
                 buf.push_str(" })");
             }
+            Expr::Select { index, arms, default } => {
+                // Inline form, used when the tree is emitted without CSE
+                // (CSE emits every select as a fused `let ... = match`
+                // statement instead). `.select_index()` is the runtime
+                // conversion trait, in scope like `.heaviside()`.
+                buf.push_str("{ let __sel = ");
+                Self::write_select_index(buf, ft, index);
+                buf.push_str("; match __sel { ");
+                for (k, a) in arms.iter().enumerate() {
+                    buf.push_str(&format!("{k} => "));
+                    a.write_rust(buf, ft, 0);
+                    buf.push_str(", ");
+                }
+                buf.push_str("_ => ");
+                match default {
+                    Some(d) => d.write_rust(buf, ft, 0),
+                    None => Self::write_select_panic(buf, "__sel", arms.len()),
+                }
+                buf.push_str(" } }");
+            }
             Expr::Func { name, params, kind, args } => {
                 if let Some(body) = kind.body() {
                     // Symbolic: inline the expanded body.
@@ -579,5 +626,159 @@ impl Expr {
         buf.push('.');
         buf.push_str(method);
         buf.push_str("()");
+    }
+
+    /// `(index).select_index()`: the runtime conversion of a select index
+    /// to the integer the `match` switches on.
+    fn write_select_index(buf: &mut String, ft: &str, index: &Expr) {
+        index.write_rust(buf, ft, 8);
+        buf.push_str(".select_index()");
+    }
+
+    /// The `_` arm of a select without a default.
+    fn write_select_panic(buf: &mut String, var: &str, n_arms: usize) {
+        buf.push_str(&format!(
+            "panic!(\"select index {{}} out of range 0..{n_arms}\", {var})"));
+    }
+}
+
+// --- CSE statements ---
+
+use crate::cse::{Arm, Intermediate};
+
+fn write_names(buf: &mut String, names: &[String]) {
+    if names.len() == 1 {
+        buf.push_str(&names[0]);
+        return;
+    }
+    buf.push('(');
+    for (i, n) in names.iter().enumerate() {
+        if i > 0 { buf.push_str(", "); }
+        buf.push_str(n);
+    }
+    buf.push(')');
+}
+
+impl Intermediate {
+    /// The Rust statement this intermediate emits; `float_type` as for
+    /// [`Expr::to_rust`].
+    pub fn to_rust(&self, float_type: &str) -> String {
+        let mut buf = String::new();
+        self.write_rust(&mut buf, float_type);
+        buf
+    }
+
+    /// The statement for a generic `T: Float` context, see
+    /// [`Expr::to_rust_generic`].
+    pub fn to_rust_generic(&self) -> String {
+        let mut buf = String::new();
+        self.write_rust(&mut buf, GENERIC_FT);
+        buf
+    }
+
+    fn write_rust(&self, buf: &mut String, ft: &str) {
+        match self {
+            Intermediate::Let { name, expr } => {
+                buf.push_str("let ");
+                buf.push_str(name);
+                buf.push_str(" = ");
+                expr.write_rust(buf, ft, 0);
+                buf.push(';');
+            }
+            Intermediate::Match { index, names, arms, default } => {
+                buf.push_str("let ");
+                write_names(buf, names);
+                buf.push_str(" = { let __sel = ");
+                Expr::write_select_index(buf, ft, index);
+                buf.push_str("; match __sel { ");
+                for (k, arm) in arms.iter().enumerate() {
+                    buf.push_str(&format!("{k} => "));
+                    arm.write_rust(buf, ft);
+                    buf.push_str(", ");
+                }
+                buf.push_str("_ => ");
+                match default {
+                    Some(arm) => arm.write_rust(buf, ft),
+                    None => Expr::write_select_panic(buf, "__sel", arms.len()),
+                }
+                buf.push_str(" } };");
+            }
+        }
+    }
+}
+
+impl Arm {
+    /// The arm's value (a tuple for a fused match), in a block holding
+    /// the arm's intermediates first when it has any.
+    fn write_rust(&self, buf: &mut String, ft: &str) {
+        let block = !self.inters.is_empty();
+        if block {
+            buf.push_str("{ ");
+            for it in &self.inters {
+                it.write_rust(buf, ft);
+                buf.push(' ');
+            }
+        }
+        if self.values.len() == 1 {
+            self.values[0].write_rust(buf, ft, 0);
+        } else {
+            buf.push('(');
+            for (i, v) in self.values.iter().enumerate() {
+                if i > 0 { buf.push_str(", "); }
+                v.write_rust(buf, ft, 0);
+            }
+            buf.push(')');
+        }
+        if block {
+            buf.push_str(" }");
+        }
+    }
+}
+
+/// The statement in the symbolic notation of [`Expr`]'s `Display`.
+impl fmt::Display for Intermediate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Intermediate::Let { name, expr } => write!(f, "let {name} = {expr};"),
+            Intermediate::Match { index, names, arms, default } => {
+                let mut names_s = String::new();
+                write_names(&mut names_s, names);
+                write!(f, "let {names_s} = match {index} {{")?;
+                for (k, arm) in arms.iter().enumerate() {
+                    write!(f, " {k} => {arm},")?;
+                }
+                match default {
+                    Some(arm) => write!(f, " _ => {arm} }};"),
+                    None => write!(f, " _ => panic }};"),
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for Arm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let block = !self.inters.is_empty();
+        if block {
+            write!(f, "{{")?;
+            for it in &self.inters {
+                write!(f, " {it}")?;
+            }
+            write!(f, " ")?;
+        }
+        if self.values.len() == 1 {
+            write!(f, "{}", self.values[0])?;
+        } else {
+            write!(f, "(")?;
+            for (i, v) in self.values.iter().enumerate() {
+                if i > 0 { write!(f, ", ")?; }
+                write!(f, "{v}")?;
+            }
+            write!(f, ")")?;
+        }
+        if block {
+            write!(f, " }}")?;
+        }
+        Ok(())
     }
 }

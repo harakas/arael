@@ -380,6 +380,11 @@ impl E {
                 b.collect_symbols(out);
                 c.collect_symbols(out);
             }
+            Expr::Select { index, arms, default } => {
+                index.collect_symbols(out);
+                for a in arms { a.collect_symbols(out); }
+                if let Some(d) = default { d.collect_symbols(out); }
+            }
             Expr::Func { params, kind, args, .. } => {
                 // Captured symbols: a function body may reference symbols
                 // beyond its params (eval resolves them from the outer
@@ -430,6 +435,10 @@ impl E {
             Expr::Heaviside(a) => heaviside(a.substitute(subs)),
             Expr::Clamp(a, lo, hi) => clamp(a.substitute(subs), lo.substitute(subs), hi.substitute(subs)),
             Expr::Branch(q, a, b) => branch(q.substitute(subs), a.substitute(subs), b.substitute(subs)),
+            Expr::Select { index, arms, default } => select(
+                index.substitute(subs),
+                arms.iter().map(|a| a.substitute(subs)).collect(),
+                default.as_ref().map(|d| d.substitute(subs))),
             Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.substitute(subs)).collect();
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
@@ -492,6 +501,21 @@ impl E {
             Expr::Branch(q, a, b) => {
                 let (q, a, b) = (rec(q), rec(a), rec(b));
                 if name == "branch" { f(&[q, a, b]) } else { branch(q, a, b) }
+            }
+            Expr::Select { index, arms, default } => {
+                // Argument order matches the Display form: index, arms,
+                // then the default when present.
+                let index = rec(index);
+                let arms: Vec<E> = arms.iter().map(rec).collect();
+                let default = default.as_ref().map(rec);
+                if name == "select" {
+                    let mut args = vec![index];
+                    args.extend(arms);
+                    args.extend(default);
+                    f(&args)
+                } else {
+                    select(index, arms, default)
+                }
             }
             Expr::Func { name: fname, params, kind, args } => {
                 let new_args: Vec<E> = args.iter().map(rec).collect();
@@ -582,6 +606,14 @@ pub enum Expr {
     /// derivative -- the switch is piecewise-constant, so `q` contributes
     /// nothing (like Heaviside).
     Branch(E, E, E),
+    /// N-way select: `index` converts to an integer `i` and `arms[i]` is
+    /// the value. Any other `i` takes `default`, or panics when there is
+    /// none. Only the taken arm is evaluated. The index is piecewise
+    /// constant, so the derivative selects the taken arm's derivative
+    /// (like `Branch`). Generated code is a `match`; CSE keeps each arm's
+    /// own work inside the arm and fuses every select on one index into
+    /// a single `match` (see [`cse_scoped`]).
+    Select { index: E, arms: Vec<E>, default: Option<E> },
     /// Named constant (pi, epsilon, e, or user-defined).
     /// Survives simplification (unlike Const which may be folded away).
     NamedConst {
@@ -693,6 +725,11 @@ impl Hash for Expr {
                 a.hash(state);
                 b.hash(state);
                 c.hash(state);
+            }
+            Expr::Select { index, arms, default } => {
+                index.hash(state);
+                arms.hash(state);
+                default.hash(state);
             }
             Expr::NamedConst { name, value, .. } => {
                 name.hash(state);
@@ -924,6 +961,17 @@ pub fn clamp(val: impl Into<E>, lo: impl Into<E>, hi: impl Into<E>) -> E {
 /// `impl Into<E>` so bare numeric arms compose: `branch(x, 1.0, -1.0)`.
 pub fn branch(q: impl Into<E>, a: impl Into<E>, b: impl Into<E>) -> E {
     E::new(Expr::Branch(q.into(), a.into(), b.into()))
+}
+/// Symbolic N-way select: `index` converts to an integer `i` and the value
+/// is `arms[i]`. Any other `i` takes `default`, or panics when there is
+/// none. The conversion is exact for integer and `bool` indices; a NaN or
+/// non-integer float index panics (generated code) or errors (`eval`), so
+/// a bad index never silently takes arm 0. Only the taken arm is evaluated,
+/// and the derivative is the taken arm's -- the index contributes nothing,
+/// like [`branch`]. Display form: `select(i, a0, a1, ...)`, or
+/// `select_or(i, a0, a1, ..., default)` with a default.
+pub fn select(index: impl Into<E>, arms: Vec<E>, default: Option<E>) -> E {
+    E::new(Expr::Select { index: index.into(), arms, default })
 }
 /// Symbolic minimum, the smaller of `a` and `b`. Built on [`branch`], so it is
 /// differentiable away from the kink -- the derivative is the taken side's. At a
@@ -1932,7 +1980,7 @@ fn fast_atan2_eval(y: f64, x: f64) -> f64 {
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use parse::{parse, parse_with_functions, ParseError};
 pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym, transform3sym, vectsym, matrixsym};
-pub use cse::cse;
+pub use cse::{cse, cse_scoped};
 pub use arael_sym_macros::sym;
 
 #[cfg(test)]
@@ -3043,6 +3091,106 @@ mod tests {
     }
 
     // --- clamp-based safe_asin tests (simple_func1 version) ---
+
+    #[test]
+    fn select_eval_picks_arm_or_default() {
+        let k = symbol("k");
+        let x = symbol("x");
+        let f = select(k.clone(), vec![x.clone(), c(10.0), c(20.0)], None);
+        let at = |kv: f64| f.eval(&HashMap::from([("k", kv), ("x", 3.0)]));
+        assert_eq!(at(0.0).unwrap(), 3.0);
+        assert_eq!(at(1.0).unwrap(), 10.0);
+        assert_eq!(at(2.0).unwrap(), 20.0);
+        // Out of range, negative, NaN and fractional indices are errors
+        // without a default, as the generated match panics on them.
+        assert!(at(3.0).is_err());
+        assert!(at(-1.0).is_err());
+        assert!(at(f64::NAN).is_err());
+        assert!(at(1.5).is_err());
+        let g = select(k, vec![x], Some(c(-1.0)));
+        let gat = |kv: f64| g.eval(&HashMap::from([("k", kv), ("x", 3.0)]));
+        assert_eq!(gat(0.0).unwrap(), 3.0);
+        assert_eq!(gat(7.0).unwrap(), -1.0);
+        assert_eq!(gat(-2.0).unwrap(), -1.0);
+        // A default does not excuse a non-integer index.
+        assert!(gat(0.5).is_err());
+        assert!(gat(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn select_eval_only_taken_arm() {
+        // The untaken arm (ln(-1) = NaN) must not be evaluated.
+        let k = symbol("k");
+        let f = select(k, vec![c(1.0), ln(c(-1.0))], Some(ln(c(-1.0))));
+        assert_eq!(f.eval(&HashMap::from([("k", 0.0)])).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn select_diff_selects_arm() {
+        let k = symbol("k");
+        let x = symbol("x");
+        // d/dx select(k, x^2, 5, sin x) = select(k, 2x, 0, cos x).
+        let d = select(k, vec![x.clone() * x.clone(), c(5.0), sin(x)], None).diff("x");
+        let at = |kv: f64| d.eval(&HashMap::from([("k", kv), ("x", 2.0)])).unwrap();
+        assert_eq!(at(0.0), 4.0);
+        assert_eq!(at(1.0), 0.0);
+        assert_eq!(at(2.0), 2.0f64.cos());
+    }
+
+    #[test]
+    fn select_display_parses_back() {
+        let k = symbol("k");
+        let x = symbol("x");
+        let f = select(k.clone(), vec![x.clone(), c(1.0)], None);
+        assert_eq!(format!("{}", f), "select(k, x, 1)");
+        assert_eq!(parse("select(k, x, 1)").unwrap(), f);
+        let g = select(k, vec![x], Some(c(-1.0)));
+        assert_eq!(format!("{}", g), "select_or(k, x, -1)");
+        assert_eq!(parse("select_or(k, x, -1)").unwrap(), g);
+        assert!(parse("select(k)").is_err());
+        assert!(parse("select_or(k, x)").is_err());
+    }
+
+    #[test]
+    fn select_simplify_constant_index() {
+        let x = symbol("x");
+        let y = symbol("y");
+        assert_eq!(select(c(1.0), vec![x.clone(), y.clone()], None).simplify(), y);
+        assert_eq!(select(c(5.0), vec![x.clone()], Some(y.clone())).simplify(), y);
+        // Out of range with no default stays a select and panics at runtime.
+        let stuck = select(c(5.0), vec![x.clone()], None).simplify();
+        assert!(matches!(stuck.as_ref(), Expr::Select { .. }));
+        // Arms simplify in place.
+        let s = select(symbol("k"), vec![x.clone() * c(1.0), y.clone() + c(0.0)], None).simplify();
+        assert_eq!(s, select(symbol("k"), vec![x, y], None));
+    }
+
+    #[test]
+    fn select_to_rust_inline() {
+        let k = symbol("k");
+        let x = symbol("x");
+        let f = select(k.clone(), vec![x.clone(), c(1.0)], None);
+        assert_eq!(f.to_rust(""),
+            "{ let __sel = k.select_index(); match __sel { 0 => x, 1 => 1.0, \
+             _ => panic!(\"select index {} out of range 0..2\", __sel) } }");
+        let g = select(k + c(1.0), vec![x], Some(c(-1.0)));
+        assert_eq!(g.to_rust(""),
+            "{ let __sel = (k + 1.0).select_index(); match __sel { 0 => x, _ => -1.0 } }");
+    }
+
+    #[test]
+    fn select_replace_function_by_name() {
+        let k = symbol("k");
+        let x = symbol("x");
+        let f = select(k.clone(), vec![x.clone(), c(1.0)], Some(c(2.0)));
+        // Arguments arrive as index, arms, default.
+        let got = f.replace_function("select", &|args: &[E]| {
+            assert_eq!(args.len(), 4);
+            args[3].clone()
+        });
+        assert_eq!(got, c(2.0));
+        assert_eq!(f.replace_function("sin", &|_| c(0.0)), f);
+    }
 
     #[test]
     fn clamp_asin_eval() {
