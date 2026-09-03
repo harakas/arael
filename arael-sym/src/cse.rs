@@ -12,17 +12,43 @@
 use std::collections::{BTreeSet, HashMap};
 use crate::{E, Expr, symbol};
 
+/// What a fused [`Intermediate::Match`] switches on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Switch {
+    /// A `select` index: `match (index).select_index() { k => arms[k], _ => default }`.
+    Index(E),
+    /// A `branch` condition: `if q >= 0 { arms[0] } else { default }`.
+    Sign(E),
+}
+
+impl Switch {
+    /// The expression switched on.
+    pub fn expr(&self) -> &E {
+        match self {
+            Switch::Index(e) | Switch::Sign(e) => e,
+        }
+    }
+
+    fn expr_mut(&mut self) -> &mut E {
+        match self {
+            Switch::Index(e) | Switch::Sign(e) => e,
+        }
+    }
+}
+
 /// One statement of a CSE result, in emission order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intermediate {
     /// `let name = expr;`
     Let { name: String, expr: E },
-    /// One `match` shared by every select on `index` in the scope:
-    /// `let (names, ..) = match index { k => arms[k], _ => default };`.
-    /// Each arm carries its own intermediates, so work used by one arm
-    /// only is computed inside that arm. Without a default, any index
-    /// outside `0..arms.len()` panics.
-    Match { index: E, names: Vec<String>, arms: Vec<Arm>, default: Option<Arm> },
+    /// One switch shared by every select or branch on the same key in
+    /// the scope: `let (names, ..) = match index { k => arms[k], _ =>
+    /// default };` or `let (names, ..) = if q >= 0 { arms[0] } else {
+    /// default };`. Each arm carries its own intermediates, so work used
+    /// by one arm only is computed inside that arm. A select without a
+    /// default panics on any index outside `0..arms.len()`; a branch
+    /// always has its else side as the default.
+    Match { switch: Switch, names: Vec<String>, arms: Vec<Arm>, default: Option<Arm> },
 }
 
 /// One arm of an [`Intermediate::Match`]: local intermediates, then one
@@ -54,8 +80,8 @@ impl Intermediate {
     fn free_vars(&self) -> BTreeSet<String> {
         match self {
             Intermediate::Let { expr, .. } => expr.free_vars(),
-            Intermediate::Match { index, arms, default, .. } => {
-                let mut set = index.free_vars();
+            Intermediate::Match { switch, arms, default, .. } => {
+                let mut set = switch.expr().free_vars();
                 for arm in arms.iter().chain(default.iter()) {
                     for i in &arm.inters { set.extend(i.free_vars()); }
                     for v in &arm.values { set.extend(v.free_vars()); }
@@ -197,6 +223,11 @@ fn count_subexprs(e: &E, in_arm: bool, scoped: bool, outside: &mut HashMap<E, us
                 count_subexprs(a, in_arm || scoped, scoped, outside, inside);
             }
         }
+        Expr::Branch(q, a, b) => {
+            count_subexprs(q, in_arm, scoped, outside, inside);
+            count_subexprs(a, in_arm || scoped, scoped, outside, inside);
+            count_subexprs(b, in_arm || scoped, scoped, outside, inside);
+        }
         _ => for c in children(e) { count_subexprs(c, in_arm, scoped, outside, inside); },
     }
 }
@@ -296,22 +327,28 @@ fn replace_outside_arms(e: &E, target: &E, replacement: &E) -> E {
             arms: arms.clone(),
             default: default.clone(),
         }),
+        Expr::Branch(q, a, b) => E::new(Expr::Branch(
+            replace_outside_arms(q, target, replacement), a.clone(), b.clone())),
         _ => map_children(e, &mut |c| replace_outside_arms(c, target, replacement)),
     }
 }
 
-/// Every distinct select node at this scope level, in first-appearance
-/// order. Selects inside another select's arms are that arm's business.
-fn collect_selects(e: &E, out: &mut Vec<E>) {
-    match e.as_ref() {
-        Expr::Select { index, .. } => {
-            if !out.contains(e) {
-                out.push(e.clone());
-            }
-            collect_selects(index, out);
+/// Every distinct select or branch node at this scope level, in
+/// first-appearance order. Switches inside another switch's arms are
+/// that arm's business.
+fn collect_switches(e: &E, out: &mut Vec<E>) {
+    let key = match e.as_ref() {
+        Expr::Select { index, .. } => index,
+        Expr::Branch(q, _, _) => q,
+        _ => {
+            for c in children(e) { collect_switches(c, out); }
+            return;
         }
-        _ => for c in children(e) { collect_selects(c, out); },
+    };
+    if !out.contains(e) {
+        out.push(e.clone());
     }
+    collect_switches(key, out);
 }
 
 /// Apply many `target -> replacement` substitutions to `e` in one memoized
@@ -587,26 +624,31 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
     // Fuse: every select at this scope level becomes part of one match
     // per (index, arm count, default presence), in first-appearance
     // order. Each member select is replaced by the name its match binds.
-    let mut selects: Vec<E> = Vec::new();
+    let mut switches: Vec<E> = Vec::new();
     for r in &results {
-        collect_selects(r, &mut selects);
+        collect_switches(r, &mut switches);
     }
     for it in &intermediates {
         if let Intermediate::Let { expr, .. } = it {
-            collect_selects(expr, &mut selects);
+            collect_switches(expr, &mut switches);
         }
     }
-    let mut groups: Vec<(E, usize, bool, Vec<E>)> = Vec::new();
-    for s in selects {
-        let Expr::Select { index, arms, default } = s.as_ref() else { unreachable!() };
-        let (n_arms, has_default) = (arms.len(), default.is_some());
+    // (switch, arm count, default present, member nodes)
+    let mut groups: Vec<(Switch, usize, bool, Vec<E>)> = Vec::new();
+    for s in switches {
+        let (switch, n_arms, has_default) = match s.as_ref() {
+            Expr::Select { index, arms, default } =>
+                (Switch::Index(index.clone()), arms.len(), default.is_some()),
+            Expr::Branch(q, _, _) => (Switch::Sign(q.clone()), 1, true),
+            _ => unreachable!(),
+        };
         match groups.iter_mut()
-            .find(|(i, n, d, _)| i == index && *n == n_arms && *d == has_default) {
+            .find(|(k, n, d, _)| *k == switch && *n == n_arms && *d == has_default) {
             Some(g) => g.3.push(s.clone()),
-            None => groups.push((index.clone(), n_arms, has_default, vec![s.clone()])),
+            None => groups.push((switch, n_arms, has_default, vec![s.clone()])),
         }
     }
-    for (index, n_arms, has_default, members) in groups {
+    for (switch, n_arms, has_default, members) in groups {
         let names: Vec<String> = members.iter().map(|_| {
             let n = format!("__m{}", *counter);
             *counter += 1;
@@ -620,15 +662,19 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
             for it in intermediates.iter_mut() {
                 match it {
                     Intermediate::Let { expr, .. } => *expr = replace_outside_arms(expr, m, &sym),
-                    // An earlier match's index may hold this select; its
+                    // An earlier switch's key may hold this node; its
                     // arms are a scope of their own and are done already.
-                    Intermediate::Match { index, .. } => *index = replace_outside_arms(index, m, &sym),
+                    Intermediate::Match { switch: sw, .. } => {
+                        let key = sw.expr_mut();
+                        *key = replace_outside_arms(key, m, &sym);
+                    }
                 }
             }
         }
         let parts = |m: &E| -> (Vec<E>, Option<E>) {
             match m.as_ref() {
                 Expr::Select { arms, default, .. } => (arms.clone(), default.clone()),
+                Expr::Branch(_, a, b) => (vec![a.clone()], Some(b.clone())),
                 _ => unreachable!(),
             }
         };
@@ -642,7 +688,7 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
             let (inters, values) = cse_scope(&exprs, counter, true);
             Arm { inters, values }
         });
-        intermediates.push(Intermediate::Match { index, names, arms, default });
+        intermediates.push(Intermediate::Match { switch, names, arms, default });
     }
 
     // Topological sort: ensure each intermediate is defined before it's used.
@@ -666,6 +712,11 @@ fn count_divisors(e: &E, in_arm: bool, scoped: bool, outside: &mut HashMap<E, us
             for a in arms.iter().chain(default.iter()) {
                 count_divisors(a, in_arm || scoped, scoped, outside, inside);
             }
+        }
+        Expr::Branch(q, a, b) => {
+            count_divisors(q, in_arm, scoped, outside, inside);
+            count_divisors(a, in_arm || scoped, scoped, outside, inside);
+            count_divisors(b, in_arm || scoped, scoped, outside, inside);
         }
         _ => for c in children(e) { count_divisors(c, in_arm, scoped, outside, inside); },
     }
@@ -818,10 +869,18 @@ mod tests {
 
     use crate::{constant, select, sqrt};
 
+    /// (key expression, names, arms, default) of a fused switch.
     fn the_match(it: &Intermediate) -> (&E, &[String], &[Arm], Option<&Arm>) {
         match it {
-            Intermediate::Match { index, names, arms, default } =>
-                (index, names, arms, default.as_ref()),
+            Intermediate::Match { switch, names, arms, default } =>
+                (switch.expr(), names, arms, default.as_ref()),
+            Intermediate::Let { .. } => panic!("expected a match, got {it}"),
+        }
+    }
+
+    fn the_switch(it: &Intermediate) -> &Switch {
+        match it {
+            Intermediate::Match { switch, .. } => switch,
             Intermediate::Let { .. } => panic!("expected a match, got {it}"),
         }
     }
@@ -942,8 +1001,8 @@ mod tests {
     #[test]
     fn loss_kernels_and_weight_fuse_into_one_match() {
         // A robust loss selecting per kind and its weight rho'(s): one
-        // match, the Huber square root inside the Huber arm only (its
-        // `branch` sides still share it, hoisted inside that arm), the
+        // match; inside the Huber arm its two branches fuse on k2 - s
+        // into one if, with the square root on the else side only; the
         // Cauchy reciprocal inside the Cauchy arm only. This is the
         // SYM.md example; keep the two in step.
         let (k, s, k2) = (symbol("k"), symbol("s"), symbol("k2"));
@@ -960,10 +1019,11 @@ mod tests {
         assert_eq!(code,
             "let (__m0, __m1) = { let __sel = k.select_index(); match __sel { \
              0 => (s, 1.0_f64), \
-             1 => { let __x3 = k2 - s; let __x2 = (k2 * s).sqrt(); \
-             ((if __x3 >= 0.0 { s } else { -k2 + 2.0_f64 * __x2 }), \
-             (if __x3 >= 0.0 { 1.0_f64 } else { k2 / __x2 })) }, \
-             2 => { let __x4 = s / k2 + 1.0_f64; (k2 * __x4.ln(), 1.0_f64 / __x4) }, \
+             1 => { let __x2 = k2 - s; \
+             let (__m3, __m4) = if __x2 >= 0.0 { (s, 1.0_f64) } \
+             else { let __x5 = (k2 * s).sqrt(); (-k2 + 2.0_f64 * __x5, k2 / __x5) }; \
+             (__m3, __m4) }, \
+             2 => { let __x6 = s / k2 + 1.0_f64; (k2 * __x6.ln(), 1.0_f64 / __x6) }, \
              _ => panic!(\"select index {} out of range 0..3\", __sel) } };");
     }
 
@@ -979,6 +1039,64 @@ mod tests {
         assert_eq!(lets, vec![("__x0".to_string(), root)]);
         assert!(matches!(results[0].as_ref(), Expr::Select { .. }));
         assert!(results[0].to_rust("").starts_with("{ let __sel = k.select_index(); match __sel { 0 => x, 1 => __x0, "));
+    }
+
+    #[test]
+    fn branch_sides_are_scopes_and_fuse_on_the_condition() {
+        // Huber alone: rho and rho' branch on k2 - s. The condition is
+        // shared above (hoisted once), the two branches fuse into one
+        // if, and the square root sits on the else side only.
+        let (s, k2) = (symbol("s"), symbol("k2"));
+        let rho = crate::loss_huber(s.clone(), k2.clone());
+        let w = rho.diff("s");
+        let (inters, results) = cse_scoped(&[rho, w]);
+        assert_eq!(inters.len(), 2, "{inters:?}");
+        assert_eq!(inters[0].to_rust(""), "let __x0 = k2 - s;");
+        assert!(matches!(the_switch(&inters[1]), Switch::Sign(_)));
+        assert_eq!(inters[1].to_rust(""),
+            "let (__m1, __m2) = if __x0 >= 0.0 { (s, 1.0) } \
+             else { let __x3 = (k2 * s).sqrt(); (-k2 + 2.0 * __x3, k2 / __x3) };");
+        assert_eq!(results, vec![symbol("__m1"), symbol("__m2")]);
+    }
+
+    #[test]
+    fn piecewise_emits_nested_ifs() {
+        let (x, a0, a1, a2, b0, b1) = (symbol("x"), symbol("a0"), symbol("a1"),
+            symbol("a2"), symbol("b0"), symbol("b1"));
+        let e = crate::piecewise(x, vec![a0, a1, a2], vec![b0, b1]);
+        let (inters, results) = cse_scoped(&[e]);
+        assert_eq!(results, vec![symbol("__m0")]);
+        assert_eq!(inters.len(), 1);
+        assert_eq!(inters[0].to_rust(""),
+            "let __m0 = if b0 - x >= 0.0 { a0 } \
+             else { let __m1 = if b1 - x >= 0.0 { a1 } else { a2 }; __m1 };");
+    }
+
+    #[test]
+    fn select_and_branch_nest_either_way() {
+        let (q, k, x, y, z) = (symbol("q"), symbol("k"), symbol("x"), symbol("y"), symbol("z"));
+        let e = crate::branch(q.clone(), select(k.clone(), vec![x.clone(), y.clone()], None), z.clone());
+        let (inters, _) = cse_scoped(&[e]);
+        assert!(matches!(the_switch(&inters[0]), Switch::Sign(_)));
+        let then_side = &the_match(&inters[0]).2[0];
+        assert!(matches!(the_switch(&then_side.inters[0]), Switch::Index(_)));
+
+        let e = select(k, vec![crate::branch(q, x, y), z], None);
+        let (inters, _) = cse_scoped(&[e]);
+        assert!(matches!(the_switch(&inters[0]), Switch::Index(_)));
+        let arm0 = &the_match(&inters[0]).2[0];
+        assert!(matches!(the_switch(&arm0.inters[0]), Switch::Sign(_)));
+    }
+
+    #[test]
+    fn flat_cse_hoists_across_branch_sides_as_before() {
+        let (s, k2) = (symbol("s"), symbol("k2"));
+        let rho = crate::loss_huber(s.clone(), k2);
+        let w = rho.diff("s");
+        let (lets, results) = cse(&[rho, w]);
+        let hoisted: Vec<String> = lets.iter().map(|(_, e)| format!("{e}")).collect();
+        assert!(hoisted.iter().any(|e| e.starts_with("sqrt(")), "{hoisted:?}");
+        assert!(results.iter().all(|r| matches!(r.as_ref(), Expr::Branch(..))));
     }
 
     #[test]

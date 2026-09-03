@@ -295,28 +295,12 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
     {
         return result.map_err(|msg| ParseError { pos: 0, msg });
     }
-    // `select` is variadic, so it bypasses the fixed-arity registry:
-    // `select(i, a0, a1, ...)` or `select_or(i, a0, ..., default)`.
-    if lookup_name == "select" || lookup_name == "select_or" {
-        let with_default = lookup_name == "select_or";
-        if args.len() < if with_default { 3 } else { 2 } {
-            return Err(ParseError {
-                pos: 0,
-                msg: format!("{name} expects an index and at least one arm{}",
-                    if with_default { ", then the default" } else { "" }),
-            });
-        }
-        let mut args = args;
-        let default = if with_default { args.pop() } else { None };
-        let mut it = args.into_iter();
-        let index = it.next().unwrap();
-        return Ok(crate::select(index, it.collect(), default));
-    }
     let fnref = crate::function_by_name(lookup_name).ok_or_else(|| ParseError {
         pos: 0,
         msg: format!("unknown function: {name}"),
     })?;
     match fnref {
+        crate::FunctionRef::Variadic(f) => f(args).map_err(|msg| ParseError { pos: 0, msg }),
         crate::FunctionRef::Unary(f) => {
             if args.len() != 1 {
                 return Err(ParseError {

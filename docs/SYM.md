@@ -399,14 +399,14 @@ let df_dy = 200.0_f64 * __x0;
 
 `select(i, a0, a1, ...)` picks one of several expressions by an integer at runtime (see Switching and Clamping below). The candidates `a0, a1, ...` are its arms, and only the chosen arm is evaluated. Plain `cse` does not know that: an expression that repeats inside the arms is hoisted above the `select` like any other, so it runs whether or not its arm is chosen. That is harmless for a few operations and wasteful when the arms are whole formulas, such as a robust loss kernel picked per solve.
 
-`cse_scoped` is `cse` with two extra rules for `select`:
+`cse_scoped` is `cse` with two extra rules for `select` and `branch` (whose two sides are its arms):
 
-- work used only inside arms stays inside the arm that uses it, so it runs only when that arm is chosen; work also used outside the `select` is hoisted once and reused inside;
-- every `select` on the same index in the batch becomes one `match` that yields one value per `select`, so expressions that switch together (a loss and its derivative, say) share their work inside the arm. A `select` nested in an arm gets the same treatment inside that arm.
+- work used only inside arms stays inside the arm that uses it, so it runs only when that arm is chosen; work also used outside the switch is hoisted once and reused inside;
+- every `select` on the same index, and every `branch` on the same condition, in the batch becomes one `match` or `if` that yields one value per switch, so expressions that switch together (a loss and its derivative, say) share their work inside the arm. A switch nested in an arm gets the same treatment inside that arm, which is how `multibranch` and `piecewise` become `if / else if / else` ladders.
 
 A `match` with work inside it is a statement, not an expression, so `cse_scoped` returns `Vec<Intermediate>` instead of `(name, expr)` pairs: an `Intermediate` is a `Let` (`name`, `expr`) or a `Match`. `to_rust` / `to_rust_generic` render either as Rust; `as_let()` reads a plain `let`. Everything else is as for `cse`, and a batch without `select` gives the same intermediates.
 
-Example: a robust loss picked by `k` from three kernels, and its weight `rho'(s)`. Both select on `k`, so they come out as one `match`; the Huber square root is computed inside the Huber arm only and the Cauchy reciprocal inside the Cauchy arm only:
+Example: a robust loss picked by `k` from three kernels, and its weight `rho'(s)`. Both select on `k`, so they come out as one `match`. Inside the Huber arm the loss's and the weight's `branch` on `k2 - s` fuse into one `if`, with the square root on its else side only; the Cauchy reciprocal sits inside the Cauchy arm only:
 
 ```rust
 sym! {
@@ -428,15 +428,16 @@ sym! {
 ```text
 let (__m0, __m1) = { let __sel = k.select_index(); match __sel {
     0 => (s, 1.0_f64),
-    1 => { let __x3 = k2 - s; let __x2 = (k2 * s).sqrt();
-           ((if __x3 >= 0.0 { s } else { -k2 + 2.0_f64 * __x2 }),
-            (if __x3 >= 0.0 { 1.0_f64 } else { k2 / __x2 })) },
-    2 => { let __x4 = s / k2 + 1.0_f64; (k2 * __x4.ln(), 1.0_f64 / __x4) },
+    1 => { let __x2 = k2 - s;
+           let (__m3, __m4) = if __x2 >= 0.0 { (s, 1.0_f64) }
+               else { let __x5 = (k2 * s).sqrt(); (-k2 + 2.0_f64 * __x5, k2 / __x5) };
+           (__m3, __m4) },
+    2 => { let __x6 = s / k2 + 1.0_f64; (k2 * __x6.ln(), 1.0_f64 / __x6) },
     _ => panic!("select index {} out of range 0..3", __sel) } };
 __m0 __m1
 ```
 
-(Line breaks added; the statement is emitted on one line.) `.select_index()` converts the index to the integer the `match` switches on; arael provides it as a trait on integer, `bool` and float values, and generated code needs it in scope. `branch` is not treated this way: work shared by its two sides, or by a side and the rest of the batch, is hoisted above the `if` as before.
+(Line breaks added; the statement is emitted on one line.) `.select_index()` converts the index to the integer the `match` switches on; arael provides it as a trait on integer, `bool` and float values, and generated code needs it in scope. `branch` gets the same treatment, as the Huber arm shows: its two sides are scopes, and every `branch` on one condition in the batch fuses into one `if`. Under plain `cse` the Huber square root would be hoisted above the `if` and computed for inliers too.
 
 ## Custom Functions
 
@@ -551,7 +552,7 @@ the exact rational forms. Usable directly in constraint bodies by
 name; the `#[arael(root, fast_atan)]` macro keyword rewrites every
 plain `atan`/`atan2` in a model onto them via `replace_function`.
 
-## Switching and Clamping: `heaviside`, `clamp`, `branch`, `select`, `min`, `max`, `sign`
+## Switching and Clamping: `heaviside`, `clamp`, `branch`, `multibranch`, `piecewise`, `select`, `min`, `max`, `sign`
 
 ### `heaviside(x)`
 
@@ -560,6 +561,14 @@ The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`, and 0 for NaN (inter
 ### `branch(q, a, b)`
 
 Selects between two subexpressions on the sign of a third: `branch(q, a, b) = q >= 0 ? a : b`, with the same `>= 0` / NaN sense as `heaviside` (a NaN condition selects `b`). It compiles to `if q >= 0.0 { a } else { b }` and interprets the same way, so **only the taken side is evaluated** -- the untaken arm may be undefined (a division by zero, a `ln` of a negative) without poisoning the result. Differentiation selects the taken side's derivative: `d/dvar branch(q, a, b) = branch(q, d a/dvar, d b/dvar)`. The switch `q` contributes nothing (the jump at `q = 0` is dropped, as with `heaviside`), so `branch` gives a piecewise residual the correct one-sided gradient with no spurious boundary term. Use it for asymmetric penalties, one-sided barriers, or guarding an inner computation valid on only one side of a condition.
+
+### `multibranch(q0, a0, q1, a1, ..., default)`
+
+A condition chain: `a0` if `q0 >= 0`, else `a1` if `q1 >= 0`, and so on, else `default`. It is nested `branch`es (`branch(q0, a0, branch(q1, a1, default))`), so it evaluates only the taken arm, differentiates to the taken arm's derivative, and a NaN condition falls through to the next. The Rust constructor takes the pairs, `multibranch(vec![(q0, a0), (q1, a1)], default)`; Display shows the nested `branch` form, as for `min` and `max`. Under `cse_scoped` the chain emits as an `if / else if / else` ladder.
+
+### `piecewise(x, a0, b0, a1, b1, ..., an)`
+
+The piecewise function of one variable, written as one reads its definition: `a0` for `x <= b0`, then `a1` for `x <= b1`, and so on, `an` above the last break. Breaks ascending. The Rust constructor takes the arms and breaks as two lists, `piecewise(x, vec![a0, a1, a2], vec![b0, b1])`, one more arm than breaks (a mismatch panics naming both counts). It is `multibranch` with the conditions `b - x`, so the break belongs to the lower arm, a NaN `x` takes the last arm, and only the taken arm runs. Huber on the squared norm is `piecewise(s, vec![s, 2 * sqrt(k2 * s) - k2], vec![k2])`.
 
 ### `select(i, a0, a1, ...)`, `select_or(i, a0, ..., default)`
 

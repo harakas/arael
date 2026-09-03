@@ -644,7 +644,7 @@ impl Expr {
 
 // --- CSE statements ---
 
-use crate::cse::{Arm, Intermediate};
+use crate::cse::{Arm, Intermediate, Switch};
 
 fn write_names(buf: &mut String, names: &[String]) {
     if names.len() == 1 {
@@ -685,7 +685,7 @@ impl Intermediate {
                 expr.write_rust(buf, ft, 0);
                 buf.push(';');
             }
-            Intermediate::Match { index, names, arms, default } => {
+            Intermediate::Match { switch: Switch::Index(index), names, arms, default } => {
                 buf.push_str("let ");
                 write_names(buf, names);
                 buf.push_str(" = { let __sel = ");
@@ -693,15 +693,32 @@ impl Intermediate {
                 buf.push_str("; match __sel { ");
                 for (k, arm) in arms.iter().enumerate() {
                     buf.push_str(&format!("{k} => "));
-                    arm.write_rust(buf, ft);
+                    arm.write_rust(buf, ft, false);
                     buf.push_str(", ");
                 }
                 buf.push_str("_ => ");
                 match default {
-                    Some(arm) => arm.write_rust(buf, ft),
+                    Some(arm) => arm.write_rust(buf, ft, false),
                     None => Expr::write_select_panic(buf, "__sel", arms.len()),
                 }
                 buf.push_str(" } };");
+            }
+            Intermediate::Match { switch: Switch::Sign(q), names, arms, default } => {
+                // Same comparison as the inline branch emitter, so NaN
+                // takes the else side either way.
+                buf.push_str("let ");
+                write_names(buf, names);
+                buf.push_str(" = if ");
+                q.write_rust(buf, ft, 0);
+                if ft == GENERIC_FT {
+                    buf.push_str(" >= __c(0.0) ");
+                } else {
+                    buf.push_str(" >= 0.0 ");
+                }
+                arms[0].write_rust(buf, ft, true);
+                buf.push_str(" else ");
+                default.as_ref().expect("a fused branch has an else side").write_rust(buf, ft, true);
+                buf.push(';');
             }
         }
     }
@@ -709,9 +726,10 @@ impl Intermediate {
 
 impl Arm {
     /// The arm's value (a tuple for a fused match), in a block holding
-    /// the arm's intermediates first when it has any.
-    fn write_rust(&self, buf: &mut String, ft: &str) {
-        let block = !self.inters.is_empty();
+    /// the arm's intermediates first when it has any, or always when
+    /// `block` (an `if` side must be a block).
+    fn write_rust(&self, buf: &mut String, ft: &str, block: bool) {
+        let block = block || !self.inters.is_empty();
         if block {
             buf.push_str("{ ");
             for it in &self.inters {
@@ -740,7 +758,7 @@ impl fmt::Display for Intermediate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Intermediate::Let { name, expr } => write!(f, "let {name} = {expr};"),
-            Intermediate::Match { index, names, arms, default } => {
+            Intermediate::Match { switch: Switch::Index(index), names, arms, default } => {
                 let mut names_s = String::new();
                 write_names(&mut names_s, names);
                 write!(f, "let {names_s} = match {index} {{")?;
@@ -752,6 +770,25 @@ impl fmt::Display for Intermediate {
                     None => write!(f, " _ => panic }};"),
                 }
             }
+            Intermediate::Match { switch: Switch::Sign(q), names, arms, default } => {
+                let mut names_s = String::new();
+                write_names(&mut names_s, names);
+                let default = default.as_ref().expect("a fused branch has an else side");
+                write!(f, "let {names_s} = if {q} >= 0 {{ {} }} else {{ {} }};",
+                    arms[0].display_bare(), default.display_bare())
+            }
+        }
+    }
+}
+
+impl Arm {
+    /// The arm's Display without the outer braces an `if` side supplies.
+    fn display_bare(&self) -> String {
+        let s = format!("{self}");
+        if !self.inters.is_empty() {
+            s[1..s.len() - 1].trim().to_string()
+        } else {
+            s
         }
     }
 }

@@ -1093,6 +1093,15 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                     _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
                 }
             }
+            arael_sym::FunctionRef::Variadic(f) => {
+                let scalars: Vec<arael_sym::E> = args.iter().map(|a| match a {
+                    SymVal::Scalar(e) => Ok(e.clone()),
+                    other => Err(syn::Error::new_spanned(span,
+                        format!("{} expects scalar arguments, got {}", name, other.type_name()))),
+                }).collect::<Result<_, _>>()?;
+                f(scalars).map(SymVal::Scalar)
+                    .map_err(|msg| syn::Error::new_spanned(span, msg))
+            }
         };
     }
     // User-defined `#[arael::function]` fallback: consult the macro

@@ -3519,6 +3519,8 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
                         Some(arael_sym::FunctionRef::Unary(f)) => expect_sym_unary(func_name, args, f),
                         Some(arael_sym::FunctionRef::Binary(f)) => expect_sym_binary(func_name, args, f),
                         Some(arael_sym::FunctionRef::Ternary(f)) => expect_sym_ternary(func_name, args, f),
+                        Some(arael_sym::FunctionRef::Variadic(f)) =>
+                            f(args).map_err(|msg| syn::Error::new_spanned(func_name, msg)),
                         None => Err(syn::Error::new_spanned(
                             func_name,
                             format!("unknown function '{fname}' in fit expression"),

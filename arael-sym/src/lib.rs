@@ -973,6 +973,70 @@ pub fn branch(q: impl Into<E>, a: impl Into<E>, b: impl Into<E>) -> E {
 pub fn select(index: impl Into<E>, arms: Vec<E>, default: Option<E>) -> E {
     E::new(Expr::Select { index: index.into(), arms, default })
 }
+/// Condition chain: the arm of the first condition `>= 0`, else `default`.
+/// Built as nested [`branch`]es, so `multibranch(vec![(q0, a0), (q1, a1)],
+/// d)` is `branch(q0, a0, branch(q1, a1, d))`: only the taken arm is
+/// evaluated, the derivative is the taken arm's, and under `cse_scoped`
+/// it emits as an `if / else if / else` ladder. Display and parser form:
+/// `multibranch(q0, a0, q1, a1, ..., default)`.
+pub fn multibranch(pieces: Vec<(E, E)>, default: E) -> E {
+    pieces.into_iter().rev().fold(default, |rest, (q, a)| branch(q, a, rest))
+}
+/// The piecewise function of one variable: `arms[0]` for `x <= breaks[0]`,
+/// then `arms[1]` for `x <= breaks[1]`, ..., and the last arm above every
+/// break. `arms` is one longer than `breaks` (else a panic naming both
+/// counts); breaks ascending. Built on [`multibranch`] with conditions
+/// `b - x`, so a NaN `x` takes the last arm, as a NaN [`branch`] condition
+/// does. Display and parser form: `piecewise(x, a0, b0, a1, b1, ..., an)`,
+/// arms and breaks interleaved as one reads the definition.
+pub fn piecewise(x: impl Into<E>, arms: Vec<E>, breaks: Vec<E>) -> E {
+    assert_eq!(arms.len(), breaks.len() + 1,
+        "piecewise: {} arms for {} breaks (arms must be breaks + 1)", arms.len(), breaks.len());
+    let x = x.into();
+    let mut arms = arms;
+    let last = arms.pop().unwrap();
+    let pieces = breaks.into_iter().zip(arms).map(|(b, a)| (b - x.clone(), a)).collect();
+    multibranch(pieces, last)
+}
+
+// Variadic registry entries: the argument list is the Display form.
+fn select_call(args: Vec<E>) -> Result<E, String> {
+    if args.len() < 2 {
+        return Err("select expects an index and at least one arm".into());
+    }
+    let mut it = args.into_iter();
+    let index = it.next().unwrap();
+    Ok(select(index, it.collect(), None))
+}
+fn select_or_call(mut args: Vec<E>) -> Result<E, String> {
+    if args.len() < 3 {
+        return Err("select_or expects an index, at least one arm, then the default".into());
+    }
+    let default = args.pop();
+    let mut it = args.into_iter();
+    let index = it.next().unwrap();
+    Ok(select(index, it.collect(), default))
+}
+fn multibranch_call(mut args: Vec<E>) -> Result<E, String> {
+    if args.len() < 3 || args.len() % 2 == 0 {
+        return Err("multibranch expects condition/arm pairs then a default (an odd count of at least 3)".into());
+    }
+    let default = args.pop().unwrap();
+    let pieces = args.chunks(2).map(|p| (p[0].clone(), p[1].clone())).collect();
+    Ok(multibranch(pieces, default))
+}
+fn piecewise_call(args: Vec<E>) -> Result<E, String> {
+    if args.len() < 2 || args.len() % 2 != 0 {
+        return Err("piecewise expects x, then arm/break pairs and a final arm (an even count of at least 2)".into());
+    }
+    let mut it = args.into_iter();
+    let x = it.next().unwrap();
+    let (mut arms, mut breaks) = (Vec::new(), Vec::new());
+    for (i, e) in it.enumerate() {
+        if i % 2 == 0 { arms.push(e) } else { breaks.push(e) }
+    }
+    Ok(piecewise(x, arms, breaks))
+}
 /// Symbolic minimum, the smaller of `a` and `b`. Built on [`branch`], so it is
 /// differentiable away from the kink -- the derivative is the taken side's. At a
 /// tie (`a == b`) it returns `a` and uses `a`'s derivative. Accepts `impl Into<E>`.
@@ -1071,6 +1135,9 @@ pub enum FunctionRef {
     Unary(fn(E) -> E),
     Binary(fn(E, E) -> E),
     Ternary(fn(E, E, E) -> E),
+    /// Any number of arguments; the function checks the count and shape
+    /// itself and reports a bad call as the error text.
+    Variadic(fn(Vec<E>) -> Result<E, String>),
 }
 
 /// The authoritative table of scalar functions arael-sym exposes by name.
@@ -1124,6 +1191,11 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     // Ternary
     ("clamp", FunctionRef::Ternary(clamp)),
     ("branch", FunctionRef::Ternary(branch)),
+    // Variadic switches, in their Display forms
+    ("select", FunctionRef::Variadic(select_call)),
+    ("select_or", FunctionRef::Variadic(select_or_call)),
+    ("multibranch", FunctionRef::Variadic(multibranch_call)),
+    ("piecewise", FunctionRef::Variadic(piecewise_call)),
 ];
 
 /// Look up a scalar function by its conventional name. Returns `None` for
@@ -3190,6 +3262,52 @@ mod tests {
         });
         assert_eq!(got, c(2.0));
         assert_eq!(f.replace_function("sin", &|_| c(0.0)), f);
+    }
+
+    #[test]
+    fn multibranch_first_true_condition_wins() {
+        let (q0, q1, a, b, d) = (symbol("q0"), symbol("q1"), symbol("a"), symbol("b"), symbol("d"));
+        let f = multibranch(vec![(q0.clone(), a.clone()), (q1.clone(), b.clone())], d.clone());
+        assert_eq!(f, branch(q0, a, branch(q1, b, d)));
+        let at = |v0: f64, v1: f64| f.eval(&HashMap::from([
+            ("q0", v0), ("q1", v1), ("a", 1.0), ("b", 2.0), ("d", 3.0)])).unwrap();
+        assert_eq!(at(1.0, 1.0), 1.0);
+        assert_eq!(at(-1.0, 0.0), 2.0);
+        assert_eq!(at(-1.0, -1.0), 3.0);
+        assert_eq!(at(f64::NAN, -1.0), 3.0);
+        assert_eq!(parse("multibranch(q0, a, q1, b, d)").unwrap(), f);
+        assert!(parse("multibranch(q0, a)").is_err());
+        assert!(parse("multibranch(q0, a, q1, d)").is_err());
+    }
+
+    #[test]
+    fn piecewise_intervals_derivative_and_spelling() {
+        let x = symbol("x");
+        // 0 up to 1, 10 up to 2, 20 above.
+        let f = piecewise(x.clone(), vec![c(0.0), c(10.0), c(20.0)], vec![c(1.0), c(2.0)]);
+        let at = |v: f64| f.eval(&HashMap::from([("x", v)])).unwrap();
+        assert_eq!(at(0.5), 0.0);
+        assert_eq!(at(1.0), 0.0);   // <= : the break belongs to the lower arm
+        assert_eq!(at(1.5), 10.0);
+        assert_eq!(at(2.0), 10.0);
+        assert_eq!(at(2.5), 20.0);
+        assert_eq!(at(f64::NAN), 20.0);
+        // The derivative is the taken arm's.
+        let g = piecewise(x.clone(), vec![x.clone() * x.clone(), c(5.0) * x.clone()], vec![c(1.0)]);
+        let d = g.diff("x");
+        assert_eq!(d.eval(&HashMap::from([("x", 0.5)])).unwrap(), 1.0);
+        assert_eq!(d.eval(&HashMap::from([("x", 3.0)])).unwrap(), 5.0);
+        // The interleaved spelling parses to the same tree; it is a branch.
+        assert_eq!(parse("piecewise(x, 0, 1, 10, 2, 20)").unwrap(), f);
+        assert_eq!(g, branch(c(1.0) - x.clone(), x.clone() * x.clone(), c(5.0) * x));
+        assert!(parse("piecewise(x, 0, 1)").is_err());
+        assert!(parse("piecewise(x)").is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "piecewise: 2 arms for 2 breaks")]
+    fn piecewise_arm_count_mismatch_panics() {
+        let _ = piecewise(symbol("x"), vec![c(0.0), c(1.0)], vec![c(1.0), c(2.0)]);
     }
 
     #[test]
