@@ -779,7 +779,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// A trailing `loss = |s| rho(s)` applies a block M-estimator to each point's
 /// squared residual `s = r^2`: the cost becomes `sum rho(s)` and each point's
 /// gradient and Gauss-Newton Hessian are scaled by the weight `rho'(s)`. Use a
-/// built-in `loss_huber` / `loss_cauchy` / `loss_tukey`, or any arael-sym
+/// built-in kernel (`loss_huber`, `loss_soft_l1`, `loss_cauchy`,
+/// `loss_geman_mcclure`, `loss_tukey`), `loss_select(kind, s, k2)` or a
+/// `match` on an integer field to pick one at runtime, or any arael-sym
 /// expression in `s`:
 ///
 /// ```ignore
@@ -3536,6 +3538,28 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
         Expr::Paren(ep) => syn_expr_to_sym(&ep.expr, ctx),
 
         Expr::Group(eg) => syn_expr_to_sym(&eg.expr, ctx),
+
+        // `match k { 0 => a, 1 => b, _ => d }`: a select node, the same
+        // rules as in a constraint body.
+        Expr::Match(em) => {
+            let index = syn_expr_to_sym(&em.expr, ctx)?;
+            let (arm_pats, default_pat) = constraint::match_arm_patterns(&em.arms)?;
+            let mut arms = Vec::with_capacity(arm_pats.len());
+            for arm in &em.arms[..arm_pats.len()] {
+                arms.push(syn_expr_to_sym(&arm.body, ctx)?);
+            }
+            let default = match default_pat {
+                Some(i) => Some(syn_expr_to_sym(&em.arms[i].body, ctx)?),
+                None => None,
+            };
+            if let arael_sym::Expr::Const(v) = index.as_ref()
+                && default.is_none()
+                && !(*v >= 0.0 && *v < arms.len() as f64 && v.fract() == 0.0) {
+                    return Err(syn::Error::new_spanned(&em.expr,
+                        format!("match on the constant {} has no arm for it", v)));
+                }
+            Ok(arael_sym::select(index, arms, default))
+        }
 
         _ => Err(syn::Error::new_spanned(
             expr,

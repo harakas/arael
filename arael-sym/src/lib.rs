@@ -1117,6 +1117,40 @@ pub fn loss_geman_mcclure(s: E, c2: E) -> E {
     c2.clone() * s.clone() / (c2 + s)
 }
 
+/// Soft-L1 loss on the squared norm: `rho(s) = 2*k2*(sqrt(1 + s/k2) - 1)`,
+/// weight `rho'(s) = 1/sqrt(1 + s/k2)`. Quadratic near zero, linear far
+/// out, smooth where Huber has a kink. Convex, never fully rejects.
+pub fn loss_soft_l1(s: E, k2: E) -> E {
+    c(2.0) * k2.clone() * (sqrt(c(1.0) + s / k2) - c(1.0))
+}
+
+/// Select a robust kernel at runtime by integer `kind`, in order of
+/// increasing aggressiveness:
+///
+/// | `kind` | kernel | |
+/// |---|---|---|
+/// | 0 | none, `rho = s` | plain least squares |
+/// | 1 | [`loss_huber`] | convex, kink at the knee |
+/// | 2 | [`loss_soft_l1`] | convex, smooth |
+/// | 3 | [`loss_cauchy`] | redescends slowly, weight never zero |
+/// | 4 | [`loss_geman_mcclure`] | redescends, smooth |
+/// | 5 | [`loss_tukey`] | redescends, hard cutoff |
+///
+/// `k2` is the squared scale, as for the kernels themselves. Any other
+/// `kind` panics. Built on [`select`], so only the taken kernel is
+/// evaluated and `cse_scoped` keeps each kernel's work inside its arm; a
+/// hand-written `match` compiles only the kernels it lists.
+pub fn loss_select(kind: E, s: E, k2: E) -> E {
+    select(kind, vec![
+        s.clone(),
+        loss_huber(s.clone(), k2.clone()),
+        loss_soft_l1(s.clone(), k2.clone()),
+        loss_cauchy(s.clone(), k2.clone()),
+        loss_geman_mcclure(s.clone(), k2.clone()),
+        loss_tukey(s, k2),
+    ], None)
+}
+
 // ---------------------------------------------------------------------------
 // Name-based function lookup
 //
@@ -1188,9 +1222,11 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("loss_cauchy", FunctionRef::Binary(loss_cauchy)),
     ("loss_huber", FunctionRef::Binary(loss_huber)),
     ("loss_tukey", FunctionRef::Binary(loss_tukey)),
+    ("loss_soft_l1", FunctionRef::Binary(loss_soft_l1)),
     // Ternary
     ("clamp", FunctionRef::Ternary(clamp)),
     ("branch", FunctionRef::Ternary(branch)),
+    ("loss_select", FunctionRef::Ternary(loss_select)),
     // Variadic switches, in their Display forms
     ("select", FunctionRef::Variadic(select_call)),
     ("select_or", FunctionRef::Variadic(select_or_call)),
@@ -2122,6 +2158,48 @@ mod tests {
     }
 
     #[test]
+    fn loss_soft_l1_value_weight_and_limit() {
+        let s = symbol("s");
+        let rho = loss_soft_l1(s.clone(), c(4.0));
+        let w = rho.diff("s");
+        let at = |e: &E, v: f64| e.eval(&HashMap::from([("s", v)])).unwrap();
+        // rho(s) = 2*4*(sqrt(1 + s/4) - 1): at s = 12, sqrt(4) = 2, so 8.
+        assert!((at(&rho, 12.0) - 8.0).abs() < 1e-12);
+        // rho'(s) = 1/sqrt(1 + s/4): at s = 12, 0.5.
+        assert!((at(&w, 12.0) - 0.5).abs() < 1e-12);
+        // Near zero: rho ~ s, weight 1.
+        assert!((at(&rho, 1e-6) / 1e-6 - 1.0).abs() < 1e-6);
+        assert_eq!(at(&w, 0.0), 1.0);
+    }
+
+    #[test]
+    fn loss_select_agrees_with_each_kernel() {
+        let (kind, s, k2) = (symbol("kind"), symbol("s"), symbol("k2"));
+        let sel = loss_select(kind, s.clone(), k2.clone());
+        let dsel = sel.diff("s");
+        let kernels: [(f64, E); 6] = [
+            (0.0, s.clone()),
+            (1.0, loss_huber(s.clone(), k2.clone())),
+            (2.0, loss_soft_l1(s.clone(), k2.clone())),
+            (3.0, loss_cauchy(s.clone(), k2.clone())),
+            (4.0, loss_geman_mcclure(s.clone(), k2.clone())),
+            (5.0, loss_tukey(s.clone(), k2.clone())),
+        ];
+        for (k, rho) in kernels {
+            let w = rho.diff("s");
+            for sv in [0.3, 2.5, 9.0] {
+                let vars = HashMap::from([("kind", k), ("s", sv), ("k2", 2.0)]);
+                assert_eq!(sel.eval(&vars).unwrap(), rho.eval(&vars).unwrap(), "kind {k} s {sv}");
+                assert_eq!(dsel.eval(&vars).unwrap(), w.eval(&vars).unwrap(), "kind {k} s {sv} weight");
+            }
+        }
+        // No default arm: a kind no kernel covers is an error.
+        assert!(sel.eval(&HashMap::from([("kind", 6.0), ("s", 1.0), ("k2", 2.0)])).is_err());
+        assert!(matches!(function_by_name("loss_select"), Some(FunctionRef::Ternary(_))));
+        assert!(matches!(function_by_name("loss_soft_l1"), Some(FunctionRef::Binary(_))));
+    }
+
+    #[test]
     fn loss_huber_value_weight_and_continuity() {
         let (s, k2) = (symbol("s"), constant(4.0)); // squared threshold
         let rho = loss_huber(s.clone(), k2);
@@ -2226,7 +2304,7 @@ mod tests {
     fn loss_kernels_resolve_by_name() {
         // The constraint interpreter dispatches through function_by_name, so
         // the loss kernels must be reachable there and match the direct call.
-        for name in ["loss_geman_mcclure", "loss_cauchy", "loss_huber", "loss_tukey"] {
+        for name in ["loss_geman_mcclure", "loss_cauchy", "loss_huber", "loss_tukey", "loss_soft_l1"] {
             match function_by_name(name) {
                 Some(FunctionRef::Binary(_)) => {}
                 other => panic!("{name} not a binary function: {}", other.is_some()),

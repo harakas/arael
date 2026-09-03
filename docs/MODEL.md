@@ -856,11 +856,31 @@ code. The dialect:
 - **Scalar functions**: the arael-sym registry -- `sin cos tan asin
   acos atan sinh cosh tanh exp ln log2 log10 sqrt abs heaviside
   identity safe_sqrt safe_asin safe_acos atan2 pow safe_atan2 rad_diff
-  rad_sum clamp branch` -- plus any `#[arael::function]` you define (next
-  section). Derivative conventions for the `safe_*`/`heaviside`/
-  `clamp`/`branch` family are documented in [SYM.md](SYM.md).
-  `branch(q, a, b)` compiles to `if q >= 0.0 { a } else { b }`, so only
-  the taken side runs and its derivative is the one selected.
+  rad_sum clamp branch min max sign select multibranch piecewise` and
+  the robust kernels `loss_huber loss_soft_l1 loss_cauchy
+  loss_geman_mcclure loss_tukey loss_select` -- plus any
+  `#[arael::function]` you define (next section). Derivative
+  conventions for the `safe_*`/`heaviside`/`clamp`/`branch` family are
+  documented in [SYM.md](SYM.md). `branch(q, a, b)` compiles to `if q
+  >= 0.0 { a } else { b }`, so only the taken side runs and its
+  derivative is the one selected; `piecewise` and `multibranch` are
+  its N-way forms.
+- **`match`**: `match k { 0 => a, 1 => b, _ => d }` on a scalar picks
+  an arm by an integer at runtime. It compiles to a `match` that
+  evaluates only the taken arm, and differentiates to that arm's
+  derivative. Patterns are the integer literals `0, 1, ...` in that
+  order, optionally ending with `_` as the default; arms are scalars;
+  without `_` any other value panics. The scrutinee is normally an
+  integer data field (`u32`, `i32`, `bool`); a float works when it
+  holds an integer value and panics otherwise. Works in residual
+  bodies and in the `loss =` clause, where it picks a robust kernel
+  per solve from one residual body:
+  `loss = |s| match obs.kind { 0 => s, 1 => loss_huber(s, obs.k2), _
+  => loss_cauchy(s, obs.k2) }`. `loss_select(obs.kind, s, obs.k2)` is
+  the shorthand over all six built-in kernels. A dispatching
+  constraint always takes the with-loss path, even when kind 0 selects
+  plain least squares; a model that only ever wants one kernel should
+  still write it directly.
 - **Vectors / matrices / quaternions**: fields of runtime type
   `vect2*/vect3*/matrix2*/matrix3*/quatern*` dispatch through their
   symbolic companions -- arithmetic, `transpose`, `det`, indexing

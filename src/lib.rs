@@ -1918,9 +1918,13 @@
 //!
 //! The closure argument is the block squared norm; the scale (`k2`, `c2`)
 //! is squared, in the same chi-square units as `s` -- an inlier threshold
-//! like the chi-square quantile 7.815 goes in unchanged. Four kernels ship
-//! (`loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`), or
-//! write any differentiable expression -- `|s| s` is plain least squares.
+//! like the chi-square quantile 7.815 goes in unchanged. Five kernels ship
+//! (`loss_huber`, `loss_soft_l1`, `loss_cauchy`, `loss_geman_mcclure`,
+//! `loss_tukey`); `loss_select(kind, s, k2)` picks one of them by an
+//! integer field at runtime and a `match` in the closure picks any set
+//! of them, so one residual body serves every kernel a solve may want;
+//! or write any differentiable expression -- `|s| s` is plain least
+//! squares.
 //! Unlike the per-element Starship wrapper (next subsection) this is a
 //! standard M-estimator: the down-weighting depends only on the block
 //! norm, so it is invariant to how the residual axes are oriented. Scaling

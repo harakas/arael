@@ -895,7 +895,85 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             }
         }
 
+        // `match k { 0 => a, 1 => b, _ => d }` on a scalar: a select node,
+        // arms in pattern order, `_` (optional, last) as the default.
+        Expr::Match(em) => {
+            let index = match eval_expr(&em.expr, ctx)? {
+                SymVal::Scalar(e) => e,
+                other => return Err(syn::Error::new_spanned(&em.expr,
+                    format!("match on a {}; the scrutinee must be a scalar", other.type_name()))),
+            };
+            let (arm_pats, default_pat) = match_arm_patterns(&em.arms)?;
+            let mut arms = Vec::with_capacity(arm_pats.len());
+            for arm in &em.arms[..arm_pats.len()] {
+                arms.push(match_arm_scalar(&arm.body, ctx)?);
+            }
+            let default = match default_pat {
+                Some(i) => Some(match_arm_scalar(&em.arms[i].body, ctx)?),
+                None => None,
+            };
+            if let arael_sym::Expr::Const(v) = index.as_ref()
+                && default.is_none()
+                && !(*v >= 0.0 && *v < arms.len() as f64 && v.fract() == 0.0) {
+                    return Err(syn::Error::new_spanned(&em.expr,
+                        format!("match on the constant {} has no arm for it", v)));
+                }
+            Ok(SymVal::Scalar(arael_sym::select(index, arms, default)))
+        }
+
         _ => Err(syn::Error::new_spanned(expr, "unsupported expression in constraint")),
+    }
+}
+
+/// Check a body `match`'s arms: patterns must be the integer literals
+/// `0, 1, ..., N-1` in that order, optionally followed by one `_`, with
+/// no guards. Returns the count of numbered arms and the index of the
+/// `_` arm when present.
+pub(crate) fn match_arm_patterns(arms: &[syn::Arm]) -> syn::Result<(Vec<usize>, Option<usize>)> {
+    let mut numbered = Vec::new();
+    let mut default = None;
+    for (i, arm) in arms.iter().enumerate() {
+        if let Some((if_token, _)) = &arm.guard {
+            return Err(syn::Error::new_spanned(if_token,
+                "match arm guards are not supported in a constraint body"));
+        }
+        if default.is_some() {
+            return Err(syn::Error::new_spanned(&arm.pat,
+                "the `_` arm must be the last arm of a match"));
+        }
+        match &arm.pat {
+            Pat::Wild(_) => default = Some(i),
+            Pat::Lit(lit) => {
+                let n = match &lit.lit {
+                    syn::Lit::Int(li) => li.base10_parse::<usize>().ok(),
+                    _ => None,
+                };
+                match n {
+                    Some(n) if n == numbered.len() => numbered.push(n),
+                    _ => return Err(syn::Error::new_spanned(&arm.pat,
+                        format!("match arm patterns must be the integer literals 0, 1, ... \
+                                 in order (expected {} here), optionally ending with `_`",
+                                numbered.len()))),
+                }
+            }
+            other => return Err(syn::Error::new_spanned(other,
+                format!("match arm patterns must be the integer literals 0, 1, ... \
+                         in order (expected {} here), optionally ending with `_`",
+                        numbered.len()))),
+        }
+    }
+    if numbered.is_empty() && default.is_none() {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+            "a match needs at least one arm"));
+    }
+    Ok((numbered, default))
+}
+
+fn match_arm_scalar(body: &Expr, ctx: &mut ConstraintCtx) -> syn::Result<arael_sym::E> {
+    match eval_expr(body, ctx)? {
+        SymVal::Scalar(e) => Ok(e),
+        other => Err(syn::Error::new_spanned(body,
+            format!("match arms must be scalars, got {}", other.type_name()))),
     }
 }
 

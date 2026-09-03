@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_body_errors/match_out_of_order.rs:8: match arm patterns must be the integer literals 0, 1, ... in order (expected 0 here), optionally ending with `_`
+ --> tests/constraint_body_errors/match_out_of_order.rs:6:1
+  |
+6 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_body_errors/match_out_of_order.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
