@@ -955,12 +955,26 @@ pub fn emit_body(model: &Model, model_crate: &str) -> Result<String, String> {
         ""
     };
 
+    // Generic entities are imported as aliases instantiated at the
+    // root's precision, so the shim names them bare like the rest.
     let mut used: Vec<&str> = vec![root.as_str()];
-    for (tn, _) in surfaced_types(model) {
-        used.push(tn.as_str());
+    let mut aliases: Vec<String> = Vec::new();
+    for (tn, ty) in surfaced_types(model) {
+        if ty.generic {
+            aliases.push(format!("type {tn} = {model_crate}::{tn}<{fp}>;"));
+        } else {
+            used.push(tn.as_str());
+        }
     }
     used.sort();
     used.dedup();
+    aliases.sort();
+    aliases.dedup();
+    let aliases = if aliases.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", aliases.join("\n"))
+    };
 
     let mirrors_all = format!("{}{}", MIRRORS, ndim_mirrors(model));
     let mut out = String::new();
@@ -973,7 +987,7 @@ use arael::simple_lm::{{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
 }};
-use {model_crate}::{{{}}};
+use {model_crate}::{{{}}};{aliases}
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the

@@ -67,6 +67,53 @@ fn block_scalar(spelling: &str) -> &str {
     }
 }
 
+/// A generic struct's spelling at a root's precision: `vect2<T>` ->
+/// `vect2f`, `Point<T>` -> `Point`, `Param<T>` -> `Param<f32>`,
+/// `CrossBlock<Point<T>, Pose<T>, T>` -> `CrossBlock<Point, Pose, f32>`.
+fn concretize(spelling: &str, generic: &str, precision: &str) -> String {
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let suffix = if precision == "f32" { "f" } else { "d" };
+    let mut s = spelling.to_string();
+    for math in ["vect2", "vect3", "matrix2", "matrix3", "quatern"] {
+        s = s.replace(&format!("{math}<{generic}>"), &format!("{math}{suffix}"));
+    }
+    // The parameter itself is the float.
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = i + generic.len();
+        if s[i..].starts_with(generic)
+            && (i == 0 || !is_ident(bytes[i - 1]))
+            && (end == bytes.len() || !is_ident(bytes[end]))
+        {
+            out.push_str(precision);
+            i = end;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    // An entity instantiation drops its argument: the sidecar names
+    // entities without it. Wrappers (`Param<f32>`) and builtin
+    // components keep theirs.
+    let arg = format!("<{precision}>");
+    let mut s = out;
+    let mut from = 0;
+    while let Some(pos) = s[from..].find(&arg) {
+        let at = from + pos;
+        let head_start = s[..at].bytes().rposition(|b| !is_ident(b)).map(|p| p + 1).unwrap_or(0);
+        let head = &s[head_start..at];
+        if registry_lookup(head).is_some_and(|l| !l.component) {
+            s.replace_range(at..at + arg.len(), "");
+            from = at;
+        } else {
+            from = at + arg.len();
+        }
+    }
+    s
+}
+
 /// Inner of a single-generic spelling: `Param<vect3f>` -> `vect3f`.
 fn generic_inner(spelling: &str) -> &str {
     match (spelling.find('<'), spelling.ends_with('>')) {
@@ -220,6 +267,9 @@ pub(crate) fn build_json(
         e.push_str(&format!("    {}: {{\n", q(tn)));
         e.push_str(&format!("      \"role\": {},\n", q(role)));
         e.push_str(&format!("      \"param_count\": {},\n", registry_param_total(tn)));
+        if layout.scalar_generic.is_some() {
+            e.push_str("      \"generic\": true,\n");
+        }
         if let Some(sb) = &layout.self_block_field {
             e.push_str(&format!("      \"self_block\": {},\n", q(sb)));
         }
@@ -232,7 +282,13 @@ pub(crate) fn build_json(
         } else {
             e.push_str("      \"fields\": [\n");
             let rows: Vec<String> = layout.spelled_types.iter()
-                .map(|(fname, sp)| format!("        {{{}}}", field_kind(&layout, fname, sp)))
+                .map(|(fname, sp)| {
+                    let sp = match &layout.scalar_generic {
+                        Some(g) => concretize(sp, g, precision),
+                        None => sp.clone(),
+                    };
+                    format!("        {{{}}}", field_kind(&layout, fname, &sp))
+                })
                 .collect();
             e.push_str(&rows.join(",\n"));
             e.push_str("\n      ]\n");
@@ -263,6 +319,52 @@ mod tests {
 
     fn store(name: &str, l: SymLayout) {
         registry_store(name, l).unwrap();
+    }
+
+    #[test]
+    fn generic_entities_are_spelled_at_the_root_precision() {
+        store("ScgPt", SymLayout {
+            fields: vec![
+                ("p".into(), SymFieldType::Vec2),
+                ("hb".into(), SymFieldType::Skip),
+            ],
+            param_fields: vec!["p".into()],
+            self_block_field: Some("hb".into()),
+            scalar_generic: Some("T".into()),
+            spelled_types: vec![
+                ("p".into(), "Param<vect2<T>>".into()),
+                ("hb".into(), "SelfBlock<ScgPt<T>, T>".into()),
+            ],
+            ..Default::default()
+        });
+        store("ScgWorld", SymLayout {
+            fields: vec![("pts".into(), SymFieldType::Struct("ScgPt".into()))],
+            collection_fields: vec!["pts".into()],
+            is_root: true,
+            spelled_types: vec![("pts".into(), "refs::Vec<ScgPt<f32>>".into())],
+            ..Default::default()
+        });
+
+        // Wrappers keep the float, entities drop it, math types take
+        // the suffix, and only the parameter itself is replaced.
+        assert_eq!(concretize("Param<vect2<T>>", "T", "f32"), "Param<vect2f>");
+        assert_eq!(concretize("Param<T>", "T", "f64"), "Param<f64>");
+        assert_eq!(concretize("QuaternionParam<T>", "T", "f32"), "QuaternionParam<f32>");
+        assert_eq!(concretize("Ref<ScgPt<T>>", "T", "f32"), "Ref<ScgPt>");
+        assert_eq!(concretize("std::vec::Vec<ScgPt<T>>", "T", "f32"), "std::vec::Vec<ScgPt>");
+        assert_eq!(concretize("CrossBlock<ScgPt<T>, ScgPt<T>, T>", "T", "f32"),
+            "CrossBlock<ScgPt, ScgPt, f32>");
+        assert_eq!(concretize("SelfBlock<ScgPt<T>, T>", "T", "f64"), "SelfBlock<ScgPt, f64>");
+        assert_eq!(concretize("matrix3<T>", "T", "f32"), "matrix3f");
+        assert_eq!(concretize("Param<TT>", "T", "f32"), "Param<TT>");
+
+        let json = build_json("ScgWorld", "f32", false,
+            &["ScgPt".to_string(), "ScgWorld".to_string()]);
+        assert!(json.contains("\"of\": \"vect2f\""), "{json}");
+        assert!(json.contains("\"kind\": \"self_block\", \"scalar\": \"f32\""), "{json}");
+        assert!(!json.contains("<T>"), "{json}");
+        assert!(json.contains("\"ScgPt\": {\n      \"role\": \"entity\",\n      \"param_count\": 2,\n      \"generic\": true,"), "{json}");
+        assert!(!json.contains("\"ScgWorld\": {\n      \"role\": \"root\",\n      \"param_count\": 0,\n      \"generic\""), "{json}");
     }
 
     #[test]

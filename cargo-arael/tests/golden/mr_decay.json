@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "root": "Decay",
+  "precision": "f32",
+  "jacobian": false,
+  "types": {
+    "Cell": {
+      "role": "entity",
+      "param_count": 1,
+      "generic": true,
+      "self_block": "hb",
+      "fields": [
+        {"name": "v", "kind": "param", "of": "f32", "params": 1},
+        {"name": "t", "kind": "data", "of": "f32"},
+        {"name": "w", "kind": "data", "of": "f32"},
+        {"name": "hb", "kind": "self_block", "scalar": "f32"}
+      ]
+    },
+    "Decay": {
+      "role": "root",
+      "param_count": 0,
+      "fields": [
+        {"name": "cells", "kind": "collection", "container": "vec", "of": "Cell", "spelled": "refs::Vec<Cell<f32>>"}
+      ]
+    }
+  },
+  "constraints": [
+    {"on": "Cell", "label": "Cell", "file": "mr/src/lib.rs", "line": 36}
+  ]
+}

@@ -783,7 +783,11 @@ in priority order:
    namespaces (`{ns}::{root_sn}`), proven by cxx-tests/mr -- an
    f64 root and an f32 root solved from one translation unit
    (runner/tests/multiroot.rs). `--root` still exports a single
-   root flat.
+   root flat. The fixture's entities are generic (`Ob<T>`, `Cell<T>`),
+   so the same parity run proves the generic export path: the
+   sidecar writer spells a generic struct at the root's precision
+   and marks it `generic`, and the shim imports it as an alias
+   instantiated at that precision; golden.rs pins the alias.
 8. **Feature-gated backends** (eigen/cholmod) -- would need a
    features pass-through in [package.metadata.arael]. Niche; faer +
    band cover the demos.

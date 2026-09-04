@@ -42,6 +42,28 @@ fn py_matches_golden() {
 }
 
 #[test]
+fn generic_entities_are_instantiated_at_the_root_precision() {
+    // The cxx-mr fixture's f32 root over a generic `Cell<T>`: the
+    // sidecar spells the entity concretely and marks it generic; the
+    // shim imports it as an alias at the root's precision, and the
+    // header reads it at that precision. Regenerate the fixture after
+    // intentional changes:
+    //   cp cxx-tests/mr/target/arael-sidecar/Decay.json cargo-arael/tests/golden/mr_decay.json
+    let m = Model::parse(include_str!("golden/mr_decay.json")).unwrap();
+    assert!(m.types["Cell"].generic);
+    assert!(!m.types["Decay"].generic);
+    assert_eq!(m.types["Cell"].fields[0].of.as_deref(), Some("f32"));
+
+    let shim = emit_ffi::emit(&m, "cxx_mr").unwrap();
+    assert!(shim.contains("type Cell = cxx_mr::Cell<f32>;"), "{shim}");
+    assert!(!shim.contains("use cxx_mr::{Cell"), "{shim}");
+    assert!(shim.contains("use cxx_mr::{Decay};"), "{shim}");
+
+    let hpp = emit_hpp::emit(&m, "cxx_mr").unwrap();
+    assert!(hpp.contains("float v() const"), "{hpp}");
+}
+
+#[test]
 fn builtin_component_types_do_not_block_class_order() {
     // Builtin components (TransformParam, UnitVecParam, ...) appear in
     // the sidecar's type table but are inlined as methods, never

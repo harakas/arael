@@ -2,10 +2,13 @@
 //! crate. The export puts both shims in one capi crate (each in its
 //! own module; symbols are root-prefixed) and each root's header in a
 //! nested namespace (`cxx_mr::line` / `cxx_mr::decay`), so one C++
-//! translation unit can use both.
+//! translation unit can use both. The entities are generic over the
+//! float and each root instantiates them at its precision, so the
+//! export spells them concretely per root.
 
 use arael::model::{Param, SelfBlock};
 use arael::refs;
+use arael::utils::Float;
 
 /// Root A (f64): fit y = k * x through the observations.
 #[arael::model]
@@ -13,9 +16,9 @@ use arael::refs;
     [ob.y - line.k * ob.x]
 }))]
 #[derive(Default)]
-pub struct Ob {
-    pub x: f64,
-    pub y: f64,
+pub struct Ob<T: Float> {
+    pub x: T,
+    pub y: T,
 }
 
 #[arael::model]
@@ -23,7 +26,7 @@ pub struct Ob {
 #[derive(Default)]
 pub struct Line {
     pub k: Param<f64>,
-    pub obs: std::vec::Vec<Ob>,
+    pub obs: std::vec::Vec<Ob<f64>>,
     pub hb: SelfBlock<Line>,
 }
 
@@ -35,16 +38,16 @@ pub struct Line {
      cell.v * 0.5]
 }))]
 #[derive(Default)]
-pub struct Cell {
-    pub v: Param<f32>,
-    pub t: f32,
-    pub w: f32,
-    pub hb: SelfBlock<Cell, f32>,
+pub struct Cell<T: Float> {
+    pub v: Param<T>,
+    pub t: T,
+    pub w: T,
+    pub hb: SelfBlock<Cell<T>, T>,
 }
 
 #[arael::model]
 #[arael(root, f32)]
 #[derive(Default)]
 pub struct Decay {
-    pub cells: refs::Vec<Cell>,
+    pub cells: refs::Vec<Cell<f32>>,
 }

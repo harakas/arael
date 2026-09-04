@@ -12,7 +12,8 @@ use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
 };
-use cxx_mr::{Cell, Decay};
+use cxx_mr::{Decay};
+type Cell = cxx_mr::Cell<f32>;
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the
@@ -1744,7 +1745,8 @@ use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
 };
-use cxx_mr::{Line, Ob};
+use cxx_mr::{Line};
+type Ob = cxx_mr::Ob<f64>;
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the

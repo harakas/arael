@@ -230,7 +230,7 @@ mod tests {
 
     fn model_with(fields: Vec<Field>) -> (Model, Type) {
         let t = Type { role: "entity".into(), param_count: 0, self_block: None,
-                       builtin: false, fields };
+                       builtin: false, generic: false, fields };
         let m = Model { schema: 1, root: "R".into(), precision: "f64".into(),
                         jacobian: false, types: BTreeMap::new(), constraints: vec![] };
         (m, t)

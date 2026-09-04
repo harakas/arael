@@ -74,5 +74,11 @@ an interface.
 - `collection.of` comes from the registry (reliable); `spelled` is the
   literal source spelling for generators that need the container
   flavor (`refs::Vec` vs `std::vec::Vec`).
+- A generic entity (`Pose<T: Float>`) is spelled at the root's
+  precision: `Param<vect2<T>>` reads `Param<vect2f>` in an f32 root's
+  sidecar, `CrossBlock<Point<T>, Pose<T>, T>` reads
+  `CrossBlock<Point, Pose, f32>`, and entity names carry no argument.
+  The type entry carries `"generic": true`, so a generator that names
+  the Rust type instantiates it (`Pose<f32>`).
 - Emission never alters generated code -- with the variable unset the
   build is byte-identical.

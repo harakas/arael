@@ -39,7 +39,9 @@ root's shim (symbols are root-prefixed), each root gets its own
 header, and the namespaces nest -- `mycrate::root_a` /
 `mycrate::root_b` -- so one translation unit can use both, even at
 different precisions. `--root <Name>` exports a single root with the
-flat single-root layout instead.
+flat single-root layout instead. A generic entity (`Cell<T: Float>`)
+is exported at each root's precision: the f32 root's header reads
+its fields as `float`, the f64 root's as `double`.
 
 ## C++ consumer
 

@@ -31,6 +31,10 @@ pub struct Type {
     pub self_block: Option<String>,
     #[serde(default)]
     pub builtin: bool,
+    /// A struct with a float type parameter, instantiated at the root's
+    /// precision.
+    #[serde(default)]
+    pub generic: bool,
     pub fields: Vec<Field>,
 }
 

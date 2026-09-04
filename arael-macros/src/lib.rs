@@ -149,6 +149,9 @@ struct SymLayout {
     /// type that registers later yet is reachable from this root -- its
     /// constraints were silently dropped.
     is_root: bool,
+    /// The struct's float type parameter (`T` in `Pose<T: Float>`), when
+    /// generic: the sidecar spells such a struct at each root's precision.
+    scalar_generic: Option<String>,
     /// Every declared field with its type spelling as written (normalized
     /// whitespace), in declaration order. `fields` collapses data types
     /// (`f64` / `bool` / `String` all read as Scalar or Struct), so this
@@ -1639,6 +1642,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         triplet_block_fields: triplet_block_fields_reg,
         cross_block_fields: cross_block_fields_reg,
         is_root: has_struct_attr_ident(&input.attrs, "root"),
+        scalar_generic: scalar_generic.clone(),
         spelled_types: spelled_types_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
