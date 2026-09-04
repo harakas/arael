@@ -171,6 +171,23 @@ vendored, version-stamped, into every generated tree:
 | `matrix.hpp` | `matrix2<T>`, `matrix3<T>` + f/d aliases | `{ rows[N] }`, row-major, rows are vectors |
 | `quatern.hpp` | `quatern<T>` + f/d aliases | `{t, v}` -- scalar FIRST, then vect3 |
 | `math.hpp` | umbrella + free functions | |
+| `eigen.hpp` | `to_eigen()` / `from_eigen()` / `eigen_map()` on every value type | opt-in Eigen interop, not part of the umbrella |
+
+Eigen interop is opt-in by include and nothing else: `math.hpp` never
+names an Eigen type. The value types declare `to_eigen()` and
+`eigen_map()` as member templates whose one-line bodies call
+`arael_to_eigen(*this)` / `arael_eigen_map(*this)`; `*this` is
+type-dependent inside a class template, so the call is looked up at
+instantiation, where argument-dependent lookup finds the overloads
+`eigen.hpp` defines in `namespace arael`. A translation unit that
+never calls them never instantiates them; one that calls them without
+the include gets the compiler's undeclared-identifier error at the
+member's line, which carries the `// provided by <arael/eigen.hpp>`
+comment. `from_eigen` reads only `x(i, j)` and `x.rows()`, so it
+needs no Eigen declaration at all. Do not replace this with a macro or
+`__has_include`: a flag would bake one consumer's choice into the
+generated tree, and auto-detection would pull Eigen into every
+translation unit that merely has it installed.
 
 Operator conventions copied from Rust arael exactly, including the
 unusual one: `*` between vectors is DOT product, `%` is CROSS product,

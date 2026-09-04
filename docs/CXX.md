@@ -112,6 +112,21 @@ views are named by their container's nature: `PathPosesDeque`,
   whitening accessors, `Dataset3` for VERTEX_SE3:QUAT/EDGE_SE3:QUAT
   with sqrt-information Cholesky blocks; `to_g2o()`/`save(path)`
   write the graph back out, byte-identical to the Rust writer).
+- **Eigen interop**: `#include <arael/eigen.hpp>` (after Eigen is on
+  the include path) and every value type converts both ways.
+  `v.to_eigen()` returns the plain Eigen value (`Eigen::Matrix<T, N,
+  1>` / `<T, R, C>`, `Eigen::Quaternion<T>` with `w() = t`, an
+  `Isometry` for `transform3`, an `Affine` with `linear() = s R` for
+  `scaled_transform3`); `vect3d::from_eigen(x)` takes any Eigen
+  expression of the right shape, blocks included, so
+  `p.set_pu_tr(arael::matrix3d::from_eigen(S.block<3, 3>(0, 3)))`
+  replaces a nine-entry copy; `m.eigen_map()` is an `Eigen::Map` over
+  the arael storage (row-major for matrices) for reading or assigning
+  in place. `arael::to_eigen(v)`, `arael::from_eigen<vect3d>(x)` and
+  `arael::eigen_map(v)` are the free spellings. Without the include
+  nothing changes: the math headers never name an Eigen type, and a
+  `to_eigen()` call in a file that did not include it fails at that
+  call with a message pointing at the header to include.
 - **Params** read/write their value; `set_<p>_optimize(false)` fixes
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,

@@ -26,6 +26,12 @@ struct quatern {
     quatern conj() const { return {t, -v}; }
     bool is_finite() const { return std::isfinite(t) && v.is_finite(); }
     template<class K> quatern<K> cast() const { return {K(t), v.template cast<K>()}; }
+    /// `Eigen::Quaternion<T>` with the same rotation (`w()` is `t`).
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// From an Eigen quaternion, through `w() x() y() z()`.
+    template<class Q> static quatern from_eigen(const Q& q) {
+        return {T(q.w()), {T(q.x()), T(q.y()), T(q.z())}};
+    }
     bool similar(quatern other) const {
         return std::abs(t - other.t)
                 < T(10) * (std::abs(t) + std::abs(other.t)

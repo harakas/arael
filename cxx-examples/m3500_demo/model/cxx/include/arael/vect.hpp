@@ -8,6 +8,9 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <type_traits>
+
+#include "assert.hpp"
 
 namespace arael {
 
@@ -42,6 +45,29 @@ template<class T> inline T rad2rad(T x) {
     return x;
 }
 
+// The shape check behind every `from_eigen`: a fixed-size Eigen
+// expression is checked at compile time, a dynamic one at runtime.
+template<class X, class = void>
+struct has_eigen_shape : std::false_type {};
+template<class X>
+struct has_eigen_shape<X, std::void_t<decltype(X::RowsAtCompileTime), decltype(X::ColsAtCompileTime)>>
+    : std::true_type {};
+
+template<class X, int R, int C>
+inline void eigen_shape(const X& x) {
+    (void)x;
+    if constexpr (has_eigen_shape<X>::value) {
+        static_assert((X::RowsAtCompileTime == R || X::RowsAtCompileTime == -1)
+                      && (X::ColsAtCompileTime == C || X::ColsAtCompileTime == -1),
+                      "from_eigen: the expression has the wrong shape");
+        if constexpr (X::RowsAtCompileTime == -1 || X::ColsAtCompileTime == -1) {
+            arael_assert_true(x.rows() == R && x.cols() == C);
+        }
+    } else {
+        arael_assert_true(x.rows() == R && x.cols() == C);
+    }
+}
+
 } // namespace detail
 
 /// 2D vector with x, y components.
@@ -61,6 +87,16 @@ struct vect2 {
     vect2 deg2rad() const { T k = detail::pi<T>() / T(180); return {x * k, y * k}; }
     vect2 rad2deg() const { T k = T(180) / detail::pi<T>(); return {x * k, y * k}; }
     template<class K> vect2<K> cast() const { return {K(x), K(y)}; }
+    /// The Eigen value, `Eigen::Matrix<T, 2, 1>`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// An `Eigen::Map` over this storage, readable or assignable in place.
+    template<class Dummy = void> auto eigen_map() { return arael_eigen_map(*this); }       // provided by <arael/eigen.hpp>
+    template<class Dummy = void> auto eigen_map() const { return arael_eigen_map(*this); } // provided by <arael/eigen.hpp>
+    /// From any 2x1 Eigen expression.
+    template<class X> static vect2 from_eigen(const X& x) {
+        detail::eigen_shape<X, 2, 1>(x);
+        return {T(x(0)), T(x(1))};
+    }
     bool similar(vect2 other) const {
         return (*this - other).norm()
             < T(10) * (norm() + other.norm() + std::numeric_limits<T>::epsilon())
@@ -100,6 +136,16 @@ struct vect3 {
     vect3 deg2rad() const { T k = detail::pi<T>() / T(180); return {x * k, y * k, z * k}; }
     vect3 rad2deg() const { T k = T(180) / detail::pi<T>(); return {x * k, y * k, z * k}; }
     template<class K> vect3<K> cast() const { return {K(x), K(y), K(z)}; }
+    /// The Eigen value, `Eigen::Matrix<T, 3, 1>`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// An `Eigen::Map` over this storage, readable or assignable in place.
+    template<class Dummy = void> auto eigen_map() { return arael_eigen_map(*this); }       // provided by <arael/eigen.hpp>
+    template<class Dummy = void> auto eigen_map() const { return arael_eigen_map(*this); } // provided by <arael/eigen.hpp>
+    /// From any 3x1 Eigen expression.
+    template<class X> static vect3 from_eigen(const X& x) {
+        detail::eigen_shape<X, 3, 1>(x);
+        return {T(x(0)), T(x(1)), T(x(2))};
+    }
     bool similar(vect3 other) const {
         return (*this - other).norm()
             < T(10) * (norm() + other.norm() + std::numeric_limits<T>::epsilon())
@@ -147,6 +193,19 @@ struct vect {
     T& operator[](std::size_t i) { return e[i]; }
     const T& operator[](std::size_t i) const { return e[i]; }
     static constexpr std::size_t size() { return N; }
+
+    /// The Eigen value, `Eigen::Matrix<T, N, 1>`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// An `Eigen::Map` over this storage, readable or assignable in place.
+    template<class Dummy = void> auto eigen_map() { return arael_eigen_map(*this); }       // provided by <arael/eigen.hpp>
+    template<class Dummy = void> auto eigen_map() const { return arael_eigen_map(*this); } // provided by <arael/eigen.hpp>
+    /// From any Nx1 Eigen expression.
+    template<class X> static vect from_eigen(const X& x) {
+        detail::eigen_shape<X, int(N), 1>(x);
+        vect r{};
+        for (std::size_t i = 0; i < N; i++) r.e[i] = T(x(i));
+        return r;
+    }
 
     vect operator+(const vect& o) const {
         vect r{};

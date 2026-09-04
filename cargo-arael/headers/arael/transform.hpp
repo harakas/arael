@@ -52,6 +52,18 @@ struct transform3 {
     }
     scaled_transform3<T> compose(const scaled_transform3<T>& b) const;
 
+    /// `Eigen::Transform<T, 3, Eigen::Isometry>` with `linear() = R`,
+    /// `translation() = t`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// From an Eigen transform whose `linear()` is a rotation (its
+    /// determinant is checked to precision).
+    template<class X> static transform3 from_eigen(const X& x) {
+        transform3 r{matrix3<T>::from_eigen(x.linear()), vect3<T>::from_eigen(x.translation())};
+        arael_assert_true(std::abs(r.rotation_matrix.det() - T(1))
+                          < std::sqrt(std::numeric_limits<T>::epsilon()));
+        return r;
+    }
+
     vect3<T> operator*(vect3<T> x) const { return transform(x); }
     transform3 operator*(const transform3& b) const { return compose(b); }
     scaled_transform3<T> operator*(const scaled_transform3<T>& b) const;
@@ -97,6 +109,18 @@ struct scaled_transform3 {
                 scale * b.scale};
     }
     scaled_transform3 compose(const transform3<T>& b) const { return compose(from(b)); }
+
+    /// `Eigen::Transform<T, 3, Eigen::Affine>` with `linear() = s R`,
+    /// `translation() = t`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// From an Eigen transform whose `linear()` is a rotation times a
+    /// positive uniform scale: `s` is the cube root of its determinant.
+    template<class X> static scaled_transform3 from_eigen(const X& x) {
+        matrix3<T> l = matrix3<T>::from_eigen(x.linear());
+        T s = std::cbrt(l.det());
+        arael_assert_true(s > T(0));
+        return {l * (T(1) / s), vect3<T>::from_eigen(x.translation()), s};
+    }
 
     vect3<T> operator*(vect3<T> x) const { return transform(x); }
     scaled_transform3 operator*(const scaled_transform3& b) const { return compose(b); }

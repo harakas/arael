@@ -49,6 +49,18 @@ struct matrix3 {
         return {{rows[0].template cast<K>(), rows[1].template cast<K>(),
                  rows[2].template cast<K>()}};
     }
+    /// The Eigen value, `Eigen::Matrix<T, 3, 3>`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// An `Eigen::Map` over this row-major storage, readable or assignable in place.
+    template<class Dummy = void> auto eigen_map() { return arael_eigen_map(*this); }       // provided by <arael/eigen.hpp>
+    template<class Dummy = void> auto eigen_map() const { return arael_eigen_map(*this); } // provided by <arael/eigen.hpp>
+    /// From any 3x3 Eigen expression, a block included.
+    template<class X> static matrix3 from_eigen(const X& x) {
+        detail::eigen_shape<X, 3, 3>(x);
+        return from_elements(T(x(0, 0)), T(x(0, 1)), T(x(0, 2)),
+                             T(x(1, 0)), T(x(1, 1)), T(x(1, 2)),
+                             T(x(2, 0)), T(x(2, 1)), T(x(2, 2)));
+    }
 
     /// Rotation from euler angles (x=roll, y=pitch, z=yaw).
     static matrix3 rotation_from_euler_angles(vect3<T> ea) {
@@ -221,6 +233,16 @@ struct matrix2 {
     static matrix2 from_elements(T a00, T a01, T a10, T a11) {
         return {{{a00, a01}, {a10, a11}}};
     }
+    /// The Eigen value, `Eigen::Matrix<T, 2, 2>`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// An `Eigen::Map` over this row-major storage, readable or assignable in place.
+    template<class Dummy = void> auto eigen_map() { return arael_eigen_map(*this); }       // provided by <arael/eigen.hpp>
+    template<class Dummy = void> auto eigen_map() const { return arael_eigen_map(*this); } // provided by <arael/eigen.hpp>
+    /// From any 2x2 Eigen expression, a block included.
+    template<class X> static matrix2 from_eigen(const X& x) {
+        detail::eigen_shape<X, 2, 2>(x);
+        return from_elements(T(x(0, 0)), T(x(0, 1)), T(x(1, 0)), T(x(1, 1)));
+    }
     static matrix2 zero_matrix() { return from_elements(T(0), T(0), T(0), T(0)); }
     static matrix2 identity() { return from_elements(T(1), T(0), T(0), T(1)); }
 
@@ -337,6 +359,21 @@ struct matrix {
         for (std::size_t i = 0; i < R; i++)
             for (std::size_t j = 0; j < C; j++)
                 r.rows[j].e[i] = rows[i].e[j];
+        return r;
+    }
+
+    /// The Eigen value, `Eigen::Matrix<T, R, C>`.
+    template<class Dummy = void> auto to_eigen() const { return arael_to_eigen(*this); }   // provided by <arael/eigen.hpp>
+    /// An `Eigen::Map` over this row-major storage, readable or assignable in place.
+    template<class Dummy = void> auto eigen_map() { return arael_eigen_map(*this); }       // provided by <arael/eigen.hpp>
+    template<class Dummy = void> auto eigen_map() const { return arael_eigen_map(*this); } // provided by <arael/eigen.hpp>
+    /// From any RxC Eigen expression, a block included.
+    template<class X> static matrix from_eigen(const X& x) {
+        detail::eigen_shape<X, int(R), int(C)>(x);
+        matrix r{};
+        for (std::size_t i = 0; i < R; i++)
+            for (std::size_t j = 0; j < C; j++)
+                r.rows[i].e[j] = T(x(i, j));
         return r;
     }
 };
