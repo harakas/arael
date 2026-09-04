@@ -6789,7 +6789,13 @@ pub fn generate_root_methods(
             // Flat iteration, no nesting. Multiple #[arael(constraint(...))] attributes on the
             // same struct are merged into a single loop per collection via cross_groups.
             let rc_ident = frines_ident.unwrap();
-            let group_key = rc_ident.to_string();
+            // A collection below the root groups by its full path, so
+            // same-named collections under different parents stay apart.
+            let group_key = if cross_prefix.is_empty() {
+                rc_ident.to_string()
+            } else {
+                format!("{}.{}", path_display(&cross_prefix), rc_ident)
+            };
             let marker = source_marker(sc);
 
             let cost_entry = if let Some(ref guard) = guard_expr {
