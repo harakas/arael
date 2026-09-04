@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/parent_cross_extra_blocks.rs:17: a `parent.<crossblock>` primary allows no further block fields -- 2 block fields given
+error: on `parent.hb: CrossBlock<Node, Node>`: a parent-owned CrossBlock is shared by every instance under the parent, so its sides must be the parent's refs or the entity two levels up -- no such Ref<Node> + Ref<Node> pair exists (the constraint's own refs cannot fill it)
   --> tests/constraint_attr_errors/parent_cross_extra_blocks.rs:33:1
    |
 33 | #[arael::model]

@@ -48,6 +48,10 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/parent_cross_ref_mismatch.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_extra_blocks.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_root_parent.rs");
+    t.compile_fail("tests/constraint_attr_errors/mixed_own_side.rs");
+    t.compile_fail("tests/constraint_attr_errors/mixed_bad_parent_field.rs");
+    t.compile_fail("tests/constraint_attr_errors/mixed_no_ancestor.rs");
+    t.compile_fail("tests/constraint_attr_errors/mixed_alias_collision.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_unclaimed.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_mixed_attrs.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_refs_ambiguous.rs");

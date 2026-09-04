@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_body_errors/parent_parent_parent.rs:45: `parent.parent.parent.scale`: two `parent.` levels only
+  --> tests/constraint_body_errors/parent_parent_parent.rs:56:1
+   |
+56 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_body_errors/parent_parent_parent.rs:4:19
+  |
+4 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

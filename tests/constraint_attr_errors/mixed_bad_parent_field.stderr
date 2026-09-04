@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/mixed_bad_parent_field.rs:24: `parent.nosuch` does not name a CrossBlock field of the containing parent `Image` -- it has CrossBlock<Point, Cam> `hb_other`
+  --> tests/constraint_attr_errors/mixed_bad_parent_field.rs:40:1
+   |
+40 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/mixed_bad_parent_field.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

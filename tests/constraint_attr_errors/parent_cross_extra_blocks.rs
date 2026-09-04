@@ -1,4 +1,4 @@
-//! `parent.<crossblock>` allows no further block fields.
+//! A parent-owned CrossBlock beside own blocks is the mixed form: its sides must be parent refs, never the instance's own.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};

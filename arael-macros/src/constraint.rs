@@ -1691,6 +1691,9 @@ pub struct ConstraintAttr {
     /// references.
     pub block_fields: Vec<String>,
     pub parent_name: Option<String>,  // e.g. "lm" for parent=lm
+    /// `parent.parent = <name>`: an alias for the entity two levels up
+    /// in the mixed parent-cross form.
+    pub ancestor_name: Option<String>,
     pub guard: Option<String>,        // runtime guard expression, e.g. "self.info.gps.is_some()"
     pub loss: Option<String>,         // robust loss closure, e.g. "|s| loss_huber(s, self.k)"
     pub name: Option<String>,         // optional label for Jacobian rows, e.g. name = "sweep"
@@ -1745,6 +1748,7 @@ fn parse_constraint_inner_impl(
     let mut pos = 0;
     let mut block_fields: Vec<String> = Vec::new();
     let mut parent_name: Option<String> = None;
+    let mut ancestor_name: Option<String> = None;
     let mut guard: Option<String> = None;
     let mut loss: Option<String> = None;
     let mut name_label: Option<String> = None;
@@ -1905,6 +1909,22 @@ fn parse_constraint_inner_impl(
                                 break;
                             }
                         }
+                        // `parent.parent = <name>`: the alias for the
+                        // entity two levels up (mixed parent-cross form).
+                        if full_name == "parent.parent"
+                            && matches!(tokens.get(pos),
+                                Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '=')
+                        {
+                            pos += 1;
+                            if let Some(proc_macro2::TokenTree::Ident(val)) = tokens.get(pos) {
+                                ancestor_name = Some(val.to_string());
+                                pos += 1;
+                            } else {
+                                return Err(syn::Error::new(ident_span,
+                                    "parent.parent = expects an alias name"));
+                            }
+                            continue;
+                        }
                         // Any bare ident / dotted path at a positional
                         // slot (not `name=val`, not `name: Type`) is a
                         // block-field reference. The positional form
@@ -1959,6 +1979,7 @@ fn parse_constraint_inner_impl(
     Ok(Some(ConstraintAttr {
         block_fields,
         parent_name,
+        ancestor_name,
         guard,
         loss,
         name: name_label,
@@ -2721,6 +2742,206 @@ struct ParentCross {
     parent_refs: Option<(String, String)>,
 }
 
+/// The mixed parent-cross form: a bracketed block list holding the
+/// constraint's own CrossBlocks together with CrossBlocks owned by the
+/// containing parent, each shared by every instance the parent holds.
+/// The entity list is the constraint's own refs, then the parent's
+/// param-bearing refs, then (when reached) the entity holding the
+/// parent, `parent.parent`.
+struct MixedParent {
+    parent_type: String,
+    /// Parent-owned CrossBlocks named in the list:
+    /// (field, A type, B type, `cross = (a, b)` on the parent's field).
+    blocks: Vec<(syn::Ident, String, String, Option<(String, String)>)>,
+    /// The parent's param-bearing Ref fields in declaration order:
+    /// (field, target type, resolve path).
+    parent_refs: Vec<(String, String, String)>,
+    /// The entity two levels up: (type, alias from `parent.parent = <name>`).
+    /// Its accessor is the prefix binding two levels out, `__seg{n-2}`.
+    ancestor: Option<(String, Option<String>)>,
+}
+
+impl MixedParent {
+    /// The ancestor's Rust accessor for a constraint whose collection
+    /// sits `prefix_len` segments below the root.
+    fn ancestor_accessor(prefix_len: usize) -> String {
+        format!("__seg{}", prefix_len - 2)
+    }
+}
+
+/// Recognize the mixed parent-cross form and validate its rules. `None`
+/// hands the list to the other forms (the owned-triplet secondary, the
+/// single parent-cross primary, remote blocks), which report their own
+/// errors.
+fn detect_mixed_parent(
+    struct_name: &str,
+    loc: &str,
+    constraint: &ConstraintAttr,
+    fields: &syn::FieldsNamed,
+    root_name: &str,
+) -> syn::Result<Option<MixedParent>> {
+    let err = |msg: String| syn::Error::new(proc_macro2::Span::call_site(),
+        format!("{}: {}", loc, msg));
+    // A primary that is the constraint's own SelfBlock is the owned-
+    // triplet shape `[hb, parent.hbt]`, never this form.
+    let primary = constraint.primary_block_field();
+    if !primary.contains('.')
+        && let Some(field) = fields.named.iter()
+            .find(|f| f.ident.as_ref().is_some_and(|i| i == primary))
+        && let Ok((_, None)) = extract_block_type_args(&field.ty)
+    {
+        return Ok(None);
+    }
+    let Some(parent_type) = find_containing_parent(root_name, struct_name) else {
+        return Ok(None);
+    };
+    if parent_type == root_name { return Ok(None); }
+    let Some(playout) = registry_lookup(&parent_type) else { return Ok(None); };
+    let mut blocks: Vec<(syn::Ident, String, String, Option<(String, String)>)> = Vec::new();
+    for bf in &constraint.block_fields {
+        let Some(rest) = bf.strip_prefix("parent.") else { continue };
+        if let Some((_, a, b, over)) = playout.cross_block_fields.iter()
+            .find(|(n, _, _, _)| n == rest)
+        {
+            blocks.push((syn::Ident::new(rest, proc_macro2::Span::call_site()),
+                a.clone(), b.clone(), over.clone()));
+        } else if playout.triplet_block_fields.contains(&rest.to_string())
+            || playout.self_block_field.as_deref() == Some(rest)
+        {
+            return Ok(None);
+        } else {
+            let have: Vec<String> = playout.cross_block_fields.iter()
+                .map(|(n, a, b, _)| format!("CrossBlock<{}, {}> `{}`", a, b, n)).collect();
+            let have = if have.is_empty() { "no CrossBlock fields".to_string() }
+                else { have.join(", ") };
+            return Err(err(format!(
+                "`parent.{}` does not name a CrossBlock field of the containing parent \
+                 `{}` -- it has {}", rest, parent_type, have)));
+        }
+    }
+    if blocks.is_empty() { return Ok(None); }
+
+    if registry_lookup(struct_name).map(|l| !l.param_fields.is_empty()).unwrap_or(false) {
+        return Err(err(format!(
+            "`{}` has its own Param fields, so a parent-owned CrossBlock would drop \
+             their cross pairs -- declare a `SelfBlock<{}>` on `{}` and use local \
+             blocks instead", struct_name, struct_name, struct_name)));
+    }
+    if !playout.param_fields.is_empty() {
+        return Err(err(format!(
+            "`parent.{}`: `{}` has its own Param fields -- the parent of a shared \
+             CrossBlock is a plain container; couple its params from a constraint \
+             held below it through `parent.parent`, or through `[hb, parent.<triplet>]`",
+            blocks[0].0, parent_type)));
+    }
+    if let Some(bf) = constraint.block_fields.iter()
+        .find(|bf| bf.contains('.') && !bf.starts_with("parent."))
+    {
+        return Err(err(format!(
+            "`{}`: a remote block cannot be combined with parent-owned CrossBlocks", bf)));
+    }
+    // Own entries: CrossBlock fields on the constraint struct.
+    let mut own_side_types: Vec<String> = Vec::new();
+    let mut own_ref_types: Vec<String> = Vec::new();
+    for f in fields.named.iter() {
+        if let Some((_, t)) = extract_wrapper_inner(&f.ty, "Ref")
+            && !is_data_ref_target(&t.to_string())
+        {
+            own_ref_types.push(t.to_string());
+        }
+    }
+    for bf in &constraint.block_fields {
+        if bf.contains('.') { continue; }
+        let Some(field) = fields.named.iter()
+            .find(|f| f.ident.as_ref().is_some_and(|i| i == bf.as_str())) else {
+            return Err(err(format!(
+                "constraint names block field `{}` but `{}` has no such field",
+                bf, struct_name)));
+        };
+        let (a, b) = extract_block_type_args(&field.ty)?;
+        let Some(b) = b else {
+            return Err(err(format!(
+                "`{}` must be a `CrossBlock<A, B>` -- the mixed parent-cross form takes \
+                 own CrossBlocks and `parent.<crossblock>` entries only", bf)));
+        };
+        if a == "__triplet__" {
+            return Err(err(format!(
+                "`{}` is a TripletBlock -- the mixed parent-cross form takes own \
+                 CrossBlocks and `parent.<crossblock>` entries only", bf)));
+        }
+        own_side_types.push(a);
+        own_side_types.push(b);
+    }
+    // The parent's param-bearing refs, declaration order, root-anchored
+    // (the hoisted resolve indexes `self.<coll>` directly).
+    let mut parent_refs: Vec<(String, String, String)> = Vec::new();
+    for (rf, rp) in &playout.ref_paths {
+        let Some((_, sft)) = playout.fields.iter().find(|(n, _)| n == rf) else { continue };
+        let SymFieldType::Struct(t) = sft else { continue };
+        if is_data_ref_target(t) { continue; }
+        if !rp.starts_with("root.") {
+            return Err(err(format!(
+                "`{}.{}` resolves through `{}` -- a parent ref of the mixed form must \
+                 target a root collection (`ref = root.<coll>`)", parent_type, rf, rp)));
+        }
+        parent_refs.push((rf.clone(), t.clone(), rp.clone()));
+    }
+    for f in fields.named.iter() {
+        let Some(id) = f.ident.as_ref() else { continue };
+        if extract_wrapper_inner(&f.ty, "Ref").is_some()
+            && parent_refs.iter().any(|(n, _, _)| n == &id.to_string())
+        {
+            return Err(err(format!(
+                "ref field `{}` on `{}` shadows the parent ref of the same name -- \
+                 rename the field", id, struct_name)));
+        }
+    }
+    // The entity two levels up: reached by an alias, a `parent.parent`
+    // read in the body or guard, or a block side no ref supplies.
+    let parent_ref_types: Vec<&String> = parent_refs.iter().map(|(_, t, _)| t).collect();
+    let supplied = |t: &String| own_ref_types.contains(t) || parent_ref_types.contains(&t);
+    let body_stmts = &constraint.body_stmts;
+    let body_src = quote! { #(#body_stmts)* }.to_string().replace(' ', "");
+    let guard_src = constraint.guard.clone().unwrap_or_default().replace(' ', "");
+    let mut reached = constraint.ancestor_name.is_some()
+        || body_src.contains("parent.parent")
+        || guard_src.contains("parent.parent");
+    let mut unsupplied: Vec<String> = Vec::new();
+    for t in own_side_types.iter().chain(blocks.iter().flat_map(|(_, a, b, _)| [a, b])) {
+        if !supplied(t) && !unsupplied.contains(t) { unsupplied.push(t.clone()); }
+    }
+    if !unsupplied.is_empty() { reached = true; }
+    let ancestor = if reached {
+        let anc = find_containing_parent(root_name, &parent_type);
+        let Some(anc) = anc.filter(|a| a != root_name) else {
+            return Err(err(format!(
+                "`parent.parent`: `{}`, the parent of `{}`, is held by the root -- \
+                 there is no entity two levels up (root fields read as `root.<field>`)",
+                parent_type, struct_name)));
+        };
+        if let Some(t) = unsupplied.iter().find(|t| **t != anc) {
+            return Err(err(format!(
+                "a block names `{}`, which no ref of `{}` or of `{}` supplies and \
+                 which is not the entity two levels up (`{}`)",
+                t, struct_name, parent_type, anc)));
+        }
+        Some((anc, constraint.ancestor_name.clone()))
+    } else { None };
+    if let Some((_, Some(al))) = &ancestor {
+        if al == "parent" || al == "root" || constraint.parent_name.as_deref() == Some(al) {
+            return Err(err(format!(
+                "`parent.parent = {}` collides with an existing binding -- pick another \
+                 alias", al)));
+        }
+        if fields.named.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == al.as_str())) {
+            return Err(err(format!(
+                "`parent.parent = {}` collides with a field of the constraint struct -- \
+                 rename the alias or the field", al)));
+        }
+    }
+    Ok(Some(MixedParent { parent_type, blocks, parent_refs, ancestor }))
+}
+
 /// How a constraint body's `parent` binding resolves, decided by the
 /// containing form's sweep shape.
 #[derive(Clone)]
@@ -2831,11 +3052,13 @@ fn rewrite_guard_parent(
     binding: &ParentBinding,
     entity_refs: Option<&(String, String)>,
     alias: Option<&str>,
+    mixed: Option<&GuardMixed>,
 ) -> syn::Result<()> {
     struct V<'a> {
         to: Option<&'a str>,
         entity_refs: Option<&'a (String, String)>,
         alias: Option<&'a str>,
+        mixed: Option<&'a GuardMixed>,
         bad: bool,
     }
     impl syn::visit_mut::VisitMut for V<'_> {
@@ -2845,6 +3068,35 @@ fn rewrite_guard_parent(
                 if p.qself.is_none() && p.path.segments.len() == 1
                     && (p.path.segments[0].ident == "parent"
                         || alias.is_some_and(|a| p.path.segments[0].ident == a)));
+            // Mixed form: `parent.parent` and the ancestor alias -> the
+            // ancestor's prefix binding; `parent.<ref>` -> the resolved
+            // local named after the parent's ref field.
+            if let Some(mx) = self.mixed {
+                if let Some((acc, anc_alias)) = &mx.ancestor {
+                    let acc_ident = syn::Ident::new(acc, proc_macro2::Span::call_site());
+                    if let syn::Expr::Field(f) = e
+                        && is_parent_head(&f.base)
+                        && let syn::Member::Named(m) = &f.member
+                        && m == "parent" {
+                            *e = syn::parse_quote!(#acc_ident);
+                            return;
+                    }
+                    if let syn::Expr::Path(p) = e
+                        && p.qself.is_none() && p.path.segments.len() == 1
+                        && anc_alias.as_deref().is_some_and(|a| p.path.segments[0].ident == a) {
+                            *e = syn::parse_quote!(#acc_ident);
+                            return;
+                    }
+                }
+                if let syn::Expr::Field(f) = e
+                    && is_parent_head(&f.base)
+                    && let syn::Member::Named(m) = &f.member
+                    && mx.parent_refs.iter().any(|r| m == r) {
+                        let ident = m.clone();
+                        *e = syn::parse_quote!(#ident);
+                        return;
+                }
+            }
             // `parent.<ref>` -> the resolved entity local (parent-refs form).
             if let syn::Expr::Field(f) = e
                 && is_parent_head(&f.base)
@@ -2873,7 +3125,7 @@ fn rewrite_guard_parent(
         ParentBinding::Data { accessor, .. } => Some(accessor.clone()),
         ParentBinding::None | ParentBinding::Ambiguous => None,
     };
-    let mut v = V { to: to.as_deref(), entity_refs, alias, bad: false };
+    let mut v = V { to: to.as_deref(), entity_refs, alias, mixed, bad: false };
     syn::visit_mut::VisitMut::visit_expr_mut(&mut v, expr);
     if v.bad {
         return Err(syn::Error::new_spanned(&*expr,
@@ -2881,6 +3133,13 @@ fn rewrite_guard_parent(
              (single containment path)"));
     }
     Ok(())
+}
+
+/// What a guard of the mixed parent-cross form rewrites: the parent's
+/// ref names, and the ancestor's accessor with its alias.
+struct GuardMixed {
+    parent_refs: Vec<String>,
+    ancestor: Option<(String, Option<String>)>,
 }
 
 /// Per-pair routing info for a multi-CrossBlock constraint. Built by
@@ -2899,6 +3158,26 @@ pub struct MultiCrossRouting {
     pub a_count: usize,
     pub b_start: usize,
     pub b_count: usize,
+    /// The block lives on the containing parent (mixed parent-cross
+    /// form): written through the parent prefix binding, shared by every
+    /// instance the parent holds.
+    pub parent_owned: bool,
+}
+
+/// The mixed parent-cross form's extra routing inputs.
+pub struct MixedRouting {
+    /// Parent-owned CrossBlocks: (field, A, B, `cross = (a, b)` on the
+    /// parent's field, naming the parent's refs).
+    pub parent_blocks: Vec<(syn::Ident, String, String, Option<(String, String)>)>,
+    /// Var names of the constraint's own refs: instance-varying sides a
+    /// parent-owned block may not take.
+    pub own_vars: Vec<String>,
+    /// The parent's ref names; `cross = (parent.<ref>, ..)` on an own
+    /// block strips the prefix.
+    pub parent_ref_names: Vec<String>,
+    /// The ancestor's var ident and the names that reach it
+    /// (`parent.parent` and the alias).
+    pub ancestor: Option<(String, Vec<String>)>,
 }
 
 /// Build the multi-cross routing table for a constraint struct that
@@ -2907,12 +3186,15 @@ pub struct MultiCrossRouting {
 /// `#[arael(cross = (refA, refB))]` when present and type-based
 /// auto-resolution otherwise. Every unordered entity pair must be covered
 /// by exactly one CrossBlock; uncovered pairs and ambiguous auto-resolution
-/// produce compile-time errors.
+/// produce compile-time errors. In the mixed parent-cross form the
+/// parent-owned blocks route too, over the parent's refs and the
+/// ancestor only.
 pub fn build_multi_cross_routing(
     fields: &syn::FieldsNamed,
     block_fields: &[String],
     triplet_entities: &[(syn::Ident, syn::Ident, usize, usize)],
     struct_ident: &syn::Ident,
+    mixed: Option<&MixedRouting>,
 ) -> syn::Result<Vec<MultiCrossRouting>> {
     let mut out: Vec<MultiCrossRouting> = Vec::new();
     // Normalized unordered pairs already claimed (prevents two CrossBlocks
@@ -2921,11 +3203,14 @@ pub fn build_multi_cross_routing(
     let candidates_desc = || triplet_entities.iter()
         .map(|(v, _, _, _)| v.to_string()).collect::<Vec<_>>().join(", ");
 
+    // (block name, A, B, cross override, parent-owned), own blocks first.
+    let mut entries: Vec<(String, String, String, Option<(String, String)>, bool)> = Vec::new();
     for block_name in block_fields {
         // Dotted-path entries (e.g. `pose.hb_pose`) are remote-block
         // references resolved by the remote-block emission path, not
         // local CrossBlock fields on this struct. Skip them here --
-        // they don't participate in per-pair routing.
+        // they don't participate in per-pair routing. (`parent.<field>`
+        // entries of the mixed form come in through `mixed`.)
         if block_name.contains('.') { continue; }
         let field = fields.named.iter().find(|f|
             f.ident.as_ref().map(|i| i.to_string()) == Some(block_name.clone())
@@ -2948,9 +3233,37 @@ pub fn build_multi_cross_routing(
                 Some((refs[0].clone(), refs[1].clone())),
             _ => None,
         };
+        entries.push((block_name.clone(), a_type, b_type, cross_refs, false));
+    }
+    if let Some(mx) = mixed {
+        for (field, a, b, over) in &mx.parent_blocks {
+            entries.push((format!("parent.{}", field), a.clone(), b.clone(), over.clone(), true));
+        }
+    }
+    // A `cross = (..)` name to the entity var it denotes: `parent.<ref>`
+    // is the parent's ref, `parent.parent` or the alias is the ancestor.
+    let resolve_name = |name: &str| -> String {
+        if let Some(mx) = mixed {
+            if let Some((var, aliases)) = &mx.ancestor
+                && aliases.iter().any(|a| a == name) {
+                return var.clone();
+            }
+            if let Some(rest) = name.strip_prefix("parent.")
+                && mx.parent_ref_names.iter().any(|r| r == rest) {
+                return rest.to_string();
+            }
+        }
+        name.to_string()
+    };
+    let is_own_var = |var: &str| mixed.is_some_and(|mx| mx.own_vars.iter().any(|v| v == var));
 
+    for (block_name, a_type, b_type, cross_refs, parent_owned) in entries {
+        let block_name = &block_name;
+        let a_type = a_type.as_str();
+        let b_type = b_type.as_str();
         // Resolve entity indices (A-side, B-side).
         let (a_idx, b_idx) = if let Some((ra, rb)) = cross_refs {
+            let (ra, rb) = (resolve_name(&ra), resolve_name(&rb));
             let a_idx = triplet_entities.iter().position(|(v, _, _, _)| v == &ra)
                 .ok_or_else(|| syn::Error::new_spanned(struct_ident,
                     format!("on field `{}`: cross = ({}, {}) references unknown ref field `{}` (candidates: {})",
@@ -2988,6 +3301,10 @@ pub fn build_multi_cross_routing(
                 for bi in 0..triplet_entities.len() {
                     if ai == bi { continue; }
                     if same_type && ai > bi { continue; }
+                    // A parent-owned tile is shared by every instance, so
+                    // an instance-varying own ref cannot be one of its sides.
+                    if parent_owned && (is_own_var(&triplet_entities[ai].0.to_string())
+                        || is_own_var(&triplet_entities[bi].0.to_string())) { continue; }
                     if triplet_entities[ai].1 == a_type
                         && triplet_entities[bi].1 == b_type
                     {
@@ -2996,6 +3313,12 @@ pub fn build_multi_cross_routing(
                 }
             }
             match pairs.len() {
+                0 if parent_owned => return Err(syn::Error::new_spanned(struct_ident,
+                    format!("on `{}: CrossBlock<{}, {}>`: a parent-owned CrossBlock is shared by \
+                             every instance under the parent, so its sides must be the parent's \
+                             refs or the entity two levels up -- no such Ref<{}> + Ref<{}> pair \
+                             exists (the constraint's own refs cannot fill it)",
+                        block_name, a_type, b_type, a_type, b_type))),
                 0 => return Err(syn::Error::new_spanned(struct_ident,
                     format!("on field `{}: CrossBlock<{}, {}>`: no Ref<{}> + Ref<{}> pair found on the struct",
                         block_name, a_type, b_type, a_type, b_type))),
@@ -3011,6 +3334,20 @@ pub fn build_multi_cross_routing(
             }
         };
 
+        if parent_owned {
+            for idx in [a_idx, b_idx] {
+                let var = triplet_entities[idx].0.to_string();
+                if is_own_var(&var) {
+                    return Err(syn::Error::new_spanned(struct_ident,
+                        format!("on `{}`: `{}` is a ref of the constraint instance, but a \
+                                 parent-owned CrossBlock is shared by every instance under \
+                                 the parent -- its sides must be the parent's refs or the \
+                                 entity two levels up",
+                            block_name, var)));
+                }
+            }
+        }
+
         // Unordered-pair uniqueness: (a, b) and (b, a) are the same Hessian
         // pair and must not be claimed twice.
         let norm = if a_idx < b_idx { (a_idx, b_idx) } else { (b_idx, a_idx) };
@@ -3022,11 +3359,13 @@ pub fn build_multi_cross_routing(
 
         let (_, _, a_start, a_count) = &triplet_entities[a_idx];
         let (_, _, b_start, b_count) = &triplet_entities[b_idx];
+        let field_name = block_name.strip_prefix("parent.").unwrap_or(block_name);
         out.push(MultiCrossRouting {
-            block_ident: syn::Ident::new(block_name, proc_macro2::Span::call_site()),
+            block_ident: syn::Ident::new(field_name, proc_macro2::Span::call_site()),
             a_idx, b_idx,
             a_start: *a_start, a_count: *a_count,
             b_start: *b_start, b_count: *b_count,
+            parent_owned,
         });
     }
 
@@ -3317,6 +3656,9 @@ pub fn generate_root_methods(
     #[derive(Clone)]
     struct MultiCrossBlockInfo {
         block_ident: syn::Ident,
+        /// The block lives on the containing parent (mixed parent-cross
+        /// form): wired through the parent prefix binding.
+        parent_owned: bool,
         /// Starting offset in __all_idx of entity A's params.
         a_start: usize,
         /// Number of scalar params for entity A.
@@ -3338,6 +3680,9 @@ pub fn generate_root_methods(
     // per declared CrossBlock over slices of __all_idx.
     struct TripletCollectionGroup {
         rc_ident: syn::Ident,
+        /// Outer hops to the constraint collection when it sits below the
+        /// root (the mixed parent-cross form); empty for a root collection.
+        prefix: Vec<AccessSegment>,
         triplet_param_count: usize,
         block_ident: syn::Ident,
         constraint_index_field: Option<syn::Ident>,
@@ -3713,9 +4058,25 @@ pub fn generate_root_methods(
         // same (A, B) pair -- checked at wiring time. With NO own Ref
         // fields, the parent's ref fields fill the slots (bodies read
         // `parent.<ref>.<field>`), resolved once per parent.
+        // The mixed parent-cross form (own CrossBlocks plus parent-owned
+        // ones in one bracketed list) is recognized first; it supersedes
+        // the single-block `parent.` primary for lists of two or more.
+        let mixed: Option<MixedParent> = if constraint.block_fields.len() >= 2
+            && constraint.block_fields.iter().any(|bf| bf.starts_with("parent."))
+        {
+            let loc = format!("{}:{}", sc.attr_file, sc.attr_line);
+            detect_mixed_parent(&sc.struct_name, &loc, &constraint, &fields,
+                &root_name.to_string())?
+        } else { None };
+        if let Some(mx) = &mixed {
+            for (field, _, _, _) in &mx.blocks {
+                claimed_parent_blocks.insert((mx.parent_type.clone(), field.to_string()));
+            }
+        }
         let mut parent_self_primary: Option<(syn::Ident, String)> = None;
         let mut parent_cross: Option<ParentCross> = None;
-        if let Some(rest) = constraint.primary_block_field().strip_prefix("parent.") {
+        if mixed.is_none()
+            && let Some(rest) = constraint.primary_block_field().strip_prefix("parent.") {
             let rest = rest.to_string();
             let parent_type = find_containing_parent(&root_name.to_string(), &sc.struct_name)
                 .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
@@ -3909,7 +4270,7 @@ pub fn generate_root_methods(
         // Check if block_field is a dotted path (remote block, e.g. pose.hb_pose)
         let is_remote_block = constraint.primary_block_field().contains('.')
             && root_self_primary.is_none() && parent_self_primary.is_none()
-            && parent_cross.is_none();
+            && parent_cross.is_none() && mixed.is_none();
 
         let (a_type, b_type, remote_block_info) = if root_self_primary.is_some()
             || parent_self_primary.is_some() {
@@ -3917,6 +4278,22 @@ pub fn generate_root_methods(
             // (or the containing parent's), so there is no local block and
             // no remote Ref target.
             (sc.struct_name.clone(), None, None)
+        } else if let Some(mx) = &mixed {
+            // Mixed parent-cross: the first entry's CrossBlock<A, B>, own
+            // or parent-owned, fills the legacy a/b pair; routing works
+            // per block over the whole entity list.
+            let first = constraint.primary_block_field();
+            if let Some(rest) = first.strip_prefix("parent.") {
+                let (_, a, b, _) = mx.blocks.iter().find(|(n, _, _, _)| n == rest)
+                    .expect("parent block validated by detect_mixed_parent");
+                (a.clone(), Some(b.clone()), None)
+            } else {
+                let f = fields.named.iter()
+                    .find(|f| f.ident.as_ref().is_some_and(|i| i == first))
+                    .expect("own block validated by detect_mixed_parent");
+                let (a, b) = extract_block_type_args(&f.ty)?;
+                (a, b, None)
+            }
         } else if let Some(pc) = &parent_cross {
             // Shared parent CrossBlock: entity types from the parent's
             // block declaration (the refs were validated to match it).
@@ -4484,13 +4861,51 @@ pub fn generate_root_methods(
                 }
             }
 
+            // The mixed form needs the parent instance as a prefix binding
+            // and, for `parent.parent`, one more level above it.
+            if let Some(mx) = &mixed {
+                if !is_root_level_cross {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `{}` is contained in `{}`, an entity the constraint \
+                                 references -- hold a mixed parent-cross constraint in a \
+                                 plain container struct (e.g. `{}`), not in an optimized \
+                                 participant",
+                            sc.attr_file, sc.attr_line, sc.struct_name, a_type,
+                            mx.parent_type)));
+                }
+                if cross_prefix.is_empty() {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `{}`'s collection sits directly on the root -- the \
+                                 parent of a shared CrossBlock must be a struct below the \
+                                 root",
+                            sc.attr_file, sc.attr_line, sc.struct_name)));
+                }
+                if mx.ancestor.is_some() && cross_prefix.len() < 2 {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `parent.parent`: `{}` is held by `{}`, which sits \
+                                 directly on the root -- there is no entity two levels up",
+                            sc.attr_file, sc.attr_line, sc.struct_name, mx.parent_type)));
+                }
+            }
             let struct_layout = registry_lookup(&sc.struct_name);
             // (ref field, resolve path, index owner expr). Own refs index
             // through `__frine`; parent-supplied refs (the parent-refs
             // form) through the parent prefix binding, so the index read
             // is loop-invariant.
             let resolve_sources: Vec<(String, String, String)> =
-                if let Some(pc) = &parent_cross
+                if let Some(mx) = &mixed {
+                    // Mixed form: the parent's refs index through the
+                    // parent prefix binding, the own refs through `__frine`.
+                    let owner = format!("__seg{}", cross_prefix.len() - 1);
+                    let mut v: Vec<(String, String, String)> = mx.parent_refs.iter()
+                        .map(|(rn, _, rp)| (rn.clone(), rp.clone(), owner.clone()))
+                        .collect();
+                    for (f, p) in struct_layout.as_ref()
+                        .map(|l| l.ref_paths.clone()).unwrap_or_default() {
+                        v.push((f, p, "__frine".to_string()));
+                    }
+                    v
+                } else if let Some(pc) = &parent_cross
                     && let Some((ra, rb)) = &pc.parent_refs {
                     let owner = format!("__seg{}", cross_prefix.len() - 1);
                     let playout = registry_lookup(&pc.parent_type);
@@ -4595,6 +5010,13 @@ pub fn generate_root_methods(
         // other refs ("pose.info.features"); substitute recursively until
         // the path is `self.`-rooted.
         let entity_access_expr = |field_name: &str| -> syn::Result<syn::Expr> {
+            // The ancestor of the mixed form is a prefix loop binding, a
+            // `&mut` place of its own: no collection to index.
+            if field_name.starts_with("__seg") {
+                return syn::parse_str(field_name).map_err(|e| syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("failed to parse entity access path `{}`: {}", field_name, e)));
+            }
             let mut path = match ref_index_paths.get(field_name) {
                 Some(p) => format!("{}[__ei_{}]", p, field_name),
                 None => return Err(syn::Error::new(proc_macro2::Span::call_site(),
@@ -4632,6 +5054,11 @@ pub fn generate_root_methods(
             ParentBinding::Entity {
                 var: ptype.to_lowercase(),
                 type_name: ptype.clone(),
+            }
+        } else if let Some(mx) = &mixed {
+            ParentBinding::Data {
+                type_name: mx.parent_type.clone(),
+                accessor: format!("__seg{}", cross_prefix.len() - 1),
             }
         } else if let Some(pc) = &parent_cross {
             ParentBinding::Data {
@@ -4682,7 +5109,7 @@ pub fn generate_root_methods(
         let root_name_str = root_name.to_string();
         let (residual_exprs, param_symbols, loss_expr, component_subs) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str,
-            parent_cross.as_ref(), &parent_binding)
+            parent_cross.as_ref(), &parent_binding, mixed.as_ref(), cross_prefix.len())
             .map_err(|e| syn::Error::new(e.span(),
                 format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
         check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
@@ -4722,7 +5149,17 @@ pub fn generate_root_methods(
         // no A-type subs under it). Every other form reads the A type
         // under the parent/self alias.
         let mut sub_targets: Vec<(String, String)> = Vec::new();
-        if let Some(pc) = &parent_cross {
+        if let Some(mx) = &mixed {
+            // Mixed form: the parent's refs bind under the ref field
+            // names, the ancestor under its prefix binding; the own
+            // refs are covered by the ref-field loop above.
+            for (rn, tn, _) in &mx.parent_refs {
+                sub_targets.push((rn.clone(), tn.clone()));
+            }
+            if let Some((anc, _)) = &mx.ancestor {
+                sub_targets.push((MixedParent::ancestor_accessor(cross_prefix.len()), anc.clone()));
+            }
+        } else if let Some(pc) = &parent_cross {
             if let Some((ra, rb)) = &pc.parent_refs {
                 sub_targets.push((ra.clone(), pc.a_type.clone()));
                 sub_targets.push((rb.clone(), pc.b_type.clone()));
@@ -4763,6 +5200,13 @@ pub fn generate_root_methods(
             // The parent's shared CrossBlock field, emitted through the
             // prefix binding (`__seg{n-1}`).
             pc.field.clone()
+        } else if mixed.is_some() {
+            // Mixed form: the primary may be a parent-owned block; the
+            // per-block routing carries the real targets, this ident only
+            // labels the group.
+            let first = constraint.primary_block_field();
+            syn::Ident::new(first.strip_prefix("parent.").unwrap_or(first),
+                proc_macro2::Span::call_site())
         } else if is_remote_block {
             // For remote blocks, the actual block field name is the last segment
             let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -4871,6 +5315,35 @@ pub fn generate_root_methods(
                         }
                     }
             }
+            // Mixed parent-cross: the parent's refs, then the entity two
+            // levels up, join after the own refs -- the order the body's
+            // parameter symbols use. A parent ref binds as the local named
+            // after the ref field; the ancestor as its prefix binding.
+            if let Some(mx) = &mixed {
+                for (rn, tn, _) in &mx.parent_refs {
+                    let entity_start = offset;
+                    offset += param_total(tn);
+                    let entity_count = offset - entity_start;
+                    if entity_count > 0 {
+                        triplet_entities.push((
+                            syn::Ident::new(rn, proc_macro2::Span::call_site()),
+                            syn::Ident::new(tn, proc_macro2::Span::call_site()),
+                            entity_start, entity_count));
+                    }
+                }
+                if let Some((anc_type, _)) = &mx.ancestor {
+                    let entity_start = offset;
+                    offset += param_total(anc_type);
+                    let entity_count = offset - entity_start;
+                    if entity_count > 0 {
+                        triplet_entities.push((
+                            syn::Ident::new(&MixedParent::ancestor_accessor(cross_prefix.len()),
+                                proc_macro2::Span::call_site()),
+                            syn::Ident::new(anc_type, proc_macro2::Span::call_site()),
+                            entity_start, entity_count));
+                    }
+                }
+            }
             // Append root as an implicit entity when any declared
             // CrossBlock references the root type. The var_ident is the
             // root's lowercased name (already bound in emitted scope as
@@ -4894,8 +5367,22 @@ pub fn generate_root_methods(
         // `#[arael(cross = (refA, refB))]` are rejected. Empty Vec for
         // non-multi-cross constraints.
         multi_cross_routing = if is_multi_cross {
+            let mixed_routing: Option<MixedRouting> = mixed.as_ref().map(|mx| MixedRouting {
+                parent_blocks: mx.blocks.clone(),
+                own_vars: fields.named.iter()
+                    .filter(|f| extract_wrapper_inner(&f.ty, "Ref").is_some())
+                    .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+                    .collect(),
+                parent_ref_names: mx.parent_refs.iter().map(|(n, _, _)| n.clone()).collect(),
+                ancestor: mx.ancestor.as_ref().map(|(_, alias)| {
+                    let mut names = vec!["parent.parent".to_string()];
+                    if let Some(a) = alias { names.push(a.clone()); }
+                    (MixedParent::ancestor_accessor(cross_prefix.len()), names)
+                }),
+            });
             build_multi_cross_routing(
-                &fields, &constraint.block_fields, &triplet_entities, &struct_ident)?
+                &fields, &constraint.block_fields, &triplet_entities, &struct_ident,
+                mixed_routing.as_ref())?
         } else {
             Vec::new()
         };
@@ -5336,8 +5823,17 @@ pub fn generate_root_methods(
                         .skip(route.a_start).take(route.a_count).cloned().collect();
                     let dr_b: Vec<TokenStream2> = dr_f64.iter()
                         .skip(route.b_start).take(route.b_count).cloned().collect();
+                    // A parent-owned tile is written through the parent
+                    // prefix binding, a field disjoint from the iterated
+                    // collection.
+                    let target: TokenStream2 = if route.parent_owned {
+                        let ctn = nested_container(&cross_prefix);
+                        quote! { #ctn.#block }
+                    } else {
+                        quote! { __frine.#block }
+                    };
                     cross_block_calls.push(quote! {
-                        __frine.#block.#m_cross(
+                        #target.#m_cross(
                             #wr,
                             &[#(#dr_a),*],
                             &[#(#dr_b),*],
@@ -5660,6 +6156,41 @@ pub fn generate_root_methods(
                         }
                     }
             }
+            // Mixed parent-cross: the parent's refs (resolved locals named
+            // after the ref fields) and the ancestor (its prefix binding),
+            // in the entity-list order.
+            if let Some(mx) = &mixed {
+                for (rn, tn, _) in &mx.parent_refs {
+                    let var_ident = syn::Ident::new(rn, proc_macro2::Span::call_site());
+                    for slot in param_slots(tn) {
+                        let size = param_slot_size(&slot.sft);
+                        if size == 0 { continue; }
+                        let offset = triplet_param_count;
+                        let end = offset + size;
+                        let access = slot_access(quote! { #var_ident }, &slot.path);
+                        triplet_idx_stmts.push(quote! {
+                            #access.write_indices(&mut __all_idx[#offset..#end]);
+                        });
+                        triplet_param_count += size;
+                    }
+                }
+                if let Some((anc_type, _)) = &mx.ancestor {
+                    let acc = syn::Ident::new(
+                        &MixedParent::ancestor_accessor(cross_prefix.len()),
+                        proc_macro2::Span::call_site());
+                    for slot in param_slots(anc_type) {
+                        let size = param_slot_size(&slot.sft);
+                        if size == 0 { continue; }
+                        let offset = triplet_param_count;
+                        let end = offset + size;
+                        let access = slot_access(quote! { #acc }, &slot.path);
+                        triplet_idx_stmts.push(quote! {
+                            #access.write_indices(&mut __all_idx[#offset..#end]);
+                        });
+                        triplet_param_count += size;
+                    }
+                }
+            }
             // Append root's write_indices calls when root is an implicit
             // entity. Accessed via `self.<param>` since root is the
             // enclosing `Self`.
@@ -5707,11 +6238,17 @@ pub fn generate_root_methods(
                 // Guards read values only, so `parent.` needs no
                 // differentiation -- rewrite the head to the binding's
                 // rendering (entity alias local / prefix accessor).
+                let guard_mixed: Option<GuardMixed> = mixed.as_ref().map(|mx| GuardMixed {
+                    parent_refs: mx.parent_refs.iter().map(|(n, _, _)| n.clone()).collect(),
+                    ancestor: mx.ancestor.as_ref().map(|(_, alias)|
+                        (MixedParent::ancestor_accessor(cross_prefix.len()), alias.clone())),
+                });
                 rewrite_guard_parent(&mut e, &parent_binding,
                     parent_cross.as_ref().and_then(|pc| pc.parent_refs.as_ref()),
-                    if parent_cross.is_some() {
+                    if parent_cross.is_some() || mixed.is_some() {
                         constraint.parent_name.as_deref()
-                    } else { None })?;
+                    } else { None },
+                    guard_mixed.as_ref())?;
                 Ok(e)
             })
             .transpose()?;
@@ -6144,7 +6681,13 @@ pub fn generate_root_methods(
             // calls). set_block_indices is populated with per-CrossBlock
             // set_indices when multi_cross_blocks is non-empty.
             let rc_ident = frines_ident.unwrap();
-            let group_key = rc_ident.to_string();
+            // A collection below the root (mixed form) groups by its full
+            // path, so same-named collections at different depths stay apart.
+            let group_key = if cross_prefix.is_empty() {
+                rc_ident.to_string()
+            } else {
+                format!("{}.{}", path_display(&cross_prefix), rc_ident)
+            };
             let marker = source_marker(sc);
 
             let cost_entry = if let Some(ref guard) = guard_expr {
@@ -6175,6 +6718,7 @@ pub fn generate_root_methods(
             let mcb: Vec<MultiCrossBlockInfo> = multi_cross_routing.iter().map(|r| {
                 MultiCrossBlockInfo {
                     block_ident: r.block_ident.clone(),
+                    parent_owned: r.parent_owned,
                     a_start: r.a_start, a_count: r.a_count,
                     b_start: r.b_start, b_count: r.b_count,
                 }
@@ -6213,6 +6757,7 @@ pub fn generate_root_methods(
                     }));
                 TripletCollectionGroup {
                     rc_ident: rc_ident.clone(),
+                    prefix: cross_prefix.clone(),
                     triplet_param_count,
                     block_ident: block_ident.clone(),
                     constraint_index_field: ci_field,
@@ -6977,41 +7522,45 @@ pub fn generate_root_methods(
             quote! { __frine.#fi = __cid; }
         });
 
-        cost_loops.push(quote! {
-            for __frine in self.#rc_ident.iter() {
+        // `self.<coll>` for a root collection; the mixed form's collection
+        // sits below the root, reached through the prefix loops.
+        let prefix = &group.prefix;
+        let ctn = nested_container(prefix);
+        cost_loops.push(wrap_in_prefix(prefix, false, quote! {
+            for __frine in #ctn.#rc_ident.iter() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
                 #(#cost_entries)*
             }
-        });
+        }));
         if jacobian {
             let ct_entries = &group.ct_entries;
-            ct_loops.push(quote! {
-                for __frine in self.#rc_ident.iter() {
+            ct_loops.push(wrap_in_prefix(prefix, false, quote! {
+                for __frine in #ctn.#rc_ident.iter() {
                     #(#resolve_stmts)*
                     let #root_var = &*__self_ref;
                     #(#ct_entries)*
                 }
-            });
+            }));
         }
 
         let entity_offsets = &group.entity_offsets;
         let entity_offsets_len = entity_offsets.len();
         // Loop-level resolves feed the __all_idx build; entries re-establish
         // their own bindings (a preceding entry's writes end these borrows).
-        grad_hessian_loops.push(quote! {
-            for __frine in self.#rc_ident.iter_mut() {
+        grad_hessian_loops.push(wrap_in_prefix(prefix, true, quote! {
+            for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#resolve_stmts)*
                 let mut __all_idx = [0u32; #tp];
                 #(#triplet_idx_stmts)*
                 let __entity_offsets: [u32; #entity_offsets_len] = [#(#entity_offsets),*];
                 #(#gh_entries)*
             }
-        });
+        }));
 
         if !jac_entries.is_empty() {
-            jacobian_loops.push(quote! {
-                for __frine in self.#rc_ident.iter() {
+            jacobian_loops.push(wrap_in_prefix(prefix, false, quote! {
+                for __frine in #ctn.#rc_ident.iter() {
                     #(#resolve_stmts)*
                     let #root_var = &*__self_ref;
                     let __jac_idx: std::vec::Vec<u32> = {
@@ -7022,7 +7571,7 @@ pub fn generate_root_methods(
                     #(#jac_entries)*
                     __jac_cid += 1;
                 }
-            });
+            }));
         }
 
         // Multi-cross: emit a set_indices call per declared CrossBlock
@@ -7038,15 +7587,24 @@ pub fn generate_root_methods(
                 let block = &mcb.block_ident;
                 let a_start = mcb.a_start; let a_end = mcb.a_start + mcb.a_count;
                 let b_start = mcb.b_start; let b_end = mcb.b_start + mcb.b_count;
+                // A parent-owned tile is wired through the parent prefix
+                // binding; every instance under the parent sets the same
+                // indices (its sides are the parent's refs or the
+                // ancestor), so the repeated call is idempotent.
+                let target: TokenStream2 = if mcb.parent_owned {
+                    quote! { #ctn.#block }
+                } else {
+                    quote! { __frine.#block }
+                };
                 quote! {
-                    __frine.#block.set_indices(
+                    #target.set_indices(
                         &__all_idx[#a_start..#a_end],
                         &__all_idx[#b_start..#b_end],
                     );
                 }
             }).collect();
-            set_block_indices_loops.push(quote! {
-                for __frine in self.#rc_ident.iter_mut() {
+            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+                for __frine in #ctn.#rc_ident.iter_mut() {
                     #(#entity_index_copies)*
                     #(#resolve_stmts)*
                     let mut __all_idx = [0u32; #tp];
@@ -7056,13 +7614,13 @@ pub fn generate_root_methods(
                     #ci_set
                     __cid += 1;
                 }
-            });
+            }));
         } else {
             // TripletBlock: set per-entity SelfBlock indices (needed so
             // the per-entity add_residual writes don't silently skip),
             // plus __cid assignment.
-            set_block_indices_loops.push(quote! {
-                for __frine in self.#rc_ident.iter_mut() {
+            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+                for __frine in #ctn.#rc_ident.iter_mut() {
                     #(#entity_index_copies)*
                     #(#resolve_stmts)*
                     let mut __all_idx = [0u32; #tp];
@@ -7071,7 +7629,7 @@ pub fn generate_root_methods(
                     #ci_set
                     __cid += 1;
                 }
-            });
+            }));
             let _ = (block_ident, triplet_idx_stmts, resolve_stmts); // silence unused warnings
         }
     }
@@ -7378,6 +7936,10 @@ fn interpret_constraint_body(
     // How `parent.` resolves in the body, decided by the caller from the
     // containing form's sweep shape.
     parent_binding: &ParentBinding,
+    // The mixed parent-cross form and the depth of the constraint's
+    // collection below the root (the ancestor binds as `__seg{depth-2}`).
+    mixed: Option<&MixedParent>,
+    prefix_len: usize,
 ) -> syn::Result<(Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>)> {
     // `root.<selfblock>` primary: the entity supplies only data, every param
     // is the root's. Deep validation lives in the traversal side (which sees
@@ -7437,10 +7999,19 @@ fn interpret_constraint_body(
     // ref field names (param-symbol naming and rendered locals), but
     // their BODY keys are `parent.<ref>` -- registered separately below,
     // so bare `<ref>` deliberately does not bind.
-    let parent_ref_names: std::collections::HashSet<String> = parent_cross
+    let mut parent_ref_names: std::collections::HashSet<String> = parent_cross
         .and_then(|pc| pc.parent_refs.as_ref())
         .map(|(ra, rb)| [ra.clone(), rb.clone()].into_iter().collect())
         .unwrap_or_default();
+    // Mixed form: the parent's refs and the ancestor's prefix binding
+    // enter var_infos for the symbol span, but bind only under their
+    // explicit keys (`parent.<ref>`, `parent.parent`, the aliases).
+    if let Some(mx) = mixed {
+        for (rn, _, _) in &mx.parent_refs { parent_ref_names.insert(rn.clone()); }
+        if mx.ancestor.is_some() {
+            parent_ref_names.insert(MixedParent::ancestor_accessor(prefix_len));
+        }
+    }
     if let Some(pc) = parent_cross
         && let Some((ra, rb)) = &pc.parent_refs {
         var_infos.push((ra.clone(), pc.a_type.clone()));
@@ -7470,7 +8041,7 @@ fn interpret_constraint_body(
         // `[hb, parent.<triplet>]`: a parent-owned triplet in the
         // SECONDARY slot (a `parent.` primary is the selfblock or
         // crossblock form, never a triplet).
-        let has_parent_triplet_block = !is_parent_primary
+        let has_parent_triplet_block = !is_parent_primary && mixed.is_none()
             && constraint.block_fields.iter().any(|bf| bf.starts_with("parent."));
         let is_pure_multi_cross = is_multi_cross_early && !is_remote
             && !has_root_triplet_block && !has_parent_triplet_block;
@@ -7501,6 +8072,16 @@ fn interpret_constraint_body(
                 .unwrap_or_else(|| root_type_name.to_string());
             var_infos.push((parent_type.to_lowercase(), parent_type));
         }
+        // Mixed form: the parent's refs, then the ancestor, after the own
+        // refs -- the entity-list order the emission uses for its spans.
+        if let Some(mx) = mixed {
+            for (rn, tn, _) in &mx.parent_refs {
+                var_infos.push((rn.clone(), tn.clone()));
+            }
+            if let Some((anc, _)) = &mx.ancestor {
+                var_infos.push((MixedParent::ancestor_accessor(prefix_len), anc.clone()));
+            }
+        }
         let root_var = root_type_name.to_lowercase();
         var_infos.push((root_var, root_type_name.to_string()));
     }
@@ -7528,7 +8109,7 @@ fn interpret_constraint_body(
     // In the parent-cross forms, `parent = <name>` names the parent
     // binding: `<name>.x` and `parent.x` are the same read. (In the
     // other forms the attribute keeps its historical meanings.)
-    let parent_alias: Option<&str> = if parent_cross.is_some() {
+    let parent_alias: Option<&str> = if parent_cross.is_some() || mixed.is_some() {
         constraint.parent_name.as_deref().filter(|n| *n != "parent")
     } else { None };
     if let Some(al) = parent_alias {
@@ -7570,6 +8151,44 @@ fn interpret_constraint_body(
     // parent entity, a data-only binding, or a poisoned name with a
     // targeted error.
     register_parent_binding(&mut ctx, parent_binding, parent_alias)?;
+
+    // Mixed form: the parent's refs bind under `parent.<ref>` (and the
+    // parent alias), rendered through the resolved locals named after
+    // the ref fields; the ancestor binds under `parent.parent` (and its
+    // alias) through its prefix binding, params differentiated. The
+    // "one level only" poison is lifted for it.
+    if let Some(mx) = mixed {
+        if fields.iter().any(|f| f.ident.as_ref().is_some_and(|i| i == "parent")) {
+            return Err(syn::Error::new_spanned(struct_name,
+                "a field named `parent` collides with the parent binding of the \
+                 mixed parent-cross form -- rename the field"));
+        }
+        for (rn, tn, _) in &mx.parent_refs {
+            ctx.entity_vars.insert(format!("parent.{}", rn), tn.clone());
+            register_bindings_recursive(&mut ctx, &format!("parent.{}", rn), rn, tn)?;
+            if let Some(al) = parent_alias {
+                ctx.entity_vars.insert(format!("{}.{}", al, rn), tn.clone());
+                register_bindings_recursive(&mut ctx, &format!("{}.{}", al, rn), rn, tn)?;
+            }
+        }
+        if let Some((anc, alias)) = &mx.ancestor {
+            let acc = MixedParent::ancestor_accessor(prefix_len);
+            ctx.poisoned.retain(|(p, _)| p != "parent.parent");
+            ctx.entity_vars.insert("parent.parent".to_string(), anc.clone());
+            register_bindings_recursive(&mut ctx, "parent.parent", &acc, anc)?;
+            ctx.poisoned.push(("parent.parent.parent".to_string(),
+                "two `parent.` levels only".to_string()));
+            if let Some(al) = alias {
+                if ctx.entity_vars.contains_key(al) {
+                    return Err(syn::Error::new_spanned(struct_name,
+                        format!("`parent.parent = {}` collides with an existing binding of \
+                                 the same name -- pick another alias", al)));
+                }
+                ctx.entity_vars.insert(al.clone(), anc.clone());
+                register_bindings_recursive(&mut ctx, al, &acc, anc)?;
+            }
+        }
+    }
 
     // `root` aliases the root variable in constraint bodies, matching the
     // `root.<field>` block spec: `root.a` and `<root_lc>.a` are the same

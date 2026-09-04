@@ -719,13 +719,22 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   `parent.<field>`).
 /// - `[hb, root.<field>]` / `[hb, parent.<field>]` naming a
 ///   `TripletBlock` -- (entity, root/parent) cross pairs in COO form.
+/// - `[hb_ab, hb_ac, parent.hb_bc]` -- the mixed form: own CrossBlocks
+///   beside CrossBlocks owned by the containing parent. The entities
+///   are the own refs, the parent's refs (`parent.<ref>`) and, when
+///   reached, the entity two levels up (`parent.parent`, or its alias
+///   from `parent.parent = name`); a parent-owned tile's sides must be
+///   parent refs or that ancestor.
 ///
 /// In a nested constraint's body and guard, `parent.<field>` reads the
 /// containing parent's plain data fields; where the parent is already
 /// a coupled entity, `parent` aliases it with full Param access. One
-/// level only. See docs/MODEL.md, "Parent values".
+/// level only, two in the mixed form. See docs/MODEL.md, "Parent
+/// values".
 ///
 /// Options:
+/// - `parent.parent = name` -- in the mixed form, name the entity two
+///   levels up: `name.x` and `parent.parent.x` are the same read.
 /// - `guard = expr` -- conditional evaluation; the constraint contributes
 ///   only when `expr` evaluates to `true` at runtime.
 /// - `parent = name` -- name the parent variable in nested constraints

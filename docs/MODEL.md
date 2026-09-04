@@ -243,6 +243,66 @@ struct PathMatch { d: f32 }
   Aliased slots (one entity in both) need the own-refs form; at
   runtime two parent refs may still point at the same entity.
 
+### Own tiles beside parent-owned ones (the mixed form)
+
+A bracketed list may mix the constraint's own CrossBlocks with one or
+more `parent.<crossblock>` entries. The bundle-adjustment shape: an
+image holds its camera ref and the `(pose, cam)` tile every one of its
+observations writes; each observation holds its point ref and the two
+point tiles. The pose is the entity holding the image, two levels up,
+reached as `parent.parent` or through the alias `parent.parent =
+<name>`:
+
+```rust,ignore
+#[arael::model]
+struct Pose {
+    rot: QuaternionParam<f64>,
+    tx: Param<f64>, ty: Param<f64>, tz: Param<f64>,
+    images: std::vec::Vec<Image>,
+    hb: SelfBlock<Pose>,
+}
+
+#[arael::model]
+struct Image {
+    #[arael(ref = root.cams)] cam: Ref<Cam>,
+    obs: std::vec::Vec<Obs>,
+    hb_pose_cam: CrossBlock<Pose, Cam>,       // shared by all obs of the image
+}
+
+#[arael::model]
+#[arael(constraint([hb_point_pose, hb_point_cam, parent.hb_pose_cam],
+    parent = image, parent.parent = pose, {
+    let p = pose.rot.rotation_matrix() * point.pos;
+    [image.cam.f * (p.x + pose.tx) / (p.z + pose.tz) - obs.u, ...]
+}))]
+struct Obs {
+    #[arael(ref = root.points)] point: Ref<Point>,
+    u: f64,
+    hb_point_pose: CrossBlock<Point, Pose>,   // per observation
+    hb_point_cam: CrossBlock<Point, Cam>,
+}
+```
+
+- The entities are the constraint's own refs, then the parent's
+  refs (`parent.<ref>`, `image.<ref>`), then the entity two levels
+  up (`parent.parent`, `pose`), params differentiated. Every
+  unordered pair is claimed by exactly one block, own or parent-owned.
+- A parent-owned tile's sides must be parent refs or the entity two
+  levels up: an instance-varying own ref cannot share a tile. A side
+  type no ref supplies resolves to the entity two levels up, which
+  is how `CrossBlock<Pose, Cam>` on the image pairs the pose above
+  with the image's camera.
+- The parent stays a plain container (no Params); the constraint's
+  collection sits below the root, two levels below it when
+  `parent.parent` is used. Diagonal writes land on each entity's
+  own SelfBlock; guards and losses stay per instance.
+- `parent.parent = <name>` is a second key root over the same
+  binding, the way `parent = <name>` names the parent; an alias
+  colliding with a field or an existing binding is a compile error.
+  Two `parent.` levels only.
+- Without `parent.parent`, the same form works with the images held
+  by the root and a pose ref on each image.
+
 ### Heap-backed blocks: `BoxedSelfBlock` / `BoxedCrossBlock`
 
 `SelfBlock` and `CrossBlock` store their Hessian **inline** as a fixed
@@ -550,6 +610,8 @@ any Model struct:
 #[arael(constraint(parent.hb, { body }))]               // containing parent's SelfBlock (parent params only)
                                                         // -- or its shared CrossBlock (see Hessian block types)
 #[arael(constraint([hb, parent.hbt], { body }))]        // self-primary + parent-owned TripletBlock
+#[arael(constraint([hb_ab, hb_ac, parent.hb_bc],        // own CrossBlocks + parent-owned shared ones
+    parent = image, parent.parent = pose, { body }))]   // (the mixed form, see Hessian block types)
 ```
 
 The positional form carries a single block only. Any N ≥ 2 block
@@ -728,10 +790,13 @@ struct Path {
   BODY is a compile error naming the coupling forms (its derivative
   pairs would be dropped). Guards read values only, so they may read
   anything.
-- One `parent.` level only. No containing parent below the root
-  (constraint held directly by the root -- use `root.<field>`), or a
-  type held under several containment paths ("the parent" is
-  ambiguous): any `parent.` read is a targeted compile error.
+- One `parent.` level, except in the mixed parent-cross form, where
+  `parent.parent` (or its alias from `parent.parent = <name>`) is the
+  entity two levels up, params differentiated, in the body and the
+  guard. No containing parent below the root (constraint held
+  directly by the root -- use `root.<field>`), or a type held under
+  several containment paths ("the parent" is ambiguous): any
+  `parent.` read is a targeted compile error.
 
 ### Constraint placement
 

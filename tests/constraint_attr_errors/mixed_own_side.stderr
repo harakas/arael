@@ -1,0 +1,15 @@
+error: on `parent.hb_shared: CrossBlock<Point, Cam>`: a parent-owned CrossBlock is shared by every instance under the parent, so its sides must be the parent's refs or the entity two levels up -- no such Ref<Point> + Ref<Cam> pair exists (the constraint's own refs cannot fill it)
+  --> tests/constraint_attr_errors/mixed_own_side.rs:40:1
+   |
+40 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/mixed_own_side.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
