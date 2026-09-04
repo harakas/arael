@@ -23,7 +23,7 @@ use arael::simple_lm::RootProblem;
 use arael::info;
 use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
-use arael_sym::E;
+use arael::sym::E;
 
 // --- Form A: purely symbolic sigmoid. No derivs, auto-differentiated
 // at constraint-expansion via the stashed arael-sym source. The body

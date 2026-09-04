@@ -958,7 +958,7 @@ resulting `E` tree into the surrounding residual. Derivatives come
 from arael-sym's own auto-diff.
 
 ```rust,ignore
-use arael_sym::E;
+use arael::sym::E;
 
 #[arael::function]
 fn sigmoid(x: E) -> E {
@@ -985,7 +985,8 @@ struct M {
 
 The body is stringified and handed to
 `arael_sym::parse_with_functions`, so identifiers resolve against
-arael-sym's parser rather than Rust's name resolution.
+arael-sym's parser rather than Rust's name resolution. `E` is
+`arael::sym::E`; the crate needs no dependency on arael-sym itself.
 
 Optional `derivs = [expr, ...]` overrides auto-diff with an
 explicit partial per parameter. Expressions are raw tokens, not

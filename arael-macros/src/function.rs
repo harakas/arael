@@ -236,7 +236,7 @@ fn form_a(attr: TokenStream2, input: syn::ItemFn) -> syn::Result<TokenStream2> {
     // plain E tree -- identical behavior to writing the body by hand.
     let runtime_body: TokenStream2 = if attrs.deriv_strings.is_some() {
         quote! {
-            let __args: ::std::vec::Vec<arael_sym::E> = ::std::vec![#(#param_i),*];
+            let __args: ::std::vec::Vec<::arael::sym::E> = ::std::vec![#(#param_i),*];
             ::arael::user_fn::with_registry_bag(|__bag| {
                 __bag.call(#sym_name_lit, &__args)
                     .expect("#[arael::function] registry entry missing (inventory not populated?)")
@@ -246,10 +246,10 @@ fn form_a(attr: TokenStream2, input: syn::ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {
             let __parsed = ::arael::user_fn::with_registry_bag(|__bag| {
-                arael_sym::parse_with_functions(#body_lit, __bag)
+                ::arael::sym::parse_with_functions(#body_lit, __bag)
             }).expect(concat!("#[arael::function ", stringify!(#sig), "] body parse failed"));
-            let __subs: ::std::vec::Vec<(arael_sym::E, arael_sym::E)> = ::std::vec![
-                #( (arael_sym::symbol(#param_lits), #param_i), )*
+            let __subs: ::std::vec::Vec<(::arael::sym::E, ::arael::sym::E)> = ::std::vec![
+                #( (::arael::sym::symbol(#param_lits), #param_i), )*
             ];
             __parsed.substitute(&__subs)
         }
@@ -361,20 +361,20 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         }
 
         #[allow(non_snake_case)]
-        #vis fn #sym_ident( #( #param_i : arael_sym::E ),* ) -> arael_sym::E {
-            let __f = arael_sym::extern_func(
+        #vis fn #sym_ident( #( #param_i : ::arael::sym::E ),* ) -> ::arael::sym::E {
+            let __f = ::arael::sym::extern_func(
                 #sym_name_lit, #arity_lit, #eval_path_lit,
-                move |__syms: ::std::vec::Vec<arael_sym::E>| -> ::std::vec::Vec<arael_sym::E> {
+                move |__syms: ::std::vec::Vec<::arael::sym::E>| -> ::std::vec::Vec<::arael::sym::E> {
                     let __bag = ::arael::user_fn::registry_bag();
                     // Parse each deriv under the registry bag. Bare
                     // idents naming the user's params (e.g. `x`) become
                     // free `symbol("x")` nodes; rewrite them to the
                     // placeholder `__p_N` syms extern_func hands us.
-                    let __user_to_ph: ::std::vec::Vec<(arael_sym::E, arael_sym::E)> = ::std::vec![
-                        #( (arael_sym::symbol(#param_lits), __syms[#arity_idx].clone()), )*
+                    let __user_to_ph: ::std::vec::Vec<(::arael::sym::E, ::arael::sym::E)> = ::std::vec![
+                        #( (::arael::sym::symbol(#param_lits), __syms[#arity_idx].clone()), )*
                     ];
                     ::std::vec![
-                        #( arael_sym::parse_with_functions(#deriv_lits, &__bag)
+                        #( ::arael::sym::parse_with_functions(#deriv_lits, &__bag)
                             .expect("#[arael::function] deriv parse failed")
                             .substitute(&__user_to_ph), )*
                     ]
