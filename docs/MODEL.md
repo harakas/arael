@@ -873,8 +873,8 @@ code. The dialect:
   without `_` any other value panics. The scrutinee is normally an
   integer data field (`u32`, `i32`, `bool`); a float works when it
   holds an integer value and panics otherwise. Works in residual
-  bodies and in the `loss =` clause, where it picks a robust kernel
-  per solve from one residual body:
+  bodies, in `#[arael::function]` bodies, and in the `loss =` clause,
+  where it picks a robust kernel per solve from one residual body:
   `loss = |s| match obs.kind { 0 => s, 1 => loss_huber(s, obs.k2), _
   => loss_cauchy(s, obs.k2) }`. `loss_select(obs.kind, s, obs.k2)` is
   the shorthand over all six built-in kernels. A dispatching
@@ -987,6 +987,10 @@ The body is stringified and handed to
 `arael_sym::parse_with_functions`, so identifiers resolve against
 arael-sym's parser rather than Rust's name resolution. `E` is
 `arael::sym::E`; the crate needs no dependency on arael-sym itself.
+A `match` in the body is rewritten to `select` / `select_or` before
+the parse, under the constraint-body rules: literal patterns `0, 1,
+...` in order, an optional trailing `_`, no guards, one expression
+per arm.
 
 Optional `derivs = [expr, ...]` overrides auto-diff with an
 explicit partial per parameter. Expressions are raw tokens, not

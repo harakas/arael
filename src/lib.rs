@@ -921,7 +921,10 @@
 //! `arael_sym::parse_with_functions`, so identifiers resolve
 //! against arael-sym's parser rather than Rust's name resolution.
 //! `E` is `arael::sym::E`; the crate needs no dependency on
-//! arael-sym itself.
+//! arael-sym itself. A `match` in the body is rewritten to
+//! `select` / `select_or` before the parse, under the constraint-body
+//! rules: literal patterns `0, 1, ...` in order, an optional trailing
+//! `_`, no guards, one expression per arm.
 //!
 //! Optional `derivs = [expr, ...]` overrides auto-diff with an
 //! explicit partial per parameter. Expressions are raw tokens,

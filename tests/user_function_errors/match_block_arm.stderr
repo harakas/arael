@@ -1,0 +1,5 @@
+error: a match arm in a #[arael::function] body must be a single expression
+ --> tests/user_function_errors/match_block_arm.rs:7:14
+  |
+7 |         0 => { let y = a; y },
+  |              ^^^^^^^^^^^^^^^^

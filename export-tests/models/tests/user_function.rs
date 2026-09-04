@@ -24,33 +24,52 @@ fn half_sin_eval(x: f64) -> f64 {
     0.5 * x.sin()
 }
 
+/// Form A with a `match`, rewritten to `select_or` for the parser.
+#[arael::function]
+fn pick(kind: E, a: E, b: E) -> E {
+    match kind {
+        0 => a,
+        _ => b,
+    }
+}
+
 #[arael::model]
 #[arael(root, jacobian)]
 #[arael(constraint(hb, {
-    [square(m.x) - 9.0, cube(m.x) - 8.0, half_sin(m.x)]
+    [square(m.x) - 9.0, cube(m.x) - 8.0, half_sin(m.x), pick(m.kind, m.x - 1.0, 0.0)]
 }))]
 struct M {
     x: Param<f64>,
+    kind: u32,
     hb: SelfBlock<M>,
 }
 
 #[test]
 fn every_form_evaluates_and_differentiates() {
-    let mut m = M { x: Param::new(2.0), hb: SelfBlock::new() };
+    let mut m = M { x: Param::new(2.0), kind: 0, hb: SelfBlock::new() };
     let mut params = Vec::new();
     m.serialize(&mut params);
 
-    // r = (4 - 9, 8 - 8, 0.5 sin 2) at x = 2.
+    // r = (4 - 9, 8 - 8, 0.5 sin 2, 2 - 1) at x = 2.
     let r2 = 0.5 * 2.0f64.sin();
     let cost = m.calc_cost(&params);
-    let expected = 25.0 + r2 * r2;
+    let expected = 25.0 + r2 * r2 + 1.0;
     assert!((cost - expected).abs() < 1e-12, "cost {cost} != {expected}");
 
-    // dC/dx = 2 r0 (2x) + 2 r1 (3x^2) + 2 r2 (0.5 cos x).
+    // dC/dx = 2 r0 (2x) + 2 r1 (3x^2) + 2 r2 (0.5 cos x) + 2 r3 (1).
     let mut g = vec![0.0; 1];
     let mut h = vec![0.0; 1];
     m.calc_grad_hessian_dense(&params, &mut g, &mut h);
-    let expected_g = 2.0 * (-5.0) * 4.0 + 2.0 * r2 * 0.5 * 2.0f64.cos();
+    let expected_g = 2.0 * (-5.0) * 4.0 + 2.0 * r2 * 0.5 * 2.0f64.cos() + 2.0;
+    assert!((g[0] - expected_g).abs() < 1e-9, "grad {} != {expected_g}", g[0]);
+
+    // The other arm: a constant residual, no gradient from it.
+    m.kind = 1;
+    let cost = m.calc_cost(&params);
+    let expected = 25.0 + r2 * r2;
+    assert!((cost - expected).abs() < 1e-12, "cost {cost} != {expected}");
+    m.calc_grad_hessian_dense(&params, &mut g, &mut h);
+    let expected_g = expected_g - 2.0;
     assert!((g[0] - expected_g).abs() < 1e-9, "grad {} != {expected_g}", g[0]);
 }
 
@@ -60,6 +79,7 @@ fn siblings_are_callable_at_runtime() {
         ("square", square(symbol("x"))),
         ("cube", cube(symbol("x"))),
         ("half_sin", half_sin(symbol("x"))),
+        ("pick", pick(symbol("k"), symbol("x"), symbol("y"))),
     ] {
         let s = format!("{e}");
         assert!(s.contains('x'), "{name}(x) printed as {s:?}");

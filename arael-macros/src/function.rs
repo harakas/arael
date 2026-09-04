@@ -110,6 +110,58 @@ fn single_expression_body(block: &syn::Block) -> syn::Result<&syn::Expr> {
     }
 }
 
+/// Rewrite every `match` in a Form A body or deriv expression into the
+/// parser's `select` / `select_or` call, so the stored arael-sym source
+/// needs no `match` of its own. Arm rules are the constraint body's
+/// (`match_arm_patterns`); an arm must be a single expression.
+fn desugar_match(expr: &mut syn::Expr) -> syn::Result<()> {
+    struct Desugar(Option<syn::Error>);
+    impl syn::visit_mut::VisitMut for Desugar {
+        fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+            // Children first, so nested matches are already calls.
+            syn::visit_mut::visit_expr_mut(self, e);
+            let syn::Expr::Match(m) = e else { return };
+            match match_to_select(m) {
+                Ok(call) => *e = call,
+                Err(err) => if self.0.is_none() { self.0 = Some(err) },
+            }
+        }
+    }
+    let mut v = Desugar(None);
+    syn::visit_mut::VisitMut::visit_expr_mut(&mut v, expr);
+    v.0.map_or(Ok(()), Err)
+}
+
+fn match_to_select(m: &syn::ExprMatch) -> syn::Result<syn::Expr> {
+    let (numbered, default) = crate::constraint::match_arm_patterns(&m.arms)?;
+    let mut args: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
+        syn::punctuated::Punctuated::new();
+    args.push((*m.expr).clone());
+    for i in 0..numbered.len() {
+        args.push(arm_expr(&m.arms[i])?);
+    }
+    if let Some(d) = default {
+        args.push(arm_expr(&m.arms[d])?);
+    }
+    let func = syn::Ident::new(
+        if default.is_some() { "select_or" } else { "select" }, m.match_token.span);
+    Ok(syn::parse_quote!(#func(#args)))
+}
+
+/// An arm body as one expression; a block is accepted when it holds
+/// exactly one trailing expression.
+fn arm_expr(arm: &syn::Arm) -> syn::Result<syn::Expr> {
+    const MSG: &str = "a match arm in a #[arael::function] body must be a single expression";
+    match &*arm.body {
+        syn::Expr::Block(b) if b.block.stmts.len() == 1 => match &b.block.stmts[0] {
+            syn::Stmt::Expr(e, None) => Ok(e.clone()),
+            other => Err(syn::Error::new_spanned(other, MSG)),
+        },
+        syn::Expr::Block(b) => Err(syn::Error::new_spanned(b, MSG)),
+        other => Ok(other.clone()),
+    }
+}
+
 struct FormAAttrs {
     deriv_strings: Option<Vec<String>>,
 }
@@ -172,7 +224,12 @@ fn parse_deriv_array(input: syn::parse::ParseStream) -> syn::Result<Vec<String>>
     syn::bracketed!(content in input);
     let items: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
         content.parse_terminated(syn::Expr::parse, syn::Token![,])?;
-    Ok(items.into_iter().map(|e| quote!(#e).to_string()).collect())
+    let mut out = Vec::with_capacity(items.len());
+    for mut e in items {
+        desugar_match(&mut e)?;
+        out.push(quote!(#e).to_string());
+    }
+    Ok(out)
 }
 
 fn source_location(span: proc_macro2::Span) -> (String, u32) {
@@ -196,7 +253,8 @@ fn form_a(attr: TokenStream2, input: syn::ItemFn) -> syn::Result<TokenStream2> {
         }
     }
 
-    let body_expr = single_expression_body(&input.block)?;
+    let mut body_expr = single_expression_body(&input.block)?.clone();
+    desugar_match(&mut body_expr)?;
     let body_string = quote!(#body_expr).to_string();
 
     let (attr_file, attr_line) = source_location(input.sig.ident.span());

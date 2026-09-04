@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_body_errors/match_guard.rs:8: match arm guards are not supported in a constraint body
+error: $DIR/tests/constraint_body_errors/match_guard.rs:8: match arm guards are not supported
  --> tests/constraint_body_errors/match_guard.rs:6:1
   |
 6 | #[arael::model]

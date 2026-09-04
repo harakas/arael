@@ -22,4 +22,7 @@ fn user_function_compile_errors() {
     t.compile_fail("tests/user_function_errors/unknown_function_in_body.rs");
     t.compile_fail("tests/user_function_errors/arity_mismatch_at_call.rs");
     t.compile_fail("tests/user_function_errors/bad_deriv_string.rs");
+    t.compile_fail("tests/user_function_errors/match_out_of_order.rs");
+    t.compile_fail("tests/user_function_errors/match_guard.rs");
+    t.compile_fail("tests/user_function_errors/match_block_arm.rs");
 }

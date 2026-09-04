@@ -935,7 +935,7 @@ pub(crate) fn match_arm_patterns(arms: &[syn::Arm]) -> syn::Result<(Vec<usize>, 
     for (i, arm) in arms.iter().enumerate() {
         if let Some((if_token, _)) = &arm.guard {
             return Err(syn::Error::new_spanned(if_token,
-                "match arm guards are not supported in a constraint body"));
+                "match arm guards are not supported"));
         }
         if default.is_some() {
             return Err(syn::Error::new_spanned(&arm.pat,

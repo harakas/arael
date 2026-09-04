@@ -1,0 +1,5 @@
+error: match arm patterns must be the integer literals 0, 1, ... in order (expected 0 here), optionally ending with `_`
+ --> tests/user_function_errors/match_out_of_order.rs:7:9
+  |
+7 |         1 => a,
+  |         ^

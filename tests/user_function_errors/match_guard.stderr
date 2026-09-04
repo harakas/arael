@@ -1,0 +1,5 @@
+error: match arm guards are not supported
+ --> tests/user_function_errors/match_guard.rs:6:11
+  |
+6 |         0 if a > b => a,
+  |           ^^
