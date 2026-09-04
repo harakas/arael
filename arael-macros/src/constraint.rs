@@ -2752,6 +2752,8 @@ struct MixedParent {
     parent_type: String,
     /// Parent-owned CrossBlocks named in the list:
     /// (field, A type, B type, `cross = (a, b)` on the parent's field).
+    /// Empty in the parent-ref form: own blocks only, an endpoint
+    /// supplied by the parent's ref or the entity two levels up.
     blocks: Vec<(syn::Ident, String, String, Option<(String, String)>)>,
     /// The parent's param-bearing Ref fields in declaration order:
     /// (field, target type, resolve path).
@@ -2819,7 +2821,11 @@ fn detect_mixed_parent(
                  `{}` -- it has {}", rest, parent_type, have)));
         }
     }
-    if blocks.is_empty() { return Ok(None); }
+    // No parent-owned entry: the parent-ref form, whose parent is a
+    // plain container. A parent with params, direct or in components,
+    // is the coupled entity of the other forms (frine-style), never
+    // this one.
+    if blocks.is_empty() && param_total(&parent_type) > 0 { return Ok(None); }
 
     if registry_lookup(struct_name).map(|l| !l.param_fields.is_empty()).unwrap_or(false) {
         return Err(err(format!(
@@ -4061,8 +4067,31 @@ pub fn generate_root_methods(
         // The mixed parent-cross form (own CrossBlocks plus parent-owned
         // ones in one bracketed list) is recognized first; it supersedes
         // the single-block `parent.` primary for lists of two or more.
-        let mixed: Option<MixedParent> = if constraint.block_fields.len() >= 2
-            && constraint.block_fields.iter().any(|bf| bf.starts_with("parent."))
+        // The parent-ref form: own CrossBlocks only, one of them naming an
+        // entity no own ref supplies -- the parent's ref or the entity two
+        // levels up fills it. The same detector recognizes it, with no
+        // parent-owned entries.
+        let parent_ref_form = !constraint.block_fields.is_empty()
+            && constraint.block_fields.iter().all(|bf| !bf.contains('.'))
+            && {
+                let root = root_name.to_string();
+                let own_ref_types: Vec<String> = fields.named.iter()
+                    .filter_map(|f| extract_wrapper_inner(&f.ty, "Ref")
+                        .map(|(_, t)| t.to_string()))
+                    .filter(|t| !is_data_ref_target(t))
+                    .collect();
+                constraint.block_fields.iter().any(|bf| {
+                    fields.named.iter()
+                        .find(|f| f.ident.as_ref().is_some_and(|i| i == bf.as_str()))
+                        .and_then(|f| extract_block_type_args(&f.ty).ok())
+                        .is_some_and(|(a, b)| b.is_some_and(|b| {
+                            [a, b].iter().any(|t| *t != root && !own_ref_types.contains(t))
+                        }))
+                })
+            };
+        let mixed: Option<MixedParent> = if (constraint.block_fields.len() >= 2
+            && constraint.block_fields.iter().any(|bf| bf.starts_with("parent.")))
+            || parent_ref_form
         {
             let loc = format!("{}:{}", sc.attr_file, sc.attr_line);
             detect_mixed_parent(&sc.struct_name, &loc, &constraint, &fields,
@@ -4357,7 +4386,7 @@ pub fn generate_root_methods(
         // coexist with is_remote_block when the *primary* block is a
         // dotted-path remote reference (e.g. `pose.hb_pose`) and the
         // additional block fields are local CrossBlocks.
-        let is_multi_cross = constraint.block_fields.len() > 1
+        let is_multi_cross = (constraint.block_fields.len() > 1 || mixed.is_some())
             && !is_self_block && !is_triplet;
 
         // Does any declared local CrossBlock field reference the root
@@ -7997,7 +8026,7 @@ fn interpret_constraint_body(
     // (where the primary A is already covered by a Ref field and adding a
     // parent_name alias would pollute param_symbols with duplicate params
     // under a second var name).
-    let is_multi_cross_early = constraint.block_fields.len() > 1;
+    let is_multi_cross_early = constraint.block_fields.len() > 1 || mixed.is_some();
 
     // Build var_infos
     let mut var_infos: Vec<(String, String)> = Vec::new();
@@ -8229,7 +8258,7 @@ fn interpret_constraint_body(
     // ensures every cross pair is covered by a declared CrossBlock.
     // Multi-cross may coexist with a remote primary block (e.g. the
     // first block is `pose.hb_pose`, the rest are local CrossBlocks).
-    let is_multi_cross = constraint.block_fields.len() > 1;
+    let is_multi_cross = constraint.block_fields.len() > 1 || mixed.is_some();
 
     // Root-as-entity: if any declared local CrossBlock references the
     // root type, OR any block is `root.<triplet>`, include root's

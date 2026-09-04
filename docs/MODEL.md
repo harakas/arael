@@ -302,6 +302,36 @@ struct Obs {
   Two `parent.` levels only.
 - Without `parent.parent`, the same form works with the images held
   by the root and a pose ref on each image.
+- Without any parent-owned tile, the same bindings still apply when
+  an own tile names an entity no own ref supplies: the parent's ref
+  fills it (the parent-ref form). An image with a constant pose,
+  held by the root, holding its camera ref and its pose as data;
+  each observation holds its point ref and the `(point, cam)` tile:
+
+```rust,ignore
+#[arael::model]
+struct FixedImage {
+    #[arael(ref = root.cams)] cam: Ref<Cam>,
+    r: matrix3d,                              // constant world-to-camera
+    t: vect3d,
+    obs: std::vec::Vec<FixedObs>,
+}
+
+#[arael::model]
+#[arael(constraint([hb_point_cam], parent = image, {
+    let p = image.r * point.pos + image.t;
+    [image.cam.f * p.x / p.z + image.cam.cx - obs.u, ...]
+}))]
+struct FixedObs {
+    #[arael(ref = root.points)] point: Ref<Point>,
+    u: f64,
+    hb_point_cam: CrossBlock<Point, Cam>,
+}
+```
+
+  The camera resolves once per image, not per observation. A parent
+  with params is not this form: there the containing entity is the
+  coupled `A` of the frine-style forms.
 
 ### Heap-backed blocks: `BoxedSelfBlock` / `BoxedCrossBlock`
 
@@ -612,6 +642,8 @@ any Model struct:
 #[arael(constraint([hb, parent.hbt], { body }))]        // self-primary + parent-owned TripletBlock
 #[arael(constraint([hb_ab, hb_ac, parent.hb_bc],        // own CrossBlocks + parent-owned shared ones
     parent = image, parent.parent = pose, { body }))]   // (the mixed form, see Hessian block types)
+#[arael(constraint([hb_ab], parent = image, { body }))] // own CrossBlock, one side from the parent's ref
+                                                        // (the parent-ref form, see Hessian block types)
 ```
 
 The positional form carries a single block only. Any N ≥ 2 block
