@@ -757,6 +757,14 @@ itself off numerically DURING a solve -- an observation that becomes
 undefined at the current iterate -- use `branch()` in the body instead:
 it changes the value, not the pattern.
 
+A body switched off by one `branch` costs nothing while it is off. When
+every row is a `branch` on the same condition with zero on the other
+side (`k * branch(q, r, 0.0)`, `max(r, 0.0)` and the like), every
+derivative is too, and the generated assembly evaluates the condition
+and skips the rows, the loss and the block writes when it is off. Rows
+under two different conditions, or a branch whose other side is not
+zero, are assembled as written.
+
 **2. A body that reads through an `Option` sub-struct must be guarded
 on it.** A residual is a number, so a `None` has no value to
 propagate: the generated read is an unwrap, and the guard is what

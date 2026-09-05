@@ -2173,6 +2173,29 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
     subs
 }
 
+/// The one `branch` condition every expression sits under, when replacing
+/// each `branch` by its other side leaves every expression exactly zero.
+/// `None` when there is no branch, more than one distinct condition, or
+/// anything survives on the other side.
+fn off_branch_guard(exprs: &[arael_sym::E]) -> Option<arael_sym::E> {
+    let conds: std::cell::RefCell<Vec<arael_sym::E>> = std::cell::RefCell::new(Vec::new());
+    for e in exprs {
+        e.replace_function("branch", &|args| {
+            let mut c = conds.borrow_mut();
+            if !c.contains(&args[0]) { c.push(args[0].clone()); }
+            arael_sym::branch(args[0].clone(), args[1].clone(), args[2].clone())
+        });
+    }
+    let mut conds = conds.into_inner();
+    if conds.len() != 1 { return None; }
+    let other_side = |args: &[arael_sym::E]| args[2].clone();
+    if exprs.iter().all(|e| e.replace_function("branch", &other_side).is_zero()) {
+        conds.pop()
+    } else {
+        None
+    }
+}
+
 /// Apply substitutions to a list of expressions. Returns the modified expressions.
 fn apply_substitutions(exprs: &mut Vec<arael_sym::E>, subs: &[(arael_sym::E, arael_sym::E)]) {
     // Every target is a cached()/symbol node matched by exact structural
@@ -5572,6 +5595,13 @@ pub fn generate_root_methods(
         // Apply substitutions AFTER differentiation, BEFORE CSE
         apply_substitutions(&mut all_gh_exprs, &all_subs);
         if fast_atan { replace_atan_fast(&mut all_gh_exprs); }
+        // Dead-branch skip: when every row and derivative sits under one
+        // `branch` condition with zero on its other side, the rows are all
+        // zero off that side, and the row and write statements are emitted
+        // behind the same test. The condition joins the batch so the CSE
+        // shares its work with the rows.
+        let off_guard = off_branch_guard(&all_gh_exprs);
+        if let Some(q) = &off_guard { all_gh_exprs.push(q.clone()); }
         let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
 
         let mut gh_stmts = Vec::new();
@@ -5626,6 +5656,9 @@ pub fn generate_root_methods(
         } else { None };
 
         gh_stmts.extend(cse_stmts(&gh_intermediates, Some(""))?);
+        // Everything from here to the deferred writes is skipped when the
+        // dead-branch test is off.
+        let skip_split = gh_stmts.len();
 
         // Pre-residual setup for the owned-triplet forms ([hb, root.hbt]
         // and [hb, parent.hbt]): build __all_idx (concatenation of entity
@@ -6004,6 +6037,14 @@ pub fn generate_root_methods(
         gh_stmts.push(loss_gh_finalize);
         if !deferred_writes.is_empty() {
             gh_stmts.push(quote! { #(#deferred_writes)* });
+        }
+        if off_guard.is_some() {
+            // The condition is the batch's last output. Off that side every
+            // row is zero, so the cost, the loss (rho(0) = 0) and the writes
+            // contribute nothing; a NaN condition is off, as in `branch`.
+            let q_code: Expr = parse_sym_code(&gh_simplified[gh_simplified.len() - 1].to_rust(""))?;
+            let tail = gh_stmts.split_off(skip_split);
+            gh_stmts.push(quote! { if (#q_code) >= 0.0 { #(#tail)* } });
         }
 
         // --- Jacobian code: same intermediates + residuals + derivatives, push rows ---
