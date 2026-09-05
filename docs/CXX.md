@@ -32,7 +32,9 @@ Commit the generated files; `cargo arael check` fails when they are
 stale (run it in CI). Rerun `export` after model changes.
 `capi/Cargo.toml` is written once and then left alone -- edit it
 freely (dependencies, crate settings); delete the file to regenerate
-it. Everything else is overwritten on every export.
+it. Everything else is regenerated on every export, but a file whose
+content did not change is not rewritten, so its timestamp stays and a
+consumer's build recompiles only what the export changed.
 
 Several roots in one crate work: the one capi crate carries every
 root's shim (symbols are root-prefixed), each root gets its own
