@@ -3572,6 +3572,8 @@ pub fn generate_root_methods(
     custom: bool,
     jacobian: bool,
     fast_atan: bool,
+    cost_kahan: bool,
+    cost_f64: bool,
     marginalize_hint_fn: &Option<TokenStream2>,
     marginalize_candidates_fn: &Option<TokenStream2>,
     has_triplet_block: bool,
@@ -3582,6 +3584,50 @@ pub fn generate_root_methods(
     let cast_type: syn::Type = syn::parse_str(precision)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
             format!("invalid precision type '{}': {}", precision, e)))?;
+    // The cost accumulator: `cost_f64` widens it to f64 (a no-op on an f64
+    // root), `cost_kahan` compensates the rounding of every add. Both cost
+    // paths, the cost-only sweep and the one fused into the block assembly,
+    // use the same declaration and add.
+    let acc_type: syn::Type = if cost_f64 { syn::parse_str("f64").unwrap() } else { cast_type.clone() };
+    let cost_decl: TokenStream2 = if cost_kahan {
+        quote! { let mut __cost = 0.0 as #acc_type; let mut __cost_c = 0.0 as #acc_type; }
+    } else {
+        quote! { let mut __cost = 0.0 as #acc_type; }
+    };
+    // `term` is already at the accumulator's precision.
+    let cost_add = |term: TokenStream2| -> TokenStream2 {
+        if cost_kahan {
+            quote! { arael::utils::kahan_add(&mut __cost, &mut __cost_c, #term); }
+        } else {
+            quote! { __cost += #term; }
+        }
+    };
+    // A scope of the cost sum: the wrapped code sums into a partial of its
+    // own, `__cost<n>`, added once into the enclosing accumulator. Every
+    // loop level of a cost sweep and every constraint's sweep is one, so a
+    // row's chain of adds is as long as its innermost loop, not the model.
+    // The wrapped code's `__cost` is renamed to the partial, so nested
+    // scopes read as a declaration before each loop and one add after it.
+    let scope_count = std::cell::Cell::new(0usize);
+    let scope = |t: TokenStream2| -> TokenStream2 {
+        let n = scope_count.get() + 1;
+        scope_count.set(n);
+        let part = format!("__cost{n}");
+        let part_c = format!("__cost_c{n}");
+        let part_id = syn::Ident::new(&part, proc_macro2::Span::call_site());
+        let part_c_id = syn::Ident::new(&part_c, proc_macro2::Span::call_site());
+        let inner = rename_ident(rename_ident(t, "__cost", &part), "__cost_c", &part_c);
+        let decl = if cost_kahan {
+            quote! { let mut #part_id = 0.0 as #acc_type; let mut #part_c_id = 0.0 as #acc_type; }
+        } else {
+            quote! { let mut #part_id = 0.0 as #acc_type; }
+        };
+        let flush = cost_add(quote! { #part_id });
+        quote! { #decl #inner #flush }
+    };
+    let wrap_in_prefix_scoped = |prefix: &[AccessSegment], mutable: bool, inner: TokenStream2| -> TokenStream2 {
+        wrap_in_prefix_scoped(prefix, mutable, inner, Some(&scope))
+    };
 
     // Root SelfBlock index setup: when the root struct has its own
     // Params + a SelfBlock<Self>, its set_indices must be called at
@@ -5530,10 +5576,11 @@ pub fn generate_root_methods(
                 let w_code: Expr = parse_sym_code(&simplified[1].to_rust(""))?;
                 quote! { let __w = (#w_code) as #cast_type; }
             } else { quote! {} };
+            let rho_add = cost_add(quote! { (#rho_code) as #acc_type });
             Ok(quote! {
                 #(#stmts)*
                 #weight_stmt
-                __cost += (#rho_code) as #cast_type;
+                #rho_add
             })
         };
         let loss_cost_finalize = emit_loss(false)?;
@@ -5545,21 +5592,20 @@ pub fn generate_root_methods(
         let ct_wrap = |blob: &TokenStream2| -> TokenStream2 {
             quote! {
                 {
-                    let mut __cost = 0.0 as #cast_type;
+                    #cost_decl
                     #blob
-                    *__table.entry(#label_literal).or_insert(0.0 as #cast_type) += __cost;
+                    *__table.entry(#label_literal).or_insert(0.0 as #cast_type) += __cost as #cast_type;
                 }
             }
         };
-        // Per-row cost accumulator: into __block_cost under a loss, else __cost.
-        let cost_acc: TokenStream2 = if loss_present { quote! { __block_cost } } else { quote! { __cost } };
-        // Row-squared term for the accumulator: __cost is #cast_type, so
-        // rows cast; __block_cost stays at the rows' own precision.
-        let row_sq = |r_ident: &syn::Ident| -> TokenStream2 {
+        // Per-row cost accumulation: into __block_cost (the rows' own
+        // precision, a few rows) under a loss, else the row squared at the
+        // accumulator's precision into __cost.
+        let row_acc = |r_ident: &syn::Ident| -> TokenStream2 {
             if loss_present {
-                quote! { #r_ident * #r_ident }
+                quote! { __block_cost += #r_ident * #r_ident; }
             } else {
-                quote! { (#r_ident as #cast_type) * (#r_ident as #cast_type) }
+                cost_add(quote! { (#r_ident as #acc_type) * (#r_ident as #acc_type) })
             }
         };
 
@@ -5575,10 +5621,10 @@ pub fn generate_root_methods(
         for (ri, r) in cost_simplified.iter().enumerate() {
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&r.to_rust(""))?;
-            let sq = row_sq(&r_ident);
+            let acc = row_acc(&r_ident);
             cost_stmts.push(quote! {
                 let #r_ident= #r_expr;
-                #cost_acc += #sq;
+                #acc
             });
         }
         cost_stmts.push(loss_cost_finalize);
@@ -5742,10 +5788,10 @@ pub fn generate_root_methods(
             // entry points get the cost for free (saves a separate cost-only
             // model evaluation in the LM loop). Under a loss this sums into
             // __block_cost = |r|^2 instead, and rho(s) is added to __cost once.
-            let sq = row_sq(&r_ident);
+            let acc = row_acc(&r_ident);
             gh_stmts.push(quote! {
                 let #r_ident= #r_expr;
-                #cost_acc += #sq;
+                #acc
             });
             idx += 1;
             // The leading argument every accumulation call passes: the residual
@@ -6390,7 +6436,7 @@ pub fn generate_root_methods(
                     }
                 };
                 if jacobian { ct_loops.push(ct_wrap(&__cl)); }
-                cost_loops.push(__cl);
+                cost_loops.push(scope(__cl));
             } else {
                 let __cl = quote! {
                     {
@@ -6406,7 +6452,7 @@ pub fn generate_root_methods(
                     }
                 };
                 if jacobian { ct_loops.push(ct_wrap(&__cl)); }
-                cost_loops.push(__cl);
+                cost_loops.push(scope(__cl));
             }
 
             // Grad+hessian loop: same traversal but get mutable access
@@ -6486,7 +6532,7 @@ pub fn generate_root_methods(
             };
             let gh_loop = rename_ident(
                 rename_ident(gh_loop, &parent_name, parent_rename_to), &root_var_name, "self");
-            grad_hessian_loops.push(gh_loop);
+            grad_hessian_loops.push(scope(gh_loop));
 
             if is_multi_cross {
                 // Multi-cross remote: emit per-CrossBlock set_indices on
@@ -6947,15 +6993,18 @@ pub fn generate_root_methods(
             } else {
                 quote! { #(#cost_stmts)* }
             };
+            let nested_cost_loop = scope(quote! {
+                for __frine in __item.#frines_ident.iter() {
+                    #(#resolve_stmts)*
+                    let #root_var_ident = &*__self_ref;
+                    #nested_cost_body
+                }
+            });
             let nested_cost = quote! {
                 {
                     #marker
                     let #parent_ident = __item;
-                    for __frine in __item.#frines_ident.iter() {
-                        #(#resolve_stmts)*
-                        let #root_var_ident = &*__self_ref;
-                        #nested_cost_body
-                    }
+                    #nested_cost_loop
                 }
             };
 
@@ -6968,14 +7017,17 @@ pub fn generate_root_methods(
             } else {
                 quote! { { #(#gh_stmts)* } }
             };
+            let nested_gh_loop = scope(quote! {
+                for __frine in __item.#frines_ident.iter_mut() {
+                    #(#entity_index_copies)*
+                    #(#resolve_reread_stmts)*
+                    #nested_gh_body
+                }
+            });
             let nested_gh = quote! {
                 {
                     #marker
-                    for __frine in __item.#frines_ident.iter_mut() {
-                        #(#entity_index_copies)*
-                        #(#resolve_reread_stmts)*
-                        #nested_gh_body
-                    }
+                    #nested_gh_loop
                 }
             };
             let nested_gh = {
@@ -7108,7 +7160,7 @@ pub fn generate_root_methods(
         let resolve_stmts = &group.resolve_stmts;
 
         // Merged cost loop: SelfBlock entries + nested CrossBlock inner loops
-        merged_cost.push(wrap_in_prefix(prefix, false, quote! {
+        merged_cost.push(wrap_in_prefix_scoped(prefix, false, quote! {
             for __item in #ctn.#coll.iter() {
                 let #self_var = __item;
                 let #root_var_ident = &*__self_ref;
@@ -7134,7 +7186,7 @@ pub fn generate_root_methods(
         // Merged grad+hessian loop. Entries access the entity as `__item`
         // and the root as `self` directly (renamed at entry creation) --
         // no alias bindings.
-        merged_gh.push(wrap_in_prefix(prefix, true, quote! {
+        merged_gh.push(wrap_in_prefix_scoped(prefix, true, quote! {
             for __item in #ctn.#coll.iter_mut() {
                 #(#resolve_stmts)*
                 #(#gh_entries)*
@@ -7463,7 +7515,7 @@ pub fn generate_root_methods(
             quote! { __frine.#fi = __cid; }
         });
 
-        cost_loops.push(wrap_in_prefix(prefix, false, quote! {
+        cost_loops.push(wrap_in_prefix_scoped(prefix, false, quote! {
             for __frine in #ctn.#rc_ident.iter() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
@@ -7483,7 +7535,7 @@ pub fn generate_root_methods(
 
         // Entries carry their own ref rereads at the top; root reads go
         // through `self` (renamed at entry creation).
-        grad_hessian_loops.push(wrap_in_prefix(prefix, true, quote! {
+        grad_hessian_loops.push(wrap_in_prefix_scoped(prefix, true, quote! {
             for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#gh_entries)*
             }
@@ -7602,7 +7654,7 @@ pub fn generate_root_methods(
         // sits below the root, reached through the prefix loops.
         let prefix = &group.prefix;
         let ctn = nested_container(prefix);
-        cost_loops.push(wrap_in_prefix(prefix, false, quote! {
+        cost_loops.push(wrap_in_prefix_scoped(prefix, false, quote! {
             for __frine in #ctn.#rc_ident.iter() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
@@ -7624,7 +7676,7 @@ pub fn generate_root_methods(
         let entity_offsets_len = entity_offsets.len();
         // Loop-level resolves feed the __all_idx build; entries re-establish
         // their own bindings (a preceding entry's writes end these borrows).
-        grad_hessian_loops.push(wrap_in_prefix(prefix, true, quote! {
+        grad_hessian_loops.push(wrap_in_prefix_scoped(prefix, true, quote! {
             for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#resolve_stmts)*
                 let mut __all_idx = [0u32; #tp];
@@ -7739,8 +7791,12 @@ pub fn generate_root_methods(
     // trait's width parameter is inferred from `params`.
     let extended_update_call =
         quote! { arael::model::ExtendedModel::extended_update(self, params); };
+    // The accumulator is the root type in the entry points and the cost
+    // accumulator's type in calc_cost.
     let extended_cost_call =
         quote! { __cost += arael::model::ExtendedModel::extended_cost(self, params); };
+    let extended_cost_call_acc =
+        quote! { __cost += arael::model::ExtendedModel::extended_cost(self, params) as #acc_type; };
     let extended_compute_call =
         quote! { arael::model::ExtendedModel::extended_compute(self, params, grad); };
 
@@ -7801,10 +7857,10 @@ pub fn generate_root_methods(
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
                 arael::model::Model::zero_blocks(self);
-                let mut __cost = 0.0 as #prec_type;
+                #cost_decl
                 #(#grad_hessian_loops)*
                 #extended_compute_call
-                __cost
+                __cost as #prec_type
             }
         }
     };
@@ -7913,10 +7969,10 @@ pub fn generate_root_methods(
                 #extended_update_call
                 // Read-only traversal: a plain shared reborrow suffices.
                 let __self_ref = &*self;
-                let mut __cost = 0.0 as #prec_type;
+                #cost_decl
                 #(#cost_loops)*
-                #extended_cost_call
-                __cost
+                #extended_cost_call_acc
+                __cost as #prec_type
             }
 
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
@@ -8878,7 +8934,23 @@ fn nested_container(prefix: &[AccessSegment]) -> TokenStream2 {
 /// `let` binding. With an empty prefix this returns `inner` unchanged, so
 /// one-hop emission is byte-identical to before.
 fn wrap_in_prefix(prefix: &[AccessSegment], mutable: bool, inner: TokenStream2) -> TokenStream2 {
-    let mut code = inner;
+    wrap_in_prefix_scoped(prefix, mutable, inner, None)
+}
+
+/// `wrap_in_prefix` for a cost-carrying sweep: with `scope`, every loop
+/// level is wrapped by it, so each level sums into an accumulator of its
+/// own and adds that once into its parent's. The rows of a loop then form
+/// a chain as long as that loop, not the whole sweep, and the drift of
+/// the total shrinks with the nesting instead of growing with the row
+/// count.
+fn wrap_in_prefix_scoped(
+    prefix: &[AccessSegment],
+    mutable: bool,
+    inner: TokenStream2,
+    scope: Option<&dyn Fn(TokenStream2) -> TokenStream2>,
+) -> TokenStream2 {
+    // The innermost loop is a level too.
+    let mut code = match scope { Some(s) => s(inner), None => inner };
     for (i, seg) in prefix.iter().enumerate().rev() {
         let field = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
         let bind = syn::Ident::new(&format!("__seg{}", i), proc_macro2::Span::call_site());
@@ -8893,8 +8965,9 @@ fn wrap_in_prefix(prefix: &[AccessSegment], mutable: bool, inner: TokenStream2) 
             // None along the path contributes nothing, and the binding
             // inside the loop is the CONTAINED struct, so later hops and
             // the inner sweep are container-agnostic.
-            if mutable { quote! { for #bind in #parent.#field.iter_mut() { #code } } }
-            else       { quote! { for #bind in #parent.#field.iter()     { #code } } }
+            let looped = if mutable { quote! { for #bind in #parent.#field.iter_mut() { #code } } }
+                         else       { quote! { for #bind in #parent.#field.iter()     { #code } } };
+            match scope { Some(s) => s(looped), None => looped }
         } else if mutable {
             quote! { { let #bind = &mut #parent.#field; #code } }
         } else {

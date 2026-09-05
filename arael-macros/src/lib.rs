@@ -833,6 +833,15 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   atan2 for every occurrence in residuals, gradients, Hessians, and
 ///   Jacobians. Derivatives are unaffected (they are the exact rational
 ///   forms either way).
+/// - `cost_plain` (the default), `cost_kahan`, `cost_f64` -- how the
+///   cost is accumulated, in `calc_cost` and in the assembly sweep
+///   alike. By default every loop sums into a partial of its own,
+///   added once into the loop around it, so a row's chain of adds is
+///   its innermost loop's length. `cost_kahan` compensates every add
+///   (`arael::utils::kahan_add`); `cost_f64` accumulates in f64 on an
+///   f32 root (ignored on f64). The two combine; `cost_plain` names
+///   the default and combines with neither. docs/MODEL.md, "The cost
+///   sum".
 /// - `marginalize(field, ...)` -- marks landmark-style fields (small
 ///   parameter blocks coupled to other parameters but never to each
 ///   other) for the sparse solver to eliminate first. Generates
@@ -2374,6 +2383,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             let mut custom = false;
             let mut jacobian = false;
             let mut fast_atan = false;
+            let mut cost_plain = false;
+            let mut cost_kahan = false;
+            let mut cost_f64 = false;
             let mut marginalize: Vec<syn::Ident> = Vec::new();
             let mut pos = 1;
             while pos < tvec.len() {
@@ -2394,6 +2406,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             jacobian = true;
                         } else if kw_str == "fast_atan" {
                             fast_atan = true;
+                        } else if kw_str == "cost_plain" {
+                            cost_plain = true;
+                        } else if kw_str == "cost_kahan" {
+                            cost_kahan = true;
+                        } else if kw_str == "cost_f64" {
+                            cost_f64 = true;
                         } else if kw_str == "marginalize" {
                             // Takes a parenthesized field list:
                             // marginalize(landmarks) or (a, b).
@@ -2421,7 +2439,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, or `marginalize(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -2436,7 +2454,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     None => {} // trailing comma
                 }
             }
-            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize)));
+            if cost_plain && (cost_kahan || cost_f64) {
+                return Some(Err(syn::Error::new(id.span(),
+                    "`cost_plain` cannot be combined with `cost_kahan` or `cost_f64`")));
+            }
+            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize, cost_kahan, cost_f64)));
         }
         None
     });
@@ -2444,11 +2466,13 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         Some(r) => Some(r?),
         None => None,
     };
-    let root_precision = root_info.as_ref().map(|(p, _, _, _, _)| p.clone());
-    let root_custom = root_info.as_ref().map(|(_, c, _, _, _)| *c).unwrap_or(false);
-    let root_jacobian = root_info.as_ref().map(|(_, _, j, _, _)| *j).unwrap_or(false);
-    let root_fast_atan = root_info.as_ref().map(|(_, _, _, f, _)| *f).unwrap_or(false);
-    let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e)| e.clone()).unwrap_or_default();
+    let root_precision = root_info.as_ref().map(|(p, _, _, _, _, _, _)| p.clone());
+    let root_custom = root_info.as_ref().map(|(_, c, _, _, _, _, _)| *c).unwrap_or(false);
+    let root_jacobian = root_info.as_ref().map(|(_, _, j, _, _, _, _)| *j).unwrap_or(false);
+    let root_fast_atan = root_info.as_ref().map(|(_, _, _, f, _, _, _)| *f).unwrap_or(false);
+    let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e, _, _)| e.clone()).unwrap_or_default();
+    let root_cost_kahan = root_info.as_ref().map(|(_, _, _, _, _, k, _)| *k).unwrap_or(false);
+    let root_cost_f64 = root_info.as_ref().map(|(_, _, _, _, _, _, w)| *w).unwrap_or(false);
 
     // Schur auto-detection: which parameter blocks may be marginalized.
     //
@@ -2617,7 +2641,8 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let constraint_impls = if let Some(ref precision) = root_precision {
         constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian,
-            root_fast_atan, &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block)?
+            root_fast_atan, root_cost_kahan, root_cost_f64,
+            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block)?
     } else {
         quote! {}
     };

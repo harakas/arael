@@ -540,10 +540,91 @@ struct Path {
 | `#[arael(root)]` | mark the top-level Model. Generates the `LmProblem` and `RootProblem` impls (unlocking LmProblem's `solve_with` / `solve_dense` / `solve_sparse`), manages indices, owns the update cycle |
 | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64). Produces `*_f32` methods. Every block in the model (`SelfBlock` / `CrossBlock` / `TripletBlock`, whose scalar defaults to f64) must match this precision -- a mismatch is a compile error naming the struct and block field. Storage and `Param` precision are free to differ (an f32-storage model solving f64 casts at the boundary) |
 | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian(&params) -> Jacobian<T>` and `calc_cost_table(&params)` for diagnostics |
+| `#[arael(root, extended)]` | the root also implements `ExtendedModel` by hand, for residuals the macro cannot express (parsed at runtime, say); the generated sweeps call its `extended_update` / `extended_cost` / `extended_compute`, and `extended_jacobian` under `jacobian`. See [Runtime differentiation](#runtime-differentiation-extendedmodel) |
 | `#[arael(root, fast_atan)]` | generated code calls `arael::utils::fast_atan` / `fast_atan2` (max error < 1e-6 rad) instead of libm atan / atan2 -- everywhere in residuals, gradients, Hessians, Jacobians. Derivatives are the exact rational forms either way. Alternatively call `fast_atan` / `fast_atan2` per site in a constraint body |
+| `#[arael(root, cost_plain)]` | the cost is summed with plain adds in the root's precision, one partial per loop (the default; see [The cost sum](#the-cost-sum)) |
+| `#[arael(root, cost_kahan)]` | every add of the cost sum is compensated (Kahan), so the sum's rounding does not grow with the row count |
+| `#[arael(root, cost_f64)]` | the cost sum is accumulated in f64 on an f32 root; ignored on an f64 root; combines with `cost_kahan` |
 | `#[arael(root, marginalize(field, ...))]` | mark landmark-style fields (small blocks coupled to poses but never to each other) for the sparse solver to marginalize. Generates `RootProblem::marginalize_hint()` with the fields' parameter ranges, which `SparseFaer` reads off the model itself. Optional: without it the solver finds the marginalizable families in the model's coupling graph anyway. Use it to override that -- the named blocks are used as given, and must be mutually uncoupled |
 | `#[arael(fit(coll, \|e\| body))]` / `fit64(...)` | shorthand: sum-of-squares fit of a residual body over one collection (f32; `fit64` is f64). Implements `FitProblem`, whose `fit()` / `fit_with()` run the dense LM round trip |
 | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>`. Reserved for Models whose parameters only appear inside constraints declared elsewhere (rare) |
+
+### The cost sum
+
+The cost is the sum of the squared residuals (of `rho` of each block's
+squared norm under a loss) over every constraint of the model. Two
+generated sweeps compute it: `calc_cost` alone, and the assembly of the
+gradient and Hessian, which gets it as a by-product.
+
+A sum of many terms accumulates rounding: every add rounds to the
+running total, and the errors build up along the chain of adds. The
+larger the model and the coarser the precision, f32 above all, the
+larger the error of the total. The solver decides on that total. It
+accepts a step when the cost at the new point is lower than at the
+old one, and near the optimum the true difference between the two is
+a few rounding units of the total. When the accumulated error is
+larger than that, the comparison is noise: a good step is rejected
+and a bad one accepted at random, damping climbs for no reason, and
+the solve either runs on with nothing to gain or ends in a failure at
+the optimum it has already reached.
+
+To keep the accumulated error below what the solver has to resolve,
+the generated sum is structured by default and two optional
+accumulation modes can be switched on, at some cost per row, where a
+model needs more. The three keywords pick the mode, and it applies to
+both sweeps alike, since the solver compares costs the two of them
+produced.
+
+**`cost_plain`, the default.** Plain adds in the root's precision,
+but every loop of a sweep sums into a partial of its own and adds it
+once into the loop around it: observations into their image's partial,
+images into their pose's, poses into the sweep's, and the sweep into
+the total. A row's chain of adds is as long as its innermost loop, not
+the model, so the rounding of the total follows the nesting instead of
+the row count. For a two-level nest the generated cost sweep reads:
+
+```rust,ignore
+let mut __cost = 0.0 as f64;
+let mut __cost2 = 0.0 as f64;
+for __seg0 in self.images.iter() {
+    let mut __cost1 = 0.0 as f64;
+    for __frine in __seg0.obs.iter() {
+        // ...
+        __cost1 += (__r_0 as f64) * (__r_0 as f64);
+        __cost1 += (__r_1 as f64) * (__r_1 as f64);
+    }
+    __cost2 += __cost1;
+}
+__cost += __cost2;
+```
+
+A single chain's rounding grows with the square root of its length;
+the partials keep every chain short. The cost is one add per loop
+iteration.
+
+**`cost_kahan`.** Every add, rows and partials, is a compensated
+(Kahan) add through `arael::utils::kahan_add`, which carries the
+rounding remainder of each add into the next. The sum's rounding then
+does not grow with the row count at all, whatever the nesting,
+including a flat model with one long loop. The price is four
+dependent flops per row instead of one.
+
+**`cost_f64`.** On an f32 root the accumulator and the partials are
+f64; the rows stay f32 and the total is rounded to f32 once at the
+end. The accumulation's rounding disappears at no cost, since the
+chain is one add per row either way. On an f64 root the keyword does
+nothing. It combines with `cost_kahan`.
+
+`cost_plain` is the explicit spelling of the default and cannot be
+combined with the other two.
+
+What none of them change is the rounding of the residuals themselves:
+a residual computed in f32 carries about `f32::EPSILON` times its
+intermediate magnitudes, and the sum of those errors over the rows
+remains after the accumulation is exact. That is the floor a solver
+in that precision works against. For an f32 model `cost_f64` is the
+setting to use; for an f64 model the default is enough, and
+`cost_kahan` removes what is left of the accumulation.
 
 ### Generic models
 

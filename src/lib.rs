@@ -730,6 +730,10 @@
 //! | `#[arael(root)]` | mark the top-level Model. Generates `LmProblem` impl, manages indices, owns the update cycle |
 //! | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64) |
 //! | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian` and `calc_cost_table` for diagnostics |
+//! | `#[arael(root, extended)]` | the root also implements [`ExtendedModel`](model::ExtendedModel) by hand, for residuals the macro cannot express (parsed at runtime, say); the generated sweeps call its `extended_update` / `extended_cost` / `extended_compute` |
+//! | `#[arael(root, fast_atan)]` | generated code calls [`utils::fast_atan`] / [`utils::fast_atan2`] instead of libm atan / atan2 everywhere; derivatives are the exact forms either way |
+//! | `#[arael(root, cost_plain)]` / `cost_kahan` / `cost_f64` | how the cost is summed: plain adds with one partial per loop (the default), compensated adds, or an f64 accumulator on an f32 root; the last two combine (docs/MODEL.md, "The cost sum") |
+//! | `#[arael(root, marginalize(field, ...))]` | landmark-style fields (small blocks coupled to poses but never to each other) the sparse solver eliminates first |
 //! | `#[arael(fit(coll, \|e\| body))]` | shorthand: sum-of-squares fit of a residual body over one collection (optional trailing `loss = \|s\| rho(s)` for a robust M-estimator) |
 //! | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>` (rare) |
 //!

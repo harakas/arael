@@ -251,6 +251,25 @@ pub fn safe_asin<T: Float>(v: T) -> T { v.safe_asin() }
 /// Safe acos that clamps input to [-1, 1].
 pub fn safe_acos<T: Float>(v: T) -> T { v.safe_acos() }
 
+/// One step of compensated (Kahan) summation: adds `x` to `sum`, carrying
+/// the rounding remainder of the add in `comp`, so a long sum's error stays
+/// at the size of one rounding instead of growing with the term count.
+/// `comp` starts at zero and belongs to the sum.
+///
+/// ```
+/// let mut sum = 0.0f32;
+/// let mut comp = 0.0f32;
+/// for _ in 0..1_000_000 { arael::utils::kahan_add(&mut sum, &mut comp, 0.1); }
+/// assert!((sum - 100_000.0).abs() < 0.01);
+/// ```
+#[inline(always)]
+pub fn kahan_add<T: Float>(sum: &mut T, comp: &mut T, x: T) {
+    let y = x - *comp;
+    let t = *sum + y;
+    *comp = (t - *sum) - y;
+    *sum = t;
+}
+
 /// Safe square root: asserts the input is not significantly negative, clamps
 /// noise-level negatives to zero.
 pub fn safe_sqrt<T: Float>(v: T) -> T {

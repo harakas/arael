@@ -1,4 +1,4 @@
-error: unknown root keyword `jacobain`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, or `marginalize(...)`
+error: unknown root keyword `jacobain`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, or `marginalize(...)`
  --> tests/constraint_attr_errors/root_typo_keyword.rs:8:15
   |
 8 | #[arael(root, jacobain)]

@@ -1,0 +1,5 @@
+error: `cost_plain` cannot be combined with `cost_kahan` or `cost_f64`
+ --> tests/constraint_attr_errors/root_cost_plain_combined.rs:8:9
+  |
+8 | #[arael(root, cost_plain, cost_kahan)]
+  |         ^^^^
