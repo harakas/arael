@@ -940,7 +940,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 /// are). Marginalized: 1 (inverse depth), 2 (a 2D point, or a bearing), 3 (a
 /// 3D point), 4 (a 3D line, or a 2D segment). Cross-checked against g2o's
 /// vertex dimensions and GTSAM's variable dimensions.
-pub const FIXED_SHAPES: [(usize, usize, usize); 29] = [
+pub const FIXED_SHAPES: [(usize, usize, usize); 65] = [
     // -- 2D --
     (3, 2, 3), // 2D pose (x, y, theta) through a 2D point. The slam2d demos,
     // g2o VertexSE2 + VertexPointXY, Victoria-Park-style range-bearing SLAM
@@ -982,6 +982,50 @@ pub const FIXED_SHAPES: [(usize, usize, usize); 29] = [
     (4, 6, 1),
     (3, 7, 1),
     (3, 9, 1),
+    // -- bundle adjustment with the camera its own entity: a 6-dof pose and
+    // a camera of 2, 4, 8 or 10 parameters (intrinsics, or intrinsics with
+    // a rig pose) through a 3D point, in every pairing, and 5 for
+    // a pose with one translation axis frozen by the gauge --
+    (6, 3, 2),
+    (2, 3, 6),
+    (6, 3, 4),
+    (4, 3, 6),
+    (6, 3, 8),
+    (8, 3, 6),
+    (6, 3, 10),
+    (10, 3, 6),
+    (4, 3, 4),
+    (8, 3, 8),
+    (10, 3, 10),
+    (5, 3, 6),
+    (6, 3, 5),
+    (5, 3, 5),
+    (5, 3, 2),
+    (2, 3, 5),
+    (5, 3, 8),
+    (8, 3, 5),
+    // two cameras of different kinds through one point (a rig's reference
+    // camera and one of its other cameras)
+    (2, 3, 8),
+    (8, 3, 2),
+    (2, 3, 4),
+    (4, 3, 2),
+    (4, 3, 8),
+    (8, 3, 4),
+    (2, 3, 10),
+    (10, 3, 2),
+    (4, 3, 10),
+    (10, 3, 4),
+    (8, 3, 10),
+    (10, 3, 8),
+    // their one-column updates ((2, 3, 1) and (4, 3, 1) are above) and
+    // back-substitutions ((3, 2, 1), (3, 4, 1) and (3, 6, 1) are above)
+    (8, 3, 1),
+    (10, 3, 1),
+    (5, 3, 1),
+    (3, 8, 1),
+    (3, 10, 1),
+    (3, 5, 1),
 ];
 
 /// Does this tile shape have an unrolled kernel, or does it fall to nano-gemm?
@@ -1046,6 +1090,10 @@ fn note_uniform_run() {}
 /// * `(6, 4, 6)` -- 3D SLAM with a 4-parameter landmark.
 /// * `(6, 6, 6)` -- 3D with a marginalized 6-dof entity (a marker, an object).
 /// * `(9, 3, 9)` -- bundle adjustment: a 9-parameter camera through a point.
+/// * `(6, 3, 2)`, `(6, 3, 8)`, `(8, 3, 8)`, ... -- bundle adjustment with the
+///   camera its own entity: a 6-dof pose and a camera of 2, 4, 8 or 10
+///   parameters through a 3D point, in every pairing, plus the
+///   5-wide pose the gauge leaves.
 ///
 /// The three widths are packed into one integer (a nibble each) and matched
 /// as a single value, so the compiler emits ONE switch. Matching the tuple
@@ -1090,6 +1138,49 @@ macro_rules! fixed_shapes {
             0x461 => return $kernel::<T, 4, 6, 1>($dst, $ca, $zb),
             0x371 => return $kernel::<T, 3, 7, 1>($dst, $ca, $zb),
             0x391 => return $kernel::<T, 3, 9, 1>($dst, $ca, $zb),
+            // bundle adjustment with the camera its own entity: a 6-dof pose
+            // and a camera of 2, 4, 8 or 10 parameters through a 3D point,
+            // in every pairing, and 5 for a pose with one translation axis
+            // frozen by the gauge
+            0x632 => return $kernel::<T, 6, 3, 2>($dst, $ca, $zb),
+            0x236 => return $kernel::<T, 2, 3, 6>($dst, $ca, $zb),
+            0x634 => return $kernel::<T, 6, 3, 4>($dst, $ca, $zb),
+            0x436 => return $kernel::<T, 4, 3, 6>($dst, $ca, $zb),
+            0x638 => return $kernel::<T, 6, 3, 8>($dst, $ca, $zb),
+            0x836 => return $kernel::<T, 8, 3, 6>($dst, $ca, $zb),
+            0x63A => return $kernel::<T, 6, 3, 10>($dst, $ca, $zb),
+            0xA36 => return $kernel::<T, 10, 3, 6>($dst, $ca, $zb),
+            0x434 => return $kernel::<T, 4, 3, 4>($dst, $ca, $zb),
+            0x838 => return $kernel::<T, 8, 3, 8>($dst, $ca, $zb),
+            0xA3A => return $kernel::<T, 10, 3, 10>($dst, $ca, $zb),
+            0x536 => return $kernel::<T, 5, 3, 6>($dst, $ca, $zb),
+            0x635 => return $kernel::<T, 6, 3, 5>($dst, $ca, $zb),
+            0x535 => return $kernel::<T, 5, 3, 5>($dst, $ca, $zb),
+            0x532 => return $kernel::<T, 5, 3, 2>($dst, $ca, $zb),
+            0x235 => return $kernel::<T, 2, 3, 5>($dst, $ca, $zb),
+            0x538 => return $kernel::<T, 5, 3, 8>($dst, $ca, $zb),
+            0x835 => return $kernel::<T, 8, 3, 5>($dst, $ca, $zb),
+            // two cameras of different kinds through one point (a rig's
+            // reference camera and one of its other cameras)
+            0x238 => return $kernel::<T, 2, 3, 8>($dst, $ca, $zb),
+            0x832 => return $kernel::<T, 8, 3, 2>($dst, $ca, $zb),
+            0x234 => return $kernel::<T, 2, 3, 4>($dst, $ca, $zb),
+            0x432 => return $kernel::<T, 4, 3, 2>($dst, $ca, $zb),
+            0x438 => return $kernel::<T, 4, 3, 8>($dst, $ca, $zb),
+            0x834 => return $kernel::<T, 8, 3, 4>($dst, $ca, $zb),
+            0x23A => return $kernel::<T, 2, 3, 10>($dst, $ca, $zb),
+            0xA32 => return $kernel::<T, 10, 3, 2>($dst, $ca, $zb),
+            0x43A => return $kernel::<T, 4, 3, 10>($dst, $ca, $zb),
+            0xA34 => return $kernel::<T, 10, 3, 4>($dst, $ca, $zb),
+            0x83A => return $kernel::<T, 8, 3, 10>($dst, $ca, $zb),
+            0xA38 => return $kernel::<T, 10, 3, 8>($dst, $ca, $zb),
+            // their one-column updates and back-substitutions
+            0x831 => return $kernel::<T, 8, 3, 1>($dst, $ca, $zb),
+            0xA31 => return $kernel::<T, 10, 3, 1>($dst, $ca, $zb),
+            0x531 => return $kernel::<T, 5, 3, 1>($dst, $ca, $zb),
+            0x381 => return $kernel::<T, 3, 8, 1>($dst, $ca, $zb),
+            0x3A1 => return $kernel::<T, 3, 10, 1>($dst, $ca, $zb),
+            0x351 => return $kernel::<T, 3, 5, 1>($dst, $ca, $zb),
             _ => {}
         }
     };
@@ -1114,6 +1205,12 @@ macro_rules! uniform_pair_shapes {
             0x66 => return $run!(6, 6, $($arg),*),
             0x73 => return $run!(7, 3, $($arg),*),
             0x93 => return $run!(9, 3, $($arg),*),
+            // bundle adjustment cameras seen alone (fixed images), and the
+            // gauge-frozen pose
+            0x43 => return $run!(4, 3, $($arg),*),
+            0x83 => return $run!(8, 3, $($arg),*),
+            0xA3 => return $run!(10, 3, $($arg),*),
+            0x53 => return $run!(5, 3, $($arg),*),
             _ => {}
         }
     };
@@ -2021,9 +2118,9 @@ mod tests {
     #[test]
     fn the_shape_list_and_the_dispatch_agree() {
         let hits = || FIXED_KERNEL_HITS.with(|c| c.get());
-        for wa in 1..=9usize {
-            for we in 1..=9usize {
-                for wb in 1..=9usize {
+        for wa in 1..=10usize {
+            for we in 1..=10usize {
+                for wb in 1..=10usize {
                     for trans in [false, true] {
                         let ca = vec![0.5f64; wa * we];
                         let zb = vec![0.5f64; we * wb];
@@ -2169,16 +2266,32 @@ mod tests {
         check_vs_dense(&h, &rhs, &part, &[1]);
     }
 
-    /// Every pair shape must reach [`gemm_tri`], not just the pair-at-a-time
-    /// loop: the two compute the same values, so nothing in the output would
-    /// show a missing arm in `uniform_pair_shapes!`.
+    /// A pair shape with one observer width on both sides must reach
+    /// [`gemm_tri`], not just the pair-at-a-time loop: the two compute the
+    /// same values, so nothing in the output would show a missing arm in
+    /// `uniform_pair_shapes!`. A mixed pair shape (two observer widths) has
+    /// no uniform run; it must reach the unrolled kernel through the pair
+    /// loop and match the dense reference.
     #[test]
     fn every_pair_shape_reaches_the_uniform_run() {
         for &(wa, we, wb) in FIXED_SHAPES.iter() {
             if wb == 1 {
                 continue; // a one-column update, not a pair shape
             }
-            assert_eq!(wa, wb, "a pair shape has the observer width on both sides");
+            if wa != wb {
+                // observers of two widths around the eliminated block
+                let part = [0usize, wa, wa + we, wa + we + wb];
+                let cells = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2)];
+                let (h, rhs) = build_upper(&part, &cells, 5);
+                UNIFORM_RUN_HITS.with(|c| c.set(0));
+                FIXED_KERNEL_HITS.with(|c| c.set(0));
+                check_vs_dense(&h, &rhs, &part, &[1]);
+                assert_eq!(UNIFORM_RUN_HITS.with(|c| c.get()), 0,
+                    "({}, {}, {}) took the uniform run with two observer widths", wa, we, wb);
+                assert!(FIXED_KERNEL_HITS.with(|c| c.get()) > 0,
+                    "({}, {}, {}) never reached an unrolled kernel", wa, we, wb);
+                continue;
+            }
             // Eliminating the LAST block leaves both coupling tiles stored
             // (kept, elim); eliminating the FIRST one stores both the other
             // way. Either way all observers agree, which is what the uniform
