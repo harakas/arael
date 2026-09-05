@@ -2678,7 +2678,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     let mut damp = if floor.is_some() { vec![T::zero(); n] } else { Vec::new() };
     let mut delta = vec![T::zero(); n];
 
-    let eight = T::from(8.0).unwrap();
+    // The noise floor of a cost comparison, in units of eps * cost: a
+    // rejected step whose cost difference is inside it is rounding, and
+    // the solve is at its precision.
+    let sixteen = T::from(16.0).unwrap();
 
     // Set by driver.start() after the first assembly (so the driver
     // sees the initial cost, gradient, and Hessian diagonal).
@@ -3026,7 +3029,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
 
             // At machine precision, cost differences are just rounding noise
             let at_precision = new_cost.is_finite()
-                && (end_cost - new_cost).abs() < eight * T::epsilon() * end_cost.abs();
+                && (end_cost - new_cost).abs() < sixteen * T::epsilon() * end_cost.abs();
 
             // Wanted by both outcomes below, and by the parameter-tolerance test.
             let step_norm = if gather {

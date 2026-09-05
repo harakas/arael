@@ -372,7 +372,7 @@ or on any of:
 
 - `iter >= max_iters`
 - `cost <= cost_threshold`
-- the new cost is within `8 * epsilon * cost` of the old one
+- the new cost is within `16 * epsilon * cost` of the old one
   (machine-precision noise floor -- further digits are not
   resolvable)
 - 20 consecutive damped attempts without an accepted step (the inner
