@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use super::{Expr, E, constant};
 
 fn is_const(e: &Expr, v: f64) -> bool {
@@ -541,6 +542,16 @@ fn plain_factor(e: &E) -> bool {
         _ => true,
     }
 }
+/// The original node when a rebuild reproduced it: sums and products
+/// are rebuilt from their flattened terms every pass, and a rebuild that
+/// changed nothing must hand back the node it started from, so nodes
+/// shared between expressions stay shared. `Rc` equality short-circuits
+/// on identity, so the comparison walks the spine and stops at the
+/// shared terms.
+fn keep_if_same(orig: &E, rebuilt: E) -> E {
+    if rebuilt == *orig { orig.clone() } else { rebuilt }
+}
+
 fn mul_is_normal(a: &E, b: &E) -> bool {
     plain_factor(a) && plain_factor(b) && distinct_leading(a, b) && mul_factor_cmp(a, b) != Ordering::Greater
 }
@@ -580,8 +591,24 @@ impl E {
         result
     }
 
+    /// One pass over the expression, each shared node rewritten once
+    /// and its rewrite shared: the pass keeps the DAG a DAG instead of
+    /// unfolding a node reached along several paths into copies. The
+    /// memo is keyed by node identity and holds the node with its
+    /// rewrite, so an address cannot be reused while the pass runs.
     fn simplify_once(&self) -> E {
-        self.0.simplify_once_inner(self)
+        let mut memo = HashMap::new();
+        self.simplify_once_memo(&mut memo)
+    }
+
+    fn simplify_once_memo(&self, memo: &mut HashMap<*const Expr, (E, E)>) -> E {
+        let key = std::rc::Rc::as_ptr(&self.0);
+        if let Some((_, r)) = memo.get(&key) {
+            return r.clone();
+        }
+        let r = self.0.simplify_once_inner(self, memo);
+        memo.insert(key, (self.clone(), r.clone()));
+        r
     }
 }
 
@@ -591,7 +618,7 @@ impl Expr {
         E::new(self.clone()).simplify()
     }
 
-    fn simplify_once_inner(&self, orig: &E) -> E {
+    fn simplify_once_inner(&self, orig: &E, memo: &mut HashMap<*const Expr, (E, E)>) -> E {
         /// Check if expression is the named constant "pi".
         fn is_pi(e: &E) -> bool {
             matches!(e.as_ref(), Expr::NamedConst { name, .. } if name == "pi")
@@ -652,7 +679,7 @@ impl Expr {
             Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => orig.clone(),
 
             Expr::Neg(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Neg(inner) = a2.as_ref() {
                     return inner.clone();
                 }
@@ -663,44 +690,44 @@ impl Expr {
             }
 
             Expr::Add(a, b) => {
-                let a2 = a.simplify_once();
-                let b2 = b.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
+                let b2 = b.simplify_once_memo(memo);
                 if add_is_normal(&a2, &b2) {
                     if std::rc::Rc::ptr_eq(&a2.0, &a.0) && std::rc::Rc::ptr_eq(&b2.0, &b.0) { return orig.clone(); }
                     return E::new(Expr::Add(a2, b2));
                 }
-                simplify_sum(a2, b2, false)
+                keep_if_same(orig, simplify_sum(a2, b2, false))
             }
 
             Expr::Sub(a, b) => {
-                let a = a.simplify_once();
-                let b = b.simplify_once();
-                simplify_sum(a, b, true)
+                let a = a.simplify_once_memo(memo);
+                let b = b.simplify_once_memo(memo);
+                keep_if_same(orig, simplify_sum(a, b, true))
             }
 
             Expr::Mul(a, b) => {
-                let a2 = a.simplify_once();
-                let b2 = b.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
+                let b2 = b.simplify_once_memo(memo);
                 if mul_is_normal(&a2, &b2) {
                     if std::rc::Rc::ptr_eq(&a2.0, &a.0) && std::rc::Rc::ptr_eq(&b2.0, &b.0) { return orig.clone(); }
                     return E::new(Expr::Mul(a2, b2));
                 }
-                simplify_product(a2, b2)
+                keep_if_same(orig, simplify_product(a2, b2))
             }
 
             Expr::Div(a, b) => {
-                let a2 = a.simplify_once();
-                let b2 = b.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
+                let b2 = b.simplify_once_memo(memo);
                 if div_is_normal(&a2, &b2) {
                     if std::rc::Rc::ptr_eq(&a2.0, &a.0) && std::rc::Rc::ptr_eq(&b2.0, &b.0) { return orig.clone(); }
                     return E::new(Expr::Div(a2, b2));
                 }
-                simplify_div(a2, b2)
+                keep_if_same(orig, simplify_div(a2, b2))
             }
 
             Expr::Pow(a, b) => {
-                let a2 = a.simplify_once();
-                let b2 = b.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
+                let b2 = b.simplify_once_memo(memo);
                 if let (Expr::Const(va), Expr::Const(vb)) = (a2.as_ref(), b2.as_ref()) {
                     return constant(va.powf(*vb));
                 }
@@ -724,7 +751,7 @@ impl Expr {
                 // compute at runtime (loss kernels given a field scale).
                 if let (Expr::Const(n), Expr::Sqrt(inner)) = (b2.as_ref(), a2.as_ref())
                     && n.fract() == 0.0 && n.rem_euclid(2.0) == 0.0 && *n > 0.0 {
-                        if *n == 2.0 { return inner.clone().simplify_once(); }
+                        if *n == 2.0 { return inner.clone().simplify_once_memo(memo); }
                         return E::new(Expr::Pow(inner.clone(), constant(n / 2.0)));
                 }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) && std::rc::Rc::ptr_eq(&b2.0, &b.0) { orig.clone() } else { E::new(Expr::Pow(a2, b2)) }
@@ -732,7 +759,7 @@ impl Expr {
 
             // Inverse function pairs
             Expr::Ln(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Exp(inner) = a2.as_ref() { return inner.clone(); }
                 if let Expr::Const(v) = a2.as_ref() { return constant(v.ln()); }
                 if is_euler(&a2) { return constant(1.0); }
@@ -742,7 +769,7 @@ impl Expr {
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Ln(a2)) }
             }
             Expr::Exp(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Ln(inner) = a2.as_ref() { return inner.clone(); }
                 if let Expr::Const(v) = a2.as_ref() { return constant(v.exp()); }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Exp(a2)) }
@@ -750,35 +777,35 @@ impl Expr {
 
             // Trig functions: constant-fold + pi rules
             Expr::Sin(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Const(v) = a2.as_ref() { return constant(v.sin()); }
                 if let Some(k) = pi_coeff(&a2) && let Some(v) = sin_pi(k) { return v; }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Sin(a2)) }
             }
             Expr::Cos(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Const(v) = a2.as_ref() { return constant(v.cos()); }
                 if let Some(k) = pi_coeff(&a2) && let Some(v) = cos_pi(k) { return v; }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Cos(a2)) }
             }
             Expr::Tan(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Const(v) = a2.as_ref() { return constant(v.tan()); }
                 // tan(n*pi) = 0 for integer n
                 if let Some(k) = pi_coeff(&a2)
                     && (k - k.round()).abs() < 1e-9 { return constant(0.0); }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Tan(a2)) }
             }
-            Expr::Asin(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.asin()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Asin(a2)) } }
-            Expr::Acos(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.acos()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Acos(a2)) } }
-            Expr::Atan(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.atan()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Atan(a2)) } }
-            Expr::Sinh(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.sinh()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Sinh(a2)) } }
-            Expr::Cosh(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.cosh()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Cosh(a2)) } }
-            Expr::Tanh(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.tanh()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Tanh(a2)) } }
-            Expr::Log2(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.log2()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Log2(a2)) } }
-            Expr::Log10(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.log10()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Log10(a2)) } }
+            Expr::Asin(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.asin()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Asin(a2)) } }
+            Expr::Acos(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.acos()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Acos(a2)) } }
+            Expr::Atan(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.atan()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Atan(a2)) } }
+            Expr::Sinh(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.sinh()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Sinh(a2)) } }
+            Expr::Cosh(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.cosh()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Cosh(a2)) } }
+            Expr::Tanh(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.tanh()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Tanh(a2)) } }
+            Expr::Log2(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.log2()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Log2(a2)) } }
+            Expr::Log10(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.log10()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Log10(a2)) } }
             Expr::Sqrt(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Const(v) = a2.as_ref() { return constant(v.sqrt()); }
                 if let Expr::Pow(base, exp) = a2.as_ref()
                     && is_const(exp, 2.0) {
@@ -786,9 +813,9 @@ impl Expr {
                     }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Sqrt(a2)) }
             }
-            Expr::Abs(a) => { let a2 = a.simplify_once(); if let Expr::Const(v) = a2.as_ref() { return constant(v.abs()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Abs(a2)) } }
+            Expr::Abs(a) => { let a2 = a.simplify_once_memo(memo); if let Expr::Const(v) = a2.as_ref() { return constant(v.abs()); } if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Abs(a2)) } }
             Expr::Heaviside(a) => {
-                let a2 = a.simplify_once();
+                let a2 = a.simplify_once_memo(memo);
                 if let Expr::Const(v) = a2.as_ref() {
                     // Same branch sense as runtime utils::heaviside
                     // (heaviside(NaN) = 0).
@@ -797,9 +824,9 @@ impl Expr {
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) { orig.clone() } else { E::new(Expr::Heaviside(a2)) }
             }
             Expr::Clamp(val, lo, hi) => {
-                let val2 = val.simplify_once();
-                let lo2 = lo.simplify_once();
-                let hi2 = hi.simplify_once();
+                let val2 = val.simplify_once_memo(memo);
+                let lo2 = lo.simplify_once_memo(memo);
+                let hi2 = hi.simplify_once_memo(memo);
                 if let (Expr::Const(v), Expr::Const(l), Expr::Const(h)) = (val2.as_ref(), lo2.as_ref(), hi2.as_ref()) {
                     return constant(v.clamp(*l, *h));
                 }
@@ -810,9 +837,9 @@ impl Expr {
                 }
             }
             Expr::Branch(q, a, b) => {
-                let q2 = q.simplify_once();
-                let a2 = a.simplify_once();
-                let b2 = b.simplify_once();
+                let q2 = q.simplify_once_memo(memo);
+                let a2 = a.simplify_once_memo(memo);
+                let b2 = b.simplify_once_memo(memo);
                 // Constant condition collapses to the taken side.
                 if let Expr::Const(qv) = q2.as_ref() {
                     return if *qv >= 0.0 { a2 } else { b2 };
@@ -824,9 +851,9 @@ impl Expr {
                 }
             }
             Expr::Select { index, arms, default } => {
-                let index2 = index.simplify_once();
-                let arms2: Vec<E> = arms.iter().map(|a| a.simplify_once()).collect();
-                let default2 = default.as_ref().map(|d| d.simplify_once());
+                let index2 = index.simplify_once_memo(memo);
+                let arms2: Vec<E> = arms.iter().map(|a| a.simplify_once_memo(memo)).collect();
+                let default2 = default.as_ref().map(|d| d.simplify_once_memo(memo));
                 // A constant index folds to the taken arm. An out-of-range
                 // constant without a default stays a node and panics at
                 // runtime, as the generated match would.
@@ -851,20 +878,20 @@ impl Expr {
                 }
             }
             Expr::Atan2(y, x) => {
-                let y2 = y.simplify_once();
-                let x2 = x.simplify_once();
+                let y2 = y.simplify_once_memo(memo);
+                let x2 = x.simplify_once_memo(memo);
                 if let (Expr::Const(vy), Expr::Const(vx)) = (y2.as_ref(), x2.as_ref()) {
                     return constant(vy.atan2(*vx));
                 }
                 if std::rc::Rc::ptr_eq(&y2.0, &y.0) && std::rc::Rc::ptr_eq(&x2.0, &x.0) { orig.clone() } else { E::new(Expr::Atan2(y2, x2)) }
             }
             Expr::Func { name, params, kind, args } => {
-                let new_args: Vec<E> = args.iter().map(|a| a.simplify_once()).collect();
+                let new_args: Vec<E> = args.iter().map(|a| a.simplify_once_memo(memo)).collect();
                 // Constant-fold functions with a symbolic body; Extern stays opaque
                 if let Some(body) = kind.body()
                     && new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {
                         let expanded = crate::expand_func(params, body, &new_args);
-                        return expanded.simplify_once();
+                        return expanded.simplify_once_memo(memo);
                     }
                 // No arg changed: keep the original node so its Rc (and any
                 // sharing of it, e.g. cached() rotation entries) survives.
