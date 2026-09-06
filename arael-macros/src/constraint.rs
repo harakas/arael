@@ -2655,6 +2655,27 @@ fn rewrite_guard_self(e: &mut syn::Expr, replacement: &str) {
     R(replacement).visit_expr_mut(e);
 }
 
+/// Rewrite every `root` path in a guard to `self`: the generated sweep is
+/// a method on the root, so a root field reads as `self.<field>` there.
+/// Runs after `rewrite_guard_self`, which has already renamed the
+/// author's `self`.
+fn rewrite_guard_root(e: &mut syn::Expr) {
+    use syn::visit_mut::VisitMut;
+    struct R;
+    impl VisitMut for R {
+        fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+            if let syn::Expr::Path(p) = node
+                && p.qself.is_none()
+                && p.path.is_ident("root") {
+                    *node = syn::parse_quote!(self);
+                    return;
+                }
+            syn::visit_mut::visit_expr_mut(self, node);
+        }
+    }
+    R.visit_expr_mut(e);
+}
+
 /// Rewrite every `self` path to `replacement` across a constraint BODY, so
 /// `self.x` names the constraint's own entity (its lowercased struct name),
 /// exactly as `self` does in a guard. Applied once before the body is
@@ -6351,6 +6372,7 @@ pub fn generate_root_methods(
                     "__frine".to_string()
                 };
                 rewrite_guard_self(&mut e, &replacement);
+                rewrite_guard_root(&mut e);
                 // Guards read values only, so `parent.` needs no
                 // differentiation -- rewrite the head to the binding's
                 // rendering (entity alias local / prefix accessor).

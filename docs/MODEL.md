@@ -804,7 +804,7 @@ struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 |---|---|
 | `parent = <name>` | bind the parent iteration variable to `<name>` inside the body (default is `a_type.to_lowercase()`) |
 | `name = "label"` | label the residual group. Shows up in `calc_cost_table` and `JacobianRow::label`. Useful for cost-breakdown diagnostics |
-| `guard = <bool expr>` | when false the whole constraint contributes nothing, on every path. Use for optional observations (has GPS this frame?). Must not change during a solve -- see [Guards and optional data](#guards-and-optional-data----the-contract) |
+| `guard = <bool expr>` | when false the whole constraint contributes nothing, on every path. Use for optional observations (has GPS this frame?). Reads `self.`, `parent.` and `root.` fields. Must not change during a solve -- see [Guards and optional data](#guards-and-optional-data----the-contract) |
 | `<var>: <Type>` | declare an extra binding so the body can refer to `<var>` as typed `<Type>`. Resolved via `Ref` / collection lookup |
 
 ```rust,ignore
