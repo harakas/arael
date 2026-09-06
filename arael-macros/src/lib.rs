@@ -238,6 +238,22 @@ pub(crate) enum UserFunction {
         attr_file: String,
         attr_line: u32,
     },
+    /// Form C: attribute sits on a fn whose parameters and result are the
+    /// body language's typed values (`E`, `vect2sym`, `vect3sym`,
+    /// `matrix2sym`, `matrix3sym`, `quaternsym`, a tuple or an `[E; N]`
+    /// array of them). The body is a block with `let` bindings, kept as
+    /// source and evaluated by the constraint-body interpreter at every
+    /// call site.
+    Typed {
+        sym_name: String,
+        param_names: Vec<String>,
+        param_kinds: Vec<String>,  // type names, one per param
+        ret_kinds: Vec<String>,    // one entry, or one per tuple element
+        ret_tuple: bool,           // the result is a tuple (or an array)
+        body: String,              // the block, `TokenStream::to_string()`
+        attr_file: String,
+        attr_line: u32,
+    },
 }
 
 impl UserFunction {
@@ -245,14 +261,16 @@ impl UserFunction {
     pub(crate) fn sym_name(&self) -> &str {
         match self {
             UserFunction::Symbolic { sym_name, .. } |
-            UserFunction::Extern   { sym_name, .. } => sym_name,
+            UserFunction::Extern   { sym_name, .. } |
+            UserFunction::Typed    { sym_name, .. } => sym_name,
         }
     }
     #[allow(dead_code)]
     pub(crate) fn param_names(&self) -> &[String] {
         match self {
             UserFunction::Symbolic { param_names, .. } |
-            UserFunction::Extern   { param_names, .. } => param_names,
+            UserFunction::Extern   { param_names, .. } |
+            UserFunction::Typed    { param_names, .. } => param_names,
         }
     }
 }

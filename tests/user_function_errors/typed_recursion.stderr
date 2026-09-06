@@ -1,0 +1,27 @@
+error: $DIR/tests/user_function_errors/typed_recursion.rs:15: arael::function `again`: calls itself
+  --> tests/user_function_errors/typed_recursion.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/user_function_errors/typed_recursion.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function cannot return without recursing
+  --> tests/user_function_errors/typed_recursion.rs:8:1
+   |
+ 8 | fn again(x: E) -> E {
+   | ^^^^^^^^^^^^^^^^^^^ cannot return without recursing
+ 9 |     let y = x * 2.0;
+10 |     again(y)
+   |     -------- recursive call site
+   |
+   = help: a `loop` may express intention better if this is on purpose
+   = note: `#[warn(unconditional_recursion)]` on by default

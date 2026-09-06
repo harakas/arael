@@ -1,0 +1,15 @@
+error: $DIR/tests/user_function_errors/typed_tuple_arithmetic.rs:15: a tuple is destructured with `let (a, b) = ...` or returned as the residual rows; it is not a value to compute with
+  --> tests/user_function_errors/typed_tuple_arithmetic.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/user_function_errors/typed_tuple_arithmetic.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

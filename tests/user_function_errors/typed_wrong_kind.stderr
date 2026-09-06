@@ -1,0 +1,15 @@
+error: $DIR/tests/user_function_errors/typed_wrong_kind.rs:16: arael::function `depth`: parameter `p` is a `vect3sym`, the argument is a scalar
+  --> tests/user_function_errors/typed_wrong_kind.rs:14:1
+   |
+14 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/user_function_errors/typed_wrong_kind.rs:5:20
+  |
+5 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

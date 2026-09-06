@@ -19,6 +19,9 @@ use crate::{registry_lookup, SymFieldType, extract_wrapper_inner};
 #[derive(Clone)]
 pub enum SymVal {
     Scalar(E),
+    /// A tuple or array literal, or a typed function's tuple result: only
+    /// destructured by `let (a, b) = ...` or taken as the residual rows.
+    Tuple(Vec<SymVal>),
     Vec2(vect2sym),
     Vec3(vect3sym),
     Mat2(arael_sym::geo::matrix2sym),
@@ -46,6 +49,7 @@ impl SymVal {
     fn type_name(&self) -> &'static str {
         match self {
             SymVal::Scalar(_) => "scalar",
+            SymVal::Tuple(_) => "tuple",
             SymVal::Vec2(_) => "vec2",
             SymVal::Vec3(_) => "vec3",
             SymVal::Mat2(_) => "mat2",
@@ -278,7 +282,8 @@ fn symval_components(v: &SymVal) -> Option<Vec<(&'static str, E)>> {
         // Dynamic dims cannot carry 'static suffixes; symbolic-field
         // caching of N-dimensional values is unsupported.
         SymVal::VecN(_) | SymVal::MatN(_) => return None,
-        SymVal::UniversalEulerAngles { .. } | SymVal::Transform(_) => return None,
+        SymVal::UniversalEulerAngles { .. } | SymVal::Transform(_) | SymVal::Tuple(_) =>
+            return None,
     })
 }
 
@@ -297,7 +302,7 @@ fn symval_from_components(shape: &SymVal, mut comps: Vec<E>) -> SymVal {
             v: vect3sym::from_components(c(1), c(2), c(3)),
         }),
         SymVal::VecN(_) | SymVal::MatN(_) | SymVal::UniversalEulerAngles { .. }
-        | SymVal::Transform(_) =>
+        | SymVal::Transform(_) | SymVal::Tuple(_) =>
             unreachable!("guarded by symval_components"),
     }
 }
@@ -379,6 +384,10 @@ struct ConstraintCtx {
     // after differentiation to precomputed field reads -- the same pattern
     // as the rotation-matrix substitutions.
     subs: Vec<(arael_sym::E, arael_sym::E)>,
+    // The typed `#[arael::function]`s being evaluated, innermost last:
+    // their bodies see only their own parameters and `let`s, and a
+    // function may not call itself.
+    typed_fn: Vec<String>,
 }
 
 impl ConstraintCtx {
@@ -389,6 +398,7 @@ impl ConstraintCtx {
             lets: std::collections::HashSet::new(),
             poisoned: Vec::new(),
             subs: Vec::new(),
+            typed_fn: Vec::new(),
         }
     }
 
@@ -455,17 +465,10 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             for (si, stmt) in blk.block.stmts.iter().enumerate() {
                 match stmt {
                     Stmt::Local(local) => {
-                        let name = match &local.pat {
-                            Pat::Ident(pi) => pi.ident.to_string(),
-                            _ => return Err(syn::Error::new_spanned(&local.pat,
-                                "simple let binding required")),
-                        };
                         let init = local.init.as_ref().ok_or_else(||
                             syn::Error::new_spanned(local, "initializer required"))?;
                         let val = eval_expr(&init.expr, ctx)?;
-                        let prev = ctx.bindings.insert(name.clone(), val);
-                        let newly = ctx.lets.insert(name.clone());
-                        saved.push((name, prev, newly));
+                        bind_let_pattern(&local.pat, val, ctx, &mut saved)?;
                     }
                     Stmt::Expr(e, semi) => {
                         if si + 1 != n || semi.is_some() {
@@ -589,6 +592,11 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     return Err(syn::Error::new_spanned(expr,
                         format!("cannot access `{}`: the path root is a local `let` binding \
                                  and the field is not a known component", path)));
+                }
+                if let Some(f) = ctx.typed_fn.last() {
+                    return Err(syn::Error::new_spanned(expr,
+                        format!("unknown binding `{}` in arael::function `{}`: a typed function \
+                                 sees only its parameters and its `let`s", path, f)));
                 }
                 if let Some(msg) = ctx.poison_for(path) {
                     return Err(syn::Error::new_spanned(expr,
@@ -778,6 +786,11 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
         Expr::Binary(eb) => {
             let left = eval_expr(&eb.left, ctx)?;
             let right = eval_expr(&eb.right, ctx)?;
+            if matches!(left, SymVal::Tuple(_)) || matches!(right, SymVal::Tuple(_)) {
+                return Err(syn::Error::new_spanned(expr,
+                    "a tuple is destructured with `let (a, b) = ...` or returned as the \
+                     residual rows; it is not a value to compute with"));
+            }
             match eb.op {
                 syn::BinOp::Add(_) => sym_add(left, right, expr),
                 syn::BinOp::Sub(_) => sym_sub(left, right, expr),
@@ -805,6 +818,9 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                         m.rows.into_iter().map(|r| -r).collect()))),
                     SymVal::Transform(_) => Err(syn::Error::new_spanned(expr,
                         "a transform has no negation; `.inv()` is its inverse")),
+                    SymVal::Tuple(_) => Err(syn::Error::new_spanned(expr,
+                        "a tuple is destructured with `let (a, b) = ...` or returned as \
+                         the residual rows; it is not a value to compute with")),
                 },
                 _ => Err(syn::Error::new_spanned(expr, "unsupported unary operator")),
             }
@@ -816,9 +832,18 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 let args: Vec<SymVal> = ec.args.iter()
                     .map(|a| eval_expr(a, ctx))
                     .collect::<Result<_, _>>()?;
-                // Single-segment path: scalar fn registry (sin/cos/atan2/user fns)
+                // Single-segment path: a builtin, a typed user function
+                // (evaluated here, in a scope of its own) or a scalar
+                // user function through arael-sym's parser.
                 if let Some(func_name) = func_path.path.get_ident() {
-                    return eval_function(&func_name.to_string(), args, expr);
+                    let name = func_name.to_string();
+                    if arael_sym::function_by_name(&name).is_none()
+                        && let Some(uf @ crate::UserFunction::Typed { .. }) =
+                            crate::registry_lookup_function(&name)
+                    {
+                        return eval_typed_call(&uf, args, ctx, expr);
+                    }
+                    return eval_function(&name, args, expr);
                 }
                 // Multi-segment path: static constructors on symbolic types,
                 // e.g. matrix2sym::rotation(angle). Match by the last two
@@ -838,9 +863,10 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
         // Parenthesized
         Expr::Paren(ep) => eval_expr(&ep.expr, ctx),
 
-        // Array literal [err1, err2] — we don't handle this here, it's the final result
-        Expr::Array(_) => Err(syn::Error::new_spanned(expr,
-            "array literal should be the final expression, not nested")),
+        // A tuple or array literal: a value that only `let (a, b) = ...`
+        // destructures, or the residual rows as the final expression.
+        Expr::Tuple(et) => tuple_value(et.elems.iter(), ctx, expr),
+        Expr::Array(ea) => tuple_value(ea.elems.iter(), ctx, expr),
 
         // Literals
         Expr::Lit(el) => match &el.lit {
@@ -1008,9 +1034,11 @@ fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
     let all = crate::registry_all_functions();
     let mut bag = arael_sym::FunctionBag::new();
 
-    // Pass 1: stubs so cross-references resolve when parsing.
+    // Pass 1: stubs so cross-references resolve when parsing. Typed
+    // functions are not scalar expressions; the interpreter inlines them.
     for uf in &all {
         match uf {
+            crate::UserFunction::Typed { .. } => continue,
             crate::UserFunction::Symbolic { sym_name, param_names, .. } => {
                 // Stub body: symbol(sym_name) -- irrelevant for dispatch as
                 // the second pass replaces it. Parser dispatches function
@@ -1043,6 +1071,7 @@ fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
     // message); here we silently skip failing entries.
     for uf in &all {
         match uf {
+            crate::UserFunction::Typed { .. } => continue,
             crate::UserFunction::Symbolic { sym_name, param_names, body, .. } => {
                 let mut sub = arael_sym::FunctionBag::new();
                 // Inherit all entries from the full bag by re-registering
@@ -1074,6 +1103,7 @@ fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
                                     call_path: oep.clone(),
                                 });
                         }
+                        crate::UserFunction::Typed { .. } => {}
                     }
                 }
                 // A body that does not parse must be reported HERE, with
@@ -1110,6 +1140,7 @@ fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
                                     call_path: oep.clone(),
                                 });
                         }
+                        crate::UserFunction::Typed { .. } => {}
                     }
                 }
                 // Same rule for deriv expressions: a malformed one is an
@@ -1136,6 +1167,164 @@ fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
         }
     }
     Ok(bag)
+}
+
+/// Bind a `let` pattern to a value: a name, `_`, or a tuple of those
+/// against a tuple value of the same arity. Records each binding in
+/// `saved` for the enclosing block to undo.
+fn bind_let_pattern(
+    pat: &Pat,
+    val: SymVal,
+    ctx: &mut ConstraintCtx,
+    saved: &mut Vec<(String, Option<SymVal>, bool)>,
+) -> Result<(), syn::Error> {
+    match pat {
+        Pat::Ident(pi) => {
+            let name = pi.ident.to_string();
+            let prev = ctx.bindings.insert(name.clone(), val);
+            let newly = ctx.lets.insert(name.clone());
+            saved.push((name, prev, newly));
+            Ok(())
+        }
+        Pat::Wild(_) => Ok(()),
+        Pat::Tuple(pt) => {
+            let SymVal::Tuple(items) = val else {
+                return Err(syn::Error::new_spanned(pat,
+                    format!("a tuple pattern needs a tuple value, got a {}", val.type_name())));
+            };
+            if items.len() != pt.elems.len() {
+                return Err(syn::Error::new_spanned(pat,
+                    format!("the pattern has {} names, the tuple {} values",
+                        pt.elems.len(), items.len())));
+            }
+            for (p, item) in pt.elems.iter().zip(items) {
+                bind_let_pattern(p, item, ctx, saved)?;
+            }
+            Ok(())
+        }
+        Pat::Paren(pp) => bind_let_pattern(&pp.pat, val, ctx, saved),
+        _ => Err(syn::Error::new_spanned(pat,
+            "a `let` binds a name, `_`, or a tuple of those")),
+    }
+}
+
+/// The value of a tuple or array literal: its elements, none of them a
+/// tuple itself.
+fn tuple_value<'a>(
+    elems: impl Iterator<Item = &'a Expr>,
+    ctx: &mut ConstraintCtx,
+    span: &Expr,
+) -> Result<SymVal, syn::Error> {
+    let mut items = Vec::new();
+    for e in elems {
+        match eval_expr(e, ctx)? {
+            SymVal::Tuple(_) => return Err(syn::Error::new_spanned(span,
+                "a tuple does not nest: its elements are scalars, vectors or matrices")),
+            v => items.push(v),
+        }
+    }
+    Ok(SymVal::Tuple(items))
+}
+
+/// Whether a value is of the kind a typed function's signature names.
+fn typed_kind_matches(kind: &str, v: &SymVal) -> bool {
+    matches!((kind, v),
+        ("E", SymVal::Scalar(_))
+        | ("vect2sym", SymVal::Vec2(_))
+        | ("vect3sym", SymVal::Vec3(_))
+        | ("matrix2sym", SymVal::Mat2(_))
+        | ("matrix3sym", SymVal::Mat3(_))
+        | ("quaternsym", SymVal::Quat(_)))
+}
+
+/// A call of a typed `#[arael::function]`: the arguments bound to the
+/// parameters in a scope of their own, the stored block evaluated by
+/// this interpreter, the result checked against the declared kinds.
+fn eval_typed_call(
+    uf: &crate::UserFunction,
+    args: Vec<SymVal>,
+    ctx: &mut ConstraintCtx,
+    span: &Expr,
+) -> Result<SymVal, syn::Error> {
+    let crate::UserFunction::Typed {
+        sym_name, param_names, param_kinds, ret_kinds, ret_tuple, body, ..
+    } = uf else {
+        unreachable!("eval_typed_call takes a typed function");
+    };
+    let at = |msg: String| syn::Error::new_spanned(span,
+        format!("arael::function `{}`: {}", sym_name, msg));
+    if args.len() != param_names.len() {
+        return Err(at(format!("expects {} argument(s), got {}", param_names.len(), args.len())));
+    }
+    for ((name, kind), arg) in param_names.iter().zip(param_kinds).zip(&args) {
+        if !typed_kind_matches(kind, arg) {
+            return Err(at(format!("parameter `{}` is a `{}`, the argument is a {}",
+                name, kind, arg.type_name())));
+        }
+    }
+    if ctx.typed_fn.iter().any(|f| f == sym_name) {
+        return Err(at(if ctx.typed_fn.last() == Some(sym_name) {
+            "calls itself".to_string()
+        } else {
+            format!("calls itself through {} -> {}", ctx.typed_fn.join(" -> "), sym_name)
+        }));
+    }
+    let block: syn::Block = syn::parse_str(body)
+        .map_err(|e| at(format!("body does not parse: {}", e)))?;
+
+    // The body sees its parameters and nothing of the caller.
+    let saved_bindings = std::mem::take(&mut ctx.bindings);
+    let saved_entities = std::mem::take(&mut ctx.entity_vars);
+    let saved_lets = std::mem::take(&mut ctx.lets);
+    let saved_poisoned = std::mem::take(&mut ctx.poisoned);
+    for (name, arg) in param_names.iter().zip(args) {
+        ctx.bindings.insert(name.clone(), arg);
+        ctx.lets.insert(name.clone());
+    }
+    ctx.typed_fn.push(sym_name.clone());
+    let result = eval_expr(
+        &Expr::Block(syn::ExprBlock { attrs: Vec::new(), label: None, block }), ctx);
+    ctx.typed_fn.pop();
+    ctx.bindings = saved_bindings;
+    ctx.entity_vars = saved_entities;
+    ctx.lets = saved_lets;
+    ctx.poisoned = saved_poisoned;
+    // An error from a nested typed call already names its function.
+    let result = result.map_err(|e| {
+        let msg = e.to_string();
+        if msg.starts_with("arael::function `") { syn::Error::new_spanned(span, msg) } else { at(msg) }
+    })?;
+
+    // The result against the signature.
+    match (&result, *ret_tuple) {
+        (SymVal::Tuple(items), true) => {
+            if items.len() != ret_kinds.len() {
+                return Err(at(format!("declared to return {} values, the body yields {}",
+                    ret_kinds.len(), items.len())));
+            }
+            for (i, (kind, item)) in ret_kinds.iter().zip(items).enumerate() {
+                if !typed_kind_matches(kind, item) {
+                    return Err(at(format!("result {} is declared `{}`, the body yields a {}",
+                        i, kind, item.type_name())));
+                }
+            }
+        }
+        (SymVal::Tuple(items), false) => {
+            return Err(at(format!("declared to return one `{}`, the body yields a tuple of {}",
+                ret_kinds[0], items.len())));
+        }
+        (v, true) => {
+            return Err(at(format!("declared to return a tuple, the body yields a {}",
+                v.type_name())));
+        }
+        (v, false) => {
+            if !typed_kind_matches(&ret_kinds[0], v) {
+                return Err(at(format!("declared to return `{}`, the body yields a {}",
+                    ret_kinds[0], v.type_name())));
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, syn::Error> {
@@ -1211,6 +1400,11 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
             .collect();
 
         match &uf {
+            crate::UserFunction::Typed { .. } => {
+                return Err(syn::Error::new_spanned(span, format!(
+                    "arael::function `{}` is typed: it is called from a constraint body or \
+                     another typed function, not from a scalar expression", name)));
+            }
             crate::UserFunction::Symbolic { body, .. } => {
                 let parsed = arael_sym::parse_with_functions(body, &bag)
                     .map_err(|err| syn::Error::new_spanned(span,
@@ -8484,14 +8678,11 @@ fn interpret_constraint_body(
     for (si, stmt) in constraint.body_stmts.iter().enumerate() {
         match stmt {
             Stmt::Local(local) => {
-                let name = match &local.pat {
-                    Pat::Ident(pi) => pi.ident.to_string(),
-                    _ => return Err(syn::Error::new_spanned(&local.pat, "simple let binding required")),
-                };
                 let init = local.init.as_ref().ok_or_else(|| syn::Error::new_spanned(local, "initializer required"))?;
                 let val = eval_expr(&init.expr, &mut ctx)?;
-                ctx.lets.insert(name.clone());
-                ctx.bindings.insert(name, val);
+                // Body-level bindings live to the end of the body.
+                let mut kept = Vec::new();
+                bind_let_pattern(&local.pat, val, &mut ctx, &mut kept)?;
             }
             Stmt::Expr(expr, semi) => {
                 if si + 1 != n_stmts {
@@ -8514,6 +8705,14 @@ fn interpret_constraint_body(
                 } else {
                     match eval_expr(expr, &mut ctx)? {
                         SymVal::Scalar(e) => residuals.push(e),
+                        SymVal::Tuple(items) => for item in items {
+                            match item {
+                                SymVal::Scalar(e) => residuals.push(e),
+                                other => return Err(syn::Error::new_spanned(expr,
+                                    format!("residual rows must be scalars, got a {}",
+                                        other.type_name()))),
+                            }
+                        },
                         _ => return Err(syn::Error::new_spanned(expr, "residual must be scalar")),
                     }
                 }

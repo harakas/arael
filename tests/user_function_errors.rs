@@ -25,4 +25,7 @@ fn user_function_compile_errors() {
     t.compile_fail("tests/user_function_errors/match_out_of_order.rs");
     t.compile_fail("tests/user_function_errors/match_guard.rs");
     t.compile_fail("tests/user_function_errors/match_block_arm.rs");
+    t.compile_fail("tests/user_function_errors/typed_wrong_kind.rs");
+    t.compile_fail("tests/user_function_errors/typed_tuple_arithmetic.rs");
+    t.compile_fail("tests/user_function_errors/typed_recursion.rs");
 }

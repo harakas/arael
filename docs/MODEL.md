@@ -1133,7 +1133,7 @@ out symbolic helper, or an opaque numerical routine with a known
 closed-form derivative -- declare it with `#[arael::function]` and
 use it in constraint bodies the same way you'd use `sin`.
 
-Two forms, distinguished by the attributed fn's signature.
+Three forms, distinguished by the attributed fn's signature.
 
 ### Form A: purely symbolic
 
@@ -1229,19 +1229,73 @@ other registered `#[arael::function]`s, including each other and
 themselves -- mutual recursion is resolved by a two-pass bag
 build at constraint-expansion time.
 
+### Form C: typed, with `let` bindings and tuples
+
+`fn name(p: vect3sym, k: E, ...) -> (E, E) { let ...; expr }` -- the
+parameters and the result are the values a constraint body works
+with: `E`, `vect2sym`, `vect3sym`, `matrix2sym`, `matrix3sym`,
+`quaternsym`, a tuple of them, or an `[E; N]` array. The body is a
+block under the constraint-body grammar: `let` bindings (a name, `_`,
+or a tuple pattern over a tuple value), vector and matrix arithmetic,
+component access, `match`, `branch`, calls of builtins and of other
+functions. A call inlines the body at the call site with the
+arguments bound to the parameters, so the generated code is what the
+body would have produced written out, derivatives included. The body
+sees only its parameters and its `let`s; `self`, `parent` and `root`
+are not in scope.
+
+A tuple is destructured, or it is the residual: `let (u, v) =
+project(...);` in a body, or a call returning `(E, E)` or `[E; 2]` as
+the body's final expression, whose elements become the rows. A tuple
+is not a value to compute with, and its elements are scalars, vectors
+or matrices, never a tuple.
+
+```rust,ignore
+use arael::sym::{vect2sym, vect3sym, E};
+
+/// Pinhole projection of a camera-frame point, zero below
+/// machine-epsilon depth.
+#[arael::function]
+fn project(p: vect3sym, f: E, c: vect2sym) -> (E, E) {
+    let ok = p.z - epsilon_for(p.z);
+    (branch(ok, f * (p.x / p.z) + c.x, 0.0),
+     branch(ok, f * (p.y / p.z) + c.y, 0.0))
+}
+
+#[arael::function]
+fn pixel(p: vect3sym, f: E, c: vect2sym, obs: vect2sym) -> [E; 2] {
+    let (u, v) = project(p, f, c);
+    [u - obs.x, v - obs.y]
+}
+
+// In a constraint body (an observation held by its camera):
+//     pixel(cam.rot.rotation_matrix() * obs.point.pos + cam.t,
+//           cam.f, cam.c, obs.px)
+```
+
+An all-`E` signature with a single-expression body is Form A; the
+same signature with `let` bindings is Form C. A typed function is
+declared before the constraint that calls it, in the same crate, and
+it may not call itself. The fn is also emitted as ordinary Rust over
+the arael-sym types, so user code can call it with `E` and vector
+values to build expressions; the signature's type names must be in
+scope there (`use arael::sym::{vect3sym, E}`).
+
 ### Ergonomics
 
 - Parameter names in deriv expressions resolve to the attributed
   fn's own parameters, not to anything in the surrounding module.
 - Numeric literals accept scientific notation (`1e-12`, `2.5E+2`).
-- The sibling fn (Form A body, Form B positional name) is also
-  callable from ordinary Rust with `E` arguments, so user fns
-  compose with `ExtendedModel` / runtime `parse_with_functions`
-  workflows for residuals that aren't known at compile time.
-  Mutually-referencing user fns (and forward references to fns
-  declared later in the file or in a dependency) work at runtime
-  via a registry populated through `inventory`; cross-crate
-  composition works without re-declaration.
+- The sibling fn (Form A body, Form B positional name, Form C as
+  written) is also callable from ordinary Rust with `E` and sym
+  vector arguments, so user fns compose with `ExtendedModel` /
+  runtime `parse_with_functions` workflows for residuals that
+  aren't known at compile time. Mutually-referencing Form A and B
+  fns (and forward references to fns declared later in the file or
+  in a dependency) work at runtime via a registry populated through
+  `inventory`; cross-crate composition works without
+  re-declaration. Form C is inlined at expansion and has no runtime
+  registry: same crate, declared first.
 - Errors point at user source: bad signatures, mismatched deriv
   counts, and name collisions fire at attribute expansion;
   parse failures and arity mismatches fire at the call site

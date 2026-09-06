@@ -14,9 +14,20 @@
 //!   fn is kept as-written; a sibling `pub fn sym_name(x: E, ...) -> E`
 //!   is emitted, wrapping `arael_sym::extern_func`.
 //!
-//! No `.clone()` insertion: body / deriv tokens are stringified verbatim
-//! and handed to `arael_sym::parse_with_functions` at use time, which has
-//! no Rust move semantics.
+//! - **Form C**: `fn name(p: vect3sym, k: E, ...) -> (E, E) { let ...; expr }`
+//!   -- typed. Parameters and the result are the body language's values
+//!   (`E`, `vect2sym`, `vect3sym`, `matrix2sym`, `matrix3sym`,
+//!   `quaternsym`, a tuple or an `[E; N]` array of them), the body a
+//!   block with `let` bindings. The block is stashed as source and
+//!   evaluated by the constraint-body interpreter at every call site, so
+//!   a call inlines exactly what the body would have written. The fn is
+//!   emitted as ordinary Rust over the arael-sym types (reads of locals
+//!   cloned, `match` lowered to `select`) so it stays callable from user
+//!   code.
+//!
+//! Forms A and B insert no `.clone()`: body / deriv tokens are
+//! stringified verbatim and handed to `arael_sym::parse_with_functions`
+//! at use time, which has no Rust move semantics.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -29,9 +40,11 @@ pub fn function_attribute(attr: TokenStream2, item: TokenStream2) -> syn::Result
     let input: syn::ItemFn = syn::parse2(item)
         .map_err(|e| syn::Error::new(e.span(),
             format!("#[arael::function] must be attached to a fn: {}", e)))?;
-    match classify_signature(&input.sig)? {
+    match classify_signature(&input.sig, &input.block)? {
         SignatureKind::FormA => form_a(attr, input),
         SignatureKind::FormB { scalar_ty } => form_b(attr, input, scalar_ty),
+        SignatureKind::FormC { param_kinds, ret_kinds, ret_tuple } =>
+            form_c(attr, input, param_kinds, ret_kinds, ret_tuple),
     }
 }
 
@@ -40,9 +53,15 @@ enum SignatureKind {
     FormA,
     /// `fn name(x: f32, ...) -> f32` or `f64`
     FormB { scalar_ty: String },
+    /// `fn name(p: vect3sym, x: E, ...) -> <kind> | (<kind>, ...) | [E; N]`
+    FormC { param_kinds: Vec<String>, ret_kinds: Vec<String>, ret_tuple: bool },
 }
 
-fn classify_signature(sig: &syn::Signature) -> syn::Result<SignatureKind> {
+/// The value kinds a Form C signature may name.
+pub(crate) const TYPED_KINDS: [&str; 6] =
+    ["E", "vect2sym", "vect3sym", "matrix2sym", "matrix3sym", "quaternsym"];
+
+fn classify_signature(sig: &syn::Signature, block: &syn::Block) -> syn::Result<SignatureKind> {
     let ret_ty = match &sig.output {
         syn::ReturnType::Type(_, ty) => ty.as_ref(),
         syn::ReturnType::Default => return Err(syn::Error::new_spanned(sig,
@@ -60,7 +79,11 @@ fn classify_signature(sig: &syn::Signature) -> syn::Result<SignatureKind> {
             "#[arael::function] requires at least one parameter"));
     }
 
-    if ret_name.as_deref() == Some("E") && param_tys.iter().all(|t| t == "E") {
+    let single_expression = block.stmts.len() == 1
+        && matches!(block.stmts[0], syn::Stmt::Expr(_, None));
+    if ret_name.as_deref() == Some("E") && param_tys.iter().all(|t| t == "E")
+        && single_expression
+    {
         return Ok(SignatureKind::FormA);
     }
     if let Some(r) = ret_name.as_deref() {
@@ -68,10 +91,43 @@ fn classify_signature(sig: &syn::Signature) -> syn::Result<SignatureKind> {
             return Ok(SignatureKind::FormB { scalar_ty: r.to_string() });
         }
     }
+    if let Some((ret_kinds, ret_tuple)) = typed_return(ret_ty)
+        && param_tys.len() == sig.inputs.len()
+        && param_tys.iter().all(|t| TYPED_KINDS.contains(&t.as_str()))
+    {
+        return Ok(SignatureKind::FormC { param_kinds: param_tys, ret_kinds, ret_tuple });
+    }
     Err(syn::Error::new_spanned(sig,
         "#[arael::function] requires one of:\n  \
-         - Form A: `fn name(x: E, ...) -> E`\n  \
-         - Form B: `fn name(x: f32, ...) -> f32` (or `f64`, all params and return type uniform)"))
+         - Form A: `fn name(x: E, ...) -> E` with a single-expression body\n  \
+         - Form B: `fn name(x: f32, ...) -> f32` (or `f64`, all params and return type uniform)\n  \
+         - Form C: params and result among `E`, `vect2sym`, `vect3sym`, `matrix2sym`, \
+         `matrix3sym`, `quaternsym`, a tuple of them or `[E; N]`; the body may hold `let` bindings"))
+}
+
+/// The kinds a Form C result names: one for a plain type, one per
+/// element for a tuple, N copies of `E` for `[E; N]`.
+fn typed_return(ty: &syn::Type) -> Option<(Vec<String>, bool)> {
+    let kind = |t: &syn::Type| -> Option<String> {
+        let n = type_last_ident(t)?.to_string();
+        TYPED_KINDS.contains(&n.as_str()).then_some(n)
+    };
+    match ty {
+        syn::Type::Tuple(tt) if !tt.elems.is_empty() => {
+            let kinds: Option<Vec<String>> = tt.elems.iter().map(kind).collect();
+            kinds.map(|k| (k, true))
+        }
+        syn::Type::Array(ta) => {
+            let elem = kind(&ta.elem)?;
+            if elem != "E" { return None; }
+            let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. }) = &ta.len else {
+                return None;
+            };
+            let n: usize = n.base10_parse().ok()?;
+            (n > 0).then(|| (vec![elem; n], true))
+        }
+        other => kind(other).map(|k| (vec![k], false)),
+    }
 }
 
 fn type_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
@@ -327,6 +383,145 @@ fn form_a(attr: TokenStream2, input: syn::ItemFn) -> syn::Result<TokenStream2> {
 
         #vis #sig { #runtime_body }
     })
+}
+
+// ---- Form C: fn name(p: vect3sym, x: E, ...) -> kind | (kinds) | [E; N] ---
+
+fn form_c(
+    attr: TokenStream2,
+    input: syn::ItemFn,
+    param_kinds: Vec<String>,
+    ret_kinds: Vec<String>,
+    ret_tuple: bool,
+) -> syn::Result<TokenStream2> {
+    if !attr.is_empty() {
+        return Err(syn::Error::new_spanned(attr,
+            "#[arael::function] on a typed fn takes no arguments: its derivatives come from \
+             the body, and `derivs` is a Form A / Form B option"));
+    }
+    let sym_name = input.sig.ident.to_string();
+    let param_i = param_idents(&input.sig)?;
+    let param_strs: Vec<String> = param_i.iter().map(|i| i.to_string()).collect();
+
+    // The block as written, `match` included: the constraint-body
+    // interpreter evaluates it at every call site.
+    let block = &input.block;
+    let body_string = quote!(#block).to_string();
+    let (attr_file, attr_line) = source_location(input.sig.ident.span());
+    registry_store_function(&sym_name, UserFunction::Typed {
+        sym_name: sym_name.clone(),
+        param_names: param_strs.clone(),
+        param_kinds,
+        ret_kinds,
+        ret_tuple,
+        body: body_string,
+        attr_file,
+        attr_line,
+    });
+
+    // The Rust twin: the same block over the arael-sym types. Reads of
+    // parameters and `let` locals are cloned, since the sym types are
+    // owned values with by-value operators; builtins and the sym types'
+    // constructors get their full paths; `match` lowers to `select`.
+    let mut twin = (*input.block).clone();
+    let mut locals: Vec<String> = param_strs.clone();
+    for stmt in &twin.stmts {
+        if let syn::Stmt::Local(local) = stmt {
+            collect_pattern_idents(&local.pat, &mut locals);
+        }
+    }
+    struct Twin { locals: Vec<String>, error: Option<syn::Error> }
+    impl syn::visit_mut::VisitMut for Twin {
+        fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+            // Children first: nested matches are calls, operands cloned.
+            match e {
+                // The callee of a call is a function name, never a local:
+                // a builtin of the body language resolves in arael-sym, a
+                // constructor on a sym type too, anything else (another
+                // user function) where the twin is declared.
+                syn::Expr::Call(call) => {
+                    for a in call.args.iter_mut() { self.visit_expr_mut(a); }
+                    if let syn::Expr::Path(p) = call.func.as_mut()
+                        && p.qself.is_none()
+                    {
+                        let segs: Vec<String> =
+                            p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                        let qualified = match segs.as_slice() {
+                            [f] => arael_sym::function_by_name(f).is_some(),
+                            [ty, _] => TYPED_KINDS.contains(&ty.as_str()),
+                            _ => false,
+                        };
+                        if qualified && p.path.leading_colon.is_none() {
+                            let path = &p.path;
+                            *call.func = syn::parse_quote!(::arael::sym::#path);
+                        }
+                    }
+                }
+                _ => syn::visit_mut::visit_expr_mut(self, e),
+            }
+            match e {
+                syn::Expr::Path(p) if p.qself.is_none() => {
+                    if let Some(id) = p.path.get_ident()
+                        && self.locals.iter().any(|l| id == l)
+                    {
+                        *e = syn::parse_quote!(::core::clone::Clone::clone(&#id));
+                    }
+                }
+                syn::Expr::Match(m) => match match_to_rust_select(m) {
+                    Ok(call) => *e = call,
+                    Err(err) => if self.error.is_none() { self.error = Some(err) },
+                },
+                _ => {}
+            }
+        }
+    }
+    let mut v = Twin { locals, error: None };
+    syn::visit_mut::VisitMut::visit_block_mut(&mut v, &mut twin);
+    if let Some(err) = v.error { return Err(err); }
+
+    // The twin's uses are inside constraint bodies, where rustc sees
+    // none of them.
+    let vis = &input.vis;
+    let sig = &input.sig;
+    let attrs = &input.attrs;
+    Ok(quote! {
+        #(#attrs)*
+        #[allow(dead_code)]
+        #vis #sig #twin
+    })
+}
+
+/// Every identifier a `let` pattern binds: a name, or the names of a
+/// tuple of names (`_` binds nothing).
+fn collect_pattern_idents(pat: &syn::Pat, out: &mut Vec<String>) {
+    match pat {
+        syn::Pat::Ident(pi) => out.push(pi.ident.to_string()),
+        syn::Pat::Tuple(pt) => for p in &pt.elems { collect_pattern_idents(p, out); },
+        syn::Pat::Type(pt) => collect_pattern_idents(&pt.pat, out),
+        syn::Pat::Paren(pp) => collect_pattern_idents(&pp.pat, out),
+        _ => {}
+    }
+}
+
+/// A `match` in a Form C twin as arael-sym's `select(index, arms,
+/// default)` call, valid Rust over `E`.
+fn match_to_rust_select(m: &syn::ExprMatch) -> syn::Result<syn::Expr> {
+    let (numbered, default) = crate::constraint::match_arm_patterns(&m.arms)?;
+    let scrutinee = &*m.expr;
+    let arms: Vec<syn::Expr> = (0..numbered.len())
+        .map(|i| arm_expr(&m.arms[i]))
+        .collect::<syn::Result<_>>()?;
+    let default: TokenStream2 = match default {
+        Some(d) => {
+            let e = arm_expr(&m.arms[d])?;
+            quote!(::core::option::Option::Some(::arael::sym::E::from(#e)))
+        }
+        None => quote!(::core::option::Option::None),
+    };
+    Ok(syn::parse_quote!(::arael::sym::select(
+        #scrutinee,
+        ::std::vec![#(::arael::sym::E::from(#arms)),*],
+        #default)))
 }
 
 // ---- Form B: fn name_eval(x: f32/f64, ...) -> same ------------------------

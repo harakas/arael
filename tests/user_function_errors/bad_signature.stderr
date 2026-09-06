@@ -1,6 +1,7 @@
 error: #[arael::function] requires one of:
-         - Form A: `fn name(x: E, ...) -> E`
+         - Form A: `fn name(x: E, ...) -> E` with a single-expression body
          - Form B: `fn name(x: f32, ...) -> f32` (or `f64`, all params and return type uniform)
+         - Form C: params and result among `E`, `vect2sym`, `vect3sym`, `matrix2sym`, `matrix3sym`, `quaternsym`, a tuple of them or `[E; N]`; the body may hold `let` bindings
  --> tests/user_function_errors/bad_signature.rs:6:1
   |
 6 | fn bad(x: f32) -> arael_sym::E {
