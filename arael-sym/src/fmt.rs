@@ -89,6 +89,61 @@ fn rust_float_literal(v: f64, ft: &str) -> String {
     if ft.is_empty() { base } else { format!("{base}_{ft}") }
 }
 
+/// A sink taking at most `limit` bytes: the write past it is cut at a
+/// character boundary and reported as an error, which stops the
+/// formatting there.
+struct Prefix {
+    buf: String,
+    limit: usize,
+    truncated: bool,
+}
+
+impl fmt::Write for Prefix {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let room = self.limit - self.buf.len();
+        if s.len() <= room {
+            self.buf.push_str(s);
+            return Ok(());
+        }
+        let mut cut = room;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.buf.push_str(&s[..cut]);
+        self.truncated = true;
+        Err(fmt::Error)
+    }
+}
+
+fn display_prefix(e: &E, limit: usize) -> (String, bool) {
+    use fmt::Write as _;
+    let mut p = Prefix { buf: String::with_capacity(limit), limit, truncated: false };
+    let _ = write!(p, "{}", e);
+    (p.buf, p.truncated)
+}
+
+/// The order of two expressions' Display strings, found without
+/// rendering either in full: both are written into bounded prefixes,
+/// compared, and extended only while they still agree. A shared
+/// subexpression renders at its unfolded size, so the full strings can
+/// be enormous where the difference sits in the first few characters.
+/// One node against itself is equal at once.
+pub(crate) fn display_cmp(a: &E, b: &E) -> std::cmp::Ordering {
+    if std::rc::Rc::ptr_eq(&a.0, &b.0) {
+        return std::cmp::Ordering::Equal;
+    }
+    let mut limit = 64;
+    loop {
+        let (sa, ta) = display_prefix(a, limit);
+        let (sb, tb) = display_prefix(b, limit);
+        if sa == sb && (ta || tb) {
+            limit *= 8;
+            continue;
+        }
+        return sa.cmp(&sb);
+    }
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

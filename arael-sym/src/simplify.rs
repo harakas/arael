@@ -78,7 +78,7 @@ fn mul_factor_cmp(a: &E, b: &E) -> Ordering {
             let cmp = type_priority(a).cmp(&type_priority(b));
             if cmp != Ordering::Equal { return cmp; }
             // Tiebreaker: compare by string representation for deterministic ordering
-            format!("{}", a).cmp(&format!("{}", b))
+            crate::fmt::display_cmp(a, b)
         }
     }
 }

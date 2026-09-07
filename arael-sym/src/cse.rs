@@ -92,61 +92,161 @@ impl Intermediate {
     }
 }
 
-/// Cost of evaluating an expression (number of operations).
-fn expr_cost(e: &E) -> usize {
-    match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => 0,
-        Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
-        | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
-        | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
-        | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
-        | Expr::Sqrt(a) | Expr::Abs(a)
-        | Expr::Heaviside(a) => 1 + expr_cost(a),
-        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
-        | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
-            1 + expr_cost(a) + expr_cost(b)
+/// What the CSE decides on for one node: a structural hash built from
+/// the children's, the cost of evaluating the expression as a tree
+/// (number of operations; a select runs its index and one arm), its
+/// depth, and whether a symbol occurs in it.
+struct NodeFacts {
+    /// The node, held so its address is not reused while the facts live.
+    #[allow(dead_code)]
+    e: E,
+    hash: u64,
+    cost: usize,
+    depth: usize,
+    has_symbol: bool,
+}
+
+/// The facts of every node of a batch, computed once per node over the
+/// DAG: an expression shares its subexpressions, and a node reached
+/// along many paths is one node here.
+#[derive(Default)]
+struct Facts {
+    by_node: HashMap<*const Expr, NodeFacts>,
+}
+
+impl Facts {
+    fn of(&mut self, e: &E) -> (u64, usize, usize, bool) {
+        use std::hash::{Hash, Hasher};
+        let ptr = e.as_ref() as *const Expr;
+        if let Some(f) = self.by_node.get(&ptr) {
+            return (f.hash, f.cost, f.depth, f.has_symbol);
         }
-        Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => 1 + expr_cost(a) + expr_cost(b) + expr_cost(c),
-        // One arm runs: the index plus the most expensive arm.
-        Expr::Select { index, arms, default } => {
-            1 + expr_cost(index)
-                + arms.iter().chain(default.iter()).map(expr_cost).max().unwrap_or(0)
-        }
-        Expr::Func { args, .. } => {
-            1 + args.iter().map(expr_cost).sum::<usize>()
-        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(e.as_ref()).hash(&mut h);
+        let (cost, depth, has_symbol) = match e.as_ref() {
+            Expr::Sym(s) => {
+                s.hash(&mut h);
+                (0, 0, true)
+            }
+            Expr::Const(v) => {
+                v.to_bits().hash(&mut h);
+                (0, 0, false)
+            }
+            Expr::NamedConst { name, value, .. } => {
+                name.hash(&mut h);
+                value.to_bits().hash(&mut h);
+                (0, 0, false)
+            }
+            Expr::Select { index, arms, default } => {
+                let (ih, ic, id, is) = self.of(index);
+                ih.hash(&mut h);
+                let (mut arm_cost, mut arm_depth, mut sym) = (0, 0, is);
+                for a in arms.iter().chain(default.iter()) {
+                    let (ah, ac, ad, asym) = self.of(a);
+                    ah.hash(&mut h);
+                    arm_cost = arm_cost.max(ac);
+                    arm_depth = arm_depth.max(ad);
+                    sym |= asym;
+                }
+                default.is_some().hash(&mut h);
+                (1 + ic + arm_cost, 1 + id.max(arm_depth), sym)
+            }
+            other => {
+                if let Expr::Func { name, .. } = other {
+                    name.hash(&mut h);
+                }
+                let (mut cost, mut depth, mut sym) = (0, 0, false);
+                for c in children(e) {
+                    let (ch, cc, cd, cs) = self.of(c);
+                    ch.hash(&mut h);
+                    cost += cc;
+                    depth = depth.max(cd);
+                    sym |= cs;
+                }
+                (1 + cost, 1 + depth, sym)
+            }
+        };
+        let hash = h.finish();
+        self.by_node.insert(ptr, NodeFacts { e: e.clone(), hash, cost, depth, has_symbol });
+        (hash, cost, depth, has_symbol)
     }
 }
 
-/// Depth of an expression tree.
-fn expr_depth(e: &E) -> usize {
-    match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => 0,
-        Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
-        | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
-        | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
-        | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
-        | Expr::Sqrt(a) | Expr::Abs(a)
-        | Expr::Heaviside(a) => 1 + expr_depth(a),
-        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
-        | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
-            1 + expr_depth(a).max(expr_depth(b))
+/// A node as a table key: hashed by its cached structural hash, equal
+/// when structurally equal, a comparison that short-circuits on shared
+/// parts.
+struct Key {
+    e: E,
+    hash: u64,
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.e == other.e
+    }
+}
+
+impl Eq for Key {}
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+/// The nodes of the roots in an order with every parent before its
+/// children (a reverse post-order over the DAG), and the number of
+/// paths reaching each node from the roots, outside and inside a
+/// select or branch arm. A node reached along several paths occurs once
+/// per path, as the unfolded trees would have it, but is visited once.
+/// When `scoped`, a path entering an arm counts inside from there on;
+/// unscoped, everything counts outside.
+fn path_counts(roots: &[&E], scoped: bool) -> (Vec<E>, HashMap<*const Expr, (usize, usize)>) {
+    fn visit(e: &E, seen: &mut std::collections::HashSet<*const Expr>, order: &mut Vec<E>) {
+        if !seen.insert(e.as_ref() as *const Expr) {
+            return;
         }
-        Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => 1 + expr_depth(a).max(expr_depth(b)).max(expr_depth(c)),
-        Expr::Select { index, arms, default } => {
-            1 + expr_depth(index)
-                .max(arms.iter().chain(default.iter()).map(expr_depth).max().unwrap_or(0))
+        for c in children(e) {
+            visit(c, seen, order);
         }
-        Expr::Func { args, .. } => {
-            1 + args.iter().map(expr_depth).max().unwrap_or(0)
+        order.push(e.clone());
+    }
+    let mut order: Vec<E> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in roots {
+        visit(r, &mut seen, &mut order);
+    }
+    order.reverse();
+
+    let mut paths: HashMap<*const Expr, (usize, usize)> = HashMap::new();
+    for r in roots {
+        paths.entry(r.as_ref() as *const Expr).or_insert((0, 0)).0 += 1;
+    }
+    for e in &order {
+        let (o, i) = paths.get(&(e.as_ref() as *const Expr)).copied().unwrap_or((0, 0));
+        // The first child of a select or branch is its index or
+        // condition; the rest are its arms.
+        let arms_from = match e.as_ref() {
+            Expr::Select { .. } | Expr::Branch(..) if scoped => 1,
+            _ => usize::MAX,
+        };
+        for (k, c) in children(e).into_iter().enumerate() {
+            let entry = paths.entry(c.as_ref() as *const Expr).or_insert((0, 0));
+            if k >= arms_from {
+                entry.1 += o + i;
+            } else {
+                entry.0 += o;
+                entry.1 += i;
+            }
         }
     }
+    (order, paths)
 }
 
 /// Every direct child of a node. `Func` children are its arguments (the
 /// body is inlined at emission); a `Select`'s are its index, arms and
 /// default.
-fn children(e: &E) -> Vec<&E> {
+pub(crate) fn children(e: &E) -> Vec<&E> {
     match e.as_ref() {
         Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => vec![],
         Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
@@ -169,7 +269,7 @@ fn children(e: &E) -> Vec<&E> {
 }
 
 /// Rebuild a node with every direct child mapped through `f`.
-fn map_children(e: &E, f: &mut dyn FnMut(&E) -> E) -> E {
+pub(crate) fn map_children(e: &E, f: &mut dyn FnMut(&E) -> E) -> E {
     E::new(match e.as_ref() {
         Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => return e.clone(),
         Expr::Neg(a) => Expr::Neg(f(a)),
@@ -209,28 +309,44 @@ fn map_children(e: &E, f: &mut dyn FnMut(&E) -> E) -> E {
     })
 }
 
-/// Walk expression tree, count occurrences of each subexpression. When
-/// `scoped`, nodes under a select arm count in `inside`, the rest in
-/// `outside`: an expression seen only inside arms is never hoisted above
-/// the match. Unscoped, everything counts as outside.
-fn count_subexprs(e: &E, in_arm: bool, scoped: bool, outside: &mut HashMap<E, usize>, inside: &mut HashMap<E, usize>) {
-    let counts: &mut HashMap<E, usize> = if in_arm { &mut *inside } else { &mut *outside };
-    *counts.entry(e.clone()).or_insert(0) += 1;
-    match e.as_ref() {
-        Expr::Select { index, arms, default } => {
-            count_subexprs(index, in_arm, scoped, outside, inside);
-            for a in arms.iter().chain(default.iter()) {
-                count_subexprs(a, in_arm || scoped, scoped, outside, inside);
-            }
-        }
-        Expr::Branch(q, a, b) => {
-            count_subexprs(q, in_arm, scoped, outside, inside);
-            count_subexprs(a, in_arm || scoped, scoped, outside, inside);
-            count_subexprs(b, in_arm || scoped, scoped, outside, inside);
-        }
-        _ => for c in children(e) { count_subexprs(c, in_arm, scoped, outside, inside); },
+/// Occurrences of every subexpression across the roots, outside and
+/// inside an arm, merged over structurally equal nodes (see
+/// [`path_counts`]).
+fn count_subexprs(roots: &[&E], scoped: bool, facts: &mut Facts) -> HashMap<Key, (usize, usize)> {
+    let (order, paths) = path_counts(roots, scoped);
+    let mut counts: HashMap<Key, (usize, usize)> = HashMap::new();
+    for e in &order {
+        let (o, i) = paths[&(e.as_ref() as *const Expr)];
+        let (hash, ..) = facts.of(e);
+        let entry = counts.entry(Key { e: e.clone(), hash }).or_insert((0, 0));
+        entry.0 += o;
+        entry.1 += i;
     }
+    counts
 }
+
+/// Occurrences of every expression as a divisor (the right side of a
+/// Div) across the roots, outside and inside an arm: each Div node's
+/// path counts go to its divisor.
+fn count_divisors(roots: &[&E], scoped: bool, facts: &mut Facts) -> HashMap<Key, (usize, usize)> {
+    let (order, paths) = path_counts(roots, scoped);
+    let mut counts: HashMap<Key, (usize, usize)> = HashMap::new();
+    for e in &order {
+        if let Expr::Div(_, b) = e.as_ref() {
+            let (o, i) = paths[&(e.as_ref() as *const Expr)];
+            let (hash, ..) = facts.of(b);
+            let entry = counts.entry(Key { e: b.clone(), hash }).or_insert((0, 0));
+            entry.0 += o;
+            entry.1 += i;
+        }
+    }
+    counts
+}
+
+/// A memo of one rewrite over a batch, keyed by node identity and
+/// holding the node with its rewrite: a shared subtree is rewritten
+/// once, and an address cannot be reused while the memo lives.
+type Memo = HashMap<*const Expr, (E, E)>;
 
 /// Replace all occurrences of a sub-expression with another in the given
 /// expression.
@@ -239,18 +355,29 @@ fn count_subexprs(e: &E, in_arm: bool, scoped: bool, outside: &mut HashMap<E, us
 /// that is equal to `target` with `replacement`. For product targets, also
 /// detects when the target's factors are a subset of a larger product.
 pub fn replace_pub(e: &E, target: &E, replacement: &E) -> E {
-    replace(e, target, replacement)
+    replace(e, target, replacement, &mut Memo::new())
 }
 
-fn replace(e: &E, target: &E, replacement: &E) -> E {
+fn replace(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
+    let ptr = e.as_ref() as *const Expr;
+    if let Some((_, r)) = memo.get(&ptr) {
+        return r.clone();
+    }
+    let result = replace_uncached(e, target, replacement, memo);
+    memo.insert(ptr, (e.clone(), result.clone()));
+    result
+}
+
+fn replace_uncached(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
     if e == target {
         return replacement.clone();
     }
+    let rec = |c: &E, memo: &mut Memo| replace(c, target, replacement, memo);
     match e.as_ref() {
         Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
-        Expr::Neg(a) => E::new(Expr::Neg(replace(a, target, replacement))),
-        Expr::Add(a, b) => E::new(Expr::Add(replace(a, target, replacement), replace(b, target, replacement))),
-        Expr::Sub(a, b) => E::new(Expr::Sub(replace(a, target, replacement), replace(b, target, replacement))),
+        Expr::Neg(a) => E::new(Expr::Neg(rec(a, memo))),
+        Expr::Add(a, b) => E::new(Expr::Add(rec(a, memo), rec(b, memo))),
+        Expr::Sub(a, b) => E::new(Expr::Sub(rec(a, memo), rec(b, memo))),
         Expr::Mul(_, _) => {
             // Factor-aware replacement: if target is a product and its factors
             // are a subset of this product's factors, replace them.
@@ -274,7 +401,7 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
                         remaining.push(replacement.clone());
                         // Recurse on remaining factors in case of nested matches
                         let result = build_mul_from_factors(e_coeff, remaining);
-                        return replace(&result, target, replacement);
+                        return replace(&result, target, replacement, memo);
                     }
                 }
             }
@@ -283,32 +410,32 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
                 Expr::Mul(a, b) => (a, b),
                 _ => unreachable!(),
             };
-            E::new(Expr::Mul(replace(a, target, replacement), replace(b, target, replacement)))
+            E::new(Expr::Mul(rec(a, memo), rec(b, memo)))
         }
-        Expr::Div(a, b) => E::new(Expr::Div(replace(a, target, replacement), replace(b, target, replacement))),
-        Expr::Pow(a, b) => E::new(Expr::Pow(replace(a, target, replacement), replace(b, target, replacement))),
-        Expr::Atan2(a, b) => E::new(Expr::Atan2(replace(a, target, replacement), replace(b, target, replacement))),
-        Expr::Sin(a) => E::new(Expr::Sin(replace(a, target, replacement))),
-        Expr::Cos(a) => E::new(Expr::Cos(replace(a, target, replacement))),
-        Expr::Tan(a) => E::new(Expr::Tan(replace(a, target, replacement))),
-        Expr::Asin(a) => E::new(Expr::Asin(replace(a, target, replacement))),
-        Expr::Acos(a) => E::new(Expr::Acos(replace(a, target, replacement))),
-        Expr::Atan(a) => E::new(Expr::Atan(replace(a, target, replacement))),
-        Expr::Sinh(a) => E::new(Expr::Sinh(replace(a, target, replacement))),
-        Expr::Cosh(a) => E::new(Expr::Cosh(replace(a, target, replacement))),
-        Expr::Tanh(a) => E::new(Expr::Tanh(replace(a, target, replacement))),
-        Expr::Exp(a) => E::new(Expr::Exp(replace(a, target, replacement))),
-        Expr::Ln(a) => E::new(Expr::Ln(replace(a, target, replacement))),
-        Expr::Log2(a) => E::new(Expr::Log2(replace(a, target, replacement))),
-        Expr::Log10(a) => E::new(Expr::Log10(replace(a, target, replacement))),
-        Expr::Sqrt(a) => E::new(Expr::Sqrt(replace(a, target, replacement))),
-        Expr::Abs(a) => E::new(Expr::Abs(replace(a, target, replacement))),
-        Expr::Heaviside(a) => E::new(Expr::Heaviside(replace(a, target, replacement))),
-        Expr::Clamp(a, b, c) => E::new(Expr::Clamp(replace(a, target, replacement), replace(b, target, replacement), replace(c, target, replacement))),
-        Expr::Branch(a, b, c) => E::new(Expr::Branch(replace(a, target, replacement), replace(b, target, replacement), replace(c, target, replacement))),
-        Expr::Select { .. } => map_children(e, &mut |c| replace(c, target, replacement)),
+        Expr::Div(a, b) => E::new(Expr::Div(rec(a, memo), rec(b, memo))),
+        Expr::Pow(a, b) => E::new(Expr::Pow(rec(a, memo), rec(b, memo))),
+        Expr::Atan2(a, b) => E::new(Expr::Atan2(rec(a, memo), rec(b, memo))),
+        Expr::Sin(a) => E::new(Expr::Sin(rec(a, memo))),
+        Expr::Cos(a) => E::new(Expr::Cos(rec(a, memo))),
+        Expr::Tan(a) => E::new(Expr::Tan(rec(a, memo))),
+        Expr::Asin(a) => E::new(Expr::Asin(rec(a, memo))),
+        Expr::Acos(a) => E::new(Expr::Acos(rec(a, memo))),
+        Expr::Atan(a) => E::new(Expr::Atan(rec(a, memo))),
+        Expr::Sinh(a) => E::new(Expr::Sinh(rec(a, memo))),
+        Expr::Cosh(a) => E::new(Expr::Cosh(rec(a, memo))),
+        Expr::Tanh(a) => E::new(Expr::Tanh(rec(a, memo))),
+        Expr::Exp(a) => E::new(Expr::Exp(rec(a, memo))),
+        Expr::Ln(a) => E::new(Expr::Ln(rec(a, memo))),
+        Expr::Log2(a) => E::new(Expr::Log2(rec(a, memo))),
+        Expr::Log10(a) => E::new(Expr::Log10(rec(a, memo))),
+        Expr::Sqrt(a) => E::new(Expr::Sqrt(rec(a, memo))),
+        Expr::Abs(a) => E::new(Expr::Abs(rec(a, memo))),
+        Expr::Heaviside(a) => E::new(Expr::Heaviside(rec(a, memo))),
+        Expr::Clamp(a, b, c) => E::new(Expr::Clamp(rec(a, memo), rec(b, memo), rec(c, memo))),
+        Expr::Branch(a, b, c) => E::new(Expr::Branch(rec(a, memo), rec(b, memo), rec(c, memo))),
+        Expr::Select { .. } => map_children(e, &mut |c| rec(c, memo)),
         Expr::Func { name, params, kind, args } => {
-            let new_args = args.iter().map(|a| replace(a, target, replacement)).collect();
+            let new_args = args.iter().map(|a| rec(a, memo)).collect();
             E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
         }
     }
@@ -373,50 +500,71 @@ pub fn replace_many(e: &E, subs: &[(E, E)]) -> E {
         // R[k][l]), and both replacement fields carry the same runtime value.
         map.entry(from).or_insert(to);
     }
+    // Looking a node up hashes its whole subtree; only a node of a
+    // target's shape is looked up.
+    let shapes: std::collections::HashSet<Shape> = subs.iter().map(|(from, _)| shape(from)).collect();
     let mut memo: HashMap<*const Expr, E> = HashMap::new();
-    replace_many_inner(e, &map, &mut memo)
+    replace_many_inner(e, &map, &shapes, &mut memo)
 }
 
-fn replace_many_inner(e: &E, map: &HashMap<&E, &E>, memo: &mut HashMap<*const Expr, E>) -> E {
+/// The shallow identity of a node: its variant and, for a symbol, a
+/// named constant or a function, its name.
+type Shape = (std::mem::Discriminant<Expr>, Option<String>);
+
+fn shape(e: &E) -> Shape {
+    let name = match e.as_ref() {
+        Expr::Sym(s) => Some(s.clone()),
+        Expr::NamedConst { name, .. } | Expr::Func { name, .. } => Some(name.clone()),
+        _ => None,
+    };
+    (std::mem::discriminant(e.as_ref()), name)
+}
+
+fn replace_many_inner(
+    e: &E,
+    map: &HashMap<&E, &E>,
+    shapes: &std::collections::HashSet<Shape>,
+    memo: &mut HashMap<*const Expr, E>,
+) -> E {
     let ptr = e.as_ref() as *const Expr;
     if let Some(r) = memo.get(&ptr) {
         return r.clone();
     }
-    let rec = replace_many_inner;
+    let rec = |c: &E, memo: &mut HashMap<*const Expr, E>| replace_many_inner(c, map, shapes, memo);
     // A whole-node match takes precedence over descending into it.
-    let result = if let Some(to) = map.get(e) {
+    let result = if let Some(to) = shapes.contains(&shape(e)).then(|| map.get(e)).flatten() {
         (*to).clone()
     } else {
         match e.as_ref() {
             Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
-            Expr::Neg(a) => E::new(Expr::Neg(rec(a, map, memo))),
-            Expr::Sin(a) => E::new(Expr::Sin(rec(a, map, memo))),
-            Expr::Cos(a) => E::new(Expr::Cos(rec(a, map, memo))),
-            Expr::Tan(a) => E::new(Expr::Tan(rec(a, map, memo))),
-            Expr::Asin(a) => E::new(Expr::Asin(rec(a, map, memo))),
-            Expr::Acos(a) => E::new(Expr::Acos(rec(a, map, memo))),
-            Expr::Atan(a) => E::new(Expr::Atan(rec(a, map, memo))),
-            Expr::Sinh(a) => E::new(Expr::Sinh(rec(a, map, memo))),
-            Expr::Cosh(a) => E::new(Expr::Cosh(rec(a, map, memo))),
-            Expr::Tanh(a) => E::new(Expr::Tanh(rec(a, map, memo))),
-            Expr::Exp(a) => E::new(Expr::Exp(rec(a, map, memo))),
-            Expr::Ln(a) => E::new(Expr::Ln(rec(a, map, memo))),
-            Expr::Log2(a) => E::new(Expr::Log2(rec(a, map, memo))),
-            Expr::Log10(a) => E::new(Expr::Log10(rec(a, map, memo))),
-            Expr::Sqrt(a) => E::new(Expr::Sqrt(rec(a, map, memo))),
-            Expr::Abs(a) => E::new(Expr::Abs(rec(a, map, memo))),
-            Expr::Heaviside(a) => E::new(Expr::Heaviside(rec(a, map, memo))),
-            Expr::Add(a, b) => E::new(Expr::Add(rec(a, map, memo), rec(b, map, memo))),
-            Expr::Sub(a, b) => E::new(Expr::Sub(rec(a, map, memo), rec(b, map, memo))),
-            Expr::Mul(a, b) => E::new(Expr::Mul(rec(a, map, memo), rec(b, map, memo))),
-            Expr::Div(a, b) => E::new(Expr::Div(rec(a, map, memo), rec(b, map, memo))),
-            Expr::Pow(a, b) => E::new(Expr::Pow(rec(a, map, memo), rec(b, map, memo))),
-            Expr::Atan2(a, b) => E::new(Expr::Atan2(rec(a, map, memo), rec(b, map, memo))),
-            Expr::Clamp(a, b, c) => E::new(Expr::Clamp(rec(a, map, memo), rec(b, map, memo), rec(c, map, memo))),
-            Expr::Branch(a, b, c) => E::new(Expr::Branch(rec(a, map, memo), rec(b, map, memo), rec(c, map, memo))),
-            Expr::Select { .. } => map_children(e, &mut |c| rec(c, map, memo)),
+            Expr::Neg(a) => E::new(Expr::Neg(rec(a, memo))),
+            Expr::Sin(a) => E::new(Expr::Sin(rec(a, memo))),
+            Expr::Cos(a) => E::new(Expr::Cos(rec(a, memo))),
+            Expr::Tan(a) => E::new(Expr::Tan(rec(a, memo))),
+            Expr::Asin(a) => E::new(Expr::Asin(rec(a, memo))),
+            Expr::Acos(a) => E::new(Expr::Acos(rec(a, memo))),
+            Expr::Atan(a) => E::new(Expr::Atan(rec(a, memo))),
+            Expr::Sinh(a) => E::new(Expr::Sinh(rec(a, memo))),
+            Expr::Cosh(a) => E::new(Expr::Cosh(rec(a, memo))),
+            Expr::Tanh(a) => E::new(Expr::Tanh(rec(a, memo))),
+            Expr::Exp(a) => E::new(Expr::Exp(rec(a, memo))),
+            Expr::Ln(a) => E::new(Expr::Ln(rec(a, memo))),
+            Expr::Log2(a) => E::new(Expr::Log2(rec(a, memo))),
+            Expr::Log10(a) => E::new(Expr::Log10(rec(a, memo))),
+            Expr::Sqrt(a) => E::new(Expr::Sqrt(rec(a, memo))),
+            Expr::Abs(a) => E::new(Expr::Abs(rec(a, memo))),
+            Expr::Heaviside(a) => E::new(Expr::Heaviside(rec(a, memo))),
+            Expr::Add(a, b) => E::new(Expr::Add(rec(a, memo), rec(b, memo))),
+            Expr::Sub(a, b) => E::new(Expr::Sub(rec(a, memo), rec(b, memo))),
+            Expr::Mul(a, b) => E::new(Expr::Mul(rec(a, memo), rec(b, memo))),
+            Expr::Div(a, b) => E::new(Expr::Div(rec(a, memo), rec(b, memo))),
+            Expr::Pow(a, b) => E::new(Expr::Pow(rec(a, memo), rec(b, memo))),
+            Expr::Atan2(a, b) => E::new(Expr::Atan2(rec(a, memo), rec(b, memo))),
+            Expr::Clamp(a, b, c) => E::new(Expr::Clamp(rec(a, memo), rec(b, memo), rec(c, memo))),
+            Expr::Branch(a, b, c) => E::new(Expr::Branch(rec(a, memo), rec(b, memo), rec(c, memo))),
+            Expr::Select { .. } => map_children(e, &mut |c| rec(c, memo)),
             Expr::Func { name, params, kind, args } => {
-                let new_args = args.iter().map(|a| rec(a, map, memo)).collect();
+                let new_args = args.iter().map(|a| rec(a, memo)).collect();
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
             }
         }
@@ -511,14 +659,11 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
 
     loop {
         // Count subexpressions across results AND intermediate definitions
-        let mut outside: HashMap<E, usize> = HashMap::new();
-        let mut inside: HashMap<E, usize> = HashMap::new();
-        for r in &results {
-            count_subexprs(r, false, scoped, &mut outside, &mut inside);
-        }
-        for (_, expr) in &lets {
-            count_subexprs(expr, false, scoped, &mut outside, &mut inside);
-        }
+        let mut facts = Facts::default();
+        let counts = {
+            let roots: Vec<&E> = results.iter().chain(lets.iter().map(|(_, e)| e)).collect();
+            count_subexprs(&roots, scoped, &mut facts)
+        };
 
         // Find the best candidate: used >= 2 times, cost >= 1, and at
         // least one symbol. Only expressions seen outside a select arm
@@ -531,30 +676,40 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
         // generated code rely on (e.g. `let __x = 2.2e-16.powf(2.0);` is
         // an ambiguous numeric type, while the same expression inline
         // infers from its surroundings).
-        // Rank by savings = (uses - 1) * cost -- how many ops we save.
-        // The display string as the final tie-break makes the choice a
-        // total order: HashMap iteration order is randomized per
-        // instance, and max_by_key keeps the LAST maximum it sees, so
-        // without it two identical builds pick different candidates and
-        // emit differently-named/ordered temporaries (nondeterministic
-        // generated code).
-        let best = outside.into_iter()
-            .map(|(e, o)| {
-                let uses = o + inside.get(&e).copied().unwrap_or(0);
-                (e, uses)
-            })
-            .filter(|(e, uses)| *uses >= 2 && expr_cost(e) >= 1 && !e.symbols().is_empty())
-            .max_by_key(|(e, uses)| {
-                let cost = expr_cost(e);
-                let savings = (*uses - 1) * cost;
-                // Primary: most savings
-                // Secondary: prefer deeper (to enable further extraction)
-                // Tertiary: display string, for determinism
-                (savings, expr_depth(e), format!("{}", e))
-            });
-
-        let (subexpr, _uses) = match best {
-            Some(b) => b,
+        // Rank by savings = (uses - 1) * cost -- how many ops we save;
+        // then depth, to enable further extraction. The display string
+        // as the final tie-break makes the choice a total order: HashMap
+        // iteration order is randomized per instance, and max_by_key
+        // keeps the LAST maximum it sees, so without it two identical
+        // builds pick different candidates and emit differently-named/
+        // ordered temporaries (nondeterministic generated code). Only
+        // the candidates tied on savings and depth are rendered.
+        let mut best_rank = (0usize, 0usize);
+        let mut tied: Vec<E> = Vec::new();
+        for (key, (o, i)) in counts {
+            if o == 0 {
+                continue;
+            }
+            let uses = o + i;
+            if uses < 2 {
+                continue;
+            }
+            let (_, cost, depth, has_symbol) = facts.of(&key.e);
+            if cost < 1 || !has_symbol {
+                continue;
+            }
+            let rank = ((uses - 1) * cost, depth);
+            match rank.cmp(&best_rank) {
+                std::cmp::Ordering::Greater => {
+                    best_rank = rank;
+                    tied = vec![key.e];
+                }
+                std::cmp::Ordering::Equal => tied.push(key.e),
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        let subexpr = match tied.into_iter().max_by(|a, b| crate::fmt::display_cmp(a, b)) {
+            Some(e) => e,
             None => break,
         };
 
@@ -562,14 +717,14 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
         *counter += 1;
         let var_sym = symbol(&var_name);
 
-        // Replace in all results
+        // Replace in all results and in the existing intermediates'
+        // definitions, one memo for the whole batch.
+        let mut memo = Memo::new();
         for r in results.iter_mut() {
-            *r = replace(r, &subexpr, &var_sym);
+            *r = replace(r, &subexpr, &var_sym, &mut memo);
         }
-
-        // Replace in existing intermediates' definitions too
         for (_, expr) in lets.iter_mut() {
-            *expr = replace(expr, &subexpr, &var_sym);
+            *expr = replace(expr, &subexpr, &var_sym, &mut memo);
         }
 
         lets.push((var_name, subexpr));
@@ -579,34 +734,29 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
     // If `/ x` appears 2+ times, extract `__xN = 1.0 / x` and replace
     // `a / x` with `a * __xN`. Same scope rule as above: a divisor seen
     // only inside arms is left to the arm's own pass.
-    let mut outside: HashMap<E, usize> = HashMap::new();
-    let mut inside: HashMap<E, usize> = HashMap::new();
-    for r in &results {
-        count_divisors(r, false, scoped, &mut outside, &mut inside);
-    }
-    for (_, expr) in &lets {
-        count_divisors(expr, false, scoped, &mut outside, &mut inside);
-    }
+    let divisor_counts = {
+        let roots: Vec<&E> = results.iter().chain(lets.iter().map(|(_, e)| e)).collect();
+        count_divisors(&roots, scoped, &mut Facts::default())
+    };
     // Sort for determinism: HashMap iteration order would name and
     // order the reciprocal temporaries randomly across builds.
-    let mut divisors: Vec<(E, usize)> = outside.into_iter()
-        .map(|(e, o)| {
-            let uses = o + inside.get(&e).copied().unwrap_or(0);
-            (e, uses)
-        })
+    let mut divisors: Vec<(E, usize)> = divisor_counts.into_iter()
+        .filter(|(_, (o, _))| *o > 0)
+        .map(|(key, (o, i))| (key.e, o + i))
         .collect();
-    divisors.sort_by_key(|(e, _)| format!("{}", e));
+    divisors.sort_by(|(a, _), (b, _)| crate::fmt::display_cmp(a, b));
     for (divisor, uses) in divisors {
         if uses >= 2 {
             let var_name = format!("__x{}", *counter);
             *counter += 1;
             let var_sym = symbol(&var_name);
             let recip = E::new(Expr::Div(E::new(Expr::Const(1.0)), divisor.clone()));
+            let mut memo = Memo::new();
             for r in results.iter_mut() {
-                *r = replace_divisor(r, &divisor, &var_sym);
+                *r = replace_divisor(r, &divisor, &var_sym, &mut memo);
             }
             for (_, expr) in lets.iter_mut() {
-                *expr = replace_divisor(expr, &divisor, &var_sym);
+                *expr = replace_divisor(expr, &divisor, &var_sym, &mut memo);
             }
             lets.push((var_name, recip));
         }
@@ -696,68 +846,53 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
     (intermediates, results)
 }
 
-/// Count how many times each expression appears as a divisor (right side
-/// of Div), split by whether the division sits inside a select arm when
-/// `scoped` (see [`count_subexprs`]).
-fn count_divisors(e: &E, in_arm: bool, scoped: bool, outside: &mut HashMap<E, usize>, inside: &mut HashMap<E, usize>) {
-    match e.as_ref() {
-        Expr::Div(a, b) => {
-            let counts: &mut HashMap<E, usize> = if in_arm { &mut *inside } else { &mut *outside };
-            *counts.entry(b.clone()).or_insert(0) += 1;
-            count_divisors(a, in_arm, scoped, outside, inside);
-            count_divisors(b, in_arm, scoped, outside, inside);
-        }
-        Expr::Select { index, arms, default } => {
-            count_divisors(index, in_arm, scoped, outside, inside);
-            for a in arms.iter().chain(default.iter()) {
-                count_divisors(a, in_arm || scoped, scoped, outside, inside);
-            }
-        }
-        Expr::Branch(q, a, b) => {
-            count_divisors(q, in_arm, scoped, outside, inside);
-            count_divisors(a, in_arm || scoped, scoped, outside, inside);
-            count_divisors(b, in_arm || scoped, scoped, outside, inside);
-        }
-        _ => for c in children(e) { count_divisors(c, in_arm, scoped, outside, inside); },
+/// Replace `a / divisor` with `a * replacement` in expression `e`.
+fn replace_divisor(e: &E, divisor: &E, replacement: &E, memo: &mut Memo) -> E {
+    let ptr = e.as_ref() as *const Expr;
+    if let Some((_, r)) = memo.get(&ptr) {
+        return r.clone();
     }
+    let result = replace_divisor_uncached(e, divisor, replacement, memo);
+    memo.insert(ptr, (e.clone(), result.clone()));
+    result
 }
 
-/// Replace `a / divisor` with `a * replacement` in expression `e`.
-fn replace_divisor(e: &E, divisor: &E, replacement: &E) -> E {
+fn replace_divisor_uncached(e: &E, divisor: &E, replacement: &E, memo: &mut Memo) -> E {
+    let rec = |c: &E, memo: &mut Memo| replace_divisor(c, divisor, replacement, memo);
     match e.as_ref() {
         Expr::Div(a, b) if b == divisor => {
-            let a2 = replace_divisor(a, divisor, replacement);
+            let a2 = rec(a, memo);
             E::new(Expr::Mul(a2, replacement.clone()))
         }
         Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
-        Expr::Neg(a) => E::new(Expr::Neg(replace_divisor(a, divisor, replacement))),
-        Expr::Add(a, b) => E::new(Expr::Add(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
-        Expr::Sub(a, b) => E::new(Expr::Sub(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
-        Expr::Mul(a, b) => E::new(Expr::Mul(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
-        Expr::Div(a, b) => E::new(Expr::Div(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
-        Expr::Pow(a, b) => E::new(Expr::Pow(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
-        Expr::Atan2(a, b) => E::new(Expr::Atan2(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
-        Expr::Sin(a) => E::new(Expr::Sin(replace_divisor(a, divisor, replacement))),
-        Expr::Cos(a) => E::new(Expr::Cos(replace_divisor(a, divisor, replacement))),
-        Expr::Tan(a) => E::new(Expr::Tan(replace_divisor(a, divisor, replacement))),
-        Expr::Asin(a) => E::new(Expr::Asin(replace_divisor(a, divisor, replacement))),
-        Expr::Acos(a) => E::new(Expr::Acos(replace_divisor(a, divisor, replacement))),
-        Expr::Atan(a) => E::new(Expr::Atan(replace_divisor(a, divisor, replacement))),
-        Expr::Sinh(a) => E::new(Expr::Sinh(replace_divisor(a, divisor, replacement))),
-        Expr::Cosh(a) => E::new(Expr::Cosh(replace_divisor(a, divisor, replacement))),
-        Expr::Tanh(a) => E::new(Expr::Tanh(replace_divisor(a, divisor, replacement))),
-        Expr::Exp(a) => E::new(Expr::Exp(replace_divisor(a, divisor, replacement))),
-        Expr::Ln(a) => E::new(Expr::Ln(replace_divisor(a, divisor, replacement))),
-        Expr::Log2(a) => E::new(Expr::Log2(replace_divisor(a, divisor, replacement))),
-        Expr::Log10(a) => E::new(Expr::Log10(replace_divisor(a, divisor, replacement))),
-        Expr::Sqrt(a) => E::new(Expr::Sqrt(replace_divisor(a, divisor, replacement))),
-        Expr::Abs(a) => E::new(Expr::Abs(replace_divisor(a, divisor, replacement))),
-        Expr::Heaviside(a) => E::new(Expr::Heaviside(replace_divisor(a, divisor, replacement))),
-        Expr::Clamp(a, b, c) => E::new(Expr::Clamp(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement), replace_divisor(c, divisor, replacement))),
-        Expr::Branch(a, b, c) => E::new(Expr::Branch(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement), replace_divisor(c, divisor, replacement))),
-        Expr::Select { .. } => map_children(e, &mut |c| replace_divisor(c, divisor, replacement)),
+        Expr::Neg(a) => E::new(Expr::Neg(rec(a, memo))),
+        Expr::Add(a, b) => E::new(Expr::Add(rec(a, memo), rec(b, memo))),
+        Expr::Sub(a, b) => E::new(Expr::Sub(rec(a, memo), rec(b, memo))),
+        Expr::Mul(a, b) => E::new(Expr::Mul(rec(a, memo), rec(b, memo))),
+        Expr::Div(a, b) => E::new(Expr::Div(rec(a, memo), rec(b, memo))),
+        Expr::Pow(a, b) => E::new(Expr::Pow(rec(a, memo), rec(b, memo))),
+        Expr::Atan2(a, b) => E::new(Expr::Atan2(rec(a, memo), rec(b, memo))),
+        Expr::Sin(a) => E::new(Expr::Sin(rec(a, memo))),
+        Expr::Cos(a) => E::new(Expr::Cos(rec(a, memo))),
+        Expr::Tan(a) => E::new(Expr::Tan(rec(a, memo))),
+        Expr::Asin(a) => E::new(Expr::Asin(rec(a, memo))),
+        Expr::Acos(a) => E::new(Expr::Acos(rec(a, memo))),
+        Expr::Atan(a) => E::new(Expr::Atan(rec(a, memo))),
+        Expr::Sinh(a) => E::new(Expr::Sinh(rec(a, memo))),
+        Expr::Cosh(a) => E::new(Expr::Cosh(rec(a, memo))),
+        Expr::Tanh(a) => E::new(Expr::Tanh(rec(a, memo))),
+        Expr::Exp(a) => E::new(Expr::Exp(rec(a, memo))),
+        Expr::Ln(a) => E::new(Expr::Ln(rec(a, memo))),
+        Expr::Log2(a) => E::new(Expr::Log2(rec(a, memo))),
+        Expr::Log10(a) => E::new(Expr::Log10(rec(a, memo))),
+        Expr::Sqrt(a) => E::new(Expr::Sqrt(rec(a, memo))),
+        Expr::Abs(a) => E::new(Expr::Abs(rec(a, memo))),
+        Expr::Heaviside(a) => E::new(Expr::Heaviside(rec(a, memo))),
+        Expr::Clamp(a, b, c) => E::new(Expr::Clamp(rec(a, memo), rec(b, memo), rec(c, memo))),
+        Expr::Branch(a, b, c) => E::new(Expr::Branch(rec(a, memo), rec(b, memo), rec(c, memo))),
+        Expr::Select { .. } => map_children(e, &mut |c| rec(c, memo)),
         Expr::Func { name, params, kind, args } => {
-            let new_args = args.iter().map(|a| replace_divisor(a, divisor, replacement)).collect();
+            let new_args = args.iter().map(|a| rec(a, memo)).collect();
             E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
         }
     }

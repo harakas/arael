@@ -456,22 +456,57 @@ impl E {
     /// fast_atan)]` keyword, which maps `atan`/`atan2` onto [`fast_atan`]
     /// / [`fast_atan2`].
     pub fn replace_function(&self, name: &str, f: &dyn Fn(&[E]) -> E) -> E {
-        let rec = |a: &E| a.replace_function(name, f);
+        let mut memo = std::collections::HashMap::new();
+        self.replace_function_memo(name, f, &mut memo)
+    }
+
+    /// One node of [`replace_function`](Self::replace_function): each
+    /// shared node is rewritten once and its rewrite shared, so the walk
+    /// is proportional to the DAG rather than the unfolded tree. Every
+    /// node is rebuilt through the operators, so the result comes out
+    /// simplified as it is built. The memo is keyed by node identity and
+    /// holds the node with its rewrite, so an address cannot be reused
+    /// while it lives.
+    fn replace_function_memo(
+        &self,
+        name: &str,
+        f: &dyn Fn(&[E]) -> E,
+        memo: &mut std::collections::HashMap<*const Expr, (E, E)>,
+    ) -> E {
+        let key = Rc::as_ptr(&self.0);
+        if let Some((_, r)) = memo.get(&key) {
+            return r.clone();
+        }
+        let rec = |a: &E, memo: &mut std::collections::HashMap<*const Expr, (E, E)>| {
+            a.replace_function_memo(name, f, memo)
+        };
         macro_rules! un {
             ($nm:literal, $ctor:ident, $a:ident) => {{
-                let a = rec($a);
+                let a = rec($a, memo);
                 if name == $nm { f(&[a]) } else { $ctor(a) }
             }};
         }
-        match &*self.0 {
+        let result = match &*self.0 {
             Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => self.clone(),
-            Expr::Neg(a) => -rec(a),
-            Expr::Add(a, b) => rec(a) + rec(b),
-            Expr::Sub(a, b) => rec(a) - rec(b),
-            Expr::Mul(a, b) => rec(a) * rec(b),
-            Expr::Div(a, b) => rec(a) / rec(b),
+            Expr::Neg(a) => -rec(a, memo),
+            Expr::Add(a, b) => {
+                let (a, b) = (rec(a, memo), rec(b, memo));
+                a + b
+            }
+            Expr::Sub(a, b) => {
+                let (a, b) = (rec(a, memo), rec(b, memo));
+                a - b
+            }
+            Expr::Mul(a, b) => {
+                let (a, b) = (rec(a, memo), rec(b, memo));
+                a * b
+            }
+            Expr::Div(a, b) => {
+                let (a, b) = (rec(a, memo), rec(b, memo));
+                a / b
+            }
             Expr::Pow(a, b) => {
-                let (a, b) = (rec(a), rec(b));
+                let (a, b) = (rec(a, memo), rec(b, memo));
                 if name == "pow" { f(&[a, b]) } else { pow(a, b) }
             }
             Expr::Sin(a) => un!("sin", sin, a),
@@ -481,7 +516,7 @@ impl E {
             Expr::Acos(a) => un!("acos", acos, a),
             Expr::Atan(a) => un!("atan", atan, a),
             Expr::Atan2(y, x) => {
-                let (y, x) = (rec(y), rec(x));
+                let (y, x) = (rec(y, memo), rec(x, memo));
                 if name == "atan2" { f(&[y, x]) } else { atan2(y, x) }
             }
             Expr::Sinh(a) => un!("sinh", sinh, a),
@@ -495,19 +530,19 @@ impl E {
             Expr::Abs(a) => un!("abs", abs, a),
             Expr::Heaviside(a) => un!("heaviside", heaviside, a),
             Expr::Clamp(a, lo, hi) => {
-                let (a, lo, hi) = (rec(a), rec(lo), rec(hi));
+                let (a, lo, hi) = (rec(a, memo), rec(lo, memo), rec(hi, memo));
                 if name == "clamp" { f(&[a, lo, hi]) } else { clamp(a, lo, hi) }
             }
             Expr::Branch(q, a, b) => {
-                let (q, a, b) = (rec(q), rec(a), rec(b));
+                let (q, a, b) = (rec(q, memo), rec(a, memo), rec(b, memo));
                 if name == "branch" { f(&[q, a, b]) } else { branch(q, a, b) }
             }
             Expr::Select { index, arms, default } => {
                 // Argument order matches the Display form: index, arms,
                 // then the default when present.
-                let index = rec(index);
-                let arms: Vec<E> = arms.iter().map(rec).collect();
-                let default = default.as_ref().map(rec);
+                let index = rec(index, memo);
+                let arms: Vec<E> = arms.iter().map(|a| rec(a, memo)).collect();
+                let default = default.as_ref().map(|d| rec(d, memo));
                 if name == "select" {
                     let mut args = vec![index];
                     args.extend(arms);
@@ -518,7 +553,7 @@ impl E {
                 }
             }
             Expr::Func { name: fname, params, kind, args } => {
-                let new_args: Vec<E> = args.iter().map(rec).collect();
+                let new_args: Vec<E> = args.iter().map(|a| rec(a, memo)).collect();
                 if fname == name {
                     f(&new_args)
                 } else {
@@ -526,7 +561,56 @@ impl E {
                                         kind: kind.clone(), args: new_args })
                 }
             }
+        };
+        memo.insert(key, (self.clone(), result.clone()));
+        result
+    }
+
+    /// Calls `f` on every node once, children before parents: a visit
+    /// proportional to the DAG, a shared node seen once.
+    pub fn for_each_node(&self, f: &mut dyn FnMut(&E)) {
+        fn walk(e: &E, seen: &mut std::collections::HashSet<*const Expr>, f: &mut dyn FnMut(&E)) {
+            if !seen.insert(Rc::as_ptr(&e.0)) {
+                return;
+            }
+            for c in crate::cse::children(e) {
+                walk(c, seen, f);
+            }
+            f(e);
         }
+        walk(self, &mut std::collections::HashSet::new(), f);
+    }
+
+    /// Rebuilds the expression bottom-up with `f` at every node: `f` sees
+    /// a node with its children already rebuilt and returns the node to
+    /// put in its place, or `None` to keep it. Nodes are rebuilt raw,
+    /// without simplification, and a shared node once. Unlike
+    /// [`replace_function`](Self::replace_function), the result is not
+    /// simplified as it is built.
+    pub fn map_nodes(&self, f: &mut dyn FnMut(&E) -> Option<E>) -> E {
+        fn walk(
+            e: &E,
+            memo: &mut std::collections::HashMap<*const Expr, (E, E)>,
+            f: &mut dyn FnMut(&E) -> Option<E>,
+        ) -> E {
+            let key = Rc::as_ptr(&e.0);
+            if let Some((_, r)) = memo.get(&key) {
+                return r.clone();
+            }
+            let rebuilt = crate::cse::map_children(e, &mut |c| walk(c, memo, f));
+            let result = f(&rebuilt).unwrap_or(rebuilt);
+            memo.insert(key, (e.clone(), result.clone()));
+            result
+        }
+        walk(self, &mut std::collections::HashMap::new(), f)
+    }
+
+    /// The number of unique nodes reachable from this expression: the
+    /// size of the DAG, a shared subexpression counted once.
+    pub fn dag_size(&self) -> usize {
+        let mut n = 0;
+        self.for_each_node(&mut |_| n += 1);
+        n
     }
 }
 
