@@ -2372,18 +2372,24 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
 /// `None` when there is no branch, more than one distinct condition, or
 /// anything survives on the other side.
 fn off_branch_guard(exprs: &[arael_sym::E]) -> Option<arael_sym::E> {
-    let conds: std::cell::RefCell<Vec<arael_sym::E>> = std::cell::RefCell::new(Vec::new());
+    let mut conds: Vec<arael_sym::E> = Vec::new();
     for e in exprs {
-        e.replace_function("branch", &|args| {
-            let mut c = conds.borrow_mut();
-            if !c.contains(&args[0]) { c.push(args[0].clone()); }
-            arael_sym::branch(args[0].clone(), args[1].clone(), args[2].clone())
+        e.for_each_node(&mut |n| {
+            if let arael_sym::Expr::Branch(q, _, _) = n.as_ref()
+                && !conds.contains(q)
+            {
+                conds.push(q.clone());
+            }
         });
     }
-    let mut conds = conds.into_inner();
     if conds.len() != 1 { return None; }
-    let other_side = |args: &[arael_sym::E]| args[2].clone();
-    if exprs.iter().all(|e| e.replace_function("branch", &other_side).is_zero()) {
+    // Every branch taken on its other side, rebuilt raw and simplified
+    // once: the answer is only whether that comes out zero.
+    let mut other_side = |n: &arael_sym::E| match n.as_ref() {
+        arael_sym::Expr::Branch(_, _, b) => Some(b.clone()),
+        _ => None,
+    };
+    if exprs.iter().all(|e| e.map_nodes(&mut other_side).simplify().is_zero()) {
         conds.pop()
     } else {
         None
