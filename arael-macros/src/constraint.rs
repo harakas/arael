@@ -8002,6 +8002,50 @@ pub fn generate_root_methods(
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
             format!("invalid precision type '{}': {}", precision, e)))?;
 
+    // Each sweep is its own method. The inlining budget is per function,
+    // so a model with many collections would otherwise grow one body past
+    // it and lose the inlining of the block accumulation and the checked
+    // collection access that a small body keeps. Each method sums into a
+    // partial of its own, added once by the caller, which is the sum the
+    // single body already formed.
+    let mut gh_sweep_methods: Vec<TokenStream2> = Vec::new();
+    let mut gh_sweep_calls: Vec<TokenStream2> = Vec::new();
+    for (i, sweep) in grad_hessian_loops.iter().enumerate() {
+        let name = syn::Ident::new(
+            &format!("__compute_sweep{i}"), proc_macro2::Span::call_site());
+        gh_sweep_methods.push(quote! {
+            #[inline(never)]
+            #[allow(unused_variables)]
+            fn #name(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #acc_type {
+                use arael::utils::{Float as _, SelectIndex as _};
+                #cost_decl
+                #sweep
+                __cost
+            }
+        });
+        gh_sweep_calls.push(cost_add(quote! { self.#name(params, grad) }));
+    }
+    // The cost-only sweeps are split the same way. They only read, so
+    // they take a shared borrow and rebind the reborrow the bodies use.
+    let mut cost_sweep_methods: Vec<TokenStream2> = Vec::new();
+    let mut cost_sweep_calls: Vec<TokenStream2> = Vec::new();
+    for (i, sweep) in cost_loops.iter().enumerate() {
+        let name = syn::Ident::new(
+            &format!("__cost_sweep{i}"), proc_macro2::Span::call_site());
+        cost_sweep_methods.push(quote! {
+            #[inline(never)]
+            #[allow(unused_variables)]
+            fn #name(&self, params: &[#prec_type]) -> #acc_type {
+                use arael::utils::{Float as _, SelectIndex as _};
+                let __self_ref = &*self;
+                #cost_decl
+                #sweep
+                __cost
+            }
+        });
+        cost_sweep_calls.push(cost_add(quote! { self.#name(params) }));
+    }
+
     // advance(): fold accepted-step euler angle deltas. Recurses through
     // the whole model tree via Model::advance_params, so EA params at any
     // location (collections, root-level fields, direct-composed structs,
@@ -8080,10 +8124,13 @@ pub fn generate_root_methods(
                 #extended_update_call
                 arael::model::Model::zero_blocks(self);
                 #cost_decl
-                #(#grad_hessian_loops)*
+                #(#gh_sweep_calls)*
                 #extended_compute_call
                 __cost as #prec_type
             }
+
+            #(#gh_sweep_methods)*
+            #(#cost_sweep_methods)*
         }
     };
 
@@ -8191,8 +8238,9 @@ pub fn generate_root_methods(
                 #extended_update_call
                 // Read-only traversal: a plain shared reborrow suffices.
                 let __self_ref = &*self;
+                let _ = __self_ref;
                 #cost_decl
-                #(#cost_loops)*
+                #(#cost_sweep_calls)*
                 #extended_cost_call_acc
                 __cost as #prec_type
             }
