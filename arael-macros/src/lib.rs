@@ -852,14 +852,10 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   Jacobians. Derivatives are unaffected (they are the exact rational
 ///   forms either way).
 /// - `cost_plain` (the default), `cost_kahan`, `cost_f64` -- how the
-///   cost is accumulated, in `calc_cost` and in the assembly sweep
-///   alike. By default every loop sums into a partial of its own,
-///   added once into the loop around it, so a row's chain of adds is
-///   its innermost loop's length. `cost_kahan` compensates every add
-///   (`arael::utils::kahan_add`); `cost_f64` accumulates in f64 on an
-///   f32 root (ignored on f64). The two combine; `cost_plain` names
-///   the default and combines with neither. docs/MODEL.md, "The cost
-///   sum".
+///   cost is summed. `cost_kahan` uses Kahan summation: more precision
+///   in the cost at a slight computational cost. `cost_f64` sums in
+///   f64 on an f32 root (ignored on an f64 root). The two combine.
+///   docs/MODEL.md, "The cost sum".
 /// - `marginalize(field, ...)` -- marks landmark-style fields (small
 ///   parameter blocks coupled to other parameters but never to each
 ///   other) for the sparse solver to eliminate first. Generates

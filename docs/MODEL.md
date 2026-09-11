@@ -602,12 +602,8 @@ A single chain's rounding grows with the square root of its length;
 the partials keep every chain short. The cost is one add per loop
 iteration.
 
-**`cost_kahan`.** Every add, rows and partials, is a compensated
-(Kahan) add through `arael::utils::kahan_add`, which carries the
-rounding remainder of each add into the next. The sum's rounding then
-does not grow with the row count at all, whatever the nesting,
-including a flat model with one long loop. The price is four
-dependent flops per row instead of one.
+**`cost_kahan`.** The cost is summed with Kahan summation: more
+precision in the cost at a slight computational cost.
 
 **`cost_f64`.** On an f32 root the accumulator and the partials are
 f64; the rows stay f32 and the total is rounded to f32 once at the

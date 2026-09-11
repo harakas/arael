@@ -55,6 +55,12 @@ struct NestedF64 { groups: refs::Vec<Group> }
 #[arael(root, cost_kahan)]
 struct KahanF64 { terms: refs::Vec<Term<f64>> }
 
+/// Kahan under nesting: each group is a scope whose partial joins the
+/// enclosing sum with its remainder, so the nesting costs nothing.
+#[arael::model]
+#[arael(root, cost_kahan)]
+struct KahanNestedF64 { groups: refs::Vec<Group> }
+
 const N: usize = 200_000;
 const SCALE: f64 = 16_777_216.0; // 2^24
 
@@ -181,4 +187,30 @@ fn kahan_f64_is_exact_to_a_few_ulps() {
     let e = ulps_f64(c, exact_sum());
     assert!(e <= 4.0, "kahan f64 error {e} ulps");
     assert!(ulps_f64(cg, c) <= 1.0, "assembly cost {cg} != sweep cost {c}");
+}
+
+#[test]
+fn kahan_keeps_its_remainder_across_scopes() {
+    // Many short groups: a remainder dropped at every scope boundary would
+    // accumulate, so the nested sum must stay as exact as the flat one.
+    let mut nested = KahanNestedF64 { groups: refs::Vec::new() };
+    let per_group = 7;
+    let mut i = 0;
+    while i < N {
+        let mut g = Group { terms: Vec::new() };
+        for _ in 0..per_group {
+            if i == N { break; }
+            g.terms.push(Term { v: Param::new(1.0), d: datum(i) as f64 / SCALE, hb: SelfBlock::new() });
+            i += 1;
+        }
+        nested.groups.push(g);
+    }
+    let (c, cg) = costs(&mut nested);
+    let e = ulps_f64(c, exact_sum());
+    assert!(e <= 4.0, "nested kahan f64 error {e} ulps");
+    assert!(ulps_f64(cg, c) <= 1.0, "assembly cost {cg} != sweep cost {c}");
+    let mut flat = KahanF64 { terms: terms() };
+    let (flat_cost, _) = costs(&mut flat);
+    assert!(ulps_f64(c, flat_cost) <= 2.0,
+        "nested {c} and flat {flat_cost} kahan sums differ by more than the final rounding");
 }

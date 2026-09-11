@@ -3823,12 +3823,26 @@ pub fn generate_root_methods(
             quote! { __cost += #term; }
         }
     };
+    // A partial joins the enclosing sum with its remainder: `kahan_add`
+    // leaves in `comp` the excess rounded into `sum`, so the partial's
+    // value is `sum - comp`, added as two terms. Without the second the
+    // remainder of every scope would be dropped at its boundary.
+    let cost_merge = |sum: TokenStream2, carry: TokenStream2| -> TokenStream2 {
+        if cost_kahan {
+            quote! {
+                arael::utils::kahan_add(&mut __cost, &mut __cost_c, #sum);
+                arael::utils::kahan_add(&mut __cost, &mut __cost_c, -(#carry));
+            }
+        } else {
+            quote! { __cost += #sum; }
+        }
+    };
     // A scope of the cost sum: the wrapped code sums into a partial of its
-    // own, `__cost<n>`, added once into the enclosing accumulator. Every
+    // own, `__cost<n>`, merged once into the enclosing accumulator. Every
     // loop level of a cost sweep and every constraint's sweep is one, so a
     // row's chain of adds is as long as its innermost loop, not the model.
     // The wrapped code's `__cost` is renamed to the partial, so nested
-    // scopes read as a declaration before each loop and one add after it.
+    // scopes read as a declaration before each loop and one merge after it.
     let scope_count = std::cell::Cell::new(0usize);
     let scope = |t: TokenStream2| -> TokenStream2 {
         let n = scope_count.get() + 1;
@@ -3843,11 +3857,15 @@ pub fn generate_root_methods(
         } else {
             quote! { let mut #part_id = 0.0 as #acc_type; }
         };
-        let flush = cost_add(quote! { #part_id });
+        let flush = cost_merge(quote! { #part_id }, quote! { #part_c_id });
         quote! { #decl #inner #flush }
     };
-    let wrap_in_prefix_scoped = |prefix: &[AccessSegment], mutable: bool, inner: TokenStream2| -> TokenStream2 {
-        wrap_in_prefix_scoped(prefix, mutable, inner, Some(&scope))
+    // A top-level sweep of the cost or the block assembly becomes a
+    // method of its own, which is its outermost scope: its adds go to the
+    // method's accumulator and come back as the method's result. The
+    // inner loop levels are scopes as before.
+    let wrap_in_prefix_sweep = |prefix: &[AccessSegment], mutable: bool, inner: TokenStream2| -> TokenStream2 {
+        wrap_in_prefix_scoped(prefix, mutable, inner, Some(&scope), false)
     };
 
     // Root SelfBlock index setup: when the root struct has its own
@@ -6658,7 +6676,7 @@ pub fn generate_root_methods(
                     }
                 };
                 if jacobian { ct_loops.push(ct_wrap(&__cl)); }
-                cost_loops.push(scope(__cl));
+                cost_loops.push(__cl);
             } else {
                 let __cl = quote! {
                     {
@@ -6674,7 +6692,7 @@ pub fn generate_root_methods(
                     }
                 };
                 if jacobian { ct_loops.push(ct_wrap(&__cl)); }
-                cost_loops.push(scope(__cl));
+                cost_loops.push(__cl);
             }
 
             // Grad+hessian loop: same traversal but get mutable access
@@ -6754,7 +6772,7 @@ pub fn generate_root_methods(
             };
             let gh_loop = rename_ident(
                 rename_ident(gh_loop, &parent_name, parent_rename_to), &root_var_name, "self");
-            grad_hessian_loops.push(scope(gh_loop));
+            grad_hessian_loops.push(gh_loop);
 
             if is_multi_cross {
                 // Multi-cross remote: emit per-CrossBlock set_indices on
@@ -7382,7 +7400,7 @@ pub fn generate_root_methods(
         let resolve_stmts = &group.resolve_stmts;
 
         // Merged cost loop: SelfBlock entries + nested CrossBlock inner loops
-        merged_cost.push(wrap_in_prefix_scoped(prefix, false, quote! {
+        merged_cost.push(wrap_in_prefix_sweep(prefix, false, quote! {
             for __item in #ctn.#coll.iter() {
                 let #self_var = __item;
                 let #root_var_ident = &*__self_ref;
@@ -7408,7 +7426,7 @@ pub fn generate_root_methods(
         // Merged grad+hessian loop. Entries access the entity as `__item`
         // and the root as `self` directly (renamed at entry creation) --
         // no alias bindings.
-        merged_gh.push(wrap_in_prefix_scoped(prefix, true, quote! {
+        merged_gh.push(wrap_in_prefix_sweep(prefix, true, quote! {
             for __item in #ctn.#coll.iter_mut() {
                 #(#resolve_stmts)*
                 #(#gh_entries)*
@@ -7737,7 +7755,7 @@ pub fn generate_root_methods(
             quote! { __frine.#fi = __cid; }
         });
 
-        cost_loops.push(wrap_in_prefix_scoped(prefix, false, quote! {
+        cost_loops.push(wrap_in_prefix_sweep(prefix, false, quote! {
             for __frine in #ctn.#rc_ident.iter() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
@@ -7757,7 +7775,7 @@ pub fn generate_root_methods(
 
         // Entries carry their own ref rereads at the top; root reads go
         // through `self` (renamed at entry creation).
-        grad_hessian_loops.push(wrap_in_prefix_scoped(prefix, true, quote! {
+        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, true, quote! {
             for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#gh_entries)*
             }
@@ -7876,7 +7894,7 @@ pub fn generate_root_methods(
         // sits below the root, reached through the prefix loops.
         let prefix = &group.prefix;
         let ctn = nested_container(prefix);
-        cost_loops.push(wrap_in_prefix_scoped(prefix, false, quote! {
+        cost_loops.push(wrap_in_prefix_sweep(prefix, false, quote! {
             for __frine in #ctn.#rc_ident.iter() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
@@ -7898,7 +7916,7 @@ pub fn generate_root_methods(
         let entity_offsets_len = entity_offsets.len();
         // Loop-level resolves feed the __all_idx build; entries re-establish
         // their own bindings (a preceding entry's writes end these borrows).
-        grad_hessian_loops.push(wrap_in_prefix_scoped(prefix, true, quote! {
+        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, true, quote! {
             for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#resolve_stmts)*
                 let mut __all_idx = [0u32; #tp];
@@ -8008,6 +8026,27 @@ pub fn generate_root_methods(
     // collection access that a small body keeps. Each method sums into a
     // partial of its own, added once by the caller, which is the sum the
     // single body already formed.
+    // The accumulator's value at the end of a sweep, the remainder included.
+    let cost_ret: TokenStream2 = if cost_kahan {
+        quote! { (__cost - __cost_c) as #prec_type }
+    } else {
+        quote! { __cost as #prec_type }
+    };
+    // A sweep method hands back its partial with its remainder, so the
+    // caller's merge loses nothing at the boundary.
+    let (sweep_ret_ty, sweep_ret): (TokenStream2, TokenStream2) = if cost_kahan {
+        (quote! { (#acc_type, #acc_type) }, quote! { (__cost, __cost_c) })
+    } else {
+        (quote! { #acc_type }, quote! { __cost })
+    };
+    let sweep_call = |call: TokenStream2| -> TokenStream2 {
+        if cost_kahan {
+            let merge = cost_merge(quote! { __s }, quote! { __c });
+            quote! { { let (__s, __c) = #call; #merge } }
+        } else {
+            cost_add(call)
+        }
+    };
     let mut gh_sweep_methods: Vec<TokenStream2> = Vec::new();
     let mut gh_sweep_calls: Vec<TokenStream2> = Vec::new();
     for (i, sweep) in grad_hessian_loops.iter().enumerate() {
@@ -8016,14 +8055,14 @@ pub fn generate_root_methods(
         gh_sweep_methods.push(quote! {
             #[inline(never)]
             #[allow(unused_variables)]
-            fn #name(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #acc_type {
+            fn #name(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
                 #cost_decl
                 #sweep
-                __cost
+                #sweep_ret
             }
         });
-        gh_sweep_calls.push(cost_add(quote! { self.#name(params, grad) }));
+        gh_sweep_calls.push(sweep_call(quote! { self.#name(params, grad) }));
     }
     // The cost-only sweeps are split the same way. They only read, so
     // they take a shared borrow and rebind the reborrow the bodies use.
@@ -8035,15 +8074,15 @@ pub fn generate_root_methods(
         cost_sweep_methods.push(quote! {
             #[inline(never)]
             #[allow(unused_variables)]
-            fn #name(&self, params: &[#prec_type]) -> #acc_type {
+            fn #name(&self, params: &[#prec_type]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
                 let __self_ref = &*self;
                 #cost_decl
                 #sweep
-                __cost
+                #sweep_ret
             }
         });
-        cost_sweep_calls.push(cost_add(quote! { self.#name(params) }));
+        cost_sweep_calls.push(sweep_call(quote! { self.#name(params) }));
     }
 
     // advance(): fold accepted-step euler angle deltas. Recurses through
@@ -8126,7 +8165,7 @@ pub fn generate_root_methods(
                 #cost_decl
                 #(#gh_sweep_calls)*
                 #extended_compute_call
-                __cost as #prec_type
+                #cost_ret
             }
 
             #(#gh_sweep_methods)*
@@ -8242,7 +8281,7 @@ pub fn generate_root_methods(
                 #cost_decl
                 #(#cost_sweep_calls)*
                 #extended_cost_call_acc
-                __cost as #prec_type
+                #cost_ret
             }
 
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
@@ -9209,7 +9248,7 @@ fn nested_container(prefix: &[AccessSegment]) -> TokenStream2 {
 /// `let` binding. With an empty prefix this returns `inner` unchanged, so
 /// one-hop emission is byte-identical to before.
 fn wrap_in_prefix(prefix: &[AccessSegment], mutable: bool, inner: TokenStream2) -> TokenStream2 {
-    wrap_in_prefix_scoped(prefix, mutable, inner, None)
+    wrap_in_prefix_scoped(prefix, mutable, inner, None, true)
 }
 
 /// `wrap_in_prefix` for a cost-carrying sweep: with `scope`, every loop
@@ -9223,9 +9262,22 @@ fn wrap_in_prefix_scoped(
     mutable: bool,
     inner: TokenStream2,
     scope: Option<&dyn Fn(TokenStream2) -> TokenStream2>,
+    outer_scoped: bool,
 ) -> TokenStream2 {
+    // The outermost loop level: the first collection segment, or the
+    // inner sweep itself when the prefix has none. A sweep that becomes
+    // a method of its own is that method's scope already, so the level
+    // is left unscoped for it (`outer_scoped` false) and its adds land
+    // in the method's accumulator.
+    let outer = prefix.iter().position(|s| s.collection || s.optional);
+    let apply = |level: Option<usize>, code: TokenStream2| -> TokenStream2 {
+        match scope {
+            Some(s) if outer_scoped || level != outer => s(code),
+            _ => code,
+        }
+    };
     // The innermost loop is a level too.
-    let mut code = match scope { Some(s) => s(inner), None => inner };
+    let mut code = apply(None, inner);
     for (i, seg) in prefix.iter().enumerate().rev() {
         let field = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
         let bind = syn::Ident::new(&format!("__seg{}", i), proc_macro2::Span::call_site());
@@ -9242,7 +9294,7 @@ fn wrap_in_prefix_scoped(
             // the inner sweep are container-agnostic.
             let looped = if mutable { quote! { for #bind in #parent.#field.iter_mut() { #code } } }
                          else       { quote! { for #bind in #parent.#field.iter()     { #code } } };
-            match scope { Some(s) => s(looped), None => looped }
+            apply(Some(i), looped)
         } else if mutable {
             quote! { { let #bind = &mut #parent.#field; #code } }
         } else {
