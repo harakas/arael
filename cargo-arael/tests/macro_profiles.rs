@@ -6,7 +6,9 @@
 // some of them, in the per-package or the build-override form, gets
 // only the rest.
 
-use cargo_arael::export::{ensure_macro_profiles, has_macro_profiles, missing_macro_profiles, run_setup};
+use cargo_arael::export::{
+    ensure_macro_profiles, has_macro_profiles, macro_profile_notice, missing_macro_profiles, run_setup,
+};
 
 const PLAIN: &str = "[package]\nname = \"m\"\nversion = \"0.1.0\"\n";
 
@@ -107,4 +109,24 @@ fn setup_adds_the_entries_and_fails_loudly_without_a_manifest() {
     std::fs::remove_dir_all(&dir).unwrap();
     // Unlike the export's silent path, setup reports a missing manifest.
     assert!(run_setup(&dir).is_err());
+}
+
+#[test]
+fn check_notes_a_missing_profile_and_modifies_nothing() {
+    let dir = std::env::temp_dir().join(format!("arael-notice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), PLAIN).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+
+    let notice = macro_profile_notice(&dir).expect("a plain manifest gets a notice");
+    assert!(notice.contains("cargo arael setup"), "{notice}");
+    assert!(notice.contains("release/arael-sym"), "{notice}");
+    assert_eq!(std::fs::read_to_string(dir.join("Cargo.toml")).unwrap(), PLAIN,
+               "the notice must not touch the manifest");
+
+    run_setup(&dir).unwrap();
+    assert!(macro_profile_notice(&dir).is_none(), "a complete manifest gets no notice");
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -11,7 +11,8 @@ commands:
   export    build the model crate, harvest its sidecar, and (re)generate
             the interface tree (capi/, cxx/, python/); adds the macro
             build profile to the workspace Cargo.toml when it is missing
-  check     regenerate in memory and fail if the committed tree is stale
+  check     regenerate in memory and fail if the committed tree is stale;
+            modifies nothing, notes a missing macro build profile
   setup     add the macro build profile to the workspace Cargo.toml: the
             arael macro crates optimized in dev and release, so a large
             model does not spend its build expanding

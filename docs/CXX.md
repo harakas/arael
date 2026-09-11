@@ -38,7 +38,9 @@ workspace root, which is where cargo reads profiles from. `cargo arael
 setup` does just that step on its own.
 
 Commit the generated files; `cargo arael check` fails when they are
-stale (run it in CI). Rerun `export` after model changes. Every
+stale (run it in CI). It modifies nothing, and notes a missing macro
+build profile since it builds the model too. Rerun `export` after
+model changes. Every
 command takes `--manifest-dir <path>` to name the model crate instead
 of the current directory.
 `capi/Cargo.toml` is written once and then left alone -- edit it

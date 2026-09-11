@@ -412,6 +412,22 @@ pub fn ensure_macro_profiles(dir: &Path) {
     }
 }
 
+/// What `check` says about a manifest that does not build the macro
+/// crates optimized: it modifies nothing, but it builds the model, so
+/// the slow path it is about to take deserves a line. `None` when the
+/// profile is complete or the manifest cannot be read.
+pub fn macro_profile_notice(dir: &Path) -> Option<String> {
+    let manifest = workspace_manifest(dir);
+    let text = std::fs::read_to_string(&manifest).ok()?;
+    let missing = missing_macro_profiles(&text);
+    if missing.is_empty() {
+        return None;
+    }
+    Some(format!("note: {} does not build the arael macro crates optimized ({}), \
+                  so this build expands the model slowly; `cargo arael setup` adds \
+                  the profile", manifest.display(), describe(&missing)))
+}
+
 /// `cargo arael setup`: the same, asked for on its own, so a failure
 /// is one and a manifest that needs nothing says so.
 pub fn run_setup(dir: &Path) -> Result<(), String> {
@@ -525,6 +541,9 @@ pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
 
 pub fn run_check(dir: &Path, root: Option<&str>) -> Result<(), String> {
     let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
+    if let Some(notice) = macro_profile_notice(dir) {
+        eprintln!("{notice}");
+    }
     let models = harvest(dir)?;
     let picked = pick(&models, root)?;
     let files = generate(&picked, &crate_name, &arael_dep, ns.as_deref())?;
