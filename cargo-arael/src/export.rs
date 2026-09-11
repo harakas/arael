@@ -288,6 +288,142 @@ edition = \"2021\"
     Ok(())
 }
 
+/// The macro crates a model's code generation runs inside, and the
+/// profiles they must be optimized in. Cargo builds proc-macros and
+/// their dependencies unoptimized in every profile, so without these a
+/// large model spends most of its build expanding.
+const MACRO_CRATES: [&str; 2] = ["arael-macros", "arael-sym"];
+const MACRO_PROFILE_NAMES: [&str; 2] = ["dev", "release"];
+
+const MACRO_PROFILES_NOTE: &str = "\
+# Added by cargo-arael. Model code generation runs inside the arael
+# proc-macros at compile time, and cargo builds proc-macros unoptimized
+# in every profile -- so a large model spends most of its build
+# expanding. These build just the macro crates optimized, without
+# optimizing your own debug build.
+";
+
+/// The (profile, crate) pairs the manifest does not yet build
+/// optimized. A pair is covered by its own `[profile.<p>.package.<c>]`
+/// table or by that profile's `build-override`, which covers every
+/// proc-macro and build script, when either sets an optimizing
+/// `opt-level`. Keys may be quoted.
+pub fn missing_macro_profiles(text: &str) -> Vec<(&'static str, &'static str)> {
+    let mut covered: Vec<(&str, &str)> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix('[') {
+            parts = rest.trim_end_matches(']').split('.')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            continue;
+        }
+        if !t.starts_with("opt-level") {
+            continue;
+        }
+        let optimized = t.split('=').nth(1).map(|v| v.trim().trim_matches('"'))
+            .is_some_and(|v| v != "0" && v != "1");
+        if !optimized || parts.first().map(String::as_str) != Some("profile") {
+            continue;
+        }
+        let Some(profile) = MACRO_PROFILE_NAMES.iter().find(|p| parts.get(1).map(String::as_str) == Some(p)) else {
+            continue;
+        };
+        match (parts.get(2).map(String::as_str), parts.get(3).map(String::as_str)) {
+            (Some("build-override"), None) => {
+                for c in MACRO_CRATES { covered.push((profile, c)); }
+            }
+            (Some("package"), Some(c)) => {
+                if let Some(c) = MACRO_CRATES.iter().find(|k| **k == c) {
+                    covered.push((profile, c));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut missing = Vec::new();
+    for p in MACRO_PROFILE_NAMES {
+        for c in MACRO_CRATES {
+            if !covered.contains(&(p, c)) { missing.push((p, c)); }
+        }
+    }
+    missing
+}
+
+/// True when the manifest already builds the macro crates optimized in
+/// both profiles.
+pub fn has_macro_profiles(text: &str) -> bool {
+    missing_macro_profiles(text).is_empty()
+}
+
+/// Cargo reads `[profile.*]` only from the workspace root, so the
+/// entries go there rather than into a member's manifest. Asks cargo
+/// for the root; falls back to the crate itself when cargo cannot say.
+fn workspace_manifest(dir: &Path) -> PathBuf {
+    let out = std::process::Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .current_dir(dir)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if path.is_empty() { dir.join("Cargo.toml") } else { PathBuf::from(path) }
+        }
+        _ => dir.join("Cargo.toml"),
+    }
+}
+
+/// Give the macro crates an optimized build in both profiles, adding
+/// only the entries the workspace manifest lacks. Returns the manifest
+/// and what was added, empty when it already had everything.
+pub fn add_macro_profiles(dir: &Path) -> Result<(PathBuf, Vec<(&'static str, &'static str)>), String> {
+    let manifest = workspace_manifest(dir);
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("read {}: {e}", manifest.display()))?;
+    let missing = missing_macro_profiles(&text);
+    if missing.is_empty() {
+        return Ok((manifest, missing));
+    }
+    let mut add = String::from(MACRO_PROFILES_NOTE);
+    for (p, c) in &missing {
+        add.push_str(&format!("[profile.{p}.package.{c}]\nopt-level = 3\n"));
+    }
+    let sep = if text.ends_with("\n\n") || text.is_empty() { "" } else if text.ends_with('\n') { "\n" } else { "\n\n" };
+    std::fs::write(&manifest, format!("{text}{sep}{add}"))
+        .map_err(|e| format!("write {}: {e}", manifest.display()))?;
+    Ok((manifest, missing))
+}
+
+fn describe(added: &[(&str, &str)]) -> String {
+    added.iter().map(|(p, c)| format!("{p}/{c}")).collect::<Vec<_>>().join(", ")
+}
+
+/// The export's call: a manifest it cannot read or write is reported
+/// and left alone, and the export goes on.
+pub fn ensure_macro_profiles(dir: &Path) {
+    match add_macro_profiles(dir) {
+        Ok((_, added)) if added.is_empty() => {}
+        Ok((manifest, added)) => {
+            println!("added the macro build profile to {} ({})", manifest.display(), describe(&added));
+        }
+        Err(e) => eprintln!("{e} -- add the macro build profile by hand \
+                             (see the README, \"Builds are slow\")"),
+    }
+}
+
+/// `cargo arael setup`: the same, asked for on its own, so a failure
+/// is one and a manifest that needs nothing says so.
+pub fn run_setup(dir: &Path) -> Result<(), String> {
+    let (manifest, added) = add_macro_profiles(dir)?;
+    if added.is_empty() {
+        println!("{} already builds the macro crates optimized", manifest.display());
+    } else {
+        println!("added the macro build profile to {} ({})", manifest.display(), describe(&added));
+    }
+    Ok(())
+}
+
 /// Build the model crate with the sidecar enabled and read the JSONs.
 fn harvest(dir: &Path) -> Result<Vec<Model>, String> {
     // The env var is not in cargo's fingerprint: touch the sources so
@@ -349,6 +485,8 @@ fn pick<'m>(models: &'m [Model], root: Option<&str>) -> Result<Vec<&'m Model>, S
 pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
     let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
     stub_capi(dir, &crate_name)?;
+    // Before the harvest, which is itself a build of the model.
+    ensure_macro_profiles(dir);
     let models = harvest(dir)?;
     let picked = pick(&models, root)?;
     let files = generate(&picked, &crate_name, &arael_dep, ns.as_deref())?;

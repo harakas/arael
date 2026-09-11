@@ -28,8 +28,19 @@ entity to fill), containers spelled `refs::Vec<..>` /
 | `cxx/CMakeLists.txt` | build glue |
 | `python/<ns>/` | the Python interface (docs/PYTHON.md) |
 
+`export` also adds a macro build profile to the workspace `Cargo.toml`
+when it is missing: the arael macro crates at `opt-level = 3` in the
+dev and release profiles. Model code generation runs inside those
+crates at compile time, and cargo builds proc-macros unoptimized in
+every profile, so without it a large model spends most of its build
+expanding. Only the entries the manifest lacks are added, in the
+workspace root, which is where cargo reads profiles from. `cargo arael
+setup` does just that step on its own.
+
 Commit the generated files; `cargo arael check` fails when they are
-stale (run it in CI). Rerun `export` after model changes.
+stale (run it in CI). Rerun `export` after model changes. Every
+command takes `--manifest-dir <path>` to name the model crate instead
+of the current directory.
 `capi/Cargo.toml` is written once and then left alone -- edit it
 freely (dependencies, crate settings); delete the file to regenerate
 it. Everything else is regenerated on every export, but a file whose

@@ -863,7 +863,13 @@ your own debug build, by adding to your `Cargo.toml`:
 opt-level = 3
 [profile.dev.package.arael-sym]
 opt-level = 3
+[profile.release.package.arael-macros]
+opt-level = 3
+[profile.release.package.arael-sym]
+opt-level = 3
 ```
+
+`cargo arael setup` writes these into the workspace root for you.
 
 ## 2D Sketch Editor
 

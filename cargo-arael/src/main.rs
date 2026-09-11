@@ -9,8 +9,12 @@ usage: cargo arael <command> [options]
 
 commands:
   export    build the model crate, harvest its sidecar, and (re)generate
-            the interface tree (capi/, cxx/)
+            the interface tree (capi/, cxx/, python/); adds the macro
+            build profile to the workspace Cargo.toml when it is missing
   check     regenerate in memory and fail if the committed tree is stale
+  setup     add the macro build profile to the workspace Cargo.toml: the
+            arael macro crates optimized in dev and release, so a large
+            model does not spend its build expanding
 
 options:
   --manifest-dir <path>   model crate directory (default: current)
@@ -50,6 +54,7 @@ fn main() {
     let result = match cmd.as_deref() {
         Some("export") => export::run_export(&dir, root.as_deref()),
         Some("check") => export::run_check(&dir, root.as_deref()),
+        Some("setup") => export::run_setup(&dir),
         _ => {
             eprint!("{USAGE}");
             std::process::exit(2);
