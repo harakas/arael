@@ -61,6 +61,18 @@ struct KahanF64 { terms: refs::Vec<Term<f64>> }
 #[arael(root, cost_kahan)]
 struct KahanNestedF64 { groups: refs::Vec<Group> }
 
+/// An extended model's cost joins the Kahan sum like any other term.
+#[arael::model]
+#[arael(root, cost_kahan, extended)]
+struct KahanExtendedF64 {
+    terms: refs::Vec<Term<f64>>,
+    extra: f64,
+}
+
+impl arael::model::ExtendedModel<f64> for KahanExtendedF64 {
+    fn extended_cost(&self, _params: &[f64]) -> f64 { self.extra }
+}
+
 const N: usize = 200_000;
 const SCALE: f64 = 16_777_216.0; // 2^24
 
@@ -186,6 +198,15 @@ fn kahan_f64_is_exact_to_a_few_ulps() {
     let (c, cg) = costs(&mut m);
     let e = ulps_f64(c, exact_sum());
     assert!(e <= 4.0, "kahan f64 error {e} ulps");
+    assert!(ulps_f64(cg, c) <= 1.0, "assembly cost {cg} != sweep cost {c}");
+}
+
+#[test]
+fn extended_cost_joins_the_kahan_sum() {
+    let mut m = KahanExtendedF64 { terms: terms(), extra: 0.375 };
+    let (c, cg) = costs(&mut m);
+    let e = ulps_f64(c, exact_sum() + 0.375);
+    assert!(e <= 4.0, "kahan f64 with an extended cost: error {e} ulps");
     assert!(ulps_f64(cg, c) <= 1.0, "assembly cost {cg} != sweep cost {c}");
 }
 

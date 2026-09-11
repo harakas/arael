@@ -8100,8 +8100,9 @@ pub fn generate_root_methods(
     // accumulator's type in calc_cost.
     let extended_cost_call =
         quote! { __cost += arael::model::ExtendedModel::extended_cost(self, params); };
+    // The extended model's cost joins the sum like any other term.
     let extended_cost_call_acc =
-        quote! { __cost += arael::model::ExtendedModel::extended_cost(self, params) as #acc_type; };
+        cost_add(quote! { arael::model::ExtendedModel::extended_cost(self, params) as #acc_type });
     let extended_compute_call =
         quote! { arael::model::ExtendedModel::extended_compute(self, params, grad); };
 
