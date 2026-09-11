@@ -67,3 +67,7 @@ harness = false
 opt-level = 3
 [profile.dev.package.arael-sym]
 opt-level = 3
+[profile.release.package.arael-macros]
+opt-level = 3
+[profile.release.package.arael-sym]
+opt-level = 3

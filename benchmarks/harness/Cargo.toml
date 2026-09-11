@@ -20,3 +20,17 @@ faer23 = { package = "faer", version = "0.23.2", default-features = false, featu
 
 [features]
 factrs = ["dep:factrs", "dep:faer23"]
+
+# Added by cargo-arael. Model code generation runs inside the arael
+# proc-macros at compile time, and cargo builds proc-macros unoptimized
+# in every profile -- so a large model spends most of its build
+# expanding. These build just the macro crates optimized, without
+# optimizing your own debug build.
+[profile.dev.package.arael-macros]
+opt-level = 3
+[profile.dev.package.arael-sym]
+opt-level = 3
+[profile.release.package.arael-macros]
+opt-level = 3
+[profile.release.package.arael-sym]
+opt-level = 3

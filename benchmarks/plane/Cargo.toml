@@ -18,3 +18,17 @@ debug = false
 # depends on how rustc partitions the crate, so timings otherwise shift with
 # unrelated code in the binary. Pins them; costs only compile time.
 codegen-units = 1
+
+# Added by cargo-arael. Model code generation runs inside the arael
+# proc-macros at compile time, and cargo builds proc-macros unoptimized
+# in every profile -- so a large model spends most of its build
+# expanding. These build just the macro crates optimized, without
+# optimizing your own debug build.
+[profile.dev.package.arael-macros]
+opt-level = 3
+[profile.dev.package.arael-sym]
+opt-level = 3
+[profile.release.package.arael-macros]
+opt-level = 3
+[profile.release.package.arael-sym]
+opt-level = 3
