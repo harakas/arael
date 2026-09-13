@@ -74,4 +74,10 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs");
     t.compile_fail("tests/constraint_attr_errors/data_ref_not_collection.rs");
     t.compile_fail("tests/constraint_attr_errors/data_ref_shadows_parent_slot.rs");
+    // `par` is inert without the `rayon` feature: the root generates
+    // sequentially and there is nothing to reject.
+    if cfg!(feature = "rayon") {
+        t.compile_fail("tests/constraint_attr_errors/par_triplet.rs");
+        t.compile_fail("tests/constraint_attr_errors/par_extended.rs");
+    }
 }

@@ -2400,6 +2400,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             let mut cost_plain = false;
             let mut cost_kahan = false;
             let mut cost_f64 = false;
+            let mut par = false;
             let mut marginalize: Vec<syn::Ident> = Vec::new();
             let mut pos = 1;
             while pos < tvec.len() {
@@ -2426,6 +2427,8 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             cost_kahan = true;
                         } else if kw_str == "cost_f64" {
                             cost_f64 = true;
+                        } else if kw_str == "par" {
+                            par = true;
                         } else if kw_str == "marginalize" {
                             // Takes a parenthesized field list:
                             // marginalize(landmarks) or (a, b).
@@ -2453,7 +2456,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, or `marginalize(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `par`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -2472,7 +2475,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 return Some(Err(syn::Error::new(id.span(),
                     "`cost_plain` cannot be combined with `cost_kahan` or `cost_f64`")));
             }
-            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize, cost_kahan, cost_f64)));
+            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize, cost_kahan, cost_f64, par)));
         }
         None
     });
@@ -2480,13 +2483,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         Some(r) => Some(r?),
         None => None,
     };
-    let root_precision = root_info.as_ref().map(|(p, _, _, _, _, _, _)| p.clone());
-    let root_custom = root_info.as_ref().map(|(_, c, _, _, _, _, _)| *c).unwrap_or(false);
-    let root_jacobian = root_info.as_ref().map(|(_, _, j, _, _, _, _)| *j).unwrap_or(false);
-    let root_fast_atan = root_info.as_ref().map(|(_, _, _, f, _, _, _)| *f).unwrap_or(false);
-    let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e, _, _)| e.clone()).unwrap_or_default();
-    let root_cost_kahan = root_info.as_ref().map(|(_, _, _, _, _, k, _)| *k).unwrap_or(false);
-    let root_cost_f64 = root_info.as_ref().map(|(_, _, _, _, _, _, w)| *w).unwrap_or(false);
+    let root_precision = root_info.as_ref().map(|(p, _, _, _, _, _, _, _)| p.clone());
+    let root_custom = root_info.as_ref().map(|(_, c, _, _, _, _, _, _)| *c).unwrap_or(false);
+    let root_jacobian = root_info.as_ref().map(|(_, _, j, _, _, _, _, _)| *j).unwrap_or(false);
+    let root_fast_atan = root_info.as_ref().map(|(_, _, _, f, _, _, _, _)| *f).unwrap_or(false);
+    let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e, _, _, _)| e.clone()).unwrap_or_default();
+    let root_cost_kahan = root_info.as_ref().map(|(_, _, _, _, _, k, _, _)| *k).unwrap_or(false);
+    let root_cost_f64 = root_info.as_ref().map(|(_, _, _, _, _, _, w, _)| *w).unwrap_or(false);
+    let root_par = root_info.as_ref().map(|(_, _, _, _, _, _, _, p)| *p).unwrap_or(false);
 
     // Schur auto-detection: which parameter blocks may be marginalized.
     //
@@ -2654,40 +2658,18 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        // The threaded sweeps over per-thread mirrors come with the
-        // `rayon` feature. A root with a form the mirrors do not cover
-        // is generated again without them and keeps the sequential path.
-        let generate = |par: bool| constraint::generate_root_methods(
+        // The threaded sweeps over per-thread mirrors are opt-in: the
+        // root asks with `par` and arael must be built with the `rayon`
+        // feature. The mirrors cover a limited set of model forms, so a
+        // `par` root using one they do not is a compile error naming it;
+        // without the keyword the root is the sequential one it always
+        // was.
+        let par = root_par && cfg!(feature = "rayon");
+        constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64,
-            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par);
-        match generate(cfg!(feature = "rayon")) {
-            Err(e) if constraint::is_par_unsupported(&e) => {
-                // Say so at compile time: the model is threaded on the
-                // caller's word (`num_threads`) and silently would not be.
-                // Stable Rust has no warning API for a proc macro, so the
-                // note is a deprecated item used once.
-                let item = syn::Ident::new(
-                    &format!("__ARAEL_NO_THREADED_SWEEP_{}", name),
-                    proc_macro2::Span::call_site());
-                let reason = constraint::par_unsupported_reason(&e);
-                let reason = reason.strip_prefix(&format!("`{}`: ", name))
-                    .unwrap_or(&reason).to_string();
-                let note = syn::LitStr::new(&format!(
-                    "`{}` has no threaded sweep and assembles on one thread whatever \
-                     `LmConfig::num_threads` says: {}", name, reason),
-                    proc_macro2::Span::call_site());
-                let body = generate(false)?;
-                quote! {
-                    #[deprecated(note = #note)]
-                    #[allow(non_upper_case_globals)]
-                    const #item: () = ();
-                    const _: () = #item;
-                    #body
-                }
-            }
-            r => r?,
-        }
+            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par)
+            .map_err(|e| constraint::par_error(name, e))?
     } else {
         quote! {}
     };

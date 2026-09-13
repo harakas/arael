@@ -1279,8 +1279,8 @@
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
-//! | `num_threads` | `1` | threads for the cost and assembly sweeps and the linear solve (needs the `rayon` feature). Measure first -- see below |
-//! | `assembly_threads` | `None` | a thread count for the sweeps alone; `None` leaves them on `num_threads` |
+//! | `num_threads` | `1` | threads for the linear solve, and for the sweeps of a `par` root (needs the `rayon` feature). Measure first -- see below |
+//! | `assembly_threads` | `None` | a thread count for a `par` root's sweeps alone; `None` leaves them on `num_threads` |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. Turn on first whenever debugging |
 //! | `observer` | `None` | an [`LmObserver`](simple_lm::LmObserver) called once per damped attempt with the current state; can stop the solve. Set with `with_observer` |
@@ -1327,9 +1327,8 @@
 //!
 //! ## Threads
 //!
-//! Arael is single-threaded by default. With the `rayon` feature the cost
-//! evaluation, the assembly of the gradient and Hessian, and the linear
-//! solve run on rayon's global pool:
+//! Arael is single-threaded by default. With the `rayon` feature the
+//! linear solve runs on rayon's global pool:
 //!
 //! ```toml
 //! arael = { version = "0.7", features = ["rayon"] }
@@ -1341,18 +1340,23 @@
 //! let cfg = LmConfig::<f64>::conservative().with_num_threads(4);
 //! ```
 //!
-//! Without the feature, anything but 1 warns and stays sequential. With it
-//! every root model must be [`Sync`].
+//! Without the feature, anything but 1 warns and stays sequential.
 //!
-//! A threaded assembly adds up in a different order than the sequential
-//! one, so the two match to rounding, not to the bit.
+//! The cost evaluation and the assembly of the gradient and Hessian can
+//! thread too, which a root asks for:
 //!
-//! Not every model can be swept on threads: a constraint form the
-//! per-thread mirrors do not cover leaves the whole model on one thread.
-//! Such a model warns when it is built, naming the form, and again at the
-//! start of a solve that asked for threads. Neither is an error. Every
-//! solve's report says which form each sweep ran in, and what the two
-//! halves were given.
+//! ```ignore
+//! #[arael(root, par)]
+//! struct Scene { .. }
+//! ```
+//!
+//! **Experimental, and it covers a limited set of model forms.** A `par`
+//! root using a form the threaded sweeps do not cover fails to compile,
+//! naming the form; drop the keyword and the model solves sequentially
+//! with its linear solve still threaded. A `par` root must be [`Sync`],
+//! and its threaded assembly adds up in a different order than the
+//! sequential one, so the two match to rounding, not to the bit. Every
+//! solve's report says which form each sweep ran in.
 //!
 //! Threading has overhead: whether it helps, and by how much, depends on the
 //! model and its number of parameters. Each solve times both forms of each

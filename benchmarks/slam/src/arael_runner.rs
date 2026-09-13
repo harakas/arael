@@ -129,7 +129,7 @@ struct PosePair<T: Float> {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, par)]
 #[derive(Clone)]
 pub struct Path {
     poses: refs::Vec<Pose<f64>>,
@@ -143,7 +143,7 @@ pub struct Path {
 }
 
 #[arael::model]
-#[arael(root, f32)]
+#[arael(root, f32, par)]
 #[derive(Clone)]
 pub struct PathF {
     poses: refs::Vec<Pose<f32>>,

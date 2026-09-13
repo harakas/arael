@@ -251,8 +251,9 @@ pub struct LmConfig<T: Float> {
     /// non-positive-definite damped systems and catastrophic Gauss-Newton
     /// overshoots along the near-null directions.
     pub lambda_floor: T,
-    /// Threads for the cost and assembly sweeps and the linear solve. `1`
-    /// (the default) is sequential; `n > 1` uses `n`; `0` uses every core.
+    /// Threads for the linear solve, and for the cost and assembly sweeps
+    /// of a `#[arael(root, par)]` model. `1` (the default) is sequential;
+    /// `n > 1` uses `n`; `0` uses every core.
     ///
     /// Requires the `rayon` cargo feature. Without it, anything other than 1 is
     /// ignored with a warning and the solve stays sequential.
@@ -266,8 +267,8 @@ pub struct LmConfig<T: Float> {
     /// bit. Of the linear backends only `SparseFaer` reads the count; the
     /// Schur reduction and the analysis are sequential.
     pub num_threads: usize,
-    /// Threads for the cost and assembly sweeps alone, when they want a
-    /// count of their own. `None` (the default) leaves them on
+    /// Threads for a `par` root's cost and assembly sweeps alone, when
+    /// they want a count of their own. `None` (the default) leaves them on
     /// [`num_threads`](Self::num_threads); `Some(n)` gives the sweeps `n`
     /// and leaves the linear solve on `num_threads`. Same scale: `1` is
     /// sequential, `0` is every core.
@@ -1708,11 +1709,10 @@ pub struct LmResult<T> {
 /// what the cost and assembly sweeps settled on. Rendered by
 /// [`LmResult::report`] whenever either half had more than one thread.
 ///
-/// `sweeps` is `None` when the model has no threaded sweep path at all:
-/// arael must be built with the `rayon` feature, and the model's every
-/// constraint form must be one the per-thread mirrors cover. Such a
-/// model assembles on one thread however many are asked for, and the
-/// solve says so through [`log::warn`](crate::log).
+/// `sweeps` is `None` when the model has no threaded sweep path: the
+/// root did not ask for one with `#[arael(root, par)]`, or arael was
+/// built without the `rayon` feature. Such a model assembles on one
+/// thread however many are asked for; its linear solve still threads.
 #[derive(Clone, Debug, Default)]
 pub struct ThreadReport {
     /// Threads the cost and assembly sweeps were asked for
@@ -1980,7 +1980,7 @@ fn render_threads(t: &ThreadReport, style: Style) -> String {
     let mut out = format!("  threads   sweeps {}, linear {}\n", t.sweeps_asked, t.linear);
     let Some(s) = &t.sweeps else {
         out.push_str(&format!("    {}\n", style.paint("33",
-            "this model has no threaded sweep: assembling on one thread")));
+            "the sweeps are sequential: this is not a `par` root")));
         return out;
     };
     let phase = |name: &str, p: &crate::threads::PhaseChoice| {
@@ -2941,12 +2941,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                feature -- assembling on one thread. Rebuild with --features rayon.",
             config.assembly_threads.unwrap());
     }
-    if threads_asked.sweeps_asked > 1 && ctx.sweeps().is_none() {
-        warn!("LmConfig asks for {} threads, but this model has no threaded sweep: it uses \
-               a constraint form the per-thread mirrors do not cover, and building it \
-               warned and named the form -- assembling on one thread.",
-            threads_asked.sweeps_asked);
-    } else if config.verbose {
+    if config.verbose {
         info!("LM threads: sweeps {}, linear {}",
             threads_asked.sweeps_asked, threads_asked.linear);
     }

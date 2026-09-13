@@ -3795,14 +3795,17 @@ fn par_unsupported(msg: String) -> syn::Error {
     syn::Error::new(proc_macro2::Span::call_site(), format!("{}{}", PAR_UNSUPPORTED, msg))
 }
 
-/// Whether `e` only says the mirror path does not cover this root.
-pub(crate) fn is_par_unsupported(e: &syn::Error) -> bool {
-    e.to_string().starts_with(PAR_UNSUPPORTED)
-}
-
-/// The form that kept this root off the mirror path, without the mark.
-pub(crate) fn par_unsupported_reason(e: &syn::Error) -> String {
-    e.to_string().trim_start_matches(PAR_UNSUPPORTED).to_string()
+/// An error the mirror path raised, rewritten for the user: the form it
+/// does not cover, and what to do about it. Other errors pass through.
+pub(crate) fn par_error(root: &syn::Ident, e: syn::Error) -> syn::Error {
+    let text = e.to_string();
+    let Some(reason) = text.strip_prefix(PAR_UNSUPPORTED) else { return e };
+    let reason = reason.strip_prefix(&format!("`{}`: ", root)).unwrap_or(reason);
+    syn::Error::new(e.span(), format!(
+        "`{}`: `par`: {}. The threaded sweeps are experimental and cover a \
+         limited set of model forms (see docs/SOLVERS.md, Threads). Drop `par` \
+         to solve this model sequentially; the linear solve still threads.",
+        root, reason))
 }
 
 /// `par`: an entity container of the mirror -- a place constraints write a

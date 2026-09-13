@@ -370,10 +370,10 @@ Three reasons to opt in:
   history in an [`Arena`](#collection-types) but only optimizes the
   recent window pays Hessian memory for the active window alone.
 
-- **Threaded solves.** With the `rayon` feature a solve on more than one
-  thread assembles into per-thread mirrors and never writes the model's
-  own blocks (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)). An
-  inline block still carries its whole `[T; M]` array inside the entity
+- **Threaded solves.** A solve of a `#[arael(root, par)]` model on more
+  than one thread assembles into per-thread mirrors and never writes the
+  model's own blocks (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)).
+  An inline block still carries its whole `[T; M]` array inside the entity
   struct; a boxed one is a single empty pointer there.
 
 Allocation is decided once, when the solver assigns block indices
@@ -551,6 +551,7 @@ struct Path {
 | `#[arael(root, cost_plain)]` | the cost is summed with plain adds in the root's precision, one partial per loop (the default; see [The cost sum](#the-cost-sum)) |
 | `#[arael(root, cost_kahan)]` | every add of the cost sum is compensated (Kahan), so the sum's rounding does not grow with the row count |
 | `#[arael(root, cost_f64)]` | the cost sum is accumulated in f64 on an f32 root; ignored on an f64 root; combines with `cost_kahan` |
+| `#[arael(root, par)]` | **experimental, limited model support.** Generate the threaded cost and assembly sweeps, so a solve with `num_threads` other than 1 sweeps the constraints on that many threads (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)). Needs the `rayon` cargo feature; without it the root is the sequential one. A root that asks for it while using a form the sweeps do not cover fails to compile, naming the form: `extended`, any `TripletBlock`, parent-owned or mixed cross blocks, `root.`/`parent.` SelfBlock primaries, anything nested more than one level below the root, an entity in more than one collection, a chained ref path, or a `constraint_index` field |
 | `#[arael(root, marginalize(field, ...))]` | mark landmark-style fields (small blocks coupled to poses but never to each other) for the sparse solver to marginalize. Generates `RootProblem::marginalize_hint()` with the fields' parameter ranges, which `SparseFaer` reads off the model itself. Optional: without it the solver finds the marginalizable families in the model's coupling graph anyway. Use it to override that -- the named blocks are used as given, and must be mutually uncoupled |
 | `#[arael(fit(coll, \|e\| body))]` / `fit64(...)` | shorthand: sum-of-squares fit of a residual body over one collection (f32; `fit64` is f64). Implements `FitProblem`, whose `fit()` / `fit_with()` run the dense LM round trip |
 | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>`. Reserved for Models whose parameters only appear inside constraints declared elsewhere (rare) |

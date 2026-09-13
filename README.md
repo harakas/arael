@@ -544,14 +544,16 @@ performance/quality trade-off that actually matters for the
 problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
 reference and a recipe for picking them.
 
-Arael is single-threaded by default. With the `rayon` feature the cost
-evaluation, the assembly of the gradient and Hessian, and the linear solve run
-on rayon's thread pool -- set `LmConfig::num_threads` (1 = sequential, the
+Arael is single-threaded by default. With the `rayon` feature the linear solve
+runs on rayon's thread pool -- set `LmConfig::num_threads` (1 = sequential, the
 default; `n` = n threads; 0 = every core).
 
-A threaded assembly adds up in a different order than the sequential one, so the
-two match to rounding, not to the bit. With the feature every root model must be
-`Sync`.
+The cost evaluation and the assembly of the gradient and Hessian can thread too,
+which a root asks for with `#[arael(root, par)]`. **This is experimental and
+covers a limited set of model forms**: a root that asks for it and uses a form
+the threaded sweeps do not cover fails to compile, naming the form. A threaded
+assembly also adds up in a different order than the sequential one, so the two
+match to rounding, not to the bit, and every `par` root must be `Sync`.
 
 Threading has overhead: whether it helps, and by how much, depends on the model
 and its number of parameters. Each solve times both forms of each phase on its

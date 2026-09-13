@@ -1,0 +1,7 @@
+error: `R`: `par`: `extended` is not supported: the extended hooks write the model's blocks, which a threaded solve does not use. The threaded sweeps are experimental and cover a limited set of model forms (see docs/SOLVERS.md, Threads). Drop `par` to solve this model sequentially; the linear solve still threads.
+  --> tests/constraint_attr_errors/par_extended.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

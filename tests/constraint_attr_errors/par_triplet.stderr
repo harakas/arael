@@ -1,0 +1,7 @@
+error: `R`: `par`: a TripletBlock anywhere in the model is not supported: its entries have no per-thread copy. The threaded sweeps are experimental and cover a limited set of model forms (see docs/SOLVERS.md, Threads). Drop `par` to solve this model sequentially; the linear solve still threads.
+  --> tests/constraint_attr_errors/par_triplet.rs:23:1
+   |
+23 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -100,7 +100,7 @@ struct Tri {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, par)]
 struct Web {
     points: refs::Vec<Point>,
     landmarks: refs::Arena<Landmark>,
@@ -115,7 +115,7 @@ struct Web {
 // A root with a parameter of its own and a constraint on it: the root is
 // an entity of the mirror too.
 #[arael::model]
-#[arael(root)]
+#[arael(root, par)]
 #[arael(constraint(hb, {
     [(knob.scale - 1.5) * knob.anchor]
 }))]
@@ -129,10 +129,9 @@ struct Knob {
     hb: SelfBlock<Knob>,
 }
 
-// A TripletBlock has no per-thread copy: this root has no mirror path
-// and runs the sequential sweeps whatever the thread count. Building
-// this file warns that it has no threaded sweep, which is the macro
-// doing its job.
+// A root that does not ask for `par` runs the sequential sweeps
+// whatever the thread count. Its TripletBlock is also a form the
+// mirrors do not cover, so asking would be a compile error.
 #[arael::model]
 #[arael(constraint(hb, { [a.pos.x + b.pos.y + c.pos.x - 1.0] }))]
 struct Loop {
@@ -417,7 +416,7 @@ fn the_report_says_what_the_threads_did() {
         .unwrap();
     assert!(!quiet.report().contains("threads"), "{}", quiet.report());
 
-    // A model with no threaded sweep reports the fall-back.
+    // A root that did not ask for `par` reports that instead.
     let mut loose = Loose {
         points: refs::Vec::new(), links: std::vec::Vec::new(), loops: std::vec::Vec::new(),
         anchor: 100.0, drift: 0.01, spring: 1.0,
@@ -433,7 +432,7 @@ fn the_report_says_what_the_threads_did() {
     let r = loose.solve_sparse(&LmConfig::<f64> { max_iters: 3, num_threads: 4, ..Default::default() })
         .unwrap();
     assert!(r.threads.fell_back());
-    assert!(r.report().contains("no threaded sweep"), "{}", r.report());
+    assert!(r.report().contains("not a `par` root"), "{}", r.report());
 }
 
 /// The phase timing runs only when the context asks for it; the counts
@@ -462,11 +461,10 @@ fn timing_is_off_unless_asked() {
     assert!(t.assembly.par.region + t.assembly.seq.region > std::time::Duration::ZERO);
 }
 
-/// A root with a form the mirrors do not cover solves through the
-/// sequential path at every thread count, and its context holds no
-/// mirrors.
+/// A root that did not ask for `par` solves through the sequential
+/// path at every thread count, and its context holds no mirrors.
 #[test]
-fn an_uncovered_root_keeps_the_sequential_path() {
+fn a_root_without_par_keeps_the_sequential_path() {
     let build = || {
         let mut l = Loose {
             points: refs::Vec::new(),
