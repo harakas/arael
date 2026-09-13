@@ -65,27 +65,35 @@ fn solve(num_threads: usize) -> LmResult<f64> {
     build_chain(60).solve_sparse(&cfg).unwrap()
 }
 
-/// Threads must not change the answer. The factorization is exact either way, so
-/// the two solves take the same steps and land on the same parameters.
+/// Parameters agree to rounding, and the cost with them.
+fn assert_same_answer(a: &LmResult<f64>, b: &LmResult<f64>) {
+    assert_eq!(a.status, b.status);
+    assert!((a.end_cost - b.end_cost).abs() <= 1e-12 * (1.0 + a.end_cost.abs()),
+        "same cost: {} vs {}", a.end_cost, b.end_cost);
+    assert_eq!(a.x.len(), b.x.len());
+    for (x, y) in a.x.iter().zip(&b.x) {
+        assert!((x - y).abs() <= 1e-9 * (1.0 + x.abs()), "same parameters: {} vs {}", x, y);
+    }
+}
+
+/// Threads must not change the answer. The factorization is exact either
+/// way, and the threaded assembly sums each entity per thread and then
+/// across the threads, so the two solves agree to rounding rather than to
+/// the bit.
 #[test]
 fn threads_do_not_change_the_answer() {
     let seq = solve(1);
     let par = solve(4);
 
-    assert_eq!(seq.status, par.status);
     assert_eq!(seq.iterations, par.iterations, "same steps");
     assert_eq!(seq.accepted_iterations, par.accepted_iterations);
-    assert_eq!(seq.end_cost, par.end_cost, "same cost, to the bit");
-    assert_eq!(seq.x, par.x, "same parameters, to the bit");
+    assert_same_answer(&seq, &par);
 }
 
 /// 0 means "every core", and must also not change the answer.
 #[test]
 fn zero_threads_means_all_cores() {
-    let seq = solve(1);
-    let all = solve(0);
-    assert_eq!(seq.end_cost, all.end_cost);
-    assert_eq!(seq.x, all.x);
+    assert_same_answer(&solve(1), &solve(0));
 }
 
 /// The default is sequential. Whatever else changes, that must not.

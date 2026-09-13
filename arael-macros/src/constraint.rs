@@ -3800,6 +3800,11 @@ pub(crate) fn is_par_unsupported(e: &syn::Error) -> bool {
     e.to_string().starts_with(PAR_UNSUPPORTED)
 }
 
+/// The form that kept this root off the mirror path, without the mark.
+pub(crate) fn par_unsupported_reason(e: &syn::Error) -> String {
+    e.to_string().trim_start_matches(PAR_UNSUPPORTED).to_string()
+}
+
 /// `par`: an entity container of the mirror -- a place constraints write a
 /// SelfBlock into (a root collection, the root itself, a direct or Option
 /// field). The mirror holds a slab of partials for it.

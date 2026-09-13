@@ -651,6 +651,36 @@ SelfBlock primaries, constraint or entity collections below the root, an
 entity held in more than one collection, refs resolving through a chained
 path, and `constraint_index` fields.
 
+Such a model says so twice, and neither is an error. Building it warns
+and names the form that stopped it:
+
+```
+warning: use of deprecated constant `__ARAEL_NO_THREADED_SWEEP_BaProblem`:
+  `BaProblem` has no threaded sweep and assembles on one thread whatever
+  `LmConfig::num_threads` says: a parent-owned CrossBlock is not supported yet
+```
+
+and a solve that asks for threads warns again, once, at its start.
+
+### What the threads did
+
+Every solve's [report](#reporting-a-solve----lmresultprint) carries a threads block: the
+counts the two halves were given, the form each sweep settled on, and the
+two times the trial measured before it chose. With `gather_timing` it also
+carries where the sweeps' own time went.
+
+```
+  threads   sweeps 4, linear 4
+    assembly    threaded      7 calls  (measured 1.02 ms sequential, 0.98 ms threaded, per call)
+    cost        sequential    8 calls  (measured 0.05 ms sequential, 0.17 ms threaded, per call)
+    per sweep   region 0.39 ms, tasks max 0.22 mean 0.19, gather 0.02, scatter 0.42
+    mirrors     build 0.31 ms x1, 1731 leaves, 1993 blocks, 553 partials
+```
+
+A model with no threaded sweep prints that in place of the rows. The same
+is in `LmResult::threads` for a caller that would rather read it than
+parse it, and `ThreadReport::fell_back` is the one-line test.
+
 To reuse what a solve allocates -- the mirrors above -- across many solves
 of one model, keep an `arael::Context` and solve through
 `lm_solve_with_context`, or solve through an `LmSession`, which keeps one.

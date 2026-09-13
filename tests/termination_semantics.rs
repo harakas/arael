@@ -789,6 +789,7 @@ fn synthetic_result() -> LmResult<f64> {
         status: LmStatus::Converged,
         final_lambda: 1e-6,
         solver: None,
+        threads: Default::default(),
         timing: Some(LmTiming {
             total: Duration::from_micros(900),
             assembly: Duration::from_micros(120),

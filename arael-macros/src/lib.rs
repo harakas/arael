@@ -2662,7 +2662,30 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             root_fast_atan, root_cost_kahan, root_cost_f64,
             &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par);
         match generate(cfg!(feature = "rayon")) {
-            Err(e) if constraint::is_par_unsupported(&e) => generate(false)?,
+            Err(e) if constraint::is_par_unsupported(&e) => {
+                // Say so at compile time: the model is threaded on the
+                // caller's word (`num_threads`) and silently would not be.
+                // Stable Rust has no warning API for a proc macro, so the
+                // note is a deprecated item used once.
+                let item = syn::Ident::new(
+                    &format!("__ARAEL_NO_THREADED_SWEEP_{}", name),
+                    proc_macro2::Span::call_site());
+                let reason = constraint::par_unsupported_reason(&e);
+                let reason = reason.strip_prefix(&format!("`{}`: ", name))
+                    .unwrap_or(&reason).to_string();
+                let note = syn::LitStr::new(&format!(
+                    "`{}` has no threaded sweep and assembles on one thread whatever \
+                     `LmConfig::num_threads` says: {}", name, reason),
+                    proc_macro2::Span::call_site());
+                let body = generate(false)?;
+                quote! {
+                    #[deprecated(note = #note)]
+                    #[allow(non_upper_case_globals)]
+                    const #item: () = ();
+                    const _: () = #item;
+                    #body
+                }
+            }
             r => r?,
         }
     } else {

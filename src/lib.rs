@@ -1347,6 +1347,13 @@
 //! A threaded assembly adds up in a different order than the sequential
 //! one, so the two match to rounding, not to the bit.
 //!
+//! Not every model can be swept on threads: a constraint form the
+//! per-thread mirrors do not cover leaves the whole model on one thread.
+//! Such a model warns when it is built, naming the form, and again at the
+//! start of a solve that asked for threads. Neither is an error. Every
+//! solve's report says which form each sweep ran in, and what the two
+//! halves were given.
+//!
 //! Threading has overhead: whether it helps, and by how much, depends on the
 //! model and its number of parameters. Each solve times both forms of each
 //! phase on its first calls and keeps the faster one, so a model too small

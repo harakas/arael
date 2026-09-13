@@ -325,6 +325,44 @@ pub struct Context {
     mirrors: Option<Box<dyn AnyMirrors>>,
 }
 
+/// What one phase's sweeps did over a solve: the form they run in, and
+/// the two times the trial measured before it chose (sequential first,
+/// dispatched second), if it got to measure both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhaseChoice {
+    /// True when the phase runs dispatched over the mirrors.
+    pub threaded: bool,
+    /// The trial's two totals, sequential and dispatched, per call.
+    pub measured: Option<(Duration, Duration)>,
+    /// Calls of the phase in this solve.
+    pub calls: usize,
+}
+
+/// The thread counts a solve was given, before anything is measured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThreadCounts {
+    /// Threads for the cost and assembly sweeps.
+    pub sweeps_asked: usize,
+    /// Threads for the linear solve.
+    pub linear: usize,
+}
+
+/// What a solve's sweeps did, for the result's report. Only a model with
+/// a threaded sweep path has one.
+#[derive(Clone, Debug, Default)]
+pub struct SweepReport {
+    /// Mirrors the sweeps were given: 0 or 1 means they ran on the
+    /// calling thread.
+    pub threads: usize,
+    pub assembly: PhaseChoice,
+    pub cost: PhaseChoice,
+    /// Where the sweeps' time went, when the solve gathered timing
+    /// ([`LmConfig::gather_timing`](crate::simple_lm::LmConfig::gather_timing)
+    /// or [`Context::set_timing`]); all zero otherwise, and `on` says
+    /// which.
+    pub timing: ParTiming,
+}
+
 /// The type-erased mirror store: `Any` for the downcast, and cloneable
 /// so the context is. `Send + Sync` so a root may keep a context in a
 /// field and stay `Sync` for the dispatch.
@@ -332,12 +370,26 @@ trait AnyMirrors: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn clone_box(&self) -> Box<dyn AnyMirrors>;
+    fn sweeps(&self) -> SweepReport;
 }
 
 impl<M: Clone + Send + Sync + 'static> AnyMirrors for Mirrors<M> {
     fn as_any(&self) -> &dyn Any { self }
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
     fn clone_box(&self) -> Box<dyn AnyMirrors> { Box::new(self.clone()) }
+    fn sweeps(&self) -> SweepReport {
+        let phase = |t: &Trial, p: &PhaseTiming| PhaseChoice {
+            threaded: self.is_on() && t.par(),
+            measured: t.measured(),
+            calls: p.calls(),
+        };
+        SweepReport {
+            threads: self.threads,
+            assembly: phase(&self.assembly, &self.timing.assembly),
+            cost: phase(&self.cost, &self.timing.cost),
+            timing: self.timing.clone(),
+        }
+    }
 }
 
 impl Default for Context {
@@ -385,6 +437,14 @@ impl Context {
     /// The resolved thread count; 1 when the sweeps run on the calling
     /// thread.
     pub fn threads(&self) -> usize { self.threads.max(1) }
+
+    /// What the sweeps of the last solve through this context did.
+    /// `None` when the model has no threaded sweep path: the macro
+    /// generates one only for a root whose every form the mirrors
+    /// cover, and only with the `rayon` feature.
+    pub fn sweeps(&self) -> Option<SweepReport> {
+        self.mirrors.as_ref().map(|m| m.sweeps())
+    }
 
     /// The mirrors of root type `M`, if this context holds them.
     pub fn mirrors<M: 'static>(&self) -> Option<&Mirrors<M>> {

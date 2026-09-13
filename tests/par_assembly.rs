@@ -130,7 +130,9 @@ struct Knob {
 }
 
 // A TripletBlock has no per-thread copy: this root has no mirror path
-// and runs the sequential sweeps whatever the thread count.
+// and runs the sequential sweeps whatever the thread count. Building
+// this file warns that it has no threaded sweep, which is the macro
+// doing its job.
 #[arael::model]
 #[arael(constraint(hb, { [a.pos.x + b.pos.y + c.pos.x - 1.0] }))]
 struct Loop {
@@ -393,6 +395,47 @@ fn assembly_threads_overrides_the_sweep_count() {
     assert!(!ctx.mirrors::<WebMirror>().unwrap().is_on());
 }
 
+/// The solve's report says what the threads did: the counts, the form
+/// each sweep settled on, and, with `gather_timing`, where their time
+/// went. A model that cannot thread says that instead.
+#[test]
+fn the_report_says_what_the_threads_did() {
+    let cfg = LmConfig::<f64> {
+        max_iters: 6, num_threads: 2, gather_timing: true, ..Default::default()
+    };
+    let r = build(40).solve_sparse(&cfg).unwrap();
+    let text = r.report();
+    assert!(text.contains("threads   sweeps 2, linear 2"), "{}", text);
+    assert!(text.contains("assembly"), "{}", text);
+    assert!(text.contains("per sweep   region"), "the sweep timing is in it: {}", text);
+    assert!(text.contains("mirrors     build"), "the build timing is in it: {}", text);
+    assert!(r.threads.sweeps.is_some());
+    assert!(!r.threads.fell_back());
+
+    // A one-thread solve says nothing about threads.
+    let quiet = build(40).solve_sparse(&LmConfig::<f64> { max_iters: 3, ..Default::default() })
+        .unwrap();
+    assert!(!quiet.report().contains("threads"), "{}", quiet.report());
+
+    // A model with no threaded sweep reports the fall-back.
+    let mut loose = Loose {
+        points: refs::Vec::new(), links: std::vec::Vec::new(), loops: std::vec::Vec::new(),
+        anchor: 100.0, drift: 0.01, spring: 1.0,
+    };
+    for i in 0..8 {
+        let pos = vect2d::new(i as f64 * 0.5, 0.3);
+        loose.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+    }
+    for i in 1..8 {
+        let (a, b) = (loose.points.ref_at(i - 1), loose.points.ref_at(i));
+        loose.links.push(Link { a, b, rest: 1.0, hb: BoxedCrossBlock::new() });
+    }
+    let r = loose.solve_sparse(&LmConfig::<f64> { max_iters: 3, num_threads: 4, ..Default::default() })
+        .unwrap();
+    assert!(r.threads.fell_back());
+    assert!(r.report().contains("no threaded sweep"), "{}", r.report());
+}
+
 /// The phase timing runs only when the context asks for it; the counts
 /// are kept either way.
 #[test]
@@ -534,4 +577,15 @@ fn routes_agree_over_the_mirrors() {
         if i != j { dense_from_coo[j * n + i] += v; }
     }
     assert_close("coo vs dense", &dense_from_coo, &h1, 1e-12);
+}
+
+/// Print the two reports, for eyeballing: `cargo test --features rayon
+/// --test par_assembly show_reports -- --nocapture --ignored`.
+#[test]
+#[ignore]
+fn show_reports() {
+    let cfg = LmConfig::<f64> {
+        max_iters: 8, num_threads: 4, gather_timing: true, ..Default::default()
+    };
+    println!("{}", build(400).solve_sparse(&cfg).unwrap().report());
 }

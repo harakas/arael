@@ -2793,6 +2793,7 @@ impl Sketch {
                 status: arael::simple_lm::LmStatus::Converged, final_lambda: 0.0,
                 timing: None,
                 solver: None,
+                threads: Default::default(),
             };
         }
 
@@ -2838,6 +2839,7 @@ impl Sketch {
             final_lambda: 0.0,
             timing: None,
             solver: None,
+            threads: Default::default(),
         };
 
         let t_prep = timer.lap();

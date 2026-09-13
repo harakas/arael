@@ -1700,6 +1700,39 @@ pub struct LmResult<T> {
     /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
     /// was set, `None` otherwise (see [`LmTiming`]).
     pub timing: Option<LmTiming>,
+    /// What the solve's threads did (see [`ThreadReport`]).
+    pub threads: ThreadReport,
+}
+
+/// What a solve's threads did: the counts the two halves were given, and
+/// what the cost and assembly sweeps settled on. Rendered by
+/// [`LmResult::report`] whenever either half had more than one thread.
+///
+/// `sweeps` is `None` when the model has no threaded sweep path at all:
+/// arael must be built with the `rayon` feature, and the model's every
+/// constraint form must be one the per-thread mirrors cover. Such a
+/// model assembles on one thread however many are asked for, and the
+/// solve says so through [`log::warn`](crate::log).
+#[derive(Clone, Debug, Default)]
+pub struct ThreadReport {
+    /// Threads the cost and assembly sweeps were asked for
+    /// ([`LmConfig::assembly_threads`], else [`LmConfig::num_threads`]),
+    /// resolved: 0 means every core, and without the `rayon` feature
+    /// every count is 1.
+    pub sweeps_asked: usize,
+    /// Threads the linear solve was given ([`LmConfig::num_threads`]),
+    /// resolved the same way.
+    pub linear: usize,
+    /// What the sweeps did, or `None` when this model has no threaded
+    /// sweep path.
+    pub sweeps: Option<crate::threads::SweepReport>,
+}
+
+impl ThreadReport {
+    /// True when threads were asked for and the model cannot use them.
+    pub fn fell_back(&self) -> bool {
+        self.sweeps_asked > 1 && self.sweeps.is_none()
+    }
 }
 
 /// `x` prints as its length, not its contents. Derived, this formats every
@@ -1718,6 +1751,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for LmResult<T> {
             .field("final_lambda", &self.final_lambda)
             .field("solver", &self.solver)
             .field("timing", &self.timing)
+            .field("threads", &self.threads)
             .finish()
     }
 }
@@ -1864,6 +1898,7 @@ impl<T: Float> LmResult<T> {
         if let Some(t) = &self.timing {
             out.push_str(&self.render_timing(t, style));
         }
+        out.push_str(&render_threads(&self.threads, style));
         if let Some(SolverReport::Schur(plan)) = &self.solver {
             out.push_str(&render_plan(plan, style));
         }
@@ -1933,6 +1968,61 @@ impl<T: Float> LmResult<T> {
         }
         out
     }
+}
+
+/// The threads block of the report. Empty for a solve where neither
+/// half had more than one thread: there is nothing to say.
+fn render_threads(t: &ThreadReport, style: Style) -> String {
+    if t.sweeps_asked <= 1 && t.linear <= 1 {
+        return String::new();
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let mut out = format!("  threads   sweeps {}, linear {}\n", t.sweeps_asked, t.linear);
+    let Some(s) = &t.sweeps else {
+        out.push_str(&format!("    {}\n", style.paint("33",
+            "this model has no threaded sweep: assembling on one thread")));
+        return out;
+    };
+    let phase = |name: &str, p: &crate::threads::PhaseChoice| {
+        if p.calls == 0 {
+            return String::new();
+        }
+        let form = if p.threaded { "threaded " } else { "sequential" };
+        let why = match p.measured {
+            // The trial runs SAMPLES calls of each form before it decides.
+            Some((seq, par)) => format!(
+                "  (measured {:.2} ms sequential, {:.2} ms threaded, per call)",
+                ms(seq) / crate::threads::Trial::SAMPLES as f64,
+                ms(par) / crate::threads::Trial::SAMPLES as f64),
+            None => String::new(),
+        };
+        format!("    {:<11} {:<11}{:>4} calls{}\n", name, form, p.calls, why)
+    };
+    out.push_str(&phase("assembly", &s.assembly));
+    out.push_str(&phase("cost", &s.cost));
+    // What the sweeps' own clocks saw, when they ran.
+    let g = &s.timing;
+    if g.on {
+        let per = |d: Duration, n: usize| ms(d) / n.max(1) as f64;
+        let a = &g.assembly;
+        let f = if a.par.calls > 0 { &a.par } else { &a.seq };
+        if a.calls() > 0 {
+            out.push_str(&format!(
+                "    {:<11} region {:.2} ms, tasks max {:.2} mean {:.2}, \
+                 gather {:.2}, scatter {:.2}\n",
+                "per sweep",
+                per(f.region, f.calls), per(f.task_max, f.calls),
+                per(f.task_sum, f.calls * s.threads.max(1)),
+                per(g.gather_grad, a.calls()), per(g.scatter, a.calls())));
+        }
+        if g.builds > 0 {
+            out.push_str(&format!(
+                "    {:<11} build {:.2} ms x{}, {} leaves, {} blocks, {} partials\n",
+                "mirrors",
+                per(g.build, g.builds), g.builds, g.leaves, g.blocks, g.partials));
+        }
+    }
+    out
 }
 
 fn render_plan(plan: &SchurPlan, style: Style) -> String {
@@ -2703,7 +2793,17 @@ fn lm_empty_result<T: Float>(x0: &[T], config: &LmConfig<T>) -> LmResult<T> {
         status: LmStatus::Converged, final_lambda: T::zero(),
         timing: config.gather_timing.then(LmTiming::default),
         solver: None,
+        threads: ThreadReport::default(),
     }
+}
+
+/// The result's thread report: what the two halves were given, and what
+/// the sweeps did.
+fn report_threads(
+    asked: crate::threads::ThreadCounts,
+    sweeps: Option<crate::threads::SweepReport>,
+) -> ThreadReport {
+    ThreadReport { sweeps_asked: asked.sweeps_asked, linear: asked.linear, sweeps }
 }
 
 /// Run Levenberg-Marquardt optimization with the given solver backend.
@@ -2818,7 +2918,38 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     debug_assert!(n > 0);
     solver.configure(config);
     ctx.set_threads(config.assembly_threads.unwrap_or(config.num_threads));
+    // Gathering the solve's timing gathers the sweeps' too; a caller that
+    // turned the sweep clocks on itself keeps them on.
+    if config.gather_timing {
+        ctx.set_timing(true);
+    }
     problem.begin_with_context(ctx);
+    // What the two halves were given, for the result's report. A model
+    // with no threaded sweep path leaves the context without mirrors:
+    // say so, since the solve was asked for threads it cannot use.
+    let threads_asked = crate::threads::ThreadCounts {
+        sweeps_asked: ctx.threads(),
+        linear: crate::threads::pool_size(config.num_threads).max(1),
+    };
+    // Without the feature every count resolves to 1, so the fall-back
+    // below cannot fire: say that case separately, and only for
+    // `assembly_threads`, since the linear solve's own warning already
+    // covers `num_threads`.
+    #[cfg(not(feature = "rayon"))]
+    if config.assembly_threads.is_some_and(|n| n != 1) {
+        warn!("LmConfig::assembly_threads is {}, but arael was built without the `rayon` \
+               feature -- assembling on one thread. Rebuild with --features rayon.",
+            config.assembly_threads.unwrap());
+    }
+    if threads_asked.sweeps_asked > 1 && ctx.sweeps().is_none() {
+        warn!("LmConfig asks for {} threads, but this model has no threaded sweep: it uses \
+               a constraint form the per-thread mirrors do not cover, and building it \
+               warned and named the form -- assembling on one thread.",
+            threads_asked.sweeps_asked);
+    } else if config.verbose {
+        info!("LM threads: sweeps {}, linear {}",
+            threads_asked.sweeps_asked, threads_asked.linear);
+    }
     let problem = &mut WithContext { model: problem, ctx };
 
     let mut cur_x = x0.to_vec();
@@ -2936,7 +3067,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
-                    timing: gather.then_some(timing), solver: solver.report() });
+                    timing: gather.then_some(timing), solver: solver.report(),
+                    threads: report_threads(threads_asked, problem.ctx.sweeps()) });
             }
             // Already at or below the target. The in-loop test only runs on an
             // ACCEPTED step, so a solve that starts met never reaches it: every
@@ -2948,7 +3080,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::CostThreshold, final_lambda: lambda,
-                    timing: gather.then_some(timing), solver: solver.report() });
+                    timing: gather.then_some(timing), solver: solver.report(),
+                    threads: report_threads(threads_asked, problem.ctx.sweeps()) });
             }
         }
 
@@ -3009,7 +3142,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 let partial = LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
                     accepted_iterations: accepted,
                     status: LmStatus::Aborted, final_lambda: lambda,
-                    timing: gather.then_some(timing), solver: solver.report() };
+                    timing: gather.then_some(timing), solver: solver.report(),
+                    threads: report_threads(threads_asked, problem.ctx.sweeps()) };
                 return Err(SolveFailure {
                     kind: SolveFailureKind::DegenerateDiagonal { param: i, fault },
                     partial: Some(Box::new(partial)),
@@ -3431,6 +3565,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         final_lambda: lambda,
         timing: gather.then_some(timing),
         solver: solver.report(),
+        threads: report_threads(threads_asked, problem.ctx.sweeps()),
     };
     match failure {
         None => Ok(result),
@@ -7839,6 +7974,7 @@ mod tests {
             final_lambda: 1e-4,
             solver: None,
             timing: None,
+            threads: Default::default(),
         };
         let e = super::SolveFailure {
             kind: super::SolveFailureKind::DegenerateDiagonal {
