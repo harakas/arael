@@ -3786,6 +3786,193 @@ fn add_param_symbols(base: &str, sft: &SymFieldType, out: &mut Vec<String>) {
 
 /// Generate `calc_cost` and `calc_grad_hessian` methods on the root struct.
 /// `precision` is "f32" or "f64".
+/// The mark of an error that only says the mirror path does not cover a
+/// form of this root. The caller generates the root again without the
+/// mirror path; every other error is the user's.
+const PAR_UNSUPPORTED: &str = "[mirror path] ";
+
+fn par_unsupported(msg: String) -> syn::Error {
+    syn::Error::new(proc_macro2::Span::call_site(), format!("{}{}", PAR_UNSUPPORTED, msg))
+}
+
+/// Whether `e` only says the mirror path does not cover this root.
+pub(crate) fn is_par_unsupported(e: &syn::Error) -> bool {
+    e.to_string().starts_with(PAR_UNSUPPORTED)
+}
+
+/// `par`: an entity container of the mirror -- a place constraints write a
+/// SelfBlock into (a root collection, the root itself, a direct or Option
+/// field). The mirror holds a slab of partials for it.
+struct ParEntity {
+    key: String,
+    /// `self.<coll>` for a container addressed through `Leaves`, or
+    /// `self` / `self.<field>` for a single instance.
+    access: TokenStream2,
+    single: bool,
+    param_count: usize,
+    parts: syn::Ident,
+    partial_ty: TokenStream2,
+    /// `write_indices` statements over `__e`, the entity, into `__idx`.
+    idx_stmts: Vec<TokenStream2>,
+}
+
+/// `par`: how a constraint container's instance is reached by leaf index.
+enum ParInstance {
+    /// A root collection: the leaf index addresses `coll`, bound as `var`.
+    Flat { coll: TokenStream2, var: syn::Ident },
+    /// Constraint structs under a parent entity: the leaf index and sub
+    /// index address the parent (bound as `parent_var`) and the child
+    /// (`__frine`).
+    Nested { coll: TokenStream2, frines: syn::Ident, parent_var: syn::Ident },
+    /// The root itself or a direct field: one leaf, bound as `__item`.
+    Single { access: TokenStream2 },
+}
+
+/// `par`: a constraint container of the mirror -- one sweep loop, with a
+/// leaf list per thread.
+struct ParContainer {
+    leaf: syn::Ident,
+    leaves: syn::Ident,
+    instance: ParInstance,
+    /// Entity id per role, in slot order.
+    roles: Vec<usize>,
+    /// The entity index per role for the build, over the instance
+    /// bindings (`__i`, `__j`, the instance vars).
+    role_exprs: Vec<TokenStream2>,
+    /// Cross blocks the leaf holds: field, type, A role, B role.
+    blocks: Vec<(syn::Ident, TokenStream2, usize, usize)>,
+    gh_entries: Vec<TokenStream2>,
+    cost_prelude: TokenStream2,
+    cost_entries: Vec<TokenStream2>,
+}
+
+/// The `write_indices` statements of one entity type over `base`, into
+/// `__idx`, and the span they fill.
+fn par_idx_stmts(type_name: &str, base: TokenStream2) -> (usize, Vec<TokenStream2>) {
+    let mut stmts = Vec::new();
+    let mut offset = 0usize;
+    for slot in param_slots(type_name) {
+        let size = param_slot_size(&slot.sft);
+        if size == 0 { continue; }
+        let end = offset + size;
+        let access = slot_access(base.clone(), &slot.path);
+        stmts.push(quote! { #access.write_indices(&mut __idx[#offset..#end]); });
+        offset = end;
+    }
+    (offset, stmts)
+}
+
+/// The id of the entity container `key`, registering it on first use.
+fn par_entity_id(
+    entities: &mut Vec<ParEntity>,
+    key: &str,
+    access: TokenStream2,
+    single: bool,
+    type_name: &str,
+    suffix: &str,
+    cast_type: &syn::Type,
+) -> usize {
+    if let Some(i) = entities.iter().position(|e| e.key == key) {
+        return i;
+    }
+    let (n, idx_stmts) = par_idx_stmts(type_name, quote! { __e });
+    let m = n * (n + 1) / 2;
+    entities.push(ParEntity {
+        key: key.to_string(),
+        access,
+        single,
+        param_count: n,
+        parts: syn::Ident::new(&format!("__parts_{}", suffix), proc_macro2::Span::call_site()),
+        partial_ty: quote! { arael::model::Partial<#n, #m, #cast_type> },
+        idx_stmts,
+    });
+    entities.len() - 1
+}
+
+/// The leaf type of the constraint container `key` (`self.<path>`).
+fn par_leaf_ident(root_name: &syn::Ident, key: &str) -> syn::Ident {
+    let path = key.strip_prefix("self.").unwrap_or(key).replace('.', "_");
+    syn::Ident::new(&format!("{}Leaf_{}", root_name, path), proc_macro2::Span::call_site())
+}
+
+/// The mirror's leaf list field of the constraint container `key`.
+fn par_leaves_ident(key: &str) -> syn::Ident {
+    let path = key.strip_prefix("self.").unwrap_or(key).replace('.', "_");
+    syn::Ident::new(&format!("__leaves_{}", path), proc_macro2::Span::call_site())
+}
+
+/// The mirror's block list field for the cross block `field` of the
+/// constraint container `key`: one block per leaf, in leaf order, kept
+/// apart from the leaf list so the cost sweep never touches them.
+fn par_blocks_ident(key: &str, field: &syn::Ident) -> syn::Ident {
+    let path = key.strip_prefix("self.").unwrap_or(key).replace('.', "_");
+    syn::Ident::new(&format!("__blocks_{}_{}", path, field), proc_macro2::Span::call_site())
+}
+
+/// The sweep-local binding of a leaf's cross block `field`.
+fn par_blk_ident(field: &syn::Ident) -> syn::Ident {
+    syn::Ident::new(&format!("__blk_{}", field), proc_macro2::Span::call_site())
+}
+
+/// The entity index of a role during the build: the entity's own index
+/// for the iterated entity, 0 for the root, the ref's index otherwise.
+fn par_role_expr(var: &str, root_type_str: &str) -> TokenStream2 {
+    if var == "__item" {
+        quote! { __i }
+    } else if var == root_type_str.to_lowercase() {
+        quote! { 0u32 }
+    } else {
+        let v = syn::Ident::new(var, proc_macro2::Span::call_site());
+        quote! { __frine.#v.index() }
+    }
+}
+
+/// The leaf's cross blocks of a multi-cross constraint: one per own
+/// CrossBlock field, with the roles of its two sides.
+fn par_leaf_blocks(
+    roles: &[(String, usize)],
+    entities: &[ParEntity],
+    triplet_entities: &[(syn::Ident, syn::Ident, usize, usize)],
+    routing: &[MultiCrossRouting],
+    cast_type: &syn::Type,
+) -> Vec<(syn::Ident, TokenStream2, usize, usize)> {
+    let role_at = |idx: usize| -> usize {
+        let var = triplet_entities[idx].0.to_string();
+        roles.iter().position(|(v, _)| *v == var).expect("every entity is a role")
+    };
+    routing.iter().filter(|r| !r.parent_owned).map(|r| {
+        let (a, b) = (role_at(r.a_idx), role_at(r.b_idx));
+        let na = entities[roles[a].1].param_count;
+        let nb = entities[roles[b].1].param_count;
+        let p = na * nb;
+        (r.block_ident.clone(),
+         quote! { arael::model::CrossBlockArray<#na, #nb, #p, #cast_type> }, a, b)
+    }).collect()
+}
+
+/// A statement of the block assembly as emitted for the sequential sweep
+/// and for the mirror sweep of a `par` root: shared, sequential only, or
+/// one form each.
+enum GhStmt {
+    Both(TokenStream2),
+    Seq(TokenStream2),
+    Split(TokenStream2, TokenStream2),
+}
+
+/// The two statement lists of a [`GhStmt`] sequence.
+fn split_gh(stmts: &[GhStmt]) -> (Vec<TokenStream2>, Vec<TokenStream2>) {
+    let mut seq = Vec::with_capacity(stmts.len());
+    let mut par = Vec::with_capacity(stmts.len());
+    for s in stmts {
+        match s {
+            GhStmt::Both(t) => { seq.push(t.clone()); par.push(t.clone()); }
+            GhStmt::Seq(t) => seq.push(t.clone()),
+            GhStmt::Split(s, p) => { seq.push(s.clone()); par.push(p.clone()); }
+        }
+    }
+    (seq, par)
+}
+
 pub fn generate_root_methods(
     root_name: &syn::Ident,
     root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
@@ -3798,9 +3985,26 @@ pub fn generate_root_methods(
     marginalize_hint_fn: &Option<TokenStream2>,
     marginalize_candidates_fn: &Option<TokenStream2>,
     has_triplet_block: bool,
+    par: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
+    // `par`: the threaded sweeps over per-thread mirrors, owned by the
+    // solve context. The forms below rewrite every block write into the
+    // mirror, so anything that writes elsewhere (TripletBlock entries,
+    // extended hooks) has no mirror path: the error is the signal for
+    // the caller to generate the root again without one.
+    let par_err = |msg: String| par_unsupported(format!("`{}`: {}", root_name, msg));
+    if par {
+        if custom {
+            return Err(par_err("`extended` is not supported: the extended hooks write the \
+                                model's blocks, which a threaded solve does not use".into()));
+        }
+        if has_triplet_block {
+            return Err(par_err("a TripletBlock anywhere in the model is not supported: \
+                                its entries have no per-thread copy".into()));
+        }
+    }
     let root_var_ident = syn::Ident::new(&root_var_name, proc_macro2::Span::call_site());
     let cast_type: syn::Type = syn::parse_str(precision)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
@@ -4082,6 +4286,11 @@ pub fn generate_root_methods(
     let mut single_instance_groups: std::collections::BTreeMap<String, SingleInstanceGroup> = std::collections::BTreeMap::new();
 
     let mut _generated_constraints_fn: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // `par`: what the mirror holds (see `ParEntity` / `ParContainer`).
+    let mut par_entities: Vec<ParEntity> = Vec::new();
+    let mut par_containers: std::collections::BTreeMap<String, ParContainer> =
+        std::collections::BTreeMap::new();
 
     // Collect all types reachable from this root (for multi-root support).
     // Seeded with the root alone: its layout was registered earlier in this
@@ -5780,6 +5989,121 @@ pub fn generate_root_methods(
             None
         };
 
+        // `par`: the entity roles of this constraint in the slot order of
+        // its leaf, each an entity container of the mirror. Every write
+        // below names one of them, so a form that writes elsewhere is
+        // rejected here.
+        let par_roles: Vec<(String, usize)> = if par {
+            let loc = format!("{}:{}", sc.attr_file, sc.attr_line);
+            let unsupported = |what: &str| par_unsupported(
+                format!("{}: {} is not supported yet on `{}`", loc, what, sc.struct_name));
+            if is_triplet || is_root_triplet_self || parent_triplet.is_some() {
+                return Err(unsupported("a TripletBlock constraint"));
+            }
+            if parent_cross.is_some() || mixed.is_some() {
+                return Err(unsupported("a parent-owned CrossBlock"));
+            }
+            if root_self_primary.is_some() || parent_self_primary.is_some() {
+                return Err(unsupported("a `root.`/`parent.` SelfBlock primary"));
+            }
+            if !cross_prefix.is_empty() {
+                return Err(unsupported("a constraint collection below the root"));
+            }
+            if registry_lookup(&sc.struct_name).is_some_and(|l| l.constraint_index_field.is_some()) {
+                return Err(unsupported("a `constraint_index` field"));
+            }
+            let root_lc = root_type_str.to_lowercase();
+            let mut roles: Vec<(String, usize)> = Vec::new();
+            // A root collection reached by one of this constraint's refs.
+            let mut ref_entity = |var: &str| -> syn::Result<usize> {
+                if var == root_lc {
+                    return Ok(par_entity_id(&mut par_entities, "self", quote! { self },
+                        true, &root_type_str, "self", &cast_type));
+                }
+                let path = ref_index_paths.get(var).ok_or_else(|| unsupported(
+                    &format!("the entity `{}` (no resolve path)", var)))?;
+                let coll = path.strip_prefix("self.")
+                    .filter(|c| !c.contains('.'))
+                    .ok_or_else(|| unsupported(&format!(
+                        "the ref `{}` resolving through `{}` (a chained path)", var, path)))?;
+                let type_name = fields.named.iter()
+                    .find(|f| f.ident.as_ref().is_some_and(|i| i == var))
+                    .and_then(|f| extract_wrapper_inner(&f.ty, "Ref").map(|(_, id)| id.to_string()))
+                    .ok_or_else(|| unsupported(&format!("the entity `{}` (not a Ref field)", var)))?;
+                let coll_id = syn::Ident::new(coll, proc_macro2::Span::call_site());
+                Ok(par_entity_id(&mut par_entities, path, quote! { self.#coll_id },
+                    false, &type_name, coll, &cast_type))
+            };
+            if is_self_block {
+                if containing_paths.len() > 1 {
+                    return Err(unsupported("an entity held in several collections"));
+                }
+                let id = match &entity_location {
+                    EntityLocation::Collection { field } => {
+                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                        par_entity_id(&mut par_entities, &format!("self.{}", field),
+                            quote! { self.#fi }, false, &a_type, field, &cast_type)
+                    }
+                    EntityLocation::OptionalField { field } => {
+                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                        par_entity_id(&mut par_entities, &format!("self.{}", field),
+                            quote! { self.#fi }, false, &a_type, field, &cast_type)
+                    }
+                    EntityLocation::DirectField { field } => {
+                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                        par_entity_id(&mut par_entities, &format!("self.{}", field),
+                            quote! { self.#fi }, true, &a_type, field, &cast_type)
+                    }
+                    EntityLocation::RootSelf => par_entity_id(&mut par_entities, "self",
+                        quote! { self }, true, &root_type_str, "self", &cast_type),
+                    EntityLocation::Nested { .. } => {
+                        return Err(unsupported("an entity collection below the root"));
+                    }
+                };
+                roles.push(("__item".to_string(), id));
+            } else if is_multi_cross {
+                for (var_id, _, _, _) in &triplet_entities {
+                    let v = var_id.to_string();
+                    let id = ref_entity(&v)?;
+                    roles.push((v, id));
+                }
+            } else if is_remote_block {
+                let (ref_field_name, _, _) = remote_block_info.as_ref().unwrap();
+                let id = ref_entity(ref_field_name)?;
+                roles.push((ref_field_name.clone(), id));
+            } else if is_root_level_cross {
+                let a = a_var_ident_for_block.as_ref().unwrap().to_string();
+                let b = b_var_ident_for_block.as_ref().unwrap().to_string();
+                let ia = ref_entity(&a)?;
+                let ib = ref_entity(&b)?;
+                roles.push((a, ia));
+                roles.push((b, ib));
+            } else {
+                // Nested cross: the parent entity's collection, then the ref.
+                match &entity_location {
+                    EntityLocation::Collection { .. } => {}
+                    _ => return Err(unsupported("a parent entity outside a root collection")),
+                }
+                let b = b_var_ident_for_block.as_ref().unwrap().to_string();
+                let ib = ref_entity(&b)?;
+                let ia = par_entity_id(&mut par_entities, &format!("self.{}", coll_ident_str),
+                    quote! { self.#coll_ident }, false, &a_type, &coll_ident_str, &cast_type);
+                roles.push(("__item".to_string(), ia));
+                roles.push((b, ib));
+            }
+            roles
+        } else { Vec::new() };
+        // The mirror's write target for an entity var: its partial in the
+        // thread's slab, through the leaf's slot for that role.
+        let par_target = |var: &str| -> syn::Result<TokenStream2> {
+            let k = par_roles.iter().position(|(v, _)| v == var)
+                .ok_or_else(|| par_unsupported(
+                    format!("{}:{}: `{}` has no mirror role on `{}`",
+                        sc.attr_file, sc.attr_line, var, sc.struct_name)))?;
+            let parts = &par_entities[par_roles[k].1].parts;
+            Ok(quote! { #parts[__leaf.slots[#k] as usize] })
+        };
+
         // --- Robust loss setup ---
         // With a loss the block accumulates its squared residual norm into
         // __block_cost, then contributes rho(s) to __cost and scales every
@@ -5889,8 +6213,11 @@ pub fn generate_root_methods(
         if let Some(q) = &off_guard { all_gh_exprs.push(q.clone()); }
         let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
 
-        let mut gh_stmts = Vec::new();
-        gh_stmts.push(block_cost_decl.clone());
+        // The sequential sweep's statements and, for a `par` root, the
+        // mirror sweep's: the same computes, the writes redirected into
+        // the mirror, and no rereads (the model is never written there).
+        let mut gh: Vec<GhStmt> = Vec::new();
+        gh.push(GhStmt::Both(block_cost_decl.clone()));
 
         // Cross-block write targets: mutable access paths taken fresh at
         // every add_residual call (a temporary exclusive borrow, ending at
@@ -5940,10 +6267,10 @@ pub fn generate_root_methods(
             Some(quote! { #access.#block_ident })
         } else { None };
 
-        gh_stmts.extend(cse_stmts(&gh_intermediates, Some(""))?);
+        for s in cse_stmts(&gh_intermediates, Some(""))? { gh.push(GhStmt::Both(s)); }
         // Everything from here to the deferred writes is skipped when the
         // dead-branch test is off.
-        let skip_split = gh_stmts.len();
+        let skip_split = gh.len();
 
         // Pre-residual setup for the owned-triplet forms ([hb, root.hbt]
         // and [hb, parent.hbt]): build __all_idx (concatenation of entity
@@ -5989,12 +6316,12 @@ pub fn generate_root_methods(
             let total = self_count + joined_count;
             let sc_u32 = self_count as u32;
             let total_u32 = total as u32;
-            gh_stmts.push(quote! {
+            gh.push(GhStmt::Seq(quote! {
                 let mut __all_idx = [0u32; #total];
                 #(#self_idx_stmts)*
                 #(#joined_idx_stmts)*
                 let __entity_offsets: [u32; 3] = [0u32, #sc_u32, #total_u32];
-            });
+            }));
         }
 
         let mut idx = 0;
@@ -6010,7 +6337,7 @@ pub fn generate_root_methods(
         // A loss forces deferral: every write is scaled by __w = rho'(s),
         // which is only known once __block_cost has summed all rows.
         let defer_writes = is_remote_block || loss_present;
-        let mut deferred_writes: Vec<TokenStream2> = Vec::new();
+        let mut deferred_writes: Vec<GhStmt> = Vec::new();
         for ri in 0..n_residuals {
             // Residual rows interleave reads (residual + derivative
             // evaluation through shared borrows) and writes (temporary
@@ -6018,7 +6345,7 @@ pub fn generate_root_methods(
             // end the previous row's shared borrows, so every row after the
             // first re-establishes the ref bindings.
             if ri > 0 && !resolve_reread_stmts.is_empty() && !defer_writes {
-                gh_stmts.push(quote! { #(#resolve_reread_stmts)* });
+                gh.push(GhStmt::Seq(quote! { #(#resolve_reread_stmts)* }));
             }
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
@@ -6028,10 +6355,10 @@ pub fn generate_root_methods(
             // model evaluation in the LM loop). Under a loss this sums into
             // __block_cost = |r|^2 instead, and rho(s) is added to __cost once.
             let acc = row_acc(&r_ident);
-            gh_stmts.push(quote! {
+            gh.push(GhStmt::Both(quote! {
                 let #r_ident= #r_expr;
                 #acc
-            });
+            }));
             idx += 1;
             // The leading argument every accumulation call passes: the residual
             // cast to the block type, prefixed by the weight when a loss is on.
@@ -6056,7 +6383,7 @@ pub fn generate_root_methods(
                 } else {
                     let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
                     let dr_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
-                    gh_stmts.push(quote! { let #dr_ident= #dr_expr; });
+                    gh.push(GhStmt::Both(quote! { let #dr_ident= #dr_expr; }));
                     dr_f64.push(quote! { #dr_ident as #cast_type });
                 }
                 idx += 1;
@@ -6099,11 +6426,11 @@ pub fn generate_root_methods(
                         &__entity_offsets,
                     );
                 }};
-                let writes = quote! {
+                let writes = GhStmt::Seq(quote! {
                     #(#triplet_calls)*
                     #cross_call
-                };
-                if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
+                });
+                if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
             } else if is_multi_cross {
                 // Multi-cross: per-entity SelfBlock writes (same as triplet)
                 // + one CrossBlock.add_residual_cross per declared CrossBlock
@@ -6123,11 +6450,19 @@ pub fn generate_root_methods(
                     remote_block_info.as_ref().map(|(_, _, t)| t.clone())
                 } else { None };
                 let mut self_block_calls: Vec<TokenStream2> = Vec::new();
+                let mut self_block_calls_par: Vec<TokenStream2> = Vec::new();
                 let mut remote_self_block_call: Option<TokenStream2> = None;
+                let mut remote_self_block_call_par: Option<TokenStream2> = None;
                 for (var_id, type_id, start, count) in &triplet_entities {
                     if span_zero(*start, *count) { continue; }
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     let type_id_str = type_id.to_string();
+                    if par {
+                        let pt = par_target(&var_id.to_string())?;
+                        self_block_calls_par.push(quote! {
+                            #pt.#m_add(#wr, &[#(#entity_dr),*]);
+                        });
+                    }
                     if type_id_str == root_ident_str {
                         // Root: its block is a root field, disjoint from the
                         // iterated collection -- write directly through self.
@@ -6148,6 +6483,8 @@ pub fn generate_root_methods(
                         remote_self_block_call = Some(quote! {
                             #rtw.#m_add(#wr, &[#(#entity_dr),*], grad);
                         });
+                        // The mirror form wrote it above, in entity order.
+                        remote_self_block_call_par = self_block_calls_par.pop();
                         continue;
                     }
                     let hb = registry_lookup(&type_id_str)
@@ -6162,6 +6499,7 @@ pub fn generate_root_methods(
                     });
                 }
                 let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
+                let mut cross_block_calls_par: Vec<TokenStream2> = Vec::new();
                 for route in &multi_cross_routing {
                     if span_zero(route.a_start, route.a_count)
                         || span_zero(route.b_start, route.b_count) { continue; }
@@ -6186,19 +6524,35 @@ pub fn generate_root_methods(
                             &[#(#dr_b),*],
                         );
                     });
+                    let blk = par_blk_ident(block);
+                    cross_block_calls_par.push(quote! {
+                        #blk.#m_cross(
+                            #wr,
+                            &[#(#dr_a),*],
+                            &[#(#dr_b),*],
+                        );
+                    });
                 }
-                let writes = quote! {
+                let writes = GhStmt::Split(quote! {
                     #(#self_block_calls)*
                     #remote_self_block_call
                     #(#cross_block_calls)*
-                };
-                if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
+                }, quote! {
+                    #(#self_block_calls_par)*
+                    #remote_self_block_call_par
+                    #(#cross_block_calls_par)*
+                });
+                if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
             } else if is_remote_block {
                 if !all_zero {
                     let rtw = remote_target_write.as_ref().unwrap();
-                    deferred_writes.push(quote! {
+                    let par_write = if par {
+                        let pt = par_target(&remote_block_info.as_ref().unwrap().0)?;
+                        quote! { #pt.#m_add(#wr, &[#(#dr_f64),*]); }
+                    } else { quote! {} };
+                    deferred_writes.push(GhStmt::Split(quote! {
                         #rtw.#m_add(#wr, &[#(#dr_f64),*], grad);
-                    });
+                    }, par_write));
                 }
             } else if is_self_block {
                 if is_root_joined {
@@ -6265,17 +6619,21 @@ pub fn generate_root_methods(
                             },
                         _ => quote! {},
                     };
-                    let writes = quote! {
+                    let writes = GhStmt::Seq(quote! {
                         #self_call
                         #root_call
                         #cross_call
-                    };
-                    if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
+                    });
+                    if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 } else if !all_zero {
-                    let writes = quote! {
+                    let par_write = if par {
+                        let pt = par_target("__item")?;
+                        quote! { #pt.#m_add(#wr, &[#(#dr_f64),*]); }
+                    } else { quote! {} };
+                    let writes = GhStmt::Split(quote! {
                         __item.#block_ident.#m_add(#wr, &[#(#dr_f64),*], grad);
-                    };
-                    if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
+                    }, par_write);
+                    if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 }
             } else {
                 // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
@@ -6308,29 +6666,54 @@ pub fn generate_root_methods(
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
                     #cross_target.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
-                let writes = quote! {
+                // The mirror form: the partials through the leaf's slots,
+                // the cross tile on the leaf.
+                let par_write = if par {
+                    let a_var = a_var_ident_for_block.as_ref().unwrap().to_string();
+                    let b_var = b_var_ident_for_block.as_ref().unwrap().to_string();
+                    let pa = par_target(&a_var)?;
+                    let pb = par_target(&b_var)?;
+                    let a_call = if a_zero { quote! {} } else { quote! {
+                        #pa.#m_add(#wr, &[#(#dr_a),*]);
+                    }};
+                    let b_call = if b_zero { quote! {} } else { quote! {
+                        #pb.#m_add(#wr, &[#(#dr_b),*]);
+                    }};
+                    let blk = par_blk_ident(&block_ident);
+                    let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
+                        #blk.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
+                    }};
+                    quote! { #a_call #b_call #cross_call }
+                } else { quote! {} };
+                let writes = GhStmt::Split(quote! {
                     #a_call
                     #b_call
                     #cross_call
-                };
-                if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
+                }, par_write);
+                if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
             }
         }
 
         // Finalize the loss before the deferred writes: __cost += rho(s) and
         // let __w = rho'(s), which every deferred write below scales by.
-        gh_stmts.push(loss_gh_finalize);
+        gh.push(GhStmt::Both(loss_gh_finalize));
         if !deferred_writes.is_empty() {
-            gh_stmts.push(quote! { #(#deferred_writes)* });
+            let (dw_seq, dw_par) = split_gh(&deferred_writes);
+            gh.push(GhStmt::Split(quote! { #(#dw_seq)* }, quote! { #(#dw_par)* }));
         }
         if off_guard.is_some() {
             // The condition is the batch's last output. Off that side every
             // row is zero, so the cost, the loss (rho(0) = 0) and the writes
             // contribute nothing; a NaN condition is off, as in `branch`.
             let q_code: Expr = parse_sym_code(&gh_simplified[gh_simplified.len() - 1].to_rust(""))?;
-            let tail = gh_stmts.split_off(skip_split);
-            gh_stmts.push(quote! { if (#q_code) >= 0.0 { #(#tail)* } });
+            let tail = gh.split_off(skip_split);
+            let (tail_seq, tail_par) = split_gh(&tail);
+            gh.push(GhStmt::Split(
+                quote! { if (#q_code) >= 0.0 { #(#tail_seq)* } },
+                quote! { if (#q_code) >= 0.0 { #(#tail_par)* } },
+            ));
         }
+        let (gh_stmts, gh_stmts_par) = split_gh(&gh);
 
         // --- Jacobian code: same intermediates + residuals + derivatives, push rows ---
         let mut jac_stmts = Vec::new();
@@ -6660,6 +7043,11 @@ pub fn generate_root_methods(
             } else {
                 quote! { { #(#gh_stmts)* } }
             };
+            let remote_guarded_gh_par = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#gh_stmts_par)* } }
+            } else {
+                quote! { { #(#gh_stmts_par)* } }
+            };
 
             // Cost loop: iterate parent -> frines, resolve refs, evaluate
             if parent_is_root {
@@ -6774,6 +7162,54 @@ pub fn generate_root_methods(
                 rename_ident(gh_loop, &parent_name, parent_rename_to), &root_var_name, "self");
             grad_hessian_loops.push(gh_loop);
 
+            if par {
+                let gh_entry_par = quote! {
+                    { #(#entity_index_copies)* #(#resolve_reread_stmts)* #remote_guarded_gh_par }
+                };
+                let gh_entry_par = rename_ident(
+                    rename_ident(gh_entry_par, &parent_name, parent_rename_to), &root_var_name, "self");
+                let (key, instance, cost_prelude) = if parent_is_root {
+                    (format!("self.{}", frines_ident),
+                     ParInstance::Flat {
+                         coll: quote! { self.#frines_ident },
+                         var: syn::Ident::new("__frine", proc_macro2::Span::call_site()),
+                     },
+                     quote! {
+                         #(#resolve_stmts)*
+                         #[allow(unused_variables)]
+                         let #parent_ident = &*__self_ref;
+                         let #root_var_ident = &*__self_ref;
+                     })
+                } else {
+                    (format!("self.{}.{}", coll_ident, frines_ident),
+                     ParInstance::Nested {
+                         coll: quote! { self.#coll_ident },
+                         frines: frines_ident.clone(),
+                         parent_var: syn::Ident::new("__lm", proc_macro2::Span::call_site()),
+                     },
+                     quote! {
+                         #(#resolve_stmts)*
+                         let #parent_ident = __lm;
+                         let #root_var_ident = &*__self_ref;
+                     })
+                };
+                let blocks = par_leaf_blocks(&par_roles, &par_entities, &triplet_entities,
+                    &multi_cross_routing, &cast_type);
+                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
+                    leaf: par_leaf_ident(root_name, &key),
+                    leaves: par_leaves_ident(&key),
+                    instance,
+                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
+                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
+                    blocks,
+                    gh_entries: Vec::new(),
+                    cost_prelude,
+                    cost_entries: Vec::new(),
+                });
+                c.gh_entries.push(gh_entry_par);
+                c.cost_entries.push(remote_guarded_cost.clone());
+            }
+
             if is_multi_cross {
                 // Multi-cross remote: emit per-CrossBlock set_indices on
                 // each frine alongside the target (remote) set_indices.
@@ -6870,6 +7306,59 @@ pub fn generate_root_methods(
                     rename_ident(renamed, &root_var_name, "self")
                 } else { renamed }
             };
+            let gh_entry_par = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #marker #(#gh_stmts_par)* } }
+            } else {
+                quote! { { #marker #(#gh_stmts_par)* } }
+            };
+            let gh_entry_par = {
+                let renamed = rename_ident(gh_entry_par, &self_var_name, "__item");
+                if root_var_name != self_var_name {
+                    rename_ident(renamed, &root_var_name, "self")
+                } else { renamed }
+            };
+            if par {
+                // One leaf per entity of its container, the entity as
+                // the only role.
+                let (key, instance) = match &entity_location {
+                    EntityLocation::Collection { field }
+                    | EntityLocation::OptionalField { field } => {
+                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                        (format!("self.{}", field), ParInstance::Flat {
+                            coll: quote! { self.#fi },
+                            var: syn::Ident::new("__item", proc_macro2::Span::call_site()),
+                        })
+                    }
+                    EntityLocation::DirectField { field } => {
+                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                        (format!("self.{}", field), ParInstance::Single { access: quote! { &self.#fi } })
+                    }
+                    EntityLocation::RootSelf => {
+                        ("self".to_string(), ParInstance::Single { access: quote! { &*__self_ref } })
+                    }
+                    EntityLocation::Nested { .. } => unreachable!("rejected above"),
+                };
+                let cost_prelude = quote! {
+                    let #self_var = __item;
+                    let #root_var_ident = &*__self_ref;
+                    #(#self_resolve_stmts)*
+                };
+                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
+                    leaf: par_leaf_ident(root_name, &key),
+                    leaves: par_leaves_ident(&key),
+                    instance,
+                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
+                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
+                    blocks: Vec::new(),
+                    gh_entries: Vec::new(),
+                    cost_prelude,
+                    cost_entries: Vec::new(),
+                });
+                // The data refs the body reads are bound per entry, as the
+                // sequential sweep binds them before the block.
+                c.gh_entries.push(quote! { { #(#self_resolve_stmts)* #gh_entry_par } });
+                c.cost_entries.push(cost_entry.clone());
+            }
             // parent.<selfblock>: the parent binding in body/write tokens
             // becomes the innermost prefix binding of the nested sweep.
             let parent_seg_rename: Option<(String, String)> = parent_prefix.as_ref()
@@ -7068,6 +7557,36 @@ pub fn generate_root_methods(
                     Some(quote! { { #marker #(#jac_stmts)* } })
                 }
             } else { None };
+            if par {
+                let gh_entry_par = if let Some(ref guard) = guard_expr {
+                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* if #guard { #(#gh_stmts_par)* } } }
+                } else {
+                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts_par)* } }
+                };
+                let gh_entry_par = rename_ident(gh_entry_par, &root_var_name, "self");
+                let key = format!("self.{}", rc_ident);
+                let blocks = par_leaf_blocks(&par_roles, &par_entities, &triplet_entities,
+                    &multi_cross_routing, &cast_type);
+                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
+                    leaf: par_leaf_ident(root_name, &key),
+                    leaves: par_leaves_ident(&key),
+                    instance: ParInstance::Flat {
+                        coll: quote! { self.#rc_ident },
+                        var: syn::Ident::new("__frine", proc_macro2::Span::call_site()),
+                    },
+                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
+                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
+                    blocks,
+                    gh_entries: Vec::new(),
+                    cost_prelude: quote! {
+                        #(#resolve_stmts)*
+                        let #root_var_ident = &*__self_ref;
+                    },
+                    cost_entries: Vec::new(),
+                });
+                c.gh_entries.push(gh_entry_par);
+                c.cost_entries.push(cost_entry.clone());
+            }
 
             // Convert multi_cross_routing entries into MultiCrossBlockInfo
             // for the group. Empty for single-TripletBlock constraints.
@@ -7166,6 +7685,38 @@ pub fn generate_root_methods(
                 quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts)* } }
             };
             let gh_entry = rename_ident(gh_entry, &root_var_name, "self");
+            if par {
+                let gh_entry_par = if let Some(ref guard) = guard_expr {
+                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* if #guard { #(#gh_stmts_par)* } } }
+                } else {
+                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts_par)* } }
+                };
+                let gh_entry_par = rename_ident(gh_entry_par, &root_var_name, "self");
+                let key = format!("self.{}", rc_ident);
+                let na = par_entities[par_roles[0].1].param_count;
+                let nb = par_entities[par_roles[1].1].param_count;
+                let p = na * nb;
+                let block_ty = quote! { arael::model::CrossBlockArray<#na, #nb, #p, #cast_type> };
+                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
+                    leaf: par_leaf_ident(root_name, &key),
+                    leaves: par_leaves_ident(&key),
+                    instance: ParInstance::Flat {
+                        coll: quote! { self.#rc_ident },
+                        var: syn::Ident::new("__frine", proc_macro2::Span::call_site()),
+                    },
+                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
+                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
+                    blocks: vec![(block_ident.clone(), block_ty, 0, 1)],
+                    gh_entries: Vec::new(),
+                    cost_prelude: quote! {
+                        #(#resolve_stmts)*
+                        let #root_var_ident = &*__self_ref;
+                    },
+                    cost_entries: Vec::new(),
+                });
+                c.gh_entries.push(gh_entry_par);
+                c.cost_entries.push(cost_entry.clone());
+            }
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
                     Some(quote! { if #guard { #marker #(#jac_stmts)* } })
@@ -7274,6 +7825,44 @@ pub fn generate_root_methods(
                 let renamed = rename_ident(nested_gh, &parent_name, "__item");
                 rename_ident(renamed, &root_var_name, "self")
             };
+            if par {
+                let nested_gh_body_par = if let Some(ref guard) = guard_expr {
+                    quote! { if #guard { #(#gh_stmts_par)* } }
+                } else {
+                    quote! { { #(#gh_stmts_par)* } }
+                };
+                let gh_entry_par = quote! {
+                    { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #nested_gh_body_par }
+                };
+                let gh_entry_par = rename_ident(
+                    rename_ident(gh_entry_par, &parent_name, "__item"), &root_var_name, "self");
+                let key = format!("self.{}.{}", coll_ident, frines_ident);
+                let na = par_entities[par_roles[0].1].param_count;
+                let nb = par_entities[par_roles[1].1].param_count;
+                let p = na * nb;
+                let block_ty = quote! { arael::model::CrossBlockArray<#na, #nb, #p, #cast_type> };
+                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
+                    leaf: par_leaf_ident(root_name, &key),
+                    leaves: par_leaves_ident(&key),
+                    instance: ParInstance::Nested {
+                        coll: quote! { self.#coll_ident },
+                        frines: frines_ident.clone(),
+                        parent_var: syn::Ident::new("__item", proc_macro2::Span::call_site()),
+                    },
+                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
+                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
+                    blocks: vec![(block_ident.clone(), block_ty, 0, 1)],
+                    gh_entries: Vec::new(),
+                    cost_prelude: quote! {
+                        #(#resolve_stmts)*
+                        let #parent_ident = __item;
+                        let #root_var_ident = &*__self_ref;
+                    },
+                    cost_entries: Vec::new(),
+                });
+                c.gh_entries.push(gh_entry_par);
+                c.cost_entries.push(quote! { { #marker #nested_cost_body } });
+            }
 
             let nested_jac = if !jac_stmts.is_empty() {
                 let resolve_stmts_j = resolve_stmts.clone();
@@ -8085,6 +8674,579 @@ pub fn generate_root_methods(
         cost_sweep_calls.push(sweep_call(quote! { self.#name(params) }));
     }
 
+    // `par`: the mirror type, its build, the two per-mirror sweeps, the
+    // gathers, and the context forms of the entry points, which take the
+    // mirror path when the context's mirrors are on. Every token here is
+    // empty for a root without the keyword, so its expansion is
+    // unchanged.
+    let par_types: TokenStream2;
+    let par_methods: TokenStream2;
+    let par_root_methods: TokenStream2;
+    let par_lm_methods: TokenStream2;
+    if par {
+        let mirror_ty = syn::Ident::new(&format!("{}Mirror", root_name), proc_macro2::Span::call_site());
+        let containers: Vec<&ParContainer> = par_containers.values().collect();
+        let ne = par_entities.len();
+        let parts_idents: Vec<&syn::Ident> = par_entities.iter().map(|e| &e.parts).collect();
+        let leaves_idents: Vec<&syn::Ident> = containers.iter().map(|c| &c.leaves).collect();
+        // Per container, the mirror field of each of its cross blocks: a
+        // list parallel to the leaf list.
+        let blocks_idents: Vec<Vec<syn::Ident>> = par_containers.iter().map(|(key, c)| {
+            c.blocks.iter().map(|(f, _, _, _)| par_blocks_ident(key, f)).collect()
+        }).collect();
+        let all_blocks_idents: Vec<&syn::Ident> = blocks_idents.iter().flatten().collect();
+        let all_block_tys: Vec<&TokenStream2> = containers.iter()
+            .flat_map(|c| c.blocks.iter().map(|(_, ty, _, _)| ty)).collect();
+
+        // The leaf types and the mirror. A leaf is the instance's index and
+        // its role slots; its cross blocks live in the parallel lists.
+        let leaf_types: Vec<TokenStream2> = containers.iter().map(|c| {
+            let leaf = &c.leaf;
+            let nroles = c.roles.len();
+            let sub = match c.instance {
+                ParInstance::Nested { .. } => quote! { sub: u32, },
+                _ => quote! {},
+            };
+            quote! {
+                #[doc(hidden)]
+                #[allow(non_camel_case_types)]
+                #[derive(Clone)]
+                pub struct #leaf {
+                    index: u32,
+                    #sub
+                    slots: [u32; #nroles],
+                }
+            }
+        }).collect();
+        let leaf_type_idents: Vec<&syn::Ident> = containers.iter().map(|c| &c.leaf).collect();
+        let partial_tys: Vec<&TokenStream2> = par_entities.iter().map(|e| &e.partial_ty).collect();
+        par_types = quote! {
+            #(#leaf_types)*
+            #[doc(hidden)]
+            #[derive(Clone, Default)]
+            pub struct #mirror_ty {
+                #(#leaves_idents: std::vec::Vec<#leaf_type_idents>,)*
+                #(#all_blocks_idents: #all_block_tys,)*
+                #(#parts_idents: std::vec::Vec<#partial_tys>,)*
+                __sum: #sweep_ret_ty,
+                /// The last sweep's time on this mirror.
+                __time: std::time::Duration,
+            }
+        };
+
+        // The instance bindings of a container's leaf, for the sweeps.
+        let instance_bind = |c: &ParContainer| -> TokenStream2 {
+            match &c.instance {
+                ParInstance::Flat { coll, var } => quote! {
+                    let #var = arael::threads::Leaves::at(&#coll, __leaf.index);
+                },
+                ParInstance::Nested { coll, frines, parent_var } => quote! {
+                    let #parent_var = arael::threads::Leaves::at(&#coll, __leaf.index);
+                    let __frine = arael::threads::Leaves::at(&#parent_var.#frines, __leaf.sub);
+                },
+                ParInstance::Single { access } => quote! {
+                    let __item = #access;
+                },
+            }
+        };
+
+        // The build: the entity counts, then per container its leaves in
+        // container order, cut into one contiguous range per thread, each
+        // leaf pushed to its thread's mirror with a partial slot per role.
+        let entity_lens: Vec<TokenStream2> = par_entities.iter().enumerate().map(|(e, ent)| {
+            let access = &ent.access;
+            if ent.single {
+                quote! { __b.set_entity_len(#e, 1); }
+            } else {
+                quote! { __b.set_entity_len(#e, arael::threads::Leaves::count(&#access)); }
+            }
+        }).collect();
+        let fills: Vec<TokenStream2> = containers.iter().enumerate().map(|(c, cont)| {
+            let leaf = &cont.leaf;
+            let leaves = &cont.leaves;
+            let exprs = &cont.role_exprs;
+            // The leaf count the ranges are cut from: the container's
+            // count, or the children summed over the parents.
+            let count = match &cont.instance {
+                ParInstance::Flat { coll, .. } => quote! { arael::threads::Leaves::count(&#coll) },
+                ParInstance::Nested { coll, frines, parent_var } => quote! {{
+                    let mut __n = 0usize;
+                    arael::threads::Leaves::each(&#coll, |_, #parent_var| {
+                        __n += arael::threads::Leaves::count(&#parent_var.#frines);
+                    });
+                    __n
+                }},
+                ParInstance::Single { .. } => quote! { 1usize },
+            };
+            let sub_init = match cont.instance {
+                ParInstance::Nested { .. } => quote! { sub: __j, },
+                _ => quote! {},
+            };
+            let slot_idents: Vec<syn::Ident> = (0..cont.roles.len())
+                .map(|k| syn::Ident::new(&format!("__s{}", k), proc_macro2::Span::call_site()))
+                .collect();
+            let slots: Vec<TokenStream2> = cont.roles.iter().enumerate().map(|(k, &eid)| {
+                let ent = &par_entities[eid];
+                let parts = &ent.parts;
+                let n = ent.param_count;
+                let idx_stmts = &ent.idx_stmts;
+                let access = &ent.access;
+                let s = &slot_idents[k];
+                let entity_bind = if ent.single {
+                    quote! { let __e = &#access; }
+                } else {
+                    quote! { let __e = arael::threads::Leaves::at(&#access, __ek); }
+                };
+                let expr = &exprs[k];
+                quote! {
+                    let #s: u32 = {
+                        let __ek: u32 = #expr;
+                        match __b.slot(#eid, __t, __ek) {
+                            Some(__s) => __s,
+                            None => {
+                                #entity_bind
+                                let mut __idx = [0u32; #n];
+                                #(#idx_stmts)*
+                                let __s = __m.#parts.len() as u32;
+                                __m.#parts.push(arael::model::Partial::new(__ek, &__idx));
+                                __b.claim(#eid, __t, __ek, __s);
+                                __s
+                            }
+                        }
+                    };
+                }
+            }).collect();
+            let block_pushes: Vec<TokenStream2> = cont.blocks.iter().enumerate().map(|(bi, (_, _, a, b))| {
+                let blocks = &blocks_idents[c][bi];
+                let pa = &par_entities[cont.roles[*a]].parts;
+                let pb = &par_entities[cont.roles[*b]].parts;
+                let sa = &slot_idents[*a];
+                let sb = &slot_idents[*b];
+                quote! {
+                    __m.#blocks.push(
+                        __m.#pa[#sa as usize].indices(),
+                        __m.#pb[#sb as usize].indices(),
+                    );
+                }
+            }).collect();
+            let blocks_of_c: Vec<&syn::Ident> = blocks_idents[c].iter().collect();
+            // Per entity container the roles name, a bound on the partials
+            // a range of `__len` leaves creates, for reserving.
+            let mut reserve: Vec<(usize, usize)> = Vec::new();
+            for &eid in &cont.roles {
+                match reserve.iter_mut().find(|r| r.0 == eid) {
+                    Some(r) => r.1 += 1,
+                    None => reserve.push((eid, 1)),
+                }
+            }
+            let reserve_eids: Vec<usize> = reserve.iter().map(|r| r.0).collect();
+            let reserve_mult: Vec<usize> = reserve.iter().map(|r| r.1).collect();
+            let reserve_parts: Vec<&syn::Ident> = reserve_eids.iter().map(|&e| &par_entities[e].parts).collect();
+            // One leaf: advance to the thread whose range holds it, then
+            // its slots, the leaf and its blocks.
+            let body = quote! {
+                while __k >= __end {
+                    __t += 1;
+                    __end = arael::threads::cut(__n, __p, __t + 1);
+                }
+                let __m = &mut __ms[__t];
+                #(#slots)*
+                __m.#leaves.push(#leaf {
+                    index: __i,
+                    #sub_init
+                    slots: [#(#slot_idents),*],
+                });
+                #(#block_pushes)*
+                __k += 1;
+            };
+            let walk = match &cont.instance {
+                ParInstance::Flat { coll, var } => quote! {
+                    arael::threads::Leaves::each(&#coll, |__i, #var| {
+                        let _ = #var;
+                        #body
+                    });
+                },
+                ParInstance::Nested { coll, frines, parent_var } => quote! {
+                    arael::threads::Leaves::each(&#coll, |__i, #parent_var| {
+                        arael::threads::Leaves::each(&#parent_var.#frines, |__j, __frine| {
+                            #body
+                        });
+                    });
+                },
+                ParInstance::Single { .. } => quote! {
+                    { let __i = 0u32; let _ = __i; #body }
+                },
+            };
+            quote! {
+                {
+                    let __n: usize = #count;
+                    for __t in 0..__p {
+                        let __len = arael::threads::cut(__n, __p, __t + 1) - arael::threads::cut(__n, __p, __t);
+                        let __m = &mut __ms[__t];
+                        __m.#leaves.reserve(__len);
+                        #(__m.#blocks_of_c.reserve(__len);)*
+                        #(__m.#reserve_parts.reserve((__len * #reserve_mult).min(__b.entity_len(#reserve_eids)));)*
+                    }
+                    let mut __k = 0usize;
+                    let mut __t = 0usize;
+                    let mut __end = arael::threads::cut(__n, __p, 1);
+                    #walk
+                }
+            }
+        }).collect();
+        let build_fn = quote! {
+            #[inline(never)]
+            #[allow(unused_variables)]
+            fn __par_build(&self, __mirrors: &mut arael::threads::Mirrors<#mirror_ty>) {
+                let __p = __mirrors.threads();
+                if __p == 0 { return; }
+                let __clock = __mirrors.clock();
+                let __t_build = __clock.start();
+                let __self_ref = &*self;
+                let (__ms, __b) = __mirrors.split();
+                __b.reset(__p, #ne);
+                #(#entity_lens)*
+                for __t in 0..__p {
+                    let __m = &mut __ms[__t];
+                    #(__m.#leaves_idents.clear();)*
+                    #(__m.#all_blocks_idents.clear();)*
+                    #(__m.#parts_idents.clear();)*
+                }
+                let __t_fill = __clock.start();
+                #(#fills)*
+                let __d_fill = __clock.stop(__t_fill);
+                let __t_finish = __clock.start();
+                let (mut __n_leaves, mut __n_blocks, mut __n_partials) = (0usize, 0usize, 0usize);
+                for __t in 0..__p {
+                    let __m = &mut __ms[__t];
+                    #(__m.#all_blocks_idents.finish();)*
+                    #(__n_leaves += __m.#leaves_idents.len();)*
+                    #(__n_blocks += __m.#all_blocks_idents.len();)*
+                    #(__n_partials += __m.#parts_idents.len();)*
+                }
+                let __d_finish = __clock.stop(__t_finish);
+                __mirrors.timing.build_fill += __d_fill;
+                __mirrors.timing.build_finish += __d_finish;
+                __mirrors.timing.build += __clock.stop(__t_build);
+                __mirrors.timing.builds += 1;
+                __mirrors.timing.leaves = __n_leaves;
+                __mirrors.timing.blocks = __n_blocks;
+                __mirrors.timing.partials = __n_partials;
+            }
+        };
+
+        // The per-mirror sweeps: the assembly over the leaves with the
+        // writes into the mirror, and the cost.
+        let assemble_loops: Vec<TokenStream2> = containers.iter().enumerate().map(|(ci, c)| {
+            let leaves = &c.leaves;
+            let bind = instance_bind(c);
+            // The leaf's blocks, bound by name and zeroed where they are
+            // about to be written.
+            let bind_blocks: Vec<TokenStream2> = c.blocks.iter().enumerate()
+                .map(|(bi, (f, _, _, _))| {
+                    let blocks = &blocks_idents[ci][bi];
+                    let blk = par_blk_ident(f);
+                    quote! {
+                        let mut #blk = #blocks.block_mut(__k);
+                        #blk.zero();
+                    }
+                }).collect();
+            let entries = &c.gh_entries;
+            scope(quote! {
+                for (__k, __leaf) in #leaves.iter().enumerate() {
+                    #bind
+                    #(#bind_blocks)*
+                    #(#entries)*
+                }
+            })
+        }).collect();
+        let cost_loops_par: Vec<TokenStream2> = containers.iter().map(|c| {
+            let leaves = &c.leaves;
+            let bind = instance_bind(c);
+            let prelude = &c.cost_prelude;
+            let entries = &c.cost_entries;
+            scope(quote! {
+                for __leaf in __mirror.#leaves.iter() {
+                    #bind
+                    #prelude
+                    #(#entries)*
+                }
+            })
+        }).collect();
+        let merge_sum = sweep_call(quote! { __m.__sum });
+        let sweep_fns = quote! {
+            #[inline(never)]
+            #[allow(unused_variables)]
+            fn __par_assemble(&self, __mirror: &mut #mirror_ty, params: &[#prec_type]) -> #sweep_ret_ty {
+                use arael::utils::{Float as _, SelectIndex as _};
+                let __self_ref = &*self;
+                #cost_decl
+                let #mirror_ty { #(#leaves_idents,)* #(#all_blocks_idents,)* #(#parts_idents,)* __sum: _, __time: _ } = __mirror;
+                #(for __p in #parts_idents.iter_mut() { __p.zero(); })*
+                #(#assemble_loops)*
+                #sweep_ret
+            }
+
+            #[inline(never)]
+            #[allow(unused_variables)]
+            fn __par_cost(&self, __mirror: &#mirror_ty, params: &[#prec_type]) -> #sweep_ret_ty {
+                use arael::utils::{Float as _, SelectIndex as _};
+                let __self_ref = &*self;
+                #cost_decl
+                #(#cost_loops_par)*
+                #sweep_ret
+            }
+
+            fn __par_calc_cost(&mut self, params: &[#prec_type], __mirrors: &mut arael::threads::Mirrors<#mirror_ty>) -> #prec_type {
+                use arael::utils::{Float as _, SelectIndex as _};
+                let __clock = __mirrors.clock();
+                let __t_update = __clock.start();
+                arael::model::Model::update_params(self, params);
+                let __d_update = __clock.stop(__t_update);
+                let __par = __mirrors.cost.par();
+                let __t = __mirrors.cost.start();
+                let __t_region = __clock.start();
+                {
+                    let __model = &*self;
+                    arael::threads::run(__par, __mirrors.as_mut_slice(), |__m| {
+                        let __t_task = __clock.start();
+                        __m.__sum = __model.__par_cost(__m, params);
+                        __m.__time = __clock.stop(__t_task);
+                    });
+                }
+                __mirrors.record_cost(__clock.stop(__t_region), __par, |__m| __m.__time);
+                __mirrors.timing.cost_update += __d_update;
+                __mirrors.cost.finish(__t);
+                #cost_decl
+                for __m in __mirrors.as_slice() { #merge_sum }
+                #cost_ret
+            }
+
+            /// The threaded assembly: the sweep over the mirrors, the
+            /// gradient gathered here, the Hessian by `scatter`.
+            fn __par_assembly(
+                &mut self,
+                params: &[#prec_type],
+                grad: &mut [#prec_type],
+                __mirrors: &mut arael::threads::Mirrors<#mirror_ty>,
+                scatter: &mut dyn FnMut(&[#mirror_ty]),
+            ) -> #prec_type {
+                use arael::utils::{Float as _, SelectIndex as _};
+                let __clock = __mirrors.clock();
+                let __t_update = __clock.start();
+                arael::model::Model::update_params(self, params);
+                let __d_update = __clock.stop(__t_update);
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                let __par = __mirrors.assembly.par();
+                let __t = __mirrors.assembly.start();
+                let __t_region = __clock.start();
+                {
+                    let __model = &*self;
+                    arael::threads::run(__par, __mirrors.as_mut_slice(), |__m| {
+                        let __t_task = __clock.start();
+                        __m.__sum = __model.__par_assemble(__m, params);
+                        __m.__time = __clock.stop(__t_task);
+                    });
+                }
+                __mirrors.record_assembly(__clock.stop(__t_region), __par, |__m| __m.__time);
+                __mirrors.timing.assembly_update += __d_update;
+                let __t_grad = __clock.start();
+                for __m in __mirrors.as_slice() {
+                    #(for __p in __m.#parts_idents.iter() { __p.scatter_grad(grad); })*
+                }
+                __mirrors.timing.gather_grad += __clock.stop(__t_grad);
+                let __t_scatter = __clock.start();
+                scatter(__mirrors.as_slice());
+                __mirrors.timing.scatter += __clock.stop(__t_scatter);
+                __mirrors.assembly.finish(__t);
+                #cost_decl
+                for __m in __mirrors.as_slice() { #merge_sum }
+                #cost_ret
+            }
+        };
+
+        // The structural walks and the gathers over every mirror's
+        // partials and leaves, in one order.
+        // Every partial, then every cross block list, of one mirror; the
+        // block statement acts on `__l`.
+        // The block statement acts on `__l`, a whole block list.
+        let walk = |partial: TokenStream2, block: TokenStream2, mutable: bool| -> TokenStream2 {
+            let iter = if mutable { quote! { iter_mut } } else { quote! { iter } };
+            let list = if mutable { quote! { &mut } } else { quote! { & } };
+            quote! {
+                #(for __p in __m.#parts_idents.#iter() { #partial })*
+                #({ let __l = #list __m.#all_blocks_idents; #block })*
+            }
+        };
+        let span_walks: Vec<TokenStream2> = par_entities.iter().map(|ent| {
+            let parts = &ent.parts;
+            let access = &ent.access;
+            let count = if ent.single {
+                quote! { 1usize }
+            } else {
+                quote! { arael::threads::Leaves::count(&#access) }
+            };
+            quote! {
+                {
+                    let mut __seen = vec![false; #count];
+                    for __m in __mirrors.as_slice() {
+                        for __p in __m.#parts.iter() {
+                            let __e = __p.entity() as usize;
+                            if !__seen[__e] {
+                                __seen[__e] = true;
+                                __p.collect_param_block(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }).collect();
+        let cells_walk = walk(quote! { __p.collect_hessian_cells(out); },
+            quote! { __l.collect_hessian_cells(out); }, false);
+        let bind_walk = walk(quote! { __p.bind_hessian_positions(binder, out); },
+            quote! { __l.bind_hessian_positions(binder, out); }, true);
+        let structure_fns = quote! {
+            fn __par_cells(&self, __mirrors: &arael::threads::Mirrors<#mirror_ty>, out: &mut std::vec::Vec<(u32, u32)>) {
+                for __m in __mirrors.as_slice() { #cells_walk }
+            }
+            fn __par_bind(&self, __mirrors: &mut arael::threads::Mirrors<#mirror_ty>, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
+                for __m in __mirrors.as_mut_slice() { #bind_walk }
+            }
+            /// One span per entity, in index order (the serialize order).
+            fn __par_spans(&self, __mirrors: &arael::threads::Mirrors<#mirror_ty>, out: &mut std::vec::Vec<(u32, u32)>) {
+                let __start = out.len();
+                #(#span_walks)*
+                out[__start..].sort_unstable();
+            }
+        };
+        par_methods = quote! { #build_fn #sweep_fns #structure_fns };
+
+        let gather = |partial: TokenStream2, block: TokenStream2| -> TokenStream2 {
+            let w = walk(partial, block, false);
+            quote! { for __m in __ms { #w } }
+        };
+        let g_dense = gather(quote! { __p.accumulate_hessian(hessian); },
+            quote! { __l.accumulate_hessian(hessian); });
+        let g_band = gather(
+            quote! { if __err.is_none() { if let Err(e) = __p.accumulate_hessian_band(band, kd) { __err = Some(e); } } },
+            quote! { if __err.is_none() { if let Err(e) = __l.accumulate_hessian_band(band, kd) { __err = Some(e); } } });
+        let g_sparse = gather(quote! { __p.accumulate_hessian_sparse(coo); },
+            quote! { __l.accumulate_hessian_sparse(coo); });
+        let g_direct = gather(quote! { __p.accumulate_hessian_sparse_direct(csc); },
+            quote! { __l.accumulate_hessian_sparse_direct(csc); });
+        let g_indexed = gather(quote! { __p.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); },
+            quote! { __l.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); });
+        // The context forms of the entry points: the mirror path when the
+        // context's mirrors are on, else the model's own path. The
+        // context-less forms below are always the model's own path.
+        par_root_methods = quote! {
+            fn param_block_spans_with_context(&self, ctx: &arael::threads::Context) -> std::vec::Vec<(u32, u32)> {
+                if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
+                    if __m.is_on() {
+                        let mut __out = std::vec::Vec::new();
+                        self.__par_spans(__m, &mut __out);
+                        return __out;
+                    }
+                }
+                arael::simple_lm::RootProblem::param_block_spans(self)
+            }
+        };
+        par_lm_methods = quote! {
+            fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
+                let __p = ctx.threads();
+                let __timing = ctx.timing();
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                __m.set_threads(__p);
+                __m.enable_timing(__timing);
+                if __m.is_on() { self.__par_build(__m); }
+            }
+            fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() { return self.__par_calc_cost(params, __m); }
+                arael::simple_lm::LmProblem::calc_cost(self, params)
+            }
+            fn calc_grad_hessian_dense_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() {
+                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                        hessian.iter_mut().for_each(|h| *h = 0.0);
+                        #g_dense
+                    });
+                }
+                arael::simple_lm::LmProblem::calc_grad_hessian_dense(self, params, grad, hessian)
+            }
+            fn calc_grad_hessian_band_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() {
+                    let mut __err: Option<arael::simple_lm::BandOverflow> = None;
+                    let __cost = self.__par_assembly(params, grad, __m, &mut |__ms| {
+                        band.iter_mut().for_each(|b| *b = 0.0);
+                        #g_band
+                    });
+                    return match __err { Some(e) => Err(e), None => Ok(__cost) };
+                }
+                arael::simple_lm::LmProblem::calc_grad_hessian_band(self, params, grad, band, kd)
+            }
+            fn calc_grad_hessian_sparse_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() {
+                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                        coo.clear();
+                        #g_sparse
+                    });
+                }
+                arael::simple_lm::LmProblem::calc_grad_hessian_sparse(self, params, grad, coo)
+            }
+            fn calc_grad_hessian_sparse_direct_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() {
+                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                        csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                        #g_direct
+                    });
+                }
+                arael::simple_lm::LmProblem::calc_grad_hessian_sparse_direct(self, params, grad, csc)
+            }
+            fn calc_grad_hessian_sparse_indexed_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) -> #prec_type {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() {
+                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                        vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                        let mut cursor = 0usize;
+                        #g_indexed
+                        assert!(cursor == positions.len(),
+                            "sparsity pattern changed between iterations: {} Hessian entries \
+                             accumulated but the cached pattern has {}",
+                            cursor, positions.len());
+                    });
+                }
+                arael::simple_lm::LmProblem::calc_grad_hessian_sparse_indexed(self, params, grad, vals, positions)
+            }
+            fn collect_hessian_cells_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
+                if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
+                    if __m.is_on() { return self.__par_cells(__m, out); }
+                }
+                arael::simple_lm::LmProblem::collect_hessian_cells(self, out)
+            }
+            fn bind_hessian_positions_with_context(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
+                let __m = ctx.mirrors_mut::<#mirror_ty>();
+                if __m.is_on() { return self.__par_bind(__m, binder, out); }
+                arael::simple_lm::LmProblem::bind_hessian_positions(self, binder, out)
+            }
+            fn collect_param_block_spans_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
+                if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
+                    if __m.is_on() { return self.__par_spans(__m, out); }
+                }
+                arael::simple_lm::LmProblem::collect_param_block_spans(self, out)
+            }
+        };
+    } else {
+        par_types = quote! {};
+        par_methods = quote! {};
+        par_root_methods = quote! {};
+        par_lm_methods = quote! {};
+    }
+
     // advance(): fold accepted-step euler angle deltas. Recurses through
     // the whole model tree via Model::advance_params, so EA params at any
     // location (collections, root-level fields, direct-composed structs,
@@ -8127,6 +9289,7 @@ pub fn generate_root_methods(
     // via UFCS -- it carries no width in its signature).
     let mut tokens = quote! {
         #(#constraint_impls)*
+        #par_types
 
         impl arael::simple_lm::RootProblem<#prec_type> for #root_name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
@@ -8142,11 +9305,14 @@ pub fn generate_root_methods(
                 arael::model::Model::collect_param_blocks(self, &mut __out);
                 __out
             }
+            #par_root_methods
             #marginalize_hint_fn
             #ref_issue_walker
         }
 
         impl #root_name {
+            #par_methods
+
             fn __set_block_indices(&mut self) {
                 let mut __cid: u32 = 0;
                 let _ = &__cid; // suppress unused warning when no constraint_index fields
@@ -8345,6 +9511,7 @@ pub fn generate_root_methods(
             fn advance(&mut self, params: &mut [#prec_type]) {
                 #advance_call
             }
+            #par_lm_methods
         }
     });
 

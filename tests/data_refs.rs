@@ -396,6 +396,34 @@ fn data_ref_shapes_solve_agree() {
     }
 }
 
+// The mirror path binds the data refs of every shape like the
+// sequential sweep: the threaded solves land where the sequential ones
+// do.
+#[cfg(feature = "rayon")]
+#[test]
+fn data_ref_shapes_agree_threaded() {
+    use arael::simple_lm::{self, LmConfig};
+    let d = data();
+    let cfg = |t: usize| LmConfig { max_iters: 50, num_threads: t, ..Default::default() };
+    // Serialize the instance that is solved: that is what wires its blocks.
+    let run = |shape: usize, t: usize| {
+        let cfg = cfg(t);
+        let mut x = Vec::new();
+        match shape {
+            0 => { let mut m = build_r(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::solve(&x, &mut m, &cfg).unwrap() }
+            1 => { let mut m = build_s(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::solve(&x, &mut m, &cfg).unwrap() }
+            _ => { let mut m = build_p(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::solve(&x, &mut m, &cfg).unwrap() }
+        }
+    };
+    let pairs = [(run(0, 1), run(0, 4)), (run(1, 1), run(1, 4)), (run(2, 1), run(2, 4))];
+    for (i, (a, b)) in pairs.iter().enumerate() {
+        assert!((a.end_cost - b.end_cost).abs() < 1e-10, "shape {i}: end cost {} != {}", a.end_cost, b.end_cost);
+        for k in 0..a.x.len() {
+            assert!((a.x[k] - b.x[k]).abs() < 1e-8, "shape {i}: x[{k}] differs");
+        }
+    }
+}
+
 // A SELF-block constraint reading a data ref: per-entity records in a
 // root arena, read by the entity's own residual.
 #[arael::model]

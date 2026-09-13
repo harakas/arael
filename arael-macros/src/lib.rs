@@ -2654,9 +2654,17 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian,
+        // The threaded sweeps over per-thread mirrors come with the
+        // `rayon` feature. A root with a form the mirrors do not cover
+        // is generated again without them and keeps the sequential path.
+        let generate = |par: bool| constraint::generate_root_methods(
+            name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64,
-            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block)?
+            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par);
+        match generate(cfg!(feature = "rayon")) {
+            Err(e) if constraint::is_par_unsupported(&e) => generate(false)?,
+            r => r?,
+        }
     } else {
         quote! {}
     };

@@ -1279,7 +1279,7 @@
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
-//! | `num_threads` | `1` | threads for the sparse factorization (needs the `rayon` feature). Measure first -- see below |
+//! | `num_threads` | `1` | threads for the cost and assembly sweeps and the linear solve (needs the `rayon` feature). Measure first -- see below |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. Turn on first whenever debugging |
 //! | `observer` | `None` | an [`LmObserver`](simple_lm::LmObserver) called once per damped attempt with the current state; can stop the solve. Set with `with_observer` |
@@ -1326,8 +1326,9 @@
 //!
 //! ## Threads
 //!
-//! Arael is single-threaded. The sparse factorization and triangular solve can
-//! optionally run on rayon's global pool:
+//! Arael is single-threaded by default. With the `rayon` feature the cost
+//! evaluation, the assembly of the gradient and Hessian, and the linear
+//! solve run on rayon's global pool:
 //!
 //! ```toml
 //! arael = { version = "0.7", features = ["rayon"] }
@@ -1339,11 +1340,17 @@
 //! let cfg = LmConfig::<f64>::conservative().with_num_threads(4);
 //! ```
 //!
-//! Without the feature, anything but 1 warns and stays sequential.
+//! Without the feature, anything but 1 warns and stays sequential. With it
+//! every root model must be [`Sync`].
+//!
+//! A threaded assembly adds up in a different order than the sequential
+//! one, so the two match to rounding, not to the bit.
 //!
 //! Threading has overhead: whether it helps, and by how much, depends on the
-//! model and its number of parameters. Only the sparse factorization and
-//! triangular solve are threaded.
+//! model and its number of parameters. Each solve times both forms of each
+//! phase on its first calls and keeps the faster one, so a model too small
+//! to pay stays sequential. See
+//! [docs/SOLVERS.md](https://github.com/harakas/arael/blob/master/docs/SOLVERS.md#threads).
 //!
 //! ## Tuning for performance vs quality
 //!
@@ -2351,6 +2358,8 @@ pub mod transform;
 pub mod unitvec;
 /// Levenberg-Marquardt solver with dense, band, and sparse backends.
 pub mod simple_lm;
+pub mod threads;
+pub use threads::Context;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;
 pub mod rank;

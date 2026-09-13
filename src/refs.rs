@@ -1104,6 +1104,15 @@ impl<T> Arena<T> {
         self.slots.len()
     }
 
+    /// The element in slot `i` (the index a `Ref` carries), or `None` if
+    /// the slot is free or out of range. Does not check the generation.
+    pub fn at_slot(&self, i: usize) -> Option<&T> {
+        match self.slots.get(i) {
+            Some(Cell { slot: Slot::Occupied(v), .. }) => Some(v),
+            _ => None,
+        }
+    }
+
     /// Removes all elements and deallocates storage.
     pub fn clear(&mut self) {
         self.slots.clear();

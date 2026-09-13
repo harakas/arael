@@ -251,17 +251,20 @@ pub struct LmConfig<T: Float> {
     /// non-positive-definite damped systems and catastrophic Gauss-Newton
     /// overshoots along the near-null directions.
     pub lambda_floor: T,
-    /// Threads for the linear solve. `1` (the default) is sequential; `n > 1`
-    /// uses `n`; `0` uses every core.
+    /// Threads for the cost and assembly sweeps and the linear solve. `1`
+    /// (the default) is sequential; `n > 1` uses `n`; `0` uses every core.
     ///
     /// Requires the `rayon` cargo feature. Without it, anything other than 1 is
     /// ignored with a warning and the solve stays sequential.
     ///
     /// Threading has overhead: whether it helps, and by how much, depends on the
-    /// model and its number of parameters.
+    /// model and its number of parameters. Each solve times both forms of each
+    /// phase on its first calls and keeps the faster one.
     ///
-    /// Only the sparse factorization and triangular solve (`SparseFaer`) honour
-    /// it -- assembly, the Schur reduction and every other backend are sequential.
+    /// The threaded sweeps assemble into per-thread mirrors gathered
+    /// serially, so they match the sequential ones to rounding, not to the
+    /// bit. Of the linear backends only `SparseFaer` reads the count; the
+    /// Schur reduction and the analysis are sequential.
     pub num_threads: usize,
     /// Print per-iteration cost, lambda, and timing to stderr. Very useful
     /// for understanding how the solver behaves with a given parameter set --
@@ -758,6 +761,12 @@ pub trait RootProblem<T: Float> {
     fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
         std::vec::Vec::new()
     }
+    /// [`param_block_spans`](Self::param_block_spans) under a solve
+    /// context: a root with its mirrors on reads them there. The default
+    /// ignores the context.
+    fn param_block_spans_with_context(&self, _ctx: &crate::threads::Context) -> std::vec::Vec<(u32, u32)> {
+        self.param_block_spans()
+    }
     /// Report every `Ref` field that no longer resolves in its
     /// collection (see [`Issue::StaleRef`](crate::validate::Issue)).
     /// The macro overrides this for roots whose collections hold
@@ -1085,6 +1094,45 @@ pub trait LmProblem<T> {
     /// Default: no-op.
     fn advance(&mut self, _params: &mut [T]) {}
 
+    /// Start a solve under `ctx`: the solve entries call it once, before
+    /// the first evaluation. A root with the mirror path (every root
+    /// under the `rayon` feature whose forms the mirrors cover) sizes
+    /// its mirrors to the context's thread count and builds them here.
+    /// Default: nothing.
+    fn begin_with_context(&mut self, _ctx: &mut crate::threads::Context) {}
+    /// [`calc_cost`](Self::calc_cost) under a solve context. A root with
+    /// its mirrors on evaluates over them; the default ignores the
+    /// context. The solve entries call these forms of the evaluations
+    /// and the structure walks; the plain ones stay for direct use.
+    fn calc_cost_with_context(&mut self, params: &[T], _ctx: &mut crate::threads::Context) -> T {
+        self.calc_cost(params)
+    }
+    /// [`calc_grad_hessian_dense`](Self::calc_grad_hessian_dense) under a
+    /// solve context.
+    fn calc_grad_hessian_dense_with_context(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T], _ctx: &mut crate::threads::Context) -> T {
+        self.calc_grad_hessian_dense(params, grad, hessian)
+    }
+    /// [`calc_grad_hessian_band`](Self::calc_grad_hessian_band) under a
+    /// solve context.
+    fn calc_grad_hessian_band_with_context(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize, _ctx: &mut crate::threads::Context) -> Result<T, BandOverflow> {
+        self.calc_grad_hessian_band(params, grad, band, kd)
+    }
+    /// [`calc_grad_hessian_sparse`](Self::calc_grad_hessian_sparse) under
+    /// a solve context.
+    fn calc_grad_hessian_sparse_with_context(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
+        self.calc_grad_hessian_sparse(params, grad, coo)
+    }
+    /// [`calc_grad_hessian_sparse_direct`](Self::calc_grad_hessian_sparse_direct)
+    /// under a solve context.
+    fn calc_grad_hessian_sparse_direct_with_context(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
+        self.calc_grad_hessian_sparse_direct(params, grad, csc)
+    }
+    /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed)
+    /// under a solve context.
+    fn calc_grad_hessian_sparse_indexed_with_context(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> T {
+        self.calc_grad_hessian_sparse_indexed(params, grad, vals, positions)
+    }
+
     /// The gradient of `calc_cost` at `params` by central finite
     /// differences: `(cost(x + h e_i) - cost(x - h e_i)) / 2h` with
     /// `h = cbrt(eps) * max(1, |x_i|)` per component. `2n` cost
@@ -1276,6 +1324,26 @@ pub trait LmProblem<T> {
     /// Append the entity parameter spans (see
     /// [`RootProblem::param_block_spans`]). Default: nothing.
     fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+    /// [`collect_hessian_cells`](Self::collect_hessian_cells) under a
+    /// solve context (see [`calc_cost_with_context`](Self::calc_cost_with_context)).
+    fn collect_hessian_cells_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &crate::threads::Context) {
+        self.collect_hessian_cells(out)
+    }
+    /// [`bind_hessian_positions`](Self::bind_hessian_positions) under a
+    /// solve context.
+    fn bind_hessian_positions_with_context(
+        &mut self,
+        binder: &mut crate::model::HessianBinder,
+        out: &mut std::vec::Vec<ValueIndex>,
+        _ctx: &mut crate::threads::Context,
+    ) {
+        self.bind_hessian_positions(binder, out)
+    }
+    /// [`collect_param_block_spans`](Self::collect_param_block_spans)
+    /// under a solve context.
+    fn collect_param_block_spans_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &crate::threads::Context) {
+        self.collect_param_block_spans(out)
+    }
 
     /// The model's OWN elimination hint -- the ranges named by
     /// `#[arael(root, marginalize(...))]`, if any. The sparse backends
@@ -2630,6 +2698,20 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
 ) -> SolveResult<T> {
+    lm_solve_with_context(x0, solver, problem, config, &mut crate::threads::Context::new())
+}
+
+/// [`lm_solve`] under a caller-owned [`Context`](crate::threads::Context):
+/// what a solve reuses (a root's mirrors) carries over to the next solve
+/// through it. The thread count is the config's; the context only keeps
+/// the allocations.
+pub fn lm_solve_with_context<T: Float, S: LmSolver<T>>(
+    x0: &[T],
+    solver: &mut S,
+    problem: &mut impl LmProblem<T>,
+    config: &LmConfig<T>,
+    ctx: &mut crate::threads::Context,
+) -> SolveResult<T> {
     if x0.is_empty() {
         return Ok(lm_empty_result(x0, config));
     }
@@ -2640,7 +2722,57 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     // skips this reset.
     solver.reset();
     let mut matrix = solver.new_matrix(x0.len());
-    lm_solve_on(x0, solver, &mut matrix, problem, config)
+    lm_solve_on(x0, solver, &mut matrix, problem, config, ctx)
+}
+
+/// A model under a solve context. The solve loop and the backends see an
+/// `LmProblem`; every evaluation and structure walk goes to the model's
+/// `_with_context` form.
+struct WithContext<'a, P> {
+    model: &'a mut P,
+    ctx: &'a mut crate::threads::Context,
+}
+
+impl<T, P: LmProblem<T>> LmProblem<T> for WithContext<'_, P> {
+    fn calc_cost(&mut self, params: &[T]) -> T {
+        self.model.calc_cost_with_context(params, &mut *self.ctx)
+    }
+    fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T {
+        self.model.calc_grad_hessian_dense_with_context(params, grad, hessian, &mut *self.ctx)
+    }
+    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<T, BandOverflow> {
+        self.model.calc_grad_hessian_band_with_context(params, grad, band, kd, &mut *self.ctx)
+    }
+    fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>) -> T {
+        self.model.calc_grad_hessian_sparse_with_context(params, grad, coo, &mut *self.ctx)
+    }
+    fn calc_grad_hessian_sparse_direct(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>) -> T {
+        self.model.calc_grad_hessian_sparse_direct_with_context(params, grad, csc, &mut *self.ctx)
+    }
+    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[ValueIndex]) -> T {
+        self.model.calc_grad_hessian_sparse_indexed_with_context(params, grad, vals, positions, &mut *self.ctx)
+    }
+    fn advance(&mut self, params: &mut [T]) {
+        self.model.advance(params)
+    }
+    fn hessian_pattern_requires_compute(&self) -> bool {
+        self.model.hessian_pattern_requires_compute()
+    }
+    fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        self.model.collect_hessian_cells_with_context(out, &*self.ctx)
+    }
+    fn bind_hessian_positions(&mut self, binder: &mut crate::model::HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+        self.model.bind_hessian_positions_with_context(binder, out, &mut *self.ctx)
+    }
+    fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        self.model.collect_param_block_spans_with_context(out, &*self.ctx)
+    }
+    fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
+        self.model.marginalize_hint()
+    }
+    fn marginalize_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
+        self.model.marginalize_candidates()
+    }
 }
 
 /// The solve loop proper, on caller-owned matrix storage and WITHOUT the
@@ -2653,6 +2785,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     matrix: &mut S::Matrix,
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
+    ctx: &mut crate::threads::Context,
 ) -> SolveResult<T> {
     // Drivers are stateful per solve; clone the config's prototype so the
     // shared config is untouched and a reused config starts each solve clean.
@@ -2666,6 +2799,9 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     let n = x0.len();
     debug_assert!(n > 0);
     solver.configure(config);
+    ctx.set_threads(config.num_threads);
+    problem.begin_with_context(ctx);
+    let problem = &mut WithContext { model: problem, ctx };
 
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];
@@ -3390,12 +3526,19 @@ pub struct LmSession<T: Float, S: LmSolver<T>> {
     // Parameter count the caches were built for; a solve at any other count
     // invalidates first and runs cold.
     n: usize,
+    // The solve context, kept so the root's mirrors carry over.
+    ctx: crate::threads::Context,
 }
 
 impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
     /// Wrap a configured backend. Nothing is analyzed until the first solve.
     pub fn new(solver: S) -> Self {
-        LmSession { solver, matrix: None, n: 0 }
+        LmSession { solver, matrix: None, n: 0, ctx: crate::threads::Context::new() }
+    }
+
+    /// The solve context the session carries between solves.
+    pub fn context(&self) -> &crate::threads::Context {
+        &self.ctx
     }
 
     /// Solve the model through the session: serialize -> optimize ->
@@ -3434,7 +3577,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
             return Ok(lm_empty_result(x0, config));
         }
         let mut matrix = self.matrix.take().unwrap_or_else(|| self.solver.new_matrix(n));
-        let result = lm_solve_on(x0, &mut self.solver, &mut matrix, problem, config);
+        let result = lm_solve_on(x0, &mut self.solver, &mut matrix, problem, config, &mut self.ctx);
         self.matrix = Some(matrix);
         result
     }

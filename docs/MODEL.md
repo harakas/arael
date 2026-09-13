@@ -352,7 +352,7 @@ struct Pose {
 }
 ```
 
-Two reasons to opt in:
+Three reasons to opt in:
 
 - **Reclaim assembly memory between solves.** The root gains a
   generated `release_blocks()` that frees every boxed Hessian in the
@@ -369,6 +369,12 @@ Two reasons to opt in:
   unallocated. A sliding-window SLAM front-end that keeps the full
   history in an [`Arena`](#collection-types) but only optimizes the
   recent window pays Hessian memory for the active window alone.
+
+- **Threaded solves.** With the `rayon` feature a solve on more than one
+  thread assembles into per-thread mirrors and never writes the model's
+  own blocks (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)). An
+  inline block still carries its whole `[T; M]` array inside the entity
+  struct; a boxed one is a single empty pointer there.
 
 Allocation is decided once, when the solver assigns block indices
 (before the first `zero`/`add_residual`), so the choice is settled for

@@ -249,9 +249,11 @@ fn auto_default_takes_the_supernodal_route() {
 }
 
 /// Auto takes the supernodal route at any thread count, and the threaded
-/// run agrees with the sequential one to the bit: the dense kernels split
-/// their output, not their reduction. (Meaningful only with the rayon
-/// feature -- without it num_threads collapses to sequential.)
+/// run agrees with the sequential one: the dense kernels split their
+/// output, not their reduction, and the assembly over the per-thread
+/// mirrors sums each entity per thread and then across the threads, so
+/// it matches to rounding rather than to the bit. (Meaningful only with
+/// the rayon feature -- without it num_threads collapses to sequential.)
 #[cfg(feature = "rayon")]
 #[test]
 fn threads_do_not_change_the_supernodal_route_or_its_answer() {
@@ -269,8 +271,11 @@ fn threads_do_not_change_the_supernodal_route_or_its_answer() {
     let (c4, x4, took4) = solve(4);
     assert!(took1 && took4, "Auto takes the supernodal route at any thread count");
     assert!(c1 < 1e-12, "end_cost {}", c1);
-    assert_eq!(c1, c4, "same cost, to the bit");
-    assert_eq!(x1, x4, "same parameters, to the bit");
+    assert!((c1 - c4).abs() <= 1e-12, "same cost to rounding: {} vs {}", c1, c4);
+    assert_eq!(x1.len(), x4.len());
+    for (a, b) in x1.iter().zip(&x4) {
+        assert!((a - b).abs() <= 1e-6 * (1.0 + a.abs()), "same parameters to rounding: {} vs {}", a, b);
+    }
 }
 
 /// A DECLINED reduction (Auto weighed it and said no) must still land on

@@ -13,6 +13,11 @@ categories = ["development-tools::procedural-macro-helpers"]
 [lib]
 proc-macro = true
 
+[features]
+# Generate the threaded sweeps over per-thread mirrors for every root.
+# Enabled by arael's `rayon` feature; not meant to be set by hand.
+rayon = []
+
 [dependencies]
 syn = { version = "2", features = ["full", "visit-mut"] }
 quote = "1"

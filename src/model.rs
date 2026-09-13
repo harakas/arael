@@ -1621,6 +1621,21 @@ pub struct BoxedSelfBlock<A, const N: usize, const M: usize, T: crate::utils::Fl
     inner: Option<std::boxed::Box<SelfBlock<A, N, M, T>>>,
 }
 
+// Manual impl, like CrossBlock's: only the float storage is cloned, so
+// an entity holding the block can derive Clone without `A: Clone`.
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> Clone for BoxedSelfBlock<A, N, M, T> {
+    fn clone(&self) -> Self {
+        BoxedSelfBlock {
+            inner: self.inner.as_ref().map(|b| std::boxed::Box::new(SelfBlock {
+                indices: b.indices,
+                pos: b.pos,
+                hessian: b.hessian,
+                _marker: std::marker::PhantomData,
+            })),
+        }
+    }
+}
+
 impl<A, const N: usize, const M: usize, T: crate::utils::Float> Default for BoxedSelfBlock<A, N, M, T> {
     fn default() -> Self { Self::new() }
 }
@@ -1742,6 +1757,116 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
     }
 }
 
+/// One thread's share of an entity's [`SelfBlock`]: the same indices and
+/// triangle plus a gradient stash, so a threaded sweep writes nothing the
+/// entity owns. The adds are branch-free: a fixed parameter's row is
+/// accumulated like any other and dropped by the scatter, which reads the
+/// indices. Built and owned by a root's generated mirror (see
+/// [`crate::threads`]).
+#[derive(Clone)]
+pub struct Partial<const N: usize, const M: usize, T: crate::utils::Float = f64> {
+    block: SelfBlock<(), N, M, T>,
+    grad: [T; N],
+    entity: u32,
+}
+
+impl<const N: usize, const M: usize, T: crate::utils::Float> Partial<N, M, T> {
+    /// A zeroed partial for the entity at `entity` with its parameter indices.
+    pub fn new(entity: u32, indices: &[u32; N]) -> Self {
+        let mut block = SelfBlock::new();
+        block.set_indices(indices);
+        Partial { block, grad: [T::zero(); N], entity }
+    }
+
+    /// The entity's index in its container.
+    pub fn entity(&self) -> u32 { self.entity }
+
+    /// The entity's parameter indices (`u32::MAX` for a fixed one).
+    pub fn indices(&self) -> &[u32; N] { &self.block.indices }
+
+    /// Reset the triangle and the gradient stash.
+    pub fn zero(&mut self) {
+        self.block.zero();
+        self.grad.fill(T::zero());
+    }
+
+    /// Add one residual's contribution: `2 r dr` into the stash and
+    /// `2 dr dr^T` into the triangle, every slot, fixed or not.
+    #[inline]
+    pub fn add_residual(&mut self, r: T, dr: &[T; N]) {
+        let two = T::two();
+        for i in 0..N {
+            self.grad[i] += two * r * dr[i];
+            let tdi = two * dr[i];
+            for j in i..N {
+                self.block.hessian[tri_idx(N, i, j)] += tdi * dr[j];
+            }
+        }
+    }
+
+    /// [`add_residual`](Self::add_residual) scaled by the loss weight `w`.
+    #[inline]
+    pub fn add_residual_with_loss(&mut self, w: T, r: T, dr: &[T; N]) {
+        let two_w = T::two() * w;
+        let wr = two_w * r;
+        for i in 0..N {
+            self.grad[i] += wr * dr[i];
+            let tdi = two_w * dr[i];
+            for j in i..N {
+                self.block.hessian[tri_idx(N, i, j)] += tdi * dr[j];
+            }
+        }
+    }
+
+    /// Add the stash into the global gradient at the live indices.
+    pub fn scatter_grad<F: crate::utils::Float>(&self, grad: &mut [F]) {
+        for i in 0..N {
+            let gi = self.block.indices[i];
+            if gi == u32::MAX { continue; }
+            grad[gi as usize] += F::from(self.grad[i]).unwrap();
+        }
+    }
+
+    /// See [`SelfBlock::collect_param_block`].
+    pub fn collect_param_block(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        self.block.collect_param_block(out);
+    }
+    /// See [`SelfBlock::collect_hessian_cells`].
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        self.block.collect_hessian_cells(out);
+    }
+    /// See [`SelfBlock::bind_hessian_positions`].
+    pub fn bind_hessian_positions(
+        &mut self,
+        binder: &mut HessianBinder,
+        out: &mut std::vec::Vec<ValueIndex>,
+    ) {
+        self.block.bind_hessian_positions(binder, out);
+    }
+    /// See [`SelfBlock::accumulate_hessian`].
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+        self.block.accumulate_hessian(hessian);
+    }
+    /// See [`SelfBlock::accumulate_hessian_band`].
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
+        -> Result<(), crate::simple_lm::BandOverflow>
+    {
+        self.block.accumulate_hessian_band(band, kd)
+    }
+    /// See [`SelfBlock::accumulate_hessian_sparse`].
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+        self.block.accumulate_hessian_sparse(coo);
+    }
+    /// See [`SelfBlock::accumulate_hessian_sparse_direct`].
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+        self.block.accumulate_hessian_sparse_direct(csc);
+    }
+    /// See [`SelfBlock::accumulate_hessian_sparse_indexed`].
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+        self.block.accumulate_hessian_sparse_indexed(vals, positions, cursor);
+    }
+}
+
 /// Hessian block coupling two model types -- stores ONLY the rectangular A x B
 /// cross Hessian pairs. A's gradient and A-A diagonal live in A's own
 /// [`SelfBlock`]; same for B. This matches the refactor where every
@@ -1843,15 +1968,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// added separately via A's and B's SelfBlocks (they receive `r` + per-side
     /// `dr` directly).
     pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
-        let two = T::two();
-        for i in 0..NA {
-            let dai = dr_a[i];
-            if dai == T::zero() { continue; }
-            let row = i * NB;
-            for j in 0..NB {
-                self.cross_hessian[row + j] += two * dai * dr_b[j];
-            }
-        }
+        cross_add(&mut self.cross_hessian, T::two(), dr_a, dr_b);
     }
 
     /// Robust-weighted variant of [`add_residual_cross`](Self::add_residual_cross):
@@ -1859,82 +1976,28 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// `_r` is ignored (the gradient goes through the SelfBlocks); it is present
     /// so the macro can route every accumulation call uniformly.
     pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
-        let two_w = T::two() * w;
-        for i in 0..NA {
-            let dai = dr_a[i];
-            if dai == T::zero() { continue; }
-            let row = i * NB;
-            for j in 0..NB {
-                self.cross_hessian[row + j] += two_w * dai * dr_b[j];
-            }
-        }
+        cross_add(&mut self.cross_hessian, T::two() * w, dr_a, dr_b);
     }
 
     /// Accumulate cross pairs into the full dense symmetric hessian.
     /// Generic over the target width; the conversion is an identity when it
     /// matches the block's storage.
     pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
-        let n_total = (hessian.len() as f64).sqrt() as usize;
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let gi = gi as usize;
-            let row = i * NB;
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let gj = gj as usize;
-                let val = F::from(self.cross_hessian[row + j]).unwrap();
-                hessian[gi * n_total + gj] += val;
-                hessian[gj * n_total + gi] += val;
-            }
-        }
+        cross_dense(&self.indices_a, &self.indices_b, &self.cross_hessian, hessian);
     }
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
     pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
-        let ldab = kd + 1;
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let gi = gi as usize;
-            let row = i * NB;
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let gj = gj as usize;
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                if hi - lo > kd {
-                    return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
-                }
-                let val = F::from(self.cross_hessian[row + j]).unwrap();
-                // Aliased slots (same entity in both refs): the triangle
-                // stores each symmetric pair once, so the diagonal needs
-                // both of the 2*dr_a*dr_b contributions explicitly.
-                let val = if gi == gj { val + val } else { val };
-                band[(kd + lo - hi) + hi * ldab] += val;
-            }
-        }
-        Ok(())
+        cross_band(&self.indices_a, &self.indices_b, &self.cross_hessian, band, kd)
     }
 
     /// Emit one representative scalar coordinate for this block's cell.
     /// Both entities are contiguous spans, so every pair lands in one
     /// cell of the entity partition (the diagonal cell when aliased).
     pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        let min_live = |idx: &[u32]| {
-            let mut min = u32::MAX;
-            for &i in idx {
-                if i != u32::MAX && i < min { min = i; }
-            }
-            min
-        };
-        let (ma, mb) = (min_live(&self.indices_a), min_live(&self.indices_b));
-        if ma != u32::MAX && mb != u32::MAX {
-            out.push((ma.min(mb), ma.max(mb)));
-        }
+        cross_cells(&self.indices_a, &self.indices_b, out);
     }
 
     /// Bind this block's tile for
@@ -1948,139 +2011,491 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         binder: &mut HessianBinder,
         out: &mut std::vec::Vec<ValueIndex>,
     ) {
-        let resolve = match binder {
-            HessianBinder::Tiled(bind) => {
-                self.pos = bind_tile(*bind, &self.indices_a, &self.indices_b);
-                return;
-            }
-            HessianBinder::Scalar(resolve) => resolve,
-        };
-        self.pos = TilePosition::MAPPED;
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                out.push(value_index(resolve(lo, hi)));
-            }
-        }
+        self.pos = cross_bind(&self.indices_a, &self.indices_b, binder, out);
     }
 
     /// Accumulate into COO sparse format. Upper triangle only.
     pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let row = i * NB;
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = F::from(self.cross_hessian[row + j]).unwrap();
-                // Aliased diagonal: see accumulate_hessian_band.
-                let val = if gi == gj { val + val } else { val };
-                coo.push(lo, hi, val);
-            }
-        }
+        cross_coo(&self.indices_a, &self.indices_b, &self.cross_hessian, coo);
     }
 
     /// Accumulate directly into CSC vals via position lookup.
     pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let row = i * NB;
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = F::from(self.cross_hessian[row + j]).unwrap();
-                // Aliased diagonal: see accumulate_hessian_band.
-                let val = if gi == gj { val + val } else { val };
-                if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
-                    csc.vals[pos] += val;
-                }
-            }
-        }
+        cross_direct(&self.indices_a, &self.indices_b, &self.cross_hessian, csc);
     }
 
     /// Accumulate into the assembled value buffer through this block's bound
     /// tile; see the note on
     /// [`SelfBlock::accumulate_hessian_sparse_indexed`].
     pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        if !self.pos.tiled() {
-            return self.accumulate_mapped_indexed(vals, positions, cursor);
+        cross_indexed(&self.indices_a, &self.indices_b, self.pos, &self.cross_hessian, vals, positions, cursor);
+    }
+}
+
+// The cross-block arithmetic, shared by [`CrossBlock`] and the mirrors'
+// [`CrossBlockArray`] lists: one block is its A and B indices, its tile
+// position and its NA x NB row-major values.
+
+/// `values += scale * dr_a * dr_b^T`, skipping the rows whose `dr_a` is zero.
+#[inline]
+fn cross_add<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float>(
+    values: &mut [T; P], scale: T, dr_a: &[T; NA], dr_b: &[T; NB],
+) {
+    for i in 0..NA {
+        let dai = dr_a[i];
+        if dai == T::zero() { continue; }
+        let row = i * NB;
+        for j in 0..NB {
+            values[row + j] += scale * dai * dr_b[j];
         }
-        let (sa, sb) = (tile_start(&self.indices_a), tile_start(&self.indices_b));
-        let (base, stride) = (self.pos.base as usize, self.pos.stride as usize);
-        if sa == sb {
-            // Aliased: both slots index one entity, so the pairs land on a
-            // diagonal tile and which side is the row flips per element.
-            return self.accumulate_aliased_indexed(vals, base, stride, sa as usize);
+    }
+}
+
+/// The dense symmetric scatter of one block.
+#[inline]
+fn cross_dense<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], hessian: &mut [F],
+) {
+    let n_total = (hessian.len() as f64).sqrt() as usize;
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let gi = gi as usize;
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let gj = gj as usize;
+            let val = F::from(values[row + j]).unwrap();
+            hessian[gi * n_total + gj] += val;
+            hessian[gj * n_total + gi] += val;
         }
-        // The tile holds the upper block triangle, so the lower-numbered
-        // entity walks the rows and the other walks the columns.
-        let (step_a, step_b) = if sa < sb { (1, stride) } else { (stride, 1) };
-        let (sa, sb) = (sa as usize, sb as usize);
-        // Offset of each live B slot: invariant across the outer loop.
-        let mut off_b = [0usize; NB];
-        for (o, &g) in std::iter::zip(&mut off_b, &self.indices_b) {
-            if g != u32::MAX {
-                *o = (g as usize - sb) * step_b;
+    }
+}
+
+/// The band scatter of one block (column-major, (kd+1)*n).
+#[inline]
+fn cross_band<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], band: &mut [F], kd: usize,
+) -> Result<(), crate::simple_lm::BandOverflow> {
+    let ldab = kd + 1;
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let gi = gi as usize;
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let gj = gj as usize;
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            if hi - lo > kd {
+                return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
             }
+            let val = F::from(values[row + j]).unwrap();
+            // Aliased slots (same entity in both refs): the triangle
+            // stores each symmetric pair once, so the diagonal needs
+            // both of the 2*dr_a*dr_b contributions explicitly.
+            let val = if gi == gj { val + val } else { val };
+            band[(kd + lo - hi) + hi * ldab] += val;
         }
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let pos = base + (gi as usize - sa) * step_a;
-            let row = i * NB;
-            for j in 0..NB {
-                if self.indices_b[j] == u32::MAX { continue; }
-                vals[pos + off_b[j]] += F::from(self.cross_hessian[row + j]).unwrap();
+    }
+    Ok(())
+}
+
+/// One representative coordinate of a block's cell: the two entities are
+/// contiguous spans, so every pair lands in one cell of the entity
+/// partition (the diagonal cell when aliased).
+#[inline]
+fn cross_cells<const NA: usize, const NB: usize>(a: &[u32; NA], b: &[u32; NB], out: &mut std::vec::Vec<(u32, u32)>) {
+    let min_live = |idx: &[u32]| {
+        let mut min = u32::MAX;
+        for &i in idx {
+            if i != u32::MAX && i < min { min = i; }
+        }
+        min
+    };
+    let (ma, mb) = (min_live(a), min_live(b));
+    if ma != u32::MAX && mb != u32::MAX {
+        out.push((ma.min(mb), ma.max(mb)));
+    }
+}
+
+/// The tile position of one block under `binder`; a scalar binder pushes
+/// one position per entry and marks the block mapped.
+#[inline]
+fn cross_bind<const NA: usize, const NB: usize>(
+    a: &[u32; NA], b: &[u32; NB], binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>,
+) -> TilePosition {
+    let resolve = match binder {
+        HessianBinder::Tiled(bind) => return bind_tile(*bind, a, b),
+        HessianBinder::Scalar(resolve) => resolve,
+    };
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            out.push(value_index(resolve(lo, hi)));
+        }
+    }
+    TilePosition::MAPPED
+}
+
+/// The COO scatter of one block, upper triangle only.
+#[inline]
+fn cross_coo<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], coo: &mut crate::simple_lm::CooMatrix<F>,
+) {
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            let val = F::from(values[row + j]).unwrap();
+            // Aliased diagonal: see cross_band.
+            let val = if gi == gj { val + val } else { val };
+            coo.push(lo, hi, val);
+        }
+    }
+}
+
+/// The direct CSC scatter of one block, by position lookup.
+#[inline]
+fn cross_direct<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], csc: &mut crate::simple_lm::CscMatrix<F>,
+) {
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            let val = F::from(values[row + j]).unwrap();
+            // Aliased diagonal: see cross_band.
+            let val = if gi == gj { val + val } else { val };
+            if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
+                csc.vals[pos] += val;
             }
         }
     }
+}
 
-    /// The aliased case of [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
-    /// one entity in both slots, every pair on its diagonal tile.
-    fn accumulate_aliased_indexed<F: crate::utils::Float>(&self, vals: &mut [F], base: usize, stride: usize, start: usize) {
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let row = i * NB;
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = F::from(self.cross_hessian[row + j]).unwrap();
-                // The triangle stores each symmetric pair once, so a pair that
-                // lands on the diagonal needs both contributions.
-                let val = if gi == gj { val + val } else { val };
-                vals[base + (hi as usize - start) * stride + (lo as usize - start)] += val;
-            }
+/// The indexed scatter of one block through its bound tile; see the note
+/// on [`SelfBlock::accumulate_hessian_sparse_indexed`].
+#[inline]
+fn cross_indexed<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], pos: TilePosition, values: &[T; P],
+    vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
+) {
+    if !pos.tiled() {
+        return cross_mapped(a, b, values, vals, positions, cursor);
+    }
+    let (sa, sb) = (tile_start(a), tile_start(b));
+    let (base, stride) = (pos.base as usize, pos.stride as usize);
+    if sa == sb {
+        // Aliased: both slots index one entity, so the pairs land on a
+        // diagonal tile and which side is the row flips per element.
+        return cross_aliased(a, b, values, vals, base, stride, sa as usize);
+    }
+    // The tile holds the upper block triangle, so the lower-numbered
+    // entity walks the rows and the other walks the columns.
+    let (step_a, step_b) = if sa < sb { (1, stride) } else { (stride, 1) };
+    let (sa, sb) = (sa as usize, sb as usize);
+    // Offset of each live B slot: invariant across the outer loop.
+    let mut off_b = [0usize; NB];
+    for (o, &g) in std::iter::zip(&mut off_b, b) {
+        if g != u32::MAX {
+            *o = (g as usize - sb) * step_b;
+        }
+    }
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let pos = base + (gi as usize - sa) * step_a;
+        let row = i * NB;
+        for j in 0..NB {
+            if b[j] == u32::MAX { continue; }
+            vals[pos + off_b[j]] += F::from(values[row + j]).unwrap();
+        }
+    }
+}
+
+/// The aliased case of [`cross_indexed`]: one entity in both slots, every
+/// pair on its diagonal tile.
+#[inline]
+fn cross_aliased<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], vals: &mut [F], base: usize, stride: usize, start: usize,
+) {
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            let val = F::from(values[row + j]).unwrap();
+            // The triangle stores each symmetric pair once, so a pair that
+            // lands on the diagonal needs both contributions.
+            let val = if gi == gj { val + val } else { val };
+            vals[base + (hi as usize - start) * stride + (lo as usize - start)] += val;
+        }
+    }
+}
+
+/// The untiled case of [`cross_indexed`]: one cached position per entry.
+#[inline]
+fn cross_mapped<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
+) {
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let val = F::from(values[row + j]).unwrap();
+            // Aliased diagonal: see cross_band.
+            let val = if gi == gj { val + val } else { val };
+            vals[positions[*cursor] as usize] += val;
+            *cursor += 1;
+        }
+    }
+}
+
+/// A list of cross blocks with the indices apart from the values: per
+/// block the A and B indices and the tile position in one array, the
+/// `NA x NB` values in one flat array. The mirrors hold their cross
+/// blocks this way. The build pushes the indices only and
+/// then calls [`finish`](Self::finish), which sizes the value array in
+/// one zeroed allocation (never written by the build; the sweep zeroes
+/// each block before it writes it) and keeps it when the length has not
+/// changed.
+#[derive(Clone)]
+pub struct CrossBlockArray<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
+    a: std::vec::Vec<[u32; NA]>,
+    b: std::vec::Vec<[u32; NB]>,
+    pos: std::vec::Vec<TilePosition>,
+    values: std::vec::Vec<T>,
+}
+
+impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for CrossBlockArray<NA, NB, P, T> {
+    fn default() -> Self { Self::new() }
+}
+
+/// One block of a [`CrossBlockArray`] list, borrowed for the sweep's writes.
+pub struct CrossBlockMut<'a, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> {
+    values: &'a mut [T; P],
+}
+
+impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlockMut<'_, NA, NB, P, T> {
+    /// Reset the values to zero.
+    #[inline]
+    pub fn zero(&mut self) {
+        self.values.fill(T::zero());
+    }
+
+    /// See [`CrossBlock::add_residual_cross`].
+    #[inline]
+    pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        cross_add(self.values, T::two(), dr_a, dr_b);
+    }
+
+    /// See [`CrossBlock::add_residual_cross_with_loss`].
+    #[inline]
+    pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        cross_add(self.values, T::two() * w, dr_a, dr_b);
+    }
+}
+
+impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlockArray<NA, NB, P, T> {
+    const CHECK_P: () = assert!(P == NA * NB, "CrossBlockArray: P must equal NA*NB");
+
+    /// An empty list.
+    pub fn new() -> Self {
+        let () = Self::CHECK_P;
+        CrossBlockArray {
+            a: std::vec::Vec::new(),
+            b: std::vec::Vec::new(),
+            pos: std::vec::Vec::new(),
+            values: std::vec::Vec::new(),
         }
     }
 
-    /// The untiled case of
-    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
-    /// one cached position per entry.
-    fn accumulate_mapped_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        for i in 0..NA {
-            let gi = self.indices_a[i];
-            if gi == u32::MAX { continue; }
-            let row = i * NB;
-            for j in 0..NB {
-                let gj = self.indices_b[j];
-                if gj == u32::MAX { continue; }
-                let val = F::from(self.cross_hessian[row + j]).unwrap();
-                // Aliased diagonal: see accumulate_hessian_band.
-                let val = if gi == gj { val + val } else { val };
-                vals[positions[*cursor] as usize] += val;
-                *cursor += 1;
-            }
+    /// The number of blocks.
+    pub fn len(&self) -> usize { self.a.len() }
+
+    /// True if the list holds no block.
+    pub fn is_empty(&self) -> bool { self.a.is_empty() }
+
+    /// Drop every block's indices; the value storage stays for `finish`.
+    pub fn clear(&mut self) {
+        self.a.clear();
+        self.b.clear();
+        self.pos.clear();
+    }
+
+    /// Room for `n` more blocks' indices.
+    pub fn reserve(&mut self, n: usize) {
+        self.a.reserve(n);
+        self.b.reserve(n);
+        self.pos.reserve(n);
+    }
+
+    /// Append a block with its parameter indices, unbound.
+    #[inline]
+    pub fn push(&mut self, a: &[u32; NA], b: &[u32; NB]) {
+        self.a.push(*a);
+        self.b.push(*b);
+        self.pos.push(TilePosition::UNBOUND);
+    }
+
+    /// Size the value array to the blocks pushed: a fresh zeroed
+    /// allocation when the length changed, else the existing storage,
+    /// whose stale values the sweep overwrites.
+    pub fn finish(&mut self) {
+        let n = self.a.len() * P;
+        if self.values.len() != n {
+            self.values = vec![T::zero(); n];
         }
+    }
+
+    /// Block `k` for writing.
+    #[inline]
+    pub fn block_mut(&mut self, k: usize) -> CrossBlockMut<'_, NA, NB, P, T> {
+        let values: &mut [T; P] = (&mut self.values[k * P..(k + 1) * P]).try_into().unwrap();
+        CrossBlockMut { values }
+    }
+
+    /// The indices of block `k`.
+    pub fn indices(&self, k: usize) -> (&[u32; NA], &[u32; NB]) {
+        (&self.a[k], &self.b[k])
+    }
+
+    /// The values of block `k`, row-major `NA x NB`.
+    pub fn values(&self, k: usize) -> &[T] {
+        &self.values[k * P..(k + 1) * P]
+    }
+
+    fn block(&self, k: usize) -> &[T; P] {
+        (&self.values[k * P..(k + 1) * P]).try_into().unwrap()
+    }
+
+    /// See [`CrossBlock::collect_hessian_cells`], over every block.
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for k in 0..self.a.len() {
+            cross_cells(&self.a[k], &self.b[k], out);
+        }
+    }
+
+    /// See [`CrossBlock::bind_hessian_positions`], over every block.
+    pub fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+        for k in 0..self.a.len() {
+            self.pos[k] = cross_bind(&self.a[k], &self.b[k], binder, out);
+        }
+    }
+
+    /// See [`CrossBlock::accumulate_hessian`], over every block.
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+        for k in 0..self.a.len() {
+            cross_dense(&self.a[k], &self.b[k], self.block(k), hessian);
+        }
+    }
+
+    /// See [`CrossBlock::accumulate_hessian_band`], over every block.
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
+        -> Result<(), crate::simple_lm::BandOverflow>
+    {
+        for k in 0..self.a.len() {
+            cross_band(&self.a[k], &self.b[k], self.block(k), band, kd)?;
+        }
+        Ok(())
+    }
+
+    /// See [`CrossBlock::accumulate_hessian_sparse`], over every block.
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+        for k in 0..self.a.len() {
+            cross_coo(&self.a[k], &self.b[k], self.block(k), coo);
+        }
+    }
+
+    /// See [`CrossBlock::accumulate_hessian_sparse_direct`], over every block.
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+        for k in 0..self.a.len() {
+            cross_direct(&self.a[k], &self.b[k], self.block(k), csc);
+        }
+    }
+
+    /// See [`CrossBlock::accumulate_hessian_sparse_indexed`], over every block.
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+        for k in 0..self.a.len() {
+            cross_indexed(&self.a[k], &self.b[k], self.pos[k], self.block(k), vals, positions, cursor);
+        }
+    }
+}
+
+#[cfg(test)]
+mod cross_block_array_tests {
+    use super::*;
+
+    /// A list of two blocks, one aliased, accumulates what two
+    /// `CrossBlock`s do, on the dense and the COO route, and `finish`
+    /// keeps the value storage across a rebuild of the same length.
+    #[test]
+    fn list_matches_blocks() {
+        let n = 5;
+        let (ia, ib) = ([0u32, 1], [3u32, 4]);
+        let (ja, jb) = ([3u32, 4], [3u32, 4]);
+        let mut one: CrossBlock<(), (), 2, 2, 4, f64> = CrossBlock::new();
+        one.set_indices(&ia, &ib);
+        let mut two: CrossBlock<(), (), 2, 2, 4, f64> = CrossBlock::new();
+        two.set_indices(&ja, &jb);
+        let mut list: CrossBlockArray<2, 2, 4, f64> = CrossBlockArray::new();
+        list.push(&ia, &ib);
+        list.push(&ja, &jb);
+        list.finish();
+        assert_eq!(list.len(), 2);
+        let (da, db) = ([1.5, -2.0], [0.25, 3.0]);
+        one.add_residual_cross(0.0, &da, &db);
+        two.add_residual_cross_with_loss(0.5, 0.0, &db, &da);
+        list.block_mut(0).zero();
+        list.block_mut(0).add_residual_cross(0.0, &da, &db);
+        list.block_mut(1).zero();
+        list.block_mut(1).add_residual_cross_with_loss(0.5, 0.0, &db, &da);
+        let (mut h1, mut h2) = (vec![0.0; n * n], vec![0.0; n * n]);
+        one.accumulate_hessian(&mut h1);
+        two.accumulate_hessian(&mut h1);
+        list.accumulate_hessian(&mut h2);
+        assert_eq!(h1, h2);
+        let (mut c1, mut c2) = (crate::simple_lm::CooMatrix::<f64>::new(n), crate::simple_lm::CooMatrix::<f64>::new(n));
+        one.accumulate_hessian_sparse(&mut c1);
+        two.accumulate_hessian_sparse(&mut c1);
+        list.accumulate_hessian_sparse(&mut c2);
+        assert_eq!((c1.rows, c1.cols, c1.vals), (c2.rows, c2.cols, c2.vals));
+        let (mut k1, mut k2) = (Vec::new(), Vec::new());
+        one.collect_hessian_cells(&mut k1);
+        two.collect_hessian_cells(&mut k1);
+        list.collect_hessian_cells(&mut k2);
+        assert_eq!(k1, k2);
+        // A rebuild of the same length keeps the (stale) values.
+        list.clear();
+        list.push(&ia, &ib);
+        list.push(&ja, &jb);
+        list.finish();
+        assert_ne!(list.values(0), &[0.0; 4]);
+        list.clear();
+        list.push(&ia, &ib);
+        list.finish();
+        assert_eq!(list.values(0), &[0.0; 4]);
     }
 }
 
@@ -2093,6 +2508,14 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
 /// [`CrossBlock`]. See [`BoxedSelfBlock`] for when to opt in.
 pub struct BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     inner: Option<std::boxed::Box<CrossBlock<A, B, NA, NB, P, T>>>,
+}
+
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Clone for BoxedCrossBlock<A, B, NA, NB, P, T> {
+    fn clone(&self) -> Self {
+        BoxedCrossBlock {
+            inner: self.inner.as_ref().map(|b| std::boxed::Box::new((**b).clone())),
+        }
+    }
 }
 
 impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for BoxedCrossBlock<A, B, NA, NB, P, T> {

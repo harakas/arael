@@ -23,16 +23,18 @@ cholmod = ["eigen"]
 # module `cholmod` binds, which is LGPL). Enabling this feature makes the
 # resulting binary subject to the GPL. Enable knowingly.
 cholmod-gpl = ["cholmod"]
-# Let the sparse factorization and triangular solve run on faer's rayon thread
+# Run the cost and assembly sweeps, and the linear solve, on rayon's thread
 # pool. Off by default: arael is single-threaded, and an edge target usually
-# wants it that way. Without it `LmConfig::num_threads` must stay 1.
-rayon = ["faer/rayon", "arael-faer/rayon"]
+# wants it that way. Without it `LmConfig::num_threads` must stay 1. With it
+# every root model must be `Sync`.
+rayon = ["dep:rayon", "faer/rayon", "arael-faer/rayon", "arael-macros/rayon"]
 
 [dependencies]
 arael-macros = { version = "0.8.4", path = "arael-macros" }
 arael-sym = { version = "0.8.4", path = "arael-sym" }
 arael-faer = { version = "0.8.4", path = "arael-faer" }
 inventory = "0.3"
+rayon = { version = "1.11", optional = true }
 num = "0.4"
 nalgebra = "0.33"
 rand = "0.9"

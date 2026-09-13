@@ -544,14 +544,19 @@ performance/quality trade-off that actually matters for the
 problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
 reference and a recipe for picking them.
 
-Arael is single-threaded. The sparse factorization and triangular solve can
-optionally run on rayon's thread pool -- enable the `rayon` feature and set
-`LmConfig::num_threads` (1 = sequential, the default; `n` = n threads; 0 = every
-core).
+Arael is single-threaded by default. With the `rayon` feature the cost
+evaluation, the assembly of the gradient and Hessian, and the linear solve run
+on rayon's thread pool -- set `LmConfig::num_threads` (1 = sequential, the
+default; `n` = n threads; 0 = every core).
+
+A threaded assembly adds up in a different order than the sequential one, so the
+two match to rounding, not to the bit. With the feature every root model must be
+`Sync`.
 
 Threading has overhead: whether it helps, and by how much, depends on the model
-and its number of parameters. Only the sparse factorization and triangular solve
-are threaded. See [docs/SOLVERS.md](docs/SOLVERS.md#threads).
+and its number of parameters. Each solve times both forms of each phase on its
+first calls and keeps the faster one. See
+[docs/SOLVERS.md](docs/SOLVERS.md#threads).
 
 ## Parameter Covariance
 

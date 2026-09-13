@@ -236,7 +236,7 @@ LmConfig {
 | `parameter_tolerance` | `None` | `Option<T>`. Stop when `\|step\|_2 <= tol * (\|x\|_2 + tol)` -- the parameters have stopped moving. A different question from the cost test: the cost can plateau while the step still does real work, and the step can vanish while the cost still creeps. Checked on an accepted step, before `advance()` re-centers. Respects `min_iters` |
 | `min_diagonal` | `None` | `Option<T>`. Floor under the DAMPING scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`. `None` leaves the scale at `H[i,i]` -- the classic multiplicative damping `(1 + lambda) * H[i,i]`. **Without it a parameter of zero curvature FAILS the solve** (`Err` with `SolveFailureKind::DegenerateDiagonal`) -- `(1 + lambda) * 0` is still 0, so the system is singular and no step can ever be accepted. With it, that parameter gets `lambda * min_diagonal` of damping, the factorization succeeds, and it simply does not move (its gradient is zero too). **A zero diagonal means the system is badly formulated -- a parameter nothing constrains -- so this is a bandaid and should be avoided**; the parameter it damps through stays unconstrained and its value is meaningless. Fix the model first: constrain it, hold it fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when a residual can legitimately switch itself off (a `branch` guarding an undefined observation, a saturated robustifier) and an entity can end one iteration with nothing reaching it. 1e-6 is reasonable. Rescues a ZERO diagonal only: NEGATIVE and NaN stay fatal, since `J^T J`'s diagonal is a sum of squares and either value means the assembly is poisoned |
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
-| `num_threads` | `1` | threads for the sparse factorization and triangular solve. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
+| `num_threads` | `1` | threads for the cost and assembly sweeps and the linear solve. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 | `observer` | `None` | an [`LmObserver`](#iteration-observer) called once per damped attempt; can stop the solve. Set with `with_observer` |
 | `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
@@ -596,9 +596,9 @@ derivatives, and only a finite-difference comparison sees them disagree.
 
 ## Threads
 
-Off by default: arael is a single-threaded solver. The one thing that can be
-threaded today is the sparse factorization and triangular solve, which faer runs
-on rayon's global thread pool.
+Off by default: arael is a single-threaded solver. The `rayon` feature runs
+the cost evaluation, the assembly of the gradient and Hessian, and the linear
+solve on rayon's global thread pool.
 
 ```toml
 [dependencies]
@@ -611,26 +611,64 @@ let cfg = LmConfig::conservative().with_num_threads(4);
 let result = model.solve_sparse(&cfg)?;
 ```
 
-Without the feature, a `num_threads` other than 1 warns and runs sequentially --
-it does not silently pretend. `num_threads: 0` resolves to
+Nothing is declared on the model: with the feature every root gets the
+threaded sweeps, and `num_threads` decides whether they are used. Without
+the feature, a `num_threads` other than 1 warns and runs sequentially -- it
+does not silently pretend. `num_threads: 0` resolves to
 `rayon::current_num_threads()`, so it honours `RAYON_NUM_THREADS` or whatever
 `ThreadPoolBuilder` the application installed; the pool is shared with the rest of
 the process.
 
+### The sweeps
+
+Each thread takes a contiguous share of every constraint collection and
+sweeps it into a **mirror**: its own copy of the Hessian blocks and the
+gradient entries those constraints write. No two threads write the same
+value and nothing is locked. A serial pass then adds the mirrors into the
+Hessian and the gradient. The model is read-only during a sweep, so with
+the feature enabled a root model must be `Sync`; a type that is not (a
+field with interior mutability) fails to compile and is named in the error.
+
+Summing each entity's contributions per thread and then across the threads
+reorders the additions: **a threaded assembly matches the sequential one to
+rounding, not to the bit.** The cost and the parameters a solve lands on
+differ in the last bits between thread counts.
+
+Each solve times both forms of each phase on its first calls and keeps the
+faster one, so a model too small to pay for a dispatch stays sequential.
+The mirrors are built once per solve, from the model as it stands then.
+
+A threaded solve never reads or writes the model's own Hessian blocks.
+Declared as [`BoxedSelfBlock` / `BoxedCrossBlock`](MODEL.md#heap-backed-blocks-boxedselfblock--boxedcrossblock)
+they cost nothing there, since their storage is never allocated; declared
+inline they sit in the entity structs whatever the solve does.
+
+Some model forms have no threaded sweep, and a model using one keeps the
+sequential sweeps at every thread count: `extended` roots, any
+`TripletBlock`, parent-owned or mixed cross blocks, the `root.` / `parent.`
+SelfBlock primaries, constraint or entity collections below the root, an
+entity held in more than one collection, refs resolving through a chained
+path, and `constraint_index` fields.
+
+To reuse what a solve allocates -- the mirrors above -- across many solves
+of one model, keep an `arael::Context` and solve through
+`lm_solve_with_context`, or solve through an `LmSession`, which keeps one.
+The plain entry points make a context per solve.
+
+### The linear solve
+
 Threads reach the block supernodal route two ways: independent subtrees
 of the elimination tree run on separate threads, and the dense kernels of
 the panels too big to chunk take the pool, size-gated. The factorization
-is the same one at every thread count and the answer is bit-identical.
-What threads do not reach: assembly, the Schur reduction, the analysis
-and the triangular solve -- on a landmark SLAM problem the reduction is
-the larger half of an iteration, which is why the 900-pose S-curve gains
-nothing while the figure-8, which does not reduce, gains 2.2x.
+is the same one at every thread count and produces the same answer. The
+factorization and the triangular solve are handed the thread count and
+faer splits what it can; the Schur reduction and the analysis are
+sequential. On a landmark SLAM problem the reduction is the larger half of
+an iteration, so a problem that reduces gains less from threads there than
+one that does not.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.
-
-Only the sparse factorization and triangular solve are threaded; assembly, the
-Schur reduction and every other backend are sequential.
 
 ## Where the log goes
 
