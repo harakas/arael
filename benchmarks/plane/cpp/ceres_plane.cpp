@@ -158,7 +158,13 @@ static bench::Result solve(const Scene& scene, int max_iters,
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.max_num_iterations = max_iters;
+    // The benchmark's thread budget, resolved by the harness and inherited
+    // through the environment. Unset or 1 is the sequential run.
     options.num_threads = 1;
+    if (const char* t = getenv("BENCH_THREADS")) {
+        const int n = atoi(t);
+        if (n > 0) options.num_threads = n;
+    }
     // Shared termination class for this benchmark (see the arael
     // runner's tolerance()); tighter than the sibling benchmarks because
     // these costs are large and the relative test is what bites.

@@ -127,7 +127,13 @@ static bench::Result solve(std::vector<Pose> poses, const std::vector<Edge>& edg
     ceres::Solver::Options options;
     options.max_num_iterations = max_iters;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    // The benchmark's thread budget, resolved by the harness and inherited
+    // through the environment. Unset or 1 is the sequential run.
     options.num_threads = 1;
+    if (const char* t = getenv("BENCH_THREADS")) {
+        const int n = atoi(t);
+        if (n > 0) options.num_threads = n;
+    }
     // Problem-appropriate initial trust region (the shipped 1e4 default
     // over-damps these well-initialized graphs; see the README's
     // initial-damping policy). Env-overridable for experiments.
@@ -141,6 +147,12 @@ static bench::Result solve(std::vector<Pose> poses, const std::vector<Edge>& edg
     auto t0 = std::chrono::steady_clock::now();
     ceres::Solve(options, &problem, &summary);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // CERES_REPORT=1 prints Ceres's own phase split on stderr -- the
+    // residual and Jacobian evaluation against the linear solver, which
+    // is what says whether a thread count reached anything.
+    if (getenv("CERES_REPORT")) {
+        std::fprintf(stderr, "%s\n", summary.FullReport().c_str());
+    }
 
     if (out) {
         out->resize(poses.size());

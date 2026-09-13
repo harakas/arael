@@ -88,7 +88,13 @@ static bench::Result solve(Bal b, ceres::LinearSolverType linsolver, int max_ite
     ceres::Solver::Options options;
     options.linear_solver_type = linsolver;
     options.max_num_iterations = max_iters;
+    // The benchmark's thread budget, resolved by the harness and inherited
+    // through the environment. Unset or 1 is the sequential run.
     options.num_threads = 1;
+    if (const char* t = getenv("BENCH_THREADS")) {
+        const int n = atoi(t);
+        if (n > 0) options.num_threads = n;
+    }
     // Same termination class as the other benchmarks. Trust region
     // defaults are Ceres's own -- tuned on these very problems -- with
     // the usual env override.
@@ -178,7 +184,13 @@ static int cov_mode(Bal b, ceres::LinearSolverType linsolver, const std::string&
     ceres::Solver::Options options;
     options.linear_solver_type = linsolver;
     options.max_num_iterations = bench::full_iters(100);
+    // The benchmark's thread budget, resolved by the harness and inherited
+    // through the environment. Unset or 1 is the sequential run.
     options.num_threads = 1;
+    if (const char* t = getenv("BENCH_THREADS")) {
+        const int n = atoi(t);
+        if (n > 0) options.num_threads = n;
+    }
     options.function_tolerance = 1e-5;
     if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
     ceres::Solver::Summary summary;

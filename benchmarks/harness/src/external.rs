@@ -25,9 +25,23 @@ pub struct Protocol {
 /// Asserts the child inherited the core pin: a subprocess that escaped it is
 /// not measuring what the rest of the table measures.
 pub fn run(mut cmd: Command) -> Protocol {
+    // Under TIMING the external runners are asked for their own phase
+    // split (Ceres prints its full report), and their stderr is passed
+    // through instead of swallowed -- otherwise a runner's diagnostics
+    // reach nobody on a successful run.
+    let loud = std::env::var("TIMING").is_ok() || std::env::var("VERBOSE").is_ok();
+    if loud {
+        cmd.env("CERES_REPORT", "1");
+    }
     let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
     assert!(out.status.success(), "{:?} failed: {}", cmd,
         String::from_utf8_lossy(&out.stderr));
+    if loud && !out.stderr.is_empty() {
+        let name = cmd.get_program().to_string_lossy().to_string();
+        for line in String::from_utf8_lossy(&out.stderr).lines() {
+            eprintln!("  [{}] {}", name.rsplit('/').next().unwrap_or(&name), line);
+        }
+    }
     let text = String::from_utf8(out.stdout).unwrap();
     let line = text.lines().rev().find(|l| l.contains("solve_ms"))
         .unwrap_or_else(|| panic!("no protocol line from {:?}", cmd));
