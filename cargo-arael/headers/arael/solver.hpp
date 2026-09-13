@@ -203,6 +203,10 @@ struct LmConfigT {
     option<double> time_limit_seconds;
     bool (*observer)(void*, const LmIterT<F>*);
     void* observer_user;
+    /// Threads for the cost and assembly sweeps alone. Empty leaves them
+    /// on `num_threads`; a value gives the sweeps that count and leaves
+    /// the linear solve on `num_threads`.
+    option<uint32_t> assembly_threads;
 };
 
 /// Whether and when the sparse backend marginalizes (mirrors arael's

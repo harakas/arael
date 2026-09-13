@@ -436,6 +436,25 @@ def _opt_property(field):
     return property(get, set)
 
 
+def _opt_int_property(field):
+    """Property mapping a COpt struct field to an int-or-None."""
+
+    def get(self):
+        c = getattr(self, field)
+        return int(c.v) if c.has else None
+
+    def set(self, value):
+        c = getattr(self, field)
+        if value is None:
+            c.has = False
+            c.v = 0
+        else:
+            c.has = True
+            c.v = int(value)
+
+    return property(get, set)
+
+
 def lm_types(fp):
     """The per-precision solver layouts as a dict: fp is
     ctypes.c_float or ctypes.c_double. Field order is the C ABI."""
@@ -445,6 +464,9 @@ def lm_types(fp):
 
     class COptSeconds(ctypes.Structure):
         _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_double)]
+
+    class COptU32(ctypes.Structure):
+        _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_uint32)]
 
     class LmIter(ctypes.Structure):
         """One damped attempt, as the observer callback sees it.
@@ -498,6 +520,7 @@ def lm_types(fp):
             ("_time_limit_seconds", COptSeconds),
             ("_observer", observer_fn),
             ("_observer_user", ctypes.c_void_p),
+            ("_assembly_threads", COptU32),
         ]
 
         gradient_tolerance = _opt_property("_gradient_tolerance")
@@ -506,6 +529,7 @@ def lm_types(fp):
             _opt_property("_predicted_reduction_tolerance")
         min_diagonal = _opt_property("_min_diagonal")
         time_limit_seconds = _opt_property("_time_limit_seconds")
+        assembly_threads = _opt_int_property("_assembly_threads")
 
         @property
         def observer(self):
