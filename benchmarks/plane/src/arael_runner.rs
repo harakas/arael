@@ -356,7 +356,8 @@ impl bench_harness::arael::Model for World {
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
-    fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
+    fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>,
+             _ctx: &mut arael::threads::Context)
         -> Result<LmResult<f64>, SolveFailure<f64>> {
         lm_solve(params, &mut SparseFaer::<f64>::new()
             .with_policy(schur_policy())
@@ -438,7 +439,8 @@ impl bench_harness::arael::Model for WorldF {
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
-    fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
+    fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>,
+             _ctx: &mut arael::threads::Context)
         -> Result<LmResult<f32>, SolveFailure<f32>> {
         lm_solve(params, &mut SparseFaer::<f32>::new()
             .with_policy(schur_policy())

@@ -47,11 +47,16 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     /// real dataset -- arael's f32 rows hit a NaN Hessian diagonal on
     /// Ladybug-1723, from observations sitting on the optical centre -- and a
     /// benchmark that panics there loses every other row in the run.
+    ///
+    /// `ctx` is the row's solve context, one per model, kept across the
+    /// probes so what a solve reuses (a `par` root's mirrors) carries
+    /// over; pass it to `lm_solve_with_context`.
     fn solve(
         input: &Self::Input,
         params: &[Self::Scalar],
         model: &mut Self,
         cfg: &LmConfig<Self::Scalar>,
+        ctx: &mut arael::threads::Context,
     ) -> Result<LmResult<Self::Scalar>, SolveFailure<Self::Scalar>>;
 
     /// Anything else this benchmark wants on the config. The defaults below are
@@ -62,6 +67,10 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     /// reads the input because the route is what distinguishes such a row from
     /// an exact one over the same model. See [`Row::inexact`].
     fn inexact(_input: &Self::Input) -> bool { false }
+
+    /// The threaded sweeps' timing of the last solve, read from the row's
+    /// context (a `par` root's mirrors' `timing`); printed under TIMING=1.
+    fn par_timing(_ctx: &arael::threads::Context) -> Option<String> { None }
 }
 
 /// ARAEL_LAMBDA0 overrides the model's damping, for experiments.
@@ -135,13 +144,15 @@ pub fn print_timing<T>(r: &LmResult<T>) {
     if let Some(t) = &r.timing {
         eprintln!(
             "  [timing] total {:.1} ms = assembly {:.1} + analysis {:.1} + linear solve {:.1} \
-             (first assembly {:.1}), {} iters",
+             + cost eval {:.1} (first assembly {:.1}), {} iters, {} cost evals",
             t.total.as_secs_f64() * 1e3,
             t.assembly.as_secs_f64() * 1e3,
             t.analysis.as_secs_f64() * 1e3,
             t.linear_solve.as_secs_f64() * 1e3,
+            t.cost_eval.as_secs_f64() * 1e3,
             t.first_assembly.as_secs_f64() * 1e3,
             r.iterations,
+            t.cost_eval_count,
         );
     }
 }
@@ -159,6 +170,11 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     let mut model = M::build(input);
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
+    // One context for the row: the model is cloned per probe, the
+    // context is not, so a `par` root's mirrors carry over. Its phase
+    // timing runs only under TIMING, where it is printed.
+    let mut ctx = arael::threads::Context::new();
+    ctx.set_timing(std::env::var("TIMING").is_ok());
 
     let mut failure: Option<String> = None;
     let row = crate::solver::run(100, |max_iters| {
@@ -178,7 +194,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
         let cfg = config::<M>(input, max_iters);
         // Qualified: `M::solve` alone is ambiguous against `LmProblem::solve`
         // (the SolverKind entry point), which Model also carries.
-        let (ms, r) = crate::solver::timed(|| <M as Model>::solve(input, &params, &mut m, &cfg));
+        let (ms, r) = crate::solver::timed(|| <M as Model>::solve(input, &params, &mut m, &cfg, &mut ctx));
         let r = match r {
             Ok(r) => r,
             Err(e) => {
@@ -194,6 +210,11 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
             }
         };
         print_timing(&r);
+        if std::env::var("TIMING").is_ok() {
+            if let Some(par) = M::par_timing(&ctx) {
+                println!("  [par] {}", par);
+            }
+        }
         m.deserialize(&r.x);
         crate::solver::Outcome {
             ms,

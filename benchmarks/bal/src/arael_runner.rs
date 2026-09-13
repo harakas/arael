@@ -11,7 +11,7 @@
 
 use arael::simple_lm::RootProblem;
 use crate::bal::{CameraIn, Dataset};
-use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
+use arael::model::{BoxedCrossBlock, BoxedSelfBlock, EulerAngleParam, Param};
 use arael::quatern::{quaternd, quaternf};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
@@ -23,14 +23,14 @@ struct Camera<T: Float> {
     t: Param<vect3<T>>,
     ea: EulerAngleParam<T>, // world-to-camera
     intr: Param<vect3<T>>,  // (f, k1, k2)
-    hb: SelfBlock<Camera<T>, T>,
+    hb: BoxedSelfBlock<Camera<T>, T>,
 }
 
 #[arael::model]
 #[derive(Clone)]
 struct Point<T: Float> {
     pos: Param<vect3<T>>,
-    hb: SelfBlock<Point<T>, T>,
+    hb: BoxedSelfBlock<Point<T>, T>,
 }
 
 #[arael::model]
@@ -50,7 +50,7 @@ struct Obs<T: Float> {
     #[arael(ref = root.points)]
     pt: Ref<Point<T>>,
     xy: vect2<T>,
-    hb: CrossBlock<Camera<T>, Point<T>, T>,
+    hb: BoxedCrossBlock<Camera<T>, Point<T>, T>,
 }
 
 #[arael::model]
@@ -83,12 +83,12 @@ fn build_parts<T: Float>(ds: &Dataset)
             t: Param::new(c3(c.t)),
             ea: EulerAngleParam::new(c3(c.rot().get_euler_angles())),
             intr: Param::new(c3(vect3d::new(c.f, c.k1, c.k2))),
-            hb: SelfBlock::new(),
+            hb: BoxedSelfBlock::new(),
         });
     }
     let mut points = refs::Vec::new();
     for p in &ds.points {
-        points.push(Point { pos: Param::new(c3(*p)), hb: SelfBlock::new() });
+        points.push(Point { pos: Param::new(c3(*p)), hb: BoxedSelfBlock::new() });
     }
     let mut observations = std::vec::Vec::new();
     for o in &ds.observations {
@@ -96,7 +96,7 @@ fn build_parts<T: Float>(ds: &Dataset)
             cam: cameras.ref_at(o.cam),
             pt: points.ref_at(o.point),
             xy: o.xy.cast(),
-            hb: CrossBlock::new(),
+            hb: BoxedCrossBlock::new(),
         });
     }
     (cameras, points, observations)
@@ -235,7 +235,7 @@ type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFa
 // BAL, unlike the slam benchmark). `schur` marginalizes the points on
 // every damped solve and factorizes only the camera system. Which wins
 // depends on the camera count -- see the README.
-fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
+fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaer::new()
@@ -243,10 +243,10 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean());
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
-fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
+fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
     // No hint: the eliminable blocks are detected from the model's coupling
     // graph. Forced, so the benchmark measures the reduction itself rather
     // than the policy's verdict about it.
@@ -264,7 +264,7 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean());
-    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
+    let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
             eprintln!("schur plan: {:?}", p);
@@ -292,7 +292,7 @@ pub fn cg_options() -> arael::simple_lm::CgOptions {
     }
 }
 
-fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
+fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
     // Force, not Auto: Iterative has nothing to solve without a reduction and
     // says so rather than falling back, and the benchmark wants the route it
     // asked for.
@@ -301,7 +301,7 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_iterative_schur(cg_options());
-    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
+    let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
             eprintln!("schur plan: {:?}", p);
@@ -310,12 +310,12 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
     r
 }
 
-fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
+fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(schur_ordering())
         .with_implicit_schur(cg_options());
-    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
+    let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
             eprintln!("schur plan: {:?}", p);
@@ -324,24 +324,24 @@ fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_
     r
 }
 
-fn solve32_schur_cg_implicit(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
+fn solve32_schur_cg_implicit(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(schur_ordering())
         .with_implicit_schur(cg_options());
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
-fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
+fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_iterative_schur(cg_options());
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
-fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
+fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaerF32::new()
@@ -349,10 +349,10 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean());
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
-fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
+fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
@@ -360,7 +360,7 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean());
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
 fn rodrigues_of(m: arael::matrix::matrix3d) -> vect3d {
@@ -410,12 +410,12 @@ impl bench_harness::arael::Model for Scene {
         }
     }
     fn solve(p: &Problem, params: &[f64], m: &mut Self,
-             cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
+             cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
         match p.route {
-            Route::Sparse => solve64(params, m, cfg),
-            Route::Schur => solve64_schur(params, m, cfg),
-            Route::SchurCg => solve64_schur_cg(params, m, cfg),
-            Route::SchurCgImplicit => solve64_schur_cg_implicit(params, m, cfg),
+            Route::Sparse => solve64(params, m, cfg, ctx),
+            Route::Schur => solve64_schur(params, m, cfg, ctx),
+            Route::SchurCg => solve64_schur_cg(params, m, cfg, ctx),
+            Route::SchurCgImplicit => solve64_schur_cg_implicit(params, m, cfg, ctx),
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl =>
                 arael::simple_lm::solve_sparse_cholmod_supernodal(params, m, cfg),
@@ -423,6 +423,9 @@ impl bench_harness::arael::Model for Scene {
     }
     fn inexact(p: &Problem) -> bool {
         matches!(p.route, Route::SchurCg | Route::SchurCgImplicit)
+    }
+    fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
+        ctx.mirrors::<SceneMirror>().map(|m| m.timing.report(m.threads()))
     }
 }
 
@@ -496,7 +499,8 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     let mut params: Vec<f64> = Vec::new();
     scene.serialize(&mut params);
     let cfg = bench_harness::arael::config::<Scene>(problem, 100);
-    let result = solve64_schur(&params, &mut scene, &cfg).expect("covariance solve failed");
+    let result = solve64_schur(&params, &mut scene, &cfg, &mut Default::default())
+        .expect("covariance solve failed");
     scene.deserialize(&result.x);
 
     let (ncam, npt) = (scene.cameras.len(), scene.points.len());
@@ -584,12 +588,12 @@ impl bench_harness::arael::Model for SceneF {
         }
     }
     fn solve(p: &Problem, params: &[f32], m: &mut Self,
-             cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
+             cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
         match p.route {
-            Route::Sparse => solve32(params, m, cfg),
-            Route::Schur => solve32_schur(params, m, cfg),
-            Route::SchurCg => solve32_schur_cg(params, m, cfg),
-            Route::SchurCgImplicit => solve32_schur_cg_implicit(params, m, cfg),
+            Route::Sparse => solve32(params, m, cfg, ctx),
+            Route::Schur => solve32_schur(params, m, cfg, ctx),
+            Route::SchurCg => solve32_schur_cg(params, m, cfg, ctx),
+            Route::SchurCgImplicit => solve32_schur_cg_implicit(params, m, cfg, ctx),
             // CHOLMOD's supernodal module is double-precision only.
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl => unreachable!("cholmod-gpl is an f64-only row"),
@@ -647,7 +651,7 @@ fn probe_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solut
     // The build is the reset, not the solve -- the clock starts here, as it does
     // everywhere else in the harness.
     let (ms, result) = bench_harness::solver::timed(|| {
-        <M as bench_harness::arael::Model>::solve(p, &params, &mut model, &cfg)
+        <M as bench_harness::arael::Model>::solve(p, &params, &mut model, &cfg, &mut Default::default())
     });
     let result = result.ok()?;
     model.deserialize(&result.x);

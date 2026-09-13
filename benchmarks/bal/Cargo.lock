@@ -35,6 +35,7 @@ dependencies = [
  "num",
  "rand",
  "rand_distr",
+ "rayon",
  "serde",
  "web-time",
 ]

@@ -447,7 +447,8 @@ impl bench_harness::arael::Model for Path {
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
-    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>,
+             _ctx: &mut arael::threads::Context)
         -> Solved<f64> { solve64(params, m, cfg) }
 }
 
@@ -468,7 +469,8 @@ impl bench_harness::arael::Model for PathF {
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
-    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>,
+             _ctx: &mut arael::threads::Context)
         -> Solved<f32> { solve32(params, m, cfg) }
 }
 
@@ -504,7 +506,7 @@ fn solve_capped<M: bench_harness::arael::Model<Input = Scene, Solution = Solutio
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, max_iters);
-    let result = <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg)
+    let result = <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg, &mut Default::default())
         .expect("capped solve failed");
     model.deserialize(&result.x);
     model.solution()
@@ -525,7 +527,7 @@ fn timed_once<M: bench_harness::arael::Model<Input = Scene>>(
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, 200);
-    <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg)
+    <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg, &mut Default::default())
         .expect("timed solve failed")
         .timing
         .expect("gather_timing is on")

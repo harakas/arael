@@ -12,7 +12,7 @@ use bench_harness::arael::{run, Model as Pipeline};
 use bench_harness::table::Row;
 use crate::g2o3::{Dataset3, Pose3In};
 use arael::matrix::matrix3;
-use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
+use arael::model::{BoxedCrossBlock, BoxedSelfBlock, Param, QuaternionParam};
 use arael::quatern::quatern;
 use arael::refs::{self, Ref};
 use arael::utils::Float;
@@ -37,7 +37,7 @@ struct Pose3<T: Float> {
     prior: vect3<T>,
     prior_rot_t: matrix3<T>,
     has_prior: bool,
-    hb: SelfBlock<Pose3<T>, T>,
+    hb: BoxedSelfBlock<Pose3<T>, T>,
 }
 
 #[arael::model]
@@ -63,7 +63,7 @@ struct Edge3<T: Float> {
     u_tt: matrix3<T>,    // sqrt-info blocks: [ u_tt u_tr ; 0 u_rr ]
     u_tr: matrix3<T>,
     u_rr: matrix3<T>,
-    hb: CrossBlock<Pose3<T>, Pose3<T>, T>,
+    hb: BoxedCrossBlock<Pose3<T>, Pose3<T>, T>,
 }
 
 #[arael::model]
@@ -96,7 +96,7 @@ fn build_parts<T: Float>(ds: &Dataset3)
             prior: p.t.cast(),
             prior_rot_t: rot.transpose().cast(),
             has_prior: i == 0,
-            hb: SelfBlock::new(),
+            hb: BoxedSelfBlock::new(),
         });
     }
     let mut edges = std::vec::Vec::new();
@@ -110,7 +110,7 @@ fn build_parts<T: Float>(ds: &Dataset3)
             u_tt: u_tt.cast(),
             u_tr: u_tr.cast(),
             u_rr: u_rr.cast(),
-            hb: CrossBlock::new(),
+            hb: BoxedCrossBlock::new(),
         });
     }
     (poses, edges)
@@ -146,14 +146,18 @@ impl Pipeline for Graph3 {
     type Scalar = f64;
     type Input = Dataset3;
     type Solution = Vec<Pose3In>;
+    fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
+        ctx.mirrors::<Graph3Mirror>().map(|m| m.timing.report(m.threads()))
+    }
     fn lambda0(_: &Dataset3) -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f64(ds) }
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<Pose3In> { solution_parts(&self.poses) }
-    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>,
+             ctx: &mut arael::threads::Context)
         -> crate::arael_runner::Solved<f64> {
-        crate::arael_runner::solve_f64(params, m, cfg)
+        crate::arael_runner::solve_f64(params, m, cfg, ctx)
     }
 }
 
@@ -166,9 +170,10 @@ impl Pipeline for Graph3F {
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<Pose3In> { solution_parts(&self.poses) }
-    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>,
+             ctx: &mut arael::threads::Context)
         -> crate::arael_runner::Solved<f32> {
-        crate::arael_runner::solve_f32(params, m, cfg)
+        crate::arael_runner::solve_f32(params, m, cfg, ctx)
     }
 }
 

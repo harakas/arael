@@ -321,8 +321,11 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
         eprintln!("  round {}/{} done", round + 1, rounds);
     }
 
-    for (label, mb) in measure_in_process_memory(path, true, true,
-        &["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]) {
+    // Only the selected systems, as in the 2D path: a filtered run must not
+    // solve the others for their memory figure.
+    let mem_labels: Vec<&str> = ["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]
+        .into_iter().filter(|l| system_selected(l)).collect();
+    for (label, mb) in measure_in_process_memory(path, true, true, &mem_labels) {
         t.set_peak_mb(&label, mb);
     }
     t.print();

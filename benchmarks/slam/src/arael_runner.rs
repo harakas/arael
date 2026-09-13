@@ -10,7 +10,7 @@
 use arael::simple_lm::RootProblem;
 use crate::scene::{Scene, Solution};
 use arael::matrix::matrix3;
-use arael::model::{CrossBlock, Param, SelfBlock, SimpleEulerAngleParam};
+use arael::model::{BoxedCrossBlock, BoxedSelfBlock, Param, SimpleEulerAngleParam};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
 use arael::vect::{vect2, vect3};
@@ -51,7 +51,7 @@ struct Pose<T: Float> {
     gps_cov_isigma: vect3<T>,
     tilt_roll: T,
     tilt_pitch: T,
-    hb_pose: SelfBlock<Pose<T>, T>,
+    hb_pose: BoxedSelfBlock<Pose<T>, T>,
 }
 
 #[arael::model]
@@ -67,7 +67,7 @@ struct PointLandmark<T: Float> {
     pos: Param<vect3<T>>,
     prior_pos: vect3<T>,
     frines: std::vec::Vec<Frine<T>>,
-    hb_drift: SelfBlock<PointLandmark<T>, T>,
+    hb_drift: BoxedSelfBlock<PointLandmark<T>, T>,
 }
 
 #[arael::model]
@@ -90,7 +90,7 @@ struct Frine<T: Float> {
     mf2r: matrix3<T>,
     camera_pos: vect3<T>,
     isigma: vect2<T>,
-    hb: CrossBlock<PointLandmark<T>, Pose<T>, T>,
+    hb: BoxedCrossBlock<PointLandmark<T>, Pose<T>, T>,
 }
 
 #[arael::model]
@@ -125,7 +125,7 @@ struct PosePair<T: Float> {
     pos_cov_isigma: vect3<T>,
     ea_cov_r: matrix3<T>,
     ea_cov_isigma: vect3<T>,
-    hb: CrossBlock<Pose<T>, Pose<T>, T>,
+    hb: BoxedCrossBlock<Pose<T>, Pose<T>, T>,
 }
 
 #[arael::model]
@@ -175,7 +175,7 @@ fn build_parts<T: Float>(scene: &Scene)
             gps_cov_isigma: g.cov_isigma.cast(),
             tilt_roll: c(p.tilt_roll),
             tilt_pitch: c(p.tilt_pitch),
-            hb_pose: SelfBlock::new(),
+            hb_pose: BoxedSelfBlock::new(),
         });
     }
     // Frines are grouped by landmark.
@@ -188,7 +188,7 @@ fn build_parts<T: Float>(scene: &Scene)
             mf2r: f.mf2r.cast(),
             camera_pos: f.camera_pos.cast(),
             isigma: f.isigma.cast(),
-            hb: CrossBlock::new(),
+            hb: BoxedCrossBlock::new(),
         });
     }
     let mut landmarks = refs::Arena::new();
@@ -197,7 +197,7 @@ fn build_parts<T: Float>(scene: &Scene)
             pos: Param::new(init.cast()),
             prior_pos: init.cast(),
             frines: std::mem::take(&mut per_lm[i]),
-            hb_drift: SelfBlock::new(),
+            hb_drift: BoxedSelfBlock::new(),
         });
     }
     let mut pose_pairs = std::vec::Vec::new();
@@ -211,7 +211,7 @@ fn build_parts<T: Float>(scene: &Scene)
             pos_cov_isigma: o.pos_cov_isigma.cast(),
             ea_cov_r: o.ea_cov_r.cast(),
             ea_cov_isigma: o.ea_cov_isigma.cast(),
-            hb: CrossBlock::new(),
+            hb: BoxedCrossBlock::new(),
         });
     }
     (poses, landmarks, pose_pairs)
@@ -405,7 +405,8 @@ fn envelope_panel_width() -> Option<usize> {
 
 type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
 
-fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
+fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>,
+           ctx: &mut arael::threads::Context)
     -> Solved<f64> {
     match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
         Ok("eigen") => {
@@ -431,7 +432,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             // policy is what pins it there -- left to itself the backend
             // would find the landmarks and marginalize them, which is the
             // other row.
-            arael::simple_lm::lm_solve(
+            arael::simple_lm::lm_solve_with_context(
                 params,
                 &mut arael::simple_lm::SparseFaer::new()
                     .with_policy(arael::simple_lm::SchurPolicy::Never)
@@ -440,13 +441,14 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
         .with_block_supernodal_memory_lean(block_supernodal_lean()),
                 path,
                 cfg,
+                ctx,
             )
         }
         _ => {
             // Default: the backend decides for itself. It finds the
             // landmarks in the model's coupling graph and marginalizes them,
             // factorizing only the reduced pose system.
-            arael::simple_lm::lm_solve(
+            arael::simple_lm::lm_solve_with_context(
                 params,
                 &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled())
                     .with_policy(schur_policy())
@@ -458,6 +460,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
         .with_block_supernodal_memory_lean(block_supernodal_lean()),
                 path,
                 cfg,
+                ctx,
             )
         }
     }
@@ -527,10 +530,11 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
-fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
+fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>,
+           ctx: &mut arael::threads::Context)
     -> Solved<f32> {
     if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
-        return arael::simple_lm::lm_solve(
+        return arael::simple_lm::lm_solve_with_context(
             params,
             &mut arael::simple_lm::SparseFaerF32::new()
                 .with_policy(arael::simple_lm::SchurPolicy::Never)
@@ -539,9 +543,10 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
         .with_block_supernodal_memory_lean(block_supernodal_lean()),
             path,
             cfg,
+            ctx,
         );
     }
-    arael::simple_lm::lm_solve(
+    arael::simple_lm::lm_solve_with_context(
         params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled())
                     .with_policy(schur_policy())
                     .with_ordering(ordering())
@@ -549,7 +554,7 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()), path, cfg)
+        .with_block_supernodal_memory_lean(block_supernodal_lean()), path, cfg, ctx)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
@@ -561,7 +566,7 @@ pub fn run_capped_route(scene: &Scene, max_iters: usize, route: Route) -> Soluti
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
     path.serialize(&mut params);
-    let result = route.solve64(&params, &mut path, &cfg(max_iters))
+    let result = route.solve64(&params, &mut path, &cfg(max_iters), &mut Default::default())
         .expect("capped solve failed");
     path.deserialize(&result.x);
     extract(&path)
@@ -575,7 +580,8 @@ pub fn run_f32_capped_route(scene: &Scene, max_iters: usize, route: Route) -> So
     let mut path = build_f32(scene);
     let mut params: Vec<f32> = Vec::new();
     path.serialize(&mut params);
-    let result = route.solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()))
+    let result = route.solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()),
+                               &mut Default::default())
         .expect("capped solve failed");
     path.deserialize(&result.x);
     extract_f32(&path)
@@ -627,35 +633,39 @@ pub fn cg_options() -> arael::simple_lm::CgOptions {
 }
 
 impl Route {
-    fn solve64(self, params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve64(self, params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>,
+               ctx: &mut arael::threads::Context)
         -> Solved<f64> {
         match self {
-            Route::Factorize => solve64(params, path, cfg),
+            Route::Factorize => solve64(params, path, cfg, ctx),
             // Force, not Auto: the iterative route has nothing to solve
             // without a reduction and says so rather than falling back, and
             // the benchmark wants the route it asked for.
-            Route::Cg => arael::simple_lm::lm_solve(
+            Route::Cg => arael::simple_lm::lm_solve_with_context(
                 params,
                 &mut arael::simple_lm::SparseFaer::new()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
                     .with_iterative_schur(cg_options()),
                 path,
                 cfg,
+                ctx,
             ),
         }
     }
 
-    fn solve32(self, params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve32(self, params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>,
+               ctx: &mut arael::threads::Context)
         -> Solved<f32> {
         match self {
-            Route::Factorize => solve32(params, path, cfg),
-            Route::Cg => arael::simple_lm::lm_solve(
+            Route::Factorize => solve32(params, path, cfg, ctx),
+            Route::Cg => arael::simple_lm::lm_solve_with_context(
                 params,
                 &mut arael::simple_lm::SparseFaerF32::new()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
                     .with_iterative_schur(cg_options()),
                 path,
                 cfg,
+                ctx,
             ),
         }
     }
@@ -687,13 +697,17 @@ impl bench_harness::arael::Model for Path {
     type Scalar = f64;
     type Input = Problem;
     type Solution = Solution;
+    fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
+        ctx.mirrors::<PathMirror>().map(|m| m.timing.report(m.threads()))
+    }
     fn lambda0(p: &Problem) -> f64 { lambda0(p.scene.poses.len(), false) }
     fn build(p: &Problem) -> Self { build(&p.scene) }
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
-    fn solve(p: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> Solved<f64> { p.route.solve64(params, m, cfg) }
+    fn solve(p: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>,
+             ctx: &mut arael::threads::Context)
+        -> Solved<f64> { p.route.solve64(params, m, cfg, ctx) }
     fn inexact(p: &Problem) -> bool { p.route == Route::Cg }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) {
         cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
@@ -710,8 +724,9 @@ impl bench_harness::arael::Model for PathF {
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
-    fn solve(p: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> Solved<f32> { p.route.solve32(params, m, cfg) }
+    fn solve(p: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>,
+             ctx: &mut arael::threads::Context)
+        -> Solved<f32> { p.route.solve32(params, m, cfg, ctx) }
     fn inexact(p: &Problem) -> bool { p.route == Route::Cg }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) {
         cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
@@ -771,7 +786,8 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
     path.serialize(&mut params);
-    let result = solve64(&params, &mut path, &cfg(200)).expect("covariance solve failed");
+    let result = solve64(&params, &mut path, &cfg(200), &mut Default::default())
+        .expect("covariance solve failed");
     path.deserialize(&result.x);
     let (np, nl) = (path.poses.len(), path.landmarks.len());
     let budget = Duration::from_secs_f64(budget_s);

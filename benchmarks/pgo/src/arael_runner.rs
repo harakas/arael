@@ -204,6 +204,7 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     params: &[f64],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f64>,
+    ctx: &mut arael::threads::Context,
 ) -> Solved<f64> {
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_ordering(ordering())
@@ -211,13 +212,14 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 
 pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     params: &[f32],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f32>,
+    ctx: &mut arael::threads::Context,
 ) -> Solved<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_ordering(ordering())
@@ -225,7 +227,7 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
+    arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 
 // Initial damping, problem-appropriate for well-initialized 2D pose graphs (the
@@ -245,8 +247,9 @@ impl Pipeline for Graph {
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<PoseIn> { solution_parts(&self.poses) }
-    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> Solved<f64> { solve_f64(params, m, cfg) }
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>,
+             ctx: &mut arael::threads::Context)
+        -> Solved<f64> { solve_f64(params, m, cfg, ctx) }
 }
 
 impl Pipeline for GraphF {
@@ -261,8 +264,9 @@ impl Pipeline for GraphF {
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Vec<PoseIn> { solution_parts(&self.poses) }
-    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> Solved<f32> { solve_f32(params, m, cfg) }
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>,
+             ctx: &mut arael::threads::Context)
+        -> Solved<f32> { solve_f32(params, m, cfg, ctx) }
 }
 
 /// `Err` is why the solve failed, for the table to show in place of the row.
