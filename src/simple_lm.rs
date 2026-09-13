@@ -266,6 +266,16 @@ pub struct LmConfig<T: Float> {
     /// bit. Of the linear backends only `SparseFaer` reads the count; the
     /// Schur reduction and the analysis are sequential.
     pub num_threads: usize,
+    /// Threads for the cost and assembly sweeps alone, when they want a
+    /// count of their own. `None` (the default) leaves them on
+    /// [`num_threads`](Self::num_threads); `Some(n)` gives the sweeps `n`
+    /// and leaves the linear solve on `num_threads`. Same scale: `1` is
+    /// sequential, `0` is every core.
+    ///
+    /// The two phases scale differently -- the sweeps split by constraint
+    /// count and the factorization by its elimination tree -- so the count
+    /// that suits one need not suit the other.
+    pub assembly_threads: Option<usize>,
     /// Print per-iteration cost, lambda, and timing to stderr. Very useful
     /// for understanding how the solver behaves with a given parameter set --
     /// check the output to validate convergence and tune the config.
@@ -318,6 +328,7 @@ impl<T: Float + std::fmt::Debug> std::fmt::Debug for LmConfig<T> {
             .field("time_limit", &self.time_limit)
             .field("lambda_floor", &self.lambda_floor)
             .field("num_threads", &self.num_threads)
+            .field("assembly_threads", &self.assembly_threads)
             .field("verbose", &self.verbose)
             .field("gather_timing", &self.gather_timing)
             .finish_non_exhaustive()
@@ -352,6 +363,7 @@ impl<T: Float> LmConfig<T> {
             time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
             num_threads: 1,
+            assembly_threads: None,
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
             observer: None,
@@ -479,6 +491,12 @@ impl<T: Float> LmConfig<T> {
     /// Set the factorization thread count ([`num_threads`](Self::num_threads)).
     pub fn with_num_threads(mut self, n: usize) -> Self {
         self.num_threads = n;
+        self
+    }
+    /// Give the cost and assembly sweeps a thread count of their own
+    /// ([`assembly_threads`](Self::assembly_threads)).
+    pub fn with_assembly_threads(mut self, n: usize) -> Self {
+        self.assembly_threads = Some(n);
         self
     }
     /// Toggle per-iteration logging ([`verbose`](Self::verbose)).
@@ -2799,7 +2817,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     let n = x0.len();
     debug_assert!(n > 0);
     solver.configure(config);
-    ctx.set_threads(config.num_threads);
+    ctx.set_threads(config.assembly_threads.unwrap_or(config.num_threads));
     problem.begin_with_context(ctx);
     let problem = &mut WithContext { model: problem, ctx };
 

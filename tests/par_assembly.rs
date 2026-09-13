@@ -364,6 +364,35 @@ fn the_model_is_untouched_by_a_threaded_solve() {
     assert_eq!(r.x, r2.x, "the same solve through the same context");
 }
 
+/// `assembly_threads` gives the sweeps a count of their own, leaving the
+/// linear solve on `num_threads`.
+#[test]
+fn assembly_threads_overrides_the_sweep_count() {
+    let mut w = build(20);
+    let mut x = Vec::new();
+    w.serialize(&mut x);
+    let mut solver = arael::simple_lm::SparseFaer::new();
+    let solve = |w: &mut Web, cfg: &LmConfig<f64>, solver: &mut arael::simple_lm::SparseFaer<f64>| {
+        let mut ctx = Context::new();
+        arael::simple_lm::lm_solve_with_context(&x, solver, w, cfg, &mut ctx).unwrap();
+        ctx
+    };
+    let base = LmConfig::<f64> { max_iters: 2, num_threads: 1, ..Default::default() };
+    // One thread everywhere: no mirrors.
+    let ctx = solve(&mut w, &base, &mut solver);
+    assert!(!ctx.mirrors::<WebMirror>().is_some_and(|m| m.is_on()));
+    // The sweeps threaded, the linear solve sequential.
+    let cfg = LmConfig::<f64> { assembly_threads: Some(3), ..base.clone() };
+    let ctx = solve(&mut w, &cfg, &mut solver);
+    assert_eq!(ctx.threads(), 3);
+    assert!(ctx.mirrors::<WebMirror>().is_some_and(|m| m.threads() == 3));
+    // `Some(1)` pins the sweeps sequential while the linear solve threads.
+    let cfg = LmConfig::<f64> { num_threads: 4, assembly_threads: Some(1), ..base.clone() };
+    let ctx = solve(&mut w, &cfg, &mut solver);
+    assert_eq!(ctx.threads(), 1);
+    assert!(!ctx.mirrors::<WebMirror>().unwrap().is_on());
+}
+
 /// The phase timing runs only when the context asks for it; the counts
 /// are kept either way.
 #[test]
