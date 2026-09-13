@@ -1148,13 +1148,6 @@ pub struct COptSeconds {{
     pub v: f64,
 }}
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct COptU32 {{
-    pub has: bool,
-    pub v: u32,
-}}
-
 fn copt(o: Option<{fp}>) -> COptF {{
     match o {{
         Some(v) => COptF {{ has: true, v }},
