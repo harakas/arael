@@ -5,7 +5,7 @@ use bench_harness::arael::{run, Model as Pipeline};
 use bench_harness::table::Row;
 use crate::g2o::{Dataset, PoseIn};
 use arael::angle::AngleParam;
-use arael::model::{Param, SelfBlock, CrossBlock};
+use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
 use arael::vect::vect2;
@@ -58,7 +58,7 @@ struct Edge<T: Float> {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, par)]
 #[derive(Clone)]
 pub struct Graph {
     poses: refs::Vec<Pose2<f64>>,
@@ -67,7 +67,7 @@ pub struct Graph {
 }
 
 #[arael::model]
-#[arael(root, f32)]
+#[arael(root, f32, par)]
 #[derive(Clone)]
 struct GraphF {
     poses: refs::Vec<Pose2<f32>>,
@@ -239,6 +239,9 @@ impl Pipeline for Graph {
     type Scalar = f64;
     type Input = Dataset;
     type Solution = Vec<PoseIn>;
+    fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
+        ctx.mirrors::<GraphMirror>().map(|m| m.timing.report(m.threads()))
+    }
     fn lambda0(_: &Dataset) -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self {
         let (poses, edges, prior) = build_parts(ds);

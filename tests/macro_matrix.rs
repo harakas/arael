@@ -5,7 +5,7 @@
 // differences, and validate() clean. A silently dropped sweep or a
 // misfilled block fails the cost or route comparison here.
 
-use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock, BoxedSelfBlock, BoxedCrossBlock};
+use arael::model::{CrossBlock, Param, SelfBlock, TripletBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{CooMatrix, LmProblem, RootProblem};
 
@@ -67,7 +67,7 @@ where
         }
     }
 
-    let (csc, positions) = coo.to_csc_with_map().unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(m).unwrap();
     let mut gi = vec![0.0; n];
     let mut vals = vec![0.0; csc.vals.len()];
     let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions);
@@ -631,7 +631,7 @@ fn triplet_block_three_entities() {
 struct Bx {
     v: Param<f64>,
     t: f64,
-    hb: BoxedSelfBlock<Bx>,
+    hb: SelfBlock<Bx>,
 }
 
 #[arael::model]
@@ -644,7 +644,7 @@ struct BTie {
     #[arael(ref = root.nodes)]
     b: Ref<Bx>,
     d: f64,
-    hb: BoxedCrossBlock<Bx, Bx>,
+    hb: CrossBlock<Bx, Bx>,
 }
 
 #[arael::model]
@@ -657,9 +657,9 @@ struct CBoxed {
 #[test]
 fn boxed_blocks_through_every_route() {
     let mut nodes = refs::Vec::new();
-    let r0 = nodes.push(Bx { v: Param::new(0.3), t: 0.0, hb: BoxedSelfBlock::new() });
-    let r1 = nodes.push(Bx { v: Param::new(1.4), t: 1.0, hb: BoxedSelfBlock::new() });
-    let ties = vec![BTie { a: r0, b: r1, d: 1.0, hb: BoxedCrossBlock::new() }];
+    let r0 = nodes.push(Bx { v: Param::new(0.3), t: 0.0, hb: SelfBlock::new() });
+    let r1 = nodes.push(Bx { v: Param::new(1.4), t: 1.0, hb: SelfBlock::new() });
+    let ties = vec![BTie { a: r0, b: r1, d: 1.0, hb: CrossBlock::new() }];
     let manual = ((0.3f64 - 0.0) * 0.4).powi(2) + ((1.4f64 - 1.0) * 0.4).powi(2)
         + ((1.4f64 - 0.3 - 1.0) * 1.3).powi(2);
     check_model("boxed", &mut CBoxed { nodes, ties }, manual);

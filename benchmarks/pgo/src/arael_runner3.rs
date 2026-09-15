@@ -12,7 +12,7 @@ use bench_harness::arael::{run, Model as Pipeline};
 use bench_harness::table::Row;
 use crate::g2o3::{Dataset3, Pose3In};
 use arael::matrix::matrix3;
-use arael::model::{BoxedCrossBlock, BoxedSelfBlock, Param, QuaternionParam};
+use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
 use arael::quatern::quatern;
 use arael::refs::{self, Ref};
 use arael::utils::Float;
@@ -37,7 +37,7 @@ struct Pose3<T: Float> {
     prior: vect3<T>,
     prior_rot_t: matrix3<T>,
     has_prior: bool,
-    hb: BoxedSelfBlock<Pose3<T>, T>,
+    hb: SelfBlock<Pose3<T>, T>,
 }
 
 #[arael::model]
@@ -63,7 +63,7 @@ struct Edge3<T: Float> {
     u_tt: matrix3<T>,    // sqrt-info blocks: [ u_tt u_tr ; 0 u_rr ]
     u_tr: matrix3<T>,
     u_rr: matrix3<T>,
-    hb: BoxedCrossBlock<Pose3<T>, Pose3<T>, T>,
+    hb: CrossBlock<Pose3<T>, Pose3<T>, T>,
 }
 
 #[arael::model]
@@ -96,7 +96,7 @@ fn build_parts<T: Float>(ds: &Dataset3)
             prior: p.t.cast(),
             prior_rot_t: rot.transpose().cast(),
             has_prior: i == 0,
-            hb: BoxedSelfBlock::new(),
+            hb: SelfBlock::new(),
         });
     }
     let mut edges = std::vec::Vec::new();
@@ -110,7 +110,7 @@ fn build_parts<T: Float>(ds: &Dataset3)
             u_tt: u_tt.cast(),
             u_tr: u_tr.cast(),
             u_rr: u_rr.cast(),
-            hb: BoxedCrossBlock::new(),
+            hb: CrossBlock::new(),
         });
     }
     (poses, edges)

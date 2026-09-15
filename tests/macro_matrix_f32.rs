@@ -4,7 +4,7 @@
 // gradient, validate. (TripletBlock<f32> and the boxed f32 blocks had
 // no test coverage anywhere before this.)
 
-use arael::model::{Component, Param, SelfBlock, CrossBlock, TripletBlock, BoxedSelfBlock, BoxedCrossBlock};
+use arael::model::{Component, CrossBlock, Param, SelfBlock, TripletBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{CooMatrix, LmProblem, RootProblem};
 
@@ -111,7 +111,7 @@ fn f32_self_cross_and_triplet_blocks() {
 struct Bxf {
     v: Param<f32>,
     t: f32,
-    hb: BoxedSelfBlock<Bxf, f32>,
+    hb: SelfBlock<Bxf, f32>,
 }
 
 #[arael::model]
@@ -124,7 +124,7 @@ struct Btf {
     #[arael(ref = root.nodes)]
     b: Ref<Bxf>,
     d: f32,
-    hb: BoxedCrossBlock<Bxf, Bxf, f32>,
+    hb: CrossBlock<Bxf, Bxf, f32>,
 }
 
 #[arael::model]
@@ -137,9 +137,9 @@ struct WBF {
 #[test]
 fn f32_boxed_blocks() {
     let mut nodes = refs::Vec::new();
-    let r0 = nodes.push(Bxf { v: Param::new(0.3), t: 0.0, hb: BoxedSelfBlock::new() });
-    let r1 = nodes.push(Bxf { v: Param::new(1.4), t: 1.0, hb: BoxedSelfBlock::new() });
-    let ties = vec![Btf { a: r0, b: r1, d: 1.0, hb: BoxedCrossBlock::new() }];
+    let r0 = nodes.push(Bxf { v: Param::new(0.3), t: 0.0, hb: SelfBlock::new() });
+    let r1 = nodes.push(Bxf { v: Param::new(1.4), t: 1.0, hb: SelfBlock::new() });
+    let ties = vec![Btf { a: r0, b: r1, d: 1.0, hb: CrossBlock::new() }];
     let mut w = WBF { nodes, ties };
     let manual = (0.3f32 * 0.4).powi(2) + (0.4f32 * 0.4).powi(2)
         + ((1.4f32 - 0.3 - 1.0) * 1.3).powi(2);

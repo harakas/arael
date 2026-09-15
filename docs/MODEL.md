@@ -116,38 +116,40 @@ result into the poses, then un-freezes.
 The full Gauss-Newton Hessian is a **symmetric** block matrix, with
 one block per (entity, entity) pair in the parameter vector. The
 block at position `(Ei, Ej)` is the `NEi × NEj` matrix of second
-partials; by symmetry `H[Ei, Ej] = H[Ej, Ei]^T`. arael stores each
-unique block once and lets the accumulator fill in the transpose
-when assembling into a dense / band / sparse matrix. Every
-constraint that couples a given pair adds its `2 * dr_i * dr_j`
-contribution to the same block:
+partials; by symmetry `H[Ei, Ej] = H[Ej, Ei]^T`. Each unique block is
+kept once and the accumulator fills in the transpose when assembling
+into a dense / band / sparse matrix.
 
-- **Diagonal blocks (`Ei == Ej`)** live in each entity's
-  `SelfBlock<Ei>` and are symmetric; only the upper triangle is
-  stored. Every constraint touching `Ei`'s params writes there
-  additively.
-- **Off-diagonal blocks (`Ei != Ej`)** live in a `CrossBlock<Ei, Ej>`
-  or in a `TripletBlock` that covers the pair. One `CrossBlock<A, B>`
-  covers both `H[A, B]` and its transpose `H[B, A]` -- the
-  accumulator writes both halves from the single stored rectangle.
+You declare which blocks the Hessian has by declaring block fields on
+the model. A block field is a marker, not a container: it names a
+coupling, and the values for it live in the solve's block store (see
+[A block field is a declaration](#a-block-field-is-a-declaration)).
 
-Gradient contributions `2 * r * dr` go directly into the LM-provided
-global gradient slice -- not into any block. Only Hessian entries
-are stored block-wise.
+- **A diagonal block (`Ei == Ej`)** is declared by `Ei`'s own
+  `SelfBlock<Ei>`. It is symmetric, so only its upper triangle is
+  kept, and every constraint touching `Ei`'s parameters adds to it.
+- **An off-diagonal block (`Ei != Ej`)** is declared by a
+  `CrossBlock<Ei, Ej>`, or by a `TripletBlock` that covers the pair.
+  One `CrossBlock<A, B>` declares both `H[A, B]` and its transpose
+  `H[B, A]`; the accumulator writes both halves from the one
+  rectangle.
+
+Gradient contributions `2 * r * dr` reach the solver's gradient vector
+directly. Only the Hessian is described block by block.
 
 Pick the block shape that matches the constraint body's parameter
 reach:
 
-| Type | Stores | Pick it when |
+| Type | Declares | Pick it when |
 |---|---|---|
-| **`SelfBlock<T>`** | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block of the Hessian |
-| **`CrossBlock<A, B>`** | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock. When many constraints couple the SAME (A, B) pair, share one block on a containing parent via `constraint(parent.<field>, ...)` (below) |
-| **`TripletBlock<T>`** | COO across-entity pairs | **placed on the coupled co-entity** -- usually the root (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec), or on a containing parent for the `[hb, parent.<field>]` form. Canonical uses: (1) the root (or parent) has its own `Param` fields and constraints couple entity params with them -- the cross pair lives in that TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push. When the constraint touches ONLY root params (the entity is pure data), skip the triplet entirely: name the root's SelfBlock as the primary block, `constraint(root.hb, ...)` -- dense writes, no COO |
+| **`SelfBlock<T>`** | the `(T, T)` diagonal block -- entity T coupled with itself | **mandatory on every params-having struct** |
+| **`CrossBlock<A, B>`** | the `(A, B)` off-diagonal block, and its transpose | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock. When many constraints couple the SAME (A, B) pair, share one block on a containing parent via `constraint(parent.<field>, ...)` (below) |
+| **`TripletBlock<T>`** | across-entity pairs it is given at runtime, rather than one named pair | **placed on the coupled co-entity** -- usually the root (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec), or on a containing parent for the `[hb, parent.<field>]` form. Canonical uses: (1) the root (or parent) has its own `Param` fields and constraints couple entity params with them -- that TripletBlock declares the cross pair; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push. When the constraint touches ONLY root params (the entity is pure data), skip the triplet entirely: name the root's SelfBlock as the primary block, `constraint(root.hb, ...)` -- dense writes, no COO |
 
 `SelfBlock<Self>` is required on every Model that has parameters --
-failing to declare it is a compile-time error. Grad and diagonal
-writes always land on each entity's `SelfBlock`; `CrossBlock` and
-`TripletBlock` are cross-only storage.
+failing to declare it is a compile-time error. An entity's diagonal
+block is always its own `SelfBlock`; `CrossBlock` and `TripletBlock`
+declare cross pairs only.
 
 ```rust,ignore
 // Entity with its mandatory SelfBlock.
@@ -171,10 +173,11 @@ struct PosePair {
 ### Shared CrossBlock on a containing parent
 
 When many constraint instances couple the SAME two entities, a
-per-instance CrossBlock stores and scatters one identical tile per
-instance. Move the block to a containing parent instead: the
-`parent.<field>` block spec makes every instance in the parent's
-collection accumulate into that one block.
+per-instance `CrossBlock` declares one block per instance for what is
+really one block of the Hessian, and the assembly scatters each of
+them. Declare it on a containing parent instead: the `parent.<field>`
+block spec makes every instance in the parent's collection add to that
+one block.
 
 ```rust,ignore
 #[arael::model]
@@ -247,9 +250,9 @@ struct PathMatch { d: f32 }
 
 A bracketed list may mix the constraint's own CrossBlocks with one or
 more `parent.<crossblock>` entries. The bundle-adjustment shape: an
-image holds its camera ref and the `(pose, cam)` tile every one of its
-observations writes; each observation holds its point ref and the two
-point tiles. The pose is the entity holding the image, two levels up,
+image holds its camera ref and declares the `(pose, cam)` block every
+one of its observations adds to; each observation holds its point ref
+and declares the two point blocks. The pose is the entity holding the image, two levels up,
 reached as `parent.parent` or through the alias `parent.parent =
 <name>`:
 
@@ -306,7 +309,8 @@ struct Obs {
   an own tile names an entity no own ref supplies: the parent's ref
   fills it (the parent-ref form). An image with a constant pose,
   held by the root, holding its camera ref and its pose as data;
-  each observation holds its point ref and the `(point, cam)` tile:
+  each observation holds its point ref and declares the
+  `(point, cam)` block:
 
 ```rust,ignore
 #[arael::model]
@@ -333,61 +337,57 @@ struct FixedObs {
   with params is not this form: there the containing entity is the
   coupled `A` of the frine-style forms.
 
-### Heap-backed blocks: `BoxedSelfBlock` / `BoxedCrossBlock`
+### A block field is a declaration
 
-`SelfBlock` and `CrossBlock` store their Hessian **inline** as a fixed
-`[T; M]` array embedded in the entity struct -- no allocation, best
-cache locality. This is the right default.
+A block field declares a block of the Hessian; it does not hold one.
+It tells the macro which entities are coupled, at what precision, and
+it carries that block's place in the block store, a generated struct
+of one array per declared block field that the solve keeps in its
+[`Context`](SOLVERS.md#threads). So an entity struct is its parameters
+and a `u32`.
 
-`BoxedSelfBlock<T>` and `BoxedCrossBlock<A, B>` are drop-in twins that
-hold the same block behind a single `Option<Box<...>>` instead. The
-math is identical (they delegate to the inline block), so a solve is
-bit-for-bit the same; only the storage differs. Swap the type and
-nothing else changes:
+That has two consequences worth knowing.
 
-```rust,ignore
-struct Pose {
-    pos: Param<vect3f>,
-    hb_pose: BoxedSelfBlock<Pose>,   // heap-backed instead of SelfBlock<Pose>
-}
-```
+- **A sweep reads only what it needs.** Evaluating cost walks the
+  entities' data without dragging Hessian storage through cache with
+  it. A bundle-adjustment observation is 32 bytes rather than 296.
 
-Three reasons to opt in:
+- **The storage is the solve's, not the model's.** It is sized when the
+  solve begins and released with the solve, so a long-lived model that
+  is solved occasionally holds no assembly memory between solves.
+  `release_blocks()` on the root still exists and is still safe to
+  call; there is simply nothing left for it to free.
 
-- **Reclaim assembly memory between solves.** The root gains a
-  generated `release_blocks()` that frees every boxed Hessian in the
-  tree. For a long-lived model that is solved occasionally, call it
-  after each solve to hand the transient Hessian memory back; the next
-  solve re-allocates on demand. Inline blocks can't do this -- their
-  storage is part of the struct.
+**Changed in 0.8.4.** Up to 0.8.3 a block field *was* the container:
+`SelfBlock` embedded its Hessian triangle in the entity struct as a
+fixed `[T; M]` array, and `CrossBlock` its rectangle, so a
+bundle-adjustment observation carried 296 bytes of Hessian and a model
+held its assembly memory for as long as it lived. `BoxedSelfBlock` and
+`BoxedCrossBlock` existed for that: they held the same block behind a
+`Box`, which could be freed between solves and skipped for a frozen
+sub-tree, at the price of a pointer indirection. Choosing between them
+mattered: an inline-block model dragged its Hessian storage through
+cache on every sweep, cost evaluation included, and paid for it.
 
-- **Optimize only part of the model tree.** A boxed block allocates
-  its Hessian **only when it is active** -- i.e. at least one of its
-  parameters is being optimized. Freeze a sub-tree with `Param::fixed`
-  (every index becomes the `u32::MAX` sentinel) and its self-blocks,
-  plus any cross-blocks whose *both* endpoints are frozen, stay
-  unallocated. A sliding-window SLAM front-end that keeps the full
-  history in an [`Arena`](#collection-types) but only optimizes the
-  recent window pays Hessian memory for the active window alone.
-
-- **Threaded solves.** A solve of a `#[arael(root, par)]` model on more
-  than one thread assembles into per-thread mirrors and never writes the
-  model's own blocks (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)).
-  An inline block still carries its whole `[T; M]` array inside the entity
-  struct; a boxed one is a single empty pointer there.
-
-Allocation is decided once, when the solver assigns block indices
-(before the first `zero`/`add_residual`), so the choice is settled for
-the whole solve. `block.is_allocated()` reports whether a block
-currently holds storage -- useful for tests and diagnostics.
-
-Prefer inline blocks unless you specifically want one of the two
-behaviours above; the inline array avoids the pointer indirection and
-the per-solve allocation of the active blocks.
+There is nothing to choose now. Both spellings are the same type, the
+struct carries no values either way, and the two `Boxed` names are
+deprecated aliases kept so existing models compile. New models should
+say `SelfBlock` and `CrossBlock`.
 
 ### Picking between multi-CrossBlock and TripletBlock
 
-For N-entity residuals the macro accepts two shapes:
+`TripletBlock` is the general block: it couples any entities in any
+combination, settled while the solve runs rather than named in the
+model. The price is assembly speed. A `CrossBlock` names its two sides
+in the type, so it gets a packed tile of a size known in advance; a
+TripletBlock names nothing and so keeps each entry on its own, as a
+triplet of row, column and value -- the coordinate form (COO) a sparse
+matrix is built from, and what the name refers to. Every entry is a
+`Vec` push.
+
+So name the pairs wherever they can be named, and reach for the
+TripletBlock where they cannot. For N-entity residuals the macro
+accepts both shapes:
 
 - **`constraint([hb_ab, hb_ac, hb_bc], { ... })`** -- one
   `CrossBlock<A, B>` field per unordered entity pair on the
@@ -431,13 +431,11 @@ struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 ```
 
 **Prefer multi-CrossBlock whenever the set of cross-pairs is fixed
-and dense.** TripletBlock carries a significant Hessian-assembly
-penalty: every cross entry is a `Vec<(u32, u32, T)>` push (with
-growth and no locality), vs CrossBlock's in-place write into a
-pre-sized `NA * NB` rectangle at a known offset. The same N-entity
-constraint assembles substantially faster through multi-CrossBlock
-than through a TripletBlock, and the rectangular layout is also
-friendlier to the CSC factorisation step that follows.
+and dense.** The push grows a `Vec<(u32, u32, T)>` and gives up
+locality, where a CrossBlock writes in place into a pre-sized
+`NA * NB` rectangle at a known offset; the rectangle also suits the
+CSC factorisation step that follows. The same N-entity constraint
+assembles substantially faster through multi-CrossBlock.
 
 Reach for the root-owned TripletBlock in two canonical situations:
 

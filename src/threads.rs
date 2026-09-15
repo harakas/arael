@@ -4,10 +4,12 @@
 //! The macro generates one mirror type per root: a struct holding, for
 //! every constraint container, the list of leaves (constraint instances)
 //! assigned to one thread with their cross blocks, and for every entity
-//! container a slab of [`Partial`](crate::model::Partial) blocks, one per
-//! entity the thread touches. The model is read-only during a sweep; each
-//! thread writes only its own mirror; a serial gather scatters the mirrors
-//! into the gradient and the Hessian. A solve's [`Context`] owns the
+//! container a [`SelfBlockArray`](crate::model::SelfBlockArray) holding
+//! the entities the thread touches, each with a gradient stash beside
+//! its triangle. The model is read-only during a sweep; each thread
+//! writes only its own mirror; a serial gather adds the stashes into the
+//! gradient and scatters the blocks into the Hessian. A solve's
+//! [`Context`] owns the
 //! mirrors, type-erased, so the root carries no field for them; the
 //! generated code takes them back by their type. Nothing here is used
 //! without the feature, or by a root with a form the mirrors do not
@@ -323,6 +325,7 @@ pub struct Context {
     threads: usize,
     timing: bool,
     mirrors: Option<Box<dyn AnyMirrors>>,
+    blocks: Option<Box<dyn AnyStore>>,
 }
 
 /// What one phase's sweeps did over a solve: the form they run in, and
@@ -402,6 +405,7 @@ impl Clone for Context {
             threads: self.threads,
             timing: self.timing,
             mirrors: self.mirrors.as_ref().map(|m| m.clone_box()),
+            blocks: self.blocks.as_ref().map(|b| b.store_clone()),
         }
     }
 }
@@ -415,7 +419,7 @@ impl std::fmt::Debug for Context {
 impl Context {
     /// One thread, no mirrors, timing off.
     pub fn new() -> Self {
-        Context { threads: 1, timing: false, mirrors: None }
+        Context { threads: 1, timing: false, mirrors: None, blocks: None }
     }
 
     /// Time the phases of the solves through this context (the mirrors'
@@ -460,6 +464,41 @@ impl Context {
         }
         self.mirrors.as_mut().unwrap().as_any_mut().downcast_mut::<Mirrors<M>>().unwrap()
     }
+
+    /// This root's Hessian block store, if the context holds it.
+    pub fn blocks<S: BlockStore>(&self) -> Option<&S> {
+        self.blocks.as_ref().and_then(|b| b.store_any().downcast_ref::<S>())
+    }
+
+    /// This root's Hessian block store, empty when the context holds
+    /// none or another root's. The generated build fills it.
+    pub fn blocks_mut<S: BlockStore>(&mut self) -> &mut S {
+        let holds = self.blocks.as_ref().is_some_and(|b| b.store_any().is::<S>());
+        if !holds {
+            self.blocks = Some(Box::new(S::default()));
+        }
+        self.blocks.as_mut().unwrap().store_any_mut().downcast_mut::<S>().unwrap()
+    }
+}
+
+/// A root's generated block store, held type-erased so the context does
+/// not name it. `Send + Sync` for the same reason the mirrors are.
+/// Implemented through [`BlockStore`], not blanket, so the mirrors keep
+/// their own `as_any`.
+trait AnyStore: Any + Send + Sync {
+    fn store_any(&self) -> &dyn Any;
+    fn store_any_mut(&mut self) -> &mut dyn Any;
+    fn store_clone(&self) -> Box<dyn AnyStore>;
+}
+
+/// What a generated block store is: the macro implements it on the type
+/// it emits per root.
+pub trait BlockStore: Clone + Default + Send + Sync + 'static {}
+
+impl<S: BlockStore> AnyStore for S {
+    fn store_any(&self) -> &dyn Any { self }
+    fn store_any_mut(&mut self) -> &mut dyn Any { self }
+    fn store_clone(&self) -> Box<dyn AnyStore> { Box::new(self.clone()) }
 }
 
 /// Which form a phase takes during one solve. The first calls alternate

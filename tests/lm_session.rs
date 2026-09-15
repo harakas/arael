@@ -168,10 +168,10 @@ fn warm_equals_cold<S: LmSolver<f64>>(mk: impl Fn() -> S, label: &str) {
     assert_eq!(written, warm.x, "{}: model not updated from the warm solve", label);
 }
 
-/// Counts how often a solver binds the model's blocks to a pattern. Blocks
-/// carry their own scatter targets, so binding is per model instance, not per
-/// pattern -- but each solve needs exactly one, and paying a second costs a
-/// lookup per block for nothing.
+/// Counts how often a solver binds the model's blocks to a pattern. The
+/// binding lives in the position stream, not in the blocks, so it belongs to
+/// the pattern: building one costs a lookup per block, and nothing after that
+/// should pay it again.
 struct BindCounter<'a> {
     inner: &'a mut World,
     binds: usize,
@@ -219,11 +219,12 @@ impl LmProblem<f64> for BindCounter<'_> {
     }
 }
 
-/// A solve binds the blocks exactly once. The setup that builds the pattern
-/// binds as it goes, so the next iteration must not bind on top of it; a warm
-/// solve, which skips setup, must bind once for its own model instance.
+/// Only the setup that builds a pattern binds. It binds as it goes, so the
+/// iterations after it must not bind again; a warm solve reuses the pattern
+/// and its stream, so a fresh model instance scatters through them without
+/// being bound at all.
 #[test]
-fn each_solve_binds_the_blocks_once() {
+fn only_the_pattern_setup_binds() {
     let mut w = build(0.05);
     let mut x0 = Vec::new();
     RootProblem::serialize(&mut w, &mut x0);
@@ -231,15 +232,16 @@ fn each_solve_binds_the_blocks_once() {
 
     let mut session = LmSession::new(SparseFaer::new());
     let cold = session.solve_x0(&x0, &mut p, &cfg()).unwrap();
-    assert!(cold.iterations > 1, "need a steady-state iteration to see a rebind");
+    assert!(cold.iterations > 1, "need a steady-state iteration past the setup");
     assert_eq!(p.binds, 1, "cold solve bound the blocks {} times", p.binds);
 
-    // Warm: same pattern, so setup is skipped -- but the blocks still have to
-    // be bound to it once, and only once.
+    // Warm: the pattern and its stream are kept, so there is nothing left to
+    // bind. `warm_equals_cold` covers the correctness of that on a fresh
+    // model instance.
     p.binds = 0;
     let warm = session.solve_x0(&x0, &mut p, &cfg()).unwrap();
     assert!(warm.iterations > 1);
-    assert_eq!(p.binds, 1, "warm solve bound the blocks {} times", p.binds);
+    assert_eq!(p.binds, 0, "warm solve bound the blocks {} times", p.binds);
 }
 
 #[test]

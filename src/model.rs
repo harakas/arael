@@ -54,6 +54,53 @@ impl<T: crate::utils::Float, const N: usize> ParamType for crate::vect::vect<T, 
     }
 }
 
+/// One parameter slot of a model: a [`Param<T>`] or one of the euler-angle
+/// parameter types. Gives the slot's width and where it sits in the flat
+/// parameter vector, which is what Hessian block indices and parameter
+/// spans are built from.
+///
+/// A slot is live or fixed as a whole (`Param::optimize`): a fixed slot
+/// has no index and occupies nothing in the parameter vector, so the live
+/// slots of a model stay contiguous there whatever is fixed between them.
+///
+/// A parameter type that holds slots rather than being one -- `AngleParam`,
+/// `UnitVecParam`, `TransformParam` -- implements no `ParamSlot` of its
+/// own. It must forward [`Model::fold_param_span`] to the slots it holds,
+/// or the span of an entity holding it will not cover its parameters.
+pub trait ParamSlot {
+    /// Scalar components this slot occupies when live.
+    const COUNT: usize;
+
+    /// Index of the first component in the flat parameter vector, or
+    /// `u32::MAX` when the slot is fixed.
+    fn param_index(&self) -> u32;
+
+    /// Write the per-component indices into `out` (`COUNT` long):
+    /// consecutive from [`param_index`](Self::param_index), or `u32::MAX`
+    /// throughout when fixed.
+    fn write_param_indices(&self, out: &mut [u32]) {
+        let base = self.param_index();
+        if base == u32::MAX {
+            out.fill(u32::MAX);
+        } else {
+            for (k, o) in out.iter_mut().enumerate() {
+                *o = base + k as u32;
+            }
+        }
+    }
+
+    /// Fold this slot into a running `(smallest live index, live count)`.
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        let i = self.param_index();
+        if i != u32::MAX {
+            if i < *min {
+                *min = i;
+            }
+            *count += Self::COUNT as u32;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Param<T> -- wrapper for an optimizable parameter
 // ---------------------------------------------------------------------------
@@ -110,15 +157,12 @@ impl<T: ParamType> Param<T> {
     pub fn index(&self) -> u32 { self.index }
 
     /// Write this parameter's per-component indices into `out`, or `u32::MAX` if fixed.
-    pub fn write_indices(&self, out: &mut [u32]) {
-        if self.index == u32::MAX {
-            for o in out.iter_mut() { *o = u32::MAX; }
-        } else {
-            for (k, o) in out.iter_mut().enumerate() {
-                *o = self.index + k as u32;
-            }
-        }
-    }
+    pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
+}
+
+impl<T: ParamType> ParamSlot for Param<T> {
+    const COUNT: usize = T::SIZE;
+    fn param_index(&self) -> u32 { self.index }
 }
 
 impl<T: ParamType + std::fmt::Debug> std::fmt::Debug for Param<T> {
@@ -148,14 +192,17 @@ impl<T: ParamType + std::fmt::Debug> std::fmt::Debug for Param<T> {
 /// - `update_params` -- copy a candidate parameter vector into working copies.
 /// - `update_self` -- reset working copies to current `value` (and precompute
 ///   derived quantities like rotation matrices).
-/// - `zero_blocks` / `accumulate_hessian*` -- zero and accumulate Hessian
-///   blocks into dense, banded, COO, CSC, or indexed sparse formats.
-///   Gradient is written directly into a global slice by each constraint,
-///   not routed through these methods.
+/// - `zero_blocks` / `accumulate_hessian*` -- clear and accumulate the
+///   Hessian entries a model owns itself (a [`TripletBlock`]'s) into
+///   dense, banded, COO, CSC, or indexed sparse formats. `SelfBlock` and
+///   `CrossBlock` entries live in the block store the solve keeps in its
+///   [`Context`](crate::threads::Context) and take their own route; the
+///   gradient never passes through these methods.
 ///
 /// The parameter-vector and Hessian methods are generic over the solve
-/// precision `F`; blocks store at their own precision and convert on
-/// accumulation (an identity after monomorphization when the widths match).
+/// precision `F`; Hessian storage keeps the block's own precision and
+/// converts on accumulation (an identity after monomorphization when the
+/// widths match).
 pub trait Model {
     fn serialize_params<F: crate::utils::Float>(&mut self, _data: &mut std::vec::Vec<F>) {}
     fn deserialize_params<F: crate::utils::Float>(&mut self, _data: &[F]) {}
@@ -169,25 +216,36 @@ pub trait Model {
     fn zero_blocks(&mut self) {}
 
     /// Append this model's parameter blocks as `(offset, width)` spans of
-    /// the flat parameter vector -- one span per entity, read from each
-    /// entity's `SelfBlock` indices. Valid only after `serialize` has
-    /// assigned indices. Entities whose params are all fixed contribute
-    /// nothing.
+    /// the flat parameter vector -- one span per entity, folded from the
+    /// entity's own parameter slots (see
+    /// [`fold_param_span`](Self::fold_param_span)). Valid only after
+    /// `serialize` has assigned indices. Entities whose params are all
+    /// fixed contribute nothing.
     fn collect_param_blocks(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+
+    /// Fold this model's own parameter slots into a running `(smallest
+    /// live index, live count)` -- the span
+    /// [`collect_param_blocks`](Self::collect_param_blocks) reports for
+    /// one entity. Implemented by the parameter types and, through the
+    /// macro, by `#[arael(component)]` structs, whose slots fold into
+    /// the owning entity's span. Everything else contributes nothing:
+    /// a collection is many entities, not one span, and a plain
+    /// sub-model's parameters are not part of its owner's block.
+    fn fold_param_span(&self, _min: &mut u32, _count: &mut u32) {}
 
     /// Append one representative scalar coordinate per Hessian block cell
     /// this model's blocks touch (TripletBlocks: one per stored
     /// entry). Same traversal order as `accumulate_hessian_sparse`;
     /// valid after `serialize`. Structure-only: no numeric work.
     fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
-    /// Bind every block to its tile in the assembled value buffer, ready
-    /// for `accumulate_hessian_sparse_indexed`. `bind` maps a scalar
-    /// coordinate to its position and the column stride of its tile; blocks
-    /// with a static tile shape keep the pair and derive the rest. Blocks
-    /// with no static shape ([`TripletBlock`]) instead push one position per
-    /// entry into `out`, in the emission order of
-    /// `accumulate_hessian_sparse`. Builds the indexed map without a COO
-    /// pass. Valid after `serialize`, and must be redone whenever parameter
+    /// Record where every block scatters in the assembled value buffer,
+    /// ready for `accumulate_hessian_sparse_indexed`. `bind` maps a scalar
+    /// coordinate to its position and the column stride of its tile; a
+    /// block with a static tile shape pushes that pair into `out` and
+    /// derives the rest of the tile from it. A block with no static shape
+    /// ([`TripletBlock`]) pushes one position per entry instead, in the
+    /// emission order of `accumulate_hessian_sparse`. Builds the indexed
+    /// map without a COO pass. Valid after `serialize`, and must be redone whenever parameter
     /// indices or the Hessian pattern change.
     fn bind_hessian_positions(
         &mut self,
@@ -195,10 +253,11 @@ pub trait Model {
         _out: &mut std::vec::Vec<ValueIndex>,
     ) {}
 
-    /// Free every heap-backed (`Boxed*`) block's Hessian storage in this model
-    /// and its sub-models, reclaiming the transient assembly memory between
-    /// solves. Inline blocks are unaffected; the next solve re-allocates the
-    /// boxed ones on demand. Default: no-op.
+    /// Release the assembly memory this model and its sub-models hold
+    /// between solves. A block field declares where Hessian entries go and
+    /// holds none of them -- they are in the block store the solve keeps
+    /// in its [`Context`](crate::threads::Context) and go with it -- so
+    /// the call frees nothing and is safe at any time. Default: no-op.
     fn release_blocks(&mut self) {}
 
     // Fold accepted-step euler angle deltas into their reference rotations
@@ -209,10 +268,10 @@ pub trait Model {
     // any nesting depth are advanced.
     fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
-    // Hessian-only accumulation: blocks hold only Hessian entries after the
-    // refactor; the gradient is written directly by constraint evaluation
-    // into the LM-provided `grad` slice, so there is nothing for these
-    // methods to do with grad.
+    // Hessian only: reads the Hessian entries a model owns itself (a
+    // TripletBlock's) into the global target. The gradient never passes
+    // through here -- it reaches the LM-provided `grad` slice from the
+    // block store and from TripletBlock::add_residual.
     fn accumulate_hessian<F: crate::utils::Float>(&self, _hessian: &mut [F]) {}
     fn accumulate_hessian_band<F: crate::utils::Float>(&self, _band: &mut [F], _kd: usize) -> Result<(), crate::simple_lm::BandOverflow> { Ok(()) }
     fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, _coo: &mut crate::simple_lm::CooMatrix<F>) {}
@@ -295,11 +354,14 @@ pub trait Component {
 /// Each solver iteration runs:
 /// 1. `Model::update_params` -- copies params into working values
 /// 2. **`extended_update`** -- set up derived state before calculations
-/// 3. `zero_blocks` -- zeros all Hessian blocks (including TripletBlocks)
-/// 4. Macro-generated constraint loops -- fill SelfBlock/CrossBlock
+/// 3. The block store is zeroed, then `zero_blocks` -- clears every
+///    TripletBlock's entries
+/// 4. Macro-generated constraint loops -- fill the block store in the
+///    [`Context`](crate::threads::Context)
 /// 5. **`extended_compute`** -- fill TripletBlocks with custom residuals
 ///    (writes grad entries directly into the LM-provided global slice)
-/// 6. `accumulate_hessian*` -- reads all Hessian blocks into global Hessian
+/// 6. `accumulate_hessian*` and the store's own walk -- read every Hessian
+///    entry into the global Hessian
 ///
 /// For cost evaluation: `Model::update_params` -> `extended_update` ->
 /// macro-generated cost loop -> **`extended_cost`**.
@@ -400,6 +462,10 @@ pub trait ExtendedModel<F: crate::utils::Float> {
 // ---------------------------------------------------------------------------
 
 impl<T: ParamType> Model for Param<T> {
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        ParamSlot::fold_param_span(self, min, count)
+    }
+
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         if self.optimize {
             self.index = data.len() as u32;
@@ -508,13 +574,7 @@ impl<T: crate::utils::Float> SimpleEulerAngleParam<T> {
     /// Return this parameter's index into the flat parameter vector, or `u32::MAX` if fixed.
     pub fn index(&self) -> u32 { self.index }
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
-    pub fn write_indices(&self, out: &mut [u32]) {
-        if self.index == u32::MAX {
-            for o in out.iter_mut() { *o = u32::MAX; }
-        } else {
-            for (k, o) in out.iter_mut().enumerate() { *o = self.index + k as u32; }
-        }
-    }
+    pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
     /// Precompute the rotation matrix and its derivative from current work value.
     #[doc(hidden)]
     pub fn __precompute(&mut self) {
@@ -524,6 +584,11 @@ impl<T: crate::utils::Float> SimpleEulerAngleParam<T> {
         // constraint Jacobian instead of rebuilt from sincos per observation.
         self.rotation_matrix_deriv = matrix3::<T>::rotation_from_euler_angles_sincos_deriv(s, c);
     }
+}
+
+impl<T: crate::utils::Float> ParamSlot for SimpleEulerAngleParam<T> {
+    const COUNT: usize = 3;
+    fn param_index(&self) -> u32 { self.index }
 }
 
 impl<T: crate::utils::Float> serde::Serialize for SimpleEulerAngleParam<T> where T: serde::Serialize {
@@ -566,6 +631,10 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 }
 
 impl<T: crate::utils::Float> Model for SimpleEulerAngleParam<T> where vect3<T>: ParamType {
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        ParamSlot::fold_param_span(self, min, count)
+    }
+
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         if self.optimize {
             self.index = data.len() as u32;
@@ -664,13 +733,7 @@ impl<T: crate::utils::Float> EulerAngleParam<T> {
     /// Return this parameter's index into the flat parameter vector, or `u32::MAX` if fixed.
     pub fn index(&self) -> u32 { self.index }
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
-    pub fn write_indices(&self, out: &mut [u32]) {
-        if self.index == u32::MAX {
-            for o in out.iter_mut() { *o = u32::MAX; }
-        } else {
-            for (k, o) in out.iter_mut().enumerate() { *o = self.index + k as u32; }
-        }
-    }
+    pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
     /// Absorb current delta into reference rotation and reset delta.
     pub fn advance(&mut self) {
         self.ref_rotation = self.ref_rotation
@@ -692,6 +755,11 @@ impl<T: crate::utils::Float> EulerAngleParam<T> {
                                       self.ref_rotation * dea_rot_deriv[2]];
         self.work = self.rotation_matrix.get_euler_angles();
     }
+}
+
+impl<T: crate::utils::Float> ParamSlot for EulerAngleParam<T> {
+    const COUNT: usize = 3;
+    fn param_index(&self) -> u32 { self.index }
 }
 
 impl<T: crate::utils::Float> serde::Serialize for EulerAngleParam<T> where T: serde::Serialize {
@@ -734,6 +802,10 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 }
 
 impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamType {
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        ParamSlot::fold_param_span(self, min, count)
+    }
+
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         // Seed the reference from value for fixed params too -- constraints
         // evaluate a fixed rotation through ref_rotation as well.
@@ -870,13 +942,7 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
     /// Return this parameter's index into the flat parameter vector, or `u32::MAX` if fixed.
     pub fn index(&self) -> u32 { self.index }
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
-    pub fn write_indices(&self, out: &mut [u32]) {
-        if self.index == u32::MAX {
-            for o in out.iter_mut() { *o = u32::MAX; }
-        } else {
-            for (k, o) in out.iter_mut().enumerate() { *o = self.index + k as u32; }
-        }
-    }
+    pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
     /// Absorb the current delta (a rotation vector) into the internal
     /// reference quaternion via the retraction (renormalized) and reset
     /// delta. `value` is left untouched -- it syncs on deserialize.
@@ -902,6 +968,11 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
                                       self.ref_rotation * d[2]];
         self.work = self.rotation_matrix.get_euler_angles();
     }
+}
+
+impl<T: crate::utils::Float> ParamSlot for QuaternionParam<T> {
+    const COUNT: usize = 3;
+    fn param_index(&self) -> u32 { self.index }
 }
 
 impl<T: crate::utils::Float> serde::Serialize for QuaternionParam<T> where T: serde::Serialize {
@@ -945,6 +1016,10 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 }
 
 impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamType {
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        ParamSlot::fold_param_span(self, min, count)
+    }
+
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         // Seed the internal reference from value for fixed params too --
         // constraints evaluate a fixed rotation through ref_rotation as well.
@@ -1254,6 +1329,28 @@ impl TilePosition {
     }
 }
 
+/// Append a block's scatter target to the position stream: two words per
+/// block, ahead of the per-entry positions a mapped block also pushes.
+/// The block itself keeps nothing, so the stream is the whole binding and
+/// a fresh set of blocks scatters through it without being rebound.
+#[inline]
+fn push_tile(out: &mut std::vec::Vec<ValueIndex>, pos: TilePosition) {
+    out.push(pos.base);
+    out.push(pos.stride);
+}
+
+/// Read the next block's scatter target from the position stream.
+#[inline]
+fn take_tile(positions: &[ValueIndex], cursor: &mut usize) -> TilePosition {
+    assert!(*cursor + 2 <= positions.len(),
+        "Hessian scatter ran past the bound pattern: the blocks were never bound \
+         to it (Model::bind_hessian_positions), or their emission order changed \
+         within the solve");
+    let pos = TilePosition { base: positions[*cursor], stride: positions[*cursor + 1] };
+    *cursor += 2;
+    pos
+}
+
 /// Smallest live index in `indices`, or `u32::MAX` if every slot is fixed.
 ///
 /// Parameters serialize in declaration order and the index arrays are filled
@@ -1319,23 +1416,25 @@ fn ascending(indices: &[u32]) -> bool {
 }
 
 
-/// Hessian block for a single model type.
+/// Declares that one entity has a diagonal Hessian block.
 ///
-/// Accumulates the upper triangle of the Gauss-Newton Hessian approximation
-/// (2·dr·dr^T) from constraint residuals involving one model's parameters.
-/// Gradient entries (2·r·dr) are written directly to the global gradient
-/// vector by `add_residual` -- no per-block grad buffer.
-/// `N` equals `A::PARAM_COUNT`. `T` is the float type (f32 or f64, default f64).
+/// The block itself is a marker. Its values -- the upper triangle of the
+/// Gauss-Newton Hessian approximation (2·dr·dr^T) over that entity's own
+/// parameters, and the entity's gradient -- live in a [`SelfBlockArray`]
+/// in the block store, the generated `<Root>Blocks` struct the solve keeps
+/// in its [`Context`](crate::threads::Context). The marker's
+/// [`slot`](Self::slot) is its index into that array.
+/// `N` equals `A::PARAM_COUNT`, `M` the triangle length `N*(N+1)/2`.
+/// `T` is the float type (f32 or f64, default f64).
 ///
-/// Created by generated constraint code; users rarely construct these manually.
+/// Declared as a field on the entity, one per entity that has parameters.
 #[derive(Clone)]
 pub struct SelfBlock<A, const N: usize, const M: usize, T: crate::utils::Float = f64> {
-    indices: [u32; N],
-    /// Value-buffer position of this block's tile origin and the tile's
-    /// column stride, from [`bind_hessian_positions`](Self::bind_hessian_positions).
-    /// `u32::MAX` base means unbound; see [`TilePosition`].
-    pos: TilePosition,
-    hessian: [T; M], // upper triangle, M = N(N+1)/2 (the macro sizes this)
+    /// This block's position in its container's array of the solve's
+    /// block store, or `u32::MAX` before the store's build has wired it.
+    /// An entity reached through a `Ref` has no ordinal at the write
+    /// site, so the block carries its own.
+    slot: u32,
     _marker: std::marker::PhantomData<(A, T)>,
 }
 
@@ -1348,534 +1447,457 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     /// hand-written mismatch fails here rather than corrupting silently).
     const CHECK_M: () = assert!(M == N * (N + 1) / 2, "SelfBlock: M must equal N*(N+1)/2");
 
-    /// Create a new zeroed block.
+    /// A new, unwired block.
     pub fn new() -> Self {
         let () = Self::CHECK_M;
-        SelfBlock {
-            indices: [u32::MAX; N],
-            pos: TilePosition::UNBOUND,
-            hessian: [T::zero(); M],
-            _marker: std::marker::PhantomData,
-        }
+        SelfBlock { slot: u32::MAX, _marker: std::marker::PhantomData }
     }
 
-    /// Set the global parameter indices for this block.
-    pub fn set_indices(&mut self, indices: &[u32; N]) {
-        self.indices = *indices;
-    }
+    /// This block's position in its container's store array; `u32::MAX`
+    /// until the build wires it.
+    #[inline]
+    pub fn slot(&self) -> u32 { self.slot }
 
-    /// Append this entity's parameter span as `(offset, width)`: the
-    /// smallest live index and the count of live (non-fixed) params.
-    /// All-fixed entities append nothing.
-    pub fn collect_param_block(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        let mut min = u32::MAX;
-        let mut count = 0u32;
-        for &i in &self.indices {
-            if i != u32::MAX {
-                if i < min { min = i; }
-                count += 1;
-            }
-        }
-        if count > 0 {
-            out.push((min, count));
-        }
-    }
+    /// Set this block's store position. The build calls it once per
+    /// instance, in container order.
+    #[inline]
+    pub fn set_slot(&mut self, slot: u32) { self.slot = slot; }
 
-    /// Emit one representative scalar coordinate for this block's cell:
-    /// (anchor, anchor) on the diagonal of the entity partition.
-    /// All-fixed blocks emit nothing (they scatter nothing either).
-    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        let mut min = u32::MAX;
-        for &i in &self.indices {
-            if i != u32::MAX && i < min { min = i; }
-        }
-        if min != u32::MAX {
-            out.push((min, min));
-        }
-    }
-
-    /// Bind this block's diagonal tile for
-    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed).
-    /// All of the block's parameters live in one entity span, so the whole
-    /// upper triangle sits in a single tile and a tiled binder leaves `out`
-    /// untouched. A scalar binder pushes one position per entry, in the
-    /// emission order of
-    /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
-    pub fn bind_hessian_positions(
-        &mut self,
-        binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
-    ) {
-        let resolve = match binder {
-            HessianBinder::Tiled(bind) => {
-                self.pos = bind_tile(*bind, &self.indices, &self.indices);
-                return;
-            }
-            HessianBinder::Scalar(resolve) => resolve,
-        };
-        self.pos = TilePosition::MAPPED;
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            for j in i..N {
-                let gj = self.indices[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                out.push(value_index(resolve(lo, hi)));
-            }
-        }
-    }
-
-    /// Reset Hessian to zero. Gradient lives in the global grad vector,
-    /// which LM zeros before each compute pass.
-    pub fn zero(&mut self) {
-        self.hessian.fill(T::zero());
-    }
-
-    /// No-op: inline storage owns no heap to release. Present so a model's
-    /// generated `release_blocks()` can call `.release()` on every block
-    /// uniformly (see [`BoxedSelfBlock`], where it frees the Hessian).
+    /// No-op: the block owns no storage to free. Kept so a generated
+    /// `release_blocks` can call it uniformly.
     pub fn release(&mut self) {}
-
-    /// Return true if any parameter in this block is being optimized.
-    pub fn is_active(&self) -> bool {
-        self.indices.iter().any(|&i| i != u32::MAX)
-    }
-
-    /// Add one residual's contribution. Writes `2·r·dr[i]` into the global
-    /// `grad` at this block's indices, and accumulates `2·dr·dr^T` into the
-    /// block's internal upper-triangular Hessian.
-    pub fn add_residual(&mut self, r: T, dr: &[T; N], grad: &mut [T]) {
-        let two = T::two();
-        for i in 0..N {
-            let gi = self.indices[i];
-            // Fixed params (u32::MAX): no gradient slot, and no Hessian
-            // pair involving them is ever read by the accumulate paths
-            // (they skip inactive indices) -- skip the whole row.
-            if gi == u32::MAX { continue; }
-            grad[gi as usize] += two * r * dr[i];
-            let tdi = two * dr[i];
-            for j in i..N {
-                if self.indices[j] == u32::MAX { continue; }
-                self.hessian[tri_idx(N, i, j)] += tdi * dr[j];
-            }
-        }
-    }
-
-    /// Like [`add_residual`](Self::add_residual) but scales both the gradient
-    /// and Hessian contribution by a robust weight `w` (the loss derivative
-    /// `rho'(s)` at the block's squared norm). `w = 1` is bit-identical to
-    /// `add_residual`.
-    pub fn add_residual_with_loss(&mut self, w: T, r: T, dr: &[T; N], grad: &mut [T]) {
-        let two_w = T::two() * w;
-        let wr = two_w * r;
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            grad[gi as usize] += wr * dr[i];
-            let tdi = two_w * dr[i];
-            for j in i..N {
-                if self.indices[j] == u32::MAX { continue; }
-                self.hessian[tri_idx(N, i, j)] += tdi * dr[j];
-            }
-        }
-    }
-
-    /// Accumulate this block's Hessian into the full dense symmetric hessian.
-    /// Generic over the target width; the conversion is an identity when it
-    /// matches the block's storage.
-    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
-        let n_total = (hessian.len() as f64).sqrt() as usize;
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            let gi = gi as usize;
-            for j in i..N {
-                let gj = self.indices[j];
-                if gj == u32::MAX { continue; }
-                let gj = gj as usize;
-                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
-                hessian[gi * n_total + gj] += val;
-                if gi != gj {
-                    hessian[gj * n_total + gi] += val;
-                }
-            }
-        }
-    }
-
-    /// Accumulate into upper-band format (column-major, (kd+1)*n).
-    /// Returns Err if any element exceeds bandwidth kd.
-    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
-    {
-        let ldab = kd + 1;
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            let gi = gi as usize;
-            for j in i..N {
-                let gj = self.indices[j];
-                if gj == u32::MAX { continue; }
-                let gj = gj as usize;
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                if hi - lo > kd {
-                    return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
-                }
-                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
-                band[(kd + lo - hi) + hi * ldab] += val;
-            }
-        }
-        Ok(())
-    }
-
-    /// Accumulate into COO (triplet) sparse format. Upper triangle only.
-    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            for j in i..N {
-                let gj = self.indices[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
-                coo.push(lo, hi, val);
-            }
-        }
-    }
-
-    /// Accumulate directly into CSC vals array using position lookup.
-    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            for j in i..N {
-                let gj = self.indices[j];
-                if gj == u32::MAX { continue; }
-                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
-                if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
-                    csc.vals[pos] += val;
-                }
-            }
-        }
-    }
-
-    /// Accumulate into the assembled value buffer through this block's bound
-    /// tile, leaving `positions` and `cursor` untouched. Blocks bound against
-    /// a pattern with no tile to walk fall back to the map.
-    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        if !self.pos.tiled() {
-            return self.accumulate_mapped_indexed(vals, positions, cursor);
-        }
-        let start = tile_start(&self.indices);
-        let (base, stride, start) =
-            (self.pos.base as usize, self.pos.stride as usize, start as usize);
-        // Column offset of each live slot: invariant across the outer loop.
-        let mut col = [0usize; N];
-        for (c, &g) in std::iter::zip(&mut col, &self.indices) {
-            if g != u32::MAX {
-                *c = (g as usize - start) * stride;
-            }
-        }
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            let row = base + (gi as usize - start);
-            let tri = i * (2 * N - i - 1) / 2;
-            for j in i..N {
-                if self.indices[j] == u32::MAX { continue; }
-                vals[row + col[j]] += F::from(self.hessian[tri + j]).unwrap();
-            }
-        }
-    }
-
-    /// The untiled case of
-    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
-    /// one cached position per entry, `cursor` advancing in lockstep with the
-    /// block traversal. An all-fixed block emits nothing and so consumes none.
-    fn accumulate_mapped_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        for i in 0..N {
-            let gi = self.indices[i];
-            if gi == u32::MAX { continue; }
-            for j in i..N {
-                if self.indices[j] == u32::MAX { continue; }
-                vals[positions[*cursor] as usize] += F::from(self.hessian[tri_idx(N, i, j)]).unwrap();
-                *cursor += 1;
-            }
-        }
-    }
 }
 
-/// Heap-backed twin of [`SelfBlock`]: the whole block (indices + Hessian)
-/// lives behind a single `Box`, wrapped in `Option` so it can be released
-/// between solves and re-allocated on demand. `None` = released (no
-/// allocation at all); `Some` = one heap block. Every method delegates to the
-/// inline [`SelfBlock`], so the two are bit-for-bit identical.
+/// The heap-backed twin of [`SelfBlock`], kept as an alias of it.
 ///
-/// Opt into it (`hb: BoxedSelfBlock<Self>`) when the inline `[T; M]` would
-/// fatten the entity struct too much (very large parameter counts), or to
-/// reclaim all transient Hessian memory between solves via the root's
-/// generated `release_blocks()`. Otherwise prefer [`SelfBlock`], which never
-/// allocates. `N`/`M` are supplied by the macro, exactly as for `SelfBlock`.
-pub struct BoxedSelfBlock<A, const N: usize, const M: usize, T: crate::utils::Float = f64> {
-    inner: Option<std::boxed::Box<SelfBlock<A, N, M, T>>>,
+/// Up to 0.8.3 a block field was the container: `SelfBlock` embedded its
+/// Hessian triangle in the entity struct as a fixed array, and this twin
+/// held the same behind a `Box` so it could be freed between solves and
+/// skipped for a frozen sub-tree. From 0.8.4 a block field declares a
+/// block and holds no values, so there is nothing to box and nothing to
+/// choose between. Use [`SelfBlock`].
+#[deprecated(since = "0.8.4", note = "a block declares, it does not store; use SelfBlock")]
+pub type BoxedSelfBlock<A, const N: usize, const M: usize, T = f64> = SelfBlock<A, N, M, T>;
+
+// The self-block arithmetic, shared by [`SelfBlock`] and the
+// [`SelfBlockArray`] slabs: one block is its N parameter indices and the
+// M entries of its upper triangle.
+
+/// The entity's parameter span as `(offset, width)`; nothing when every
+/// slot is fixed.
+#[inline]
+fn self_param_block<const N: usize>(indices: &[u32; N], out: &mut std::vec::Vec<(u32, u32)>) {
+    let mut min = u32::MAX;
+    let mut count = 0u32;
+    for &i in indices {
+        if i != u32::MAX {
+            if i < min { min = i; }
+            count += 1;
+        }
+    }
+    if count > 0 {
+        out.push((min, count));
+    }
 }
 
-// Manual impl, like CrossBlock's: only the float storage is cloned, so
-// an entity holding the block can derive Clone without `A: Clone`.
-impl<A, const N: usize, const M: usize, T: crate::utils::Float> Clone for BoxedSelfBlock<A, N, M, T> {
-    fn clone(&self) -> Self {
-        BoxedSelfBlock {
-            inner: self.inner.as_ref().map(|b| std::boxed::Box::new(SelfBlock {
-                indices: b.indices,
-                pos: b.pos,
-                hessian: b.hessian,
-                _marker: std::marker::PhantomData,
-            })),
+/// One representative coordinate of the block's cell: its anchor on the
+/// diagonal of the entity partition.
+#[inline]
+fn self_cells<const N: usize>(indices: &[u32; N], out: &mut std::vec::Vec<(u32, u32)>) {
+    let min = tile_start(indices);
+    if min != u32::MAX {
+        out.push((min, min));
+    }
+}
+
+/// The block's scatter target, pushed into the stream; a scalar binder
+/// follows it with one position per entry.
+#[inline]
+fn self_bind<const N: usize>(
+    indices: &[u32; N], binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>,
+) {
+    let resolve = match binder {
+        HessianBinder::Tiled(bind) => {
+            push_tile(out, bind_tile(*bind, indices, indices));
+            return;
+        }
+        HessianBinder::Scalar(resolve) => resolve,
+    };
+    push_tile(out, TilePosition::MAPPED);
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        for j in i..N {
+            let gj = indices[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            out.push(value_index(resolve(lo, hi)));
         }
     }
 }
 
-impl<A, const N: usize, const M: usize, T: crate::utils::Float> Default for BoxedSelfBlock<A, N, M, T> {
+/// The dense symmetric scatter of one block.
+#[inline]
+fn self_dense<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M], out: &mut [F],
+) {
+    let n_total = (out.len() as f64).sqrt() as usize;
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        let gi = gi as usize;
+        for j in i..N {
+            let gj = indices[j];
+            if gj == u32::MAX { continue; }
+            let gj = gj as usize;
+            let val = F::from(hessian[tri_idx(N, i, j)]).unwrap();
+            out[gi * n_total + gj] += val;
+            if gi != gj {
+                out[gj * n_total + gi] += val;
+            }
+        }
+    }
+}
+
+/// The band scatter of one block (column-major, (kd+1)*n).
+#[inline]
+fn self_band<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M], band: &mut [F], kd: usize,
+) -> Result<(), crate::simple_lm::BandOverflow> {
+    let ldab = kd + 1;
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        let gi = gi as usize;
+        for j in i..N {
+            let gj = indices[j];
+            if gj == u32::MAX { continue; }
+            let gj = gj as usize;
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            if hi - lo > kd {
+                return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
+            }
+            band[(kd + lo - hi) + hi * ldab] += F::from(hessian[tri_idx(N, i, j)]).unwrap();
+        }
+    }
+    Ok(())
+}
+
+/// The COO scatter of one block, upper triangle only.
+#[inline]
+fn self_coo<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M], coo: &mut crate::simple_lm::CooMatrix<F>,
+) {
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        for j in i..N {
+            let gj = indices[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            coo.push(lo, hi, F::from(hessian[tri_idx(N, i, j)]).unwrap());
+        }
+    }
+}
+
+/// The direct CSC scatter of one block, by position lookup.
+#[inline]
+fn self_direct<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M], csc: &mut crate::simple_lm::CscMatrix<F>,
+) {
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        for j in i..N {
+            let gj = indices[j];
+            if gj == u32::MAX { continue; }
+            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+            let val = F::from(hessian[tri_idx(N, i, j)]).unwrap();
+            if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
+                csc.vals[pos] += val;
+            }
+        }
+    }
+}
+
+/// The indexed scatter of one block through the tile the stream holds for
+/// it; a mapped block falls back to the per-entry positions behind it.
+#[inline]
+fn self_indexed<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M],
+    vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
+) {
+    let pos = take_tile(positions, cursor);
+    if !pos.tiled() {
+        return self_mapped(indices, hessian, vals, positions, cursor);
+    }
+    let start = tile_start(indices) as usize;
+    let (base, stride) = (pos.base as usize, pos.stride as usize);
+    // Column offset of each live slot: invariant across the outer loop.
+    let mut col = [0usize; N];
+    for (c, &g) in std::iter::zip(&mut col, indices) {
+        if g != u32::MAX {
+            *c = (g as usize - start) * stride;
+        }
+    }
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        let row = base + (gi as usize - start);
+        let tri = i * (2 * N - i - 1) / 2;
+        for j in i..N {
+            if indices[j] == u32::MAX { continue; }
+            vals[row + col[j]] += F::from(hessian[tri + j]).unwrap();
+        }
+    }
+}
+
+/// The untiled case of [`self_indexed`]: one cached position per entry,
+/// `cursor` advancing in lockstep with the block traversal. An all-fixed
+/// block emits nothing and so consumes none.
+#[inline]
+fn self_mapped<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M],
+    vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
+) {
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        for j in i..N {
+            if indices[j] == u32::MAX { continue; }
+            vals[positions[*cursor] as usize] += F::from(hessian[tri_idx(N, i, j)]).unwrap();
+            *cursor += 1;
+        }
+    }
+}
+
+/// A slab of self blocks with the indices apart from the values: per
+/// entity its container slot and its N parameter indices in one array,
+/// the M entries of its upper triangle in one flat array. A root's
+/// generated mirror holds one per entity container, for the entities its
+/// thread touched; the gradient does not live here, each thread keeps a
+/// vector of its own (see [`crate::threads`]).
+///
+/// The build pushes the indices only and then calls
+/// [`finish`](Self::finish), which sizes the value array in one zeroed
+/// allocation and keeps it when the length has not changed. The sweep
+/// zeroes the whole slab before it writes.
+///
+/// One entity's triangle and its gradient stash are adjacent in `data`,
+/// at stride `M + N`: a residual writes both, so they share the region
+/// the write pulls in rather than sitting in two arrays a thread has to
+/// stream separately.
+#[derive(Clone)]
+pub struct SelfBlockArray<const N: usize, const M: usize, T: crate::utils::Float = f64> {
+    entity: std::vec::Vec<u32>,
+    indices: std::vec::Vec<[u32; N]>,
+    /// Per entity: `M` triangle entries, then `N` gradient entries.
+    data: std::vec::Vec<T>,
+}
+
+impl<const N: usize, const M: usize, T: crate::utils::Float> Default for SelfBlockArray<N, M, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A, N, M, T> {
-    /// Create an empty (released) block. Storage is allocated by the first
-    /// `set_indices` call that finds the block active.
+impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M, T> {
+    const CHECK_M: () = assert!(M == N * (N + 1) / 2, "SelfBlockArray: M must equal N*(N+1)/2");
+    /// One entity's span of [`data`](Self::data): the triangle then the stash.
+    const STRIDE: usize = M + N;
+
+    /// An empty slab.
     pub fn new() -> Self {
-        BoxedSelfBlock { inner: None }
-    }
-
-    /// Materialise the inner block, allocating it if released.
-    fn ensure(&mut self) -> &mut SelfBlock<A, N, M, T> {
-        self.inner.get_or_insert_with(|| std::boxed::Box::new(SelfBlock::new()))
-    }
-
-    /// Whether this block currently holds a heap allocation. False when
-    /// released, and false for an inactive block (its entity is not being
-    /// optimized -- every index is the `u32::MAX` fixed sentinel), so a frozen
-    /// sub-tree costs no Hessian memory. Mainly for diagnostics and tests.
-    pub fn is_allocated(&self) -> bool {
-        self.inner.is_some()
-    }
-
-    /// Set the global parameter indices. Allocates the block only if it is
-    /// active (at least one index is being optimized); an all-fixed block is
-    /// left released, so a frozen sub-tree never allocates its Hessian. The
-    /// solver calls this once, before any `zero`/`add_residual`, so activity
-    /// is settled before those run.
-    pub fn set_indices(&mut self, indices: &[u32; N]) {
-        if indices.iter().any(|&i| i != u32::MAX) {
-            self.ensure().set_indices(indices);
-        } else {
-            self.inner = None;
+        let () = Self::CHECK_M;
+        SelfBlockArray {
+            entity: std::vec::Vec::new(),
+            indices: std::vec::Vec::new(),
+            data: std::vec::Vec::new(),
         }
     }
 
-    /// Reset the Hessian to zero. No-op when unallocated: `set_indices` has
-    /// already materialised every active block, so there is nothing to zero
-    /// for an inactive/released one.
-    pub fn zero(&mut self) {
-        if let Some(b) = &mut self.inner { b.zero(); }
+    /// The number of entities.
+    pub fn len(&self) -> usize { self.entity.len() }
+
+    /// True if the slab holds no entity.
+    pub fn is_empty(&self) -> bool { self.entity.is_empty() }
+
+    /// Drop every entity's indices; the value storage stays for `finish`.
+    pub fn clear(&mut self) {
+        self.entity.clear();
+        self.indices.clear();
     }
 
-    /// Append this entity's parameter span; a released or all-fixed block
-    /// appends nothing (see [`SelfBlock::collect_param_block`]).
-    pub fn collect_param_block(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        if let Some(b) = &self.inner { b.collect_param_block(out); }
+    /// Room for `n` more entities' indices.
+    pub fn reserve(&mut self, n: usize) {
+        self.entity.reserve(n);
+        self.indices.reserve(n);
     }
 
-    /// Free the whole block's heap allocation. The next `set_indices` on an
-    /// active block re-allocates it.
-    pub fn release(&mut self) {
-        self.inner = None;
-    }
-
-    /// Return true if any parameter in this block is being optimized.
-    pub fn is_active(&self) -> bool {
-        self.inner.as_ref().is_some_and(|b| b.is_active())
-    }
-
-    /// Add one residual's contribution (see [`SelfBlock::add_residual`]).
-    /// No-op when unallocated: an inactive block (all indices fixed) writes
-    /// nothing to grad or Hessian anyway.
-    pub fn add_residual(&mut self, r: T, dr: &[T; N], grad: &mut [T]) {
-        if let Some(b) = &mut self.inner { b.add_residual(r, dr, grad); }
-    }
-
-    /// Robust-weighted residual add (see [`SelfBlock::add_residual_with_loss`]).
-    /// No-op when unallocated.
-    pub fn add_residual_with_loss(&mut self, w: T, r: T, dr: &[T; N], grad: &mut [T]) {
-        if let Some(b) = &mut self.inner { b.add_residual_with_loss(w, r, dr, grad); }
-    }
-
-    /// Scatter this block into a dense n x n Hessian.
-    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
-        if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
-    }
-
-    /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
-    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
-    {
-        match &self.inner {
-            Some(b) => b.accumulate_hessian_band(band, kd),
-            None => Ok(()),
-        }
-    }
-
-    /// Append this block's upper-triangle (row, col) cells to `out` -- the pattern pass.
-    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
-    }
-
-    /// Bind this block's tile in the assembled value buffer.
-    pub fn bind_hessian_positions(
-        &mut self,
-        binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
-    ) {
-        if let Some(b) = &mut self.inner { b.bind_hessian_positions(binder, out); }
-    }
-
-    /// Scatter this block into COO triplets.
-    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
-        if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
-    }
-
-    /// Scatter this block into a prebuilt CSC structure by position lookup.
-    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
-        if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
-    }
-
-    /// Scatter this block into CSC values through cached positions.
-    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        if let Some(b) = &self.inner {
-            b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
-        }
-    }
-}
-
-/// One thread's share of an entity's [`SelfBlock`]: the same indices and
-/// triangle plus a gradient stash, so a threaded sweep writes nothing the
-/// entity owns. The adds are branch-free: a fixed parameter's row is
-/// accumulated like any other and dropped by the scatter, which reads the
-/// indices. Built and owned by a root's generated mirror (see
-/// [`crate::threads`]).
-#[derive(Clone)]
-pub struct Partial<const N: usize, const M: usize, T: crate::utils::Float = f64> {
-    block: SelfBlock<(), N, M, T>,
-    grad: [T; N],
-    entity: u32,
-}
-
-impl<const N: usize, const M: usize, T: crate::utils::Float> Partial<N, M, T> {
-    /// A zeroed partial for the entity at `entity` with its parameter indices.
-    pub fn new(entity: u32, indices: &[u32; N]) -> Self {
-        let mut block = SelfBlock::new();
-        block.set_indices(indices);
-        Partial { block, grad: [T::zero(); N], entity }
-    }
-
-    /// The entity's index in its container.
-    pub fn entity(&self) -> u32 { self.entity }
-
-    /// The entity's parameter indices (`u32::MAX` for a fixed one).
-    pub fn indices(&self) -> &[u32; N] { &self.block.indices }
-
-    /// Reset the triangle and the gradient stash.
-    pub fn zero(&mut self) {
-        self.block.zero();
-        self.grad.fill(T::zero());
-    }
-
-    /// Add one residual's contribution: `2 r dr` into the stash and
-    /// `2 dr dr^T` into the triangle, every slot, fixed or not.
+    /// Append the entity at container slot `entity` with its parameter
+    /// indices, and return the slab slot it took.
     #[inline]
-    pub fn add_residual(&mut self, r: T, dr: &[T; N]) {
-        let two = T::two();
-        for i in 0..N {
-            self.grad[i] += two * r * dr[i];
-            let tdi = two * dr[i];
-            for j in i..N {
-                self.block.hessian[tri_idx(N, i, j)] += tdi * dr[j];
-            }
+    pub fn push(&mut self, entity: u32, indices: &[u32; N]) -> u32 {
+        let k = self.entity.len() as u32;
+        self.entity.push(entity);
+        self.indices.push(*indices);
+        k
+    }
+
+    /// Size the value array to the entities pushed: a fresh zeroed
+    /// allocation when the length changed, else the existing storage,
+    /// whose stale values [`zero`](Self::zero) clears.
+    pub fn finish(&mut self) {
+        let n = self.entity.len() * Self::STRIDE;
+        if self.data.len() != n {
+            self.data = vec![T::zero(); n];
         }
+    }
+
+    /// Reset every triangle and every gradient stash.
+    pub fn zero(&mut self) {
+        self.data.fill(T::zero());
+    }
+
+    /// The container slot of entity `k`.
+    pub fn entity(&self, k: usize) -> u32 { self.entity[k] }
+
+    /// The parameter indices of entity `k` (`u32::MAX` for a fixed one).
+    pub fn indices(&self, k: usize) -> &[u32; N] { &self.indices[k] }
+
+    #[inline]
+    fn block(&self, k: usize) -> &[T; M] {
+        let base = k * Self::STRIDE;
+        (&self.data[base..base + M]).try_into().unwrap()
+    }
+
+    /// Add one residual's contribution to entity `k`: `2 r dr` into its
+    /// gradient stash and `2 dr dr^T` into its triangle, every slot,
+    /// fixed or not. Branch-free: a fixed parameter's row is accumulated
+    /// like any other and dropped by
+    /// [`scatter_grad`](Self::scatter_grad) and the Hessian walks, which
+    /// read the indices.
+    #[inline]
+    pub fn add_residual(&mut self, k: usize, r: T, dr: &[T; N]) {
+        self.add_scaled(k, T::two(), r, dr);
     }
 
     /// [`add_residual`](Self::add_residual) scaled by the loss weight `w`.
     #[inline]
-    pub fn add_residual_with_loss(&mut self, w: T, r: T, dr: &[T; N]) {
-        let two_w = T::two() * w;
-        let wr = two_w * r;
+    pub fn add_residual_with_loss(&mut self, k: usize, w: T, r: T, dr: &[T; N]) {
+        self.add_scaled(k, T::two() * w, r, dr);
+    }
+
+    #[inline]
+    fn add_scaled(&mut self, k: usize, scale: T, r: T, dr: &[T; N]) {
+        let base = k * Self::STRIDE;
+        let (h, g) = self.data[base..base + Self::STRIDE].split_at_mut(M);
+        let h: &mut [T; M] = h.try_into().unwrap();
+        let g: &mut [T; N] = g.try_into().unwrap();
+        let sr = scale * r;
         for i in 0..N {
-            self.grad[i] += wr * dr[i];
-            let tdi = two_w * dr[i];
+            g[i] += sr * dr[i];
+            let tdi = scale * dr[i];
             for j in i..N {
-                self.block.hessian[tri_idx(N, i, j)] += tdi * dr[j];
+                h[tri_idx(N, i, j)] += tdi * dr[j];
             }
         }
     }
 
-    /// Add the stash into the global gradient at the live indices.
+    /// Add every entity's stash into the global gradient at its live
+    /// indices; a fixed slot has none and is dropped here.
     pub fn scatter_grad<F: crate::utils::Float>(&self, grad: &mut [F]) {
-        for i in 0..N {
-            let gi = self.block.indices[i];
-            if gi == u32::MAX { continue; }
-            grad[gi as usize] += F::from(self.grad[i]).unwrap();
+        for k in 0..self.entity.len() {
+            let idx = &self.indices[k];
+            let base = k * Self::STRIDE + M;
+            let g = &self.data[base..base + N];
+            for i in 0..N {
+                let gi = idx[i];
+                if gi == u32::MAX { continue; }
+                grad[gi as usize] += F::from(g[i]).unwrap();
+            }
         }
     }
 
-    /// See [`SelfBlock::collect_param_block`].
-    pub fn collect_param_block(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        self.block.collect_param_block(out);
+    /// Append entity `k`'s `(offset, width)` span of the flat parameter
+    /// vector, or nothing when all of its params are fixed.
+    pub fn collect_param_block(&self, k: usize, out: &mut std::vec::Vec<(u32, u32)>) {
+        self_param_block(&self.indices[k], out);
     }
-    /// See [`SelfBlock::collect_hessian_cells`].
+
+    /// Append one representative scalar coordinate of each entity's
+    /// triangle, over every entity. Structure only, no values.
     pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        self.block.collect_hessian_cells(out);
+        for idx in &self.indices {
+            self_cells(idx, out);
+        }
     }
-    /// See [`SelfBlock::bind_hessian_positions`].
-    pub fn bind_hessian_positions(
-        &mut self,
-        binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
-    ) {
-        self.block.bind_hessian_positions(binder, out);
+
+    /// Record where each entity's triangle scatters in the assembled value
+    /// buffer, over every entity. See
+    /// [`Model::bind_hessian_positions`].
+    pub fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+        for idx in &self.indices {
+            self_bind(idx, binder, out);
+        }
     }
-    /// See [`SelfBlock::accumulate_hessian`].
+
+    /// Add every entity's triangle into the dense symmetric Hessian,
+    /// both sides of the diagonal.
     pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
-        self.block.accumulate_hessian(hessian);
+        for k in 0..self.entity.len() {
+            self_dense(&self.indices[k], self.block(k), hessian);
+        }
     }
-    /// See [`SelfBlock::accumulate_hessian_band`].
+
+    /// Add every entity's triangle into an upper-band Hessian of
+    /// half-bandwidth `kd` (LAPACK layout). Errors when an entry falls
+    /// outside the band.
     pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
-        self.block.accumulate_hessian_band(band, kd)
+        for k in 0..self.entity.len() {
+            self_band(&self.indices[k], self.block(k), band, kd)?;
+        }
+        Ok(())
     }
-    /// See [`SelfBlock::accumulate_hessian_sparse`].
+
+    /// Push every entity's triangle into a COO Hessian as `(row, col,
+    /// value)` triplets.
     pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
-        self.block.accumulate_hessian_sparse(coo);
+        for k in 0..self.entity.len() {
+            self_coo(&self.indices[k], self.block(k), coo);
+        }
     }
-    /// See [`SelfBlock::accumulate_hessian_sparse_direct`].
+
+    /// Add every entity's triangle straight into an already-patterned CSC
+    /// Hessian, looking each entry up by column.
     pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
-        self.block.accumulate_hessian_sparse_direct(csc);
+        for k in 0..self.entity.len() {
+            self_direct(&self.indices[k], self.block(k), csc);
+        }
     }
-    /// See [`SelfBlock::accumulate_hessian_sparse_indexed`].
+
+    /// Add every entity's triangle into the assembled value buffer through
+    /// the positions [`bind_hessian_positions`](Self::bind_hessian_positions)
+    /// recorded, reading them in the same order.
     pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        self.block.accumulate_hessian_sparse_indexed(vals, positions, cursor);
+        for k in 0..self.entity.len() {
+            self_indexed(&self.indices[k], self.block(k), vals, positions, cursor);
+        }
     }
 }
 
-/// Hessian block coupling two model types -- stores ONLY the rectangular A x B
-/// cross Hessian pairs. A's gradient and A-A diagonal live in A's own
-/// [`SelfBlock`]; same for B. This matches the refactor where every
-/// params-having Model owns a `SelfBlock<Self>`, and cross blocks carry only
-/// the pieces that don't fit in a per-entity block.
+/// Declares that two entities are coupled in the Hessian.
 ///
-/// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
-/// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
-/// `T` is the float type (f32 or f64, default f64).
+/// The block itself is a marker. Its values -- the rectangular A x B cross
+/// pairs, and nothing else -- live in a [`CrossBlockArray`] in the block
+/// store, the generated `<Root>Blocks` struct the solve keeps in its
+/// [`Context`](crate::threads::Context). The marker's
+/// [`slot`](Self::slot) is its index into that array. A's gradient and A-A
+/// diagonal belong to A's own [`SelfBlock`]; same for B. So every
+/// `∂r/∂p_i · ∂r/∂p_j` pair is written in exactly one place.
+///
+/// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`, and the tile is NA×NB
+/// row-major. `T` is the float type (f32 or f64, default f64).
 ///
 /// Placement: normally a field on the constraint struct itself (one tile
 /// per constraint instance). When many constraints couple the SAME two
@@ -1888,26 +1910,14 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> Partial<N, M, T> {
 /// fields fill the slots and bodies read `parent.<ref>.<field>`. See
 /// docs/MODEL.md, "Shared CrossBlock on a containing parent".
 pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
-    indices_a: [u32; NA],
-    indices_b: [u32; NB],
-    /// Origin and column stride of the A-B tile; see [`TilePosition`].
-    pos: TilePosition,
-    cross_hessian: [T; P],    // NA*NB row-major (the macro sizes this)
+    /// See [`SelfBlock::slot`].
+    slot: u32,
     _marker: std::marker::PhantomData<(A, B, T)>,
 }
 
-// Manual impl: the derive would bound the phantom entity types A and B,
-// but only float storage is actually cloned. Lets constraint structs
-// holding a CrossBlock derive Clone without their entities being Clone.
 impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Clone for CrossBlock<A, B, NA, NB, P, T> {
     fn clone(&self) -> Self {
-        CrossBlock {
-            indices_a: self.indices_a,
-            indices_b: self.indices_b,
-            pos: self.pos,
-            cross_hessian: self.cross_hessian,
-            _marker: std::marker::PhantomData,
-        }
+        CrossBlock { slot: self.slot, _marker: std::marker::PhantomData }
     }
 }
 
@@ -1918,16 +1928,11 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
 impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlock<A, B, NA, NB, P, T> {
     /// Compile-time guard that `P` matches `NA*NB` (set by the macro).
     const CHECK_P: () = assert!(P == NA * NB, "CrossBlock: P must equal NA*NB");
-    /// Create a new zeroed cross-block.
+
+    /// A new, unwired tile.
     pub fn new() -> Self {
         let () = Self::CHECK_P;
-        CrossBlock {
-            indices_a: [u32::MAX; NA],
-            indices_b: [u32::MAX; NB],
-            pos: TilePosition::UNBOUND,
-            cross_hessian: [T::zero(); P],
-            _marker: std::marker::PhantomData,
-        }
+        CrossBlock { slot: u32::MAX, _marker: std::marker::PhantomData }
     }
 
     /// Return the number of parameters belonging to model A.
@@ -1935,101 +1940,16 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// Return the number of parameters belonging to model B.
     pub fn nb(&self) -> usize { NB }
 
-    /// Set the global parameter indices.
-    ///
-    /// The two slots may resolve to the same entity ("aliased", e.g. a
-    /// distance between the two endpoints of a single line): the two
-    /// symmetric accumulate writes then land on the same Hessian cell,
-    /// summing to the 2 * dr_a * dr_b diagonal contribution the shared
-    /// parameter requires. No special casing anywhere.
-    pub fn set_indices(&mut self, a_indices: &[u32], b_indices: &[u32]) {
-        debug_assert_eq!(a_indices.len(), NA);
-        debug_assert_eq!(b_indices.len(), NB);
-        self.indices_a.copy_from_slice(a_indices);
-        self.indices_b.copy_from_slice(b_indices);
-    }
+    /// See [`SelfBlock::slot`].
+    #[inline]
+    pub fn slot(&self) -> u32 { self.slot }
 
-    /// Reset cross hessian to zero.
-    pub fn zero(&mut self) {
-        self.cross_hessian.fill(T::zero());
-    }
+    /// See [`SelfBlock::set_slot`].
+    #[inline]
+    pub fn set_slot(&mut self, slot: u32) { self.slot = slot; }
 
-    /// No-op: inline storage owns no heap to release (see [`BoxedCrossBlock`]).
+    /// No-op: the tile owns no storage to free.
     pub fn release(&mut self) {}
-
-    /// Return true if any parameter in this block is being optimized.
-    pub fn is_active(&self) -> bool {
-        self.indices_a.iter().any(|&i| i != u32::MAX)
-            || self.indices_b.iter().any(|&i| i != u32::MAX)
-    }
-
-    /// Add one residual's cross contribution: accumulates `2 * dr_a[i] * dr_b[j]`
-    /// into the A×B rectangular Hessian. Gradient and A-A / B-B pairs must be
-    /// added separately via A's and B's SelfBlocks (they receive `r` + per-side
-    /// `dr` directly).
-    pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
-        cross_add(&mut self.cross_hessian, T::two(), dr_a, dr_b);
-    }
-
-    /// Robust-weighted variant of [`add_residual_cross`](Self::add_residual_cross):
-    /// scales the cross Hessian by the loss weight `w`. `w = 1` is bit-identical.
-    /// `_r` is ignored (the gradient goes through the SelfBlocks); it is present
-    /// so the macro can route every accumulation call uniformly.
-    pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
-        cross_add(&mut self.cross_hessian, T::two() * w, dr_a, dr_b);
-    }
-
-    /// Accumulate cross pairs into the full dense symmetric hessian.
-    /// Generic over the target width; the conversion is an identity when it
-    /// matches the block's storage.
-    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
-        cross_dense(&self.indices_a, &self.indices_b, &self.cross_hessian, hessian);
-    }
-
-    /// Accumulate into upper-band format (column-major, (kd+1)*n).
-    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
-    {
-        cross_band(&self.indices_a, &self.indices_b, &self.cross_hessian, band, kd)
-    }
-
-    /// Emit one representative scalar coordinate for this block's cell.
-    /// Both entities are contiguous spans, so every pair lands in one
-    /// cell of the entity partition (the diagonal cell when aliased).
-    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        cross_cells(&self.indices_a, &self.indices_b, out);
-    }
-
-    /// Bind this block's tile for
-    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed).
-    /// Both entities are contiguous spans, so every cross pair lands in the
-    /// one tile (the diagonal tile when the two slots alias one entity).
-    /// A scalar binder falls back to the map; see
-    /// [`SelfBlock::bind_hessian_positions`].
-    pub fn bind_hessian_positions(
-        &mut self,
-        binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
-    ) {
-        self.pos = cross_bind(&self.indices_a, &self.indices_b, binder, out);
-    }
-
-    /// Accumulate into COO sparse format. Upper triangle only.
-    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
-        cross_coo(&self.indices_a, &self.indices_b, &self.cross_hessian, coo);
-    }
-
-    /// Accumulate directly into CSC vals via position lookup.
-    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
-        cross_direct(&self.indices_a, &self.indices_b, &self.cross_hessian, csc);
-    }
-
-    /// Accumulate into the assembled value buffer through this block's bound
-    /// tile; see the note on
-    /// [`SelfBlock::accumulate_hessian_sparse_indexed`].
-    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        cross_indexed(&self.indices_a, &self.indices_b, self.pos, &self.cross_hessian, vals, positions, cursor);
-    }
 }
 
 // The cross-block arithmetic, shared by [`CrossBlock`] and the mirrors'
@@ -2126,11 +2046,15 @@ fn cross_cells<const NA: usize, const NB: usize>(a: &[u32; NA], b: &[u32; NB], o
 #[inline]
 fn cross_bind<const NA: usize, const NB: usize>(
     a: &[u32; NA], b: &[u32; NB], binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>,
-) -> TilePosition {
+) {
     let resolve = match binder {
-        HessianBinder::Tiled(bind) => return bind_tile(*bind, a, b),
+        HessianBinder::Tiled(bind) => {
+            push_tile(out, bind_tile(*bind, a, b));
+            return;
+        }
         HessianBinder::Scalar(resolve) => resolve,
     };
+    push_tile(out, TilePosition::MAPPED);
     for i in 0..NA {
         let gi = a[i];
         if gi == u32::MAX { continue; }
@@ -2141,7 +2065,6 @@ fn cross_bind<const NA: usize, const NB: usize>(
             out.push(value_index(resolve(lo, hi)));
         }
     }
-    TilePosition::MAPPED
 }
 
 /// The COO scatter of one block, upper triangle only.
@@ -2192,9 +2115,10 @@ fn cross_direct<const NA: usize, const NB: usize, const P: usize, T: crate::util
 /// on [`SelfBlock::accumulate_hessian_sparse_indexed`].
 #[inline]
 fn cross_indexed<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
-    a: &[u32; NA], b: &[u32; NB], pos: TilePosition, values: &[T; P],
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P],
     vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
 ) {
+    let pos = take_tile(positions, cursor);
     if !pos.tiled() {
         return cross_mapped(a, b, values, vals, positions, cursor);
     }
@@ -2284,7 +2208,6 @@ fn cross_mapped<const NA: usize, const NB: usize, const P: usize, T: crate::util
 pub struct CrossBlockArray<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     a: std::vec::Vec<[u32; NA]>,
     b: std::vec::Vec<[u32; NB]>,
-    pos: std::vec::Vec<TilePosition>,
     values: std::vec::Vec<T>,
 }
 
@@ -2304,13 +2227,15 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         self.values.fill(T::zero());
     }
 
-    /// See [`CrossBlock::add_residual_cross`].
+    /// Add one residual's cross pairs `2 dr_a dr_b^T` into the tile. The
+    /// residual itself belongs to the two entities' gradients, not here.
     #[inline]
     pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
         cross_add(self.values, T::two(), dr_a, dr_b);
     }
 
-    /// See [`CrossBlock::add_residual_cross_with_loss`].
+    /// [`add_residual_cross`](Self::add_residual_cross) with the pairs
+    /// scaled by the loss weight `w`. `w = 1` is the plain form.
     #[inline]
     pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
         cross_add(self.values, T::two() * w, dr_a, dr_b);
@@ -2326,7 +2251,6 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         CrossBlockArray {
             a: std::vec::Vec::new(),
             b: std::vec::Vec::new(),
-            pos: std::vec::Vec::new(),
             values: std::vec::Vec::new(),
         }
     }
@@ -2341,14 +2265,12 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     pub fn clear(&mut self) {
         self.a.clear();
         self.b.clear();
-        self.pos.clear();
     }
 
     /// Room for `n` more blocks' indices.
     pub fn reserve(&mut self, n: usize) {
         self.a.reserve(n);
         self.b.reserve(n);
-        self.pos.reserve(n);
     }
 
     /// Append a block with its parameter indices, unbound.
@@ -2356,7 +2278,6 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     pub fn push(&mut self, a: &[u32; NA], b: &[u32; NB]) {
         self.a.push(*a);
         self.b.push(*b);
-        self.pos.push(TilePosition::UNBOUND);
     }
 
     /// Size the value array to the blocks pushed: a fresh zeroed
@@ -2367,6 +2288,11 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         if self.values.len() != n {
             self.values = vec![T::zero(); n];
         }
+    }
+
+    /// Reset every tile.
+    pub fn zero(&mut self) {
+        self.values.fill(T::zero());
     }
 
     /// Block `k` for writing.
@@ -2390,28 +2316,33 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         (&self.values[k * P..(k + 1) * P]).try_into().unwrap()
     }
 
-    /// See [`CrossBlock::collect_hessian_cells`], over every block.
+    /// Append one representative scalar coordinate of each tile, over
+    /// every block. Structure only, no values.
     pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         for k in 0..self.a.len() {
             cross_cells(&self.a[k], &self.b[k], out);
         }
     }
 
-    /// See [`CrossBlock::bind_hessian_positions`], over every block.
+    /// Record where each tile scatters in the assembled value buffer, over
+    /// every block. See
+    /// [`Model::bind_hessian_positions`].
     pub fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
         for k in 0..self.a.len() {
-            self.pos[k] = cross_bind(&self.a[k], &self.b[k], binder, out);
+            cross_bind(&self.a[k], &self.b[k], binder, out);
         }
     }
 
-    /// See [`CrossBlock::accumulate_hessian`], over every block.
+    /// Add every tile into the dense symmetric Hessian, at `(A, B)` and
+    /// its transpose.
     pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
         for k in 0..self.a.len() {
             cross_dense(&self.a[k], &self.b[k], self.block(k), hessian);
         }
     }
 
-    /// See [`CrossBlock::accumulate_hessian_band`], over every block.
+    /// Add every tile into an upper-band Hessian of half-bandwidth `kd`
+    /// (LAPACK layout). Errors when an entry falls outside the band.
     pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
         -> Result<(), crate::simple_lm::BandOverflow>
     {
@@ -2421,236 +2352,60 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         Ok(())
     }
 
-    /// See [`CrossBlock::accumulate_hessian_sparse`], over every block.
+    /// Push every tile into a COO Hessian as `(row, col, value)` triplets.
     pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
         for k in 0..self.a.len() {
             cross_coo(&self.a[k], &self.b[k], self.block(k), coo);
         }
     }
 
-    /// See [`CrossBlock::accumulate_hessian_sparse_direct`], over every block.
+    /// Add every tile straight into an already-patterned CSC Hessian,
+    /// looking each entry up by column.
     pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
         for k in 0..self.a.len() {
             cross_direct(&self.a[k], &self.b[k], self.block(k), csc);
         }
     }
 
-    /// See [`CrossBlock::accumulate_hessian_sparse_indexed`], over every block.
+    /// Add every tile into the assembled value buffer through the positions
+    /// [`bind_hessian_positions`](Self::bind_hessian_positions) recorded,
+    /// reading them in the same order.
     pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         for k in 0..self.a.len() {
-            cross_indexed(&self.a[k], &self.b[k], self.pos[k], self.block(k), vals, positions, cursor);
+            cross_indexed(&self.a[k], &self.b[k], self.block(k), vals, positions, cursor);
         }
     }
 }
 
-#[cfg(test)]
-mod cross_block_array_tests {
-    use super::*;
-
-    /// A list of two blocks, one aliased, accumulates what two
-    /// `CrossBlock`s do, on the dense and the COO route, and `finish`
-    /// keeps the value storage across a rebuild of the same length.
-    #[test]
-    fn list_matches_blocks() {
-        let n = 5;
-        let (ia, ib) = ([0u32, 1], [3u32, 4]);
-        let (ja, jb) = ([3u32, 4], [3u32, 4]);
-        let mut one: CrossBlock<(), (), 2, 2, 4, f64> = CrossBlock::new();
-        one.set_indices(&ia, &ib);
-        let mut two: CrossBlock<(), (), 2, 2, 4, f64> = CrossBlock::new();
-        two.set_indices(&ja, &jb);
-        let mut list: CrossBlockArray<2, 2, 4, f64> = CrossBlockArray::new();
-        list.push(&ia, &ib);
-        list.push(&ja, &jb);
-        list.finish();
-        assert_eq!(list.len(), 2);
-        let (da, db) = ([1.5, -2.0], [0.25, 3.0]);
-        one.add_residual_cross(0.0, &da, &db);
-        two.add_residual_cross_with_loss(0.5, 0.0, &db, &da);
-        list.block_mut(0).zero();
-        list.block_mut(0).add_residual_cross(0.0, &da, &db);
-        list.block_mut(1).zero();
-        list.block_mut(1).add_residual_cross_with_loss(0.5, 0.0, &db, &da);
-        let (mut h1, mut h2) = (vec![0.0; n * n], vec![0.0; n * n]);
-        one.accumulate_hessian(&mut h1);
-        two.accumulate_hessian(&mut h1);
-        list.accumulate_hessian(&mut h2);
-        assert_eq!(h1, h2);
-        let (mut c1, mut c2) = (crate::simple_lm::CooMatrix::<f64>::new(n), crate::simple_lm::CooMatrix::<f64>::new(n));
-        one.accumulate_hessian_sparse(&mut c1);
-        two.accumulate_hessian_sparse(&mut c1);
-        list.accumulate_hessian_sparse(&mut c2);
-        assert_eq!((c1.rows, c1.cols, c1.vals), (c2.rows, c2.cols, c2.vals));
-        let (mut k1, mut k2) = (Vec::new(), Vec::new());
-        one.collect_hessian_cells(&mut k1);
-        two.collect_hessian_cells(&mut k1);
-        list.collect_hessian_cells(&mut k2);
-        assert_eq!(k1, k2);
-        // A rebuild of the same length keeps the (stale) values.
-        list.clear();
-        list.push(&ia, &ib);
-        list.push(&ja, &jb);
-        list.finish();
-        assert_ne!(list.values(0), &[0.0; 4]);
-        list.clear();
-        list.push(&ia, &ib);
-        list.finish();
-        assert_eq!(list.values(0), &[0.0; 4]);
-    }
-}
 
 // ---------------------------------------------------------------------------
 
-/// Heap-backed twin of [`CrossBlock`]: the whole block (both index arrays +
-/// cross-Hessian) lives behind a single `Box`, wrapped in `Option` so it can
-/// be released between solves and re-allocated on demand. `None` = released;
-/// `Some` = one heap block. Every method delegates to the inline
-/// [`CrossBlock`]. See [`BoxedSelfBlock`] for when to opt in.
-pub struct BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
-    inner: Option<std::boxed::Box<CrossBlock<A, B, NA, NB, P, T>>>,
-}
+/// The heap-backed twin of [`CrossBlock`], kept as an alias of it. See
+/// [`BoxedSelfBlock`] for what changed in 0.8.4. Use [`CrossBlock`].
+#[deprecated(since = "0.8.4", note = "a block declares, it does not store; use CrossBlock")]
+pub type BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T = f64> =
+    CrossBlock<A, B, NA, NB, P, T>;
 
-impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Clone for BoxedCrossBlock<A, B, NA, NB, P, T> {
-    fn clone(&self) -> Self {
-        BoxedCrossBlock {
-            inner: self.inner.as_ref().map(|b| std::boxed::Box::new((**b).clone())),
-        }
-    }
-}
 
-impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for BoxedCrossBlock<A, B, NA, NB, P, T> {
-    fn default() -> Self { Self::new() }
-}
-
-impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> BoxedCrossBlock<A, B, NA, NB, P, T> {
-    /// Create an empty (released) block. Storage is allocated by the first
-    /// `set_indices` call that finds the block active.
-    pub fn new() -> Self {
-        BoxedCrossBlock { inner: None }
-    }
-
-    /// Materialise the inner block, allocating it if released.
-    fn ensure(&mut self) -> &mut CrossBlock<A, B, NA, NB, P, T> {
-        self.inner.get_or_insert_with(|| std::boxed::Box::new(CrossBlock::new()))
-    }
-
-    /// Return the number of parameters belonging to model A.
-    pub fn na(&self) -> usize { NA }
-    /// Return the number of parameters belonging to model B.
-    pub fn nb(&self) -> usize { NB }
-
-    /// Whether this block currently holds a heap allocation. False when
-    /// released, and false for an inactive block (both endpoints are fixed --
-    /// every index is the `u32::MAX` sentinel), so a link between two frozen
-    /// entities costs no Hessian memory. Mainly for diagnostics and tests.
-    pub fn is_allocated(&self) -> bool {
-        self.inner.is_some()
-    }
-
-    /// Set the global parameter indices. Allocates the block only if it is
-    /// active (at least one index, on either side, is being optimized); a link
-    /// between two fully-fixed entities is left released. The solver calls this
-    /// once, before any `zero`/`add_residual_cross`.
-    pub fn set_indices(&mut self, a_indices: &[u32], b_indices: &[u32]) {
-        let active = a_indices.iter().chain(b_indices.iter()).any(|&i| i != u32::MAX);
-        if active {
-            self.ensure().set_indices(a_indices, b_indices);
-        } else {
-            self.inner = None;
-        }
-    }
-
-    /// Reset the cross-Hessian to zero. No-op when unallocated: `set_indices`
-    /// has already materialised every active block.
-    pub fn zero(&mut self) {
-        if let Some(b) = &mut self.inner { b.zero(); }
-    }
-
-    /// Free the whole block's heap allocation. The next `set_indices` on an
-    /// active block re-allocates it.
-    pub fn release(&mut self) {
-        self.inner = None;
-    }
-
-    /// Return true if any parameter in this block is being optimized.
-    pub fn is_active(&self) -> bool {
-        self.inner.as_ref().is_some_and(|b| b.is_active())
-    }
-
-    /// Add one residual's cross contribution (see [`CrossBlock::add_residual_cross`]).
-    /// No-op when unallocated: an inactive block contributes nothing.
-    pub fn add_residual_cross(&mut self, r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
-        if let Some(b) = &mut self.inner { b.add_residual_cross(r, dr_a, dr_b); }
-    }
-
-    /// Robust-weighted cross add (see [`CrossBlock::add_residual_cross_with_loss`]).
-    /// No-op when unallocated.
-    pub fn add_residual_cross_with_loss(&mut self, w: T, r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
-        if let Some(b) = &mut self.inner { b.add_residual_cross_with_loss(w, r, dr_a, dr_b); }
-    }
-
-    /// Scatter this block into a dense n x n Hessian.
-    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
-        if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
-    }
-
-    /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
-    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
-    {
-        match &self.inner {
-            Some(b) => b.accumulate_hessian_band(band, kd),
-            None => Ok(()),
-        }
-    }
-
-    /// Append this block's upper-triangle (row, col) cells to `out` -- the pattern pass.
-    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
-    }
-
-    /// Bind this block's tile in the assembled value buffer.
-    pub fn bind_hessian_positions(
-        &mut self,
-        binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
-    ) {
-        if let Some(b) = &mut self.inner { b.bind_hessian_positions(binder, out); }
-    }
-
-    /// Scatter this block into COO triplets.
-    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
-        if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
-    }
-
-    /// Scatter this block into a prebuilt CSC structure by position lookup.
-    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
-        if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
-    }
-
-    /// Scatter this block into CSC values through cached positions.
-    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
-        if let Some(b) = &self.inner {
-            b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-
-/// Sparse cross-only Hessian accumulation block for N-ary constraints.
+/// The general Hessian block: it couples any entities, in any combination,
+/// settled while the solve runs.
 ///
-/// After the refactor: TripletBlock stores ONLY across-entity Hessian pairs
-/// (pairs where the two params belong to different entity spans). The
-/// within-entity `H[A,A]` / `H[B,B]` / ... diagonals live in each entity's
-/// `SelfBlock<Self>`, and the gradient lives there too. This matches the
-/// invariant that every `∂r/∂p_i · ∂r/∂p_j` pair is written to exactly one
-/// block with no duplication.
+/// [`SelfBlock`] and [`CrossBlock`] name their sides in the type, so the
+/// solve can hand them packed tiles of a size it knows in advance. A
+/// TripletBlock names nothing, so there is no tile to hand it: it keeps
+/// each entry on its own, as a triplet of row, column and value -- the
+/// coordinate form a sparse matrix is built from, and what the name refers
+/// to. That generality is paid for in assembly speed, every entry being a
+/// `Vec` push. **Use a `CrossBlock` wherever the two sides can be named**,
+/// and a TripletBlock where they cannot: a constraint over more entities
+/// than a pair, or residuals parsed at runtime, where nothing can be
+/// written into the model up front.
 ///
-/// **Prefer [`CrossBlock`] for 2-entity constraints.** CrossBlock uses packed
-/// dense storage with compile-time-known NA×NB size, which is more
-/// cache-friendly than COO. Use TripletBlock only when a constraint couples
-/// 3+ entities.
+/// It holds its own entries, unlike the markers, and only the across-entity
+/// pairs (pairs whose two params belong to different entity spans). The
+/// within-entity `H[A,A]` / `H[B,B]` / ... diagonals and the gradient
+/// belong to each entity's `SelfBlock<Self>`, so every
+/// `∂r/∂p_i · ∂r/∂p_j` pair is written in exactly one place.
 ///
 /// Two entry points:
 /// - [`add_residual`](TripletBlock::add_residual) for direct callers with a
@@ -2966,32 +2721,14 @@ macro_rules! block_model_methods {
     };
 }
 
-/// The self blocks also carry the entity's param-block span.
-macro_rules! collect_param_block_method {
-    () => {
-        #[inline]
-        fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-            self.collect_param_block(out);
-        }
-    };
-}
+// A self or cross block contributes nothing to the `Model` walks: it
+// holds no values at all now, only its place in the solve's store, which
+// the root walks itself. `release_blocks` stays a no-op so a generated
+// `release` can call it uniformly.
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> Model for SelfBlock<A, N, M, T> {}
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Model
+    for CrossBlock<A, B, NA, NB, P, T> {}
 
-impl<A, const N: usize, const M: usize, T: crate::utils::Float> Model for SelfBlock<A, N, M, T> {
-    block_model_methods!();
-    collect_param_block_method!();
-}
-impl<A, const N: usize, const M: usize, T: crate::utils::Float> Model for BoxedSelfBlock<A, N, M, T> {
-    block_model_methods!();
-    collect_param_block_method!();
-}
-impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Model
-    for CrossBlock<A, B, NA, NB, P, T> {
-    block_model_methods!();
-}
-impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Model
-    for BoxedCrossBlock<A, B, NA, NB, P, T> {
-    block_model_methods!();
-}
 impl<T: crate::utils::Float> Model for TripletBlock<T> {
     block_model_methods!();
 }
@@ -3654,35 +3391,36 @@ mod tests {
     }
 
     #[test]
-    fn selfblock_band_matches_dense() {
+    fn self_blocks_band_matches_dense() {
         let n = 4;
         let kd = 2;
-        let mut blk: SelfBlock<Param<f64>, 3, 6, f64> = SelfBlock::new();
-        blk.set_indices(&[0, 1, 2]);
-        let mut grad = vec![0.0; n];
-        blk.add_residual(0.3, &[1.0, 0.5, -0.25], &mut grad);
-        blk.add_residual(-0.7, &[0.2, -1.5, 0.75], &mut grad);
+        let mut arr: SelfBlockArray<3, 6, f64> = SelfBlockArray::new();
+        arr.push(0, &[0, 1, 2]);
+        arr.finish();
+        arr.add_residual(0, 0.3, &[1.0, 0.5, -0.25]);
+        arr.add_residual(0, -0.7, &[0.2, -1.5, 0.75]);
 
         let mut dense = vec![0.0; n * n];
-        blk.accumulate_hessian(&mut dense);
+        arr.accumulate_hessian(&mut dense);
         let mut band = vec![0.0; (kd + 1) * n];
-        blk.accumulate_hessian_band(&mut band, kd).unwrap();
+        arr.accumulate_hessian_band(&mut band, kd).unwrap();
         assert_eq!(densify_band(&band, n, kd), dense);
     }
 
     #[test]
-    fn crossblock_band_matches_dense() {
+    fn cross_blocks_band_matches_dense() {
         let n = 5;
         let kd = 3;
-        let mut blk: CrossBlock<Param<f64>, Param<f64>, 2, 2, 4, f64> = CrossBlock::new();
-        blk.set_indices(&[0, 1], &[2, 3]);
-        blk.add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
-        blk.add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
+        let mut arr: CrossBlockArray<2, 2, 4, f64> = CrossBlockArray::new();
+        arr.push(&[0, 1], &[2, 3]);
+        arr.finish();
+        arr.block_mut(0).add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
+        arr.block_mut(0).add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
 
         let mut dense = vec![0.0; n * n];
-        blk.accumulate_hessian(&mut dense);
+        arr.accumulate_hessian(&mut dense);
         let mut band = vec![0.0; (kd + 1) * n];
-        blk.accumulate_hessian_band(&mut band, kd).unwrap();
+        arr.accumulate_hessian_band(&mut band, kd).unwrap();
         assert_eq!(densify_band(&band, n, kd), dense);
     }
 
@@ -3745,7 +3483,7 @@ mod tests {
     }
 
     #[test]
-    fn tripletblock_band_matches_selfblock_band() {
+    fn tripletblock_band_matches_self_block_array_band() {
         // The same residual pushed through both block types must produce
         // byte-identical gradient and band arrays.
         let n = 4;
@@ -3754,10 +3492,12 @@ mod tests {
         let dr = [1.0, -2.0, 0.5];
         let idx = [0u32, 1, 3];
 
+        let mut arr: SelfBlockArray<3, 6, f64> = SelfBlockArray::new();
+        arr.push(0, &idx);
+        arr.finish();
+        arr.add_residual(0, r, &dr);
         let mut g_self = vec![0.0; n];
-        let mut sb: SelfBlock<Param<f64>, 3, 6, f64> = SelfBlock::new();
-        sb.set_indices(&idx);
-        sb.add_residual(r, &dr, &mut g_self);
+        arr.scatter_grad(&mut g_self);
 
         let mut g_triplet = vec![0.0; n];
         let mut tb: TripletBlock<f64> = TripletBlock::new();
@@ -3766,7 +3506,7 @@ mod tests {
         assert_eq!(g_self, g_triplet);
 
         let mut band_self = vec![0.0; (kd + 1) * n];
-        sb.accumulate_hessian_band(&mut band_self, kd).unwrap();
+        arr.accumulate_hessian_band(&mut band_self, kd).unwrap();
         let mut band_triplet = vec![0.0; (kd + 1) * n];
         tb.accumulate_hessian_band(&mut band_triplet, kd).unwrap();
         assert_eq!(band_self, band_triplet);

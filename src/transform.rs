@@ -295,6 +295,12 @@ where
     fn serialize_size(&self) -> u32 {
         Model::serialize_size(&self.w) + Model::serialize_size(&self.d)
     }
+    // Both halves of the step fold into the entity's span; either may be
+    // frozen on its own, and then only the live one counts.
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        Model::fold_param_span(&self.w, min, count);
+        Model::fold_param_span(&self.d, min, count);
+    }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.w", base), out);
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.d", base), out);
@@ -764,6 +770,13 @@ where
         Model::serialize_size(&self.w)
             + Model::serialize_size(&self.d)
             + Model::serialize_size(&self.log_s)
+    }
+    // All three slots fold into the entity's span; any of them may be
+    // frozen on its own, and then only the live ones count.
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        Model::fold_param_span(&self.w, min, count);
+        Model::fold_param_span(&self.d, min, count);
+        Model::fold_param_span(&self.log_s, min, count);
     }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.w", base), out);

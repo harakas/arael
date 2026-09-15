@@ -2,7 +2,7 @@
 // arael_faer::bsc::SparseBlockColMat must equal the scalar CSC path
 // bit for bit. Both paths replay the same generated indexed scatter
 // (calc_grad_hessian_sparse_indexed) -- only the position maps differ:
-// the scalar one comes from CooMatrix::to_csc_with_map, the block one
+// the scalar one comes from CooMatrix::to_csc_with_positions, the block one
 // from SymbolicSparseBlockColMat::from_scalar_coords over the entity
 // partition (RootProblem::param_block_spans + block_partition_from_spans).
 
@@ -165,7 +165,7 @@ fn block_assembly_matches_scalar() {
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
 
     // Scalar pipeline: CSC + positions, indexed refill.
-    let (mut csc, positions_scalar) = coo.to_csc_with_map().unwrap();
+    let (mut csc, positions_scalar) = coo.to_csc_with_positions(&mut w).unwrap();
     let mut grad_s = vec![0.0; n];
     let mut vals_s = vec![0.0; csc.vals.len()];
     let cost_s = w.calc_grad_hessian_sparse_indexed(&params, &mut grad_s, &mut vals_s, &positions_scalar);
@@ -173,12 +173,13 @@ fn block_assembly_matches_scalar() {
 
     // Block pipeline: bsc structure + positions over the SAME coords,
     // refilled by the SAME generated scatter.
-    let (sym, positions_block) = SymbolicSparseBlockColMat::from_scalar_coords(
+    let (sym, block_map) = SymbolicSparseBlockColMat::from_scalar_coords(
         partition.clone(),
         partition,
         coo.nnz(),
         |k| (coo.rows[k] as usize, coo.cols[k] as usize),
     );
+    let positions_block = w.positions_from_map(&block_map);
     assert_eq!(positions_block.len(), positions_scalar.len());
     let mut bsc = SparseBlockColMat::<usize, f64>::zeroed(sym);
     let mut grad_b = vec![0.0; n];
@@ -228,7 +229,7 @@ fn two_scan_matches_coo_route() {
 
     // two-scan: cells from indices alone, positions by emission replay
     let mut cells: Vec<(u32, u32)> = Vec::new();
-    arael::model::Model::collect_hessian_cells(&w, &mut cells);
+    LmProblem::collect_hessian_cells(&w, &mut cells);
     let (sym2, _) = SymbolicSparseBlockColMat::from_scalar_coords(
         partition.clone(),
         partition,
@@ -237,7 +238,7 @@ fn two_scan_matches_coo_route() {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions(
+    LmProblem::bind_hessian_positions(
         &mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
@@ -248,7 +249,7 @@ fn two_scan_matches_coo_route() {
     assert_eq!(sym2.parts().2, sym_coo.parts().2);
     assert_eq!(sym2.parts().3, sym_coo.parts().3);
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
-    assert_eq!(pos2, pos_coo);
+    assert_eq!(pos2, LmProblem::positions_from_map(&mut w, &pos_coo));
 
     // and a fixed param reshapes both routes identically
     let mut w = build();
@@ -267,7 +268,7 @@ fn two_scan_matches_coo_route() {
         |k| (coo.rows[k] as usize, coo.cols[k] as usize),
     );
     let mut cells: Vec<(u32, u32)> = Vec::new();
-    arael::model::Model::collect_hessian_cells(&w, &mut cells);
+    LmProblem::collect_hessian_cells(&w, &mut cells);
     let (sym2, _) = SymbolicSparseBlockColMat::from_scalar_coords(
         partition.clone(),
         partition,
@@ -276,13 +277,13 @@ fn two_scan_matches_coo_route() {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions(
+    LmProblem::bind_hessian_positions(
         &mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
     );
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
-    assert_eq!(pos2, pos_coo);
+    assert_eq!(pos2, LmProblem::positions_from_map(&mut w, &pos_coo));
 }
 
 /// The scalar fast path (tile-expanded CSC from cells, SparseFaer's new
@@ -301,7 +302,7 @@ fn scalar_fast_path_matches_coo_route() {
     let mut grad = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let (mut csc_ref, pos_ref) = coo.to_csc_with_map().unwrap();
+    let (mut csc_ref, pos_ref) = coo.to_csc_with_positions(&mut w).unwrap();
     let mut vals = vec![0.0; csc_ref.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &pos_ref);
     csc_ref.vals = vals;
@@ -320,7 +321,8 @@ fn scalar_fast_path_matches_coo_route() {
         &mut positions,
     );
     // Every block here has a static tile shape, so nothing needs a map.
-    assert!(positions.is_empty());
+    assert!(!positions.is_empty() && positions.len() % 2 == 0,
+        "a tiled bind emits one tile -- two words -- per block");
     let mut vals = vec![0.0; csc_fast.vals.len()];
     let mut grad_f = vec![0.0; n];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_f, &mut vals, &positions);
@@ -359,7 +361,7 @@ fn assert_routes_agree(w: &mut World) {
     let mut grad_ref = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad_ref, &mut coo);
-    let (mut csc_ref, pos_ref) = coo.to_csc_with_map().unwrap();
+    let (mut csc_ref, pos_ref) = coo.to_csc_with_positions(&mut *w).unwrap();
     let mut vals = vec![0.0; csc_ref.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_ref, &mut vals, &pos_ref);
     csc_ref.vals = vals;
@@ -374,7 +376,8 @@ fn assert_routes_agree(w: &mut World) {
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
         &mut positions,
     );
-    assert!(positions.is_empty());
+    assert!(!positions.is_empty() && positions.len() % 2 == 0,
+        "a tiled bind emits one tile -- two words -- per block");
     let mut vals = vec![0.0; csc_fast.vals.len()];
     let mut grad_fast = vec![0.0; n];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_fast, &mut vals, &positions);
@@ -405,14 +408,14 @@ fn assert_routes_agree(w: &mut World) {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions(
+    LmProblem::bind_hessian_positions(
         w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
     );
     assert_eq!(sym2.parts().3, sym_coo.parts().3);
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
-    assert_eq!(pos2, pos_coo);
+    assert_eq!(pos2, LmProblem::positions_from_map(w, &pos_coo));
 }
 
 /// Blocks that keep only their tile origin and column stride must scatter
@@ -450,7 +453,8 @@ fn assert_tiled_matches_mapped(w: &mut World) {
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
         &mut tiled,
     );
-    assert!(tiled.is_empty(), "static tile shapes need no per-scalar map");
+    assert!(tiled.len() < mapped.len(),
+        "a tiled block contributes its tile alone; a mapped one a position per entry");
     let mut vals_tiled = vec![0.0; csc.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_tiled, &tiled);
     assert_eq!(vals_mapped, vals_tiled, "scalar CSC: tiled fill differs from mapped");
@@ -481,7 +485,8 @@ fn assert_tiled_matches_mapped(w: &mut World) {
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
         &mut btiled,
     );
-    assert!(btiled.is_empty());
+    assert!(btiled.len() < bmapped.len(),
+        "a tiled block contributes its tile alone; a mapped one a position per entry");
     let mut bsc_tiled = SparseBlockColMat::<usize, f64>::zeroed(sym);
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_tiled.vals_mut(), &btiled);
     assert_eq!(
@@ -795,4 +800,53 @@ fn cholmod_supernodal_backend_matches_dense() {
         rd.end_cost,
         rc.end_cost
     );
+}
+
+/// The binding lives in the position stream, not in the blocks, so a
+/// stream bound against one model instance scatters another instance of
+/// the same shape correctly. That is what lets a warm solve skip binding
+/// and what lets the stream outlive the blocks it was built from.
+#[test]
+fn a_stream_binds_any_instance_of_the_shape() {
+    let mut a = build();
+    let mut b = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut a, &mut params);
+    let mut params_b = Vec::new();
+    RootProblem::serialize(&mut b, &mut params_b);
+    assert_eq!(params, params_b);
+    let n = params.len();
+
+    // The stream comes from `a`; `b` never sees a binder.
+    let mut grad = vec![0.0; n];
+    let mut coo = CooMatrix::new(n);
+    a.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
+    let (csc, positions) = coo.to_csc_with_positions(&mut a).unwrap();
+
+    let mut grad_a = vec![0.0; n];
+    let mut vals_a = vec![0.0; csc.vals.len()];
+    let cost_a = a.calc_grad_hessian_sparse_indexed(&params, &mut grad_a, &mut vals_a, &positions);
+
+    let mut grad_b = vec![0.0; n];
+    let mut vals_b = vec![0.0; csc.vals.len()];
+    let cost_b = b.calc_grad_hessian_sparse_indexed(&params, &mut grad_b, &mut vals_b, &positions);
+
+    assert_eq!(cost_a, cost_b);
+    assert_eq!(grad_a, grad_b);
+    assert_eq!(vals_a, vals_b);
+}
+
+/// Scattering without a stream is a caller error, and a loud one: the
+/// blocks hold no fallback target, so a silent pass would write nothing
+/// and hand back an all-zero Hessian.
+#[test]
+#[should_panic(expected = "ran past the bound pattern")]
+fn scattering_through_no_stream_is_rejected() {
+    let mut w = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let n = params.len();
+    let mut grad = vec![0.0; n];
+    let mut vals = vec![0.0; n * n];
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &[]);
 }

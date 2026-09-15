@@ -192,7 +192,7 @@ fn aliased_all_formats_agree() {
     assert_eq!(g_direct, g_dense);
     assert_eq!(densify_csc(&csc_direct), h_dense, "direct CSC differs from dense");
 
-    let (csc, positions) = coo.to_csc_with_map().unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(&mut m).unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g_indexed = vec![0.0; n];
     m.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions);
@@ -389,7 +389,7 @@ fn aliased_cross_equals_self_formulation() {
         w.calc_grad_hessian_sparse_direct(params, &mut g, &mut csc_direct);
         print_h(&format!("H {} via CSC direct (densified)", label), &densify_csc(&csc_direct), n);
 
-        let (csc, positions) = coo.to_csc_with_map().unwrap();
+        let (csc, positions) = coo.to_csc_with_positions(w).unwrap();
         let mut vals = vec![0.0; csc.vals.len()];
         let mut g2 = vec![0.0; n];
         w.calc_grad_hessian_sparse_indexed(params, &mut g2, &mut vals, &positions);
