@@ -3819,7 +3819,7 @@ struct ParEntity {
     single: bool,
     param_count: usize,
     parts: syn::Ident,
-    partial_ty: TokenStream2,
+    slab_ty: TokenStream2,
     /// `write_indices` statements over `__e`, the entity, into `__idx`.
     idx_stmts: Vec<TokenStream2>,
 }
@@ -3891,7 +3891,7 @@ fn par_entity_id(
         single,
         param_count: n,
         parts: syn::Ident::new(&format!("__parts_{}", suffix), proc_macro2::Span::call_site()),
-        partial_ty: quote! { arael::model::Partial<#n, #m, #cast_type> },
+        slab_ty: quote! { arael::model::SelfBlockArray<#n, #m, #cast_type> },
         idx_stmts,
     });
     entities.len() - 1
@@ -3979,6 +3979,183 @@ fn split_gh(stmts: &[GhStmt]) -> (Vec<TokenStream2>, Vec<TokenStream2>) {
         }
     }
     (seq, par)
+}
+
+// ---- The block store -----------------------------------------------
+//
+// One array per containment path and block field, built by one walk
+// over the containers. A block's two sides are its type arguments;
+// each side's parameter slots are a registry lookup by type name; and
+// the instance of each side is reached through this struct's own `Ref`
+// fields, through containment, or through the root. None of that needs
+// a constraint, so the walk visits every declared block, used or not.
+
+/// The store's array for one block field: per declaring type, not per
+/// container. A type in two collections keeps one array numbered
+/// straight through both -- the instances are distinct either way, the
+/// dimensions come from the declaration, and a write site reads the
+/// block's slot rather than working out which container it came from.
+fn store_array_ident(type_name: &str, field: &str) -> syn::Ident {
+    syn::Ident::new(&format!("__a_{}__{}", type_name.to_lowercase(), field),
+        proc_macro2::Span::call_site())
+}
+
+/// The type at each level of a containment path, root first: the
+/// element type of each hop, read off the holder's registry entry.
+fn store_path_types(root_name: &str, path: &[AccessSegment]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = root_name.to_string();
+    for seg in path {
+        let Some(layout) = registry_lookup(&cur) else { break };
+        let next = layout.fields.iter().find(|(n, _)| *n == seg.field).and_then(|(_, t)| match t {
+            SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) => Some(s.clone()),
+            _ => None,
+        });
+        match next {
+            Some(t) => { out.push(t.clone()); cur = t; }
+            None => break,
+        }
+    }
+    out
+}
+
+/// How a cross tile's two sides are reached from the instance holding
+/// it. The pair resolves together because the refs are taken in
+/// declaration order -- `[Ref<A>, Ref<B>]` -- so the A side claims one
+/// before the B side looks, which is what decides it when both sides are
+/// the same type. `#[arael(cross = (a, b))]` names them outright
+/// instead. A side with no ref of its own is the containing parent, or
+/// the root.
+fn store_cross_sides(
+    holder: &str,
+    a_type: &str,
+    b_type: &str,
+    over: Option<&(String, String)>,
+    item: &TokenStream2,
+    ancestors: &[(TokenStream2, String)],
+    root_name: &str,
+) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
+    let layout = registry_lookup(holder)?;
+    let target_of = |f: &str| -> Option<String> {
+        layout.fields.iter().find(|(n, _)| n == f).and_then(|(_, t)| match t {
+            SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) => Some(s.clone()),
+            _ => None,
+        })
+    };
+    let mut free: Vec<String> = layout.ref_paths.iter().map(|(f, _)| f.clone()).collect();
+    let mut take = |want: &str, named: Option<&String>| -> Option<String> {
+        let pos = match named {
+            Some(f) => free.iter().position(|c| c == f),
+            None => free.iter().position(|c| target_of(c).as_deref() == Some(want)),
+        }?;
+        Some(free.remove(pos))
+    };
+    let a_field = take(a_type, over.map(|o| &o.0));
+    let b_field = take(b_type, over.map(|o| &o.1));
+    let up = ancestors.last().map(|(e, _)| e);
+
+    let side = |side_ty: &str, field: Option<String>| -> Option<TokenStream2> {
+        if let Some(f) = field {
+            return store_ref_access(holder, &f, item, up, 0);
+        }
+        // Any ancestor of the right type, nearest first: `parent.parent`
+        // is just the level above the one above.
+        if let Some((e, _)) = ancestors.iter().rev().find(|(_, t)| t == side_ty) {
+            return Some(e.clone());
+        }
+        // Or an ancestor's own reference -- an observation under an image
+        // reaches the pose the image points at.
+        for (l, (aexpr, atype)) in ancestors.iter().enumerate().rev() {
+            let Some(al) = registry_lookup(atype) else { continue };
+            let target = |f: &str| al.fields.iter().find(|(n, _)| n == f).and_then(|(_, t)| match t {
+                SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) => Some(s.clone()),
+                _ => None,
+            });
+            if let Some((f, _)) = al.ref_paths.iter().find(|(f, _)| target(f).as_deref() == Some(side_ty))
+                && let Some(acc) = store_ref_access(
+                    atype, f, aexpr, l.checked_sub(1).map(|u| &ancestors[u].0), 0)
+            {
+                return Some(acc);
+            }
+        }
+        if side_ty == root_name {
+            return Some(quote! { (*self) });
+        }
+        None
+    };
+    if let (Some(a), Some(b)) = (side(a_type, a_field.clone()), side(b_type, b_field.clone())) {
+        return Some((a, b, quote! {}));
+    }
+    // The tile is the parent's and its two ends are its children's:
+    // every child under one parent must name the same pair, so the first
+    // child wires it. An empty collection leaves it inert.
+    let layout = registry_lookup(holder)?;
+    for (cf, cty) in layout.fields.iter().filter_map(|(n, t)| match t {
+        SymFieldType::Struct(c) if layout.collection_fields.contains(n) => Some((n.clone(), c.clone())),
+        _ => None,
+    }) {
+        let child = quote! { __kid };
+        if let Some((a, b, _)) = store_cross_sides(
+            &cty, a_type, b_type, over, &child, ancestors, root_name)
+        {
+            let cfi = syn::Ident::new(&cf, proc_macro2::Span::call_site());
+            return Some((a, b, quote! { let Some(__kid) = #item.#cfi.iter().next() }));
+        }
+    }
+    None
+}
+
+/// A `Ref` field's target, as a place expression: the declared
+/// resolve path indexed by the ref, with a path through another ref
+/// resolved the same way.
+fn store_ref_access(
+    holder: &str,
+    field: &str,
+    item: &TokenStream2,
+    parent: Option<&TokenStream2>,
+    depth: usize,
+) -> Option<TokenStream2> {
+    if depth > 8 { return None; }
+    let layout = registry_lookup(holder)?;
+    let path = layout.ref_paths.iter().find(|(f, _)| f == field).map(|(_, p)| p.clone())?;
+    let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+    let mut parts = path.split('.');
+    let head = parts.next()?;
+    let rest: Vec<&str> = parts.collect();
+    if rest.is_empty() { return None; }
+    let rest_idents: Vec<syn::Ident> = rest.iter()
+        .map(|s| syn::Ident::new(s, proc_macro2::Span::call_site()))
+        .collect();
+    if head == "root" {
+        return Some(quote! { self.#(#rest_idents).* [#item.#fi] });
+    }
+    // `parent.nodes`: the collection belongs to the containing instance,
+    // which the walk has bound one level up.
+    if head == "parent" {
+        let p = parent?;
+        return Some(quote! { #p.#(#rest_idents).* [#item.#fi] });
+    }
+    // `pose.features`: resolve `pose` first, then walk the rest.
+    let base = store_ref_access(holder, head, item, parent, depth + 1)?;
+    Some(quote! { #base.#(#rest_idents).* [#item.#fi] })
+}
+
+/// `write_indices` statements for one entity type over `base`, into
+/// `out`, and the number of scalars they fill.
+fn store_idx_stmts(type_name: &str, base: &TokenStream2, out: &syn::Ident)
+    -> (usize, Vec<TokenStream2>)
+{
+    let mut stmts = Vec::new();
+    let mut offset = 0usize;
+    for slot in param_slots(type_name) {
+        let size = param_slot_size(&slot.sft);
+        if size == 0 { continue; }
+        let end = offset + size;
+        let access = slot_access(base.clone(), &slot.path);
+        stmts.push(quote! { #access.write_indices(&mut #out[#offset..#end]); });
+        offset = end;
+    }
+    (offset, stmts)
 }
 
 pub fn generate_root_methods(
@@ -4095,7 +4272,7 @@ pub fn generate_root_methods(
         let root_param_fields = root_layout.as_ref().map(|l| l.param_fields.clone()).unwrap_or_default();
         let _ = &root_param_fields;
         if let Some(hb) = root_hb_field.as_ref().filter(|_| param_total(&root_name.to_string()) > 0) {
-            let hb_ident = syn::Ident::new(hb, proc_macro2::Span::call_site());
+            let _hb_ident = syn::Ident::new(hb, proc_macro2::Span::call_site());
             let layout = root_layout.as_ref().unwrap();
             let mut count: usize = 0;
             let mut idx_stmts: Vec<TokenStream2> = Vec::new();
@@ -4114,9 +4291,6 @@ pub fn generate_root_methods(
                 quote! {}
             } else {
                 quote! {
-                    let mut __root_self_idx = [0u32; #count];
-                    #(#idx_stmts)*
-                    self.#hb_ident.set_indices(&__root_self_idx);
                 }
             }
         } else {
@@ -4174,36 +4348,14 @@ pub fn generate_root_methods(
     // last-ulp numeric drift between recompiles.
     let mut cross_groups: std::collections::BTreeMap<String, CrossCollectionGroup> = std::collections::BTreeMap::new();
 
-    // Per-CrossBlock info for a multi-cross constraint (one entry per
-    // declared CrossBlock field). The entity-span setup (__all_idx via
-    // triplet_idx_stmts) is shared across all CrossBlocks on the same
-    // struct; each entry just knows which slice of __all_idx to pass to
-    // its own set_indices call and which dr sub-slices to write.
-    #[derive(Clone)]
-    struct MultiCrossBlockInfo {
-        block_ident: syn::Ident,
-        /// The block lives on the containing parent (mixed parent-cross
-        /// form): wired through the parent prefix binding.
-        parent_owned: bool,
-        /// Starting offset in __all_idx of entity A's params.
-        a_start: usize,
-        /// Number of scalar params for entity A.
-        a_count: usize,
-        /// Starting offset in __all_idx of entity B's params.
-        b_start: usize,
-        /// Number of scalar params for entity B.
-        b_count: usize,
-    }
-
     // Grouping for TripletBlock constraints on the same collection.
     //
     // Also used for multi-cross constraints (N-entity constraint declared
     // with multiple CrossBlock fields instead of a single TripletBlock):
-    // when `multi_cross_blocks` is non-empty, the final
-    // TripletBlock.add_residual_cross call in the gh loop is replaced by
-    // per-pair CrossBlock.add_residual_cross calls (emitted into
-    // gh_entries), and the set_block_indices loop emits one set_indices
-    // per declared CrossBlock over slices of __all_idx.
+    // when `is_multi_cross` holds, the final TripletBlock.add_residual_cross
+    // call in the gh loop is replaced by per-pair CrossBlock.add_residual_cross
+    // calls (emitted into gh_entries), which reach their tiles through the
+    // store and so read no index array.
     struct TripletCollectionGroup {
         rc_ident: syn::Ident,
         /// Outer hops to the constraint collection when it sits below the
@@ -4221,17 +4373,9 @@ pub fn generate_root_methods(
         ct_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
-        /// Non-empty only for multi-cross constraints. When populated,
-        /// set_block_indices emits per-CrossBlock set_indices calls
-        /// instead of the trivial TripletBlock no-op.
-        multi_cross_blocks: Vec<MultiCrossBlockInfo>,
-        /// Per-entity SelfBlock.set_indices calls. Needed when the
-        /// participating entity has no other constraint of its own that
-        /// would set its SelfBlock indices (which would leave indices at
-        /// the u32::MAX sentinel, silently skipping every add_residual).
-        /// Skipped for the root entity — its indices are set by the
-        /// unconditional root_self_block_prelude at method entry.
-        entity_self_indices: Vec<TokenStream2>,
+        /// The constraint declared its own CrossBlock fields rather than
+        /// one TripletBlock. Mixing the two on a struct is rejected.
+        is_multi_cross: bool,
     }
     let mut triplet_groups: std::collections::BTreeMap<String, TripletCollectionGroup> = std::collections::BTreeMap::new();
 
@@ -4309,6 +4453,8 @@ pub fn generate_root_methods(
     // into the set. (A syntax-side seed used to run here too; it pulled in
     // skipped and non-containment wrapper args, which false-positived the
     // reachable-set checks.)
+    let store_ty = syn::Ident::new(&format!("{}Blocks", root_name), proc_macro2::Span::call_site());
+
     let reachable = {
         let mut set = std::collections::HashSet::new();
         let mut queue = Vec::new();
@@ -4329,6 +4475,15 @@ pub fn generate_root_methods(
         set
     };
 
+    // The block store's walk: every container that holds blocks, visited
+    // once, assigning each block instance its slot in that container's
+    // array. One counter per containment path and block field, so a type
+    // held in two collections gets one array (and one numbering) each.
+    //
+    // This is the only walk that numbers blocks. The `set_indices` calls
+    // below are emitted per constraint and can reach one entity's block
+    // from several of them, which is harmless for indices (idempotent)
+    // but would double-count a slot.
     // Ordering guard: every collection element type in the root's fields
     // must have a registered layout by the time the root expands. Macro
     // expansion is file-order top-down, so a #[arael::model] struct
@@ -6101,15 +6256,15 @@ pub fn generate_root_methods(
             }
             roles
         } else { Vec::new() };
-        // The mirror's write target for an entity var: its partial in the
-        // thread's slab, through the leaf's slot for that role.
-        let par_target = |var: &str| -> syn::Result<TokenStream2> {
+        // The mirror's write target for an entity var: the thread's slab
+        // for its container, and the leaf's slot for that role in it.
+        let par_target = |var: &str| -> syn::Result<(TokenStream2, TokenStream2)> {
             let k = par_roles.iter().position(|(v, _)| v == var)
                 .ok_or_else(|| par_unsupported(
                     format!("{}:{}: `{}` has no mirror role on `{}`",
                         sc.attr_file, sc.attr_line, var, sc.struct_name)))?;
             let parts = &par_entities[par_roles[k].1].parts;
-            Ok(quote! { #parts[__leaf.slots[#k] as usize] })
+            Ok((quote! { #parts }, quote! { __leaf.slots[#k] as usize }))
         };
 
         // --- Robust loss setup ---
@@ -6415,10 +6570,10 @@ pub fn generate_root_methods(
                     // Write through a fresh temporary exclusive borrow of the
                     // entity's owning collection slot.
                     let access = entity_access_expr(&var_id.to_string())?;
-                    let _ = type_id;
+                    let arr = store_array_ident(&type_id.to_string(), &hb);
                     triplet_calls.push(quote! {
-                        #access.#hb_ident
-                            .#m_add(#wr, &[#(#entity_dr),*], grad);
+                        __store.#arr.#m_add(
+                            #access.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                     });
                 }
                 // Cross pairs need two live spans: with <= 1 nonzero span
@@ -6466,9 +6621,9 @@ pub fn generate_root_methods(
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     let type_id_str = type_id.to_string();
                     if par {
-                        let pt = par_target(&var_id.to_string())?;
+                        let (pt, ps) = par_target(&var_id.to_string())?;
                         self_block_calls_par.push(quote! {
-                            #pt.#m_add(#wr, &[#(#entity_dr),*]);
+                            #pt.#m_add(#ps, #wr, &[#(#entity_dr),*]);
                         });
                     }
                     if type_id_str == root_ident_str {
@@ -6479,17 +6634,22 @@ pub fn generate_root_methods(
                             .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                                 format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                        let arr = store_array_ident(&type_id_str, &hb);
                         self_block_calls.push(quote! {
-                            self.#hb_ident
-                                .#m_add(#wr, &[#(#entity_dr),*], grad);
+                            __store.#arr.#m_add(
+                                self.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
                         continue;
                     }
                     if remote_target_type.as_deref() == Some(type_id_str.as_str()) {
                         // Remote primary: write through the remote target path.
                         let rtw = remote_target_write.as_ref().unwrap();
+                        let rhb = registry_lookup(&type_id_str)
+                            .and_then(|l| l.self_block_field.clone())
+                            .unwrap_or_default();
+                        let arr = store_array_ident(&type_id_str, &rhb);
                         remote_self_block_call = Some(quote! {
-                            #rtw.#m_add(#wr, &[#(#entity_dr),*], grad);
+                            __store.#arr.#m_add(#rtw.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
                         // The mirror form wrote it above, in entity order.
                         remote_self_block_call_par = self_block_calls_par.pop();
@@ -6501,9 +6661,10 @@ pub fn generate_root_methods(
                             format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
                     let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                     let access = entity_access_expr(&var_id.to_string())?;
+                    let arr = store_array_ident(&type_id_str, &hb);
                     self_block_calls.push(quote! {
-                        #access.#hb_ident
-                            .#m_add(#wr, &[#(#entity_dr),*], grad);
+                        __store.#arr.#m_add(
+                            #access.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                     });
                 }
                 let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
@@ -6519,14 +6680,17 @@ pub fn generate_root_methods(
                     // A parent-owned tile is written through the parent
                     // prefix binding, a field disjoint from the iterated
                     // collection.
-                    let target: TokenStream2 = if route.parent_owned {
+                    let (target, holder): (TokenStream2, String) = if route.parent_owned {
                         let ctn = nested_container(&cross_prefix);
-                        quote! { #ctn.#block }
+                        let pt = find_containing_parent(&root_name.to_string(), &sc.struct_name)
+                            .unwrap_or_else(|| sc.struct_name.clone());
+                        (quote! { #ctn.#block }, pt)
                     } else {
-                        quote! { __frine.#block }
+                        (quote! { __frine.#block }, sc.struct_name.clone())
                     };
+                    let arr = store_array_ident(&holder, &block.to_string());
                     cross_block_calls.push(quote! {
-                        #target.#m_cross(
+                        __store.#arr.block_mut(#target.slot() as usize).#m_cross(
                             #wr,
                             &[#(#dr_a),*],
                             &[#(#dr_b),*],
@@ -6555,11 +6719,13 @@ pub fn generate_root_methods(
                 if !all_zero {
                     let rtw = remote_target_write.as_ref().unwrap();
                     let par_write = if par {
-                        let pt = par_target(&remote_block_info.as_ref().unwrap().0)?;
-                        quote! { #pt.#m_add(#wr, &[#(#dr_f64),*]); }
+                        let (pt, ps) = par_target(&remote_block_info.as_ref().unwrap().0)?;
+                        quote! { #pt.#m_add(#ps, #wr, &[#(#dr_f64),*]); }
                     } else { quote! {} };
+                    let rty = remote_block_info.as_ref().unwrap().2.clone();
+                    let arr = store_array_ident(&rty, &block_ident.to_string());
                     deferred_writes.push(GhStmt::Split(quote! {
-                        #rtw.#m_add(#wr, &[#(#dr_f64),*], grad);
+                        __store.#arr.#m_add(#rtw.slot() as usize, #wr, &[#(#dr_f64),*]);
                     }, par_write));
                 }
             } else if is_self_block {
@@ -6597,7 +6763,11 @@ pub fn generate_root_methods(
                         Some((_, _, s_start, s_count)) if !span_zero(*s_start, *s_count) => {
                             let dr_self: Vec<TokenStream2> = dr_f64.iter()
                                 .skip(*s_start).take(*s_count).cloned().collect();
-                            quote! { __item.#block_ident.#m_add(#wr, &[#(#dr_self),*], grad); }
+                            let arr = store_array_ident(&a_type, &block_ident.to_string());
+                            quote! {
+                                __store.#arr.#m_add(
+                                    __item.#block_ident.slot() as usize, #wr, &[#(#dr_self),*]);
+                            }
                         }
                         _ => quote! {},
                     };
@@ -6605,7 +6775,11 @@ pub fn generate_root_methods(
                         Some((_, _, r_start, r_count)) if !span_zero(*r_start, *r_count) => {
                             let dr_root: Vec<TokenStream2> = dr_f64.iter()
                                 .skip(*r_start).take(*r_count).cloned().collect();
-                            quote! { #joined_accessor.#joined_hb_ident.#m_add(#wr, &[#(#dr_root),*], grad); }
+                            let arr = store_array_ident(&joined_type, &joined_hb);
+                            quote! {
+                                __store.#arr.#m_add(
+                                    #joined_accessor.#joined_hb_ident.slot() as usize, #wr, &[#(#dr_root),*]);
+                            }
                         }
                         _ => quote! {},
                     };
@@ -6635,11 +6809,13 @@ pub fn generate_root_methods(
                     if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 } else if !all_zero {
                     let par_write = if par {
-                        let pt = par_target("__item")?;
-                        quote! { #pt.#m_add(#wr, &[#(#dr_f64),*]); }
+                        let (pt, ps) = par_target("__item")?;
+                        quote! { #pt.#m_add(#ps, #wr, &[#(#dr_f64),*]); }
                     } else { quote! {} };
+                    let arr = store_array_ident(&a_type, &block_ident.to_string());
                     let writes = GhStmt::Split(quote! {
-                        __item.#block_ident.#m_add(#wr, &[#(#dr_f64),*], grad);
+                        __store.#arr.#m_add(
+                            __item.#block_ident.slot() as usize, #wr, &[#(#dr_f64),*]);
                     }, par_write);
                     if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 }
@@ -6655,37 +6831,46 @@ pub fn generate_root_methods(
                 let b_zero = span_zero(a_param_count, b_param_count);
                 let a_target = a_write_target.as_ref().unwrap();
                 let b_target = b_write_target.as_ref().unwrap();
+                let a_hb_name = registry_lookup(&a_type)
+                    .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
+                let b_hb_name = b_type.as_ref().and_then(|b| registry_lookup(b))
+                    .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
+                let a_arr = store_array_ident(&a_type, &a_hb_name);
+                let b_arr = store_array_ident(b_type.as_deref().unwrap_or(""), &b_hb_name);
                 let a_call = if a_zero { quote! {} } else { quote! {
-                    #a_target.#m_add(#wr, &[#(#dr_a),*], grad);
+                    __store.#a_arr.#m_add(#a_target.slot() as usize, #wr, &[#(#dr_a),*]);
                 }};
                 let b_call = if b_zero { quote! {} } else { quote! {
-                    #b_target.#m_add(#wr, &[#(#dr_b),*], grad);
+                    __store.#b_arr.#m_add(#b_target.slot() as usize, #wr, &[#(#dr_b),*]);
                 }};
                 // The cross tile: the constraint's own block, or the shared
                 // parent-owned block reached through the prefix binding
                 // (disjoint field from the iterated collection, so the
                 // borrow splits cleanly).
-                let cross_target: TokenStream2 = if parent_cross.is_some() {
-                    let ctn = nested_container(&cross_prefix);
-                    quote! { #ctn.#block_ident }
-                } else {
-                    quote! { __frine.#block_ident }
-                };
+                let (cross_target, cross_holder): (TokenStream2, String) =
+                    if let Some(pc) = &parent_cross {
+                        let ctn = nested_container(&cross_prefix);
+                        (quote! { #ctn.#block_ident }, pc.parent_type.clone())
+                    } else {
+                        (quote! { __frine.#block_ident }, sc.struct_name.clone())
+                    };
+                let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
-                    #cross_target.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
+                    __store.#cross_arr.block_mut(#cross_target.slot() as usize)
+                        .#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
                 // The mirror form: the partials through the leaf's slots,
                 // the cross tile on the leaf.
                 let par_write = if par {
                     let a_var = a_var_ident_for_block.as_ref().unwrap().to_string();
                     let b_var = b_var_ident_for_block.as_ref().unwrap().to_string();
-                    let pa = par_target(&a_var)?;
-                    let pb = par_target(&b_var)?;
+                    let (pa, sa) = par_target(&a_var)?;
+                    let (pb, sb) = par_target(&b_var)?;
                     let a_call = if a_zero { quote! {} } else { quote! {
-                        #pa.#m_add(#wr, &[#(#dr_a),*]);
+                        #pa.#m_add(#sa, #wr, &[#(#dr_a),*]);
                     }};
                     let b_call = if b_zero { quote! {} } else { quote! {
-                        #pb.#m_add(#wr, &[#(#dr_b),*]);
+                        #pb.#m_add(#sb, #wr, &[#(#dr_b),*]);
                     }};
                     let blk = par_blk_ident(&block_ident);
                     let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
@@ -7022,7 +7207,7 @@ pub fn generate_root_methods(
             // Index setup for the target type's params. `param_slots` walks
             // into `#[arael(component)]` fields, so a component's params sit
             // in the target's span exactly as they do for a self/cross block.
-            let target_param_count = param_total(target_type);
+            let _target_param_count = param_total(target_type);
 
             let mut target_idx_stmts = Vec::new();
             let mut offset = 0usize;
@@ -7098,7 +7283,7 @@ pub fn generate_root_methods(
             // set_indices see a &mut Frine.
             let _target_coll_id = target_coll_ident.unwrap();
             let marker_gh = marker.clone();
-            let entity_self_indices: Vec<TokenStream2> = {
+            let _entity_self_indices: Vec<TokenStream2> = {
                 // Per-entity SelfBlock set_indices + __all_idx setup,
                 // needed when any Ref entity (other than the remote
                 // target) participates in a local CrossBlock and so
@@ -7107,7 +7292,7 @@ pub fn generate_root_methods(
                 if is_multi_cross {
                     let root_ident_str_local = root_name.to_string();
                     let mut v: Vec<TokenStream2> = Vec::new();
-                    for (var_id, type_id, start, count) in &triplet_entities {
+                    for (_var_id, type_id, start, count) in &triplet_entities {
                         if type_id.to_string() == root_ident_str_local { continue; }
                         if *count == 0 { continue; }
                         // Remote target's SelfBlock is set via __target_block below; skip.
@@ -7119,19 +7304,14 @@ pub fn generate_root_methods(
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                         let end = start + count;
                         let cnt = *count;
-                        v.push(quote! {
-                            unsafe {
-                                (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident.set_indices(
-                                    <&[u32; #cnt]>::try_from(&__all_idx[#start..#end]).unwrap()
-                                );
-                            }
-                        });
+                        let _ = (&hb_ident, &cnt, &start, &end);
+                        v.push(quote! {});
                     }
                     v
                 } else { Vec::new() }
             };
-            let tp_remote = triplet_param_count;
-            let triplet_idx_stmts_remote = triplet_idx_stmts.clone();
+            let _tp_remote = triplet_param_count;
+            let _triplet_idx_stmts_remote = triplet_idx_stmts.clone();
             // Remote-target writes go through the owning collection slot
             // (built into gh_stmts as `self.<coll>[__frine.<ref>].<block>`),
             // a temporary exclusive borrow per call -- disjoint from the
@@ -7225,24 +7405,14 @@ pub fn generate_root_methods(
                     let block = &r.block_ident;
                     let a_start = r.a_start; let a_end = r.a_start + r.a_count;
                     let b_start = r.b_start; let b_end = r.b_start + r.b_count;
-                    quote! {
-                        __frine.#block.set_indices(
-                            &__all_idx[#a_start..#a_end],
-                            &__all_idx[#b_start..#b_end],
-                        );
-                    }
+                    let _ = (&block, &a_start, &a_end, &b_start, &b_end);
+                    quote! {}
                 }).collect();
-                let rtw = remote_target_write.as_ref().unwrap();
+                let _rtw = remote_target_write.as_ref().unwrap();
                 let sbi_body = quote! {
                     #(#entity_index_copies)*
                     #(#resolve_stmts)*
                     let __target_ref = #ref_field_ident;
-                    let mut __a_idx = [0u32; #target_param_count];
-                    #(#target_idx_stmts)*
-                    let mut __all_idx = [0u32; #tp_remote];
-                    #(#triplet_idx_stmts_remote)*
-                    #rtw.set_indices(&__a_idx);
-                    #(#entity_self_indices)*
                     #(#mcb_calls)*
                 };
                 let sbi_loop = if parent_is_root {
@@ -7258,14 +7428,11 @@ pub fn generate_root_methods(
                     rename_ident(sbi_loop, &parent_name, parent_rename_to), &root_var_name, "self");
                 set_block_indices_loops.push(sbi_loop);
             } else {
-                let rtw = remote_target_write.as_ref().unwrap();
+                let _rtw = remote_target_write.as_ref().unwrap();
                 let sbi_body = quote! {
                     #(#entity_index_copies)*
                     #(#resolve_stmts)*
                     let __target_ref = #ref_field_ident;
-                    let mut __a_idx = [0u32; #target_param_count];
-                    #(#target_idx_stmts)*
-                    #rtw.set_indices(&__a_idx);
                 };
                 let sbi_loop = if parent_is_root {
                     quote! { for __frine in self.#frines_ident.iter() { #sbi_body } }
@@ -7596,41 +7763,23 @@ pub fn generate_root_methods(
                 c.cost_entries.push(cost_entry.clone());
             }
 
-            // Convert multi_cross_routing entries into MultiCrossBlockInfo
-            // for the group. Empty for single-TripletBlock constraints.
-            let mcb: Vec<MultiCrossBlockInfo> = multi_cross_routing.iter().map(|r| {
-                MultiCrossBlockInfo {
-                    block_ident: r.block_ident.clone(),
-                    parent_owned: r.parent_owned,
-                    a_start: r.a_start, a_count: r.a_count,
-                    b_start: r.b_start, b_count: r.b_count,
-                }
-            }).collect();
+            // The constraint declared CrossBlock fields of its own; empty
+            // for single-TripletBlock constraints.
+            let is_mcb = !multi_cross_routing.is_empty();
 
-            // Build per-entity SelfBlock.set_indices calls for this group.
-            // Skipped entirely for the root entity (handled globally by
-            // root_self_block_prelude). Each call uses a slice of
-            // __all_idx and converts it to a fixed-size array via
-            // TryFrom so SelfBlock's `&[u32; N]` signature is satisfied.
+            // Every participant carries its own diagonal and gradient, so
+            // it must declare a SelfBlock -- checked here, where the
+            // participant list is known, rather than leaving the entity
+            // to lose its diagonal silently.
             let root_ident_str = root_name.to_string();
-            let mut entity_set_indices: Vec<TokenStream2> = Vec::new();
-            for (var_id, type_id, start, count) in &triplet_entities {
+            for (var_id, type_id, _start, count) in &triplet_entities {
                 if type_id.to_string() == root_ident_str { continue; }
                 if *count == 0 { continue; }
-                let hb = registry_lookup(&type_id.to_string())
+                registry_lookup(&type_id.to_string())
                     .and_then(|l| l.self_block_field.clone())
                     .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                        format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross/triplet participant for set_indices)", type_id)))?;
-                let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                let end = start + count;
-                let cnt = *count;
-                let access = entity_access_expr(&var_id.to_string())?;
-                let _ = type_id;
-                entity_set_indices.push(quote! {
-                    #access.#hb_ident.set_indices(
-                        <&[u32; #cnt]>::try_from(&__all_idx[#start..#end]).unwrap()
-                    );
-                });
+                        format!("type `{}` must declare a `SelfBlock<Self>` field (required as a multi-cross/triplet participant)", type_id)))?;
+                entity_access_expr(&var_id.to_string())?;
             }
 
             let group = triplet_groups.entry(group_key).or_insert_with(|| {
@@ -7652,14 +7801,12 @@ pub fn generate_root_methods(
                     cost_entries: Vec::new(), ct_entries: Vec::new(),
                     gh_entries: Vec::new(),
                     jac_entries: Vec::new(),
-                    multi_cross_blocks: mcb.clone(),
-                    entity_self_indices: entity_set_indices.clone(),
+                    is_multi_cross: is_mcb,
                 }
             });
-            // If multi_cross_blocks was empty at group creation (first
-            // attribute was a TripletBlock) but a subsequent attribute is
-            // multi-cross -- error. For now we reject mixed.
-            if group.multi_cross_blocks.is_empty() != mcb.is_empty() {
+            // The group was created by the first attribute; a later one
+            // of the other kind on the same struct is rejected.
+            if group.is_multi_cross != is_mcb {
                 return Err(syn::Error::new_spanned(&struct_ident,
                     format!("on `{}`: cannot mix TripletBlock and multi-CrossBlock constraint attributes on the same struct", struct_ident)));
             }
@@ -7934,13 +8081,7 @@ pub fn generate_root_methods(
                     }));
                 set_block_indices_loops.push(quote! {
                     for __item in self.#coll_ident.iter_mut() {
-                        let mut __a_idx = [0u32; #a_param_count];
-                        #(#a_idx_stmts)*
                         for __frine in __item.#frines_ident.iter_mut() {
-                            #(#resolve_stmts)*
-                            let mut __b_idx = [0u32; #b_param_count];
-                            #(#b_idx_stmts)*
-                            __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
                             #ci_set_nested
                             __cid += 1;
                         }
@@ -8056,9 +8197,9 @@ pub fn generate_root_methods(
 
         // set_block_indices loop (only if there's a SelfBlock)
         if let Some(ref sb) = group.self_block {
-            let a_count = sb.a_param_count;
-            let a_idx = &sb.a_idx_stmts;
-            let block = &sb.block_ident;
+            let _a_count = sb.a_param_count;
+            let _a_idx = &sb.a_idx_stmts;
+            let _block = &sb.block_ident;
             let a_type_name = a_type.to_string();
             let ci_set = crate::registry_lookup(&a_type_name)
                 .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
@@ -8067,9 +8208,6 @@ pub fn generate_root_methods(
                 }));
             merged_sbi.push(wrap_in_prefix(prefix, true, quote! {
                 for __item in #ctn.#coll.iter_mut() {
-                    let mut __a_idx = [0u32; #a_count];
-                    #(#a_idx)*
-                    __item.#block.set_indices(&__a_idx);
                     #ci_set
                     __cid += 1;
                 }
@@ -8141,13 +8279,7 @@ pub fn generate_root_methods(
             }
             if offset == 0 { continue; }
             let a_count = offset;
-            merged_sbi.push(quote! {
-                for __item in self.#field_ident.iter_mut() {
-                    let mut __a_idx = [0u32; #a_count];
-                    #(#a_idx_stmts)*
-                    __item.#hb_ident.set_indices(&__a_idx);
-                }
-            });
+            let _ = (&field_ident, &hb_ident, &a_count, &a_idx_stmts);
         }
 
         // Same pass for passive DIRECT-COMPOSED entities: a bare
@@ -8192,13 +8324,7 @@ pub fn generate_root_methods(
             }
             if offset == 0 { continue; }
             let d_count = offset;
-            merged_sbi.push(quote! {
-                {
-                    let mut __d_idx = [0u32; #d_count];
-                    #(#idx_stmts)*
-                    self.#field_ident.#hb_ident.set_indices(&__d_idx);
-                }
-            });
+            let _ = (&field_ident, &hb_ident, &d_count, &idx_stmts);
         }
 
         // Passive NESTED entities: a block-bearing entity two or more hops
@@ -8244,14 +8370,8 @@ pub fn generate_root_methods(
             let prefix = &segments[..segments.len() - 1];
             let coll_ident = syn::Ident::new(&segments.last().unwrap().field,
                 proc_macro2::Span::call_site());
-            let ctn = nested_container(prefix);
-            merged_sbi.push(wrap_in_prefix(prefix, true, quote! {
-                for __item in #ctn.#coll_ident.iter_mut() {
-                    let mut __a_idx = [0u32; #a_count];
-                    #(#a_idx_stmts)*
-                    __item.#hb_ident.set_indices(&__a_idx);
-                }
-            }));
+            let _ctn = nested_container(prefix);
+            let _ = (&coll_ident, &hb_ident, &a_count, &a_idx_stmts);
         }
     }
 
@@ -8323,10 +8443,8 @@ pub fn generate_root_methods(
             }));
         }
 
+        let _ = (&block_ident, &a_count, &a_idx_stmts);
         merged_sbi.push(wrap(accessor_write, quote! {
-            let mut __a_idx = [0u32; #a_count];
-            #(#a_idx_stmts)*
-            __item.#block_ident.set_indices(&__a_idx);
             #ci_set
             __cid += 1;
         }));
@@ -8339,11 +8457,11 @@ pub fn generate_root_methods(
         let ctn = nested_container(prefix);   // `self` (root-level) or `__seg{n-1}` (nested)
         let a_param_count = group.a_param_count;
         let b_param_count = group.b_param_count;
-        let block_ident = &group.block_ident;
+        let _block_ident = &group.block_ident;
         let a_idx_stmts = &group.a_idx_stmts;
         let b_idx_stmts = &group.b_idx_stmts;
         let resolve_stmts = &group.resolve_stmts;
-        let wiring_resolve_stmts = &group.wiring_resolve_stmts;
+        let _wiring_resolve_stmts = &group.wiring_resolve_stmts;
         let root_var = &group.root_var_ident;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
@@ -8406,14 +8524,6 @@ pub fn generate_root_methods(
                 // empty collection leaves the block unwired and inert. The
                 // per-instance loop only assigns constraint IDs.
                 quote! {
-                    if #ctn.#rc_ident.iter().next().is_some() {
-                        #(#wiring_resolve_stmts)*
-                        let mut __a_idx = [0u32; #a_param_count];
-                        #(#a_idx_stmts)*
-                        let mut __b_idx = [0u32; #b_param_count];
-                        #(#b_idx_stmts)*
-                        #ctn.#block_ident.set_indices(&__a_idx, &__b_idx);
-                    }
                     for __frine in #ctn.#rc_ident.iter_mut() {
                         let _ = &__frine;
                         #ci_set
@@ -8441,7 +8551,6 @@ pub fn generate_root_methods(
                         #(#b_idx_stmts)*
                         match &__wired {
                             None => {
-                                #ctn.#block_ident.set_indices(&__a_idx, &__b_idx);
                                 __wired = Some((__a_idx, __b_idx));
                             }
                             Some((__wa, __wb)) => {
@@ -8457,12 +8566,6 @@ pub fn generate_root_methods(
             } else {
                 quote! {
                     for __frine in #ctn.#rc_ident.iter_mut() {
-                        #(#resolve_stmts)*
-                        let mut __a_idx = [0u32; #a_param_count];
-                        #(#a_idx_stmts)*
-                        let mut __b_idx = [0u32; #b_param_count];
-                        #(#b_idx_stmts)*
-                        __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
                         #ci_set
                         __cid += 1;
                     }
@@ -8511,14 +8614,30 @@ pub fn generate_root_methods(
 
         let entity_offsets = &group.entity_offsets;
         let entity_offsets_len = entity_offsets.len();
-        // Loop-level resolves feed the __all_idx build; entries re-establish
-        // their own bindings (a preceding entry's writes end these borrows).
-        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, true, quote! {
-            for __frine in #ctn.#rc_ident.iter_mut() {
+        // Only a TripletBlock write reads the index array and the entity
+        // spans -- self and cross writes reach the store by their slot --
+        // and the loop-level resolves are there to feed that build, the
+        // entries re-establishing their own bindings. Several entry forms
+        // can be the reader, so ask the tokens: without one, the array is
+        // a write_indices call per parameter per instance that nothing
+        // ever looks at.
+        let reads_idx = gh_entries.iter().any(|e| {
+            let s = e.to_string();
+            s.contains("__all_idx") || s.contains("__entity_offsets")
+        });
+        let idx_prelude = if reads_idx {
+            quote! {
                 #(#resolve_stmts)*
                 let mut __all_idx = [0u32; #tp];
                 #(#triplet_idx_stmts)*
                 let __entity_offsets: [u32; #entity_offsets_len] = [#(#entity_offsets),*];
+            }
+        } else {
+            quote! {}
+        };
+        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, true, quote! {
+            for __frine in #ctn.#rc_ident.iter_mut() {
+                #idx_prelude
                 #(#gh_entries)*
             }
         }));
@@ -8539,64 +8658,19 @@ pub fn generate_root_methods(
             }));
         }
 
-        // Multi-cross: emit a set_indices call per declared CrossBlock
-        // field plus per-entity SelfBlock set_indices so the entities'
-        // hb.indices leave their u32::MAX sentinel (otherwise every
-        // add_residual on them would silently skip). Each CrossBlock's
-        // a/b slices are cut from __all_idx using the entity-span
-        // (start, count) pairs recorded in routing. Single-TripletBlock
-        // groups also need per-entity set_indices for the same reason.
-        let entity_self_indices = &group.entity_self_indices;
-        if !group.multi_cross_blocks.is_empty() {
-            let mcb_calls: Vec<TokenStream2> = group.multi_cross_blocks.iter().map(|mcb| {
-                let block = &mcb.block_ident;
-                let a_start = mcb.a_start; let a_end = mcb.a_start + mcb.a_count;
-                let b_start = mcb.b_start; let b_end = mcb.b_start + mcb.b_count;
-                // A parent-owned tile is wired through the parent prefix
-                // binding; every instance under the parent sets the same
-                // indices (its sides are the parent's refs or the
-                // ancestor), so the repeated call is idempotent.
-                let target: TokenStream2 = if mcb.parent_owned {
-                    quote! { #ctn.#block }
-                } else {
-                    quote! { __frine.#block }
-                };
-                quote! {
-                    #target.set_indices(
-                        &__all_idx[#a_start..#a_end],
-                        &__all_idx[#b_start..#b_end],
-                    );
-                }
-            }).collect();
-            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
-                for __frine in #ctn.#rc_ident.iter_mut() {
-                    #(#entity_index_copies)*
-                    #(#resolve_stmts)*
-                    let mut __all_idx = [0u32; #tp];
-                    #(#triplet_idx_stmts)*
-                    #(#entity_self_indices)*
-                    #(#mcb_calls)*
-                    #ci_set
-                    __cid += 1;
-                }
-            }));
-        } else {
-            // TripletBlock: set per-entity SelfBlock indices (needed so
-            // the per-entity add_residual writes don't silently skip),
-            // plus __cid assignment.
-            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
-                for __frine in #ctn.#rc_ident.iter_mut() {
-                    #(#entity_index_copies)*
-                    #(#resolve_stmts)*
-                    let mut __all_idx = [0u32; #tp];
-                    #(#triplet_idx_stmts)*
-                    #(#entity_self_indices)*
-                    #ci_set
-                    __cid += 1;
-                }
-            }));
-            let _ = (block_ident, triplet_idx_stmts, resolve_stmts); // silence unused warnings
-        }
+        // Nothing is wired here any more -- the store holds the indices,
+        // and the blocks their slot -- so what is left is the constraint
+        // id. The walk stays even when no field takes one: the ids are a
+        // single sequence over every group, so this collection still has
+        // to move the counter past its instances.
+        set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+            for __frine in #ctn.#rc_ident.iter_mut() {
+                let _ = &__frine;
+                #ci_set
+                __cid += 1;
+            }
+        }));
+        let _ = (block_ident, triplet_idx_stmts, resolve_stmts, entity_index_copies);
     }
 
     // Prepend merged SelfBlock loops before cross/triplet loops
@@ -8652,14 +8726,14 @@ pub fn generate_root_methods(
         gh_sweep_methods.push(quote! {
             #[inline(never)]
             #[allow(unused_variables)]
-            fn #name(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #sweep_ret_ty {
+            fn #name(&mut self, __store: &mut #store_ty, params: &[#prec_type]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
                 #cost_decl
                 #sweep
                 #sweep_ret
             }
         });
-        gh_sweep_calls.push(sweep_call(quote! { self.#name(params, grad) }));
+        gh_sweep_calls.push(sweep_call(quote! { self.#name(__store, params) }));
     }
     // The cost-only sweeps are split the same way. They only read, so
     // they take a shared borrow and rebind the reborrow the bodies use.
@@ -8687,10 +8761,193 @@ pub fn generate_root_methods(
     // mirror path when the context's mirrors are on. Every token here is
     // empty for a root without the keyword, so its expansion is
     // unchanged.
+    // The store's arrays and the walk that fills them: one array per
+    // containment path and block field, read-only, in the same container
+    // order the slot walk numbers by, so an instance's slot is where its
+    // entry landed.
+    let mut store_names: Vec<syn::Ident> = Vec::new();
+    let mut store_tys: Vec<TokenStream2> = Vec::new();
+    let mut store_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The self arrays alone carry gradient stashes.
+    let mut store_self_names: Vec<syn::Ident> = Vec::new();
+    let mut build_walks: Vec<TokenStream2> = Vec::new();
+    {
+        let mut types: Vec<&String> = reachable.iter().collect();
+        types.sort();
+        let root_str = root_name.to_string();
+        for type_name in types {
+            let Some(layout) = registry_lookup(type_name) else { continue };
+            let self_field = layout.self_block_field.clone();
+            let cross_fields = layout.cross_block_fields.clone();
+            if self_field.is_none() && cross_fields.is_empty() { continue; }
+            let paths: Vec<Vec<AccessSegment>> = if type_name == &root_str {
+                vec![Vec::new()]
+            } else {
+                containment_paths(root_fields, &root_str, type_name)
+            };
+            // One array for the type, filled by every path to it in turn.
+            for path in paths.into_iter() {
+                let item: TokenStream2 = match path.len().checked_sub(1) {
+                    Some(last) => {
+                        let i = syn::Ident::new(&format!("__seg{}", last), proc_macro2::Span::call_site());
+                        quote! { #i }
+                    }
+                    None => quote! { (*self) },
+                };
+                // Every level above this one, root-most first, with the
+                // type it holds: an ancestor side names one of these.
+                let level_types = store_path_types(&root_str, &path);
+                let ancestors: Vec<(TokenStream2, String)> = level_types.iter().enumerate()
+                    .take(level_types.len().saturating_sub(1))
+                    .map(|(l, t)| {
+                        let i = syn::Ident::new(&format!("__seg{}", l), proc_macro2::Span::call_site());
+                        (quote! { #i }, t.clone())
+                    })
+                    .collect();
+                let mut body: Vec<TokenStream2> = Vec::new();
+                // The type's own self block: its indices are its params.
+                if let Some(hb) = &self_field {
+                    let n = param_total(type_name);
+                    if n > 0 {
+                        let m = n * (n + 1) / 2;
+                        let name = store_array_ident(type_name, hb);
+                        let idx = syn::Ident::new("__idx", proc_macro2::Span::call_site());
+                        let (_, stmts) = store_idx_stmts(type_name, &item, &idx);
+                        body.push(quote! {
+                            {
+                                let mut #idx = [u32::MAX; #n];
+                                #(#stmts)*
+                                let __e = __store.#name.len() as u32;
+                                __store.#name.push(__e, &#idx);
+                            }
+                        });
+                        if store_seen.insert(name.to_string()) {
+                            store_self_names.push(name.clone());
+                            store_names.push(name);
+                            store_tys.push(quote! { arael::model::SelfBlockArray<#n, #m, #cast_type> });
+                        }
+                    }
+                }
+                // Each cross tile: its two sides are its type arguments.
+                for (fname, a_type, b_type, over) in &cross_fields {
+                    let (na, nb) = (param_total(a_type), param_total(b_type));
+                    if na == 0 || nb == 0 { continue; }
+                    // A block with no array has nowhere to be written, so
+                    // an unresolved side is an error here rather than a
+                    // silently missing tile later.
+                    let Some((a_acc, b_acc, guard)) = store_cross_sides(
+                        type_name, a_type, b_type, over.as_ref(), &item, &ancestors, &root_str)
+                    else {
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(), format!(
+                            "`{}`: cannot tell which instances `{}.{}: CrossBlock<{}, {}>` \
+                             couples. Each side is a `Ref` field of `{}` (taken in \
+                             declaration order), the containing parent, or the root; name \
+                             them with #[arael(cross = (a, b))] when several refs fit.",
+                            root_name, type_name, fname, a_type, b_type, type_name)));
+                    };
+                    let ai = syn::Ident::new("__ai", proc_macro2::Span::call_site());
+                    let bi = syn::Ident::new("__bi", proc_macro2::Span::call_site());
+                    let (_, a_stmts) = store_idx_stmts(a_type, &a_acc, &ai);
+                    let (_, b_stmts) = store_idx_stmts(b_type, &b_acc, &bi);
+                    let pcount = na * nb;
+                    let name = store_array_ident(type_name, fname);
+                    // A guarded pair (the parent-owned form) leaves the
+                    // indices inactive when there is no child to read, so
+                    // the entry still takes its slot and scatters nothing.
+                    let fill = if guard.is_empty() {
+                        quote! { #(#a_stmts)* #(#b_stmts)* }
+                    } else {
+                        quote! { if #guard { #(#a_stmts)* #(#b_stmts)* } }
+                    };
+                    body.push(quote! {
+                        {
+                            let mut #ai = [u32::MAX; #na];
+                            let mut #bi = [u32::MAX; #nb];
+                            #fill
+                            __store.#name.push(&#ai, &#bi);
+                        }
+                    });
+                    if store_seen.insert(name.to_string()) {
+                        store_names.push(name);
+                        store_tys.push(quote! {
+                            arael::model::CrossBlockArray<#na, #nb, #pcount, #cast_type>
+                        });
+                    }
+                }
+                if body.is_empty() { continue; }
+                let inner = quote! { #(#body)* };
+                build_walks.push(if path.is_empty() {
+                    inner
+                } else {
+                    wrap_in_prefix_scoped(&path, false, inner, None, false)
+                });
+            }
+        }
+    }
+
+    let slot_walks: Vec<TokenStream2> = {
+        let mut walks: Vec<TokenStream2> = Vec::new();
+        let mut types: Vec<&String> = reachable.iter().collect();
+        types.sort();
+        for type_name in types {
+            let Some(layout) = registry_lookup(type_name) else { continue };
+            // Every block field the type declares, in a stable order.
+            // TripletBlock keeps its own storage and takes no slot.
+            let mut fields: Vec<String> = Vec::new();
+            if let Some(hb) = &layout.self_block_field { fields.push(hb.clone()); }
+            for (f, _, _, _) in &layout.cross_block_fields { fields.push(f.clone()); }
+            if fields.is_empty() { continue; }
+            let field_idents: Vec<syn::Ident> = fields.iter()
+                .map(|f| syn::Ident::new(f, proc_macro2::Span::call_site()))
+                .collect();
+
+            if type_name == &root_name.to_string() {
+                // The root is one instance; its blocks are slot 0.
+                walks.push(quote! { #(self.#field_idents.set_slot(0);)* });
+                continue;
+            }
+            // One counter per block field, running across every path to
+            // the type, because the array does too.
+            let counters: Vec<syn::Ident> = fields.iter().map(|f| syn::Ident::new(
+                &format!("__slot_{}_{}", type_name.to_lowercase(), f),
+                proc_macro2::Span::call_site())).collect();
+            let mut per_path: Vec<TokenStream2> = Vec::new();
+            for path in containment_paths(root_fields, &root_name.to_string(), type_name) {
+                let Some(last) = path.len().checked_sub(1) else { continue };
+                let item = syn::Ident::new(&format!("__seg{}", last), proc_macro2::Span::call_site());
+                let body = quote! {
+                    #(#item.#field_idents.set_slot(#counters); #counters += 1;)*
+                };
+                per_path.push(wrap_in_prefix_scoped(&path, true, body, None, false));
+            }
+            if per_path.is_empty() { continue; }
+            walks.push(quote! {
+                #(let mut #counters: u32 = 0;)*
+                #(#per_path)*
+                #(let _ = #counters;)*
+            });
+        }
+        walks
+    };
+
     let par_types: TokenStream2;
     let par_methods: TokenStream2;
     let par_root_methods: TokenStream2;
-    let par_lm_methods: TokenStream2;
+    let par_begin: TokenStream2;
+    /// The mirror branch that each context entry point tries first.
+    #[derive(Default)]
+    struct ParCtx {
+        cost: TokenStream2,
+        dense: TokenStream2,
+        band: TokenStream2,
+        sparse: TokenStream2,
+        direct: TokenStream2,
+        indexed: TokenStream2,
+        cells: TokenStream2,
+        bind: TokenStream2,
+        spans: TokenStream2,
+    }
+    let par_ctx: ParCtx;
     if par {
         let mirror_ty = syn::Ident::new(&format!("{}Mirror", root_name), proc_macro2::Span::call_site());
         let containers: Vec<&ParContainer> = par_containers.values().collect();
@@ -8727,7 +8984,7 @@ pub fn generate_root_methods(
             }
         }).collect();
         let leaf_type_idents: Vec<&syn::Ident> = containers.iter().map(|c| &c.leaf).collect();
-        let partial_tys: Vec<&TokenStream2> = par_entities.iter().map(|e| &e.partial_ty).collect();
+        let slab_tys: Vec<&TokenStream2> = par_entities.iter().map(|e| &e.slab_ty).collect();
         par_types = quote! {
             #(#leaf_types)*
             #[doc(hidden)]
@@ -8735,7 +8992,7 @@ pub fn generate_root_methods(
             pub struct #mirror_ty {
                 #(#leaves_idents: std::vec::Vec<#leaf_type_idents>,)*
                 #(#all_blocks_idents: #all_block_tys,)*
-                #(#parts_idents: std::vec::Vec<#partial_tys>,)*
+                #(#parts_idents: #slab_tys,)*
                 __sum: #sweep_ret_ty,
                 /// The last sweep's time on this mirror.
                 __time: std::time::Duration,
@@ -8815,8 +9072,7 @@ pub fn generate_root_methods(
                                 #entity_bind
                                 let mut __idx = [0u32; #n];
                                 #(#idx_stmts)*
-                                let __s = __m.#parts.len() as u32;
-                                __m.#parts.push(arael::model::Partial::new(__ek, &__idx));
+                                let __s = __m.#parts.push(__ek, &__idx);
                                 __b.claim(#eid, __t, __ek, __s);
                                 __s
                             }
@@ -8832,8 +9088,8 @@ pub fn generate_root_methods(
                 let sb = &slot_idents[*b];
                 quote! {
                     __m.#blocks.push(
-                        __m.#pa[#sa as usize].indices(),
-                        __m.#pb[#sb as usize].indices(),
+                        __m.#pa.indices(#sa as usize),
+                        __m.#pb.indices(#sb as usize),
                     );
                 }
             }).collect();
@@ -8928,6 +9184,7 @@ pub fn generate_root_methods(
                 for __t in 0..__p {
                     let __m = &mut __ms[__t];
                     #(__m.#all_blocks_idents.finish();)*
+                    #(__m.#parts_idents.finish();)*
                     #(__n_leaves += __m.#leaves_idents.len();)*
                     #(__n_blocks += __m.#all_blocks_idents.len();)*
                     #(__n_partials += __m.#parts_idents.len();)*
@@ -8990,7 +9247,7 @@ pub fn generate_root_methods(
                 let __self_ref = &*self;
                 #cost_decl
                 let #mirror_ty { #(#leaves_idents,)* #(#all_blocks_idents,)* #(#parts_idents,)* __sum: _, __time: _ } = __mirror;
-                #(for __p in #parts_idents.iter_mut() { __p.zero(); })*
+                #(#parts_idents.zero();)*
                 #(#assemble_loops)*
                 #sweep_ret
             }
@@ -9060,7 +9317,7 @@ pub fn generate_root_methods(
                 __mirrors.timing.assembly_update += __d_update;
                 let __t_grad = __clock.start();
                 for __m in __mirrors.as_slice() {
-                    #(for __p in __m.#parts_idents.iter() { __p.scatter_grad(grad); })*
+                    #(__m.#parts_idents.scatter_grad(grad);)*
                 }
                 __mirrors.timing.gather_grad += __clock.stop(__t_grad);
                 let __t_scatter = __clock.start();
@@ -9074,15 +9331,13 @@ pub fn generate_root_methods(
         };
 
         // The structural walks and the gathers over every mirror's
-        // partials and leaves, in one order.
-        // Every partial, then every cross block list, of one mirror; the
-        // block statement acts on `__l`.
-        // The block statement acts on `__l`, a whole block list.
+        // slabs and leaves, in one order. The entity statement acts on
+        // `__p`, one mirror's slab; the block statement on `__l`, one of
+        // its cross block lists.
         let walk = |partial: TokenStream2, block: TokenStream2, mutable: bool| -> TokenStream2 {
-            let iter = if mutable { quote! { iter_mut } } else { quote! { iter } };
             let list = if mutable { quote! { &mut } } else { quote! { & } };
             quote! {
-                #(for __p in __m.#parts_idents.#iter() { #partial })*
+                #({ let __p = #list __m.#parts_idents; #partial })*
                 #({ let __l = #list __m.#all_blocks_idents; #block })*
             }
         };
@@ -9098,11 +9353,11 @@ pub fn generate_root_methods(
                 {
                     let mut __seen = vec![false; #count];
                     for __m in __mirrors.as_slice() {
-                        for __p in __m.#parts.iter() {
-                            let __e = __p.entity() as usize;
+                        for __k in 0..__m.#parts.len() {
+                            let __e = __m.#parts.entity(__k) as usize;
                             if !__seen[__e] {
                                 __seen[__e] = true;
-                                __p.collect_param_block(out);
+                                __m.#parts.collect_param_block(__k, out);
                             }
                         }
                     }
@@ -9159,100 +9414,115 @@ pub fn generate_root_methods(
                 arael::simple_lm::RootProblem::param_block_spans(self)
             }
         };
-        par_lm_methods = quote! {
-            fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
+        par_begin = quote! {
+            let __on = {
                 let __p = ctx.threads();
                 let __timing = ctx.timing();
                 let __m = ctx.mirrors_mut::<#mirror_ty>();
                 __m.set_threads(__p);
                 __m.enable_timing(__timing);
-                if __m.is_on() { self.__par_build(__m); }
-            }
-            fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                __m.is_on()
+            };
+            if __on {
                 let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() { return self.__par_calc_cost(params, __m); }
-                arael::simple_lm::LmProblem::calc_cost(self, params)
+                self.__par_build(__m);
+                return;
             }
-            fn calc_grad_hessian_dense_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() {
-                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                        hessian.iter_mut().for_each(|h| *h = 0.0);
-                        #g_dense
-                    });
+        };
+        // The mirror branch of each context entry point. Empty for a
+        // root without `par`; the store path below follows it.
+        par_ctx = ParCtx {
+            cost: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() { return self.__par_calc_cost(params, __m); }
                 }
-                arael::simple_lm::LmProblem::calc_grad_hessian_dense(self, params, grad, hessian)
-            }
-            fn calc_grad_hessian_band_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() {
-                    let mut __err: Option<arael::simple_lm::BandOverflow> = None;
-                    let __cost = self.__par_assembly(params, grad, __m, &mut |__ms| {
-                        band.iter_mut().for_each(|b| *b = 0.0);
-                        #g_band
-                    });
-                    return match __err { Some(e) => Err(e), None => Ok(__cost) };
+            },
+            dense: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() {
+                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                            hessian.iter_mut().for_each(|h| *h = 0.0);
+                            #g_dense
+                        });
+                    }
                 }
-                arael::simple_lm::LmProblem::calc_grad_hessian_band(self, params, grad, band, kd)
-            }
-            fn calc_grad_hessian_sparse_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() {
-                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                        coo.clear();
-                        #g_sparse
-                    });
+            },
+            band: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() {
+                        let mut __err: Option<arael::simple_lm::BandOverflow> = None;
+                        let __cost = self.__par_assembly(params, grad, __m, &mut |__ms| {
+                            band.iter_mut().for_each(|b| *b = 0.0);
+                            #g_band
+                        });
+                        return match __err { Some(e) => Err(e), None => Ok(__cost) };
+                    }
                 }
-                arael::simple_lm::LmProblem::calc_grad_hessian_sparse(self, params, grad, coo)
-            }
-            fn calc_grad_hessian_sparse_direct_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() {
-                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                        csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                        #g_direct
-                    });
+            },
+            sparse: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() {
+                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                            coo.clear();
+                            #g_sparse
+                        });
+                    }
                 }
-                arael::simple_lm::LmProblem::calc_grad_hessian_sparse_direct(self, params, grad, csc)
-            }
-            fn calc_grad_hessian_sparse_indexed_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) -> #prec_type {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() {
-                    return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                        vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                        let mut cursor = 0usize;
-                        #g_indexed
-                        assert!(cursor == positions.len(),
-                            "sparsity pattern changed between iterations: {} Hessian entries \
-                             accumulated but the cached pattern has {}",
-                            cursor, positions.len());
-                    });
+            },
+            direct: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() {
+                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                            csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                            #g_direct
+                        });
+                    }
                 }
-                arael::simple_lm::LmProblem::calc_grad_hessian_sparse_indexed(self, params, grad, vals, positions)
-            }
-            fn collect_hessian_cells_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
+            },
+            indexed: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() {
+                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
+                            vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                            let mut cursor = 0usize;
+                            #g_indexed
+                            assert!(cursor == positions.len(),
+                                "sparsity pattern changed between iterations: {} Hessian entries \
+                                 accumulated but the cached pattern has {}",
+                                cursor, positions.len());
+                        });
+                    }
+                }
+            },
+            cells: quote! {
                 if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
                     if __m.is_on() { return self.__par_cells(__m, out); }
                 }
-                arael::simple_lm::LmProblem::collect_hessian_cells(self, out)
-            }
-            fn bind_hessian_positions_with_context(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                if __m.is_on() { return self.__par_bind(__m, binder, out); }
-                arael::simple_lm::LmProblem::bind_hessian_positions(self, binder, out)
-            }
-            fn collect_param_block_spans_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
+            },
+            bind: quote! {
+                {
+                    let __m = ctx.mirrors_mut::<#mirror_ty>();
+                    if __m.is_on() { return self.__par_bind(__m, binder, out); }
+                }
+            },
+            spans: quote! {
                 if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
                     if __m.is_on() { return self.__par_spans(__m, out); }
                 }
-                arael::simple_lm::LmProblem::collect_param_block_spans(self, out)
-            }
+            },
         };
     } else {
         par_types = quote! {};
         par_methods = quote! {};
         par_root_methods = quote! {};
-        par_lm_methods = quote! {};
+        par_ctx = ParCtx::default();
+        par_begin = quote! {};
     }
 
     // advance(): fold accepted-step euler angle deltas. Recurses through
@@ -9295,9 +9565,64 @@ pub fn generate_root_methods(
     // deserialize_params stay pure tree walks, and the RootProblem impl
     // appends the block wiring / the extended-deserialize hook (the latter
     // via UFCS -- it carries no width in its signature).
+    let (par_ctx_cost, par_ctx_dense, par_ctx_band, par_ctx_sparse, par_ctx_direct,
+         par_ctx_indexed, par_ctx_cells, par_ctx_bind, par_ctx_spans) =
+        (par_ctx.cost, par_ctx.dense, par_ctx.band, par_ctx.sparse, par_ctx.direct,
+         par_ctx.indexed, par_ctx.cells, par_ctx.bind, par_ctx.spans);
     let mut tokens = quote! {
         #(#constraint_impls)*
         #par_types
+
+        /// Every Hessian block of this root, as one array per container
+        /// and block field. Owned by the solve context, not the model.
+        #[doc(hidden)]
+        #[derive(Clone, Default)]
+        pub struct #store_ty {
+            #(#store_names: #store_tys,)*
+        }
+
+        impl arael::threads::BlockStore for #store_ty {}
+
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        impl #store_ty {
+            /// Clear every tile and every gradient stash.
+            fn zero(&mut self) {
+                #(self.#store_names.zero();)*
+            }
+            /// Add the entities' stashes into the global gradient.
+            fn scatter_grad(&self, grad: &mut [#prec_type]) {
+                #(self.#store_self_names.scatter_grad(grad);)*
+            }
+            // The three walks below share the position stream's cursor,
+            // so they must agree on this order -- the arrays as declared,
+            // and the root's own walk after them for whatever
+            // `TripletBlock`s the model still holds.
+            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                #(self.#store_names.collect_hessian_cells(out);)*
+            }
+            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
+                #(self.#store_names.bind_hessian_positions(binder, out);)*
+            }
+            fn accumulate_hessian<F: arael::utils::Float>(&self, hessian: &mut [F]) {
+                #(self.#store_names.accumulate_hessian(hessian);)*
+            }
+            fn accumulate_hessian_band<F: arael::utils::Float>(&self, band: &mut [F], kd: usize)
+                -> Result<(), arael::simple_lm::BandOverflow>
+            {
+                #(self.#store_names.accumulate_hessian_band(band, kd)?;)*
+                Ok(())
+            }
+            fn accumulate_hessian_sparse<F: arael::utils::Float>(&self, coo: &mut arael::simple_lm::CooMatrix<F>) {
+                #(self.#store_names.accumulate_hessian_sparse(coo);)*
+            }
+            fn accumulate_hessian_sparse_direct<F: arael::utils::Float>(&self, csc: &mut arael::simple_lm::CscMatrix<F>) {
+                #(self.#store_names.accumulate_hessian_sparse_direct(csc);)*
+            }
+            fn accumulate_hessian_sparse_indexed<F: arael::utils::Float>(&self, vals: &mut [F], positions: &[arael::ValueIndex], cursor: &mut usize) {
+                #(self.#store_names.accumulate_hessian_sparse_indexed(vals, positions, cursor);)*
+            }
+        }
 
         impl arael::simple_lm::RootProblem<#prec_type> for #root_name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
@@ -9326,21 +9651,114 @@ pub fn generate_root_methods(
                 let _ = &__cid; // suppress unused warning when no constraint_index fields
                 #root_self_block_prelude
                 #(#set_block_indices_loops)*
+                self.__assign_block_slots();
+            }
+
+            /// Number every block by its position in its container's
+            /// array of the solve's block store. One walk per containment
+            /// path, each instance visited once.
+            #[allow(unused_variables, unused_mut)]
+            fn __assign_block_slots(&mut self) {
+                #(#slot_walks)*
+            }
+
+            /// Fill the store: every block's parameter indices, pushed in
+            /// the container order `__assign_block_slots` numbers by, so a
+            /// block's slot is where its entry landed. Read-only in the
+            /// model -- a reference can point into the very collection
+            /// being walked.
+            #[doc(hidden)]
+            #[allow(unused_variables, dead_code)]
+            pub fn __build_blocks(&self, __store: &mut #store_ty) {
+                #(__store.#store_names.clear();)*
+                #(#build_walks)*
+                #(__store.#store_names.finish();)*
             }
 
             /// Returns the cost (sum of squared residuals, excluding
             /// extended-model residuals) as a byproduct of the sweep.
-            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #prec_type {
+            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type], __store: &mut #store_ty) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
                 use arael::utils::{Float as _, SelectIndex as _};
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
+                __store.zero();
+                // Clears whatever `TripletBlock`s the model still holds.
                 arael::model::Model::zero_blocks(self);
                 #cost_decl
                 #(#gh_sweep_calls)*
+                // The sweeps stash each entity's gradient beside its
+                // triangle; this is where it reaches the caller's vector.
+                __store.scatter_grad(grad);
                 #extended_compute_call
                 #cost_ret
+            }
+
+            // One assembly against a given store: the caller decides
+            // whether that is the solve context's or one of its own.
+            // The store's arrays come first in every walk that shares the
+            // position stream, then the model's own for its TripletBlocks.
+            fn __gh_dense_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], __store: &mut #store_ty) -> #prec_type {
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                let mut __cost = self.__compute_blocks(params, grad, __store);
+                #extended_cost_call
+                hessian.iter_mut().for_each(|h| *h = 0.0);
+                __store.accumulate_hessian(hessian);
+                arael::model::Model::accumulate_hessian(self, hessian);
+                __cost
+            }
+
+            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __store: &mut #store_ty) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                let mut __cost = self.__compute_blocks(params, grad, __store);
+                #extended_cost_call
+                band.iter_mut().for_each(|b| *b = 0.0);
+                __store.accumulate_hessian_band(band, kd)?;
+                arael::model::Model::accumulate_hessian_band(self, band, kd)?;
+                Ok(__cost)
+            }
+
+            fn __gh_sparse_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, __store: &mut #store_ty) -> #prec_type {
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                let mut __cost = self.__compute_blocks(params, grad, __store);
+                #extended_cost_call
+                coo.clear();
+                __store.accumulate_hessian_sparse(coo);
+                arael::model::Model::accumulate_hessian_sparse(self, coo);
+                __cost
+            }
+
+            fn __gh_direct_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, __store: &mut #store_ty) -> #prec_type {
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                let mut __cost = self.__compute_blocks(params, grad, __store);
+                #extended_cost_call
+                csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                __store.accumulate_hessian_sparse_direct(csc);
+                arael::model::Model::accumulate_hessian_sparse_direct(self, csc);
+                __cost
+            }
+
+            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], __store: &mut #store_ty) -> #prec_type {
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                let mut __cost = self.__compute_blocks(params, grad, __store);
+                #extended_cost_call
+                vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                let mut cursor = 0usize;
+                __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor);
+                arael::model::Model::accumulate_hessian_sparse_indexed(self, vals, positions, &mut cursor);
+                // The cached position map is replayed by cursor and assumes
+                // an identical entry sequence every iteration. A shorter
+                // sequence (a TripletBlock or extended constraint emitting
+                // fewer entries than when the pattern was built) would
+                // scatter every subsequent block into wrong slots -- a
+                // silently wrong Hessian.
+                assert!(cursor == positions.len(),
+                    "sparsity pattern changed between iterations: {} Hessian entries \
+                     accumulated but the cached pattern has {} (TripletBlock / extended \
+                     constraint entry counts must stay constant within one solve)",
+                    cursor, positions.len());
+                __cost
             }
 
             #(#gh_sweep_methods)*
@@ -9435,12 +9853,6 @@ pub fn generate_root_methods(
             fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
             #marginalize_hint_fn
             #marginalize_candidates_fn
-            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                arael::model::Model::collect_hessian_cells(self, out)
-            }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                arael::model::Model::bind_hessian_positions(self, binder, out)
-            }
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::collect_param_blocks(self, out)
             }
@@ -9459,67 +9871,111 @@ pub fn generate_root_methods(
                 #cost_ret
             }
 
+            fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
+                #par_begin
+                let __store = ctx.blocks_mut::<#store_ty>();
+                self.__build_blocks(__store);
+            }
+
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
-                grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad);
-                #extended_cost_call
-                hessian.iter_mut().for_each(|h| *h = 0.0);
-                arael::model::Model::accumulate_hessian(self, hessian);
-                __cost
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                self.__gh_dense_in(params, grad, hessian, &mut __store)
             }
 
             fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
-                grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad);
-                #extended_cost_call
-                band.iter_mut().for_each(|b| *b = 0.0);
-                arael::model::Model::accumulate_hessian_band(self, band, kd)?;
-                Ok(__cost)
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                self.__gh_band_in(params, grad, band, kd, &mut __store)
             }
 
             fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) -> #prec_type {
-                grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad);
-                #extended_cost_call
-                coo.clear();
-                arael::model::Model::accumulate_hessian_sparse(self, coo);
-                __cost
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                self.__gh_sparse_in(params, grad, coo, &mut __store)
             }
 
             fn calc_grad_hessian_sparse_direct(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>) -> #prec_type {
-                grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad);
-                #extended_cost_call
-                csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                arael::model::Model::accumulate_hessian_sparse_direct(self, csc);
-                __cost
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                self.__gh_direct_in(params, grad, csc, &mut __store)
             }
 
             fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex]) -> #prec_type {
-                grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad);
-                #extended_cost_call
-                vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                let mut cursor = 0usize;
-                arael::model::Model::accumulate_hessian_sparse_indexed(self, vals, positions, &mut cursor);
-                // The cached position map is replayed by cursor and assumes
-                // an identical entry sequence every iteration. A shorter
-                // sequence (a TripletBlock or extended constraint emitting
-                // fewer entries than when the pattern was built) would
-                // scatter every subsequent block into wrong slots -- a
-                // silently wrong Hessian.
-                assert!(cursor == positions.len(),
-                    "sparsity pattern changed between iterations: {} Hessian entries \
-                     accumulated but the cached pattern has {} (TripletBlock / extended \
-                     constraint entry counts must stay constant within one solve)",
-                    cursor, positions.len());
-                __cost
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                self.__gh_indexed_in(params, grad, vals, positions, &mut __store)
+            }
+
+            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                __store.collect_hessian_cells(out);
+                arael::model::Model::collect_hessian_cells(self, out);
+            }
+
+            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
+                let mut __store = #store_ty::default();
+                self.__build_blocks(&mut __store);
+                __store.bind_hessian_positions(binder, out);
+                arael::model::Model::bind_hessian_positions(self, binder, out);
             }
 
             fn advance(&mut self, params: &mut [#prec_type]) {
                 #advance_call
             }
-            #par_lm_methods
+            fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                #par_ctx_cost
+                let _ = &ctx;
+                arael::simple_lm::LmProblem::calc_cost(self, params)
+            }
+            fn calc_grad_hessian_dense_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                #par_ctx_dense
+                let __store = ctx.blocks_mut::<#store_ty>();
+                self.__gh_dense_in(params, grad, hessian, __store)
+            }
+            fn calc_grad_hessian_band_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+                #par_ctx_band
+                let __store = ctx.blocks_mut::<#store_ty>();
+                self.__gh_band_in(params, grad, band, kd, __store)
+            }
+            fn calc_grad_hessian_sparse_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
+                #par_ctx_sparse
+                let __store = ctx.blocks_mut::<#store_ty>();
+                self.__gh_sparse_in(params, grad, coo, __store)
+            }
+            fn calc_grad_hessian_sparse_direct_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
+                #par_ctx_direct
+                let __store = ctx.blocks_mut::<#store_ty>();
+                self.__gh_direct_in(params, grad, csc, __store)
+            }
+            fn calc_grad_hessian_sparse_indexed_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) -> #prec_type {
+                #par_ctx_indexed
+                let __store = ctx.blocks_mut::<#store_ty>();
+                self.__gh_indexed_in(params, grad, vals, positions, __store)
+            }
+            fn collect_hessian_cells_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
+                #par_ctx_cells
+                match ctx.blocks::<#store_ty>() {
+                    Some(__store) => {
+                        __store.collect_hessian_cells(out);
+                        arael::model::Model::collect_hessian_cells(self, out);
+                    }
+                    // No solve has begun on this context: build one here.
+                    None => arael::simple_lm::LmProblem::collect_hessian_cells(self, out),
+                }
+            }
+            fn bind_hessian_positions_with_context(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
+                #par_ctx_bind
+                let __store = ctx.blocks_mut::<#store_ty>();
+                __store.bind_hessian_positions(binder, out);
+                arael::model::Model::bind_hessian_positions(self, binder, out);
+            }
+            fn collect_param_block_spans_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
+                #par_ctx_spans
+                let _ = &ctx;
+                arael::simple_lm::LmProblem::collect_param_block_spans(self, out)
+            }
         }
     });
 

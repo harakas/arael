@@ -11,7 +11,7 @@
 
 use arael::simple_lm::RootProblem;
 use crate::bal::{CameraIn, Dataset};
-use arael::model::{BoxedCrossBlock, BoxedSelfBlock, EulerAngleParam, Param};
+use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::quatern::{quaternd, quaternf};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
@@ -23,14 +23,14 @@ struct Camera<T: Float> {
     t: Param<vect3<T>>,
     ea: EulerAngleParam<T>, // world-to-camera
     intr: Param<vect3<T>>,  // (f, k1, k2)
-    hb: BoxedSelfBlock<Camera<T>, T>,
+    hb: SelfBlock<Camera<T>, T>,
 }
 
 #[arael::model]
 #[derive(Clone)]
 struct Point<T: Float> {
     pos: Param<vect3<T>>,
-    hb: BoxedSelfBlock<Point<T>, T>,
+    hb: SelfBlock<Point<T>, T>,
 }
 
 #[arael::model]
@@ -50,7 +50,7 @@ struct Obs<T: Float> {
     #[arael(ref = root.points)]
     pt: Ref<Point<T>>,
     xy: vect2<T>,
-    hb: BoxedCrossBlock<Camera<T>, Point<T>, T>,
+    hb: CrossBlock<Camera<T>, Point<T>, T>,
 }
 
 #[arael::model]
@@ -83,12 +83,12 @@ fn build_parts<T: Float>(ds: &Dataset)
             t: Param::new(c3(c.t)),
             ea: EulerAngleParam::new(c3(c.rot().get_euler_angles())),
             intr: Param::new(c3(vect3d::new(c.f, c.k1, c.k2))),
-            hb: BoxedSelfBlock::new(),
+            hb: SelfBlock::new(),
         });
     }
     let mut points = refs::Vec::new();
     for p in &ds.points {
-        points.push(Point { pos: Param::new(c3(*p)), hb: BoxedSelfBlock::new() });
+        points.push(Point { pos: Param::new(c3(*p)), hb: SelfBlock::new() });
     }
     let mut observations = std::vec::Vec::new();
     for o in &ds.observations {
@@ -96,7 +96,7 @@ fn build_parts<T: Float>(ds: &Dataset)
             cam: cameras.ref_at(o.cam),
             pt: points.ref_at(o.point),
             xy: o.xy.cast(),
-            hb: BoxedCrossBlock::new(),
+            hb: CrossBlock::new(),
         });
     }
     (cameras, points, observations)

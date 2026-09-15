@@ -502,7 +502,7 @@ mod tests {
     /// and these run in parallel.
     #[test]
     fn schur_can_be_forced() {
-        use arael::simple_lm::{lm_solve, EnvelopeMode, LmConfig, SchurPolicy, SparseFaer};
+        use arael::simple_lm::{lm_solve, EnvelopeMode, LmConfig, RootProblem, SchurPolicy, SparseFaer};
         let raw = crate::scene::make_scene_with(120).raw;
         let solve_with = |policy| {
             let mut world = super::build(&raw);

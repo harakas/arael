@@ -128,6 +128,11 @@ where
     fn serialize_size(&self) -> u32 {
         Model::serialize_size(&self.angle)
     }
+    // The slot belongs to the entity holding this param: its span has to
+    // cover the angle like any other component.
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        Model::fold_param_span(&self.angle, min, count);
+    }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<T> as Model>::param_symbols(&format!("{}.angle", base), out);
     }

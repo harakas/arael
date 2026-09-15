@@ -388,8 +388,26 @@ fn print_header(rounds: usize, only: &Option<String>) {
     println!("solver verbose    : {} [VERBOSE], per-solve timing {} [TIMING]",
         if c64.verbose { "on" } else { "off" },
         if std::env::var("TIMING").is_ok() { "on" } else { "off" });
-    println!("pinned to core    : {} (all thread pools forced to 1)",
-        std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string()));
+    println!("{}", core_line(bench_harness::pin::threads()));
+}
+
+/// The pin line. Takes the resolved count instead of reading it here so a
+/// test can hold it fixed.
+fn core_line(threads: usize) -> String {
+    format!("pinned to core    : {} (every thread pool capped at {}) [BENCH_THREADS]",
+        std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string()), threads)
+}
+
+#[cfg(test)]
+mod header_tests {
+    /// The line claimed every pool was forced to 1 whatever BENCH_THREADS
+    /// resolved to, which mislabels every threaded run.
+    #[test]
+    fn the_header_reports_the_resolved_thread_count() {
+        let line = super::core_line(4);
+        assert!(line.contains("capped at 4"), "{line}");
+        assert!(!line.contains("forced to 1"), "{line}");
+    }
 }
 
 // PGO_SYSTEMS=<substr>[,<substr>...] runs only the systems whose label

@@ -10,7 +10,7 @@
 use arael::simple_lm::RootProblem;
 use crate::scene::{Scene, Solution};
 use arael::matrix::matrix3;
-use arael::model::{BoxedCrossBlock, BoxedSelfBlock, Param, SimpleEulerAngleParam};
+use arael::model::{CrossBlock, Param, SelfBlock, SimpleEulerAngleParam};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
 use arael::vect::{vect2, vect3};
@@ -51,7 +51,7 @@ struct Pose<T: Float> {
     gps_cov_isigma: vect3<T>,
     tilt_roll: T,
     tilt_pitch: T,
-    hb_pose: BoxedSelfBlock<Pose<T>, T>,
+    hb_pose: SelfBlock<Pose<T>, T>,
 }
 
 #[arael::model]
@@ -67,7 +67,7 @@ struct PointLandmark<T: Float> {
     pos: Param<vect3<T>>,
     prior_pos: vect3<T>,
     frines: std::vec::Vec<Frine<T>>,
-    hb_drift: BoxedSelfBlock<PointLandmark<T>, T>,
+    hb_drift: SelfBlock<PointLandmark<T>, T>,
 }
 
 #[arael::model]
@@ -90,7 +90,7 @@ struct Frine<T: Float> {
     mf2r: matrix3<T>,
     camera_pos: vect3<T>,
     isigma: vect2<T>,
-    hb: BoxedCrossBlock<PointLandmark<T>, Pose<T>, T>,
+    hb: CrossBlock<PointLandmark<T>, Pose<T>, T>,
 }
 
 #[arael::model]
@@ -125,7 +125,7 @@ struct PosePair<T: Float> {
     pos_cov_isigma: vect3<T>,
     ea_cov_r: matrix3<T>,
     ea_cov_isigma: vect3<T>,
-    hb: BoxedCrossBlock<Pose<T>, Pose<T>, T>,
+    hb: CrossBlock<Pose<T>, Pose<T>, T>,
 }
 
 #[arael::model]
@@ -175,7 +175,7 @@ fn build_parts<T: Float>(scene: &Scene)
             gps_cov_isigma: g.cov_isigma.cast(),
             tilt_roll: c(p.tilt_roll),
             tilt_pitch: c(p.tilt_pitch),
-            hb_pose: BoxedSelfBlock::new(),
+            hb_pose: SelfBlock::new(),
         });
     }
     // Frines are grouped by landmark.
@@ -188,7 +188,7 @@ fn build_parts<T: Float>(scene: &Scene)
             mf2r: f.mf2r.cast(),
             camera_pos: f.camera_pos.cast(),
             isigma: f.isigma.cast(),
-            hb: BoxedCrossBlock::new(),
+            hb: CrossBlock::new(),
         });
     }
     let mut landmarks = refs::Arena::new();
@@ -197,7 +197,7 @@ fn build_parts<T: Float>(scene: &Scene)
             pos: Param::new(init.cast()),
             prior_pos: init.cast(),
             frines: std::mem::take(&mut per_lm[i]),
-            hb_drift: BoxedSelfBlock::new(),
+            hb_drift: SelfBlock::new(),
         });
     }
     let mut pose_pairs = std::vec::Vec::new();
@@ -211,7 +211,7 @@ fn build_parts<T: Float>(scene: &Scene)
             pos_cov_isigma: o.pos_cov_isigma.cast(),
             ea_cov_r: o.ea_cov_r.cast(),
             ea_cov_isigma: o.ea_cov_isigma.cast(),
-            hb: BoxedCrossBlock::new(),
+            hb: CrossBlock::new(),
         });
     }
     (poses, landmarks, pose_pairs)

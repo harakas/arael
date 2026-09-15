@@ -183,7 +183,7 @@ fn hessian_formats_agree() {
     assert_eq!(densify_csc(&csc_direct), h_dense, "direct CSC assembly differs from dense");
 
     // Indexed CSC (cached position map, the production steady-state path).
-    let (csc, positions) = coo.to_csc_with_map().unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(&mut chain).unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g_indexed = vec![0.0; n];
     chain.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions);

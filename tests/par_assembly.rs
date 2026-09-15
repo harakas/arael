@@ -14,7 +14,7 @@
 // sequential path at any thread count.
 #![cfg(feature = "rayon")]
 
-use arael::model::{BoxedCrossBlock, BoxedSelfBlock, CrossBlock, Param, SelfBlock, TripletBlock};
+use arael::model::{CrossBlock, Param, SelfBlock, TripletBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{LmConfig, LmProblem, RootProblem};
 use arael::threads::Context;
@@ -31,7 +31,7 @@ use arael::vect::vect2d;
 struct Point {
     pos: Param<vect2d>,
     is_anchor: bool,
-    hb: BoxedSelfBlock<Point>,
+    hb: SelfBlock<Point>,
 }
 
 #[arael::model]
@@ -43,7 +43,7 @@ struct Link {
     #[arael(ref = root.points)] a: Ref<Point>,
     #[arael(ref = root.points)] b: Ref<Point>,
     rest: f64,
-    hb: BoxedCrossBlock<Point, Point>,
+    hb: CrossBlock<Point, Point>,
 }
 
 #[arael::model]
@@ -165,15 +165,15 @@ fn build(n: usize) -> Web {
     };
     for i in 0..n {
         let pos = vect2d::new(i as f64 * 0.5, if i % 2 == 0 { 0.7 } else { -0.7 });
-        w.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+        w.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: SelfBlock::new() });
     }
     for i in 1..n {
         let (a, b) = (w.points.ref_at(i - 1), w.points.ref_at(i));
-        w.links.push(Link { a, b, rest: 1.0, hb: BoxedCrossBlock::new() });
+        w.links.push(Link { a, b, rest: 1.0, hb: CrossBlock::new() });
     }
     // An aliased link: both slots the same point.
     let p = w.points.ref_at(n / 2);
-    w.links.push(Link { a: p, b: p, rest: 0.0, hb: BoxedCrossBlock::new() });
+    w.links.push(Link { a: p, b: p, rest: 0.0, hb: CrossBlock::new() });
     for i in 0..n / 3 {
         let mut frines = std::vec::Vec::new();
         for k in 0..3 {
@@ -218,11 +218,11 @@ fn build_knob(n: usize) -> Knob {
     };
     for i in 0..n {
         let pos = vect2d::new(i as f64 * 0.5, if i % 2 == 0 { 0.7 } else { -0.7 });
-        k.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+        k.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: SelfBlock::new() });
     }
     for i in 1..n {
         let (a, b) = (k.points.ref_at(i - 1), k.points.ref_at(i));
-        k.links.push(Link { a, b, rest: 1.0, hb: BoxedCrossBlock::new() });
+        k.links.push(Link { a, b, rest: 1.0, hb: CrossBlock::new() });
     }
     k
 }
@@ -423,11 +423,11 @@ fn the_report_says_what_the_threads_did() {
     };
     for i in 0..8 {
         let pos = vect2d::new(i as f64 * 0.5, 0.3);
-        loose.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+        loose.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: SelfBlock::new() });
     }
     for i in 1..8 {
         let (a, b) = (loose.points.ref_at(i - 1), loose.points.ref_at(i));
-        loose.links.push(Link { a, b, rest: 1.0, hb: BoxedCrossBlock::new() });
+        loose.links.push(Link { a, b, rest: 1.0, hb: CrossBlock::new() });
     }
     let r = loose.solve_sparse(&LmConfig::<f64> { max_iters: 3, num_threads: 4, ..Default::default() })
         .unwrap();
@@ -476,11 +476,11 @@ fn a_root_without_par_keeps_the_sequential_path() {
         };
         for i in 0..12 {
             let pos = vect2d::new(i as f64 * 0.5, if i % 2 == 0 { 0.7 } else { -0.7 });
-            l.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+            l.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: SelfBlock::new() });
         }
         for i in 1..12 {
             let (a, b) = (l.points.ref_at(i - 1), l.points.ref_at(i));
-            l.links.push(Link { a, b, rest: 1.0, hb: BoxedCrossBlock::new() });
+            l.links.push(Link { a, b, rest: 1.0, hb: CrossBlock::new() });
         }
         for i in 0..10 {
             l.loops.push(Loop {
@@ -575,6 +575,74 @@ fn routes_agree_over_the_mirrors() {
         if i != j { dense_from_coo[j * n + i] += v; }
     }
     assert_close("coo vs dense", &dense_from_coo, &h1, 1e-12);
+}
+
+/// Fixed parameters through the threaded assembly. Each thread writes
+/// its own gradient vector at the live indices, so a fixed slot is
+/// skipped at the write rather than dropped by a scatter, and an entity
+/// touched from several threads still has to come out summed once.
+#[test]
+fn fixed_params_match_sequential() {
+    let fix = |w: &mut Web| {
+        // Whole entities: at a thread boundary and in the middle.
+        w.points[0].pos.optimize = false;
+        w.points[15].pos.optimize = false;
+        // An entity every thread's leaves reach through a reference.
+        w.points[29].pos.optimize = false;
+    };
+    let mut seq = build(30);
+    fix(&mut seq);
+    let mut par = build(30);
+    fix(&mut par);
+
+    let mut x = Vec::new();
+    seq.serialize(&mut x);
+    let mut x2 = Vec::new();
+    par.serialize(&mut x2);
+    assert_eq!(x, x2);
+    let mut full = Vec::new();
+    build(30).serialize(&mut full);
+    assert_eq!(x.len() + 6, full.len(), "three fixed points, two slots each");
+
+    let mut ctx = context(4);
+    par.begin_with_context(&mut ctx);
+    assert!(ctx.mirrors::<WebMirror>().expect("mirrors built").is_on());
+
+    let n = x.len();
+    let (mut g1, mut h1) = (vec![0.0; n], vec![0.0; n * n]);
+    let (mut g2, mut h2) = (vec![0.0; n], vec![0.0; n * n]);
+    let c1 = seq.calc_grad_hessian_dense(&x, &mut g1, &mut h1);
+    let c2 = par.calc_grad_hessian_dense_with_context(&x, &mut g2, &mut h2, &mut ctx);
+    assert!(close(c1, c2, 1e-13), "cost {} vs {}", c1, c2);
+    assert_close("grad", &g1, &g2, 1e-12);
+    assert_close("hessian", &h1, &h2, 1e-12);
+}
+
+/// The root's own parameter fixed: the root is an entity of the mirror
+/// too, and a single-instance one.
+#[test]
+fn a_fixed_root_param_matches_sequential() {
+    let mut seq = build_knob(24);
+    seq.scale.optimize = false;
+    let mut par = build_knob(24);
+    par.scale.optimize = false;
+
+    let mut x = Vec::new();
+    seq.serialize(&mut x);
+    let mut x2 = Vec::new();
+    par.serialize(&mut x2);
+    assert_eq!(x, x2);
+    let mut ctx = context(4);
+    par.begin_with_context(&mut ctx);
+
+    let n = x.len();
+    let (mut g1, mut h1) = (vec![0.0; n], vec![0.0; n * n]);
+    let (mut g2, mut h2) = (vec![0.0; n], vec![0.0; n * n]);
+    let c1 = seq.calc_grad_hessian_dense(&x, &mut g1, &mut h1);
+    let c2 = par.calc_grad_hessian_dense_with_context(&x, &mut g2, &mut h2, &mut ctx);
+    assert!(close(c1, c2, 1e-13), "cost {} vs {}", c1, c2);
+    assert_close("grad", &g1, &g2, 1e-12);
+    assert_close("hessian", &h1, &h2, 1e-12);
 }
 
 /// Print the two reports, for eyeballing: `cargo test --features rayon

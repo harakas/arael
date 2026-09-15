@@ -652,10 +652,10 @@ Each solve times both forms of each phase on its first calls and keeps the
 faster one, so a model too small to pay for a dispatch stays sequential.
 The mirrors are built once per solve, from the model as it stands then.
 
-A threaded solve never reads or writes the model's own Hessian blocks.
-Declared as [`BoxedSelfBlock` / `BoxedCrossBlock`](MODEL.md#heap-backed-blocks-boxedselfblock--boxedcrossblock)
-they cost nothing there, since their storage is never allocated; declared
-inline they sit in the entity structs whatever the solve does.
+A threaded solve assembles into the mirrors and never touches the store a
+sequential one uses. Neither costs anything in the model: a block field
+holds no values, only its place in the storage the solve owns (see
+[docs/MODEL.md](MODEL.md#a-block-field-is-a-declaration)).
 
 ### The forms `par` does not cover
 
@@ -701,8 +701,9 @@ A root without `par` prints that in place of the rows. The same is in
 `LmResult::threads` for a caller that would rather read it than parse it,
 and `ThreadReport::fell_back` is the one-line test.
 
-To reuse what a solve allocates -- the mirrors above -- across many solves
-of one model, keep an `arael::Context` and solve through
+To reuse what a solve allocates -- the block store holding every Hessian
+block, and the mirrors above -- across many solves of one model, keep an
+`arael::Context` and solve through
 `lm_solve_with_context`, or solve through an `LmSession`, which keeps one.
 The plain entry points make a context per solve.
 

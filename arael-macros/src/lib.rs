@@ -2037,6 +2037,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
     }
 
+    // The struct's own `SelfBlock<Self>` field, if it declares one. A
+    // struct with a self block is an entity: it owns one span of the
+    // parameter vector, which `collect_param_blocks` reports and which
+    // is derived below from the parameters themselves. A struct without
+    // one (a grouping sub-model, a `skip_self_block` bag of parameters)
+    // owns no span and reports nothing.
+    let self_block_field: Option<syn::Ident> = fields.iter()
+        .find(|f| is_self_block_for(&f.ty, &name.to_string()))
+        .and_then(|f| f.ident.clone());
+
     // Detect euler angle param types and generate precompute calls
     let mut euler_compute_stmts: Vec<TokenStream2> = Vec::new();
     for field in fields {
@@ -2071,9 +2081,13 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // (field, size expr, element type name). The type name is what the
     // Schur detector's coupling graph is built over.
     let mut size_walk: Vec<(syn::Ident, TokenStream2, Option<String>)> = Vec::new();
-    // Per-struct recursion for Model::collect_param_blocks (entity spans
-    // read from SelfBlock indices).
+    // Per-struct recursion for Model::collect_param_blocks (sub-models
+    // holding entities of their own).
     let mut collect_param_blocks_stmts: Vec<TokenStream2> = Vec::new();
+    // This struct's OWN parameter slots, folded into one span: its
+    // `Param` fields and its `#[arael(component)]` fields, in
+    // declaration order, which is the order they serialize in.
+    let mut span_fold_stmts: Vec<TokenStream2> = Vec::new();
     // Per-struct recursion for the structure-only Hessian walks (cells
     // and scatter positions), mirroring the accumulate stmt list exactly
     // -- emission order is the invariant.
@@ -2153,13 +2167,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             }
                         });
                     }
+                    span_fold_stmts.push(quote! {
+                        arael::model::Model::fold_param_span(&self.#ident, __min, __count);
+                    });
                 } else if let syn::Type::Path(tp) = ty
                     && let Some(seg) = tp.path.segments.last()
                     && registry_lookup(&seg.ident.to_string()).map(|l| l.component).unwrap_or(false)
                 {
                     // A component-typed field: its params fold into this
                     // struct's span (serialize recursion below carries them;
-                    // the count and symbol walk must too).
+                    // the count, symbol and span walks must too).
                     param_count_terms.push(quote! {
                         <#ty as arael::model::Model>::PARAM_COUNT
                     });
@@ -2168,6 +2185,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         <#ty as arael::model::Model>::param_symbols(
                             &format!("{}.{}", base, #field_name), out
                         );
+                    });
+                    span_fold_stmts.push(quote! {
+                        arael::model::Model::fold_param_span(&self.#ident, __min, __count);
                     });
                 }
 
@@ -2207,9 +2227,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 zero_blocks_stmts.push(quote! {
                     arael::model::Model::zero_blocks(&mut self.#ident);
                 });
-                collect_param_blocks_stmts.push(quote! {
-                    arael::model::Model::collect_param_blocks(&self.#ident, out);
-                });
+                // The self block no longer reports the span: this struct
+                // does, from its own parameters, below. Every other field
+                // recurses, so entities nested in a sub-model are reached.
+                if self_block_field.as_ref() != Some(ident) {
+                    collect_param_blocks_stmts.push(quote! {
+                        arael::model::Model::collect_param_blocks(&self.#ident, out);
+                    });
+                }
                 collect_cells_stmts.push(quote! {
                     arael::model::Model::collect_hessian_cells(&self.#ident, out);
                 });
@@ -2299,6 +2324,26 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    // An entity reports one span of the parameter vector: the smallest
+    // live index of its own slots and how many live components they
+    // hold. A fixed slot takes no room in the vector, so the live ones
+    // stay contiguous there and the pair describes them exactly. Only a
+    // struct with a self block is an entity; the rest report nothing.
+    let own_param_span: TokenStream2 = if self_block_field.is_some() {
+        quote! {
+            {
+                let mut __span = (u32::MAX, 0u32);
+                {
+                    let (__min, __count) = (&mut __span.0, &mut __span.1);
+                    #(#span_fold_stmts)*
+                }
+                if __span.1 > 0 { out.push(__span); }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let model_impl = quote! {
         impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
             fn serialize_params<F: arael::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
@@ -2338,7 +2383,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 let _ = &out;
+                #own_param_span
                 #(#collect_param_blocks_stmts)*
+            }
+            fn fold_param_span(&self, __min: &mut u32, __count: &mut u32) {
+                let _ = (&__min, &__count);
+                #(#span_fold_stmts)*
             }
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 let _ = &out;

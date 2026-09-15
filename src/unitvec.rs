@@ -207,6 +207,10 @@ where
     fn serialize_size(&self) -> u32 {
         Model::serialize_size(&self.d)
     }
+    // The tangent delta is the slot; it folds into the entity's span.
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        Model::fold_param_span(&self.d, min, count);
+    }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<vect2<T>> as Model>::param_symbols(&format!("{}.d", base), out);
     }

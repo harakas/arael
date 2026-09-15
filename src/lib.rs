@@ -89,10 +89,10 @@
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
 //!   auto-differentiate symbolically, and optimize via `ExtendedModel` +
 //!   `TripletBlock` (see `examples/runtime_fit_demo.rs`)
-//! - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and
-//!   2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO
-//!   sparse). Heap-backed `BoxedSelfBlock`/`BoxedCrossBlock` variants allocate
-//!   only the active blocks and can be freed between solves
+//! - **Hessian blocks** -- markers declaring which parameters a constraint
+//!   couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one
+//!   entity with another, `TripletBlock` generic coupling. The solve
+//!   owns the values the markers stand for
 //! - **Jacobian computation** -- `#[arael(root, jacobian)]` generates
 //!   `calc_jacobian()` returning a sparse [`Jacobian<T>`](model::Jacobian)
 //!   matrix for DOF analysis via SVD.
@@ -528,39 +528,41 @@
 //! with one block per (entity, entity) pair in the parameter
 //! vector. The block at position `(Ei, Ej)` is the `NEi × NEj`
 //! matrix of second partials; by symmetry
-//! `H[Ei, Ej] = H[Ej, Ei]^T`. arael stores each unique block once
-//! and lets the accumulator fill in the transpose when assembling
-//! into a dense / band / sparse matrix. Every constraint that
-//! couples a given pair adds its `2 * dr_i * dr_j` contribution to
-//! the same block:
+//! `H[Ei, Ej] = H[Ej, Ei]^T`. Each unique block is kept once and the
+//! accumulator fills in the transpose when assembling into a dense /
+//! band / sparse matrix.
 //!
-//! - **Diagonal blocks (`Ei == Ej`)** live in each entity's
-//!   `SelfBlock<Ei>` and are symmetric; only the upper triangle is
-//!   stored. Every constraint touching `Ei`'s params writes there
-//!   additively.
-//! - **Off-diagonal blocks (`Ei != Ej`)** live in a
-//!   `CrossBlock<Ei, Ej>` or in a `TripletBlock` that covers the
-//!   pair. One `CrossBlock<A, B>` covers both `H[A, B]` and its
-//!   transpose `H[B, A]` -- the accumulator writes both halves from
-//!   the single stored rectangle.
+//! You declare which blocks the Hessian has by declaring block fields
+//! on the model. A block field is a marker, not a container: it names
+//! a coupling and carries that block's place in the block store, a
+//! generated struct of one array per declared block field that the
+//! solve keeps in its [`threads::Context`].
 //!
-//! Gradient contributions `2 * r * dr` go directly into the LM-
-//! provided global gradient slice -- not into any block. Only
-//! Hessian entries are stored block-wise.
+//! - **A diagonal block (`Ei == Ej`)** is declared by `Ei`'s own
+//!   `SelfBlock<Ei>`. It is symmetric, so only its upper triangle is
+//!   kept, and every constraint touching `Ei`'s parameters adds to it.
+//! - **An off-diagonal block (`Ei != Ej`)** is declared by a
+//!   `CrossBlock<Ei, Ej>`, or by a `TripletBlock` that covers the
+//!   pair. One `CrossBlock<A, B>` declares both `H[A, B]` and its
+//!   transpose `H[B, A]`; the accumulator writes both halves from the
+//!   one rectangle.
+//!
+//! Gradient contributions `2 * r * dr` reach the solver's gradient
+//! vector directly. Only the Hessian is described block by block.
 //!
 //! Pick the block shape that matches the constraint body's parameter
 //! reach:
 //!
-//! | Type | Stores | Pick it when |
+//! | Type | Declares | Pick it when |
 //! |---|---|---|
-//! | [`SelfBlock<T>`](model::SelfBlock) | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block |
-//! | [`CrossBlock<A, B>`](model::CrossBlock) | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One per unordered (A, B) entity pair; (A, A) / (B, B) diagonals stay on each entity's `SelfBlock` |
-//! | [`TripletBlock<T>`](model::TripletBlock) | COO across-entity pairs | **always placed on the root** (one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel) that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** -- every entry is a `Vec` push |
+//! | [`SelfBlock<T>`](model::SelfBlock) | the `(T, T)` diagonal block -- entity T coupled with itself | **mandatory on every params-having struct** |
+//! | [`CrossBlock<A, B>`](model::CrossBlock) | the `(A, B)` off-diagonal block, and its transpose | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One per unordered (A, B) entity pair; (A, A) / (B, B) diagonals stay on each entity's `SelfBlock` |
+//! | [`TripletBlock<T>`](model::TripletBlock) | across-entity pairs it is given at runtime, rather than one named pair | **always placed on the root** (one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the root's TripletBlock declares the (entity, root) cross pair; (2) runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel) that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** -- every entry is a `Vec` push |
 //!
 //! `SelfBlock<Self>` is required on every Model that has
-//! parameters -- omitting it is a compile-time error. Grad and
-//! diagonal writes always land on each entity's `SelfBlock`;
-//! `CrossBlock` and `TripletBlock` are cross-only storage.
+//! parameters -- omitting it is a compile-time error. An entity's
+//! diagonal block is always its own `SelfBlock`; `CrossBlock` and
+//! `TripletBlock` declare cross pairs only.
 //!
 //! ```
 //! # use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
@@ -597,7 +599,18 @@
 //!
 //! ### Multi-CrossBlock vs TripletBlock
 //!
-//! For N-entity residuals the macro accepts two shapes:
+//! `TripletBlock` is the general block: it couples any entities in
+//! any combination, settled while the solve runs rather than named in
+//! the model. The price is assembly speed. A `CrossBlock` names its
+//! two sides in the type, so it gets a packed tile of a size known in
+//! advance; a TripletBlock names nothing and so keeps each entry on
+//! its own, as a triplet of row, column and value -- the coordinate
+//! form (COO) a sparse matrix is built from, and what the name refers
+//! to. Every entry is a `Vec` push.
+//!
+//! So name the pairs wherever they can be named, and reach for the
+//! TripletBlock where they cannot. For N-entity residuals the macro
+//! accepts both shapes:
 //!
 //! - **`constraint([hb_ab, hb_ac, hb_bc], { ... })`** -- one
 //!   `CrossBlock<A, B>` field per unordered entity pair on the
@@ -612,14 +625,12 @@
 //!   the only correct way to reach a `TripletBlock`.
 //!
 //! Prefer multi-`CrossBlock` whenever the set of cross-pairs is
-//! fixed and dense. `TripletBlock` carries a significant
-//! Hessian-assembly penalty: every cross entry is a
-//! `Vec<(u32, u32, T)>` push (with growth and no locality), whereas
-//! `CrossBlock` writes in place into a pre-sized `NA * NB`
-//! rectangle at a known offset. The same N-entity constraint
-//! assembles substantially faster through multi-`CrossBlock`, and
-//! the rectangular layout is friendlier to the CSC factorisation
-//! that follows.
+//! fixed and dense. The push grows a `Vec<(u32, u32, T)>` and gives
+//! up locality, whereas `CrossBlock` writes in place into a
+//! pre-sized `NA * NB` rectangle at a known offset; the rectangle
+//! also suits the CSC factorisation that follows. The same N-entity
+//! constraint assembles substantially faster through
+//! multi-`CrossBlock`.
 //!
 //! Reach for the root-owned `TripletBlock` in two canonical
 //! situations:
@@ -2416,7 +2427,7 @@ pub use arael_macros::__register_model;
 /// ambiguity downstream.
 pub mod prelude {
     pub use crate::model::{
-        BoxedCrossBlock, BoxedSelfBlock, CrossBlock, EulerAngleParam,
+        CrossBlock, EulerAngleParam,
         ExtendedModel, JacobianModel, Model, Param, QuaternionParam,
         SelfBlock, SimpleEulerAngleParam, TripletBlock,
     };

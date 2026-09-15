@@ -123,8 +123,8 @@ fn direct_composed_passive_entity_is_wired() {
     let mut params = Vec::new();
     wd.serialize(&mut params);
     assert_eq!(params.len(), 1);
-    assert!(wd.direct.hb.is_active(),
-        "direct-composed passive SelfBlock must have wired indices after serialize");
+    assert_ne!(wd.direct.hb.slot(), u32::MAX,
+        "direct-composed passive SelfBlock must have a store slot after serialize");
 }
 
 #[test]
