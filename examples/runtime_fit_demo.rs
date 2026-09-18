@@ -2,7 +2,7 @@
 ///
 /// Demonstrates ExtendedModel: the model equation is a string parsed at
 /// runtime with arael_sym, symbolically differentiated, then optimized
-/// with Levenberg-Marquardt using TripletBlock for Gauss-Newton updates.
+/// with Levenberg-Marquardt, pushing Gauss-Newton updates into the solve's COO list.
 ///
 /// Usage:
 ///   cargo run --example runtime_fit_demo
@@ -20,7 +20,7 @@
 
 use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
-use arael::model::{ExtendedModel, Param, TripletBlock};
+use arael::model::{Coo, ExtendedModel, Param};
 use arael::simple_lm::LmConfig;
 use arael_sym::E;
 
@@ -30,7 +30,7 @@ use arael_sym::E;
 
 /// One optimizable coefficient. Params are written by RegressionModel's
 /// ExtendedModel::extended_compute directly into the global grad/hessian
-/// via a TripletBlock, so Coefficient itself has no grad+diag to store.
+/// via the COO list, so Coefficient itself has no grad+diag to store.
 #[arael::model]
 #[arael(skip_self_block)]
 struct Coefficient {
@@ -43,7 +43,6 @@ struct Coefficient {
 struct RegressionModel {
     coeffs: arael::refs::Vec<Coefficient>,
 
-    hb: TripletBlock<f64>,
 
     // --- runtime (not part of model tree) ---
     #[arael(skip)]
@@ -71,7 +70,7 @@ impl ExtendedModel<f64> for RegressionModel {
         cost
     }
 
-    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64], coo: &mut Coo<f64>) {
         let residual = match self.residual_expr { Some(ref e) => e.clone(), None => return };
         let derivs: Vec<(u32, E)> = self.derivs.iter().map(|(_, idx, d)| (*idx, d.clone())).collect();
         let mut vars: HashMap<&str, f64> = HashMap::new();
@@ -89,7 +88,7 @@ impl ExtendedModel<f64> for RegressionModel {
                 .filter_map(|(_, d)| d.eval(&vars).ok())
                 .collect();
             if dr.len() == indices.len() {
-                self.hb.add_residual(r, &indices, &dr, grad);
+                coo.add_residual(r, &indices, &dr, grad);
             }
         }
     }
@@ -183,7 +182,6 @@ fn build_model(equation: &str, data: Vec<(f64, f64)>, init: &HashMap<String, f64
 
     let mut model = RegressionModel {
         coeffs,
-        hb: TripletBlock::new(),
         residual_expr: Some(residual_expr.clone()),
         derivs: Vec::new(),
         data,
@@ -315,7 +313,7 @@ fn main() {
     // Parameter uncertainties from the inverse Hessian at the
     // solution. arael's `calc_grad_hessian_dense` writes the full
     // mathematical Hessian H = d2S/d theta2 = 2 JT J (under
-    // Gauss-Newton; see TripletBlock::add_residual). The textbook
+    // Gauss-Newton; see Coo::add_residual). The textbook
     // covariance is sigma_r2 * (JT J)^-1 = 2 sigma_r2 * H^-1, hence
     // the factor of 2 here. sigma_r2 is estimated from
     // s2 = end_cost / (N - p) -- the reduced-chi-squared / Birge-ratio

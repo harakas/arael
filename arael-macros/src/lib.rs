@@ -1391,7 +1391,6 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     let mut suspect_wrappers_reg: Vec<(String, String, String)> = Vec::new();
     let mut block_precision_reg: Option<(String, String)> = None;
     let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
-    let mut triplet_block_fields_reg: Vec<String> = Vec::new();
     let mut cross_block_fields_reg: Vec<(String, String, String, Option<(String, String)>)> = Vec::new();
     let mut spelled_types_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
@@ -1481,11 +1480,6 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
             let bare = if let Some((inner, _)) = extract_wrapper_inner(&field.ty, "Option") {
                 inner
             } else { &field.ty };
-            if let syn::Type::Path(tp) = bare
-                && let Some(seg) = tp.path.segments.last()
-                && seg.ident == "TripletBlock" {
-                    triplet_block_fields_reg.push(field_name.clone());
-                }
             if let syn::Type::Path(tp) = bare
                 && let Some(seg) = tp.path.segments.last()
                 && (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock")
@@ -1662,7 +1656,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         suspect_wrappers: suspect_wrappers_reg,
         block_precision: block_precision_reg,
         inst_precisions: inst_precisions_reg,
-        triplet_block_fields: triplet_block_fields_reg,
+        triplet_block_fields: std::vec::Vec::new(),
         cross_block_fields: cross_block_fields_reg,
         is_root: has_struct_attr_ident(&input.attrs, "root"),
         scalar_generic: scalar_generic.clone(),
@@ -2091,7 +2085,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // Per-struct recursion for the structure-only Hessian walks (cells
     // and scatter positions), mirroring the accumulate stmt list exactly
     // -- emission order is the invariant.
-    let mut has_triplet_block = false;
     let mut collect_cells_stmts: Vec<TokenStream2> = Vec::new();
     let mut positions_stmts: Vec<TokenStream2> = Vec::new();
 
@@ -2139,9 +2132,13 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 // one width a generated root actually calls.
                 if let syn::Type::Path(tp) = &field.ty
                     && let Some(seg) = tp.path.segments.last()
-                        && seg.ident == "TripletBlock" {
-                            has_triplet_block = true;
-                        }
+                    && (seg.ident == "Coo" || seg.ident == "TripletBlock")
+                {
+                    return Err(syn::Error::new_spanned(field,
+                        "a `Coo` is not a model field: the solve owns one per thread. \
+                         A constraint reaches it with the `coo` keyword and an \
+                         `extended_compute` hook is handed one."));
+                }
 
                 let ty = &field.ty;
 
@@ -2378,9 +2375,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
                 #(#param_symbols_stmts)*
             }
-            fn zero_blocks(&mut self) {
-                #(#zero_blocks_stmts)*
-            }
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 let _ = &out;
                 #own_param_span
@@ -2390,32 +2384,8 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 let _ = (&__min, &__count);
                 #(#span_fold_stmts)*
             }
-            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                let _ = &out;
-                #(#collect_cells_stmts)*
-            }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                let _ = (&binder, &out);
-                #(#positions_stmts)*
-            }
             fn release_blocks(&mut self) {
                 #(#release_blocks_stmts)*
-            }
-            fn accumulate_hessian<F: arael::utils::Float>(&self, hessian: &mut [F]) {
-                #(#accumulate_hessian_stmts)*
-            }
-            fn accumulate_hessian_band<F: arael::utils::Float>(&self, band: &mut [F], kd: usize) -> Result<(), arael::simple_lm::BandOverflow> {
-                #(#accumulate_hessian_band_stmts)*
-                Ok(())
-            }
-            fn accumulate_hessian_sparse<F: arael::utils::Float>(&self, coo: &mut arael::simple_lm::CooMatrix<F>) {
-                #(#accumulate_hessian_sparse_stmts)*
-            }
-            fn accumulate_hessian_sparse_direct<F: arael::utils::Float>(&self, csc: &mut arael::simple_lm::CscMatrix<F>) {
-                #(#accumulate_hessian_sparse_direct_stmts)*
-            }
-            fn accumulate_hessian_sparse_indexed<F: arael::utils::Float>(&self, vals: &mut [F], positions: &[arael::ValueIndex], cursor: &mut usize) {
-                #(#accumulate_hessian_sparse_indexed_stmts)*
             }
         }
     };
@@ -2561,15 +2531,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // one set is the normal case, not a special one -- points and lines with
     // different block sizes are simply two nodes with no edge between them.
     //
-    // TripletBlock entries exist only at runtime, so a triplet ANYWHERE in
-    // the containment tree (the root's own fields or a nested sub-model,
-    // e.g. the `[hb, parent.hbt]` form) makes the Hessian pattern knowable
-    // only after a compute pass. The derive walk above saw the root's own
-    // fields; close over the containment here.
-    let has_triplet_block = has_triplet_block
-        || (root_precision.is_some() && containment_tree_has_triplet(fields));
+    // COO entries exist only at runtime, so a `coo` constraint ANYWHERE in
+    // the containment tree makes the Hessian pattern knowable only after a
+    // compute pass. An `extended` root is the other way entries can appear,
+    // and nothing static settles that one: the solve runs its hook once
+    // and records the answer on the context.
+    let has_triplet_block = root_precision.is_some()
+        && (containment_tree_has_triplet(fields)
+            || crate::constraint::struct_uses_coo(&name.to_string()));
 
-    // TripletBlock roots emit nothing: their Hessian pattern is only known
+    // A COO root emits no candidates: its Hessian pattern is only known
     // after a compute pass, so no static claim about coupling is possible
     // (the Schur backend refuses those models anyway).
     let marginalize_candidates_fn = if root_precision.is_some() && !has_triplet_block {
@@ -2708,18 +2679,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        // The threaded sweeps over per-thread mirrors are opt-in: the
-        // root asks with `par` and arael must be built with the `rayon`
-        // feature. The mirrors cover a limited set of model forms, so a
-        // `par` root using one they do not is a compile error naming it;
-        // without the keyword the root is the sequential one it always
-        // was.
+        // The threaded sweeps over per-thread block stores are opt-in:
+        // the root asks with `par` and arael must be built with the
+        // `rayon` feature. Without the keyword the root keeps one store
+        // and is the sequential one it always was.
         let par = root_par && cfg!(feature = "rayon");
         constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64,
-            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par)
-            .map_err(|e| constraint::par_error(name, e))?
+            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par)?
     } else {
         quote! {}
     };
@@ -2970,6 +2938,7 @@ fn containment_tree_has_triplet(
         if !seen.insert(t.clone()) { continue; }
         let Some(l) = registry_lookup(&t) else { continue };
         if !l.triplet_block_fields.is_empty() { return true; }
+        if crate::constraint::struct_uses_coo(&t) { return true; }
         for (_, sft) in &l.fields {
             match sft {
                 SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) => {
@@ -4043,16 +4012,6 @@ fn generate_fit_impl(
                 __cost
             }
 
-            fn calc_grad_hessian_band(
-                &mut self,
-                _params: &[#prec_type],
-                _grad: &mut [#prec_type],
-                _band: &mut [#prec_type],
-                _kd: usize,
-            ) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
-                unimplemented!("fit models do not support band assembly")
-            }
-
             fn calc_grad_hessian_sparse(
                 &mut self,
                 _params: &[#prec_type],
@@ -4061,26 +4020,11 @@ fn generate_fit_impl(
             ) -> #prec_type {
                 unimplemented!("fit models do not support sparse assembly")
             }
-
-            fn calc_grad_hessian_sparse_direct(
-                &mut self,
-                _params: &[#prec_type],
-                _grad: &mut [#prec_type],
-                _csc: &mut arael::simple_lm::CscMatrix<#prec_type>,
-            ) -> #prec_type {
-                unimplemented!("fit models do not support sparse direct assembly")
-            }
-
-            fn calc_grad_hessian_sparse_indexed(
-                &mut self,
-                _params: &[#prec_type],
-                _grad: &mut [#prec_type],
-                _vals: &mut [#prec_type],
-                _positions: &[arael::ValueIndex],
-            ) -> #prec_type {
-                unimplemented!("fit models do not support sparse indexed assembly")
-            }
         }
+
+        // A fit model is solved dense. The band, CSC and indexed routes
+        // are the trait's own defaults, which say so.
+        impl arael::simple_lm::LmProblemInternals<#prec_type> for #name {}
 
         impl arael::simple_lm::FitProblem<#prec_type> for #name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {

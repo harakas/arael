@@ -14,7 +14,8 @@
 // data), carrying the partial state.
 
 use arael::simple_lm::RootProblem;
-use arael::simple_lm::{self, BandOverflow, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
+use arael::simple_lm::{
+    LmProblemInternals,self, BandOverflow, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
 // The bad-diagonal diagnostic goes through arael's process-global log sink.
@@ -206,16 +207,16 @@ fn min_diagonal_does_not_rescue_a_nan_diagonal() {
 
 // Pattern drift: the indexed (cached-pattern) assembly must detect a sparsity
 // pattern that changed mid-solve. The position map is built from the
-// first iteration's entry sequence; a TripletBlock emitting fewer
+// first iteration's entry sequence; a COO constraint emitting fewer
 // entries later (here: a guard flipped between assemblies) used to
 // scatter every subsequent block into wrong slots -- silently wrong
 // Hessian values with no error anywhere.
 
-use arael::model::{Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock};
 use arael::refs;
 
 #[arael::model]
-#[arael(constraint([hb, root.hbt], guard = self.active, {
+#[arael(constraint([hb, coo], guard = self.active, {
     [(item10.a + w10.offset) * w10.isigma]
 }))]
 struct Item10 {
@@ -231,12 +232,13 @@ struct W10 {
     offset: Param<f64>,
     isigma: f64,
     hb: SelfBlock<W10>,
-    hbt: TripletBlock<f64>,
 }
 
 #[test]
 #[should_panic(expected = "sparsity pattern changed between iterations")]
 fn pattern_drift_detected_in_indexed_assembly() {
+
+    let mut ctx = arael::threads::Context::new();
     let mut items = refs::Vec::new();
     items.push(Item10 { a: Param::new(1.0), active: true, hb: SelfBlock::new() });
     let mut w = W10 {
@@ -244,25 +246,26 @@ fn pattern_drift_detected_in_indexed_assembly() {
         offset: Param::new(0.5),
         isigma: 2.0,
         hb: SelfBlock::new(),
-        hbt: TripletBlock::new(),
     };
     let mut params = Vec::new();
     w.serialize(&mut params);
     let n = params.len();
 
-    // First iteration: build the pattern with the guard active.
+    // First iteration: build the pattern with the guard active. The COO
+    // pass runs through the same context the pattern binds against --
+    // the entries it has to cover live in that context's store.
     let mut grad = vec![0.0; n];
     let mut coo = simple_lm::CooMatrix::new(n);
-    w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let (csc, positions) = coo.to_csc_with_positions(&mut w).unwrap();
+    w.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
+    let (csc, positions) = coo.to_csc_with_positions(&mut w, &mut ctx).unwrap();
 
-    // Mid-solve structure change: the guard flips off, the TripletBlock
+    // Mid-solve structure change: the guard flips off, the constraint
     // emits nothing this iteration.
     w.items[0].active = false;
 
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g2 = vec![0.0; n];
-    let _ = w.calc_grad_hessian_sparse_indexed(&params, &mut g2, &mut vals, &positions);
+    let _ = w.calc_grad_hessian_sparse_indexed(&params, &mut g2, &mut vals, &positions, &mut ctx);
 }
 
 // A structural failure that reaches the solve (not just the CSC helper) must
@@ -274,12 +277,13 @@ struct BandOverflowProblem;
 impl LmProblem<f64> for BandOverflowProblem {
     fn calc_cost(&mut self, _x: &[f64]) -> f64 { 1.0 }
     fn calc_grad_hessian_dense(&mut self, _x: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 { 1.0 }
-    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize) -> Result<f64, BandOverflow> {
+    fn calc_grad_hessian_sparse(&mut self, _x: &[f64], _g: &mut [f64], _coo: &mut CooMatrix<f64>) -> f64 { unimplemented!() }
+}
+
+impl LmProblemInternals<f64> for BandOverflowProblem {
+    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize, _ctx: &mut arael::threads::Context) -> Result<f64, BandOverflow> {
         Err(BandOverflow { row: 0, col: 1, kd })
     }
-    fn calc_grad_hessian_sparse(&mut self, _x: &[f64], _g: &mut [f64], _coo: &mut CooMatrix<f64>) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[arael::ValueIndex]) -> f64 { unimplemented!() }
 }
 
 #[test]
@@ -297,15 +301,14 @@ struct UnconstrainedSparseProblem;
 impl LmProblem<f64> for UnconstrainedSparseProblem {
     fn calc_cost(&mut self, _x: &[f64]) -> f64 { 1.0 }
     fn calc_grad_hessian_dense(&mut self, _x: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize) -> Result<f64, BandOverflow> { unimplemented!() }
     fn calc_grad_hessian_sparse(&mut self, _x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
         g[0] = 0.0; g[1] = 0.0;
         coo.push(0, 0, 2.0); // param 0 has a diagonal; param 1 has none
         1.0
     }
-    fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[arael::ValueIndex]) -> f64 { unimplemented!() }
 }
+
+impl LmProblemInternals<f64> for UnconstrainedSparseProblem {}
 
 #[test]
 #[allow(deprecated)] // exercises the COO validation baseline

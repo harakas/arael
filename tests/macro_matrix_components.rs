@@ -1,13 +1,13 @@
 // Component params (`#[arael(component)]`) in the constraint forms
-// that used to reject them: TripletBlock, multi-CrossBlock,
+// that used to reject them: `coo`, multi-CrossBlock,
 // `root.<selfblock>`, and `[hb, root.<triplet>]`. Each case runs the
 // full invariant battery -- hand-computed cost, dense/COO/indexed/band
 // assembly agreement, FD gradients, clean validate() -- and the
 // registration shape also solves.
 
-use arael::model::{Component, Param, SelfBlock, CrossBlock, TripletBlock};
+use arael::model::{Component, Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{CooMatrix, LmConfig, LmProblem, RootProblem};
+use arael::simple_lm::{CooMatrix, LmConfig, LmProblem, RootProblem, LmProblemInternals};
 
 const TOL: f64 = 1e-9;
 
@@ -18,7 +18,7 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 /// Cost + all-route + FD + validate battery (same as macro_matrix.rs).
 fn check_model<P>(label: &str, m: &mut P, manual_cost: f64)
 where
-    P: LmProblem<f64> + RootProblem<f64>,
+    P: LmProblemInternals<f64> + RootProblem<f64>,
 {
     let mut x = Vec::new();
     RootProblem::serialize(m, &mut x);
@@ -34,9 +34,14 @@ where
     let cd = m.calc_grad_hessian_dense(&x, &mut gd, &mut hd);
     assert!(close(cd, cost, TOL), "{label}: dense cost");
 
+    // The COO pass and the position binding below must see the same
+    // store: entries a constraint cannot tile live in the store's own
+    // COO list, so a pattern bound against a different one describes
+    // nothing.
+    let mut ctx = arael::threads::Context::new();
     let mut gs = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
-    let cs = m.calc_grad_hessian_sparse(&x, &mut gs, &mut coo);
+    let cs = m.calc_grad_hessian_sparse_with_context(&x, &mut gs, &mut coo, &mut ctx);
     assert!(close(cs, cost, TOL), "{label}: coo cost");
     let mut hs = vec![0.0; n * n];
     for k in 0..coo.rows.len() {
@@ -52,10 +57,10 @@ where
         }
     }
 
-    let (csc, positions) = coo.to_csc_with_positions(m).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(m, &mut ctx).unwrap();
     let mut gi = vec![0.0; n];
     let mut vals = vec![0.0; csc.vals.len()];
-    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions);
+    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions, &mut ctx);
     assert!(close(ci, cost, TOL), "{label}: indexed cost");
     for i in 0..n {
         assert!(close(gi[i], gd[i], TOL), "{label}: indexed grad[{i}]");
@@ -65,7 +70,7 @@ where
     let ldab = kd + 1;
     let mut gb = vec![0.0; n];
     let mut band = vec![0.0; ldab * n];
-    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd)
+    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd, &mut ctx)
         .unwrap_or_else(|e| panic!("{label}: band overflow: {e}"));
     assert!(close(cb, cost, TOL), "{label}: band cost");
     for i in 0..n {
@@ -195,7 +200,7 @@ fn component_entity_as_direct_and_option_fields() {
 }
 
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(coo, {
     [(a.off.c + b.off.c + cc.off.c - tri.s) * 1.1]
 }))]
 struct Tri {
@@ -206,7 +211,6 @@ struct Tri {
     #[arael(ref = root.nodes)]
     cc: Ref<N>,
     s: f64,
-    hb: TripletBlock<f64>,
 }
 
 #[arael::model]
@@ -222,7 +226,7 @@ fn component_params_in_a_triplet() {
     let r0 = nodes.push(n(0.1, 0.0));
     let r1 = nodes.push(n(1.2, 1.0));
     let r2 = nodes.push(n(2.3, 2.0));
-    let tris = vec![Tri { a: r0, b: r1, cc: r2, s: 3.0, hb: TripletBlock::new() }];
+    let tris = vec![Tri { a: r0, b: r1, cc: r2, s: 3.0 }];
     let mut w = WTri { nodes, tris };
     let manual = n_cost(0.1, 0.0) + n_cost(1.2, 1.0) + n_cost(2.3, 2.0)
         + ((0.1f64 + 1.2 + 2.3 - 3.0) * 1.1).powi(2);
@@ -316,7 +320,7 @@ fn component_root_in_root_selfblock() {
 // ---------------------- [hb, root.<triplet>] with a component-param root
 
 #[arael::model]
-#[arael(constraint([hb, root.hbt], {
+#[arael(constraint([hb, coo], {
     [(e.x - root.bias.c - e.t) * 1.2]
 }))]
 struct E {
@@ -331,7 +335,6 @@ struct WJoin {
     bias: Off,
     items: std::vec::Vec<E>,
     hb: SelfBlock<WJoin>,
-    hbt: TripletBlock<f64>,
 }
 
 #[test]
@@ -343,9 +346,8 @@ fn component_root_in_root_triplet() {
             E { x: Param::new(2.0), t: 1.8, hb: SelfBlock::new() },
         ],
         hb: SelfBlock::new(),
-        hbt: TripletBlock::new(),
     };
     let manual = ((1.0f64 - 0.3 - 0.5) * 1.2).powi(2)
         + ((2.0f64 - 0.3 - 1.8) * 1.2).powi(2);
-    check_model("component [hb, root.hbt]", &mut w, manual);
+    check_model("component [hb, coo]", &mut w, manual);
 }

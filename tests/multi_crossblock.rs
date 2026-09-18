@@ -2,12 +2,12 @@
 //
 // Verifies that a 3-entity constraint declared with three named CrossBlocks
 // (one per ref pair) produces the same gradient and Hessian as the
-// equivalent constraint declared with a single TripletBlock. This is the
+// equivalent constraint declared with `coo`. This is the
 // "never drop cross-Hessian" invariant under the multi-cross refactor.
 
 #[allow(unused_imports)]
 use arael::simple_lm::RootProblem;
-use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 
@@ -23,10 +23,10 @@ struct Point {
     hb: SelfBlock<Point>,
 }
 
-// 3-entity constraint declared with a single TripletBlock. Residual
+// 3-entity constraint declared with `coo`. Residual
 // couples all three points (a simple dense coupling).
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(coo, {
     let dx_ab = a.pos.x - b.pos.x;
     let dy_ab = a.pos.y - b.pos.y;
     let dx_bc = b.pos.x - c.pos.x;
@@ -45,11 +45,10 @@ struct TripletCoupling {
     b: arael::refs::Ref<Point>,
     #[arael(ref = root.points)]
     c: arael::refs::Ref<Point>,
-    hb: TripletBlock<f64>,
 }
 
 // Same residual, but expressed via three CrossBlocks (one per unordered
-// ref pair) instead of a TripletBlock. Each CrossBlock carries the
+// ref pair) instead of `coo`. Each CrossBlock carries the
 // Hessian contributions for its pair; per-entity SelfBlocks hold
 // gradient + within-entity diagonal (as usual).
 #[arael::model]
@@ -117,7 +116,6 @@ fn make_triplet_model() -> (TestModel, Vec<f64>) {
         a: model.points.ref_at(0),
         b: model.points.ref_at(1),
         c: model.points.ref_at(2),
-        hb: TripletBlock::new(),
     });
     let mut params = Vec::new();
     model.serialize(&mut params);

@@ -11,7 +11,7 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaer};
+use arael::simple_lm::{LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaer, LmProblemInternals};
 
 // 2-parameter pose
 #[arael::model]
@@ -208,7 +208,7 @@ fn build() -> World {
 #[test]
 fn detects_both_landmark_types() {
     let w = build();
-    let candidates = LmProblem::marginalize_candidates(&w);
+    let candidates = LmProblemInternals::marginalize_candidates(&w);
     assert_eq!(candidates.len(), 1, "expected one maximal candidate set, got {:?}", candidates);
 
     // serialize order: poses_a | points | poses_b | lines

@@ -3,7 +3,7 @@
 // Sigma = 2 H^-1 = (1/isig^2) I -- an analytic value to check against.
 
 use arael::covariance::{CovError, CovMode, CovOptions, CovOrdering, Covariance};
-use arael::simple_lm::BlockSupernodalMode;
+use arael::simple_lm::{BlockSupernodalMode, CooMatrix, LmProblem, RootProblem};
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 
@@ -652,4 +652,60 @@ fn ordering_does_not_change_the_covariance() {
         plain.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)],
         auto.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)],
     );
+}
+
+// A model whose Hessian pattern exists only after a compute: the COO
+// entries are pushed at runtime, so a structure walk run before any
+// assembly sees none of them.
+#[arael::model]
+#[arael(constraint(coo, { [(ta.x + tb.y + tc.x - 1.0) * 0.5] }))]
+struct Tri3 {
+    #[arael(ref = root.pts)] ta: Ref<Pt>,
+    #[arael(ref = root.pts)] tb: Ref<Pt>,
+    #[arael(ref = root.pts)] tc: Ref<Pt>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct TriW {
+    pts: refs::Vec<Pt>,
+    tris: std::vec::Vec<Tri3>,
+}
+
+fn tri_world() -> TriW {
+    let mut w = TriW { pts: refs::Vec::new(), tris: std::vec::Vec::new() };
+    for _ in 0..3 {
+        w.pts.push(Pt {
+            x: Param::new(0.0), y: Param::new(0.0),
+            ax: 1.0, ay: 2.0, isig: 0.5, hb: SelfBlock::new(),
+        });
+    }
+    w.tris.push(Tri3 {
+        ta: w.pts.ref_at(0), tb: w.pts.ref_at(1), tc: w.pts.ref_at(2),
+    });
+    w
+}
+
+/// The covariance of a model whose pattern needs a compute must not
+/// depend on whether an assembly has run before the call.
+#[test]
+fn covariance_of_a_triplet_model_needs_no_prior_assembly() {
+    // Primed: one assembly has left its entries on the model.
+    let mut primed = tri_world();
+    let mut x = std::vec::Vec::new();
+    primed.serialize(&mut x);
+    let n = x.len();
+    let mut grad = vec![0.0; n];
+    let mut coo = CooMatrix::new(n);
+    primed.calc_grad_hessian_sparse(&x, &mut grad, &mut coo);
+    let want = primed.assemble_covariance(CovMode::PerQuery).unwrap()
+        .marginal_cov(&primed.pts[0]).unwrap();
+
+    let mut fresh = tri_world();
+    let got = fresh.assemble_covariance(CovMode::PerQuery).unwrap()
+        .marginal_cov(&fresh.pts[0]).unwrap();
+    assert!((got[(0, 0)] - want[(0, 0)]).abs() < 1e-10,
+        "fresh {} vs primed {}", got[(0, 0)], want[(0, 0)]);
+    assert!((got[(1, 1)] - want[(1, 1)]).abs() < 1e-10,
+        "fresh {} vs primed {}", got[(1, 1)], want[(1, 1)]);
 }

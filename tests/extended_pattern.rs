@@ -1,17 +1,13 @@
-// `hessian_pattern_requires_compute` follows the presence of a
-// TripletBlock ANYWHERE in the containment tree -- not the `extended`
-// flag. An extended root without triplets keeps a static block pattern
-// (extended hooks can only add Hessian entries through declared block
-// fields), so the structure-based sparse routes apply; a parent-owned
-// triplet (`[hb, parent.hbt]`) forces the compute-first route even
-// though the root's own fields hold no triplet.
+// `hessian_pattern_requires_compute` follows the COO entries a model can
+// hold: a `coo` constraint ANYWHERE in the containment tree, or an
+// `extended` hook, which is handed the COO list and may push into it.
 
-use arael::model::{ExtendedModel, Param, SelfBlock, TripletBlock};
+use arael::model::{Coo, ExtendedModel, Param, SelfBlock};
 use arael::refs;
-use arael::simple_lm::{LmConfig, LmProblem, RootProblem};
+use arael::simple_lm::{LmConfig, LmProblem, RootProblem, LmProblemInternals};
 
 // ===========================================================================
-// Extended root, no TripletBlock: static pattern, fast sparse routes
+// Extended root that pushes no COO entries
 // ===========================================================================
 
 #[arael::model]
@@ -51,9 +47,14 @@ fn upd_only() -> UpdOnly {
 }
 
 #[test]
-fn extended_without_triplet_has_static_pattern() {
-    let u = upd_only();
-    assert!(!LmProblem::<f64>::hessian_pattern_requires_compute(&u));
+fn extended_without_coo_entries_keeps_a_static_pattern() {
+    let mut u = upd_only();
+    assert!(!LmProblemInternals::<f64>::hessian_pattern_requires_compute(&u));
+    // The hook is handed a COO list either way; the probe the solve runs
+    // before its first assembly finds this one pushes nothing.
+    let mut x = Vec::new();
+    u.serialize(&mut x);
+    assert!(!LmProblemInternals::<f64>::extended_hook_writes_coo(&mut u, &x));
 }
 
 #[test]
@@ -71,11 +72,11 @@ fn extended_without_triplet_solves_sparse() {
 }
 
 // ===========================================================================
-// Parent-owned TripletBlock ([hb, parent.hbt]): compute-first route
+// Parent-coupled `coo` ([hb, coo]): compute-first route
 // ===========================================================================
 
 #[arael::model]
-#[arael(constraint([hb, parent.hbt], {
+#[arael(constraint([hb, coo], {
     [obs.y - (curve.m * obs.x + obs.o)]
 }))]
 struct Obs {
@@ -90,7 +91,6 @@ struct Curve {
     m: Param<f64>,
     obs: std::vec::Vec<Obs>,
     hb: SelfBlock<Curve>,
-    hbt: TripletBlock<f64>,
 }
 
 #[arael::model]
@@ -105,7 +105,6 @@ fn fit() -> Fit {
         m: Param::new(0.1),
         obs: std::vec::Vec::new(),
         hb: SelfBlock::new(),
-        hbt: TripletBlock::new(),
     };
     c.obs.push(Obs { x: 1.0, y: 2.0, o: Param::new(0.0), hb: SelfBlock::new() });
     c.obs.push(Obs { x: 2.0, y: 3.5, o: Param::new(0.1), hb: SelfBlock::new() });
@@ -117,7 +116,7 @@ fn fit() -> Fit {
 #[test]
 fn nested_triplet_requires_compute() {
     let f = fit();
-    assert!(LmProblem::<f64>::hessian_pattern_requires_compute(&f));
+    assert!(LmProblemInternals::<f64>::hessian_pattern_requires_compute(&f));
 }
 
 // Used to panic ("sparsity pattern changed between iterations"): the
@@ -134,7 +133,7 @@ fn nested_triplet_solves_sparse() {
 }
 
 // ===========================================================================
-// Extended root WITH a root triplet: stays compute-first
+// Extended root whose hook pushes COO entries
 // ===========================================================================
 
 #[arael::model]
@@ -142,14 +141,13 @@ fn nested_triplet_solves_sparse() {
 struct ExtTriplet {
     a: Param<f64>,
     hb: SelfBlock<ExtTriplet>,
-    hbt: TripletBlock<f64>,
 }
 
 impl ExtendedModel<f64> for ExtTriplet {
-    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64], coo: &mut Coo<f64>) {
         let i = self.a.index() as usize;
         let r = params[i] - 3.0;
-        self.hbt.add_residual(r, &[i as u32], &[1.0], grad);
+        coo.add_residual(r, &[i as u32], &[1.0], grad);
     }
     fn extended_cost(&self, params: &[f64]) -> f64 {
         let r = params[self.a.index() as usize] - 3.0;
@@ -158,7 +156,27 @@ impl ExtendedModel<f64> for ExtTriplet {
 }
 
 #[test]
-fn extended_with_triplet_requires_compute() {
-    let e = ExtTriplet { a: Param::new(0.0), hb: SelfBlock::new(), hbt: TripletBlock::new() };
-    assert!(LmProblem::<f64>::hessian_pattern_requires_compute(&e));
+fn extended_with_coo_entries_is_observed() {
+    let mut e = ExtTriplet { a: Param::new(0.0), hb: SelfBlock::new() };
+    // Nothing static says this model has runtime entries: its constraints
+    // declare none and the hook is opaque.
+    assert!(!LmProblemInternals::<f64>::hessian_pattern_requires_compute(&e));
+    // Running the hook is what says so, which is what the solve does once
+    // before its first assembly.
+    let mut x = Vec::new();
+    e.serialize(&mut x);
+    assert!(LmProblemInternals::<f64>::extended_hook_writes_coo(&mut e, &x));
+}
+
+/// And the solve that follows the probe lands on the right answer -- the
+/// hook's entries reach the Hessian through the discovered pattern.
+#[test]
+fn extended_with_coo_entries_solves_sparse() {
+    let mut s = ExtTriplet { a: Param::new(0.0), hb: SelfBlock::new() };
+    let rs = s.solve_sparse(&LmConfig::default()).unwrap();
+    let mut d = ExtTriplet { a: Param::new(0.0), hb: SelfBlock::new() };
+    let rd = d.solve_dense(&LmConfig::default()).unwrap();
+    assert!((rs.end_cost - rd.end_cost).abs() < 1e-12,
+        "sparse {} vs dense {}", rs.end_cost, rd.end_cost);
+    assert!((s.a.value - 3.0).abs() < 1e-9, "a = {}", s.a.value);
 }

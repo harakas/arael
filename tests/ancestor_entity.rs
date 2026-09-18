@@ -8,7 +8,7 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{CooMatrix, LmConfig, LmProblem, RootProblem};
+use arael::simple_lm::{CooMatrix, LmConfig, LmProblem, RootProblem, LmProblemInternals};
 use arael::vect::vect2d;
 
 const TOL: f64 = 1e-9;
@@ -20,7 +20,7 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 /// Cost + all-route + FD + validate battery; returns the dense (g, H).
 fn check_model<P>(label: &str, m: &mut P, manual_cost: f64) -> (Vec<f64>, Vec<f64>)
 where
-    P: LmProblem<f64> + RootProblem<f64>,
+    P: LmProblemInternals<f64> + RootProblem<f64>,
 {
     let mut x = Vec::new();
     RootProblem::serialize(m, &mut x);
@@ -52,10 +52,12 @@ where
         }
     }
 
-    let (csc, positions) = coo.to_csc_with_positions(m).unwrap();
+    let mut ctx = arael::threads::Context::new();
+
+    let (csc, positions) = coo.to_csc_with_positions(m, &mut ctx).unwrap();
     let mut gi = vec![0.0; n];
     let mut vals = vec![0.0; csc.vals.len()];
-    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions);
+    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions, &mut ctx);
     assert!(close(ci, cost, TOL), "{label}: indexed cost");
     for i in 0..n {
         assert!(close(gi[i], gd[i], TOL), "{label}: indexed grad[{i}]");
@@ -65,7 +67,7 @@ where
     let ldab = kd + 1;
     let mut gb = vec![0.0; n];
     let mut band = vec![0.0; ldab * n];
-    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd)
+    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd, &mut ctx)
         .unwrap_or_else(|e| panic!("{label}: band overflow: {e}"));
     assert!(close(cb, cost, TOL), "{label}: band cost");
     for i in 0..n {

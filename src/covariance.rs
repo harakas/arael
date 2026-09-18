@@ -40,7 +40,9 @@
 //! entity's own `H_ee` block (`O(dof^3)`, no factor solve).
 
 use crate::model::Model;
-use crate::simple_lm::{BlockSupernodalMode, CooMatrix, CscMatrix, LmProblem, RootProblem};
+use crate::simple_lm::{
+    BlockSupernodalMode, CooMatrix, CscMatrix, LmProblemInternals, RootProblem,
+};
 use crate::utils::Float;
 use faer::sparse::linalg::cholesky as fchol;
 use nalgebra::DMatrix;
@@ -837,6 +839,7 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     cells: &[(u32, u32)],
     n: usize,
     opts: &CovOptions,
+    ctx: &mut crate::threads::Context,
 ) -> Result<Option<CovAssembly>, CovError> {
     use arael_faer::supernodal as sn;
 
@@ -848,18 +851,19 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     // traversal's order -- what the indexed assembly writes through.
     let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
     let mut positions = Vec::new();
-    LmProblem::bind_hessian_positions(
+    LmProblemInternals::bind_hessian_positions(
         m,
         &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
             resolver.resolve_tile(i as usize, j as usize)
         }),
         &mut positions,
+        ctx,
     );
 
     // Assemble at the model's precision, then carry the values to f64: a
     // covariance is computed in f64 whatever the model is.
     let mut vals_t = vec![T::zero(); hsym.val_count()];
-    m.calc_grad_hessian_sparse_indexed(params, grad, &mut vals_t, &positions);
+    m.calc_grad_hessian_sparse_indexed(params, grad, &mut vals_t, &positions, ctx);
     let vals: Vec<f64> = vals_t.iter().map(|&x| x.to_f64().unwrap_or(f64::NAN)).collect();
 
     let params = sn::SupernodalParams::default();
@@ -1061,7 +1065,7 @@ fn build_band<T: Float>(band: &[T], kd: usize, n: usize, spans: &[(usize, usize)
 /// with the trait in scope after the solution has been written into the model
 /// (i.e. after a `solve_*` / `deserialize`), since it reads the model's current
 /// parameters as the linearization point.
-pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
+pub trait Covariance<T: Float>: LmProblemInternals<T> + RootProblem<T> + Model {
     /// Re-assemble `H` at the current parameters and prepare it for querying, per
     /// `mode`. The dense inverse is never formed. `Err` if `H` is singular, or
     /// (for [`CovMode::TriDiagonal`]) not block-tridiagonal.
@@ -1086,6 +1090,19 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
         }
         let mut grad = vec![T::zero(); n];
 
+        // One store for the whole query. Every walk below goes through
+        // the context, so the block structure is built once here instead
+        // of once per walk: the structure walks and the assembly each
+        // build their own otherwise, and on a large model that is the
+        // expensive part. Owned here and dropped with the call -- a
+        // caller never sees a context.
+        let mut ctx = crate::threads::Context::new();
+        self.begin_with_context(&mut ctx);
+        // An extended hook may push COO entries, which only running it
+        // tells; the walks below need to know before they walk.
+        let __writes_coo = self.extended_hook_writes_coo(&params);
+        ctx.set_runtime_coo(__writes_coo);
+
         // TriDiagonal: assemble straight into the band (no COO/CSC), extract the
         // block-tridiagonal structure, run the forward Schur pass. A coupling
         // beyond the band makes calc_grad_hessian_band fail -> not tridiagonal.
@@ -1097,7 +1114,7 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             spans.sort_by_key(|&(o, _)| o);
             let kd = band_half_width(&spans);
             let mut band = vec![T::zero(); (kd + 1) * n];
-            self.calc_grad_hessian_band(&params, &mut grad, &mut band, kd)
+            self.calc_grad_hessian_band(&params, &mut grad, &mut band, kd, &mut ctx)
                 .map_err(|_| CovError::NotTriDiagonal)?;
             let bd = build_band(&band, kd, n, &spans)?;
             // The band route factorizes nothing, so no ordering is chosen.
@@ -1105,11 +1122,17 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
         }
 
         // The model's block structure, when it has one. Both the block route
-        // and Auto's block ordering are built on it.
+        // and Auto's block ordering are built on it. A model whose pattern
+        // is only knowable after a compute has no complete structure to
+        // walk here -- its COO entries do not exist yet -- so it is left
+        // unblocked and takes the COO route below, which discovers the
+        // pattern and the values in the one assembly it runs anyway.
         let mut spans: Vec<(u32, u32)> = Vec::new();
         self.collect_param_blocks(&mut spans);
         let mut cells: Vec<(u32, u32)> = Vec::new();
-        LmProblem::collect_hessian_cells(self, &mut cells);
+        if !self.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
+            LmProblemInternals::collect_hessian_cells(self, &mut cells, &mut ctx);
+        }
         let blocked = !spans.is_empty() && !cells.is_empty();
 
         // The block route: assemble straight into block form, order over the
@@ -1121,13 +1144,13 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             BlockSupernodalMode::Never => false,
         };
         if want_block && blocked && mode == CovMode::PerQuery {
-            if let Some(a) = block_assemble(self, &params, &mut grad, &spans, &cells, n, opts)? {
+            if let Some(a) = block_assemble(self, &params, &mut grad, &spans, &cells, n, opts, &mut ctx)? {
                 return Ok(a);
             }
         }
 
         let mut coo = CooMatrix::new(n);
-        self.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
+        self.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
         let csc_t = coo.to_csc().map_err(|_| CovError::NotPositiveDefinite)?;
 
         // Upper-triangle CSC of H in f64 (covariance is computed in f64
@@ -1212,4 +1235,4 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
     }
 }
 
-impl<T: Float, P: LmProblem<T> + RootProblem<T> + Model> Covariance<T> for P {}
+impl<T: Float, P: LmProblemInternals<T> + RootProblem<T> + Model> Covariance<T> for P {}

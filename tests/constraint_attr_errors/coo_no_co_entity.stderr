@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/coo_no_co_entity.rs:7: `coo` has no cross pairs to hold -- the body reads no params of the root `W`. Name the self block alone.
+  --> tests/constraint_attr_errors/coo_no_co_entity.rs:14:1
+   |
+14 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

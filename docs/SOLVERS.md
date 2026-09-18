@@ -445,20 +445,34 @@ Reference "healthy" trace: run
 ## `LmProblem` -- the solver's interface
 
 ```rust,ignore
-pub trait LmProblem<T> {
+pub trait LmProblem<T>: LmProblemInternals<T> {
     fn calc_cost(&mut self, params: &[T]) -> T;
-    fn calc_grad_hessian_dense(...) -> T;   // all assembly methods
-    fn calc_grad_hessian_band(...) -> T;    // return the cost as a
-    fn calc_grad_hessian_sparse(...) -> T;  // free byproduct
-    fn calc_grad_hessian_sparse_direct(...) -> T;
-    fn calc_grad_hessian_sparse_indexed(...) -> T;
-    fn advance(&mut self, params: &mut [T]);
+    fn calc_grad_hessian_dense(...) -> T;   // both assembly methods
+    fn calc_grad_hessian_sparse(...) -> T;  // return the cost as a
+    fn advance(&mut self, params: &mut [T]);// free byproduct
 }
 ```
 
 The `#[arael(root)]` macro generates all of these from your constraint
 attributes. You only call them via `solve*`; you never implement
-them by hand.
+them by hand. The two assembly methods are also how you get a Hessian
+to look at: dense for a small model, COO sparse for a large one.
+
+`LmProblemInternals` is the other half -- the routes a backend picks
+(band, CSC, indexed), the context forms of the evaluations, the
+structure walks the sparse patterns are built from, and the elimination
+hints. It is `#[doc(hidden)]`: arael's own interface, not one to program
+against, and it may change without a major version bump. Every method
+has a default, so a hand-written problem opts in with one empty impl:
+
+```rust,ignore
+impl LmProblem<f64> for MyProblem { /* cost, dense, sparse, advance */ }
+impl LmProblemInternals<f64> for MyProblem {}
+```
+
+Solving through a route the problem does not assemble then panics
+saying which route it was, instead of making you write that panic five
+times over.
 
 `advance` is called after every ACCEPTED step. It exists for
 `EulerAngleParam`: the accepted delta angles are folded into the
@@ -628,81 +642,66 @@ only for a root that asks:
 struct Scene { .. }
 ```
 
-**The threaded sweeps cover a limited set of model forms.** A `par` root
-using one they do not cover fails to compile, naming the form; dropping
-the keyword solves that model sequentially with its linear solve still
-threaded. The forms are listed below. They will stop being a special
-case once the sweeps are rebuilt over the model's own structure, and the
-keyword goes with them.
+**The threaded sweeps are experimental.** Dropping the keyword solves a
+model sequentially with its linear solve still threaded. A model holding
+a `TripletBlock` anywhere keeps the keyword but assembles on one thread:
+a triplet pushes into the model rather than into a store, so its sweeps
+cannot run side by side yet. The report says when that happened.
 
-Each thread takes a contiguous share of every constraint collection and
-sweeps it into a **mirror**: its own copy of the Hessian blocks and the
-gradient entries those constraints write. No two threads write the same
-value and nothing is locked. A serial pass then adds the mirrors into the
-Hessian and the gradient. The model is read-only during a sweep, so with
-a `par` root must be `Sync`; a type that is not (a field with interior
-mutability) fails to compile and is named in the error.
+A solve divides every top-level collection into one contiguous range per
+thread, and each thread sweeps its own ranges into its own **store**: a
+copy of the Hessian blocks and the gradient entries those constraints
+write, holding only the entities that range reaches. No two threads
+write the same value and nothing is locked. A serial pass then adds the
+stores into the Hessian and the gradient. The ranges are cut by the work
+under each slot, not by slot count, so a collection whose entries carry
+very different amounts of work still divides evenly.
 
-Summing each entity's contributions per thread and then across the threads
+The cost evaluation of a trial step is split the same way, over the same
+ranges. It only reads, so it has nothing to gather afterwards but the
+sums. A sweep short enough that the worker threads are still waking runs
+on the calling thread instead, which costs about what the sequential
+walk costs.
+
+The model is read-only during a sweep, so a `par` root must be `Sync`; a
+type that is not (a field with interior mutability) fails to compile and
+is named in the error.
+
+Summing each entity's contributions per range and then across the ranges
 reorders the additions: **a threaded assembly matches the sequential one to
 rounding, not to the bit.** The cost and the parameters a solve lands on
 differ in the last bits between thread counts.
 
-Each solve times both forms of each phase on its first calls and keeps the
-faster one, so a model too small to pay for a dispatch stays sequential.
-The mirrors are built once per solve, from the model as it stands then.
-
-A threaded solve assembles into the mirrors and never touches the store a
-sequential one uses. Neither costs anything in the model: a block field
+A threaded solve assembles into its stores and never touches the one a
+sequential solve uses. Neither costs anything in the model: a block field
 holds no values, only its place in the storage the solve owns (see
 [docs/MODEL.md](MODEL.md#a-block-field-is-a-declaration)).
 
-### The forms `par` does not cover
-
-A root that asks for `par` while using one of these fails to compile:
-
-- an `extended` root, or any `TripletBlock` in the model
-- a parent-owned cross block, or a block list mixing own and parent ones
-- a `root.` or `parent.` SelfBlock primary
-- a constraint or entity collection below the root, that is, anything
-  nested more than one level
-- an entity held in more than one collection
-- a ref resolving through a chained path
-- a `constraint_index` field
-
-The error names the form and where it is:
-
-```
-error: `BaProblem`: `par`: a parent-owned CrossBlock is not supported yet on
-  `PinholeObs`. The threaded sweeps are experimental and cover a limited set of
-  model forms (see docs/SOLVERS.md, Threads). Drop `par` to solve this model
-  sequentially; the linear solve still threads.
-```
-
-A root without the keyword never sees this: it assembles sequentially,
-and its report says so.
-
 ### What the threads did
 
-Every solve's [report](#reporting-a-solve----lmresultprint) carries a threads block: the
-counts the two halves were given, the form each sweep settled on, and the
-two times the trial measured before it chose. With `gather_timing` it also
-carries where the sweeps' own time went.
+Every solve's [report](#reporting-a-solve----lmresultprint) carries a
+threads block: the counts the two halves were given and the form each
+sweep ran in. With `gather_timing` it also carries where the sweeps' own
+time went.
 
 ```
   threads   sweeps 4, linear 4
-    assembly    threaded      7 calls  (measured 1.02 ms sequential, 0.98 ms threaded, per call)
-    cost        sequential    8 calls  (measured 0.05 ms sequential, 0.17 ms threaded, per call)
-    per sweep   region 0.39 ms, tasks max 0.22 mean 0.19, gather 0.02, scatter 0.42
-    mirrors     build 0.31 ms x1, 1731 leaves, 1993 blocks, 553 partials
+    assembly    threaded      7 calls
+    cost        threaded      8 calls
+    per assembly region 0.39 ms, tasks max 0.22 mean 0.19, gather 0.02, scatter 0.42
+    per cost    region 0.16 ms, tasks max 0.06 mean 0.06
 ```
 
-A root without `par` prints that in place of the rows. The same is in
-`LmResult::threads` for a caller that would rather read it than parse it,
-and `ThreadReport::fell_back` is the one-line test.
+`region` is dispatch to join; `tasks max` is the longest single thread of
+that region, so the gap between them is the dispatch and the wake-up, and
+the gap between `max` and `mean` is the imbalance.
 
-To reuse what a solve allocates -- the block store holding every Hessian
-block, and the mirrors above -- across many solves of one model, keep an
+A root without `par` prints a line saying so in place of the rows. The
+same is in `LmResult::threads` for a caller that would rather read it
+than parse it, and `ThreadReport::fell_back` is the one-line test.
+
+To reuse what a solve allocates -- the stores above, holding every
+Hessian block -- across many solves of one model, keep an
 `arael::Context` and solve through
 `lm_solve_with_context`, or solve through an `LmSession`, which keeps one.
 The plain entry points make a context per solve.

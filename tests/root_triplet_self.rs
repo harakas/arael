@@ -1,27 +1,28 @@
-// Root-owned TripletBlock + self-primary constraint.
+// Root-coupled `coo` + self-primary constraint.
 //
 // A constraint declared ON the entity struct (self-primary) can couple
 // self-params with root-params via:
-//   #[arael(constraint([<local_self_block>, root.<triplet>], { body }))]
+//   #[arael(constraint([<local_self_block>, coo], { body }))]
 //
-// where `root.<triplet>` names a `TripletBlock<T>` field on the root.
-// Diagonal J^T J writes land on each entity's `SelfBlock<Self>`; the
-// (self, root) cross pair goes into the root's TripletBlock (COO).
+// The body reads the root's params, which is what names the root as the
+// co-entity. Diagonal J^T J writes land on each entity's
+// `SelfBlock<Self>`; the (self, root) cross pair goes to the solve's COO
+// list.
 //
 // This test mirrors `tests/root_params_constraint.rs` in shape but
 // declares the constraint on the entity rather than on a dedicated
-// constraint struct, and routes cross pairs through a root-owned
-// TripletBlock instead of a local CrossBlock<X, Root>. Linear
-// residuals make J^T J equal the true Hessian, so analytic grad +
-// Hessian must match numerical derivatives exactly (up to f.d. noise).
+// constraint struct, and routes cross pairs through COO instead of a
+// local CrossBlock<X, Root>. Linear residuals make J^T J equal the true
+// Hessian, so analytic grad + Hessian must match numerical derivatives
+// exactly (up to f.d. noise).
 
 #[allow(unused_imports)]
 use arael::simple_lm::RootProblem;
-use arael::model::{Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 
 #[arael::model]
-#[arael(constraint([hb, root.hbt], {
+#[arael(constraint([hb, coo], {
     [(item.a + testmodel.offset) * testmodel.isigma,
      (2.0 * item.a - 3.0 * testmodel.offset) * testmodel.isigma]
 }))]
@@ -37,7 +38,6 @@ struct TestModel {
     offset: Param<f64>,
     isigma: f64,
     hb: SelfBlock<TestModel>,
-    hbt: TripletBlock<f64>,
 }
 
 fn build_model() -> (TestModel, Vec<f64>) {
@@ -50,7 +50,6 @@ fn build_model() -> (TestModel, Vec<f64>) {
         offset: Param::new(0.3),
         isigma: 2.0,
         hb: SelfBlock::new(),
-        hbt: TripletBlock::new(),
     };
     let mut params = Vec::new();
     model.serialize(&mut params);

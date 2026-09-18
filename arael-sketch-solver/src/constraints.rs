@@ -1964,7 +1964,7 @@ pub struct LineP2OnArc {
 // false = B's direction (for when A/C are nearly perpendicular to B).
 // Set at constraint creation based on initial geometry.
 // Dense 3-entity coupling: one named CrossBlock<Line, Line> per unordered
-// ref pair. Packed NA*NB storage is faster than TripletBlock's COO push.
+// ref pair. Packed NA*NB storage is faster than a COO push.
 // `cross = (refA, refB)` is mandatory here since all three CrossBlocks
 // share the same type signature.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -2160,7 +2160,7 @@ pub struct DistanceArcEndL {
 /// Two points forced symmetric about a mirror line.
 /// Residual: reflect a across line, compare to c.
 /// Dense 3-entity coupling: packed CrossBlocks for each pair beat
-/// TripletBlock's COO push. hb_ac is unambiguous by type (only
+/// a COO push. hb_ac is unambiguous by type (only
 /// Point-Point pair); the two Point-Line blocks need explicit
 /// `cross = (..)` to pick their ref.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

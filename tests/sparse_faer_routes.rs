@@ -6,7 +6,8 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{SolveFailureKind,
+use arael::simple_lm::{
+    LmProblemInternals,SolveFailureKind,
     lm_solve, CooMatrix, CscMatrix, FaerOrdering, LmConfig, LmProblem, RootProblem,
     SchurPolicy, SolveError, SolverReport, SparseFaer,
 };
@@ -273,7 +274,7 @@ fn a_pose_graph_is_never_reduced() {
         });
     }
     assert!(
-        LmProblem::marginalize_candidates(&c).is_empty(),
+        LmProblemInternals::marginalize_candidates(&c).is_empty(),
         "a pose chain offers nothing to marginalize"
     );
 
@@ -322,11 +323,6 @@ impl LmProblem<f64> for LineFit {
         self.calc_cost(p)
     }
 
-    fn calc_grad_hessian_band(
-        &mut self, _p: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize,
-    ) -> Result<f64, arael::simple_lm::BandOverflow> {
-        unimplemented!("dense/sparse only")
-    }
 
     fn calc_grad_hessian_sparse(
         &mut self, p: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>,
@@ -347,14 +343,13 @@ impl LmProblem<f64> for LineFit {
         self.calc_cost(p)
     }
 
-    fn calc_grad_hessian_sparse_direct(
-        &mut self, _p: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>,
-    ) -> f64 {
-        unimplemented!("not used by SparseFaer")
-    }
 
+}
+
+impl LmProblemInternals<f64> for LineFit {
     fn calc_grad_hessian_sparse_indexed(
         &mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex],
+        _ctx: &mut arael::threads::Context,
     ) -> f64 {
         grad.fill(0.0);
         vals.fill(0.0);

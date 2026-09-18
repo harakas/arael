@@ -1,10 +1,10 @@
 // The f32 side of the combination matrix: SelfBlock, CrossBlock,
-// TripletBlock, and the boxed block variants on an #[arael(root, f32)]
+// `coo`, and the boxed block variants on an #[arael(root, f32)]
 // root -- hand-computed cost, dense-vs-COO assembly agreement, FD
-// gradient, validate. (TripletBlock<f32> and the boxed f32 blocks had
+// gradient, validate. (The f32 COO entries and the boxed f32 blocks had
 // no test coverage anywhere before this.)
 
-use arael::model::{Component, CrossBlock, Param, SelfBlock, TripletBlock};
+use arael::model::{Component, CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{CooMatrix, LmProblem, RootProblem};
 
@@ -66,7 +66,7 @@ struct Tf {
 }
 
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(coo, {
     [(a.v + b.v + c.v - trif.s) * 1.1]
 }))]
 struct Trif {
@@ -77,7 +77,6 @@ struct Trif {
     #[arael(ref = root.nodes)]
     c: Ref<Nf>,
     s: f32,
-    hb: TripletBlock<f32>,
 }
 
 #[arael::model]
@@ -95,7 +94,7 @@ fn f32_self_cross_and_triplet_blocks() {
     let r1 = nodes.push(Nf { v: Param::new(1.3), t: 1.0, hb: SelfBlock::new() });
     let r2 = nodes.push(Nf { v: Param::new(2.2), t: 2.0, hb: SelfBlock::new() });
     let ties = vec![Tf { a: r0, b: r1, d: 1.0, hb: CrossBlock::new() }];
-    let tris = vec![Trif { a: r0, b: r1, c: r2, s: 3.0, hb: TripletBlock::new() }];
+    let tris = vec![Trif { a: r0, b: r1, c: r2, s: 3.0 }];
     let mut w = WF { nodes, ties, tris };
     let nc = |v: f32, t: f32| ((v - t) * 0.3f32).powi(2);
     let manual = nc(0.1, 0.0) + nc(1.3, 1.0) + nc(2.2, 2.0)
@@ -186,7 +185,7 @@ fn f32_parent_selfblock() {
 
 // `[hb, parent.<triplet>]` -- own-params observations coupling to the parent.
 #[arael::model]
-#[arael(constraint([hb, parent.hbt], {
+#[arael(constraint([hb, coo], {
     [otf.y - (curvetf.m * otf.x + otf.o),
      otf.o * 3.0]
 }))]
@@ -202,7 +201,6 @@ struct CurveTf {
     m: Param<f32>,
     obs: std::vec::Vec<Otf>,
     hb: SelfBlock<CurveTf, f32>,
-    hbt: TripletBlock<f32>,
 }
 
 #[arael::model]
@@ -219,10 +217,10 @@ fn f32_parent_triplet() {
             Otf { x: 1.0, y: 2.0, o: Param::new(0.01), hb: SelfBlock::new() },
             Otf { x: 2.0, y: 3.7, o: Param::new(-0.02), hb: SelfBlock::new() },
         ],
-        hb: SelfBlock::new(), hbt: TripletBlock::new(),
+        hb: SelfBlock::new(),
     }]};
     let r = |x: f32, y: f32, o: f32| (y - (1.8 * x + o)).powi(2) + (o * 3.0f32).powi(2);
-    check_f32("f32 [hb, parent.hbt]", &mut w, r(1.0, 2.0, 0.01) + r(2.0, 3.7, -0.02));
+    check_f32("f32 [hb, coo]", &mut w, r(1.0, 2.0, 0.01) + r(2.0, 3.7, -0.02));
 }
 
 // Frines in an Option, directly on the root and under an Option
@@ -316,7 +314,7 @@ struct Ncf {
 }
 
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(coo, {
     [(a.off.c + b.off.c - tricf.s) * 1.1]
 }))]
 struct Tricf {
@@ -325,7 +323,6 @@ struct Tricf {
     #[arael(ref = root.cnodes)]
     b: Ref<Ncf>,
     s: f32,
-    hb: TripletBlock<f32>,
 }
 
 #[arael::model]
@@ -342,7 +339,7 @@ fn f32_component_params_in_a_triplet() {
     let mut cnodes = refs::Vec::new();
     let r0 = cnodes.push(mk(0.1, 0.0));
     let r1 = cnodes.push(mk(1.2, 1.0));
-    let tris = vec![Tricf { a: r0, b: r1, s: 1.5, hb: TripletBlock::new() }];
+    let tris = vec![Tricf { a: r0, b: r1, s: 1.5 }];
     let mut w = WCf { cnodes, tris };
     let nc = |c: f32, t: f32| ((c - t) * 0.3f32).powi(2);
     let manual = nc(0.1, 0.0) + nc(1.2, 1.0) + ((0.1f32 + 1.2 - 1.5) * 1.1).powi(2);

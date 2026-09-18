@@ -4,10 +4,10 @@
 // analytic grad + Hessian must match finite differences exactly (up to f.d.
 // noise); the fits must recover the generating line; and the equivalent
 // forms (`root.` alias vs lowercased type name, `root.hb` vs the param-less
-// `[hb, root.hbt]` triplet spelling) must agree on the optimum.
+// `[hb, coo]` triplet spelling) must agree on the optimum.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 
 // --- the primary form: root.hb, body via the `root` alias ---
@@ -130,11 +130,11 @@ fn root_alias_and_type_name_agree() {
     assert_eq!(r1.iterations, r2.iterations);
 }
 
-// --- the param-less [hb, root.hbt] triplet spelling (formerly a macro
+// --- the param-less [hb, coo] triplet spelling (formerly a macro
 // panic: index out of bounds building the entity spans) ---
 
 #[arael::model]
-#[arael(constraint([hb, root.hbt], { [e3.y - fit3.a * e3.x - fit3.b] }))]
+#[arael(constraint([hb, coo], { [e3.y - fit3.a * e3.x - fit3.b] }))]
 struct E3 {
     x: f64,
     y: f64,
@@ -147,7 +147,6 @@ struct Fit3 {
     a: Param<f64>,
     b: Param<f64>,
     hb: SelfBlock<Fit3>,
-    hbt: TripletBlock<f64>,
     data: std::vec::Vec<E3>,
 }
 
@@ -160,7 +159,6 @@ fn paramless_triplet_form_matches_root_selfblock() {
         a: Param::new(0.3),
         b: Param::new(-0.2),
         hb: SelfBlock::new(),
-        hbt: TripletBlock::new(),
         data: points().into_iter().map(|(x, y)| E3 { x, y, hb: SelfBlock::new() }).collect(),
     };
     let r1 = m1.solve_dense(&LmConfig::conservative()).unwrap();

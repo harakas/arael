@@ -20,7 +20,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, JacobianModel};
-use arael::simple_lm::{self, LmConfig, LmProblem, CooMatrix, CscMatrix};
+use arael::simple_lm::{self, LmConfig, LmProblem, CooMatrix, CscMatrix, LmProblemInternals};
 use arael::refs::{self, Ref};
 
 #[arael::model]
@@ -165,6 +165,8 @@ fn aliased_gradient_matches_fd() {
 /// its own gi == gj skip.
 #[test]
 fn aliased_all_formats_agree() {
+
+    let mut ctx = arael::threads::Context::new();
     let (mut m, params) = build();
     let n = params.len();
     let kd = n - 1;
@@ -175,7 +177,7 @@ fn aliased_all_formats_agree() {
 
     let mut g_band = vec![0.0; n];
     let mut band = vec![0.0; (kd + 1) * n];
-    m.calc_grad_hessian_band(&params, &mut g_band, &mut band, kd).unwrap();
+    m.calc_grad_hessian_band(&params, &mut g_band, &mut band, kd, &mut ctx).unwrap();
     assert_eq!(g_band, g_dense);
     assert_eq!(densify_band(&band, n, kd), h_dense, "band differs from dense");
 
@@ -188,14 +190,14 @@ fn aliased_all_formats_agree() {
     let mut csc_direct = coo.to_csc().unwrap();
     csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
     let mut g_direct = vec![0.0; n];
-    m.calc_grad_hessian_sparse_direct(&params, &mut g_direct, &mut csc_direct);
+    m.calc_grad_hessian_sparse_direct(&params, &mut g_direct, &mut csc_direct, &mut ctx);
     assert_eq!(g_direct, g_dense);
     assert_eq!(densify_csc(&csc_direct), h_dense, "direct CSC differs from dense");
 
-    let (csc, positions) = coo.to_csc_with_positions(&mut m).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(&mut m, &mut ctx).unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g_indexed = vec![0.0; n];
-    m.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions);
+    m.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions, &mut ctx);
     let csc_indexed = CscMatrix { vals, ..csc };
     assert_eq!(g_indexed, g_dense);
     assert_eq!(densify_csc(&csc_indexed), h_dense, "indexed CSC differs from dense");
@@ -316,6 +318,8 @@ fn print_h(label: &str, h: &[f64], n: usize) {
 
 #[test]
 fn aliased_cross_equals_self_formulation() {
+
+    let mut ctx = arael::threads::Context::new();
     let (x, y) = (0.7, -1.3);
 
     // Self formulation.
@@ -383,16 +387,17 @@ fn aliased_cross_equals_self_formulation() {
     // structure from COO; steady state replays via the cached position
     // map). Exercise both variants for both formulations.
     let run_csc = |w: &mut W, params: &[f64], coo: &CooMatrix<f64>, label: &str| {
+        let mut ctx = arael::threads::Context::new();
         let mut csc_direct = coo.to_csc().unwrap();
         csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
         let mut g = vec![0.0; n];
-        w.calc_grad_hessian_sparse_direct(params, &mut g, &mut csc_direct);
+        w.calc_grad_hessian_sparse_direct(params, &mut g, &mut csc_direct, &mut ctx);
         print_h(&format!("H {} via CSC direct (densified)", label), &densify_csc(&csc_direct), n);
 
-        let (csc, positions) = coo.to_csc_with_positions(w).unwrap();
+        let (csc, positions) = coo.to_csc_with_positions(w, &mut ctx).unwrap();
         let mut vals = vec![0.0; csc.vals.len()];
         let mut g2 = vec![0.0; n];
-        w.calc_grad_hessian_sparse_indexed(params, &mut g2, &mut vals, &positions);
+        w.calc_grad_hessian_sparse_indexed(params, &mut g2, &mut vals, &positions, &mut ctx);
         let csc_indexed = CscMatrix { vals, ..csc };
         print_h(&format!("H {} via CSC indexed (densified)", label), &densify_csc(&csc_indexed), n);
         (densify_csc(&csc_direct), densify_csc(&csc_indexed))

@@ -425,7 +425,9 @@ impl bench_harness::arael::Model for Scene {
         matches!(p.route, Route::SchurCg | Route::SchurCgImplicit)
     }
     fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
-        ctx.mirrors::<SceneMirror>().map(|m| m.timing.report(m.threads()))
+        let t = ctx.sweep_timing();
+        if t.assembly.calls() == 0 { return None; }
+        Some(t.report(ctx.threads()))
     }
 }
 

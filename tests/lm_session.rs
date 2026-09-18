@@ -8,6 +8,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
+    LmProblemInternals,
     lm_solve, Band, BandOverflow, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
     LmSession, LmSolver, RootProblem, SchurPolicy, SparseFaer,
 };
@@ -178,44 +179,50 @@ struct BindCounter<'a> {
 }
 
 impl LmProblem<f64> for BindCounter<'_> {
-    fn hessian_pattern_requires_compute(&self) -> bool {
-        self.inner.hessian_pattern_requires_compute()
-    }
-    fn collect_hessian_cells(&self, out: &mut Vec<(u32, u32)>) {
-        self.inner.collect_hessian_cells(out)
-    }
-    fn collect_param_block_spans(&self, out: &mut Vec<(u32, u32)>) {
-        self.inner.collect_param_block_spans(out)
-    }
-    fn bind_hessian_positions(
-        &mut self,
-        binder: &mut arael::model::HessianBinder,
-        out: &mut Vec<arael::ValueIndex>,
-    ) {
-        self.binds += 1;
-        self.inner.bind_hessian_positions(binder, out)
-    }
     fn calc_cost(&mut self, x: &[f64]) -> f64 {
         self.inner.calc_cost(x)
     }
     fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
         self.inner.calc_grad_hessian_dense(x, g, h)
     }
-    fn calc_grad_hessian_band(
-        &mut self, x: &[f64], g: &mut [f64], b: &mut [f64], kd: usize,
-    ) -> Result<f64, BandOverflow> {
-        self.inner.calc_grad_hessian_band(x, g, b, kd)
-    }
     fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
         self.inner.calc_grad_hessian_sparse(x, g, coo)
     }
-    fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], g: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
-        self.inner.calc_grad_hessian_sparse_direct(x, g, csc)
+}
+
+impl LmProblemInternals<f64> for BindCounter<'_> {
+    fn calc_grad_hessian_band(
+        &mut self, x: &[f64], g: &mut [f64], b: &mut [f64], kd: usize,
+        _ctx: &mut arael::threads::Context,
+    ) -> Result<f64, BandOverflow> {
+        self.inner.calc_grad_hessian_band(x, g, b, kd, _ctx)
+    }
+    fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], g: &mut [f64], csc: &mut CscMatrix<f64>, _ctx: &mut arael::threads::Context) -> f64 {
+        self.inner.calc_grad_hessian_sparse_direct(x, g, csc, _ctx)
     }
     fn calc_grad_hessian_sparse_indexed(
         &mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[arael::ValueIndex],
+        _ctx: &mut arael::threads::Context,
     ) -> f64 {
-        self.inner.calc_grad_hessian_sparse_indexed(x, g, vals, pos)
+        self.inner.calc_grad_hessian_sparse_indexed(x, g, vals, pos, _ctx)
+    }
+    fn hessian_pattern_requires_compute(&self) -> bool {
+        self.inner.hessian_pattern_requires_compute()
+    }
+    fn collect_hessian_cells(&self, out: &mut Vec<(u32, u32)>, ctx: &mut arael::threads::Context) {
+        self.inner.collect_hessian_cells(out, ctx)
+    }
+    fn bind_hessian_positions(
+        &mut self,
+        binder: &mut arael::model::HessianBinder,
+        out: &mut Vec<arael::ValueIndex>,
+        ctx: &mut arael::threads::Context,
+    ) {
+        self.binds += 1;
+        self.inner.bind_hessian_positions(binder, out, ctx)
+    }
+    fn collect_param_block_spans(&self, out: &mut Vec<(u32, u32)>, ctx: &mut arael::threads::Context) {
+        self.inner.collect_param_block_spans(out, ctx)
     }
 }
 
@@ -337,13 +344,6 @@ impl LmProblem<f64> for Spy {
     fn calc_grad_hessian_dense(&mut self, _p: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 {
         unimplemented!("sparse only")
     }
-    fn calc_grad_hessian_band(&mut self, _p: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize)
-        -> Result<f64, BandOverflow> {
-        unimplemented!("sparse only")
-    }
-    fn calc_grad_hessian_sparse_direct(&mut self, _p: &[f64], _g: &mut [f64], _c: &mut CscMatrix<f64>) -> f64 {
-        unimplemented!("sparse only")
-    }
 
     fn calc_grad_hessian_sparse(&mut self, p: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
         self.coo_calls += 1;
@@ -363,7 +363,10 @@ impl LmProblem<f64> for Spy {
         self.calc_cost(p)
     }
 
-    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex]) -> f64 {
+}
+
+impl LmProblemInternals<f64> for Spy {
+    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex], _ctx: &mut arael::threads::Context) -> f64 {
         self.indexed_calls += 1;
         grad.fill(0.0);
         vals.fill(0.0);

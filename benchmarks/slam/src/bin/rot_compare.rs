@@ -23,7 +23,7 @@ use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
-use arael::simple_lm::{self, LmConfig, LmProblem, LmTiming};
+use arael::simple_lm::{self, LmConfig, LmProblem, LmProblemInternals, LmTiming};
 use arael::vect::{vect2d, vect3d};
 use scene::Scene;
 use std::time::Duration;
@@ -467,7 +467,7 @@ fn build_qu(scene: &Scene) -> (QuPath, Vec<f64>) {
     (path, params)
 }
 
-fn solve_and_time<P: LmProblem<f64>>(path: &mut P, params: &[f64]) -> (usize, usize, f64, LmTiming) {
+fn solve_and_time<P: LmProblemInternals<f64>>(path: &mut P, params: &[f64]) -> (usize, usize, f64, LmTiming) {
     let result = simple_lm::solve_sparse(params, path, &cfg()).unwrap();
     (result.iterations, result.accepted_iterations, result.end_cost,
      result.timing.expect("gather_timing is on"))

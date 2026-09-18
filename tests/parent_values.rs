@@ -6,7 +6,7 @@
 
 use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{CooMatrix, LmProblem, RootProblem};
+use arael::simple_lm::{CooMatrix, LmProblem, LmProblemInternals, RootProblem};
 
 const TOL: f64 = 1e-9;
 
@@ -17,7 +17,7 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 /// Cost + all-route + FD + validate battery (same as macro_matrix.rs).
 fn check_model<P>(label: &str, m: &mut P, manual_cost: f64)
 where
-    P: LmProblem<f64> + RootProblem<f64>,
+    P: LmProblemInternals<f64> + RootProblem<f64>,
 {
     let mut x = Vec::new();
     RootProblem::serialize(m, &mut x);

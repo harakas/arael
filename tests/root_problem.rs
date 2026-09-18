@@ -5,7 +5,7 @@
 // methods on a concrete struct.
 
 use arael::model::{Param, SelfBlock};
-use arael::simple_lm::{Band, LmConfig, LmProblem, RootProblem, SolveResult};
+use arael::simple_lm::{Band, LmConfig, LmProblem, LmProblemInternals, RootProblem, SolveResult};
 
 #[arael::model]
 #[arael(root)]
@@ -28,7 +28,7 @@ fn model() -> M {
 fn optimize<T, P>(m: &mut P, cfg: &LmConfig<T>) -> SolveResult<T>
 where
     T: arael::utils::Float,
-    P: LmProblem<T> + RootProblem<T>,
+    P: LmProblemInternals<T> + RootProblem<T>,
     arael::simple_lm::Dense: arael::simple_lm::LmSolver<T>,
 {
     m.solve_dense(cfg)

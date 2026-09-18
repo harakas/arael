@@ -1,12 +1,12 @@
 // The runtime-differentiation escape hatch: `#[arael(root, extended)]` +
 // `ExtendedModel`, with the parameters living in `#[arael(skip_self_block)]`
-// entities whose gradient and Hessian arrive through a root TripletBlock
+// entities whose gradient and Hessian arrive through the solve's COO list
 // instead of per-entity SelfBlocks (the runtime_fit_demo shape). A line fit
 // with residuals and derivatives supplied at runtime must reach the
 // closed-form least-squares solution, on the dense and the sparse path.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{ExtendedModel, Param, TripletBlock};
+use arael::model::{Coo, ExtendedModel, Param};
 use arael::refs;
 use arael::simple_lm::{self, LmConfig, LmProblem};
 
@@ -20,7 +20,6 @@ struct Coefficient {
 #[arael(root, extended)]
 struct Fit {
     coeffs: refs::Vec<Coefficient>,
-    hb: TripletBlock<f64>,
     #[arael(skip)]
     data: Vec<(f64, f64)>,
 }
@@ -35,14 +34,14 @@ impl ExtendedModel<f64> for Fit {
         }).sum()
     }
 
-    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64], coo: &mut Coo<f64>) {
         let ia = self.coeffs[0].value.index();
         let ib = self.coeffs[1].value.index();
         let a = params[ia as usize];
         let b = params[ib as usize];
         for &(x, y) in &self.data {
             let r = a * x + b - y;
-            self.hb.add_residual(r, &[ia, ib], &[x, 1.0], grad);
+            coo.add_residual(r, &[ia, ib], &[x, 1.0], grad);
         }
     }
 }
@@ -67,7 +66,6 @@ fn normal_equations(data: &[(f64, f64)]) -> (f64, f64) {
 fn build() -> Fit {
     let mut m = Fit {
         coeffs: refs::Vec::new(),
-        hb: TripletBlock::new(),
         data: data(),
     };
     m.coeffs.push(Coefficient { value: Param::new(0.0) });
@@ -93,7 +91,7 @@ fn extended_line_fit_matches_normal_equations() {
     assert!((dense.coeffs[1].value.value - b_ref).abs() < 1e-8,
         "dense b {} vs {}", dense.coeffs[1].value.value, b_ref);
 
-    // The sparse path must handle the TripletBlock-only structure (no
+    // The sparse path must handle the COO-only structure (no
     // entity SelfBlocks exist to declare the pattern).
     let mut sparse = build();
     let mut p = Vec::new();

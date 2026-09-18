@@ -5,9 +5,9 @@
 // differences, and validate() clean. A silently dropped sweep or a
 // misfilled block fails the cost or route comparison here.
 
-use arael::model::{CrossBlock, Param, SelfBlock, TripletBlock};
+use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{CooMatrix, LmProblem, RootProblem};
+use arael::simple_lm::{CooMatrix, LmProblem, RootProblem, LmProblemInternals};
 
 const TOL: f64 = 1e-9;
 
@@ -30,7 +30,7 @@ fn densify_coo(n: usize, coo: &CooMatrix<f64>) -> Vec<f64> {
 /// The invariant battery every combination case runs.
 fn check_model<P>(label: &str, m: &mut P, manual_cost: f64)
 where
-    P: LmProblem<f64> + RootProblem<f64>,
+    P: LmProblemInternals<f64> + RootProblem<f64>,
 {
     let mut x = Vec::new();
     RootProblem::serialize(m, &mut x);
@@ -52,9 +52,14 @@ where
         }
     }
 
+    // The COO pass and the position binding below must see the same
+    // store: entries a constraint cannot tile live in the store's own
+    // COO list, so a pattern bound against a different one describes
+    // nothing.
+    let mut ctx = arael::threads::Context::new();
     let mut gs = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
-    let cs = m.calc_grad_hessian_sparse(&x, &mut gs, &mut coo);
+    let cs = m.calc_grad_hessian_sparse_with_context(&x, &mut gs, &mut coo, &mut ctx);
     assert!(close(cs, cost, TOL), "{label}: coo cost {} != {}", cs, cost);
     for i in 0..n {
         assert!(close(gs[i], gd[i], TOL), "{label}: coo grad[{i}] {} != dense {}", gs[i], gd[i]);
@@ -67,10 +72,10 @@ where
         }
     }
 
-    let (csc, positions) = coo.to_csc_with_positions(m).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(m, &mut ctx).unwrap();
     let mut gi = vec![0.0; n];
     let mut vals = vec![0.0; csc.vals.len()];
-    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions);
+    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions, &mut ctx);
     assert!(close(ci, cost, TOL), "{label}: indexed cost {} != {}", ci, cost);
     for i in 0..n {
         assert!(close(gi[i], gd[i], TOL), "{label}: indexed grad[{i}]");
@@ -96,7 +101,7 @@ where
     let ldab = kd + 1;
     let mut gb = vec![0.0; n];
     let mut band = vec![0.0; ldab * n];
-    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd)
+    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd, &mut ctx)
         .unwrap_or_else(|e| panic!("{label}: band overflow at full bandwidth: {e}"));
     assert!(close(cb, cost, TOL), "{label}: band cost {} != {}", cb, cost);
     for i in 0..n {
@@ -591,7 +596,7 @@ fn chained_ref_through_a_pose() {
 // triplet, boxed, and multi-containment shapes.
 
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(coo, {
     [(a.v + b.v + c.v - tri.s) * 1.1]
 }))]
 struct Tri {
@@ -602,7 +607,6 @@ struct Tri {
     #[arael(ref = root.nodes)]
     c: Ref<N>,
     s: f64,
-    hb: TripletBlock<f64>,
 }
 
 #[arael::model]
@@ -618,7 +622,7 @@ fn triplet_block_three_entities() {
     let r0 = nodes.push(n(0.1, 0.0));
     let r1 = nodes.push(n(1.2, 1.0));
     let r2 = nodes.push(n(2.3, 2.0));
-    let tris = vec![Tri { a: r0, b: r1, c: r2, s: 3.0, hb: TripletBlock::new() }];
+    let tris = vec![Tri { a: r0, b: r1, c: r2, s: 3.0 }];
     let manual = n_cost(0.1, 0.0) + n_cost(1.2, 1.0) + n_cost(2.3, 2.0)
         + ((0.1f64 + 1.2 + 2.3 - 3.0) * 1.1).powi(2);
     check_model("triplet", &mut CTriplet { nodes, tris }, manual);
@@ -785,7 +789,7 @@ struct Lc {
 }
 
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(coo, {
     [(a.v + b.v + c.v - tsum.s) * 1.1]
 }))]
 struct TSum {
@@ -796,7 +800,6 @@ struct TSum {
     #[arael(ref = root.nodes)]
     c: Ref<N>,
     s: f64,
-    hb: TripletBlock<f64>,
 }
 
 #[arael::model]
@@ -822,7 +825,7 @@ fn root_level_optional_cross_and_triplet() {
     let mut w = AFrineRootOpt {
         nodes,
         loop_closure: Some(Lc { a: r0, b: r1, d: 1.0, hb: CrossBlock::new() }),
-        sum: Some(TSum { a: r0, b: r1, c: r2, s: 3.0, hb: TripletBlock::new() }),
+        sum: Some(TSum { a: r0, b: r1, c: r2, s: 3.0 }),
     };
     let manual = base + ((1.2f64 - 0.1 - 1.0) * 1.5).powi(2)
         + ((0.1f64 + 1.2 + 2.3 - 3.0) * 1.1).powi(2);

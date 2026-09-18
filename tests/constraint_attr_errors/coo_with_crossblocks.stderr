@@ -1,0 +1,15 @@
+error: `coo` cannot share a block list with CrossBlock fields -- name the blocks whose pairs you want tiled, or `coo` alone for all of them
+  --> tests/constraint_attr_errors/coo_with_crossblocks.rs:25:1
+   |
+25 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/coo_with_crossblocks.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

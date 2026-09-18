@@ -200,7 +200,7 @@ pub type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::Sol
 
 /// The two solvers, one per scalar. This is the one thing the generic pipeline
 /// cannot pick for itself. The per-solve TIMING breakdown is the harness's.
-pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
+pub fn solve_f64<P: arael::simple_lm::LmProblemInternals<f64>>(
     params: &[f64],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f64>,
@@ -215,7 +215,7 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 
-pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
+pub fn solve_f32<P: arael::simple_lm::LmProblemInternals<f32>>(
     params: &[f32],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f32>,
@@ -240,7 +240,9 @@ impl Pipeline for Graph {
     type Input = Dataset;
     type Solution = Vec<PoseIn>;
     fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
-        ctx.mirrors::<GraphMirror>().map(|m| m.timing.report(m.threads()))
+        let t = ctx.sweep_timing();
+        if t.assembly.calls() == 0 { return None; }
+        Some(t.report(ctx.threads()))
     }
     fn lambda0(_: &Dataset) -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self {

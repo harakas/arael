@@ -17,15 +17,15 @@
 //   * PointFrine uses multi-cross [pose.hb_pose, hb_root] with
 //     hb_root: CrossBlock<Pose, Path> -- routes the pose<->root cross
 //     Hessian pair arising from globals in robot_pos.
-//   * Tilt uses self-primary + root-owned TripletBlock spec
-//     `(hb_pose, root.hbt)` so it can couple pose.ea with
-//     path.global_rot without needing a dedicated CrossBlock field on
-//     Pose. Cross pairs land in path.hbt (COO).
+//   * Tilt uses the self-primary + `coo` spec `[hb_pose, coo]` so it can
+//     couple pose.ea with path.global_rot without needing a dedicated
+//     CrossBlock field on Pose. The cross pairs go to the solve's COO
+//     list.
 // The rest (drift on raw params, odometry) is unchanged from loc_demo.
 
 use arael::simple_lm::RootProblem;
 use arael::covariance::{CovMode, Covariance};
-use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock, SimpleEulerAngleParam};
+use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -91,11 +91,11 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
 // Tilt: accelerometer-measured roll/pitch is absolute world-frame
 // (gravity). Compare against the effective world-frame orientation
 // R_global * R_pose, not raw pose.ea. The residual touches both
-// pose.ea and path.global_rot; the (pose, path) cross-Hessian pair
-// routes through the root-owned `hbt: TripletBlock` (COO). No
-// dedicated CrossBlock<Pose, Path> field on Pose needed; diagonal
-// writes still land on each entity's own SelfBlock<Self>.
-#[arael(constraint([hb_pose, root.hbt], {
+// pose.ea and path.global_rot; the (pose, path) cross-Hessian pair goes
+// to the solve's COO list. No dedicated CrossBlock<Pose, Path> field on
+// Pose needed; diagonal writes still land on each entity's own
+// SelfBlock<Self>.
+#[arael(constraint([hb_pose, coo], {
     let mr_global = path.global_rot.rotation_matrix();
     let mr2w_eff = mr_global * pose.ea.rotation_matrix();
     let ea_eff = mr2w_eff.get_euler_angles();
@@ -213,7 +213,6 @@ struct Path {
     tilt_isigma: f32,
     frine_isigma_scale: f32,
     hb: SelfBlock<Path, f32>,
-    hbt: TripletBlock<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +445,6 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
         tilt_isigma: 1.0 / tilt_sigma_rad,
         frine_isigma_scale: 1.0,
         hb: SelfBlock::new(),
-        hbt: TripletBlock::new(),
     };
 
     // (landmark index, observing-pose index, feature ref). The pose ref is

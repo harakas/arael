@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/parent_triplet_bad_field.rs:7: `parent.nosuch` does not name a `TripletBlock` field on the containing parent `Curve` -- the (entity, parent) cross pairs need one to live in
+error: $DIR/tests/constraint_attr_errors/parent_triplet_bad_field.rs:7: `parent.nosuch` is not a block a constraint can name here -- the (entity, parent) cross pairs go to COO: write `constraint([hb, coo], ...)` and read the parent's params in the body
   --> tests/constraint_attr_errors/parent_triplet_bad_field.rs:24:1
    |
 24 | #[arael::model]

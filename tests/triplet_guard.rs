@@ -1,9 +1,9 @@
-// Test that guards on TripletBlock constraints are applied correctly.
-// This is a regression test for a bug where TripletBlock guards were
+// Test that guards on COO constraints are applied correctly.
+// This is a regression test for a bug where COO guards were
 // silently ignored in cost and grad/hessian computation.
 
 use arael::simple_lm::RootProblem;
-use arael::model::{Param, SelfBlock, CrossBlock, TripletBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 
@@ -34,9 +34,9 @@ struct GuardedCross {
     hb: CrossBlock<Point, Point>,
 }
 
-// TripletBlock constraint with guard -- guards were NOT applied (bug)
+// COO constraint with guard -- guards were NOT applied (bug)
 #[arael::model]
-#[arael(constraint(hb, guard = self.active, {
+#[arael(constraint(coo, guard = self.active, {
     [(a.pos.x - b.pos.x) * testmodel.constraint_isigma]
 }))]
 struct GuardedTriplet {
@@ -48,7 +48,6 @@ struct GuardedTriplet {
     c: arael::refs::Ref<Point>,
     #[arael(skip)]
     active: bool,
-    hb: TripletBlock<f64>,
 }
 
 // Root model with both constraint types
@@ -114,7 +113,6 @@ fn make_triplet_model(active: bool) -> (TestModel, Vec<f64>) {
         b: model.points.ref_at(1),
         c: model.points.ref_at(2),
         active,
-        hb: TripletBlock::new(),
     });
     let mut params = Vec::new();
     model.serialize(&mut params);
@@ -137,17 +135,17 @@ fn test_crossblock_guard_enables_constraint() {
 
 #[test]
 fn test_tripletblock_guard_disables_constraint() {
-    // THIS IS THE BUG: TripletBlock guard=false should produce zero cost but doesn't
+    // THIS IS THE BUG: COO guard=false should produce zero cost but doesn't
     let (mut model, params) = make_triplet_model(false);
     let cost = model.calc_cost(&params);
-    assert!(cost < 1e-10, "TripletBlock guard=false should produce zero cost, got {}", cost);
+    assert!(cost < 1e-10, "COO guard=false should produce zero cost, got {}", cost);
 }
 
 #[test]
 fn test_tripletblock_guard_enables_constraint() {
     let (mut model, params) = make_triplet_model(true);
     let cost = model.calc_cost(&params);
-    assert!(cost > 1.0, "TripletBlock guard=true should produce nonzero cost, got {}", cost);
+    assert!(cost > 1.0, "COO guard=true should produce nonzero cost, got {}", cost);
 }
 
 #[test]
