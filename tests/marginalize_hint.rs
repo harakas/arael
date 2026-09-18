@@ -11,7 +11,7 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{lm_solve, LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaer};
+use arael::simple_lm::{lm_solve, LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaer, LmProblemInternals};
 
 #[arael::model]
 #[arael(constraint(hb, {

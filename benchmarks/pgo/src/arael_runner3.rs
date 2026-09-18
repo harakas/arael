@@ -147,7 +147,9 @@ impl Pipeline for Graph3 {
     type Input = Dataset3;
     type Solution = Vec<Pose3In>;
     fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
-        ctx.mirrors::<Graph3Mirror>().map(|m| m.timing.report(m.threads()))
+        let t = ctx.sweep_timing();
+        if t.assembly.calls() == 0 { return None; }
+        Some(t.report(ctx.threads()))
     }
     fn lambda0(_: &Dataset3) -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f64(ds) }

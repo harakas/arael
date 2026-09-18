@@ -391,10 +391,11 @@ fn main() {
         fn bench_solver<S: LmSolver<f64>>(
             name: &str,
             solver: &mut S,
-            problem: &mut dyn LmProblem<f64>,
+            problem: &mut dyn arael::simple_lm::LmProblemInternals<f64>,
             x0: &[f64],
             runs: usize,
         ) {
+        let mut ctx = arael::threads::Context::new();
             let n = x0.len();
             let mut matrix = solver.new_matrix(n);
             let mut grad = vec![0.0f64; n];
@@ -402,7 +403,7 @@ fn main() {
             let mut delta = vec![0.0f64; n];
 
             // Warmup: one full compute+solve to initialize symbolic factorization
-            solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
+            solver.compute(problem, x0, &mut grad, &mut matrix, &mut ctx).unwrap();
             solver.extract_diagonal(&matrix, &mut diagonal);
 
             // No min_diagonal floor here, so the damping scale IS the diagonal --
@@ -413,7 +414,7 @@ fn main() {
             let mut assembly_us = Vec::new();
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
-                solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
+                solver.compute(problem, x0, &mut grad, &mut matrix, &mut ctx).unwrap();
                 assembly_us.push(t0.elapsed().as_nanos() as f64 / 1000.0);
             }
 

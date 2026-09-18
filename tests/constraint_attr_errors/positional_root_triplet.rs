@@ -1,19 +1,17 @@
-//! The `(<local_self_block>, root.<triplet>)` positional shape used to
-//! be accepted as a grandfathered form. It now must be bracketed
-//! (`[<local>, root.<triplet>]`) like every other N >= 2 block list.
+//! The `(<local_self_block>, coo)` positional shape: every N >= 2 block
+//! list must be bracketed (`[<local>, coo]`).
 
-use arael::model::{Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock};
 
 #[arael::model]
 #[arael(root, jacobian)]
-#[arael(constraint(hb, root.hbt, {
+#[arael(constraint(hb, coo, {
     [(m.x - 1.0) * m.isigma]
 }))]
 struct M {
     x: Param<f64>,
     isigma: f64,
     hb: SelfBlock<M>,
-    hbt: TripletBlock<f64>,
 }
 
 fn main() {}

@@ -14,6 +14,7 @@ use arael::matrix::matrix3d;
 use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
+    LmProblemInternals,
     BlockSupernodalMode, EnvelopeMode, LmProblem, LmSolver, RootProblem, SchurPolicy,
     SparseFaer, SparseFaerF32,
 };
@@ -382,17 +383,18 @@ fn load_bal(window: Option<usize>) -> Bundle {
 /// where the factorization rejected the system.
 fn steps<T: Float>(
     solver: &mut SparseFaer<T>,
-    problem: &mut dyn LmProblem<T>,
+    problem: &mut dyn LmProblemInternals<T>,
     params: &[T],
     lambdas: &[T],
 ) -> Vec<Option<Vec<T>>>
 where
     SparseFaer<T>: LmSolver<T>,
 {
+        let mut ctx = arael::threads::Context::new();
     let n = params.len();
     let mut m = solver.new_matrix(n);
     let mut grad = vec![T::zero(); n];
-    solver.compute(problem, params, &mut grad, &mut m).expect("compute");
+    solver.compute(problem, params, &mut grad, &mut m, &mut ctx).expect("compute");
     let mut diag = vec![T::zero(); n];
     solver.extract_diagonal(&m, &mut diag);
     lambdas

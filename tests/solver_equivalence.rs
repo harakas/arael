@@ -20,8 +20,7 @@ use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{
     self, CooMatrix, CscMatrix, LmConfig, LmProblem, SolveError,
-    SolveFailureKind, SolverKind, SparseFaerOptions,
-};
+    SolveFailureKind, SolverKind, SparseFaerOptions, LmProblemInternals};
 use arael::vect::{vect2d, vect2f};
 use arael::refs::{self, Ref};
 
@@ -163,7 +162,8 @@ fn hessian_formats_agree() {
     // Band.
     let mut g_band = vec![0.0; n];
     let mut band = vec![0.0; (KD + 1) * n];
-    chain.calc_grad_hessian_band(&params, &mut g_band, &mut band, KD).unwrap();
+    let mut ctx = arael::threads::Context::new();
+    chain.calc_grad_hessian_band(&params, &mut g_band, &mut band, KD, &mut ctx).unwrap();
     assert_eq!(g_band, g_dense);
     assert_eq!(densify_band(&band, n, KD), h_dense, "band assembly differs from dense");
 
@@ -178,15 +178,15 @@ fn hessian_formats_agree() {
     let mut csc_direct = coo.to_csc().unwrap();
     csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
     let mut g_direct = vec![0.0; n];
-    chain.calc_grad_hessian_sparse_direct(&params, &mut g_direct, &mut csc_direct);
+    chain.calc_grad_hessian_sparse_direct(&params, &mut g_direct, &mut csc_direct, &mut ctx);
     assert_eq!(g_direct, g_dense);
     assert_eq!(densify_csc(&csc_direct), h_dense, "direct CSC assembly differs from dense");
 
     // Indexed CSC (cached position map, the production steady-state path).
-    let (csc, positions) = coo.to_csc_with_positions(&mut chain).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(&mut chain, &mut ctx).unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g_indexed = vec![0.0; n];
-    chain.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions);
+    chain.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions, &mut ctx);
     let csc_indexed = CscMatrix { vals, ..csc };
     assert_eq!(g_indexed, g_dense);
     assert_eq!(densify_csc(&csc_indexed), h_dense, "indexed CSC assembly differs from dense");
@@ -201,7 +201,8 @@ fn band_error_on_underdeclared_kd() {
     let kd = 1; // links couple indices up to distance 3
     let mut grad = vec![0.0; n];
     let mut band = vec![0.0; (kd + 1) * n];
-    assert!(chain.calc_grad_hessian_band(&params, &mut grad, &mut band, kd).is_err());
+    let mut ctx = arael::threads::Context::new();
+    assert!(chain.calc_grad_hessian_band(&params, &mut grad, &mut band, kd, &mut ctx).is_err());
 }
 
 #[test]

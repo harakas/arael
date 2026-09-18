@@ -1274,7 +1274,10 @@
 //! ```
 //!
 //! The `#[arael(root)]` macro generates the `LmProblem<T>` impl the
-//! solver needs; you never write it by hand.
+//! solver needs; you never write it by hand. It also generates the
+//! hidden `LmProblemInternals<T>` half -- the routes a backend picks,
+//! the structure walks, the elimination hints -- which is arael's own
+//! interface rather than one to program against.
 //!
 //! ## [`LmConfig`](simple_lm::LmConfig) -- every field, with defaults
 //!
@@ -1361,18 +1364,16 @@
 //! struct Scene { .. }
 //! ```
 //!
-//! **Experimental, and it covers a limited set of model forms.** A `par`
-//! root using a form the threaded sweeps do not cover fails to compile,
-//! naming the form; drop the keyword and the model solves sequentially
-//! with its linear solve still threaded. A `par` root must be [`Sync`],
-//! and its threaded assembly adds up in a different order than the
-//! sequential one, so the two match to rounding, not to the bit. Every
-//! solve's report says which form each sweep ran in.
+//! **Experimental.** Each thread walks its own slice of the model and
+//! writes its own copy of the Hessian blocks; a serial pass adds them
+//! up. A `par` root must be [`Sync`], and its threaded assembly adds up
+//! in a different order than the sequential one, so the two match to
+//! rounding, not to the bit. Drop the keyword and the model solves
+//! sequentially with its linear solve still threaded.
 //!
-//! Threading has overhead: whether it helps, and by how much, depends on the
-//! model and its number of parameters. Each solve times both forms of each
-//! phase on its first calls and keeps the faster one, so a model too small
-//! to pay stays sequential. See
+//! Threading has overhead: whether it helps, and by how much, depends on
+//! the model and its number of parameters. Every solve's report says
+//! what the threads did. See
 //! [docs/SOLVERS.md](https://github.com/harakas/arael/blob/master/docs/SOLVERS.md#threads).
 //!
 //! ## Tuning for performance vs quality
@@ -2427,9 +2428,9 @@ pub use arael_macros::__register_model;
 /// ambiguity downstream.
 pub mod prelude {
     pub use crate::model::{
-        CrossBlock, EulerAngleParam,
+        Coo, CrossBlock, EulerAngleParam,
         ExtendedModel, JacobianModel, Model, Param, QuaternionParam,
-        SelfBlock, SimpleEulerAngleParam, TripletBlock,
+        SelfBlock, SimpleEulerAngleParam,
     };
     pub use crate::covariance::{CovAssembly, CovError, CovMode, Covariance};
     pub use crate::refs::{self, Ref};
@@ -2437,6 +2438,10 @@ pub mod prelude {
         FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
         RootProblem,
     };
+    // Hidden from the docs, but a hand-written problem has to name it to
+    // write its one empty impl.
+    #[doc(hidden)]
+    pub use crate::simple_lm::LmProblemInternals;
     pub use crate::angle::{AngleParam, AngleParamF};
     pub use crate::transform::{
         ScaledTransformParam, ScaledTransformParamF, TransformParam, TransformParamF,

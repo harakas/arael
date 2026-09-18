@@ -5,6 +5,7 @@
 // near its minimum (1, 1) (the well-conditioned regime).
 
 use arael::simple_lm::{
+    LmProblemInternals,
     solve, BandOverflow, CooMatrix, CscMatrix, LmConfig, LmProblem, LmResult,
 };
 
@@ -37,20 +38,12 @@ impl LmProblem<f64> for Rosenbrock {
         self.calc_cost(p)
     }
 
-    fn calc_grad_hessian_band(&mut self, _p: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize)
-        -> Result<f64, BandOverflow> {
-        unimplemented!("dense only")
-    }
     fn calc_grad_hessian_sparse(&mut self, _p: &[f64], _g: &mut [f64], _c: &mut CooMatrix<f64>) -> f64 {
         unimplemented!("dense only")
     }
-    fn calc_grad_hessian_sparse_direct(&mut self, _p: &[f64], _g: &mut [f64], _c: &mut CscMatrix<f64>) -> f64 {
-        unimplemented!("dense only")
-    }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _p: &[f64], _g: &mut [f64], _v: &mut [f64], _pos: &[arael::ValueIndex]) -> f64 {
-        unimplemented!("dense only")
-    }
 }
+
+impl LmProblemInternals<f64> for Rosenbrock {}
 
 fn run(cfg: &LmConfig<f64>, x0: [f64; 2]) -> LmResult<f64> {
     solve(&x0, &mut Rosenbrock, cfg).unwrap()

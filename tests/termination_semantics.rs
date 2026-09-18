@@ -8,7 +8,7 @@
 // small-step tail, so it cannot test this.)
 
 use arael::model::{Param, SelfBlock, CrossBlock};
-use arael::simple_lm::{LmConfig, LmProblem, LmStatus, RootProblem};
+use arael::simple_lm::{LmConfig, LmProblem, LmProblemInternals, LmStatus, RootProblem};
 use arael::vect::vect2d;
 use arael::refs::{self, Ref};
 
@@ -261,10 +261,10 @@ impl LmSolver<f64> for NeverFactorizes {
         <Dense as LmSolver<f64>>::new_matrix(&self.0, n)
     }
     fn compute(
-        &mut self, problem: &mut dyn LmProblem<f64>, params: &[f64],
-        grad: &mut [f64], m: &mut Vec<f64>,
+        &mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64],
+        grad: &mut [f64], m: &mut Vec<f64>, ctx: &mut arael::threads::Context,
     ) -> Result<f64, SolveError> {
-        <Dense as LmSolver<f64>>::compute(&mut self.0, problem, params, grad, m)
+        <Dense as LmSolver<f64>>::compute(&mut self.0, problem, params, grad, m, ctx)
     }
     fn extract_diagonal(&self, m: &Vec<f64>, d: &mut [f64]) {
         <Dense as LmSolver<f64>>::extract_diagonal(&self.0, m, d)

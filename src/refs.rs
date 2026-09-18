@@ -327,6 +327,14 @@ impl<T> Vec<T> {
         self.inner.iter_mut()
     }
 
+    /// The elements of `[lo, hi)` in order. `hi` is clamped to the length
+    /// and an empty or reversed range yields nothing.
+    pub fn range(&self, lo: u32, hi: u32) -> std::slice::Iter<'_, T> {
+        let hi = (hi as usize).min(self.inner.len());
+        let lo = (lo as usize).min(hi);
+        self.inner[lo..hi].iter()
+    }
+
     /// Returns the contents as a slice.
     pub fn as_slice(&self) -> &[T] {
         self.inner.as_slice()
@@ -600,6 +608,14 @@ impl<T> Deque<T> {
         self.inner.iter_mut()
     }
 
+    /// The elements of positions `[lo, hi)`, front to back. `hi` is clamped
+    /// to the length and an empty or reversed range yields nothing.
+    pub fn range(&self, lo: u32, hi: u32) -> std::collections::vec_deque::Iter<'_, T> {
+        let hi = (hi as usize).min(self.inner.len());
+        let lo = (lo as usize).min(hi);
+        self.inner.range(lo..hi)
+    }
+
     /// Returns an iterator yielding a `Ref<T>` for each element, front to back.
     pub fn refs(&self) -> DequeRefIter<T> {
         DequeRefIter { pos: self.first_index, remaining: self.inner.len() as u32,
@@ -844,6 +860,23 @@ impl<T> Blocks<T> {
 
     fn iter(&self) -> BlockIter<'_, T> {
         BlockIter { blocks: self.blocks.iter(), current: [].iter(), remaining: self.len }
+    }
+
+    /// The cells of `[lo, hi)` in index order, opening at the block that
+    /// holds `lo` rather than at the front. `hi` is clamped to the length
+    /// and an empty or reversed range yields nothing.
+    fn iter_range(&self, lo: usize, hi: usize) -> BlockIter<'_, T> {
+        let hi = hi.min(self.len);
+        if lo >= hi {
+            return BlockIter { blocks: [].iter(), current: [].iter(), remaining: 0 };
+        }
+        let (b, o) = (lo >> self.shift, lo & (self.block_len() - 1));
+        let mut blocks = self.blocks[b..].iter();
+        let current = match blocks.next() {
+            Some(block) => block[o..].iter(),
+            None => [].iter(),
+        };
+        BlockIter { blocks, current, remaining: hi - lo }
     }
 
     fn iter_mut(&mut self) -> BlockIterMut<'_, T> {
@@ -1181,6 +1214,30 @@ impl<T> Arena<T> {
         ArenaRefIter { current: 0, slots: &self.slots, _marker: PhantomData }
     }
 
+    /// The live elements of the slot range `[lo, hi)`, in slot order,
+    /// skipping freed slots. Starts at the block holding `lo`, so it costs
+    /// nothing to begin part-way through a long arena.
+    ///
+    /// Slots, not positions: `lo` and `hi` count freed slots too, which is
+    /// what makes a range nameable while elements come and go.
+    pub fn iter_range(&self, lo: u32, hi: u32) -> impl Iterator<Item = &T> + '_ {
+        self.slots.iter_range(lo as usize, hi as usize).filter_map(|c| match &c.slot {
+            Slot::Occupied(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// [`iter_range`](Self::iter_range) with each element's `Ref`.
+    pub fn iter_refs_range(&self, lo: u32, hi: u32) -> impl Iterator<Item = (Ref<T>, &T)> + '_ {
+        let base = lo as usize;
+        self.slots.iter_range(base, hi as usize).enumerate()
+            .filter_map(move |(k, c)| match c {
+                Cell { slot: Slot::Occupied(v), generation } =>
+                    Some((Ref::new_gen((base + k) as u32, *generation), v)),
+                _ => None,
+            })
+    }
+
     /// Returns an iterator yielding `(Ref<T>, &T)` for each live element,
     /// skipping freed slots -- the stable handle alongside the value.
     pub fn iter_refs(&self) -> impl Iterator<Item = (Ref<T>, &T)> + '_ {
@@ -1368,6 +1425,86 @@ impl<'a, T> Iterator for ArenaRefIter<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    // -- range walks --
+
+    #[test]
+    fn vec_range_covers_the_slice_and_clamps() {
+        let v = Vec::from_vec(vec![10, 20, 30, 40]);
+        let got: std::vec::Vec<i32> = v.range(1, 3).copied().collect();
+        assert_eq!(got, vec![20, 30]);
+        assert_eq!(v.range(0, 99).count(), 4, "hi clamps to the length");
+        assert_eq!(v.range(2, 2).count(), 0, "empty range");
+        assert_eq!(v.range(3, 1).count(), 0, "reversed range");
+        assert_eq!(v.range(9, 12).count(), 0, "lo past the end");
+    }
+
+    #[test]
+    fn deque_range_walks_positions_front_to_back() {
+        let mut d: Deque<i32> = Deque::new();
+        d.push_back(20);
+        d.push_back(30);
+        d.push_front(10);
+        let all: std::vec::Vec<i32> = d.iter().copied().collect();
+        assert_eq!(all, vec![10, 20, 30]);
+        let got: std::vec::Vec<i32> = d.range(1, 3).copied().collect();
+        assert_eq!(got, vec![20, 30], "positions, not ref indices");
+        assert_eq!(d.range(0, 99).count(), 3);
+        assert_eq!(d.range(2, 1).count(), 0);
+    }
+
+    #[test]
+    fn arena_range_skips_holes_and_counts_slots() {
+        let mut a: Arena<i32> = Arena::new();
+        let r: std::vec::Vec<Ref<i32>> = (0..6).map(|i| a.push(i * 10)).collect();
+        a.remove(r[1]);
+        a.remove(r[4]);
+        // Slots 0..6 with 1 and 4 free: the range names slots, so it spans
+        // the holes and yields only what is live inside it.
+        let got: std::vec::Vec<i32> = a.iter_range(1, 5).copied().collect();
+        assert_eq!(got, vec![20, 30]);
+        assert_eq!(a.iter_range(0, 6).count(), 4, "every live element");
+        assert_eq!(a.iter_range(1, 2).count(), 0, "a range holding only a hole");
+        assert_eq!(a.iter_range(0, 99).count(), 4, "hi clamps to the slot count");
+        assert_eq!(a.iter_range(4, 1).count(), 0, "reversed range");
+    }
+
+    #[test]
+    fn arena_range_starts_inside_a_later_block() {
+        // Two cells per block, so a range opening at slot 5 opens at block 2
+        // with an offset -- the case a front-to-back walk would not reach.
+        let mut a: Arena<i32> = Arena::with_block_size(2);
+        let r: std::vec::Vec<Ref<i32>> = (0..9).map(|i| a.push(i as i32)).collect();
+        a.remove(r[6]);
+        let got: std::vec::Vec<i32> = a.iter_range(5, 9).copied().collect();
+        assert_eq!(got, vec![5, 7, 8]);
+        // Every start offset agrees with the full walk filtered to the range.
+        let full: std::vec::Vec<(u32, i32)> =
+            a.iter_refs().map(|(rf, v)| (rf.index(), *v)).collect();
+        for lo in 0..10u32 {
+            for hi in lo..11u32 {
+                let want: std::vec::Vec<i32> = full.iter()
+                    .filter(|(i, _)| *i >= lo && *i < hi).map(|(_, v)| *v).collect();
+                let got: std::vec::Vec<i32> = a.iter_range(lo, hi).copied().collect();
+                assert_eq!(got, want, "slots [{}, {})", lo, hi);
+            }
+        }
+    }
+
+    #[test]
+    fn arena_refs_range_carries_the_slot() {
+        let mut a: Arena<i32> = Arena::with_block_size(2);
+        let r: std::vec::Vec<Ref<i32>> = (0..5).map(|i| a.push(i as i32 * 100)).collect();
+        a.remove(r[2]);
+        let got: std::vec::Vec<(u32, i32)> =
+            a.iter_refs_range(1, 5).map(|(rf, v)| (rf.index(), *v)).collect();
+        assert_eq!(got, vec![(1, 100), (3, 300), (4, 400)]);
+        // The refs resolve, so the slot carried is the live generation.
+        for (rf, _) in a.iter_refs_range(0, 5) {
+            assert!(a.get(rf).is_some());
+        }
+    }
 
     // -- Ref --
 

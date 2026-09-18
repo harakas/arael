@@ -11,7 +11,7 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, LmProblem, RootProblem};
+use arael::simple_lm::{block_partition_from_spans, LmProblem, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use arael_faer::schur::{schur_backsub, schur_reduce, schur_symbolic, SchurContext};
 use scene::SceneConfig;
@@ -43,6 +43,7 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 }
 
 fn main() {
+    let mut hctx = arael::threads::Context::new();
     pin_single_core();
     let mut cfg = SceneConfig::default();
     if let Ok(n) = std::env::var("SLAM_POSES") {
@@ -61,10 +62,10 @@ fn main() {
 
     // block H via the two-scan assembly (as SparseFaer's fast path)
     let mut spans = Vec::new();
-    path.collect_param_block_spans(&mut spans);
+    path.collect_param_block_spans(&mut spans, &mut hctx);
     let partition = block_partition_from_spans(&spans, n);
     let mut cells: Vec<(u32, u32)> = Vec::new();
-    arael::model::Model::collect_hessian_cells(&path, &mut cells);
+    LmProblemInternals::collect_hessian_cells(&path, &mut cells, &mut hctx);
     let (hsym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
         partition.clone(),
         partition.clone(),
@@ -73,14 +74,15 @@ fn main() {
     );
     let mut resolver = PositionResolver::new(&hsym);
     let mut positions: Vec<arael::ValueIndex> = Vec::new();
-    arael::model::Model::bind_hessian_positions(
+    LmProblemInternals::bind_hessian_positions(
         &mut path,
         &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
         &mut positions,
+        &mut hctx,
     );
     let mut h = SparseBlockColMat::<usize, f64>::zeroed(hsym);
     let mut grad = vec![0.0; n];
-    path.calc_grad_hessian_sparse_indexed(&params, &mut grad, h.vals_mut(), &positions);
+    path.calc_grad_hessian_sparse_indexed(&params, &mut grad, h.vals_mut(), &positions, &mut hctx);
 
     // What the solver marginalizes: the model names nothing, so take the
     // coupling graph's candidates and pick the biggest, exactly as SparseFaer
@@ -95,7 +97,7 @@ fn main() {
     };
     let hint = RootProblem::marginalize_hint(&path);
     let candidates: Vec<Vec<usize>> = if hint.is_empty() {
-        LmProblem::marginalize_candidates(&path).iter().map(|r| blocks_in(r)).collect()
+        LmProblemInternals::marginalize_candidates(&path).iter().map(|r| blocks_in(r)).collect()
     } else {
         vec![blocks_in(&hint)]
     };

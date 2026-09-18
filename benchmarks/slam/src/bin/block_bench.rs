@@ -10,7 +10,7 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem};
+use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use scene::SceneConfig;
 use std::time::Instant;
@@ -41,6 +41,8 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 }
 
 fn main() {
+
+    let mut ctx = arael::threads::Context::new();
     pin_single_core();
     let mut cfg = SceneConfig::default();
     if let Ok(n) = std::env::var("SLAM_POSES") {
@@ -62,7 +64,7 @@ fn main() {
     let mut grad = vec![0.0; n];
     let (t_coo, coo) = min_ms(rounds, || {
         let mut coo = CooMatrix::new(n);
-        path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
+        path.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
         coo
     });
 
@@ -94,15 +96,16 @@ fn main() {
     let (t_scatter, _) = min_ms(rounds, || {
         bsc.vals_mut().iter_mut().for_each(|v| *v = 0.0);
         let mut cursor = 0usize;
-        arael::model::Model::accumulate_hessian_sparse_indexed(
-            &path, bsc.vals_mut(), &positions_block, &mut cursor);
+        let _ = &mut cursor;
+        LmProblemInternals::scatter_hessian_indexed(
+            &path, bsc.vals_mut(), &positions_block, &mut ctx);
     });
 
     // -- two-scan route: no COO at all ---------------------------------
     // scan 1: block cells from indices alone (structure-only)
     let (t_cells, cells) = min_ms(rounds, || {
         let mut cells: Vec<(u32, u32)> = Vec::new();
-        arael::model::Model::collect_hessian_cells(&path, &mut cells);
+        LmProblemInternals::collect_hessian_cells(&path, &mut cells, &mut ctx);
         cells
     });
     // symbolic from the cells (anchors are ordinary scalar coords)
@@ -118,10 +121,11 @@ fn main() {
     let (t_pos2, positions2) = min_ms(rounds, || {
         let mut resolver = PositionResolver::new(&sym2);
         let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_block.len());
-        arael::model::Model::bind_hessian_positions(
+        LmProblemInternals::bind_hessian_positions(
             &mut path,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
             &mut out,
+            &mut ctx,
         );
         out
     });
@@ -137,10 +141,11 @@ fn main() {
     let (t_spos, _spos) = min_ms(rounds, || {
         let mut resolver = resolver_proto.clone();
         let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_scalar.len());
-        arael::model::Model::bind_hessian_positions(
+        LmProblemInternals::bind_hessian_positions(
             &mut path,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut out,
+            &mut ctx,
         );
         out
     });
@@ -150,16 +155,16 @@ fn main() {
 
     let mut vals_s = vec![0.0; csc.vals.len()];
     let (t_fill_scalar, _) = min_ms(rounds, || {
-        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_s, &positions_scalar)
+        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_s, &positions_scalar, &mut ctx)
     });
     let (t_fill_block, _) = min_ms(rounds, || {
-        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc.vals_mut(), &positions_block)
+        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc.vals_mut(), &positions_block, &mut ctx)
     });
     // second reference: direct CSC accumulation (binary search per
     // write, no position map) -- what indexing buys
     let mut csc_direct = coo.to_csc().expect("valid COO");
     let (t_fill_direct, _) = min_ms(rounds, || {
-        path.calc_grad_hessian_sparse_direct(&params, &mut grad, &mut csc_direct)
+        path.calc_grad_hessian_sparse_direct(&params, &mut grad, &mut csc_direct, &mut ctx)
     });
 
     println!("scene: {} poses, {} params; COO contributions {}, scalar nnz {}, blocks {} ({} block vals)",

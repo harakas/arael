@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/coo_reserved_field_name.rs:7: `coo` is reserved: it names the solve's COO list in a constraint, so a block field cannot be called that
+  --> tests/constraint_attr_errors/coo_reserved_field_name.rs:14:1
+   |
+14 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

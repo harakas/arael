@@ -3,9 +3,9 @@
 // `root.<selfblock>`, the "one shared parameter set, many observations"
 // shape without a container struct or Ref indirection.
 
-use arael::model::{Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock};
 use arael::refs;
-use arael::simple_lm::{CooMatrix, LmConfig, LmProblem, RootProblem};
+use arael::simple_lm::{CooMatrix, LmConfig, LmProblem, RootProblem, LmProblemInternals};
 
 const TOL: f64 = 1e-9;
 
@@ -16,7 +16,7 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 /// Cost + all-route + FD + validate battery (same as macro_matrix.rs).
 fn check_model<P>(label: &str, m: &mut P, manual_cost: f64)
 where
-    P: LmProblem<f64> + RootProblem<f64>,
+    P: LmProblemInternals<f64> + RootProblem<f64>,
 {
     let mut x = Vec::new();
     RootProblem::serialize(m, &mut x);
@@ -30,9 +30,14 @@ where
     let cd = m.calc_grad_hessian_dense(&x, &mut gd, &mut hd);
     assert!(close(cd, cost, TOL), "{label}: dense cost");
 
+    // The COO pass and the position binding below must see the same
+    // store: entries a constraint cannot tile live in the store's own
+    // COO list, so a pattern bound against a different one describes
+    // nothing.
+    let mut ctx = arael::threads::Context::new();
     let mut gs = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
-    let cs = m.calc_grad_hessian_sparse(&x, &mut gs, &mut coo);
+    let cs = m.calc_grad_hessian_sparse_with_context(&x, &mut gs, &mut coo, &mut ctx);
     assert!(close(cs, cost, TOL), "{label}: coo cost");
     let mut hs = vec![0.0; n * n];
     for k in 0..coo.rows.len() {
@@ -48,10 +53,10 @@ where
         }
     }
 
-    let (csc, positions) = coo.to_csc_with_positions(m).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions(m, &mut ctx).unwrap();
     let mut gi = vec![0.0; n];
     let mut vals = vec![0.0; csc.vals.len()];
-    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions);
+    let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions, &mut ctx);
     assert!(close(ci, cost, TOL), "{label}: indexed cost");
     for i in 0..n {
         assert!(close(gi[i], gd[i], TOL), "{label}: indexed grad[{i}]");
@@ -61,7 +66,7 @@ where
     let ldab = kd + 1;
     let mut gb = vec![0.0; n];
     let mut band = vec![0.0; ldab * n];
-    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd)
+    let cb = m.calc_grad_hessian_band(&x, &mut gb, &mut band, kd, &mut ctx)
         .unwrap_or_else(|e| panic!("{label}: band overflow: {e}"));
     assert!(close(cb, cost, TOL), "{label}: band cost");
     for i in 0..n {
@@ -176,11 +181,11 @@ fn parents_nested_below_the_root() {
 // ---------------------------------------------------------------------------
 // `[hb, parent.<triplet>]`: the entity has its OWN params (per-obs
 // nuisance offset), the constraint also touches the containing parent's
-// params, and the (entity, parent) cross pairs live in a TripletBlock on
+// params, and the (entity, parent) cross pairs go to the COO list of
 // the parent -- the non-root analog of `[hb, root.<triplet>]`.
 
 #[arael::model]
-#[arael(constraint([hb, parent.hbt], {
+#[arael(constraint([hb, coo], {
     [obst.y - (curvet.m * obst.x + curvet.c + obst.o),
      obst.o * 3.0]
 }))]
@@ -197,7 +202,6 @@ struct CurveT {
     c: Param<f64>,
     obs: std::vec::Vec<ObsT>,
     hb: SelfBlock<CurveT>,
-    hbt: TripletBlock<f64>,
 }
 
 #[arael::model]
@@ -211,7 +215,7 @@ fn curve_t(m: f64, c: f64, data: &[(f64, f64, f64)]) -> CurveT {
         m: Param::new(m), c: Param::new(c),
         obs: data.iter().map(|&(x, y, o)| ObsT {
             x, y, o: Param::new(o), hb: SelfBlock::new() }).collect(),
-        hb: SelfBlock::new(), hbt: TripletBlock::new(),
+        hb: SelfBlock::new(),
     }
 }
 
@@ -230,7 +234,7 @@ fn own_params_couple_through_parents_triplet() {
         curve_t(-0.2, 0.5, &d2),
     ]};
     let manual = curve_t_cost(0.3, 0.1, &d1) + curve_t_cost(-0.2, 0.5, &d2);
-    check_model("[hb, parent.hbt]", &mut w, manual);
+    check_model("[hb, coo]", &mut w, manual);
 
     // Noiseless data, zero-seeded nuisance offsets: the solve must
     // recover each curve's generating line exactly (offsets pulled to 0
@@ -251,9 +255,9 @@ fn own_params_couple_through_parents_triplet() {
     assert!((w.curves[1].c.value - 0.3).abs() < 1e-7, "c1 {}", w.curves[1].c.value);
 }
 
-// The [hb, root.hbt] twin of a single CurveT, for numerical equivalence.
+// The [hb, coo] twin of a single CurveT, for numerical equivalence.
 #[arael::model]
-#[arael(constraint([hb, root.hbt], {
+#[arael(constraint([hb, coo], {
     [obsr.y - (fitr.m * obsr.x + fitr.c + obsr.o),
      obsr.o * 3.0]
 }))]
@@ -271,7 +275,6 @@ struct FitR {
     c: Param<f64>,
     obs: std::vec::Vec<ObsR>,
     hb: SelfBlock<FitR>,
-    hbt: TripletBlock<f64>,
 }
 
 #[test]
@@ -282,7 +285,7 @@ fn parent_triplet_matches_the_root_triplet_form() {
         m: Param::new(1.8), c: Param::new(0.9),
         obs: d.iter().map(|&(x, y, o)| ObsR {
             x, y, o: Param::new(o), hb: SelfBlock::new() }).collect(),
-        hb: SelfBlock::new(), hbt: TripletBlock::new(),
+        hb: SelfBlock::new(),
     };
     let mut xp = Vec::new();
     RootProblem::serialize(&mut wp, &mut xp);
@@ -327,5 +330,5 @@ fn parent_triplet_nested_below_the_root() {
         GroupT { curves: vec![curve_t(-0.2, 0.5, &d2)] },
     ]};
     let manual = curve_t_cost(0.3, 0.1, &d1) + curve_t_cost(-0.2, 0.5, &d2);
-    check_model("deep [hb, parent.hbt]", &mut w, manual);
+    check_model("deep [hb, coo]", &mut w, manual);
 }

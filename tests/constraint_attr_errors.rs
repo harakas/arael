@@ -22,7 +22,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/root_before_entity.rs");
     t.compile_fail("tests/constraint_attr_errors/same_name_structs.rs");
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_missing_field.rs");
-    t.compile_fail("tests/constraint_attr_errors/root_selfblock_triplet_primary.rs");
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_entity_params.rs");
     t.compile_fail("tests/constraint_attr_errors/duplicate_containment.rs");
     t.compile_fail("tests/constraint_attr_errors/optional_duplicate_containment.rs");
@@ -41,10 +40,14 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/parent_triplet_bad_field.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_triplet_root_parent.rs");
     t.compile_fail("tests/constraint_attr_errors/root_triplet_bad_field.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_as_a_model_field.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_both_co_entities.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_no_co_entity.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_reserved_field_name.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_with_crossblocks.rs");
     t.compile_fail("tests/constraint_attr_errors/option_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/nested_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_bad_field.rs");
-    t.compile_fail("tests/constraint_attr_errors/parent_cross_triplet_primary.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_entity_params.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_ref_mismatch.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_extra_blocks.rs");
@@ -74,10 +77,4 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs");
     t.compile_fail("tests/constraint_attr_errors/data_ref_not_collection.rs");
     t.compile_fail("tests/constraint_attr_errors/data_ref_shadows_parent_slot.rs");
-    // `par` is inert without the `rayon` feature: the root generates
-    // sequentially and there is nothing to reject.
-    if cfg!(feature = "rayon") {
-        t.compile_fail("tests/constraint_attr_errors/par_triplet.rs");
-        t.compile_fail("tests/constraint_attr_errors/par_extended.rs");
-    }
 }

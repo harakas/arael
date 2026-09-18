@@ -1,12 +1,10 @@
-//! A `root.<field>` secondary is no longer a way to place cross pairs:
-//! they go to COO, and the error says so.
+//! `[hb, coo]` with a body that reads no co-entity params: there are no
+//! cross pairs for COO to hold.
 
 use arael::model::{Param, SelfBlock};
 
 #[arael::model]
-#[arael(constraint([hb, root.nosuch], {
-    [e.x - w.b - e.t]
-}))]
+#[arael(constraint([hb, coo], { [(e.x - e.t) * 2.0] }))]
 struct E {
     x: Param<f64>,
     t: f64,

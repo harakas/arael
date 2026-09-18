@@ -7,7 +7,7 @@
 //   cargo run -r --features faer --example bench_sparse
 //   OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 cargo run -r --features faer --example bench_sparse
 
-use arael::simple_lm::RootProblem;
+use arael::simple_lm::{RootProblem, LmProblemInternals};
 use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -369,6 +369,7 @@ fn save_sparsity_png(csc: &arael::simple_lm::CscMatrix<f64>, filename: &str) {
 }
 
 fn main() {
+    let mut ctx = arael::threads::Context::new();
     unsafe {
         std::env::set_var("OMP_NUM_THREADS", "1");
         std::env::set_var("OPENBLAS_NUM_THREADS", "1");
@@ -450,7 +451,7 @@ fn main() {
             let mut csc2 = coo2.to_csc().unwrap();
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
-                path.calc_grad_hessian_sparse_direct(&params, &mut grad, &mut csc2);
+                path.calc_grad_hessian_sparse_direct(&params, &mut grad, &mut csc2, &mut ctx);
                 direct_times.push(t0.elapsed().as_nanos() as f64 / 1000.0);
             }
         }
@@ -466,7 +467,7 @@ fn main() {
             let mut vals = vec![0.0f64; csc2.nnz()];
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
-                path.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &positions);
+                path.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &positions, &mut ctx);
                 indexed_times.push(t0.elapsed().as_nanos() as f64 / 1000.0);
             }
         }
@@ -489,9 +490,10 @@ fn main() {
     fn time_one<S: LmSolver<f64>>(
         name: &str,
         solver: &mut S,
-        problem: &mut dyn LmProblem<f64>,
+        problem: &mut dyn LmProblemInternals<f64>,
         x0: &[f64],
     ) -> Vec<f64> {
+        let mut ctx = arael::threads::Context::new();
         let n = x0.len();
         let mut matrix = solver.new_matrix(n);
         let mut grad = vec![0.0f64; n];
@@ -500,7 +502,7 @@ fn main() {
 
         // First assembly (COO + build for sparse, flat for dense)
         let t0 = std::time::Instant::now();
-        solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
+        solver.compute(problem, x0, &mut grad, &mut matrix, &mut ctx).unwrap();
         let asm1_us = t0.elapsed().as_micros();
 
         solver.extract_diagonal(&matrix, &mut diagonal);
@@ -515,7 +517,7 @@ fn main() {
 
         // Second assembly (indexed for sparse, flat for dense)
         let t0 = std::time::Instant::now();
-        solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
+        solver.compute(problem, x0, &mut grad, &mut matrix, &mut ctx).unwrap();
         let asm2_us = t0.elapsed().as_micros();
 
         solver.extract_diagonal(&matrix, &mut diagonal);

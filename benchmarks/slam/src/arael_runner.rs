@@ -698,7 +698,9 @@ impl bench_harness::arael::Model for Path {
     type Input = Problem;
     type Solution = Solution;
     fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
-        ctx.mirrors::<PathMirror>().map(|m| m.timing.report(m.threads()))
+        let t = ctx.sweep_timing();
+        if t.assembly.calls() == 0 { return None; }
+        Some(t.report(ctx.threads()))
     }
     fn lambda0(p: &Problem) -> f64 { lambda0(p.scene.poses.len(), false) }
     fn build(p: &Problem) -> Self { build(&p.scene) }

@@ -2474,6 +2474,66 @@ fn param_total(type_name: &str) -> usize {
     param_slots(type_name).iter().map(|s| param_slot_size(&s.sft)).sum()
 }
 
+/// A bare `coo` in a block list's secondary slot, resolved: which
+/// co-entity the body couples the entity to. Returns `None` when the
+/// constraint has no such entry; otherwise (reads root params, reads
+/// parent params, the containing parent's type when there is one). Both
+/// or neither is an error, which each caller words for itself.
+fn coo_secondary_join(
+    constraint: &ConstraintAttr,
+    struct_name: &str,
+    root_type_name: &str,
+) -> Option<(bool, bool, Option<String>)> {
+    if !constraint.block_fields.iter().skip(1).any(|bf| bf == "coo") {
+        return None;
+    }
+    let parent = find_containing_parent(root_type_name, struct_name)
+        .filter(|p| p != root_type_name);
+    let root_vars = vec!["root".to_string(), root_type_name.to_lowercase()];
+    let reads_root = body_reads_params(&constraint.body_stmts, &root_vars, root_type_name);
+    let reads_parent = parent.as_ref().is_some_and(|ptype| {
+        let var = constraint.parent_name.clone().unwrap_or_else(|| ptype.to_lowercase());
+        body_reads_params(&constraint.body_stmts, &[var], ptype)
+    });
+    Some((reads_root, reads_parent, parent))
+}
+
+/// Does the body read a PARAMETER of `type_name` through one of the
+/// bindings in `vars`? Bodies name a parameter as `<binding>.<field>`,
+/// so that pair is what this looks for, with `<field>` the head of one of
+/// the type's parameter slots. A data field of the same entity does not
+/// count: reading one couples nothing. This is what decides the
+/// co-entity of `constraint([<self_block>, coo], ...)`.
+fn body_reads_params(body: &[Stmt], vars: &[String], type_name: &str) -> bool {
+    let heads: std::collections::HashSet<String> = param_slots(type_name).iter()
+        .filter_map(|s| s.path.split('.').next().map(|h| h.to_string()))
+        .collect();
+    if heads.is_empty() || vars.is_empty() { return false; }
+    fn walk(
+        ts: TokenStream2,
+        vars: &[String],
+        heads: &std::collections::HashSet<String>,
+    ) -> bool {
+        let tt: Vec<proc_macro2::TokenTree> = ts.into_iter().collect();
+        for w in tt.windows(3) {
+            if let proc_macro2::TokenTree::Ident(a) = &w[0]
+                && let proc_macro2::TokenTree::Punct(p) = &w[1]
+                && let proc_macro2::TokenTree::Ident(b) = &w[2]
+                && p.as_char() == '.'
+                && vars.iter().any(|v| a == v.as_str())
+                && heads.contains(&b.to_string())
+            {
+                return true;
+            }
+        }
+        tt.into_iter().any(|t| match t {
+            proc_macro2::TokenTree::Group(g) => walk(g.stream(), vars, heads),
+            _ => false,
+        })
+    }
+    walk(quote! { #(#body)* }, vars, &heads)
+}
+
 /// A `Ref<T>` whose registered target holds no params (directly or in
 /// components) is a DATA ref: a pure read, excluded from entity/block
 /// accounting. Unregistered targets are not data refs -- they keep
@@ -3455,6 +3515,11 @@ pub fn build_multi_cross_routing(
 
     // (block name, A, B, cross override, parent-owned), own blocks first.
     let mut entries: Vec<(String, String, String, Option<(String, String)>, bool)> = Vec::new();
+    if block_fields.iter().any(|b| b == "coo") {
+        return Err(syn::Error::new_spanned(struct_ident,
+            "`coo` cannot share a block list with CrossBlock fields -- name the blocks \
+whose pairs you want tiled, or `coo` alone for all of them"));
+    }
     for block_name in block_fields {
         // Dotted-path entries (e.g. `pose.hb_pose`) are remote-block
         // references resolved by the remote-block emission path, not
@@ -3786,185 +3851,12 @@ fn add_param_symbols(base: &str, sft: &SymFieldType, out: &mut Vec<String>) {
 
 /// Generate `calc_cost` and `calc_grad_hessian` methods on the root struct.
 /// `precision` is "f32" or "f64".
-/// The mark of an error that only says the mirror path does not cover a
-/// form of this root. The caller generates the root again without the
-/// mirror path; every other error is the user's.
-const PAR_UNSUPPORTED: &str = "[mirror path] ";
-
-fn par_unsupported(msg: String) -> syn::Error {
-    syn::Error::new(proc_macro2::Span::call_site(), format!("{}{}", PAR_UNSUPPORTED, msg))
-}
-
-/// An error the mirror path raised, rewritten for the user: the form it
-/// does not cover, and what to do about it. Other errors pass through.
-pub(crate) fn par_error(root: &syn::Ident, e: syn::Error) -> syn::Error {
-    let text = e.to_string();
-    let Some(reason) = text.strip_prefix(PAR_UNSUPPORTED) else { return e };
-    let reason = reason.strip_prefix(&format!("`{}`: ", root)).unwrap_or(reason);
-    syn::Error::new(e.span(), format!(
-        "`{}`: `par`: {}. The threaded sweeps are experimental and cover a \
-         limited set of model forms (see docs/SOLVERS.md, Threads). Drop `par` \
-         to solve this model sequentially; the linear solve still threads.",
-        root, reason))
-}
-
-/// `par`: an entity container of the mirror -- a place constraints write a
-/// SelfBlock into (a root collection, the root itself, a direct or Option
-/// field). The mirror holds a slab of partials for it.
-struct ParEntity {
-    key: String,
-    /// `self.<coll>` for a container addressed through `Leaves`, or
-    /// `self` / `self.<field>` for a single instance.
-    access: TokenStream2,
-    single: bool,
-    param_count: usize,
-    parts: syn::Ident,
-    slab_ty: TokenStream2,
-    /// `write_indices` statements over `__e`, the entity, into `__idx`.
-    idx_stmts: Vec<TokenStream2>,
-}
-
-/// `par`: how a constraint container's instance is reached by leaf index.
-enum ParInstance {
-    /// A root collection: the leaf index addresses `coll`, bound as `var`.
-    Flat { coll: TokenStream2, var: syn::Ident },
-    /// Constraint structs under a parent entity: the leaf index and sub
-    /// index address the parent (bound as `parent_var`) and the child
-    /// (`__frine`).
-    Nested { coll: TokenStream2, frines: syn::Ident, parent_var: syn::Ident },
-    /// The root itself or a direct field: one leaf, bound as `__item`.
-    Single { access: TokenStream2 },
-}
-
-/// `par`: a constraint container of the mirror -- one sweep loop, with a
-/// leaf list per thread.
-struct ParContainer {
-    leaf: syn::Ident,
-    leaves: syn::Ident,
-    instance: ParInstance,
-    /// Entity id per role, in slot order.
-    roles: Vec<usize>,
-    /// The entity index per role for the build, over the instance
-    /// bindings (`__i`, `__j`, the instance vars).
-    role_exprs: Vec<TokenStream2>,
-    /// Cross blocks the leaf holds: field, type, A role, B role.
-    blocks: Vec<(syn::Ident, TokenStream2, usize, usize)>,
-    gh_entries: Vec<TokenStream2>,
-    cost_prelude: TokenStream2,
-    cost_entries: Vec<TokenStream2>,
-}
-
-/// The `write_indices` statements of one entity type over `base`, into
-/// `__idx`, and the span they fill.
-fn par_idx_stmts(type_name: &str, base: TokenStream2) -> (usize, Vec<TokenStream2>) {
-    let mut stmts = Vec::new();
-    let mut offset = 0usize;
-    for slot in param_slots(type_name) {
-        let size = param_slot_size(&slot.sft);
-        if size == 0 { continue; }
-        let end = offset + size;
-        let access = slot_access(base.clone(), &slot.path);
-        stmts.push(quote! { #access.write_indices(&mut __idx[#offset..#end]); });
-        offset = end;
-    }
-    (offset, stmts)
-}
-
-/// The id of the entity container `key`, registering it on first use.
-fn par_entity_id(
-    entities: &mut Vec<ParEntity>,
-    key: &str,
-    access: TokenStream2,
-    single: bool,
-    type_name: &str,
-    suffix: &str,
-    cast_type: &syn::Type,
-) -> usize {
-    if let Some(i) = entities.iter().position(|e| e.key == key) {
-        return i;
-    }
-    let (n, idx_stmts) = par_idx_stmts(type_name, quote! { __e });
-    let m = n * (n + 1) / 2;
-    entities.push(ParEntity {
-        key: key.to_string(),
-        access,
-        single,
-        param_count: n,
-        parts: syn::Ident::new(&format!("__parts_{}", suffix), proc_macro2::Span::call_site()),
-        slab_ty: quote! { arael::model::SelfBlockArray<#n, #m, #cast_type> },
-        idx_stmts,
-    });
-    entities.len() - 1
-}
-
-/// The leaf type of the constraint container `key` (`self.<path>`).
-fn par_leaf_ident(root_name: &syn::Ident, key: &str) -> syn::Ident {
-    let path = key.strip_prefix("self.").unwrap_or(key).replace('.', "_");
-    syn::Ident::new(&format!("{}Leaf_{}", root_name, path), proc_macro2::Span::call_site())
-}
-
-/// The mirror's leaf list field of the constraint container `key`.
-fn par_leaves_ident(key: &str) -> syn::Ident {
-    let path = key.strip_prefix("self.").unwrap_or(key).replace('.', "_");
-    syn::Ident::new(&format!("__leaves_{}", path), proc_macro2::Span::call_site())
-}
-
-/// The mirror's block list field for the cross block `field` of the
-/// constraint container `key`: one block per leaf, in leaf order, kept
-/// apart from the leaf list so the cost sweep never touches them.
-fn par_blocks_ident(key: &str, field: &syn::Ident) -> syn::Ident {
-    let path = key.strip_prefix("self.").unwrap_or(key).replace('.', "_");
-    syn::Ident::new(&format!("__blocks_{}_{}", path, field), proc_macro2::Span::call_site())
-}
-
-/// The sweep-local binding of a leaf's cross block `field`.
-fn par_blk_ident(field: &syn::Ident) -> syn::Ident {
-    syn::Ident::new(&format!("__blk_{}", field), proc_macro2::Span::call_site())
-}
-
-/// The entity index of a role during the build: the entity's own index
-/// for the iterated entity, 0 for the root, the ref's index otherwise.
-fn par_role_expr(var: &str, root_type_str: &str) -> TokenStream2 {
-    if var == "__item" {
-        quote! { __i }
-    } else if var == root_type_str.to_lowercase() {
-        quote! { 0u32 }
-    } else {
-        let v = syn::Ident::new(var, proc_macro2::Span::call_site());
-        quote! { __frine.#v.index() }
-    }
-}
-
-/// The leaf's cross blocks of a multi-cross constraint: one per own
-/// CrossBlock field, with the roles of its two sides.
-fn par_leaf_blocks(
-    roles: &[(String, usize)],
-    entities: &[ParEntity],
-    triplet_entities: &[(syn::Ident, syn::Ident, usize, usize)],
-    routing: &[MultiCrossRouting],
-    cast_type: &syn::Type,
-) -> Vec<(syn::Ident, TokenStream2, usize, usize)> {
-    let role_at = |idx: usize| -> usize {
-        let var = triplet_entities[idx].0.to_string();
-        roles.iter().position(|(v, _)| *v == var).expect("every entity is a role")
-    };
-    routing.iter().filter(|r| !r.parent_owned).map(|r| {
-        let (a, b) = (role_at(r.a_idx), role_at(r.b_idx));
-        let na = entities[roles[a].1].param_count;
-        let nb = entities[roles[b].1].param_count;
-        let p = na * nb;
-        (r.block_ident.clone(),
-         quote! { arael::model::CrossBlockArray<#na, #nb, #p, #cast_type> }, a, b)
-    }).collect()
-}
-
 /// A statement of the block assembly as emitted for the sequential sweep
 /// and for the mirror sweep of a `par` root: shared, sequential only, or
 /// one form each.
 enum GhStmt {
     Both(TokenStream2),
     Seq(TokenStream2),
-    Split(TokenStream2, TokenStream2),
 }
 
 /// The two statement lists of a [`GhStmt`] sequence.
@@ -3975,7 +3867,6 @@ fn split_gh(stmts: &[GhStmt]) -> (Vec<TokenStream2>, Vec<TokenStream2>) {
         match s {
             GhStmt::Both(t) => { seq.push(t.clone()); par.push(t.clone()); }
             GhStmt::Seq(t) => seq.push(t.clone()),
-            GhStmt::Split(s, p) => { seq.push(s.clone()); par.push(p.clone()); }
         }
     }
     (seq, par)
@@ -3995,6 +3886,52 @@ fn split_gh(stmts: &[GhStmt]) -> (Vec<TokenStream2>, Vec<TokenStream2>) {
 /// straight through both -- the instances are distinct either way, the
 /// dimensions come from the declaration, and a write site reads the
 /// block's slot rather than working out which container it came from.
+/// Claim `acc`'s place in its type's self slab, with `idx` as its
+/// parameter indices. Nothing when the type declares no self block or has
+/// no parameters: there is no slab to hold it.
+fn self_claim(type_name: &str, acc: &TokenStream2, idx: &syn::Ident) -> TokenStream2 {
+    let Some(hb) = registry_lookup(type_name).and_then(|l| l.self_block_field.clone())
+    else { return TokenStream2::new() };
+    if param_total(type_name) == 0 { return TokenStream2::new(); }
+    let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+    let arr = store_array_ident(type_name, &hb);
+    quote! {
+        {
+            let __g = #acc.#hb_id.slot();
+            if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
+                __store.#arr.push_at(__g, __g, &#idx);
+            }
+        }
+    }
+}
+
+/// How many constraint instances of this walk sit under one unit of the
+/// container it is cut by, as an expression over `__u`.
+///
+/// A flat walk's unit is its instance, so one. A nested walk's unit is the
+/// outermost element and the instances are what hangs below it, which is
+/// what an even split by unit count gets wrong: two landmarks are one unit
+/// each whether one carries two observations and the other two hundred.
+fn unit_count_expr(prefix: &[AccessSegment], inner: &syn::Ident) -> TokenStream2 {
+    let Some(k) = prefix.iter().position(|s| s.collection || s.optional) else {
+        return quote! { 1u64 };
+    };
+    let mut body = quote! {
+        __n += arael::threads::Leaves::count(&__c.#inner) as u64;
+    };
+    for seg in prefix[k + 1..].iter().rev() {
+        let f = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
+        body = if seg.collection || seg.optional {
+            quote! {
+                for __c in arael::threads::Leaves::range_iter(&__c.#f, 0, u32::MAX) { #body }
+            }
+        } else {
+            quote! { { let __c = &__c.#f; #body } }
+        };
+    }
+    quote! { { let mut __n = 0u64; let __c = __u; #body __n } }
+}
+
 fn store_array_ident(type_name: &str, field: &str) -> syn::Ident {
     syn::Ident::new(&format!("__a_{}__{}", type_name.to_lowercase(), field),
         proc_macro2::Span::call_site())
@@ -4174,22 +4111,6 @@ pub fn generate_root_methods(
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
-    // `par`: the threaded sweeps over per-thread mirrors, owned by the
-    // solve context. The forms below rewrite every block write into the
-    // mirror, so anything that writes elsewhere (TripletBlock entries,
-    // extended hooks) has no mirror path: the error is the signal for
-    // the caller to generate the root again without one.
-    let par_err = |msg: String| par_unsupported(format!("`{}`: {}", root_name, msg));
-    if par {
-        if custom {
-            return Err(par_err("`extended` is not supported: the extended hooks write the \
-                                model's blocks, which a threaded solve does not use".into()));
-        }
-        if has_triplet_block {
-            return Err(par_err("a TripletBlock anywhere in the model is not supported: \
-                                its entries have no per-thread copy".into()));
-        }
-    }
     let root_var_ident = syn::Ident::new(&root_var_name, proc_macro2::Span::call_site());
     let cast_type: syn::Type = syn::parse_str(precision)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
@@ -4254,8 +4175,65 @@ pub fn generate_root_methods(
     // method's accumulator and come back as the method's result. The
     // inner loop levels are scopes as before.
     let wrap_in_prefix_sweep = |prefix: &[AccessSegment], mutable: bool, inner: TokenStream2| -> TokenStream2 {
-        wrap_in_prefix_scoped(prefix, mutable, inner, Some(&scope), false)
+        // A mutable walk is a tail walk: nothing cuts it, so it keeps the
+        // whole container.
+        let r = quote! { __r };
+        let range = if mutable { None } else { Some(&r) };
+        wrap_in_prefix_ranged(prefix, mutable, inner, Some(&scope), false, range)
     };
+    // The iterator a sweep's own loop takes. That loop is the walk's
+    // outermost only when no collection level sits above it in the prefix;
+    // when one does, the range went there instead.
+    let sweep_iter_for = |prefix: &[AccessSegment], mutable: bool| -> TokenStream2 {
+        if mutable { quote! { iter_mut() } }
+        else if prefix.iter().any(|s| s.collection || s.optional) { quote! { iter() } }
+        else { quote! { range_iter(__r.0, __r.1) } }
+    };
+    // A unit is one slot of a walk's outermost container, so a range is
+    // keyed by that container rather than by the walk: several walks can
+    // share one (an entity's self-block walk and a constraint walk over the
+    // same collection), and they have to be cut alike. The build enumerates
+    // by containment path, not by walk, and keys the same way.
+    let container_keys: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let container_id = |prefix: &[AccessSegment], own: &str| -> usize {
+        let key = match prefix.iter().find(|s| s.collection || s.optional) {
+            Some(seg) => seg.field.clone(),
+            None => own.to_string(),
+        };
+        let mut v = container_keys.borrow_mut();
+        match v.iter().position(|k| *k == key) {
+            Some(i) => i,
+            None => { v.push(key); v.len() - 1 }
+        }
+    };
+    // One entry per walk: which container it is cut by. Split exactly as
+    // the walk lists are, merged-then-loops, so the concatenation below
+    // lines up entry for entry with them.
+    let mut merged_containers: Vec<usize> = Vec::new();
+    let mut loop_containers: Vec<usize> = Vec::new();
+    // Beside each, what one unit of that container is worth: the instances
+    // of this walk under it.
+    let mut merged_weights: Vec<TokenStream2> = Vec::new();
+    let mut loop_weights: Vec<TokenStream2> = Vec::new();
+
+    // The assembly sweep writes the store, never the model: tiles and
+    // gradient stashes through the block arrays, COO entries into the
+    // store's own list. So it takes `&self`, which is what a thread can
+    // be handed.
+    let sweep_self = quote! { &self };
+    let sweep_iter = quote! { iter() };
+    // The single-instance shapes (the root itself, a direct field, an
+    // `Option`) reach their entity through a binding rather than a loop;
+    // reading the marker's slot needs only a shared one.
+    let sweep_self_ref = quote! { let __self_ref = &*self; };
+
+    // The nested-parent form builds its loops directly rather than through
+    // the prefix wrapper, so its outermost one takes the range here. The
+    // loops below it stay whole: a range cuts a walk's outermost level and
+    // everything under it belongs to the unit.
+    let range_it = quote! { range_iter(__r.0, __r.1) };
+    let outer_mc = range_it.clone();
+    let outer_plain = range_it.clone();
 
     // Root SelfBlock index setup: when the root struct has its own
     // Params + a SelfBlock<Self>, its set_indices must be called at
@@ -4373,6 +4351,9 @@ pub fn generate_root_methods(
         ct_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
+        /// What a split store has to claim before it sweeps: the self
+        /// blocks of the participants these entries write through refs.
+        claim_entries: Vec<TokenStream2>,
         /// The constraint declared its own CrossBlock fields rather than
         /// one TripletBlock. Mixing the two on a struct is rejected.
         is_multi_cross: bool,
@@ -4405,6 +4386,20 @@ pub fn generate_root_methods(
         nested_ct_loops: Vec<TokenStream2>,
         nested_gh_loops: Vec<TokenStream2>,
         nested_jac_loops: Vec<TokenStream2>,
+        /// The collections those inner loops walk. A unit of this group is
+        /// worth what hangs below it, and this is what hangs below it.
+        nested_colls: Vec<syn::Ident>,
+        /// Ancestors whose self block a constraint of this group writes
+        /// through `parent.<block>` or `root.<block>` -- a block the item
+        /// itself does not hold. A split store claims each in the walk
+        /// that writes it.
+        ancestor_self_blocks: Vec<AncestorSelfBlock>,
+    }
+    #[derive(PartialEq)]
+    enum AncestorSelfBlock {
+        /// The entity holding the group's collection: the walk's container.
+        Parent { type_name: String },
+        Root,
     }
     struct SelfBlockInfo {
         a_param_count: usize,
@@ -4429,6 +4424,9 @@ pub fn generate_root_methods(
         a_param_count: usize,
         a_idx_stmts: Vec<TokenStream2>,
         block_ident: syn::Ident,
+        /// The entity's type, so a split store can be told which slab to
+        /// give it a place in.
+        type_name: String,
         constraint_index_field: Option<syn::Ident>,
         cost_entries: Vec<TokenStream2>,
         ct_entries: Vec<TokenStream2>,
@@ -4440,9 +4438,6 @@ pub fn generate_root_methods(
     let mut _generated_constraints_fn: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // `par`: what the mirror holds (see `ParEntity` / `ParContainer`).
-    let mut par_entities: Vec<ParEntity> = Vec::new();
-    let mut par_containers: std::collections::BTreeMap<String, ParContainer> =
-        std::collections::BTreeMap::new();
 
     // Collect all types reachable from this root (for multi-root support).
     // Seeded with the root alone: its layout was registered earlier in this
@@ -4702,10 +4697,11 @@ pub fn generate_root_methods(
                 }
                 "TripletBlock" => {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                        format!("{}:{}: `root.{}` is a TripletBlock -- a root-owned \
-                                 TripletBlock is a secondary block: use \
-                                 `constraint([<local_self_block>, root.{}], ...)`",
-                            sc.attr_file, sc.attr_line, rest, rest)));
+                        format!("{}:{}: `root.{}` is a TripletBlock -- cross pairs go to \
+                                 COO through the `coo` keyword: \
+                                 `constraint([<local_self_block>, coo], ...)`, with the \
+                                 root's params read in the body",
+                            sc.attr_file, sc.attr_line, rest)));
                 }
                 _ => {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
@@ -4952,10 +4948,11 @@ pub fn generate_root_methods(
                 });
             } else if playout.triplet_block_fields.contains(&rest) {
                 return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: `parent.{}` is a TripletBlock -- a parent-owned \
-                             TripletBlock is a secondary block: use \
-                             `constraint([<local_self_block>, parent.{}], ...)`",
-                        sc.attr_file, sc.attr_line, rest, rest)));
+                    format!("{}:{}: `parent.{}` is a TripletBlock -- cross pairs go to COO \
+                             through the `coo` keyword: \
+                             `constraint([<local_self_block>, coo], ...)`, with the \
+                             parent's params read in the body",
+                        sc.attr_file, sc.attr_line, rest)));
             } else {
                 let mut have: Vec<String> = Vec::new();
                 if let Some(sb) = &playout.self_block_field {
@@ -4974,6 +4971,18 @@ pub fn generate_root_methods(
                              containing parent `{}` -- it has {}",
                         sc.attr_file, sc.attr_line, rest, parent_type, have)));
             }
+        }
+
+        // `coo` is the keyword for the solve's COO list, so a block field
+        // of that name could never be named in a constraint.
+        if let Some(f) = fields.named.iter().find(|f|
+            f.ident.as_ref().is_some_and(|i| i == "coo"))
+            && extract_block_type_args(&f.ty).is_ok()
+        {
+            return Err(syn::Error::new_spanned(f,
+                format!("{}:{}: `coo` is reserved: it names the solve's COO list in a \
+                         constraint, so a block field cannot be called that",
+                    sc.attr_file, sc.attr_line)));
         }
 
         // Check if block_field is a dotted path (remote block, e.g. pose.hb_pose)
@@ -5033,6 +5042,12 @@ pub fn generate_root_methods(
                     format!("cannot find parent struct containing {}", sc.struct_name)))?;
 
             (parent_type, None, Some((ref_field_name.to_string(), target_block_field.to_string(), target_type)))
+        } else if constraint.primary_block_field() == "coo" {
+            // `constraint(coo, {...})`: the N-ary form. The participants
+            // are the constraint's `Ref` fields, their diagonals go to
+            // their own self blocks and the cross pairs to the store's COO
+            // list. Nothing is declared on the struct.
+            ("__triplet__".to_string(), None, None)
         } else {
             // Local block field on this struct
             let block_field_obj = fields.named.iter().find(|f|
@@ -5046,6 +5061,13 @@ pub fn generate_root_methods(
                         constraint.primary_block_field(), sc.struct_name)));
             };
             let (a, b) = extract_block_type_args(&block_field_obj.unwrap().ty)?;
+            if a == "__triplet__" {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `{}` is a `TripletBlock` -- a constraint puts its cross \
+                             pairs in COO with the `coo` keyword, which declares nothing on \
+                             the struct: `constraint(coo, ...)`",
+                        sc.attr_file, sc.attr_line, constraint.primary_block_field())));
+            }
             (a, b, None)
         };
 
@@ -5082,6 +5104,35 @@ pub fn generate_root_methods(
             a == root_type_str || b_opt.as_deref() == Some(root_type_str.as_str())
         });
 
+        // Self-primary + `coo` secondary:
+        //   #[arael(constraint([<local_self_block>, coo], {...}))]
+        // The entity has its own params, the cross pairs go to the store's
+        // COO list, and the co-entity is whichever of the root or the
+        // containing parent the body reads PARAMS of -- reading both is
+        // an error, as coupling to two owned triplets always was.
+        let coo_join = if is_self_block {
+            coo_secondary_join(&constraint, &sc.struct_name, &root_type_str)
+        } else { None };
+        let coo_parent: Option<String> = coo_join.as_ref().and_then(|(_, _, p)| p.clone());
+        let (coo_joins_root, coo_joins_parent) = if let Some((reads_root, reads_parent, _)) = coo_join {
+            match (reads_root, reads_parent) {
+                (true, true) => return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `coo` couples this entity to one co-entity, but the \
+                             body reads params of both the root `{}` and the containing \
+                             parent `{}`",
+                        sc.attr_file, sc.attr_line, root_name,
+                        coo_parent.clone().unwrap_or_default()))),
+                (false, false) => return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `coo` has no cross pairs to hold -- the body reads no \
+                             params of the root `{}`{}. Name the self block alone.",
+                        sc.attr_file, sc.attr_line, root_name,
+                        coo_parent.as_ref().map(|p| format!(" or of the containing parent `{}`", p))
+                            .unwrap_or_default()))),
+                (r, _) => (r, !r),
+            }
+        } else { (false, false) };
+        let coo_ident = || syn::Ident::new("coo", proc_macro2::Span::call_site());
+
         // Self-primary + root-owned TripletBlock shape:
         //   #[arael(constraint(<local_self_block>, root.<triplet>, {...}))]
         // Primary block is the entity's own SelfBlock<Self>, secondary
@@ -5091,22 +5142,8 @@ pub fn generate_root_methods(
         // root's TripletBlock (COO). Self is treated like an implicit
         // entity — parallel to `has_root_entity` for CrossBlock-backed
         // multi-cross, but with COO storage and no per-pair routing.
-        let root_triplet_field: Option<syn::Ident> = if is_self_block {
-            constraint.block_fields.iter()
-                .filter_map(|bf| bf.strip_prefix("root.").map(|s| s.to_string()))
-                .find_map(|rest| {
-                    root_fields.iter().find(|f|
-                        f.ident.as_ref().map(|i| i.to_string()) == Some(rest.clone()))
-                        .and_then(|f| {
-                            if let syn::Type::Path(tp) = &f.ty
-                                && let Some(seg) = tp.path.segments.last()
-                                && seg.ident == "TripletBlock" {
-                                    return Some(syn::Ident::new(&rest, proc_macro2::Span::call_site()));
-                                }
-                            None
-                        })
-                })
-        } else { None };
+        let root_triplet_field: Option<syn::Ident> =
+            if coo_joins_root { Some(coo_ident()) } else { None };
         let is_root_triplet_self = root_triplet_field.is_some();
         // A `root.`-prefixed secondary that did not resolve above would
         // otherwise fall through to codegen and die as an E0308 far from
@@ -5115,9 +5152,12 @@ pub fn generate_root_methods(
             && let Some(rest) = constraint.block_fields.iter().skip(1)
                 .find_map(|bf| bf.strip_prefix("root.")) {
             return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                format!("{}:{}: `root.{}` does not name a `TripletBlock` field on the \
-                         root `{}` -- the (entity, root) cross pairs need one to live in",
-                    sc.attr_file, sc.attr_line, rest, root_name)));
+                format!("{}:{}: `root.{}` is not a block a constraint can name here -- \
+                         the (entity, root) cross pairs go to COO: write \
+                         `constraint([{}, coo], ...)` and read the root's params in \
+                         the body",
+                    sc.attr_file, sc.attr_line, rest,
+                    constraint.primary_block_field())));
         }
 
         // Self-primary + parent-owned TripletBlock shape:
@@ -5127,8 +5167,9 @@ pub fn generate_root_methods(
         // the CONTAINING parent, and the (entity, parent) cross pairs go
         // to a TripletBlock field on that parent. (field ident, parent
         // type name.)
-        let parent_triplet: Option<(syn::Ident, String)> = if is_self_block
-            && parent_self_primary.is_none() {
+        let parent_triplet: Option<(syn::Ident, String)> = if coo_joins_parent {
+            Some((coo_ident(), coo_parent.clone().unwrap_or_default()))
+        } else if is_self_block && parent_self_primary.is_none() && mixed.is_none() {
             constraint.block_fields.iter().skip(1)
                 .filter_map(|bf| bf.strip_prefix("parent."))
                 .next()
@@ -5139,23 +5180,27 @@ pub fn generate_root_methods(
                                 sc.attr_file, sc.attr_line, rest, sc.struct_name)))?;
                     if parent_type == root_name.to_string() {
                         return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                            format!("{}:{}: `{}`'s containing parent is the root -- use \
-                                     `constraint([{}, root.{}], ...)`",
+                            format!("{}:{}: `{}`'s containing parent is the root -- write \
+                                     `constraint([{}, coo], ...)` and read the root's \
+                                     params in the body",
                                 sc.attr_file, sc.attr_line, sc.struct_name,
-                                constraint.primary_block_field(), rest)));
+                                constraint.primary_block_field())));
                     }
                     let playout = registry_lookup(&parent_type)
                         .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
                             format!("{}:{}: parent type `{}` not in registry",
                                 sc.attr_file, sc.attr_line, parent_type)))?;
-                    if !playout.triplet_block_fields.contains(&rest.to_string()) {
-                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                            format!("{}:{}: `parent.{}` does not name a `TripletBlock` field \
-                                     on the containing parent `{}` -- the (entity, parent) \
-                                     cross pairs need one to live in",
-                                sc.attr_file, sc.attr_line, rest, parent_type)));
-                    }
-                    Ok((syn::Ident::new(rest, proc_macro2::Span::call_site()), parent_type))
+                    let _ = &playout;
+                    // A `parent.` secondary named a parent-owned TripletBlock;
+                    // those pairs go to COO now, and which co-entity they
+                    // couple comes from the params the body reads.
+                    Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `parent.{}` is not a block a constraint can name \
+                                 here -- the (entity, parent) cross pairs go to COO: write \
+                                 `constraint([{}, coo], ...)` and read the parent's params \
+                                 in the body",
+                            sc.attr_file, sc.attr_line, rest,
+                            constraint.primary_block_field())))
                 })
                 .transpose()?
         } else { None };
@@ -6152,131 +6197,27 @@ pub fn generate_root_methods(
             None
         };
 
-        // `par`: the entity roles of this constraint in the slot order of
-        // its leaf, each an entity container of the mirror. Every write
-        // below names one of them, so a form that writes elsewhere is
-        // rejected here.
-        let par_roles: Vec<(String, usize)> = if par {
-            let loc = format!("{}:{}", sc.attr_file, sc.attr_line);
-            let unsupported = |what: &str| par_unsupported(
-                format!("{}: {} is not supported yet on `{}`", loc, what, sc.struct_name));
-            if is_triplet || is_root_triplet_self || parent_triplet.is_some() {
-                return Err(unsupported("a TripletBlock constraint"));
-            }
-            if parent_cross.is_some() || mixed.is_some() {
-                return Err(unsupported("a parent-owned CrossBlock"));
-            }
-            if root_self_primary.is_some() || parent_self_primary.is_some() {
-                return Err(unsupported("a `root.`/`parent.` SelfBlock primary"));
-            }
-            if !cross_prefix.is_empty() {
-                return Err(unsupported("a constraint collection below the root"));
-            }
-            if registry_lookup(&sc.struct_name).is_some_and(|l| l.constraint_index_field.is_some()) {
-                return Err(unsupported("a `constraint_index` field"));
-            }
-            let root_lc = root_type_str.to_lowercase();
-            let mut roles: Vec<(String, usize)> = Vec::new();
-            // A root collection reached by one of this constraint's refs.
-            let mut ref_entity = |var: &str| -> syn::Result<usize> {
-                if var == root_lc {
-                    return Ok(par_entity_id(&mut par_entities, "self", quote! { self },
-                        true, &root_type_str, "self", &cast_type));
-                }
-                let path = ref_index_paths.get(var).ok_or_else(|| unsupported(
-                    &format!("the entity `{}` (no resolve path)", var)))?;
-                let coll = path.strip_prefix("self.")
-                    .filter(|c| !c.contains('.'))
-                    .ok_or_else(|| unsupported(&format!(
-                        "the ref `{}` resolving through `{}` (a chained path)", var, path)))?;
-                let type_name = fields.named.iter()
-                    .find(|f| f.ident.as_ref().is_some_and(|i| i == var))
-                    .and_then(|f| extract_wrapper_inner(&f.ty, "Ref").map(|(_, id)| id.to_string()))
-                    .ok_or_else(|| unsupported(&format!("the entity `{}` (not a Ref field)", var)))?;
-                let coll_id = syn::Ident::new(coll, proc_macro2::Span::call_site());
-                Ok(par_entity_id(&mut par_entities, path, quote! { self.#coll_id },
-                    false, &type_name, coll, &cast_type))
-            };
-            if is_self_block {
-                if containing_paths.len() > 1 {
-                    return Err(unsupported("an entity held in several collections"));
-                }
-                let id = match &entity_location {
-                    EntityLocation::Collection { field } => {
-                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
-                        par_entity_id(&mut par_entities, &format!("self.{}", field),
-                            quote! { self.#fi }, false, &a_type, field, &cast_type)
-                    }
-                    EntityLocation::OptionalField { field } => {
-                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
-                        par_entity_id(&mut par_entities, &format!("self.{}", field),
-                            quote! { self.#fi }, false, &a_type, field, &cast_type)
-                    }
-                    EntityLocation::DirectField { field } => {
-                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
-                        par_entity_id(&mut par_entities, &format!("self.{}", field),
-                            quote! { self.#fi }, true, &a_type, field, &cast_type)
-                    }
-                    EntityLocation::RootSelf => par_entity_id(&mut par_entities, "self",
-                        quote! { self }, true, &root_type_str, "self", &cast_type),
-                    EntityLocation::Nested { .. } => {
-                        return Err(unsupported("an entity collection below the root"));
-                    }
-                };
-                roles.push(("__item".to_string(), id));
-            } else if is_multi_cross {
-                for (var_id, _, _, _) in &triplet_entities {
-                    let v = var_id.to_string();
-                    let id = ref_entity(&v)?;
-                    roles.push((v, id));
-                }
-            } else if is_remote_block {
-                let (ref_field_name, _, _) = remote_block_info.as_ref().unwrap();
-                let id = ref_entity(ref_field_name)?;
-                roles.push((ref_field_name.clone(), id));
-            } else if is_root_level_cross {
-                let a = a_var_ident_for_block.as_ref().unwrap().to_string();
-                let b = b_var_ident_for_block.as_ref().unwrap().to_string();
-                let ia = ref_entity(&a)?;
-                let ib = ref_entity(&b)?;
-                roles.push((a, ia));
-                roles.push((b, ib));
-            } else {
-                // Nested cross: the parent entity's collection, then the ref.
-                match &entity_location {
-                    EntityLocation::Collection { .. } => {}
-                    _ => return Err(unsupported("a parent entity outside a root collection")),
-                }
-                let b = b_var_ident_for_block.as_ref().unwrap().to_string();
-                let ib = ref_entity(&b)?;
-                let ia = par_entity_id(&mut par_entities, &format!("self.{}", coll_ident_str),
-                    quote! { self.#coll_ident }, false, &a_type, &coll_ident_str, &cast_type);
-                roles.push(("__item".to_string(), ia));
-                roles.push((b, ib));
-            }
-            roles
-        } else { Vec::new() };
-        // The mirror's write target for an entity var: the thread's slab
-        // for its container, and the leaf's slot for that role in it.
-        let par_target = |var: &str| -> syn::Result<(TokenStream2, TokenStream2)> {
-            let k = par_roles.iter().position(|(v, _)| v == var)
-                .ok_or_else(|| par_unsupported(
-                    format!("{}:{}: `{}` has no mirror role on `{}`",
-                        sc.attr_file, sc.attr_line, var, sc.struct_name)))?;
-            let parts = &par_entities[par_roles[k].1].parts;
-            Ok((quote! { #parts }, quote! { __leaf.slots[#k] as usize }))
-        };
-
         // --- Robust loss setup ---
         // With a loss the block accumulates its squared residual norm into
         // __block_cost, then contributes rho(s) to __cost and scales every
         // Hessian/gradient write by the weight __w = rho'(s). Without a loss,
         // every token below is empty and the emission is byte-identical.
         let loss_present = loss_expr.is_some();
-        let (m_add, m_cross): (TokenStream2, TokenStream2) = if loss_present {
-            (quote! { add_residual_with_loss }, quote! { add_residual_cross_with_loss })
+        let m_cross: TokenStream2 = if loss_present {
+            quote! { add_residual_cross_with_loss }
         } else {
-            (quote! { add_residual }, quote! { add_residual_cross })
+            quote! { add_residual_cross }
+        };
+        // A write into the store picks its addressing from the sweep's
+        // `MAPPED`: a whole store takes the marker's slot as it stands, a
+        // thread's resolves it through the map. The constant is the
+        // instantiation's, so neither copy carries a test. Writes that do
+        // not go to the store (a mirror partial, a model TripletBlock)
+        // keep `m_add` / `m_cross`.
+        let s_add: TokenStream2 = if loss_present {
+            quote! { add_residual_with_loss_at::<MAPPED> }
+        } else {
+            quote! { add_residual_at::<MAPPED> }
         };
         // Build the finalize statements (compute rho, and for the gh path the
         // weight) from the loss expression, sharing the residual pipeline:
@@ -6572,7 +6513,7 @@ pub fn generate_root_methods(
                     let access = entity_access_expr(&var_id.to_string())?;
                     let arr = store_array_ident(&type_id.to_string(), &hb);
                     triplet_calls.push(quote! {
-                        __store.#arr.#m_add(
+                        __store.#arr.#s_add(
                             #access.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                     });
                 }
@@ -6582,7 +6523,7 @@ pub fn generate_root_methods(
                     .filter(|(_, _, start, count)| !span_zero(*start, *count))
                     .count();
                 let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
-                    __frine.#block_ident.#m_cross(
+                    __store.__coo.#m_cross(
                         #wr,
                         &__all_idx,
                         &[#(#dr_f64),*],
@@ -6613,19 +6554,11 @@ pub fn generate_root_methods(
                     remote_block_info.as_ref().map(|(_, _, t)| t.clone())
                 } else { None };
                 let mut self_block_calls: Vec<TokenStream2> = Vec::new();
-                let mut self_block_calls_par: Vec<TokenStream2> = Vec::new();
                 let mut remote_self_block_call: Option<TokenStream2> = None;
-                let mut remote_self_block_call_par: Option<TokenStream2> = None;
                 for (var_id, type_id, start, count) in &triplet_entities {
                     if span_zero(*start, *count) { continue; }
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     let type_id_str = type_id.to_string();
-                    if par {
-                        let (pt, ps) = par_target(&var_id.to_string())?;
-                        self_block_calls_par.push(quote! {
-                            #pt.#m_add(#ps, #wr, &[#(#entity_dr),*]);
-                        });
-                    }
                     if type_id_str == root_ident_str {
                         // Root: its block is a root field, disjoint from the
                         // iterated collection -- write directly through self.
@@ -6636,7 +6569,7 @@ pub fn generate_root_methods(
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                         let arr = store_array_ident(&type_id_str, &hb);
                         self_block_calls.push(quote! {
-                            __store.#arr.#m_add(
+                            __store.#arr.#s_add(
                                 self.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
                         continue;
@@ -6649,10 +6582,9 @@ pub fn generate_root_methods(
                             .unwrap_or_default();
                         let arr = store_array_ident(&type_id_str, &rhb);
                         remote_self_block_call = Some(quote! {
-                            __store.#arr.#m_add(#rtw.slot() as usize, #wr, &[#(#entity_dr),*]);
+                            __store.#arr.#s_add(#rtw.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
                         // The mirror form wrote it above, in entity order.
-                        remote_self_block_call_par = self_block_calls_par.pop();
                         continue;
                     }
                     let hb = registry_lookup(&type_id_str)
@@ -6663,12 +6595,11 @@ pub fn generate_root_methods(
                     let access = entity_access_expr(&var_id.to_string())?;
                     let arr = store_array_ident(&type_id_str, &hb);
                     self_block_calls.push(quote! {
-                        __store.#arr.#m_add(
+                        __store.#arr.#s_add(
                             #access.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                     });
                 }
                 let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
-                let mut cross_block_calls_par: Vec<TokenStream2> = Vec::new();
                 for route in &multi_cross_routing {
                     if span_zero(route.a_start, route.a_count)
                         || span_zero(route.b_start, route.b_count) { continue; }
@@ -6690,43 +6621,27 @@ pub fn generate_root_methods(
                     };
                     let arr = store_array_ident(&holder, &block.to_string());
                     cross_block_calls.push(quote! {
-                        __store.#arr.block_mut(#target.slot() as usize).#m_cross(
-                            #wr,
-                            &[#(#dr_a),*],
-                            &[#(#dr_b),*],
-                        );
-                    });
-                    let blk = par_blk_ident(block);
-                    cross_block_calls_par.push(quote! {
-                        #blk.#m_cross(
+                        __store.#arr.block_mut_at::<MAPPED>(#target.slot() as usize).#m_cross(
                             #wr,
                             &[#(#dr_a),*],
                             &[#(#dr_b),*],
                         );
                     });
                 }
-                let writes = GhStmt::Split(quote! {
+                let writes = GhStmt::Seq(quote! {
                     #(#self_block_calls)*
                     #remote_self_block_call
                     #(#cross_block_calls)*
-                }, quote! {
-                    #(#self_block_calls_par)*
-                    #remote_self_block_call_par
-                    #(#cross_block_calls_par)*
                 });
                 if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
             } else if is_remote_block {
                 if !all_zero {
                     let rtw = remote_target_write.as_ref().unwrap();
-                    let par_write = if par {
-                        let (pt, ps) = par_target(&remote_block_info.as_ref().unwrap().0)?;
-                        quote! { #pt.#m_add(#ps, #wr, &[#(#dr_f64),*]); }
-                    } else { quote! {} };
                     let rty = remote_block_info.as_ref().unwrap().2.clone();
                     let arr = store_array_ident(&rty, &block_ident.to_string());
-                    deferred_writes.push(GhStmt::Split(quote! {
-                        __store.#arr.#m_add(#rtw.slot() as usize, #wr, &[#(#dr_f64),*]);
-                    }, par_write));
+                    deferred_writes.push(GhStmt::Seq(quote! {
+                        __store.#arr.#s_add(#rtw.slot() as usize, #wr, &[#(#dr_f64),*]);
+                    }));
                 }
             } else if is_self_block {
                 if is_root_joined {
@@ -6765,7 +6680,7 @@ pub fn generate_root_methods(
                                 .skip(*s_start).take(*s_count).cloned().collect();
                             let arr = store_array_ident(&a_type, &block_ident.to_string());
                             quote! {
-                                __store.#arr.#m_add(
+                                __store.#arr.#s_add(
                                     __item.#block_ident.slot() as usize, #wr, &[#(#dr_self),*]);
                             }
                         }
@@ -6777,7 +6692,7 @@ pub fn generate_root_methods(
                                 .skip(*r_start).take(*r_count).cloned().collect();
                             let arr = store_array_ident(&joined_type, &joined_hb);
                             quote! {
-                                __store.#arr.#m_add(
+                                __store.#arr.#s_add(
                                     #joined_accessor.#joined_hb_ident.slot() as usize, #wr, &[#(#dr_root),*]);
                             }
                         }
@@ -6785,13 +6700,14 @@ pub fn generate_root_methods(
                     };
                     // The (self, joined) cross pairs need a declared
                     // triplet -- the root's or the parent's -- and both
-                    // spans live.
+                    // spans live. The declaration says the pairs are COO;
+                    // the entries themselves go to the store's list.
                     let owned_triplet: Option<syn::Ident> = root_triplet_field.clone()
                         .or_else(|| parent_triplet.as_ref().map(|(i, _)| i.clone()));
                     let cross_call = match (&owned_triplet, &self_entry, &root_entry) {
-                        (Some(triplet_ident), Some((_, _, ss, sc_)), Some((_, _, rs, rc)))
+                        (Some(_), Some((_, _, ss, sc_)), Some((_, _, rs, rc)))
                             if !span_zero(*ss, *sc_) && !span_zero(*rs, *rc) => quote! {
-                                #joined_accessor.#triplet_ident
+                                __store.__coo
                                     .#m_cross(
                                         #wr,
                                         &__all_idx,
@@ -6808,15 +6724,11 @@ pub fn generate_root_methods(
                     });
                     if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 } else if !all_zero {
-                    let par_write = if par {
-                        let (pt, ps) = par_target("__item")?;
-                        quote! { #pt.#m_add(#ps, #wr, &[#(#dr_f64),*]); }
-                    } else { quote! {} };
                     let arr = store_array_ident(&a_type, &block_ident.to_string());
-                    let writes = GhStmt::Split(quote! {
-                        __store.#arr.#m_add(
+                    let writes = GhStmt::Seq(quote! {
+                        __store.#arr.#s_add(
                             __item.#block_ident.slot() as usize, #wr, &[#(#dr_f64),*]);
-                    }, par_write);
+                    });
                     if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 }
             } else {
@@ -6838,10 +6750,10 @@ pub fn generate_root_methods(
                 let a_arr = store_array_ident(&a_type, &a_hb_name);
                 let b_arr = store_array_ident(b_type.as_deref().unwrap_or(""), &b_hb_name);
                 let a_call = if a_zero { quote! {} } else { quote! {
-                    __store.#a_arr.#m_add(#a_target.slot() as usize, #wr, &[#(#dr_a),*]);
+                    __store.#a_arr.#s_add(#a_target.slot() as usize, #wr, &[#(#dr_a),*]);
                 }};
                 let b_call = if b_zero { quote! {} } else { quote! {
-                    __store.#b_arr.#m_add(#b_target.slot() as usize, #wr, &[#(#dr_b),*]);
+                    __store.#b_arr.#s_add(#b_target.slot() as usize, #wr, &[#(#dr_b),*]);
                 }};
                 // The cross tile: the constraint's own block, or the shared
                 // parent-owned block reached through the prefix binding
@@ -6856,33 +6768,16 @@ pub fn generate_root_methods(
                     };
                 let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
-                    __store.#cross_arr.block_mut(#cross_target.slot() as usize)
+                    __store.#cross_arr.block_mut_at::<MAPPED>(#cross_target.slot() as usize)
                         .#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
                 // The mirror form: the partials through the leaf's slots,
                 // the cross tile on the leaf.
-                let par_write = if par {
-                    let a_var = a_var_ident_for_block.as_ref().unwrap().to_string();
-                    let b_var = b_var_ident_for_block.as_ref().unwrap().to_string();
-                    let (pa, sa) = par_target(&a_var)?;
-                    let (pb, sb) = par_target(&b_var)?;
-                    let a_call = if a_zero { quote! {} } else { quote! {
-                        #pa.#m_add(#sa, #wr, &[#(#dr_a),*]);
-                    }};
-                    let b_call = if b_zero { quote! {} } else { quote! {
-                        #pb.#m_add(#sb, #wr, &[#(#dr_b),*]);
-                    }};
-                    let blk = par_blk_ident(&block_ident);
-                    let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
-                        #blk.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
-                    }};
-                    quote! { #a_call #b_call #cross_call }
-                } else { quote! {} };
-                let writes = GhStmt::Split(quote! {
+                let writes = GhStmt::Seq(quote! {
                     #a_call
                     #b_call
                     #cross_call
-                }, par_write);
+                });
                 if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
             }
         }
@@ -6891,8 +6786,8 @@ pub fn generate_root_methods(
         // let __w = rho'(s), which every deferred write below scales by.
         gh.push(GhStmt::Both(loss_gh_finalize));
         if !deferred_writes.is_empty() {
-            let (dw_seq, dw_par) = split_gh(&deferred_writes);
-            gh.push(GhStmt::Split(quote! { #(#dw_seq)* }, quote! { #(#dw_par)* }));
+            let (dw_seq, _) = split_gh(&deferred_writes);
+            gh.push(GhStmt::Seq(quote! { #(#dw_seq)* }));
         }
         if off_guard.is_some() {
             // The condition is the batch's last output. Off that side every
@@ -6900,13 +6795,12 @@ pub fn generate_root_methods(
             // contribute nothing; a NaN condition is off, as in `branch`.
             let q_code: Expr = parse_sym_code(&gh_simplified[gh_simplified.len() - 1].to_rust(""))?;
             let tail = gh.split_off(skip_split);
-            let (tail_seq, tail_par) = split_gh(&tail);
-            gh.push(GhStmt::Split(
+            let (tail_seq, _) = split_gh(&tail);
+            gh.push(GhStmt::Seq(
                 quote! { if (#q_code) >= 0.0 { #(#tail_seq)* } },
-                quote! { if (#q_code) >= 0.0 { #(#tail_par)* } },
             ));
         }
-        let (gh_stmts, gh_stmts_par) = split_gh(&gh);
+        let (gh_stmts, _) = split_gh(&gh);
 
         // --- Jacobian code: same intermediates + residuals + derivatives, push rows ---
         let mut jac_stmts = Vec::new();
@@ -7236,18 +7130,28 @@ pub fn generate_root_methods(
             } else {
                 quote! { { #(#gh_stmts)* } }
             };
-            let remote_guarded_gh_par = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#gh_stmts_par)* } }
-            } else {
-                quote! { { #(#gh_stmts_par)* } }
-            };
 
             // Cost loop: iterate parent -> frines, resolve refs, evaluate
+            // The cost sweep covers its walk's range; the jacobian walk is
+            // diagnostic and always covers everything, so the two differ by
+            // the outermost iterator and nothing else.
+            loop_containers.push(container_id(&[], &if parent_is_root {
+                frines_ident.to_string()
+            } else {
+                coll_ident.to_string()
+            }));
+            // Cut by the frines when they hang off the root, else by the
+            // parent collection -- and then a parent is worth its children.
+            loop_weights.push(if parent_is_root {
+                quote! { 1u64 }
+            } else {
+                quote! { arael::threads::Leaves::count(&__u.#frines_ident) as u64 }
+            });
             if parent_is_root {
-                let __cl = quote! {
+                let mk = |it: &TokenStream2| quote! {
                     {
                         #marker
-                        for __frine in self.#frines_ident.iter() {
+                        for __frine in self.#frines_ident.#it {
                             #(#resolve_stmts)*
                             #[allow(unused_variables)]
                             let #parent_ident = &*__self_ref;
@@ -7256,13 +7160,13 @@ pub fn generate_root_methods(
                         }
                     }
                 };
-                if jacobian { ct_loops.push(ct_wrap(&__cl)); }
-                cost_loops.push(__cl);
+                if jacobian { ct_loops.push(ct_wrap(&mk(&quote! { iter() }))); }
+                cost_loops.push(mk(&range_it));
             } else {
-                let __cl = quote! {
+                let mk = |it: &TokenStream2| quote! {
                     {
                         #marker
-                        for __lm in self.#coll_ident.iter() {
+                        for __lm in self.#coll_ident.#it {
                             for __frine in __lm.#frines_ident.iter() {
                                 #(#resolve_stmts)*
                                 let #parent_ident = __lm;
@@ -7272,8 +7176,8 @@ pub fn generate_root_methods(
                         }
                     }
                 };
-                if jacobian { ct_loops.push(ct_wrap(&__cl)); }
-                cost_loops.push(__cl);
+                if jacobian { ct_loops.push(ct_wrap(&mk(&quote! { iter() }))); }
+                cost_loops.push(mk(&range_it));
             }
 
             // Grad+hessian loop: same traversal but get mutable access
@@ -7324,23 +7228,23 @@ pub fn generate_root_methods(
             };
             let gh_loop = match (parent_is_root, is_multi_cross) {
                 (true, true) => quote! {
-                    { #marker_gh for __frine in self.#frines_ident.iter_mut() { #gh_body } }
+                    { #marker_gh for __frine in self.#frines_ident.#outer_mc { #gh_body } }
                 },
                 (true, false) => quote! {
-                    { #marker_gh for __frine in self.#frines_ident.iter() { #gh_body } }
+                    { #marker_gh for __frine in self.#frines_ident.#outer_plain { #gh_body } }
                 },
                 (false, true) => quote! {
                     {
                         #marker_gh
-                        for __lm in self.#coll_ident.iter_mut() {
-                            for __frine in __lm.#frines_ident.iter_mut() { #gh_body }
+                        for __lm in self.#coll_ident.#outer_mc {
+                            for __frine in __lm.#frines_ident.#sweep_iter { #gh_body }
                         }
                     }
                 },
                 (false, false) => quote! {
                     {
                         #marker_gh
-                        for __lm in self.#coll_ident.iter() {
+                        for __lm in self.#coll_ident.#outer_plain {
                             for __frine in __lm.#frines_ident.iter() { #gh_body }
                         }
                     }
@@ -7350,53 +7254,6 @@ pub fn generate_root_methods(
                 rename_ident(gh_loop, &parent_name, parent_rename_to), &root_var_name, "self");
             grad_hessian_loops.push(gh_loop);
 
-            if par {
-                let gh_entry_par = quote! {
-                    { #(#entity_index_copies)* #(#resolve_reread_stmts)* #remote_guarded_gh_par }
-                };
-                let gh_entry_par = rename_ident(
-                    rename_ident(gh_entry_par, &parent_name, parent_rename_to), &root_var_name, "self");
-                let (key, instance, cost_prelude) = if parent_is_root {
-                    (format!("self.{}", frines_ident),
-                     ParInstance::Flat {
-                         coll: quote! { self.#frines_ident },
-                         var: syn::Ident::new("__frine", proc_macro2::Span::call_site()),
-                     },
-                     quote! {
-                         #(#resolve_stmts)*
-                         #[allow(unused_variables)]
-                         let #parent_ident = &*__self_ref;
-                         let #root_var_ident = &*__self_ref;
-                     })
-                } else {
-                    (format!("self.{}.{}", coll_ident, frines_ident),
-                     ParInstance::Nested {
-                         coll: quote! { self.#coll_ident },
-                         frines: frines_ident.clone(),
-                         parent_var: syn::Ident::new("__lm", proc_macro2::Span::call_site()),
-                     },
-                     quote! {
-                         #(#resolve_stmts)*
-                         let #parent_ident = __lm;
-                         let #root_var_ident = &*__self_ref;
-                     })
-                };
-                let blocks = par_leaf_blocks(&par_roles, &par_entities, &triplet_entities,
-                    &multi_cross_routing, &cast_type);
-                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
-                    leaf: par_leaf_ident(root_name, &key),
-                    leaves: par_leaves_ident(&key),
-                    instance,
-                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
-                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
-                    blocks,
-                    gh_entries: Vec::new(),
-                    cost_prelude,
-                    cost_entries: Vec::new(),
-                });
-                c.gh_entries.push(gh_entry_par);
-                c.cost_entries.push(remote_guarded_cost.clone());
-            }
 
             if is_multi_cross {
                 // Multi-cross remote: emit per-CrossBlock set_indices on
@@ -7481,59 +7338,6 @@ pub fn generate_root_methods(
                     rename_ident(renamed, &root_var_name, "self")
                 } else { renamed }
             };
-            let gh_entry_par = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #marker #(#gh_stmts_par)* } }
-            } else {
-                quote! { { #marker #(#gh_stmts_par)* } }
-            };
-            let gh_entry_par = {
-                let renamed = rename_ident(gh_entry_par, &self_var_name, "__item");
-                if root_var_name != self_var_name {
-                    rename_ident(renamed, &root_var_name, "self")
-                } else { renamed }
-            };
-            if par {
-                // One leaf per entity of its container, the entity as
-                // the only role.
-                let (key, instance) = match &entity_location {
-                    EntityLocation::Collection { field }
-                    | EntityLocation::OptionalField { field } => {
-                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
-                        (format!("self.{}", field), ParInstance::Flat {
-                            coll: quote! { self.#fi },
-                            var: syn::Ident::new("__item", proc_macro2::Span::call_site()),
-                        })
-                    }
-                    EntityLocation::DirectField { field } => {
-                        let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
-                        (format!("self.{}", field), ParInstance::Single { access: quote! { &self.#fi } })
-                    }
-                    EntityLocation::RootSelf => {
-                        ("self".to_string(), ParInstance::Single { access: quote! { &*__self_ref } })
-                    }
-                    EntityLocation::Nested { .. } => unreachable!("rejected above"),
-                };
-                let cost_prelude = quote! {
-                    let #self_var = __item;
-                    let #root_var_ident = &*__self_ref;
-                    #(#self_resolve_stmts)*
-                };
-                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
-                    leaf: par_leaf_ident(root_name, &key),
-                    leaves: par_leaves_ident(&key),
-                    instance,
-                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
-                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
-                    blocks: Vec::new(),
-                    gh_entries: Vec::new(),
-                    cost_prelude,
-                    cost_entries: Vec::new(),
-                });
-                // The data refs the body reads are bound per entry, as the
-                // sequential sweep binds them before the block.
-                c.gh_entries.push(quote! { { #(#self_resolve_stmts)* #gh_entry_par } });
-                c.cost_entries.push(cost_entry.clone());
-            }
             // parent.<selfblock>: the parent binding in body/write tokens
             // becomes the innermost prefix binding of the nested sweep.
             let parent_seg_rename: Option<(String, String)> = parent_prefix.as_ref()
@@ -7588,6 +7392,8 @@ pub fn generate_root_methods(
                             nested_cost_loops: Vec::new(), nested_ct_loops: Vec::new(),
                             nested_gh_loops: Vec::new(),
                             nested_jac_loops: Vec::new(),
+                            nested_colls: Vec::new(),
+                            ancestor_self_blocks: Vec::new(),
                         });
                         if group.resolve_stmts.is_empty() && !self_resolve_stmts.is_empty() {
                             group.resolve_stmts = self_resolve_stmts.clone();
@@ -7596,7 +7402,9 @@ pub fn generate_root_methods(
                         // block: registering one would emit set_indices on a
                         // field the entity does not have. (The root's own
                         // SelfBlock is wired by root_self_block_prelude; a
-                        // parent's by the passive nested wiring.)
+                        // parent's by the passive nested wiring.) The block it
+                        // writes is the ancestor's, so that is what a split
+                        // store has to claim.
                         if group.self_block.is_none() && root_self_primary.is_none()
                             && parent_self_primary.is_none() {
                             group.self_block = Some(SelfBlockInfo {
@@ -7604,6 +7412,24 @@ pub fn generate_root_methods(
                                 a_idx_stmts: a_idx_stmts.clone(),
                                 block_ident: block_ident.clone(),
                             });
+                        }
+                        // The COO forms write the joined co-entity's
+                        // diagonal too -- `[hb, root.<triplet>]` the
+                        // root's, `[hb, parent.<triplet>]` the parent's --
+                        // so every store sweeping this collection claims
+                        // it, not just the one whose range opens on it.
+                        let ancestor = if root_self_primary.is_some() || is_root_triplet_self {
+                            Some(AncestorSelfBlock::Root)
+                        } else if let Some((_, ptype)) = &parent_triplet {
+                            Some(AncestorSelfBlock::Parent { type_name: ptype.clone() })
+                        } else {
+                            parent_self_primary.as_ref().map(|(_, ptype)|
+                                AncestorSelfBlock::Parent { type_name: ptype.clone() })
+                        };
+                        if let Some(a) = ancestor
+                            && !group.ancestor_self_blocks.contains(&a)
+                        {
+                            group.ancestor_self_blocks.push(a);
                         }
                         if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
                         group.cost_entries.push(cost_entry.clone());
@@ -7682,6 +7508,7 @@ pub fn generate_root_methods(
                         a_param_count,
                         a_idx_stmts: a_idx_stmts.clone(),
                         block_ident: block_ident.clone(),
+                        type_name: a_type.clone(),
                         constraint_index_field: ci_field,
                         cost_entries: Vec::new(), ct_entries: Vec::new(),
                         gh_entries: Vec::new(),
@@ -7725,6 +7552,51 @@ pub fn generate_root_methods(
                 quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts)* } }
             };
             let gh_entry = rename_ident(gh_entry, &root_var_name, "self");
+            // A split store claims what its sweep writes. This walk writes
+            // every participant's own diagonal through its ref, and those
+            // entities sit in containers cut on their own, so each store
+            // claims the participants it will write -- here, where the
+            // instances are in hand. Claiming twice is a no-op, and a
+            // guarded entry claims a place it may not write into: one
+            // empty tile, never a missing one.
+            let mut claim_entries: Vec<TokenStream2> = Vec::new();
+            for (var_id, type_id, _start, count) in &triplet_entities {
+                if *count == 0 { continue; }
+                let ty = type_id.to_string();
+                let n = param_total(&ty);
+                if n == 0 { continue; }
+                let Some(hb) = registry_lookup(&ty).and_then(|l| l.self_block_field.clone())
+                else { continue };
+                // The root joins as an implicit participant and has no ref
+                // to resolve: it is reached where every walk reaches it.
+                let acc = if ty == root_name.to_string() {
+                    quote! { (*self) }
+                } else {
+                    let a = entity_access_expr(&var_id.to_string())?;
+                    quote! { #a }
+                };
+                let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                let arr = store_array_ident(&ty, &hb);
+                let idx = syn::Ident::new("__cl_idx", proc_macro2::Span::call_site());
+                let (_, stmts) = store_idx_stmts(&ty, &acc, &idx);
+                claim_entries.push(quote! {
+                    {
+                        let __g = #acc.#hb_id.slot();
+                        if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
+                            let mut #idx = [u32::MAX; #n];
+                            #(#stmts)*
+                            __store.#arr.push_at(__g, __g, &#idx);
+                        }
+                    }
+                });
+            }
+            let claim_entry = if claim_entries.is_empty() {
+                None
+            } else {
+                Some(rename_ident(quote! {
+                    #(#entity_index_copies)* #(#claim_entries)*
+                }, &root_var_name, "self"))
+            };
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
                     Some(quote! { if #guard { #marker #(#jac_stmts)* } })
@@ -7732,36 +7604,6 @@ pub fn generate_root_methods(
                     Some(quote! { { #marker #(#jac_stmts)* } })
                 }
             } else { None };
-            if par {
-                let gh_entry_par = if let Some(ref guard) = guard_expr {
-                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* if #guard { #(#gh_stmts_par)* } } }
-                } else {
-                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts_par)* } }
-                };
-                let gh_entry_par = rename_ident(gh_entry_par, &root_var_name, "self");
-                let key = format!("self.{}", rc_ident);
-                let blocks = par_leaf_blocks(&par_roles, &par_entities, &triplet_entities,
-                    &multi_cross_routing, &cast_type);
-                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
-                    leaf: par_leaf_ident(root_name, &key),
-                    leaves: par_leaves_ident(&key),
-                    instance: ParInstance::Flat {
-                        coll: quote! { self.#rc_ident },
-                        var: syn::Ident::new("__frine", proc_macro2::Span::call_site()),
-                    },
-                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
-                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
-                    blocks,
-                    gh_entries: Vec::new(),
-                    cost_prelude: quote! {
-                        #(#resolve_stmts)*
-                        let #root_var_ident = &*__self_ref;
-                    },
-                    cost_entries: Vec::new(),
-                });
-                c.gh_entries.push(gh_entry_par);
-                c.cost_entries.push(cost_entry.clone());
-            }
 
             // The constraint declared CrossBlock fields of its own; empty
             // for single-TripletBlock constraints.
@@ -7801,6 +7643,7 @@ pub fn generate_root_methods(
                     cost_entries: Vec::new(), ct_entries: Vec::new(),
                     gh_entries: Vec::new(),
                     jac_entries: Vec::new(),
+                    claim_entries: Vec::new(),
                     is_multi_cross: is_mcb,
                 }
             });
@@ -7813,6 +7656,7 @@ pub fn generate_root_methods(
             if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
+            if let Some(ce) = claim_entry { group.claim_entries.push(ce); }
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
         } else if is_root_level_cross {
             // Root-level CrossBlock: constraint struct is directly on root (e.g. PosePair, CoincidentPP)
@@ -7840,38 +7684,6 @@ pub fn generate_root_methods(
                 quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts)* } }
             };
             let gh_entry = rename_ident(gh_entry, &root_var_name, "self");
-            if par {
-                let gh_entry_par = if let Some(ref guard) = guard_expr {
-                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* if #guard { #(#gh_stmts_par)* } } }
-                } else {
-                    quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts_par)* } }
-                };
-                let gh_entry_par = rename_ident(gh_entry_par, &root_var_name, "self");
-                let key = format!("self.{}", rc_ident);
-                let na = par_entities[par_roles[0].1].param_count;
-                let nb = par_entities[par_roles[1].1].param_count;
-                let p = na * nb;
-                let block_ty = quote! { arael::model::CrossBlockArray<#na, #nb, #p, #cast_type> };
-                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
-                    leaf: par_leaf_ident(root_name, &key),
-                    leaves: par_leaves_ident(&key),
-                    instance: ParInstance::Flat {
-                        coll: quote! { self.#rc_ident },
-                        var: syn::Ident::new("__frine", proc_macro2::Span::call_site()),
-                    },
-                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
-                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
-                    blocks: vec![(block_ident.clone(), block_ty, 0, 1)],
-                    gh_entries: Vec::new(),
-                    cost_prelude: quote! {
-                        #(#resolve_stmts)*
-                        let #root_var_ident = &*__self_ref;
-                    },
-                    cost_entries: Vec::new(),
-                });
-                c.gh_entries.push(gh_entry_par);
-                c.cost_entries.push(cost_entry.clone());
-            }
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
                     Some(quote! { if #guard { #marker #(#jac_stmts)* } })
@@ -7964,7 +7776,7 @@ pub fn generate_root_methods(
                 quote! { { #(#gh_stmts)* } }
             };
             let nested_gh_loop = scope(quote! {
-                for __frine in __item.#frines_ident.iter_mut() {
+                for __frine in __item.#frines_ident.#sweep_iter {
                     #(#entity_index_copies)*
                     #(#resolve_reread_stmts)*
                     #nested_gh_body
@@ -7980,44 +7792,6 @@ pub fn generate_root_methods(
                 let renamed = rename_ident(nested_gh, &parent_name, "__item");
                 rename_ident(renamed, &root_var_name, "self")
             };
-            if par {
-                let nested_gh_body_par = if let Some(ref guard) = guard_expr {
-                    quote! { if #guard { #(#gh_stmts_par)* } }
-                } else {
-                    quote! { { #(#gh_stmts_par)* } }
-                };
-                let gh_entry_par = quote! {
-                    { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #nested_gh_body_par }
-                };
-                let gh_entry_par = rename_ident(
-                    rename_ident(gh_entry_par, &parent_name, "__item"), &root_var_name, "self");
-                let key = format!("self.{}.{}", coll_ident, frines_ident);
-                let na = par_entities[par_roles[0].1].param_count;
-                let nb = par_entities[par_roles[1].1].param_count;
-                let p = na * nb;
-                let block_ty = quote! { arael::model::CrossBlockArray<#na, #nb, #p, #cast_type> };
-                let c = par_containers.entry(key.clone()).or_insert_with(|| ParContainer {
-                    leaf: par_leaf_ident(root_name, &key),
-                    leaves: par_leaves_ident(&key),
-                    instance: ParInstance::Nested {
-                        coll: quote! { self.#coll_ident },
-                        frines: frines_ident.clone(),
-                        parent_var: syn::Ident::new("__item", proc_macro2::Span::call_site()),
-                    },
-                    roles: par_roles.iter().map(|(_, id)| *id).collect(),
-                    role_exprs: par_roles.iter().map(|(v, _)| par_role_expr(v, &root_type_str)).collect(),
-                    blocks: vec![(block_ident.clone(), block_ty, 0, 1)],
-                    gh_entries: Vec::new(),
-                    cost_prelude: quote! {
-                        #(#resolve_stmts)*
-                        let #parent_ident = __item;
-                        let #root_var_ident = &*__self_ref;
-                    },
-                    cost_entries: Vec::new(),
-                });
-                c.gh_entries.push(gh_entry_par);
-                c.cost_entries.push(quote! { { #marker #nested_cost_body } });
-            }
 
             let nested_jac = if !jac_stmts.is_empty() {
                 let resolve_stmts_j = resolve_stmts.clone();
@@ -8067,10 +7841,13 @@ pub fn generate_root_methods(
                 nested_cost_loops: Vec::new(), nested_ct_loops: Vec::new(),
                 nested_gh_loops: Vec::new(),
                 nested_jac_loops: Vec::new(),
+                nested_colls: Vec::new(),
+                ancestor_self_blocks: Vec::new(),
             });
             if jacobian { group.nested_ct_loops.push(ct_wrap(&nested_cost)); }
             group.nested_cost_loops.push(nested_cost);
             group.nested_gh_loops.push(nested_gh);
+            group.nested_colls.push(frines_ident.clone());
             if let Some(nj) = nested_jac { group.nested_jac_loops.push(nj); }
 
             {
@@ -8117,6 +7894,10 @@ pub fn generate_root_methods(
     // Emit merged loops for collection groups FIRST, then append existing
     // non-merged loops. This ensures SelfBlock entities get lower constraint
     // IDs than cross-block/triplet constraints.
+    // A self-block constraint writes an entity that no cross block need
+    // mention, so its container is claimed here -- otherwise a split store
+    // could sweep an entity it was never given a place for.
+    let mut self_claim_walks: Vec<TokenStream2> = Vec::new();
     let mut merged_cost: Vec<TokenStream2> = Vec::new();
     let mut merged_ct: Vec<TokenStream2> = Vec::new();
     let mut merged_gh: Vec<TokenStream2> = Vec::new();
@@ -8138,8 +7919,17 @@ pub fn generate_root_methods(
         let resolve_stmts = &group.resolve_stmts;
 
         // Merged cost loop: SelfBlock entries + nested CrossBlock inner loops
+        merged_containers.push(container_id(prefix, &coll.to_string()));
+        {
+            let own = unit_count_expr(prefix, coll);
+            let nested: Vec<TokenStream2> = group.nested_colls.iter()
+                .map(|c| quote! { arael::threads::Leaves::count(&__u.#c) as u64 })
+                .collect();
+            merged_weights.push(quote! { #own #( + #nested )* });
+        }
+        let __it = sweep_iter_for(prefix, false);
         merged_cost.push(wrap_in_prefix_sweep(prefix, false, quote! {
-            for __item in #ctn.#coll.iter() {
+            for __item in #ctn.#coll.#__it {
                 let #self_var = __item;
                 let #root_var_ident = &*__self_ref;
                 #(#resolve_stmts)*
@@ -8161,11 +7951,86 @@ pub fn generate_root_methods(
             }));
         }
 
+        // The claim of this container: every self block its constraints
+        // write. A store claims exactly what its sweep writes, so the claim
+        // takes the sweep's own walk -- the outermost level cut to the
+        // store's range, everything below it in full -- and names the entity
+        // each constraint writes: the item's own block, or the ancestor's a
+        // `parent.`/`root.` primary writes instead.
+        let mut claims: Vec<TokenStream2> = Vec::new();
+        if let Some(sb) = &group.self_block {
+            let a_count = sb.a_param_count;
+            let a_idx = &sb.a_idx_stmts;
+            let ty = a_type.to_string();
+            if a_count > 0
+                && let Some(hb) = registry_lookup(&ty).and_then(|l| l.self_block_field.clone())
+            {
+                let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                let arr = store_array_ident(&ty, &hb);
+                claims.push(quote! {
+                    {
+                        let mut __a_idx = [u32::MAX; #a_count];
+                        #(#a_idx)*
+                        let __g = __item.#hb_id.slot();
+                        if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
+                            __store.#arr.push_at(__g, __g, &__a_idx);
+                        }
+                    }
+                });
+            }
+        }
+        for ancestor in &group.ancestor_self_blocks {
+            let (ty, acc) = match ancestor {
+                AncestorSelfBlock::Parent { type_name } => (type_name.clone(), quote! { #ctn }),
+                AncestorSelfBlock::Root => (root_name.to_string(), quote! { (*self) }),
+            };
+            let n = param_total(&ty);
+            let Some(hb) = registry_lookup(&ty).and_then(|l| l.self_block_field.clone())
+            else { continue };
+            if n == 0 { continue; }
+            let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+            let arr = store_array_ident(&ty, &hb);
+            let idx = syn::Ident::new("__anc_idx", proc_macro2::Span::call_site());
+            let (_, stmts) = store_idx_stmts(&ty, &acc, &idx);
+            // One ancestor, many children: test the claim before filling the
+            // indices, so a parent is indexed once per store, not once per
+            // child.
+            claims.push(quote! {
+                {
+                    let __g = #acc.#hb_id.slot();
+                    if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
+                        let mut #idx = [u32::MAX; #n];
+                        #(#stmts)*
+                        __store.#arr.push_at(__g, __g, &#idx);
+                    }
+                }
+            });
+        }
+        if !claims.is_empty() {
+            let cid = container_id(prefix, &coll.to_string());
+            let it = sweep_iter_for(prefix, false);
+            let body = quote! {
+                for __item in #ctn.#coll.#it {
+                    let _ = &__item;
+                    #(#claims)*
+                }
+            };
+            let r = quote! { __r };
+            let walk = wrap_in_prefix_ranged(prefix, false, body, None, false, Some(&r));
+            self_claim_walks.push(quote! {
+                if __split {
+                    let __r = arael::threads::walk_range(__ranges, #cid);
+                    #walk
+                }
+            });
+        }
+
         // Merged grad+hessian loop. Entries access the entity as `__item`
         // and the root as `self` directly (renamed at entry creation) --
         // no alias bindings.
-        merged_gh.push(wrap_in_prefix_sweep(prefix, true, quote! {
-            for __item in #ctn.#coll.iter_mut() {
+        let __it = sweep_iter_for(prefix, false);
+        merged_gh.push(wrap_in_prefix_sweep(prefix, false, quote! {
+            for __item in #ctn.#coll.#__it {
                 #(#resolve_stmts)*
                 #(#gh_entries)*
                 #(#nested_gh)*
@@ -8408,8 +8273,16 @@ pub fn generate_root_methods(
                 quote! { { let __item = #accessor; #body } }
             }
         };
+        // A single instance is one unit, and it belongs to the store whose
+        // range opens on it. Without this every store evaluates it and the
+        // contribution is counted once per store. Only the cost and the
+        // assembly are cut; the jacobian and the slot walk cover everything.
+        let wrap_ranged = |accessor: &TokenStream2, body: TokenStream2| -> TokenStream2 {
+            let inner = wrap(accessor, body);
+            quote! { if __r.0 == 0 { #inner } }
+        };
 
-        merged_cost.push(wrap(accessor_read, quote! {
+        merged_cost.push(wrap_ranged(accessor_read, quote! {
             let #self_var = __item;
             let #root_var = &*__self_ref;
             #(#cost_entries)*
@@ -8423,7 +8296,37 @@ pub fn generate_root_methods(
             }));
         }
 
-        merged_gh.push(wrap(accessor_write, quote! {
+        merged_containers.push(container_id(&[], "self"));
+        merged_weights.push(quote! { 1u64 });
+        // A single instance is claimed by the store whose range opens on
+        // it, the same store that sweeps it.
+        if group.a_param_count > 0
+            && let Some(hb) = registry_lookup(&group.type_name)
+                .and_then(|l| l.self_block_field.clone())
+        {
+            let a_count = group.a_param_count;
+            let a_idx = &group.a_idx_stmts;
+            let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+            let arr = store_array_ident(&group.type_name, &hb);
+            let cid = container_id(&[], "self");
+            let inner = quote! {
+                let mut __a_idx = [u32::MAX; #a_count];
+                #(#a_idx)*
+                let __g = __item.#hb_id.slot();
+                if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
+                    __store.#arr.push_at(__g, __g, &__a_idx);
+                }
+            };
+            let bound = wrap(accessor_read, inner);
+            self_claim_walks.push(quote! {
+                if __split {
+                    let __r = arael::threads::walk_range(__ranges, #cid);
+                    if __r.0 == 0 { #bound }
+                }
+            });
+        }
+        let gh_accessor = accessor_read;
+        merged_gh.push(wrap_ranged(gh_accessor, quote! {
             #(#gh_entries)*
         }));
 
@@ -8470,8 +8373,11 @@ pub fn generate_root_methods(
             quote! { __frine.#fi = __cid; }
         });
 
+        loop_containers.push(container_id(prefix, &rc_ident.to_string()));
+        loop_weights.push(unit_count_expr(prefix, rc_ident));
+        let __it = sweep_iter_for(prefix, false);
         cost_loops.push(wrap_in_prefix_sweep(prefix, false, quote! {
-            for __frine in #ctn.#rc_ident.iter() {
+            for __frine in #ctn.#rc_ident.#__it {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
                 #(#cost_entries)*
@@ -8490,8 +8396,9 @@ pub fn generate_root_methods(
 
         // Entries carry their own ref rereads at the top; root reads go
         // through `self` (renamed at entry creation).
-        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, true, quote! {
-            for __frine in #ctn.#rc_ident.iter_mut() {
+        let __it = sweep_iter_for(prefix, false);
+        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, false, quote! {
+            for __frine in #ctn.#rc_ident.#__it {
                 #(#gh_entries)*
             }
         }));
@@ -8594,8 +8501,36 @@ pub fn generate_root_methods(
         // sits below the root, reached through the prefix loops.
         let prefix = &group.prefix;
         let ctn = nested_container(prefix);
+        loop_containers.push(container_id(prefix, &rc_ident.to_string()));
+        loop_weights.push(unit_count_expr(prefix, rc_ident));
+
+        // The claim walk takes the sweep's own walk -- the outermost level
+        // cut to this store's range -- and names every participant the
+        // entries below write through a ref.
+        if !group.claim_entries.is_empty() {
+            let claim_entries = &group.claim_entries;
+            let cid = container_id(prefix, &rc_ident.to_string());
+            let it = sweep_iter_for(prefix, false);
+            let body = quote! {
+                for __frine in #ctn.#rc_ident.#it {
+                    let _ = &__frine;
+                    #(#resolve_stmts)*
+                    #(#claim_entries)*
+                }
+            };
+            let r = quote! { __r };
+            let walk = wrap_in_prefix_ranged(prefix, false, body, None, false, Some(&r));
+            self_claim_walks.push(quote! {
+                if __split {
+                    let __r = arael::threads::walk_range(__ranges, #cid);
+                    #walk
+                }
+            });
+        }
+
+        let __it = sweep_iter_for(prefix, false);
         cost_loops.push(wrap_in_prefix_sweep(prefix, false, quote! {
-            for __frine in #ctn.#rc_ident.iter() {
+            for __frine in #ctn.#rc_ident.#__it {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
                 #(#cost_entries)*
@@ -8635,8 +8570,9 @@ pub fn generate_root_methods(
         } else {
             quote! {}
         };
-        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, true, quote! {
-            for __frine in #ctn.#rc_ident.iter_mut() {
+        let __it = sweep_iter_for(prefix, false);
+        grad_hessian_loops.push(wrap_in_prefix_sweep(prefix, false, quote! {
+            for __frine in #ctn.#rc_ident.#__it {
                 #idx_prelude
                 #(#gh_entries)*
             }
@@ -8681,6 +8617,30 @@ pub fn generate_root_methods(
     let cost_loops = ordered_cost;
     let mut ordered_gh = merged_gh; ordered_gh.append(&mut grad_hessian_loops);
     let grad_hessian_loops = ordered_gh;
+    let walk_containers = {
+        let mut v = merged_containers; v.append(&mut loop_containers); v
+    };
+    let walk_weights = {
+        let mut v = merged_weights; v.append(&mut loop_weights); v
+    };
+    // Each walk opens by naming the slot range it covers. The number is
+    // its position in this list, and the two lists are in step (checked
+    // below), so one cut means the same thing to the cost sweep and the
+    // assembly sweep. An empty table is the whole model, which is what
+    // every caller passes until a cut exists to fill it.
+    let with_range = |loops: Vec<TokenStream2>| -> Vec<TokenStream2> {
+        loops.into_iter().enumerate().map(|(k, w)| {
+            let c = walk_containers.get(k).copied().unwrap_or(0);
+            quote! {
+            {
+                let __r = arael::threads::walk_range(__ranges, #c);
+                let _ = &__r;
+                #w
+            }
+        }}).collect()
+    };
+    let cost_loops = with_range(cost_loops);
+    let grad_hessian_loops = with_range(grad_hessian_loops);
     let mut ordered_jac = merged_jac; ordered_jac.append(&mut jacobian_loops);
     let jacobian_loops = ordered_jac;
     let mut ordered_sbi = merged_sbi; ordered_sbi.append(&mut set_block_indices_loops);
@@ -8718,49 +8678,127 @@ pub fn generate_root_methods(
             cost_add(call)
         }
     };
+
+    // The cost walks and the assembly walks are numbered the same, because
+    // one cut has to mean the same thing to both: every emission site above
+    // pushes one of each, in the same order, with nothing between them that
+    // can skip one. If that ever stops holding, walk `k` names two
+    // different containers and a range cuts the wrong one, silently -- so
+    // it is checked here rather than left to hold by habit.
+    if walk_containers.len() != grad_hessian_loops.len() {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), format!(
+            "`{}`: {} walks but {} of them recorded a container. Every push of a \
+             walk has to record which container cuts it, in the same order.",
+            root_name, grad_hessian_loops.len(), walk_containers.len())));
+    }
+    if cost_loops.len() != grad_hessian_loops.len() {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), format!(
+            "`{}`: the cost and assembly walks came out of step ({} against {}). \
+             They are numbered together, so an emission site that pushes one has \
+             to push the other.",
+            root_name, cost_loops.len(), grad_hessian_loops.len())));
+    }
     let mut gh_sweep_methods: Vec<TokenStream2> = Vec::new();
-    let mut gh_sweep_calls: Vec<TokenStream2> = Vec::new();
+    // The same calls against a shared binding of the model, which is what a
+    // dispatched task holds.
+    let mut gh_calls_m: Vec<TokenStream2> = Vec::new();
+    let mut gh_calls_mapped_m: Vec<TokenStream2> = Vec::new();
     for (i, sweep) in grad_hessian_loops.iter().enumerate() {
         let name = syn::Ident::new(
             &format!("__compute_sweep{i}"), proc_macro2::Span::call_site());
         gh_sweep_methods.push(quote! {
             #[inline(never)]
             #[allow(unused_variables)]
-            fn #name(&mut self, __store: &mut #store_ty, params: &[#prec_type]) -> #sweep_ret_ty {
+            fn #name<const MAPPED: bool>(#sweep_self, __store: &mut #store_ty, params: &[#prec_type], __ranges: &[(u32, u32)]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
+                use arael::threads::Leaves as _;
+                #sweep_self_ref
                 #cost_decl
                 #sweep
                 #sweep_ret
             }
         });
-        gh_sweep_calls.push(sweep_call(quote! { self.#name(__store, params) }));
+        gh_calls_m.push(sweep_call(quote! { __model.#name::<false>(__store, params, __ranges) }));
+        gh_calls_mapped_m.push(sweep_call(quote! { __model.#name::<true>(__store, params, __ranges) }));
     }
+
+    // A store is addressed whole or through its map, and which it is falls
+    // out of whether a cut was built. Only a root that can thread ever has
+    // a mapped store, so only it carries the second copy of the sweeps.
+    let sweep_dispatch2 = if par {
+        quote! {
+            if __cut.is_empty() { #(#gh_calls_m)* } else { #(#gh_calls_mapped_m)* }
+        }
+    } else {
+        quote! { #(#gh_calls_m)* }
+    };
+    // A task's own accumulator, and the merge of every store's into the
+    // caller's, in store order.
+    let cost_decl2 = cost_decl.clone();
+    let cost_gather = if cost_kahan {
+        let m = cost_merge(quote! { __store.__cost.0 }, quote! { __store.__cost.1 });
+        quote! { for __store in __stores.iter() { #m } }
+    } else {
+        let m = cost_merge(quote! { __store.__cost }, quote! {});
+        quote! { for __store in __stores.iter() { #m } }
+    };
+
+    // Dispatching over the stores asks the model for `Sync`, which a root
+    // that never asked for `par` should not have to be -- one holding an
+    // `Rc` is a perfectly good sequential model. So only a `par` root gets
+    // the dispatch; the rest walk their one store in place.
+    let region = if par {
+        quote! {
+            let __model = &*self;
+            arael::threads::run_indexed(__par, __stores, |__si, __store| {
+                let __ranges = __cut.store(__si);
+                let __ts = __clock.start();
+                #cost_decl2
+                #sweep_dispatch2
+                __store.__cost = #sweep_ret;
+                __store.__time = __clock.stop(__ts);
+            });
+        }
+    } else {
+        quote! {
+            let __model = &*self;
+            for (__si, __store) in __stores.iter_mut().enumerate() {
+                let __ranges = __cut.store(__si);
+                let __ts = __clock.start();
+                #cost_decl2
+                #sweep_dispatch2
+                __store.__cost = #sweep_ret;
+                __store.__time = __clock.stop(__ts);
+            }
+        }
+    };
+
     // The cost-only sweeps are split the same way. They only read, so
     // they take a shared borrow and rebind the reborrow the bodies use.
     let mut cost_sweep_methods: Vec<TokenStream2> = Vec::new();
     let mut cost_sweep_calls: Vec<TokenStream2> = Vec::new();
+    // The same calls against a shared binding of the model, which is what
+    // a dispatched task holds.
+    let mut cost_sweep_calls_m: Vec<TokenStream2> = Vec::new();
     for (i, sweep) in cost_loops.iter().enumerate() {
         let name = syn::Ident::new(
             &format!("__cost_sweep{i}"), proc_macro2::Span::call_site());
         cost_sweep_methods.push(quote! {
             #[inline(never)]
             #[allow(unused_variables)]
-            fn #name(&self, params: &[#prec_type]) -> #sweep_ret_ty {
+            fn #name(&self, params: &[#prec_type], __ranges: &[(u32, u32)]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
+                use arael::threads::Leaves as _;
                 let __self_ref = &*self;
                 #cost_decl
                 #sweep
                 #sweep_ret
             }
         });
-        cost_sweep_calls.push(sweep_call(quote! { self.#name(params) }));
+        cost_sweep_calls.push(sweep_call(quote! { self.#name(params, __ranges) }));
+        cost_sweep_calls_m.push(sweep_call(quote! { __model.#name(params, __ranges) }));
     }
 
-    // `par`: the mirror type, its build, the two per-mirror sweeps, the
-    // gathers, and the context forms of the entry points, which take the
-    // mirror path when the context's mirrors are on. Every token here is
-    // empty for a root without the keyword, so its expansion is
-    // unchanged.
     // The store's arrays and the walk that fills them: one array per
     // containment path and block field, read-only, in the same container
     // order the slot walk numbers by, so an instance's slot is where its
@@ -8770,6 +8808,9 @@ pub fn generate_root_methods(
     let mut store_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The self arrays alone carry gradient stashes.
     let mut store_self_names: Vec<syn::Ident> = Vec::new();
+    // The cross arrays, in a stable order, so a store's run can be told
+    // which global slot it opens on.
+    let mut store_cross_names: Vec<syn::Ident> = Vec::new();
     let mut build_walks: Vec<TokenStream2> = Vec::new();
     {
         let mut types: Vec<&String> = reachable.iter().collect();
@@ -8804,6 +8845,10 @@ pub fn generate_root_methods(
                         (quote! { #i }, t.clone())
                     })
                     .collect();
+                // Self entries go to every store whole, so their walk is
+                // not cut; cross entries belong to the store that owns the
+                // unit they sit under, so theirs is.
+                let mut body_self: Vec<TokenStream2> = Vec::new();
                 let mut body: Vec<TokenStream2> = Vec::new();
                 // The type's own self block: its indices are its params.
                 if let Some(hb) = &self_field {
@@ -8813,12 +8858,19 @@ pub fn generate_root_methods(
                         let name = store_array_ident(type_name, hb);
                         let idx = syn::Ident::new("__idx", proc_macro2::Span::call_site());
                         let (_, stmts) = store_idx_stmts(type_name, &item, &idx);
-                        body.push(quote! {
+                        body_self.push(quote! {
                             {
                                 let mut #idx = [u32::MAX; #n];
                                 #(#stmts)*
-                                let __e = __store.#name.len() as u32;
-                                __store.#name.push(__e, &#idx);
+                                // Only a whole store holds every entity of
+                                // the container. A split one holds what its
+                                // own range writes, which the constraint
+                                // walks claim -- walking the container here
+                                // would give it entities it never touches.
+                                if !__split {
+                                    let __e = __store.#name.len() as u32;
+                                    __store.#name.push(__e, &#idx);
+                                }
                             }
                         });
                         if store_seen.insert(name.to_string()) {
@@ -8854,10 +8906,17 @@ pub fn generate_root_methods(
                     // A guarded pair (the parent-owned form) leaves the
                     // indices inactive when there is no child to read, so
                     // the entry still takes its slot and scatters nothing.
+                    // A split store holds only the entities its own range
+                    // writes, so each side claims a place here -- this walk
+                    // knows which instances are the store's. Claiming twice
+                    // is a no-op. Inside the guard, where the accessors are.
+                    let claim_a = self_claim(a_type, &a_acc, &ai);
+                    let claim_b = self_claim(b_type, &b_acc, &bi);
+                    let claims = quote! { if __split { #claim_a #claim_b } };
                     let fill = if guard.is_empty() {
-                        quote! { #(#a_stmts)* #(#b_stmts)* }
+                        quote! { #(#a_stmts)* #(#b_stmts)* #claims }
                     } else {
-                        quote! { if #guard { #(#a_stmts)* #(#b_stmts)* } }
+                        quote! { if #guard { #(#a_stmts)* #(#b_stmts)* #claims } }
                     };
                     body.push(quote! {
                         {
@@ -8868,22 +8927,126 @@ pub fn generate_root_methods(
                         }
                     });
                     if store_seen.insert(name.to_string()) {
+                        store_cross_names.push(name.clone());
                         store_names.push(name);
                         store_tys.push(quote! {
                             arael::model::CrossBlockArray<#na, #nb, #pcount, #cast_type>
                         });
                     }
                 }
-                if body.is_empty() { continue; }
-                let inner = quote! { #(#body)* };
-                build_walks.push(if path.is_empty() {
-                    inner
-                } else {
-                    wrap_in_prefix_scoped(&path, false, inner, None, false)
-                });
+                if !body_self.is_empty() {
+                    let inner = quote! { #(#body_self)* };
+                    build_walks.push(if path.is_empty() {
+                        inner
+                    } else {
+                        wrap_in_prefix_scoped(&path, false, inner, None, false)
+                    });
+                }
+                if !body.is_empty() {
+                    let cid = container_id(&path, "self");
+                    let inner = quote! { #(#body)* };
+                    let walk = if path.is_empty() {
+                        // One unit: it belongs to whichever store opens at 0.
+                        quote! { if __r.0 == 0 { #inner } }
+                    } else {
+                        wrap_in_prefix_ranged(&path, false, inner, None, false,
+                            Some(&quote! { __r }))
+                    };
+                    build_walks.push(quote! {
+                        {
+                            let __r = arael::threads::walk_range(__ranges, #cid);
+                            let _ = &__r;
+                            #walk
+                        }
+                    });
+                }
             }
         }
     }
+
+    // A root that did not ask for `par` keeps one store: the split
+    // addressing is only emitted where it can be used.
+    let store_count = if par {
+        quote! { ctx.threads() }
+    } else {
+        quote! { 1usize }
+    };
+
+    let cross_idx: Vec<syn::Index> =
+        (0..store_cross_names.len()).map(syn::Index::from).collect();
+    let n_cross = store_cross_names.len();
+
+    // Each container's slot count, in the order the ranges are keyed by.
+    // Per container, what one of its units is worth: the instances every
+    // walk it cuts puts under that unit. Within a container the per-instance
+    // cost is the same for every unit, so it cancels out of the shares --
+    // what does not cancel is how many instances a unit carries.
+    let cut_walks: Vec<TokenStream2> = container_keys.borrow().iter().enumerate().map(|(cid, key)| {
+        if key == "self" {
+            // One unit, and it belongs to the store that opens on it.
+            return quote! {
+                __cut.set(0usize, #cid, 0u32, 1u32);
+                for __s in 1..stores { __cut.set(__s, #cid, 1u32, 1u32); }
+            };
+        }
+        let f = syn::Ident::new(key, proc_macro2::Span::call_site());
+        let terms: Vec<&TokenStream2> = walk_containers.iter().enumerate()
+            .filter(|(k, c)| **c == cid && k < &walk_weights.len())
+            .map(|(k, _)| &walk_weights[k]).collect();
+        let weight = if terms.is_empty() {
+            quote! { 1u64 }
+        } else {
+            quote! { 0u64 #( + #terms )* }
+        };
+        quote! {
+            {
+                let __n = arael::threads::Leaves::count(&self.#f) as u32;
+                let mut __total = 0u64;
+                arael::threads::Leaves::each(&self.#f, |_, __u| { __total += #weight; });
+                if __total == 0 {
+                    // Nothing to weigh; an even split of the slots is as
+                    // good an answer as any.
+                    for __s in 0..stores {
+                        let __lo = arael::threads::cut(__n as usize, stores, __s) as u32;
+                        let __hi = arael::threads::cut(__n as usize, stores, __s + 1) as u32;
+                        __cut.set(__s, #cid, __lo, __hi);
+                    }
+                } else {
+                    let mut __acc = 0u64;
+                    let mut __s = 0usize;
+                    let mut __lo = 0u32;
+                    arael::threads::Leaves::each(&self.#f, |__slot, __u| {
+                        __acc += #weight;
+                        let __end = __slot + 1;
+                        // A unit heavier than a whole share closes more
+                        // than one store, which is the case no cut fixes.
+                        while __s + 1 < stores
+                            && __acc * (stores as u64) >= __total * ((__s + 1) as u64)
+                        {
+                            __cut.set(__s, #cid, __lo, __end);
+                            __lo = __end;
+                            __s += 1;
+                        }
+                    });
+                    while __s < stores {
+                        __cut.set(__s, #cid, __lo, __n);
+                        __lo = __n;
+                        __s += 1;
+                    }
+                }
+            }
+        }
+    }).collect();
+
+    let container_counts: Vec<TokenStream2> = container_keys.borrow().iter().map(|k| {
+        if k == "self" {
+            quote! { 1u32 }
+        } else {
+            let f = syn::Ident::new(k, proc_macro2::Span::call_site());
+            quote! { arael::threads::Leaves::count(&self.#f) as u32 }
+        }
+    }).collect();
+    let n_containers = container_counts.len();
 
     let slot_walks: Vec<TokenStream2> = {
         let mut walks: Vec<TokenStream2> = Vec::new();
@@ -8930,600 +9093,13 @@ pub fn generate_root_methods(
         walks
     };
 
-    let par_types: TokenStream2;
-    let par_methods: TokenStream2;
-    let par_root_methods: TokenStream2;
-    let par_begin: TokenStream2;
-    /// The mirror branch that each context entry point tries first.
-    #[derive(Default)]
-    struct ParCtx {
-        cost: TokenStream2,
-        dense: TokenStream2,
-        band: TokenStream2,
-        sparse: TokenStream2,
-        direct: TokenStream2,
-        indexed: TokenStream2,
-        cells: TokenStream2,
-        bind: TokenStream2,
-        spans: TokenStream2,
-    }
-    let par_ctx: ParCtx;
-    if par {
-        let mirror_ty = syn::Ident::new(&format!("{}Mirror", root_name), proc_macro2::Span::call_site());
-        let containers: Vec<&ParContainer> = par_containers.values().collect();
-        let ne = par_entities.len();
-        let parts_idents: Vec<&syn::Ident> = par_entities.iter().map(|e| &e.parts).collect();
-        let leaves_idents: Vec<&syn::Ident> = containers.iter().map(|c| &c.leaves).collect();
-        // Per container, the mirror field of each of its cross blocks: a
-        // list parallel to the leaf list.
-        let blocks_idents: Vec<Vec<syn::Ident>> = par_containers.iter().map(|(key, c)| {
-            c.blocks.iter().map(|(f, _, _, _)| par_blocks_ident(key, f)).collect()
-        }).collect();
-        let all_blocks_idents: Vec<&syn::Ident> = blocks_idents.iter().flatten().collect();
-        let all_block_tys: Vec<&TokenStream2> = containers.iter()
-            .flat_map(|c| c.blocks.iter().map(|(_, ty, _, _)| ty)).collect();
-
-        // The leaf types and the mirror. A leaf is the instance's index and
-        // its role slots; its cross blocks live in the parallel lists.
-        let leaf_types: Vec<TokenStream2> = containers.iter().map(|c| {
-            let leaf = &c.leaf;
-            let nroles = c.roles.len();
-            let sub = match c.instance {
-                ParInstance::Nested { .. } => quote! { sub: u32, },
-                _ => quote! {},
-            };
-            quote! {
-                #[doc(hidden)]
-                #[allow(non_camel_case_types)]
-                #[derive(Clone)]
-                pub struct #leaf {
-                    index: u32,
-                    #sub
-                    slots: [u32; #nroles],
-                }
-            }
-        }).collect();
-        let leaf_type_idents: Vec<&syn::Ident> = containers.iter().map(|c| &c.leaf).collect();
-        let slab_tys: Vec<&TokenStream2> = par_entities.iter().map(|e| &e.slab_ty).collect();
-        par_types = quote! {
-            #(#leaf_types)*
-            #[doc(hidden)]
-            #[derive(Clone, Default)]
-            pub struct #mirror_ty {
-                #(#leaves_idents: std::vec::Vec<#leaf_type_idents>,)*
-                #(#all_blocks_idents: #all_block_tys,)*
-                #(#parts_idents: #slab_tys,)*
-                __sum: #sweep_ret_ty,
-                /// The last sweep's time on this mirror.
-                __time: std::time::Duration,
-            }
-        };
-
-        // The instance bindings of a container's leaf, for the sweeps.
-        let instance_bind = |c: &ParContainer| -> TokenStream2 {
-            match &c.instance {
-                ParInstance::Flat { coll, var } => quote! {
-                    let #var = arael::threads::Leaves::at(&#coll, __leaf.index);
-                },
-                ParInstance::Nested { coll, frines, parent_var } => quote! {
-                    let #parent_var = arael::threads::Leaves::at(&#coll, __leaf.index);
-                    let __frine = arael::threads::Leaves::at(&#parent_var.#frines, __leaf.sub);
-                },
-                ParInstance::Single { access } => quote! {
-                    let __item = #access;
-                },
-            }
-        };
-
-        // The build: the entity counts, then per container its leaves in
-        // container order, cut into one contiguous range per thread, each
-        // leaf pushed to its thread's mirror with a partial slot per role.
-        let entity_lens: Vec<TokenStream2> = par_entities.iter().enumerate().map(|(e, ent)| {
-            let access = &ent.access;
-            if ent.single {
-                quote! { __b.set_entity_len(#e, 1); }
-            } else {
-                quote! { __b.set_entity_len(#e, arael::threads::Leaves::count(&#access)); }
-            }
-        }).collect();
-        let fills: Vec<TokenStream2> = containers.iter().enumerate().map(|(c, cont)| {
-            let leaf = &cont.leaf;
-            let leaves = &cont.leaves;
-            let exprs = &cont.role_exprs;
-            // The leaf count the ranges are cut from: the container's
-            // count, or the children summed over the parents.
-            let count = match &cont.instance {
-                ParInstance::Flat { coll, .. } => quote! { arael::threads::Leaves::count(&#coll) },
-                ParInstance::Nested { coll, frines, parent_var } => quote! {{
-                    let mut __n = 0usize;
-                    arael::threads::Leaves::each(&#coll, |_, #parent_var| {
-                        __n += arael::threads::Leaves::count(&#parent_var.#frines);
-                    });
-                    __n
-                }},
-                ParInstance::Single { .. } => quote! { 1usize },
-            };
-            let sub_init = match cont.instance {
-                ParInstance::Nested { .. } => quote! { sub: __j, },
-                _ => quote! {},
-            };
-            let slot_idents: Vec<syn::Ident> = (0..cont.roles.len())
-                .map(|k| syn::Ident::new(&format!("__s{}", k), proc_macro2::Span::call_site()))
-                .collect();
-            let slots: Vec<TokenStream2> = cont.roles.iter().enumerate().map(|(k, &eid)| {
-                let ent = &par_entities[eid];
-                let parts = &ent.parts;
-                let n = ent.param_count;
-                let idx_stmts = &ent.idx_stmts;
-                let access = &ent.access;
-                let s = &slot_idents[k];
-                let entity_bind = if ent.single {
-                    quote! { let __e = &#access; }
-                } else {
-                    quote! { let __e = arael::threads::Leaves::at(&#access, __ek); }
-                };
-                let expr = &exprs[k];
-                quote! {
-                    let #s: u32 = {
-                        let __ek: u32 = #expr;
-                        match __b.slot(#eid, __t, __ek) {
-                            Some(__s) => __s,
-                            None => {
-                                #entity_bind
-                                let mut __idx = [0u32; #n];
-                                #(#idx_stmts)*
-                                let __s = __m.#parts.push(__ek, &__idx);
-                                __b.claim(#eid, __t, __ek, __s);
-                                __s
-                            }
-                        }
-                    };
-                }
-            }).collect();
-            let block_pushes: Vec<TokenStream2> = cont.blocks.iter().enumerate().map(|(bi, (_, _, a, b))| {
-                let blocks = &blocks_idents[c][bi];
-                let pa = &par_entities[cont.roles[*a]].parts;
-                let pb = &par_entities[cont.roles[*b]].parts;
-                let sa = &slot_idents[*a];
-                let sb = &slot_idents[*b];
-                quote! {
-                    __m.#blocks.push(
-                        __m.#pa.indices(#sa as usize),
-                        __m.#pb.indices(#sb as usize),
-                    );
-                }
-            }).collect();
-            let blocks_of_c: Vec<&syn::Ident> = blocks_idents[c].iter().collect();
-            // Per entity container the roles name, a bound on the partials
-            // a range of `__len` leaves creates, for reserving.
-            let mut reserve: Vec<(usize, usize)> = Vec::new();
-            for &eid in &cont.roles {
-                match reserve.iter_mut().find(|r| r.0 == eid) {
-                    Some(r) => r.1 += 1,
-                    None => reserve.push((eid, 1)),
-                }
-            }
-            let reserve_eids: Vec<usize> = reserve.iter().map(|r| r.0).collect();
-            let reserve_mult: Vec<usize> = reserve.iter().map(|r| r.1).collect();
-            let reserve_parts: Vec<&syn::Ident> = reserve_eids.iter().map(|&e| &par_entities[e].parts).collect();
-            // One leaf: advance to the thread whose range holds it, then
-            // its slots, the leaf and its blocks.
-            let body = quote! {
-                while __k >= __end {
-                    __t += 1;
-                    __end = arael::threads::cut(__n, __p, __t + 1);
-                }
-                let __m = &mut __ms[__t];
-                #(#slots)*
-                __m.#leaves.push(#leaf {
-                    index: __i,
-                    #sub_init
-                    slots: [#(#slot_idents),*],
-                });
-                #(#block_pushes)*
-                __k += 1;
-            };
-            let walk = match &cont.instance {
-                ParInstance::Flat { coll, var } => quote! {
-                    arael::threads::Leaves::each(&#coll, |__i, #var| {
-                        let _ = #var;
-                        #body
-                    });
-                },
-                ParInstance::Nested { coll, frines, parent_var } => quote! {
-                    arael::threads::Leaves::each(&#coll, |__i, #parent_var| {
-                        arael::threads::Leaves::each(&#parent_var.#frines, |__j, __frine| {
-                            #body
-                        });
-                    });
-                },
-                ParInstance::Single { .. } => quote! {
-                    { let __i = 0u32; let _ = __i; #body }
-                },
-            };
-            quote! {
-                {
-                    let __n: usize = #count;
-                    for __t in 0..__p {
-                        let __len = arael::threads::cut(__n, __p, __t + 1) - arael::threads::cut(__n, __p, __t);
-                        let __m = &mut __ms[__t];
-                        __m.#leaves.reserve(__len);
-                        #(__m.#blocks_of_c.reserve(__len);)*
-                        #(__m.#reserve_parts.reserve((__len * #reserve_mult).min(__b.entity_len(#reserve_eids)));)*
-                    }
-                    let mut __k = 0usize;
-                    let mut __t = 0usize;
-                    let mut __end = arael::threads::cut(__n, __p, 1);
-                    #walk
-                }
-            }
-        }).collect();
-        let build_fn = quote! {
-            #[inline(never)]
-            #[allow(unused_variables)]
-            fn __par_build(&self, __mirrors: &mut arael::threads::Mirrors<#mirror_ty>) {
-                let __p = __mirrors.threads();
-                if __p == 0 { return; }
-                let __clock = __mirrors.clock();
-                let __t_build = __clock.start();
-                let __self_ref = &*self;
-                let (__ms, __b) = __mirrors.split();
-                __b.reset(__p, #ne);
-                #(#entity_lens)*
-                for __t in 0..__p {
-                    let __m = &mut __ms[__t];
-                    #(__m.#leaves_idents.clear();)*
-                    #(__m.#all_blocks_idents.clear();)*
-                    #(__m.#parts_idents.clear();)*
-                }
-                let __t_fill = __clock.start();
-                #(#fills)*
-                let __d_fill = __clock.stop(__t_fill);
-                let __t_finish = __clock.start();
-                let (mut __n_leaves, mut __n_blocks, mut __n_partials) = (0usize, 0usize, 0usize);
-                for __t in 0..__p {
-                    let __m = &mut __ms[__t];
-                    #(__m.#all_blocks_idents.finish();)*
-                    #(__m.#parts_idents.finish();)*
-                    #(__n_leaves += __m.#leaves_idents.len();)*
-                    #(__n_blocks += __m.#all_blocks_idents.len();)*
-                    #(__n_partials += __m.#parts_idents.len();)*
-                }
-                let __d_finish = __clock.stop(__t_finish);
-                __mirrors.timing.build_fill += __d_fill;
-                __mirrors.timing.build_finish += __d_finish;
-                __mirrors.timing.build += __clock.stop(__t_build);
-                __mirrors.timing.builds += 1;
-                __mirrors.timing.leaves = __n_leaves;
-                __mirrors.timing.blocks = __n_blocks;
-                __mirrors.timing.partials = __n_partials;
-            }
-        };
-
-        // The per-mirror sweeps: the assembly over the leaves with the
-        // writes into the mirror, and the cost.
-        let assemble_loops: Vec<TokenStream2> = containers.iter().enumerate().map(|(ci, c)| {
-            let leaves = &c.leaves;
-            let bind = instance_bind(c);
-            // The leaf's blocks, bound by name and zeroed where they are
-            // about to be written.
-            let bind_blocks: Vec<TokenStream2> = c.blocks.iter().enumerate()
-                .map(|(bi, (f, _, _, _))| {
-                    let blocks = &blocks_idents[ci][bi];
-                    let blk = par_blk_ident(f);
-                    quote! {
-                        let mut #blk = #blocks.block_mut(__k);
-                        #blk.zero();
-                    }
-                }).collect();
-            let entries = &c.gh_entries;
-            scope(quote! {
-                for (__k, __leaf) in #leaves.iter().enumerate() {
-                    #bind
-                    #(#bind_blocks)*
-                    #(#entries)*
-                }
-            })
-        }).collect();
-        let cost_loops_par: Vec<TokenStream2> = containers.iter().map(|c| {
-            let leaves = &c.leaves;
-            let bind = instance_bind(c);
-            let prelude = &c.cost_prelude;
-            let entries = &c.cost_entries;
-            scope(quote! {
-                for __leaf in __mirror.#leaves.iter() {
-                    #bind
-                    #prelude
-                    #(#entries)*
-                }
-            })
-        }).collect();
-        let merge_sum = sweep_call(quote! { __m.__sum });
-        let sweep_fns = quote! {
-            #[inline(never)]
-            #[allow(unused_variables)]
-            fn __par_assemble(&self, __mirror: &mut #mirror_ty, params: &[#prec_type]) -> #sweep_ret_ty {
-                use arael::utils::{Float as _, SelectIndex as _};
-                let __self_ref = &*self;
-                #cost_decl
-                let #mirror_ty { #(#leaves_idents,)* #(#all_blocks_idents,)* #(#parts_idents,)* __sum: _, __time: _ } = __mirror;
-                #(#parts_idents.zero();)*
-                #(#assemble_loops)*
-                #sweep_ret
-            }
-
-            #[inline(never)]
-            #[allow(unused_variables)]
-            fn __par_cost(&self, __mirror: &#mirror_ty, params: &[#prec_type]) -> #sweep_ret_ty {
-                use arael::utils::{Float as _, SelectIndex as _};
-                let __self_ref = &*self;
-                #cost_decl
-                #(#cost_loops_par)*
-                #sweep_ret
-            }
-
-            fn __par_calc_cost(&mut self, params: &[#prec_type], __mirrors: &mut arael::threads::Mirrors<#mirror_ty>) -> #prec_type {
-                use arael::utils::{Float as _, SelectIndex as _};
-                let __clock = __mirrors.clock();
-                let __t_update = __clock.start();
-                arael::model::Model::update_params(self, params);
-                let __d_update = __clock.stop(__t_update);
-                let __par = __mirrors.cost.par();
-                let __t = __mirrors.cost.start();
-                let __t_region = __clock.start();
-                {
-                    let __model = &*self;
-                    arael::threads::run(__par, __mirrors.as_mut_slice(), |__m| {
-                        let __t_task = __clock.start();
-                        __m.__sum = __model.__par_cost(__m, params);
-                        __m.__time = __clock.stop(__t_task);
-                    });
-                }
-                __mirrors.record_cost(__clock.stop(__t_region), __par, |__m| __m.__time);
-                __mirrors.timing.cost_update += __d_update;
-                __mirrors.cost.finish(__t);
-                #cost_decl
-                for __m in __mirrors.as_slice() { #merge_sum }
-                #cost_ret
-            }
-
-            /// The threaded assembly: the sweep over the mirrors, the
-            /// gradient gathered here, the Hessian by `scatter`.
-            fn __par_assembly(
-                &mut self,
-                params: &[#prec_type],
-                grad: &mut [#prec_type],
-                __mirrors: &mut arael::threads::Mirrors<#mirror_ty>,
-                scatter: &mut dyn FnMut(&[#mirror_ty]),
-            ) -> #prec_type {
-                use arael::utils::{Float as _, SelectIndex as _};
-                let __clock = __mirrors.clock();
-                let __t_update = __clock.start();
-                arael::model::Model::update_params(self, params);
-                let __d_update = __clock.stop(__t_update);
-                grad.iter_mut().for_each(|g| *g = 0.0);
-                let __par = __mirrors.assembly.par();
-                let __t = __mirrors.assembly.start();
-                let __t_region = __clock.start();
-                {
-                    let __model = &*self;
-                    arael::threads::run(__par, __mirrors.as_mut_slice(), |__m| {
-                        let __t_task = __clock.start();
-                        __m.__sum = __model.__par_assemble(__m, params);
-                        __m.__time = __clock.stop(__t_task);
-                    });
-                }
-                __mirrors.record_assembly(__clock.stop(__t_region), __par, |__m| __m.__time);
-                __mirrors.timing.assembly_update += __d_update;
-                let __t_grad = __clock.start();
-                for __m in __mirrors.as_slice() {
-                    #(__m.#parts_idents.scatter_grad(grad);)*
-                }
-                __mirrors.timing.gather_grad += __clock.stop(__t_grad);
-                let __t_scatter = __clock.start();
-                scatter(__mirrors.as_slice());
-                __mirrors.timing.scatter += __clock.stop(__t_scatter);
-                __mirrors.assembly.finish(__t);
-                #cost_decl
-                for __m in __mirrors.as_slice() { #merge_sum }
-                #cost_ret
-            }
-        };
-
-        // The structural walks and the gathers over every mirror's
-        // slabs and leaves, in one order. The entity statement acts on
-        // `__p`, one mirror's slab; the block statement on `__l`, one of
-        // its cross block lists.
-        let walk = |partial: TokenStream2, block: TokenStream2, mutable: bool| -> TokenStream2 {
-            let list = if mutable { quote! { &mut } } else { quote! { & } };
-            quote! {
-                #({ let __p = #list __m.#parts_idents; #partial })*
-                #({ let __l = #list __m.#all_blocks_idents; #block })*
-            }
-        };
-        let span_walks: Vec<TokenStream2> = par_entities.iter().map(|ent| {
-            let parts = &ent.parts;
-            let access = &ent.access;
-            let count = if ent.single {
-                quote! { 1usize }
-            } else {
-                quote! { arael::threads::Leaves::count(&#access) }
-            };
-            quote! {
-                {
-                    let mut __seen = vec![false; #count];
-                    for __m in __mirrors.as_slice() {
-                        for __k in 0..__m.#parts.len() {
-                            let __e = __m.#parts.entity(__k) as usize;
-                            if !__seen[__e] {
-                                __seen[__e] = true;
-                                __m.#parts.collect_param_block(__k, out);
-                            }
-                        }
-                    }
-                }
-            }
-        }).collect();
-        let cells_walk = walk(quote! { __p.collect_hessian_cells(out); },
-            quote! { __l.collect_hessian_cells(out); }, false);
-        let bind_walk = walk(quote! { __p.bind_hessian_positions(binder, out); },
-            quote! { __l.bind_hessian_positions(binder, out); }, true);
-        let structure_fns = quote! {
-            fn __par_cells(&self, __mirrors: &arael::threads::Mirrors<#mirror_ty>, out: &mut std::vec::Vec<(u32, u32)>) {
-                for __m in __mirrors.as_slice() { #cells_walk }
-            }
-            fn __par_bind(&self, __mirrors: &mut arael::threads::Mirrors<#mirror_ty>, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                for __m in __mirrors.as_mut_slice() { #bind_walk }
-            }
-            /// One span per entity, in index order (the serialize order).
-            fn __par_spans(&self, __mirrors: &arael::threads::Mirrors<#mirror_ty>, out: &mut std::vec::Vec<(u32, u32)>) {
-                let __start = out.len();
-                #(#span_walks)*
-                out[__start..].sort_unstable();
-            }
-        };
-        par_methods = quote! { #build_fn #sweep_fns #structure_fns };
-
-        let gather = |partial: TokenStream2, block: TokenStream2| -> TokenStream2 {
-            let w = walk(partial, block, false);
-            quote! { for __m in __ms { #w } }
-        };
-        let g_dense = gather(quote! { __p.accumulate_hessian(hessian); },
-            quote! { __l.accumulate_hessian(hessian); });
-        let g_band = gather(
-            quote! { if __err.is_none() { if let Err(e) = __p.accumulate_hessian_band(band, kd) { __err = Some(e); } } },
-            quote! { if __err.is_none() { if let Err(e) = __l.accumulate_hessian_band(band, kd) { __err = Some(e); } } });
-        let g_sparse = gather(quote! { __p.accumulate_hessian_sparse(coo); },
-            quote! { __l.accumulate_hessian_sparse(coo); });
-        let g_direct = gather(quote! { __p.accumulate_hessian_sparse_direct(csc); },
-            quote! { __l.accumulate_hessian_sparse_direct(csc); });
-        let g_indexed = gather(quote! { __p.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); },
-            quote! { __l.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); });
-        // The context forms of the entry points: the mirror path when the
-        // context's mirrors are on, else the model's own path. The
-        // context-less forms below are always the model's own path.
-        par_root_methods = quote! {
-            fn param_block_spans_with_context(&self, ctx: &arael::threads::Context) -> std::vec::Vec<(u32, u32)> {
-                if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
-                    if __m.is_on() {
-                        let mut __out = std::vec::Vec::new();
-                        self.__par_spans(__m, &mut __out);
-                        return __out;
-                    }
-                }
-                arael::simple_lm::RootProblem::param_block_spans(self)
-            }
-        };
-        par_begin = quote! {
-            let __on = {
-                let __p = ctx.threads();
-                let __timing = ctx.timing();
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                __m.set_threads(__p);
-                __m.enable_timing(__timing);
-                __m.is_on()
-            };
-            if __on {
-                let __m = ctx.mirrors_mut::<#mirror_ty>();
-                self.__par_build(__m);
-                return;
-            }
-        };
-        // The mirror branch of each context entry point. Empty for a
-        // root without `par`; the store path below follows it.
-        par_ctx = ParCtx {
-            cost: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() { return self.__par_calc_cost(params, __m); }
-                }
-            },
-            dense: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() {
-                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                            hessian.iter_mut().for_each(|h| *h = 0.0);
-                            #g_dense
-                        });
-                    }
-                }
-            },
-            band: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() {
-                        let mut __err: Option<arael::simple_lm::BandOverflow> = None;
-                        let __cost = self.__par_assembly(params, grad, __m, &mut |__ms| {
-                            band.iter_mut().for_each(|b| *b = 0.0);
-                            #g_band
-                        });
-                        return match __err { Some(e) => Err(e), None => Ok(__cost) };
-                    }
-                }
-            },
-            sparse: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() {
-                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                            coo.clear();
-                            #g_sparse
-                        });
-                    }
-                }
-            },
-            direct: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() {
-                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                            csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                            #g_direct
-                        });
-                    }
-                }
-            },
-            indexed: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() {
-                        return self.__par_assembly(params, grad, __m, &mut |__ms| {
-                            vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                            let mut cursor = 0usize;
-                            #g_indexed
-                            assert!(cursor == positions.len(),
-                                "sparsity pattern changed between iterations: {} Hessian entries \
-                                 accumulated but the cached pattern has {}",
-                                cursor, positions.len());
-                        });
-                    }
-                }
-            },
-            cells: quote! {
-                if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
-                    if __m.is_on() { return self.__par_cells(__m, out); }
-                }
-            },
-            bind: quote! {
-                {
-                    let __m = ctx.mirrors_mut::<#mirror_ty>();
-                    if __m.is_on() { return self.__par_bind(__m, binder, out); }
-                }
-            },
-            spans: quote! {
-                if let Some(__m) = ctx.mirrors::<#mirror_ty>() {
-                    if __m.is_on() { return self.__par_spans(__m, out); }
-                }
-            },
-        };
-    } else {
-        par_types = quote! {};
-        par_methods = quote! {};
-        par_root_methods = quote! {};
-        par_ctx = ParCtx::default();
-        par_begin = quote! {};
-    }
+    // The mirrors are gone: a threading root splits its walks across the
+    // stores the context holds instead of re-describing itself as leaves
+    // and roles. These tokens stay only until their use sites go with them.
+    let par_types: TokenStream2 = quote! {};
+    let par_methods: TokenStream2 = quote! {};
+    let par_root_methods: TokenStream2 = quote! {};
+    let par_begin: TokenStream2 = quote! {};
 
     // advance(): fold accepted-step euler angle deltas. Recurses through
     // the whole model tree via Model::advance_params, so EA params at any
@@ -9543,8 +9119,54 @@ pub fn generate_root_methods(
     // The extended model's cost joins the sum like any other term.
     let extended_cost_call_acc =
         cost_add(quote! { arael::model::ExtendedModel::extended_cost(self, params) as #acc_type });
+    // The hook runs after the join, on the calling thread, and pushes
+    // into the first store's COO list -- its entries follow that store's
+    // own in the position stream.
     let extended_compute_call =
-        quote! { arael::model::ExtendedModel::extended_compute(self, params, grad); };
+        quote! {
+            arael::model::ExtendedModel::extended_compute(
+                self, params, grad, &mut __stores[0].__coo);
+        };
+
+    // The cost region: every store sums its own ranges into its own
+    // accumulator, and the merge after the join is the same one the
+    // assembly uses. A cost sweep only reads the model, so nothing here
+    // depends on which store a walk lands in -- the split is for the
+    // parallelism alone. Emitted only for a root that can thread; every
+    // other one keeps forwarding to the plain `calc_cost`.
+    let cost_region = if par {
+        let cost_decl3 = cost_decl.clone();
+        quote! {
+            arael::model::Model::update_params(self, params);
+            #extended_update_call
+            let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+            let __par = __stores.len() > 1;
+            let __clock = arael::threads::Clock::new(__tm.on);
+            let __t = __clock.start();
+            {
+                let __model = &*self;
+                arael::threads::run_indexed(__par, __stores, |__si, __store| {
+                    let __ranges = __cut.store(__si);
+                    let __ts = __clock.start();
+                    #cost_decl3
+                    #(#cost_sweep_calls_m)*
+                    __store.__cost = #sweep_ret;
+                    __store.__time = __clock.stop(__ts);
+                });
+            }
+            let __region = __clock.stop(__t);
+            __tm.cost.record(__region, __par, __stores.iter().map(|__s| __s.__time));
+            #cost_decl
+            #cost_gather
+            #extended_cost_call_acc
+            #cost_ret
+        }
+    } else {
+        quote! {
+            let _ = &ctx;
+            arael::simple_lm::LmProblem::calc_cost(self, params)
+        }
+    };
 
     let extended_jacobian_call = if custom {
         quote! { arael::model::ExtendedModel::extended_jacobian(self, params, &mut __jac_rows, &mut __jac_cid); }
@@ -9559,16 +9181,31 @@ pub fn generate_root_methods(
     // and every static-shaped block is covered by the structure walks.
     let requires_compute = has_triplet_block;
 
+    // An `extended` root's hook is handed the COO list, and only running
+    // it says whether it pushes. The probe runs it alone -- no sweeps, no
+    // store -- into a list of its own, and throws the gradient away.
+    let extended_probe_fn = if custom {
+        quote! {
+            fn extended_hook_writes_coo(&mut self, params: &[#prec_type]) -> bool {
+                let mut __probe = arael::model::Coo::<#cast_type>::new();
+                let mut __grad = std::vec![0 as #prec_type; params.len()];
+                arael::model::Model::update_params(self, params);
+                arael::model::ExtendedModel::extended_update(self, params);
+                arael::model::ExtendedModel::extended_compute(
+                    self, params, &mut __grad, &mut __probe);
+                !__probe.is_empty()
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
 
     // The entry points own the root post-passes: Model::serialize_params /
     // deserialize_params stay pure tree walks, and the RootProblem impl
     // appends the block wiring / the extended-deserialize hook (the latter
     // via UFCS -- it carries no width in its signature).
-    let (par_ctx_cost, par_ctx_dense, par_ctx_band, par_ctx_sparse, par_ctx_direct,
-         par_ctx_indexed, par_ctx_cells, par_ctx_bind, par_ctx_spans) =
-        (par_ctx.cost, par_ctx.dense, par_ctx.band, par_ctx.sparse, par_ctx.direct,
-         par_ctx.indexed, par_ctx.cells, par_ctx.bind, par_ctx.spans);
     let mut tokens = quote! {
         #(#constraint_impls)*
         #par_types
@@ -9579,6 +9216,20 @@ pub fn generate_root_methods(
         #[derive(Clone, Default)]
         pub struct #store_ty {
             #(#store_names: #store_tys,)*
+            /// The Hessian pairs this store's sweeps could not put in a
+            /// tile: the COO entries of the constraints that declare one.
+            /// Pushed in sweep order and read back in it, so the position
+            /// stream a solve caches replays exactly.
+            __coo: arael::model::Coo<#cast_type>,
+            /// What this store's own range summed to. A dispatched region
+            /// leaves it here and the join merges the stores in order, so
+            /// the total does not depend on which finished first.
+            __cost: #sweep_ret_ty,
+            /// How long this store's own sweep took. The region's total
+            /// beyond the longest of these is the dispatch, the wake-up
+            /// and the join; the spread between longest and shortest is
+            /// what the cut left unbalanced.
+            __time: std::time::Duration,
         }
 
         impl arael::threads::BlockStore for #store_ty {}
@@ -9586,9 +9237,10 @@ pub fn generate_root_methods(
         #[doc(hidden)]
         #[allow(dead_code)]
         impl #store_ty {
-            /// Clear every tile and every gradient stash.
+            /// Clear every tile, every gradient stash and the COO list.
             fn zero(&mut self) {
                 #(self.#store_names.zero();)*
+                self.__coo.zero();
             }
             /// Add the entities' stashes into the global gradient.
             fn scatter_grad(&self, grad: &mut [#prec_type]) {
@@ -9600,27 +9252,34 @@ pub fn generate_root_methods(
             // `TripletBlock`s the model still holds.
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 #(self.#store_names.collect_hessian_cells(out);)*
+                self.__coo.collect_hessian_cells(out);
             }
             fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
                 #(self.#store_names.bind_hessian_positions(binder, out);)*
+                self.__coo.bind_hessian_positions(binder, out);
             }
             fn accumulate_hessian<F: arael::utils::Float>(&self, hessian: &mut [F]) {
                 #(self.#store_names.accumulate_hessian(hessian);)*
+                self.__coo.accumulate_hessian(hessian);
             }
             fn accumulate_hessian_band<F: arael::utils::Float>(&self, band: &mut [F], kd: usize)
                 -> Result<(), arael::simple_lm::BandOverflow>
             {
                 #(self.#store_names.accumulate_hessian_band(band, kd)?;)*
+                self.__coo.accumulate_hessian_band(band, kd)?;
                 Ok(())
             }
             fn accumulate_hessian_sparse<F: arael::utils::Float>(&self, coo: &mut arael::simple_lm::CooMatrix<F>) {
                 #(self.#store_names.accumulate_hessian_sparse(coo);)*
+                self.__coo.accumulate_hessian_sparse(coo);
             }
             fn accumulate_hessian_sparse_direct<F: arael::utils::Float>(&self, csc: &mut arael::simple_lm::CscMatrix<F>) {
                 #(self.#store_names.accumulate_hessian_sparse_direct(csc);)*
+                self.__coo.accumulate_hessian_sparse_direct(csc);
             }
             fn accumulate_hessian_sparse_indexed<F: arael::utils::Float>(&self, vals: &mut [F], positions: &[arael::ValueIndex], cursor: &mut usize) {
                 #(self.#store_names.accumulate_hessian_sparse_indexed(vals, positions, cursor);)*
+                self.__coo.accumulate_hessian_sparse_indexed(vals, positions, cursor);
             }
         }
 
@@ -9669,28 +9328,109 @@ pub fn generate_root_methods(
             /// being walked.
             #[doc(hidden)]
             #[allow(unused_variables, dead_code)]
-            pub fn __build_blocks(&self, __store: &mut #store_ty) {
+            /// Fill one store from the units `__ranges` gives it.
+            ///
+            /// `__base` carries the global slot each cross array has
+            /// reached, so a store built after another opens where that one
+            /// ended -- the runs are contiguous in walk order, so this is
+            /// the marker's slot for the first block a store holds. Build
+            /// the stores in order and it is right by construction.
+            pub fn __build_blocks_at(&self, __store: &mut #store_ty,
+                                     __ranges: &[(u32, u32)], __base: &mut [u32]) {
+                use arael::threads::Leaves as _;
+                // A range table means the solve divided its walks, so the
+                // stores are addressed as slices rather than as the whole.
+                let __split = !__ranges.is_empty();
+                let _ = __split;
+                // The single-instance accessors read through this, as the
+                // sweeps do.
+                let __self_ref = &*self;
+                let _ = __self_ref;
                 #(__store.#store_names.clear();)*
+                #(#self_claim_walks)*
                 #(#build_walks)*
                 #(__store.#store_names.finish();)*
+                #(
+                    __store.#store_cross_names.set_base(__base[#cross_idx]);
+                    __base[#cross_idx] += __store.#store_cross_names.len() as u32;
+                )*
+            }
+
+            /// The whole model into one store.
+            pub fn __build_blocks(&self, __store: &mut #store_ty) {
+                let mut __base = [0u32; #n_cross];
+                self.__build_blocks_at(__store, &[], &mut __base);
+            }
+
+            /// How many cross arrays a store holds, so a caller can size the
+            /// running base.
+            pub const __CROSS_ARRAYS: usize = #n_cross;
+
+            /// How many slots each container has, in the order a cut keys
+            /// its ranges by.
+            pub fn __container_counts(&self) -> [u32; #n_containers] {
+                [#(#container_counts),*]
+            }
+
+            /// Divide every container evenly among `stores`. A weighted
+            /// split replaces the even one; the shape is the same either
+            /// way, one range per store per container.
+            pub fn __build_cut(&self, __cut: &mut arael::threads::Cut, stores: usize) {
+                // One store is the whole model, and an empty cut is how
+                // every other part of the solve is told so.
+                if stores <= 1 { __cut.clear(); return; }
+                __cut.reset(stores, #n_containers);
+                #(#cut_walks)*
+            }
+
+            /// Make sure `ctx` holds this root's blocks. A solve builds
+            /// them in `begin_with_context` and this returns at once; a
+            /// direct call on a context of one's own builds them here,
+            /// so the structure is built once per context and not once
+            /// per walk.
+            ///
+            /// A context is tied to the structure it was built for. It
+            /// is filled once and then reused, so a model whose blocks
+            /// have changed -- a fixed parameter, a collection resized
+            /// -- needs a fresh one, which is what every solve gets in
+            /// `begin_with_context`.
+            #[doc(hidden)]
+            pub fn __blocks_in(&self, ctx: &mut arael::threads::Context) {
+                if ctx.blocks_list::<#store_ty>().is_some() { return; }
+                self.__build_cut(ctx.cut_mut(), 1);
+                let (__stores, __cut) = ctx.blocks_and_cut_mut::<#store_ty>(1);
+                let mut __base = [0u32; #n_cross];
+                for (__s, __store) in __stores.iter_mut().enumerate() {
+                    self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
+                }
             }
 
             /// Returns the cost (sum of squared residuals, excluding
             /// extended-model residuals) as a byproduct of the sweep.
-            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type], __store: &mut #store_ty) -> #prec_type {
+            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
                 use arael::utils::{Float as _, SelectIndex as _};
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
-                __store.zero();
-                // Clears whatever `TripletBlock`s the model still holds.
-                arael::model::Model::zero_blocks(self);
+                for __store in __stores.iter_mut() { __store.zero(); }
+                // Each store sweeps the ranges the cut gave it. An unbuilt
+                // cut hands every walk the whole of its container, which is
+                // one store covering the model. Dispatch only when there is
+                // more than one to run.
+                let __par = __stores.len() > 1;
+                let __clock = arael::threads::Clock::new(__tm.on);
+                let __t = __clock.start();
+                #region
+                let __region = __clock.stop(__t);
+                __tm.assembly.record(__region, __par, __stores.iter().map(|__s| __s.__time));
                 #cost_decl
-                #(#gh_sweep_calls)*
+                #cost_gather
                 // The sweeps stash each entity's gradient beside its
                 // triangle; this is where it reaches the caller's vector.
-                __store.scatter_grad(grad);
+                let __t = __clock.start();
+                for __store in __stores.iter() { __store.scatter_grad(grad); }
+                __tm.gather_grad += __clock.stop(__t);
                 #extended_compute_call
                 #cost_ret
             }
@@ -9699,54 +9439,59 @@ pub fn generate_root_methods(
             // whether that is the solve context's or one of its own.
             // The store's arrays come first in every walk that shares the
             // position stream, then the model's own for its TripletBlocks.
-            fn __gh_dense_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], __store: &mut #store_ty) -> #prec_type {
+            fn __gh_dense_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad, __store);
+                let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 hessian.iter_mut().for_each(|h| *h = 0.0);
-                __store.accumulate_hessian(hessian);
-                arael::model::Model::accumulate_hessian(self, hessian);
+                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                  for __store in __stores.iter() { __store.accumulate_hessian(hessian); }
+                  __tm.scatter += __c.stop(__t); }
                 __cost
             }
 
-            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __store: &mut #store_ty) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad, __store);
+                let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 band.iter_mut().for_each(|b| *b = 0.0);
-                __store.accumulate_hessian_band(band, kd)?;
-                arael::model::Model::accumulate_hessian_band(self, band, kd)?;
+                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                  for __store in __stores.iter() { __store.accumulate_hessian_band(band, kd)?; }
+                  __tm.scatter += __c.stop(__t); }
                 Ok(__cost)
             }
 
-            fn __gh_sparse_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, __store: &mut #store_ty) -> #prec_type {
+            fn __gh_sparse_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad, __store);
+                let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 coo.clear();
-                __store.accumulate_hessian_sparse(coo);
-                arael::model::Model::accumulate_hessian_sparse(self, coo);
+                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                  for __store in __stores.iter() { __store.accumulate_hessian_sparse(coo); }
+                  __tm.scatter += __c.stop(__t); }
                 __cost
             }
 
-            fn __gh_direct_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, __store: &mut #store_ty) -> #prec_type {
+            fn __gh_direct_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad, __store);
+                let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                __store.accumulate_hessian_sparse_direct(csc);
-                arael::model::Model::accumulate_hessian_sparse_direct(self, csc);
+                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                  for __store in __stores.iter() { __store.accumulate_hessian_sparse_direct(csc); }
+                  __tm.scatter += __c.stop(__t); }
                 __cost
             }
 
-            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], __store: &mut #store_ty) -> #prec_type {
+            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                let mut __cost = self.__compute_blocks(params, grad, __store);
+                let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
-                __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor);
-                arael::model::Model::accumulate_hessian_sparse_indexed(self, vals, positions, &mut cursor);
+                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                  for __store in __stores.iter() { __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); }
+                  __tm.scatter += __c.stop(__t); }
                 // The cached position map is replayed by cursor and assumes
                 // an identical entry sequence every iteration. A shorter
                 // sequence (a TripletBlock or extended constraint emitting
@@ -9850,12 +9595,6 @@ pub fn generate_root_methods(
 
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
-            fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
-            #marginalize_hint_fn
-            #marginalize_candidates_fn
-            fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                arael::model::Model::collect_param_blocks(self, out)
-            }
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
@@ -9865,116 +9604,108 @@ pub fn generate_root_methods(
                 // Read-only traversal: a plain shared reborrow suffices.
                 let __self_ref = &*self;
                 let _ = __self_ref;
+                let __ranges: &[(u32, u32)] = &[];
                 #cost_decl
                 #(#cost_sweep_calls)*
                 #extended_cost_call_acc
                 #cost_ret
             }
-
-            fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
-                #par_begin
-                let __store = ctx.blocks_mut::<#store_ty>();
-                self.__build_blocks(__store);
-            }
-
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                self.__gh_dense_in(params, grad, hessian, &mut __store)
+                let mut __stores = [#store_ty::default()];
+                let __cut = arael::threads::Cut::new();
+                let mut __tm = arael::threads::ParTiming::default();
+                let __tm = &mut __tm;
+                self.__build_blocks(&mut __stores[0]);
+                self.__gh_dense_in(params, grad, hessian, &mut __stores, &__cut, __tm)
             }
-
-            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                self.__gh_band_in(params, grad, band, kd, &mut __store)
-            }
-
             fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) -> #prec_type {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                self.__gh_sparse_in(params, grad, coo, &mut __store)
+                let mut __stores = [#store_ty::default()];
+                let __cut = arael::threads::Cut::new();
+                let mut __tm = arael::threads::ParTiming::default();
+                let __tm = &mut __tm;
+                self.__build_blocks(&mut __stores[0]);
+                self.__gh_sparse_in(params, grad, coo, &mut __stores, &__cut, __tm)
             }
-
-            fn calc_grad_hessian_sparse_direct(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>) -> #prec_type {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                self.__gh_direct_in(params, grad, csc, &mut __store)
-            }
-
-            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex]) -> #prec_type {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                self.__gh_indexed_in(params, grad, vals, positions, &mut __store)
-            }
-
-            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                __store.collect_hessian_cells(out);
-                arael::model::Model::collect_hessian_cells(self, out);
-            }
-
-            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                let mut __store = #store_ty::default();
-                self.__build_blocks(&mut __store);
-                __store.bind_hessian_positions(binder, out);
-                arael::model::Model::bind_hessian_positions(self, binder, out);
-            }
-
             fn advance(&mut self, params: &mut [#prec_type]) {
                 #advance_call
             }
-            fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
-                #par_ctx_cost
-                let _ = &ctx;
-                arael::simple_lm::LmProblem::calc_cost(self, params)
-            }
-            fn calc_grad_hessian_dense_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
-                #par_ctx_dense
-                let __store = ctx.blocks_mut::<#store_ty>();
-                self.__gh_dense_in(params, grad, hessian, __store)
-            }
-            fn calc_grad_hessian_band_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
-                #par_ctx_band
-                let __store = ctx.blocks_mut::<#store_ty>();
-                self.__gh_band_in(params, grad, band, kd, __store)
-            }
-            fn calc_grad_hessian_sparse_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
-                #par_ctx_sparse
-                let __store = ctx.blocks_mut::<#store_ty>();
-                self.__gh_sparse_in(params, grad, coo, __store)
-            }
-            fn calc_grad_hessian_sparse_direct_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
-                #par_ctx_direct
-                let __store = ctx.blocks_mut::<#store_ty>();
-                self.__gh_direct_in(params, grad, csc, __store)
-            }
-            fn calc_grad_hessian_sparse_indexed_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) -> #prec_type {
-                #par_ctx_indexed
-                let __store = ctx.blocks_mut::<#store_ty>();
-                self.__gh_indexed_in(params, grad, vals, positions, __store)
-            }
-            fn collect_hessian_cells_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
-                #par_ctx_cells
-                match ctx.blocks::<#store_ty>() {
-                    Some(__store) => {
-                        __store.collect_hessian_cells(out);
-                        arael::model::Model::collect_hessian_cells(self, out);
-                    }
-                    // No solve has begun on this context: build one here.
-                    None => arael::simple_lm::LmProblem::collect_hessian_cells(self, out),
+        }
+
+        // The solver-facing half: the routes a backend picks, the
+        // context forms, the structure walks and the elimination
+        // hints. Hidden from the docs, generated in full here.
+        impl arael::simple_lm::LmProblemInternals<#prec_type> for #root_name {
+            fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
+            #extended_probe_fn
+            #marginalize_hint_fn
+            #marginalize_candidates_fn
+            fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
+                #par_begin
+                let __n = #store_count;
+                self.__build_cut(ctx.cut_mut(), __n);
+                let (__stores, __cut) = ctx.blocks_and_cut_mut::<#store_ty>(__n);
+                let mut __base = [0u32; #n_cross];
+                // In store order: a run opens where the previous one ended.
+                for (__s, __store) in __stores.iter_mut().enumerate() {
+                    self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
             }
-            fn bind_hessian_positions_with_context(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
-                #par_ctx_bind
-                let __store = ctx.blocks_mut::<#store_ty>();
-                __store.bind_hessian_positions(binder, out);
-                arael::model::Model::bind_hessian_positions(self, binder, out);
+            fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                // Generated expressions may call Float trait methods
+                // (e.g. heaviside from safe-function derivatives).
+                use arael::utils::{Float as _, SelectIndex as _};
+                #cost_region
             }
-            fn collect_param_block_spans_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &arael::threads::Context) {
-                #par_ctx_spans
-                let _ = &ctx;
-                arael::simple_lm::LmProblem::collect_param_block_spans(self, out)
+            fn calc_grad_hessian_dense_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
+                self.__blocks_in(ctx);
+                let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                self.__gh_dense_in(params, grad, hessian, __stores, __cut, __tm)
+            }
+            fn calc_grad_hessian_sparse_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
+                self.__blocks_in(ctx);
+                let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                self.__gh_sparse_in(params, grad, coo, __stores, __cut, __tm)
+            }
+            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+                self.__blocks_in(ctx);
+                let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                self.__gh_band_in(params, grad, band, kd, __stores, __cut, __tm)
+            }
+            fn calc_grad_hessian_sparse_direct(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, ctx: &mut arael::threads::Context) -> #prec_type {
+                self.__blocks_in(ctx);
+                let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                self.__gh_direct_in(params, grad, csc, __stores, __cut, __tm)
+            }
+            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) -> #prec_type {
+                self.__blocks_in(ctx);
+                let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                self.__gh_indexed_in(params, grad, vals, positions, __stores, __cut, __tm)
+            }
+            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>, ctx: &mut arael::threads::Context) {
+                self.__blocks_in(ctx);
+                if let Some(__stores) = ctx.blocks_list::<#store_ty>() {
+                    for __store in __stores.iter() { __store.collect_hessian_cells(out); }
+                }
+            }
+            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
+                self.__blocks_in(ctx);
+                // Reads the solve's stores; must not narrow the list.
+                let __stores = ctx.blocks_active_mut::<#store_ty>();
+                for __store in __stores.iter_mut() { __store.bind_hessian_positions(binder, out); }
+            }
+            fn scatter_hessian_indexed(&self, vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) {
+                let mut cursor = 0usize;
+                if let Some(__stores) = ctx.blocks_list::<#store_ty>() {
+                    for __store in __stores.iter() {
+                        __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor);
+                    }
+                }
+                assert!(cursor == positions.len(),
+                    "scatter_hessian_indexed: {} entries against a stream of {}",
+                    cursor, positions.len());
+            }
+            fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut arael::threads::Context) {
+                arael::model::Model::collect_param_blocks(self, out)
             }
         }
     });
@@ -10047,6 +9778,10 @@ fn interpret_constraint_body(
         let parent_type = find_containing_parent(root_type_name, &struct_name.to_string())
             .unwrap_or_else(|| inner.to_string());
         (parent_type, Some(inner.to_string()))
+    } else if constraint.primary_block_field() == "coo" {
+        // The N-ary COO form: no block on the struct, participants are
+        // its `Ref` fields.
+        ("__triplet__".to_string(), None)
     } else {
         let block_field = fields.iter().find(|f| {
             f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.primary_block_field().to_string())
@@ -10058,6 +9793,10 @@ fn interpret_constraint_body(
     let struct_layout = registry_lookup(&struct_name.to_string());
     let ref_paths = struct_layout.as_ref().map(|l| &l.ref_paths[..]).unwrap_or(&[]);
     let parent_name = constraint.parent_name.clone().unwrap_or_else(|| a_type.to_lowercase());
+    // A bare `coo` secondary joins the root or the containing parent,
+    // whichever the body reads params of -- the same question the
+    // traversal side answers, asked the same way.
+    let coo_join = coo_secondary_join(constraint, &struct_name.to_string(), root_type_name);
 
     // Multi-cross vs single-cross discriminator — needed before building
     // var_infos so we can skip the parent_name entry in multi-cross
@@ -10110,12 +9849,14 @@ fn interpret_constraint_body(
         // no Ref<Self> field and parent_name is the only path that
         // resolves `<self_lc>.*` in the body.
         let has_root_triplet_block = constraint.block_fields.iter()
-            .any(|bf| bf.starts_with("root."));
+            .any(|bf| bf.starts_with("root."))
+            || matches!(coo_join, Some((true, _, _)));
         // `[hb, parent.<triplet>]`: a parent-owned triplet in the
         // SECONDARY slot (a `parent.` primary is the selfblock or
         // crossblock form, never a triplet).
         let has_parent_triplet_block = !is_parent_primary && mixed.is_none()
-            && constraint.block_fields.iter().any(|bf| bf.starts_with("parent."));
+            && (constraint.block_fields.iter().any(|bf| bf.starts_with("parent."))
+                || matches!(coo_join, Some((false, true, _))));
         let is_pure_multi_cross = is_multi_cross_early && !is_remote
             && !has_root_triplet_block && !has_parent_triplet_block;
         if is_parent_self_primary {
@@ -10301,14 +10042,15 @@ fn interpret_constraint_body(
     // Root-as-entity: if any declared local CrossBlock references the
     // root type, OR any block is `root.<triplet>`, include root's
     // Params in the symbol set too.
-    let has_root_entity = is_multi_cross && constraint.block_fields.iter().any(|bf| {
+    let has_root_entity = is_multi_cross && (matches!(coo_join, Some((true, _, _)))
+        || constraint.block_fields.iter().any(|bf| {
         if bf.starts_with("root.") { return true; }
         if bf.contains('.') { return false; }
         let Some(field) = fields.iter().find(|f|
             f.ident.as_ref().map(|i| i.to_string()) == Some(bf.clone())) else { return false; };
         let Ok((a, b_opt)) = extract_block_type_args(&field.ty) else { return false; };
         a == root_type_name || b_opt.as_deref() == Some(root_type_name)
-    });
+    }));
 
     if is_triplet || is_multi_cross {
         // TripletBlock / multi-cross: collect params from ALL ref fields
@@ -10896,6 +10638,21 @@ fn wrap_in_prefix_scoped(
     scope: Option<&dyn Fn(TokenStream2) -> TokenStream2>,
     outer_scoped: bool,
 ) -> TokenStream2 {
+    wrap_in_prefix_ranged(prefix, mutable, inner, scope, outer_scoped, None)
+}
+
+/// `wrap_in_prefix_scoped` whose outermost loop covers a slot range
+/// instead of the whole container. That level is the walk's unit level --
+/// the one a thread's range cuts -- and everything under it runs in full,
+/// so a thread owns whole subtrees. `None` walks all of it.
+fn wrap_in_prefix_ranged(
+    prefix: &[AccessSegment],
+    mutable: bool,
+    inner: TokenStream2,
+    scope: Option<&dyn Fn(TokenStream2) -> TokenStream2>,
+    outer_scoped: bool,
+    outer_range: Option<&TokenStream2>,
+) -> TokenStream2 {
     // The outermost loop level: the first collection segment, or the
     // inner sweep itself when the prefix has none. A sweep that becomes
     // a method of its own is that method's scope already, so the level
@@ -10924,8 +10681,11 @@ fn wrap_in_prefix_scoped(
             // None along the path contributes nothing, and the binding
             // inside the loop is the CONTAINED struct, so later hops and
             // the inner sweep are container-agnostic.
-            let looped = if mutable { quote! { for #bind in #parent.#field.iter_mut() { #code } } }
-                         else       { quote! { for #bind in #parent.#field.iter()     { #code } } };
+            let looped = match (outer_range, Some(i) == outer) {
+                (Some(r), true) => quote! { for #bind in #parent.#field.range_iter(#r.0, #r.1) { #code } },
+                _ if mutable    => quote! { for #bind in #parent.#field.iter_mut() { #code } },
+                _               => quote! { for #bind in #parent.#field.iter()     { #code } },
+            };
             apply(Some(i), looped)
         } else if mutable {
             quote! { { let #bind = &mut #parent.#field; #code } }
@@ -11122,4 +10882,24 @@ mod nested_path_tests {
 
         assert_eq!(resolve_nested_path("NrtRefRoot", "NrtTarget"), None);
     }
+}
+
+/// Does any constraint on this struct route its cross pairs to COO --
+/// the `coo` keyword in either block slot? The Hessian pattern of such a
+/// model is only knowable after a compute, which is what the root asks
+/// this to decide.
+pub(crate) fn struct_uses_coo(struct_name: &str) -> bool {
+    let err_ident = syn::Ident::new("__coo_probe", proc_macro2::Span::call_site());
+    crate::registry_constraints().iter()
+        .filter(|sc| sc.struct_name == struct_name)
+        .any(|sc| {
+            let Ok(ts) = sc.attr_tokens.parse::<proc_macro2::TokenStream>() else { return false };
+            let tokens: Vec<proc_macro2::TokenTree> = ts.into_iter().collect();
+            let Some(proc_macro2::TokenTree::Ident(id)) = tokens.first() else { return false };
+            if *id != "constraint" { return false; }
+            let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(1) else { return false };
+            let parsed = parse_constraint_inner_impl(
+                &g.stream().into_iter().collect::<Vec<_>>(), &err_ident);
+            matches!(parsed, Ok(Some(c)) if c.block_fields.iter().any(|bf| bf == "coo"))
+        })
 }

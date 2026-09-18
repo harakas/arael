@@ -1,7 +1,7 @@
 //! `[hb, parent.<triplet>]` with the entity held directly by the root:
-//! the containing parent IS the root, so the root form applies.
+//! the containing parent IS the root, and the form is `coo` either way.
 
-use arael::model::{Param, SelfBlock, TripletBlock};
+use arael::model::{Param, SelfBlock};
 
 #[arael::model]
 #[arael(constraint([hb, parent.hbt], {
@@ -20,7 +20,6 @@ struct W {
     m: Param<f64>,
     obs: std::vec::Vec<Obs>,
     hb: SelfBlock<W>,
-    hbt: TripletBlock<f64>,
 }
 
 fn main() {}

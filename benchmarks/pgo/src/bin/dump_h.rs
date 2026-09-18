@@ -13,7 +13,7 @@ mod g2o3;
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, LmProblem, RootProblem};
+use arael::simple_lm::{block_partition_from_spans, csc_from_cells, LmProblem, RootProblem, LmProblemInternals};
 
 // The 2D pose graph, same shape as the benchmark's.
 #[arael::model]
@@ -54,6 +54,7 @@ struct Graph {
 }
 
 fn main() {
+    let mut ctx = arael::threads::Context::new();
     let dir = std::env::var("SCHUR_DUMP_DIR").expect("set SCHUR_DUMP_DIR");
     for (name, path) in [
         ("pgo-m3500", "datasets/input_M3500_g2o.g2o"),
@@ -86,20 +87,20 @@ fn main() {
         RootProblem::serialize(&mut g, &mut params);
         let n = params.len();
         let mut cells = std::vec::Vec::new();
-        LmProblem::collect_hessian_cells(&mut g, &mut cells);
+        LmProblemInternals::collect_hessian_cells(&mut g, &mut cells, &mut ctx);
         let mut spans = std::vec::Vec::new();
-        LmProblem::collect_param_block_spans(&mut g, &mut spans);
+        LmProblemInternals::collect_param_block_spans(&mut g, &mut spans, &mut ctx);
         let partition = block_partition_from_spans(&spans, n);
         let (mut csc, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
         let mut positions = std::vec::Vec::new();
-        LmProblem::bind_hessian_positions(
-            &mut g,
+        LmProblemInternals::bind_hessian_positions(&mut g,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut positions,
+            &mut ctx,
         );
         let mut grad = vec![0.0; n];
-        LmProblem::calc_grad_hessian_sparse_indexed(
-            &mut g, &params, &mut grad, &mut csc.vals, &positions,
+        LmProblemInternals::calc_grad_hessian_sparse_indexed(
+            &mut g, &params, &mut grad, &mut csc.vals, &positions, &mut ctx,
         );
         // Levenberg damping, as a real solve would apply before factorizing.
         for i in 0..n {

@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/coo_both_co_entities.rs:7: `coo` couples this entity to one co-entity, but the body reads params of both the root `W` and the containing parent `Curve`
+  --> tests/constraint_attr_errors/coo_both_co_entities.rs:20:1
+   |
+20 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

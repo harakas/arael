@@ -259,10 +259,9 @@ pub struct LmConfig<T: Float> {
     /// ignored with a warning and the solve stays sequential.
     ///
     /// Threading has overhead: whether it helps, and by how much, depends on the
-    /// model and its number of parameters. Each solve times both forms of each
-    /// phase on its first calls and keeps the faster one.
+    /// model and its number of parameters.
     ///
-    /// The threaded sweeps assemble into per-thread mirrors gathered
+    /// The threaded sweeps assemble into per-thread block stores gathered
     /// serially, so they match the sequential ones to rounding, not to the
     /// bit. Of the linear backends only `SparseFaer` reads the count; the
     /// Schur reduction and the analysis are sequential.
@@ -781,7 +780,7 @@ pub trait RootProblem<T: Float> {
         std::vec::Vec::new()
     }
     /// [`param_block_spans`](Self::param_block_spans) under a solve
-    /// context: a root with its mirrors on reads them there. The default
+    /// context: a root with split stores reads them there. The default
     /// ignores the context.
     fn param_block_spans_with_context(&self, _ctx: &crate::threads::Context) -> std::vec::Vec<(u32, u32)> {
         self.param_block_spans()
@@ -878,7 +877,7 @@ impl ScalarCscResolver {
 /// stored cell contributes its full dense tile, so the pattern carries
 /// the tiles' structural zeros (~1% on entity-block models) and needs
 /// no COO pass. Returns the zero-valued matrix and the position
-/// resolver for [`LmProblem::bind_hessian_positions`].
+/// resolver for [`LmProblemInternals::bind_hessian_positions`].
 pub fn csc_from_cells<T: Float>(
     partition: &[usize],
     cells: &[(u32, u32)],
@@ -1031,6 +1030,7 @@ pub trait FitProblem<T: Float>: LmProblem<T> + Sized {
     fn fit_with(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
         Dense: LmSolver<T>,
+        Self: LmProblemInternals<T>,
     {
         let mut params = Vec::new();
         self.serialize(&mut params);
@@ -1043,6 +1043,7 @@ pub trait FitProblem<T: Float>: LmProblem<T> + Sized {
     fn fit(&mut self) -> SolveResult<T>
     where
         Dense: LmSolver<T>,
+        Self: LmProblemInternals<T>,
     {
         self.fit_with(&LmConfig::default())
     }
@@ -1096,61 +1097,12 @@ pub trait LmProblem<T> {
     /// so the cost is a free byproduct (macro-generated models compute it
     /// in the same sweep; hand-written impls should return it likewise).
     fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T;
-    /// Assemble gradient and Hessian in upper-band format (column-major, (kd+1)*n).
-    /// Returns the cost at `params`, or Err if any block exceeds the
-    /// declared bandwidth kd.
-    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<T, BandOverflow>;
     /// Assemble gradient and upper-triangle Hessian as COO triplets.
     /// Returns the cost at `params`.
     fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>) -> T;
-    /// Assemble gradient and accumulate Hessian directly into CSC vals
-    /// (structure must be pre-built). Returns the cost at `params`.
-    fn calc_grad_hessian_sparse_direct(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>) -> T;
-    /// Assemble gradient and accumulate Hessian into CSC vals using a
-    /// precomputed position map. Returns the cost at `params`.
-    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[ValueIndex]) -> T;
     /// Called after each accepted LM step to let the problem update internal state.
     /// Default: no-op.
     fn advance(&mut self, _params: &mut [T]) {}
-
-    /// Start a solve under `ctx`: the solve entries call it once, before
-    /// the first evaluation. A root with the mirror path (every root
-    /// under the `rayon` feature whose forms the mirrors cover) sizes
-    /// its mirrors to the context's thread count and builds them here.
-    /// Default: nothing.
-    fn begin_with_context(&mut self, _ctx: &mut crate::threads::Context) {}
-    /// [`calc_cost`](Self::calc_cost) under a solve context. A root with
-    /// its mirrors on evaluates over them; the default ignores the
-    /// context. The solve entries call these forms of the evaluations
-    /// and the structure walks; the plain ones stay for direct use.
-    fn calc_cost_with_context(&mut self, params: &[T], _ctx: &mut crate::threads::Context) -> T {
-        self.calc_cost(params)
-    }
-    /// [`calc_grad_hessian_dense`](Self::calc_grad_hessian_dense) under a
-    /// solve context.
-    fn calc_grad_hessian_dense_with_context(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T], _ctx: &mut crate::threads::Context) -> T {
-        self.calc_grad_hessian_dense(params, grad, hessian)
-    }
-    /// [`calc_grad_hessian_band`](Self::calc_grad_hessian_band) under a
-    /// solve context.
-    fn calc_grad_hessian_band_with_context(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize, _ctx: &mut crate::threads::Context) -> Result<T, BandOverflow> {
-        self.calc_grad_hessian_band(params, grad, band, kd)
-    }
-    /// [`calc_grad_hessian_sparse`](Self::calc_grad_hessian_sparse) under
-    /// a solve context.
-    fn calc_grad_hessian_sparse_with_context(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
-        self.calc_grad_hessian_sparse(params, grad, coo)
-    }
-    /// [`calc_grad_hessian_sparse_direct`](Self::calc_grad_hessian_sparse_direct)
-    /// under a solve context.
-    fn calc_grad_hessian_sparse_direct_with_context(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
-        self.calc_grad_hessian_sparse_direct(params, grad, csc)
-    }
-    /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed)
-    /// under a solve context.
-    fn calc_grad_hessian_sparse_indexed_with_context(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> T {
-        self.calc_grad_hessian_sparse_indexed(params, grad, vals, positions)
-    }
 
     /// The gradient of `calc_cost` at `params` by central finite
     /// differences: `(cost(x + h e_i) - cost(x - h e_i)) / 2h` with
@@ -1289,7 +1241,7 @@ pub trait LmProblem<T> {
     /// [`solve_sparse`](Self::solve_sparse).
     fn solve_with<S: LmSolver<T>>(&mut self, solver: &mut S, config: &LmConfig<T>) -> SolveResult<T>
     where
-        Self: RootProblem<T> + Sized,
+        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
         T: Float,
     {
         let mut params = Vec::new();
@@ -1304,11 +1256,106 @@ pub trait LmProblem<T> {
     /// over [`solve_with`](Self::solve_with).
     fn solve_dense(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
-        Self: RootProblem<T> + Sized,
+        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
         T: Float,
         Dense: LmSolver<T>,
     {
         self.solve_with(&mut Dense, config)
+    }
+
+
+    /// Solve with the sparse faer backend ([`SparseFaer`], pure Rust) --
+    /// the default choice for anything non-trivial. Convenience over
+    /// [`solve_with`](Self::solve_with).
+    ///
+    /// Nothing needs wiring: the solver reads the model's own
+    /// `#[arael(root, marginalize(field))]` hint
+    /// ([`marginalize_hint`](LmProblemInternals::marginalize_hint)), and finds the
+    /// marginalizable blocks itself when there is no hint
+    /// ([`marginalize_candidates`](LmProblemInternals::marginalize_candidates)). Whether
+    /// marginalizing them actually pays is then decided from the model's
+    /// structure -- see [`SparseFaer`].
+    fn solve_sparse(&mut self, config: &LmConfig<T>) -> SolveResult<T>
+    where
+        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
+        T: Float,
+        SparseFaer<T>: LmSolver<T>,
+    {
+        self.solve_with(&mut SparseFaer::<T>::new(), config)
+    }
+
+    /// Solve with a backend chosen at run time by [`SolverKind`]. A backend
+    /// that is not compiled in, or does not support this scalar, errors with
+    /// [`SolveError::SolverUnavailable`] and leaves the parameters
+    /// unchanged, instead of failing to build.
+    fn solve(&mut self, kind: SolverKind, config: &LmConfig<T>) -> SolveResult<T>
+    where
+        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
+        T: BackendScalar,
+    {
+        T::dispatch(&kind, self, config)
+    }
+}
+
+/// The half of a problem the solver drives and a user never calls: the
+/// context forms of the evaluations, the routes only a backend picks,
+/// the structure walks its sparse patterns are built from, and the
+/// elimination hints. Every method has a default, so a hand-written
+/// problem opts in with one empty impl:
+///
+/// ```rust,ignore
+/// impl LmProblemInternals<f64> for MyProblem {}
+/// ```
+///
+/// `#[arael(root)]` models get a real implementation from the macro.
+/// Hidden from the docs on purpose -- it is arael's own interface, not
+/// an API to program against, and it may change without a major bump.
+#[doc(hidden)]
+pub trait LmProblemInternals<T>: LmProblem<T> {
+    /// Assemble gradient and Hessian in upper-band format (column-major, (kd+1)*n).
+    /// Returns the cost at `params`, or Err if any block exceeds the
+    /// declared bandwidth kd.
+    ///
+    /// A backend route, not a user call. The default panics: a problem
+    /// solved through a route it does not assemble is a wiring mistake,
+    /// and saying so at the call beats a wrong answer.
+    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize, _ctx: &mut crate::threads::Context) -> Result<T, BandOverflow> {
+        unimplemented!("this problem assembles no band Hessian; solve through a dense or sparse route")
+    }
+    /// Assemble gradient and accumulate Hessian directly into CSC vals
+    /// (structure must be pre-built). Returns the cost at `params`.
+    /// Defaults like [`calc_grad_hessian_band`](Self::calc_grad_hessian_band).
+    fn calc_grad_hessian_sparse_direct(&mut self, _params: &[T], _grad: &mut [T], _csc: &mut CscMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
+        unimplemented!("this problem assembles no CSC Hessian; solve through a dense or COO sparse route")
+    }
+    /// Assemble gradient and accumulate Hessian into CSC vals using a
+    /// precomputed position map. Returns the cost at `params`.
+    /// Defaults like [`calc_grad_hessian_band`](Self::calc_grad_hessian_band).
+    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> T {
+        unimplemented!("this problem assembles no indexed Hessian; solve through a dense or COO sparse route")
+    }
+
+    /// Start a solve under `ctx`: the solve entries call it once, before
+    /// the first evaluation. A generated root sizes its block stores to
+    /// the context's thread count, builds the cut that divides its walks
+    /// among them, and fills them here. Default: nothing.
+    fn begin_with_context(&mut self, _ctx: &mut crate::threads::Context) {}
+    /// [`calc_cost`](Self::calc_cost) under a solve context. A root
+    /// evaluates over the context's stores; the default ignores the
+    /// context. The solve entries call these forms of the evaluations
+    /// and the structure walks; the plain ones stay for direct use.
+    fn calc_cost_with_context(&mut self, params: &[T], _ctx: &mut crate::threads::Context) -> T {
+        self.calc_cost(params)
+    }
+    /// [`calc_grad_hessian_dense`](Self::calc_grad_hessian_dense) under a
+    /// solve context.
+    fn calc_grad_hessian_dense_with_context(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T], _ctx: &mut crate::threads::Context) -> T {
+        self.calc_grad_hessian_dense(params, grad, hessian)
+    }
+    /// [`calc_grad_hessian_sparse`](Self::calc_grad_hessian_sparse) under
+    /// a solve context.
+    fn calc_grad_hessian_sparse_with_context(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
+        self.calc_grad_hessian_sparse(params, grad, coo)
     }
 
     /// Whether the Hessian pattern is only discoverable by running a
@@ -1325,10 +1372,28 @@ pub trait LmProblem<T> {
     fn hessian_pattern_requires_compute(&self) -> bool {
         true
     }
+
+    /// Whether this model's `extended_compute` hook pushes COO entries.
+    /// Nothing static can answer it -- the hook is arbitrary code handed
+    /// the solve's COO list -- so the answer comes from running the hook
+    /// once, against `params`, into a list of its own. A solve asks once,
+    /// before its first assembly, and records it on the
+    /// [`Context`](crate::threads::Context); a model with no hook says
+    /// false without running anything.
+    ///
+    /// The hook's entry structure is frozen for the whole solve by the
+    /// same contract that freezes every other model's, so one probe
+    /// settles it.
+    fn extended_hook_writes_coo(&mut self, _params: &[T]) -> bool { false }
     /// Append one representative scalar coordinate per Hessian block
     /// cell (see `Model::collect_hessian_cells`). Default: nothing
     /// (structure walk unsupported -- backends fall back to COO).
-    fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+    ///
+    /// This is the form the backends call. They hold no context, so the
+    /// context they run under reaches the model through the adapter that
+    /// wraps it for the solve; a root called directly builds a store for
+    /// the walk and drops it.
+    fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut crate::threads::Context) {}
     /// Bind every block to its tile in the assembled value buffer, ready for
     /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed).
     /// `binder` hands out scatter targets (see `Model::bind_hessian_positions`):
@@ -1339,6 +1404,7 @@ pub trait LmProblem<T> {
         &mut self,
         _binder: &mut crate::model::HessianBinder,
         _out: &mut std::vec::Vec<ValueIndex>,
+        _ctx: &mut crate::threads::Context,
     ) {}
     /// The position stream
     /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed)
@@ -1351,7 +1417,9 @@ pub trait LmProblem<T> {
     /// per-entry map is not enough: binding the blocks against the map
     /// puts each block's target ahead of its entries. A problem with no
     /// blocks binds nothing and gets the map back.
-    fn positions_from_map(&mut self, map: &[ValueIndex]) -> std::vec::Vec<ValueIndex> {
+    fn positions_from_map(&mut self, map: &[ValueIndex], ctx: &mut crate::threads::Context)
+        -> std::vec::Vec<ValueIndex>
+    {
         let mut k = 0usize;
         let mut positions = std::vec::Vec::new();
         self.bind_hessian_positions(
@@ -1361,32 +1429,26 @@ pub trait LmProblem<T> {
                 p as usize
             }),
             &mut positions,
+            ctx,
         );
         if positions.is_empty() { map.to_vec() } else { positions }
     }
+    /// Scatter the Hessian this context's stores already hold through a
+    /// cached position stream, adding into `vals`. No compute: the values
+    /// are whatever the last assembly into this context left, so a caller
+    /// zeroes `vals` itself and pairs this with
+    /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed),
+    /// which computes and scatters in one call. Default: nothing.
+    fn scatter_hessian_indexed(
+        &self,
+        _vals: &mut [T],
+        _positions: &[ValueIndex],
+        _ctx: &mut crate::threads::Context,
+    ) {}
+
     /// Append the entity parameter spans (see
     /// [`RootProblem::param_block_spans`]). Default: nothing.
-    fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
-    /// [`collect_hessian_cells`](Self::collect_hessian_cells) under a
-    /// solve context (see [`calc_cost_with_context`](Self::calc_cost_with_context)).
-    fn collect_hessian_cells_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &crate::threads::Context) {
-        self.collect_hessian_cells(out)
-    }
-    /// [`bind_hessian_positions`](Self::bind_hessian_positions) under a
-    /// solve context.
-    fn bind_hessian_positions_with_context(
-        &mut self,
-        binder: &mut crate::model::HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
-        _ctx: &mut crate::threads::Context,
-    ) {
-        self.bind_hessian_positions(binder, out)
-    }
-    /// [`collect_param_block_spans`](Self::collect_param_block_spans)
-    /// under a solve context.
-    fn collect_param_block_spans_with_context(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &crate::threads::Context) {
-        self.collect_param_block_spans(out)
-    }
+    fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut crate::threads::Context) {}
 
     /// The model's OWN elimination hint -- the ranges named by
     /// `#[arael(root, marginalize(...))]`, if any. The sparse backends
@@ -1418,38 +1480,6 @@ pub trait LmProblem<T> {
     fn marginalize_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
         std::vec::Vec::new()
     }
-
-    /// Solve with the sparse faer backend ([`SparseFaer`], pure Rust) --
-    /// the default choice for anything non-trivial. Convenience over
-    /// [`solve_with`](Self::solve_with).
-    ///
-    /// Nothing needs wiring: the solver reads the model's own
-    /// `#[arael(root, marginalize(field))]` hint
-    /// ([`marginalize_hint`](Self::marginalize_hint)), and finds the
-    /// marginalizable blocks itself when there is no hint
-    /// ([`marginalize_candidates`](Self::marginalize_candidates)). Whether
-    /// marginalizing them actually pays is then decided from the model's
-    /// structure -- see [`SparseFaer`].
-    fn solve_sparse(&mut self, config: &LmConfig<T>) -> SolveResult<T>
-    where
-        Self: RootProblem<T> + Sized,
-        T: Float,
-        SparseFaer<T>: LmSolver<T>,
-    {
-        self.solve_with(&mut SparseFaer::<T>::new(), config)
-    }
-
-    /// Solve with a backend chosen at run time by [`SolverKind`]. A backend
-    /// that is not compiled in, or does not support this scalar, errors with
-    /// [`SolveError::SolverUnavailable`] and leaves the parameters
-    /// unchanged, instead of failing to build.
-    fn solve(&mut self, kind: SolverKind, config: &LmConfig<T>) -> SolveResult<T>
-    where
-        Self: RootProblem<T> + Sized,
-        T: BackendScalar,
-    {
-        T::dispatch(&kind, self, config)
-    }
 }
 
 /// Adapter: wrap two closures into an LmProblem (dense only).
@@ -1473,19 +1503,18 @@ where
     fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T {
         (self.grad_hessian)(params, grad, hessian)
     }
-    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize) -> Result<T, BandOverflow> {
-        unimplemented!("FnProblem does not support band assembly")
-    }
     fn calc_grad_hessian_sparse(&mut self, _params: &[T], _grad: &mut [T], _coo: &mut CooMatrix<T>) -> T {
         unimplemented!("FnProblem does not support sparse assembly")
     }
-    fn calc_grad_hessian_sparse_direct(&mut self, _params: &[T], _grad: &mut [T], _csc: &mut CscMatrix<T>) -> T {
-        unimplemented!("FnProblem does not support sparse direct assembly")
-    }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[ValueIndex]) -> T {
-        unimplemented!("FnProblem does not support sparse indexed assembly")
-    }
 }
+
+// The band, CSC and indexed routes are the trait's own defaults, which
+// say what these said.
+impl<T, F1, F2> LmProblemInternals<T> for FnProblem<F1, F2>
+where
+    F1: FnMut(&[T]) -> T,
+    F2: FnMut(&[T], &mut [T], &mut [T]) -> T,
+{}
 
 /// Why the Levenberg-Marquardt solver stopped (see [`LmResult::status`]).
 /// Each variant is a distinct exit path in the solve loop.
@@ -1733,10 +1762,12 @@ pub struct LmResult<T> {
 /// what the cost and assembly sweeps settled on. Rendered by
 /// [`LmResult::report`] whenever either half had more than one thread.
 ///
-/// `sweeps` is `None` when the model has no threaded sweep path: the
-/// root did not ask for one with `#[arael(root, par)]`, or arael was
+/// `sweeps` is `None` when the solve ran no generated sweep at all, and
+/// reports a single store when the model has no threaded sweep path:
+/// the root did not ask for one with `#[arael(root, par)]`, or arael was
 /// built without the `rayon` feature. Such a model assembles on one
 /// thread however many are asked for; its linear solve still threads.
+/// [`fell_back`](ThreadReport::fell_back) is the test for that.
 #[derive(Clone, Debug, Default)]
 pub struct ThreadReport {
     /// Threads the cost and assembly sweeps were asked for
@@ -1753,9 +1784,12 @@ pub struct ThreadReport {
 }
 
 impl ThreadReport {
-    /// True when threads were asked for and the model cannot use them.
+    /// True when threads were asked for and the model cannot use them:
+    /// the sweeps ran over a single store however many were asked for.
+    /// Either the root did not ask for `par`, or it holds a form that
+    /// cannot thread yet (a `TripletBlock` anywhere in the model).
     pub fn fell_back(&self) -> bool {
-        self.sweeps_asked > 1 && self.sweeps.is_none()
+        self.sweeps_asked > 1 && self.sweeps.as_ref().is_none_or(|s| s.threads <= 1)
     }
 }
 
@@ -2002,49 +2036,42 @@ fn render_threads(t: &ThreadReport, style: Style) -> String {
     }
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let mut out = format!("  threads   sweeps {}, linear {}\n", t.sweeps_asked, t.linear);
-    let Some(s) = &t.sweeps else {
+    if t.fell_back() {
         out.push_str(&format!("    {}\n", style.paint("33",
-            "the sweeps are sequential: this is not a `par` root")));
+            "the sweeps ran on one thread: this model has no threaded assembly")));
         return out;
-    };
+    }
+    let Some(s) = &t.sweeps else { return out };
     let phase = |name: &str, p: &crate::threads::PhaseChoice| {
         if p.calls == 0 {
             return String::new();
         }
         let form = if p.threaded { "threaded " } else { "sequential" };
-        let why = match p.measured {
-            // The trial runs SAMPLES calls of each form before it decides.
-            Some((seq, par)) => format!(
-                "  (measured {:.2} ms sequential, {:.2} ms threaded, per call)",
-                ms(seq) / crate::threads::Trial::SAMPLES as f64,
-                ms(par) / crate::threads::Trial::SAMPLES as f64),
-            None => String::new(),
-        };
-        format!("    {:<11} {:<11}{:>4} calls{}\n", name, form, p.calls, why)
+        format!("    {:<11} {:<11}{:>4} calls\n", name, form, p.calls)
     };
     out.push_str(&phase("assembly", &s.assembly));
     out.push_str(&phase("cost", &s.cost));
-    // What the sweeps' own clocks saw, when they ran.
+    // What the sweeps' own clocks saw, when they ran. One line per
+    // phase: the region is dispatch to join, and the task figures are
+    // over the stores of one call.
     let g = &s.timing;
     if g.on {
         let per = |d: Duration, n: usize| ms(d) / n.max(1) as f64;
-        let a = &g.assembly;
-        let f = if a.par.calls > 0 { &a.par } else { &a.seq };
-        if a.calls() > 0 {
+        let mut region = |name: &str, p: &crate::threads::PhaseTiming, tail: String| {
+            if p.calls() == 0 {
+                return;
+            }
+            let f = if p.par.calls > 0 { &p.par } else { &p.seq };
             out.push_str(&format!(
-                "    {:<11} region {:.2} ms, tasks max {:.2} mean {:.2}, \
-                 gather {:.2}, scatter {:.2}\n",
-                "per sweep",
+                "    {:<11} region {:.2} ms, tasks max {:.2} mean {:.2}{}\n",
+                name,
                 per(f.region, f.calls), per(f.task_max, f.calls),
-                per(f.task_sum, f.calls * s.threads.max(1)),
-                per(g.gather_grad, a.calls()), per(g.scatter, a.calls())));
-        }
-        if g.builds > 0 {
-            out.push_str(&format!(
-                "    {:<11} build {:.2} ms x{}, {} leaves, {} blocks, {} partials\n",
-                "mirrors",
-                per(g.build, g.builds), g.builds, g.leaves, g.blocks, g.partials));
-        }
+                per(f.task_sum, f.calls * s.threads.max(1)), tail));
+        };
+        let n = g.assembly.calls();
+        region("per assembly", &g.assembly, format!(", gather {:.2}, scatter {:.2}",
+            per(g.gather_grad, n), per(g.scatter, n)));
+        region("per cost", &g.cost, String::new());
     }
     out
 }
@@ -2216,7 +2243,7 @@ pub trait LmSolver<T: Float> {
     /// structure factored (band overflow, an unconstrained parameter, a failed
     /// symbolic factorization, an illegal marginalization). The loop turns that
     /// into [`SolveFailureKind::Setup`] and stops without a step.
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix) -> Result<T, SolveError>;
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix, ctx: &mut crate::threads::Context) -> Result<T, SolveError>;
 
     /// Extract all diagonal elements from the matrix.
     fn extract_diagonal(&self, matrix: &Self::Matrix, diagonal: &mut [T]);
@@ -2306,8 +2333,8 @@ pub struct Dense;
 impl LmSolver<f64> for Dense {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) -> Result<f64, SolveError> {
-        Ok(problem.calc_grad_hessian_dense(params, grad, hessian))
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
+        Ok(problem.calc_grad_hessian_dense_with_context(params, grad, hessian, ctx))
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let n = diagonal.len();
@@ -2326,8 +2353,8 @@ impl LmSolver<f64> for Dense {
 impl LmSolver<f32> for Dense {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) -> Result<f32, SolveError> {
-        Ok(problem.calc_grad_hessian_dense(params, grad, hessian))
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SolveError> {
+        Ok(problem.calc_grad_hessian_dense_with_context(params, grad, hessian, ctx))
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let n = diagonal.len();
@@ -2365,8 +2392,8 @@ impl Band {
 impl LmSolver<f64> for Band {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> Result<f64, SolveError> {
-        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
@@ -2391,8 +2418,8 @@ impl LmSolver<f64> for Band {
 impl LmSolver<f32> for Band {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> Result<f32, SolveError> {
-        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
@@ -2434,8 +2461,8 @@ impl BandLapack {
 impl LmSolver<f64> for BandLapack {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> Result<f64, SolveError> {
-        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
@@ -2459,8 +2486,8 @@ impl LmSolver<f64> for BandLapack {
 impl LmSolver<f32> for BandLapack {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> Result<f32, SolveError> {
-        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>, ctx: &mut crate::threads::Context) -> Result<f32, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd, ctx)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
@@ -2837,20 +2864,20 @@ fn report_threads(
 pub fn lm_solve<T: Float, S: LmSolver<T>>(
     x0: &[T],
     solver: &mut S,
-    problem: &mut impl LmProblem<T>,
+    problem: &mut impl LmProblemInternals<T>,
     config: &LmConfig<T>,
 ) -> SolveResult<T> {
     lm_solve_with_context(x0, solver, problem, config, &mut crate::threads::Context::new())
 }
 
 /// [`lm_solve`] under a caller-owned [`Context`](crate::threads::Context):
-/// what a solve reuses (a root's mirrors) carries over to the next solve
-/// through it. The thread count is the config's; the context only keeps
+/// what a solve reuses (a root's block stores) carries over to the next
+/// solve through it. The thread count is the config's; the context only keeps
 /// the allocations.
 pub fn lm_solve_with_context<T: Float, S: LmSolver<T>>(
     x0: &[T],
     solver: &mut S,
-    problem: &mut impl LmProblem<T>,
+    problem: &mut impl LmProblemInternals<T>,
     config: &LmConfig<T>,
     ctx: &mut crate::threads::Context,
 ) -> SolveResult<T> {
@@ -2867,56 +2894,6 @@ pub fn lm_solve_with_context<T: Float, S: LmSolver<T>>(
     lm_solve_on(x0, solver, &mut matrix, problem, config, ctx)
 }
 
-/// A model under a solve context. The solve loop and the backends see an
-/// `LmProblem`; every evaluation and structure walk goes to the model's
-/// `_with_context` form.
-struct WithContext<'a, P> {
-    model: &'a mut P,
-    ctx: &'a mut crate::threads::Context,
-}
-
-impl<T, P: LmProblem<T>> LmProblem<T> for WithContext<'_, P> {
-    fn calc_cost(&mut self, params: &[T]) -> T {
-        self.model.calc_cost_with_context(params, &mut *self.ctx)
-    }
-    fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T {
-        self.model.calc_grad_hessian_dense_with_context(params, grad, hessian, &mut *self.ctx)
-    }
-    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<T, BandOverflow> {
-        self.model.calc_grad_hessian_band_with_context(params, grad, band, kd, &mut *self.ctx)
-    }
-    fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>) -> T {
-        self.model.calc_grad_hessian_sparse_with_context(params, grad, coo, &mut *self.ctx)
-    }
-    fn calc_grad_hessian_sparse_direct(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>) -> T {
-        self.model.calc_grad_hessian_sparse_direct_with_context(params, grad, csc, &mut *self.ctx)
-    }
-    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[ValueIndex]) -> T {
-        self.model.calc_grad_hessian_sparse_indexed_with_context(params, grad, vals, positions, &mut *self.ctx)
-    }
-    fn advance(&mut self, params: &mut [T]) {
-        self.model.advance(params)
-    }
-    fn hessian_pattern_requires_compute(&self) -> bool {
-        self.model.hessian_pattern_requires_compute()
-    }
-    fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        self.model.collect_hessian_cells_with_context(out, &*self.ctx)
-    }
-    fn bind_hessian_positions(&mut self, binder: &mut crate::model::HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-        self.model.bind_hessian_positions_with_context(binder, out, &mut *self.ctx)
-    }
-    fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
-        self.model.collect_param_block_spans_with_context(out, &*self.ctx)
-    }
-    fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
-        self.model.marginalize_hint()
-    }
-    fn marginalize_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
-        self.model.marginalize_candidates()
-    }
-}
-
 /// The solve loop proper, on caller-owned matrix storage and WITHOUT the
 /// entry reset: whatever structure the solver has cached (and the pattern
 /// held in `matrix`) is reused as-is. [`lm_solve`] clears both first;
@@ -2925,7 +2902,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     x0: &[T],
     solver: &mut S,
     matrix: &mut S::Matrix,
-    problem: &mut impl LmProblem<T>,
+    problem: &mut impl LmProblemInternals<T>,
     config: &LmConfig<T>,
     ctx: &mut crate::threads::Context,
 ) -> SolveResult<T> {
@@ -2948,9 +2925,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         ctx.set_timing(true);
     }
     problem.begin_with_context(ctx);
+    // An extended hook is handed the COO list and may push into it, which
+    // only running it can tell. Ask once, here, so every route below
+    // knows whether the Hessian pattern is knowable before a compute.
+    let writes_coo = problem.extended_hook_writes_coo(x0);
+    ctx.set_runtime_coo(writes_coo);
     // What the two halves were given, for the result's report. A model
-    // with no threaded sweep path leaves the context without mirrors:
-    // say so, since the solve was asked for threads it cannot use.
+    // with no threaded sweep path leaves the context on one store: say
+    // so, since the solve was asked for threads it cannot use.
     let threads_asked = crate::threads::ThreadCounts {
         sweeps_asked: ctx.threads(),
         linear: crate::threads::pool_size(config.num_threads).max(1),
@@ -2969,8 +2951,6 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         info!("LM threads: sweeps {}, linear {}",
             threads_asked.sweeps_asked, threads_asked.linear);
     }
-    let problem = &mut WithContext { model: problem, ctx };
-
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];
     let mut grad = vec![T::zero(); n];
@@ -3035,7 +3015,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
 
         let t_asm = gather.then(Instant::now);
-        let computed_cost = match solver.compute(problem, &cur_x, &mut grad, matrix) {
+        let computed_cost = match solver.compute(problem, &cur_x, &mut grad, matrix, ctx) {
             Ok(c) => c,
             Err(e) => {
                 // The linear system could not be built or factored, so no
@@ -3087,7 +3067,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, problem.ctx.sweeps()) });
+                    threads: report_threads(threads_asked, ctx.sweeps()) });
             }
             // Already at or below the target. The in-loop test only runs on an
             // ACCEPTED step, so a solve that starts met never reaches it: every
@@ -3100,7 +3080,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::CostThreshold, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, problem.ctx.sweeps()) });
+                    threads: report_threads(threads_asked, ctx.sweeps()) });
             }
         }
 
@@ -3162,7 +3142,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     accepted_iterations: accepted,
                     status: LmStatus::Aborted, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, problem.ctx.sweeps()) };
+                    threads: report_threads(threads_asked, ctx.sweeps()) };
                 return Err(SolveFailure {
                     kind: SolveFailureKind::DegenerateDiagonal { param: i, fault },
                     partial: Some(Box::new(partial)),
@@ -3314,7 +3294,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             }
 
             let t_cost = gather.then(Instant::now);
-            let new_cost = problem.calc_cost(&try_x);
+            let new_cost = problem.calc_cost_with_context(&try_x, ctx);
             let mut cost_dt = Duration::ZERO;
             if let Some(t) = t_cost {
                 let dt = t.elapsed();
@@ -3584,7 +3564,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         final_lambda: lambda,
         timing: gather.then_some(timing),
         solver: solver.report(),
-        threads: report_threads(threads_asked, problem.ctx.sweeps()),
+        threads: report_threads(threads_asked, ctx.sweeps()),
     };
     match failure {
         None => Ok(result),
@@ -3605,7 +3585,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
 /// implement the sparse assembly paths -- macro-generated models always
 /// do; a hand-written dense-only [`LmProblem`] should call
 /// [`solve_dense`] instead.
-pub fn solve(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     if x0.len() <= 6 {
         solve_dense(x0, problem, config)
     } else {
@@ -3615,7 +3595,7 @@ pub fn solve(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f6
 
 /// Solve with an automatically chosen backend (f32): dense for <= 6
 /// params, [`SparseFaer`] otherwise.
-pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     if x0.len() <= 6 {
         solve_dense_f32(x0, problem, config)
     } else {
@@ -3624,34 +3604,34 @@ pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfi
 }
 
 /// Solve with the dense Cholesky backend (f64).
-pub fn solve_dense(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_dense(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut Dense, problem, config)
 }
 
 /// Solve with the dense Cholesky backend (f32).
-pub fn solve_dense_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_dense_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut Dense, problem, config)
 }
 
 /// Solve with pure-Rust band Cholesky backend (f64).
-pub fn solve_band(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_band(x0: &[f64], kd: usize, problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut Band::new(kd), problem, config)
 }
 
 /// Solve with pure-Rust band Cholesky backend (f32).
-pub fn solve_band_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_band_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut Band::new(kd), problem, config)
 }
 
 /// Solve with LAPACK band Cholesky backend (f64).
 #[cfg(feature = "lapack")]
-pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut BandLapack::new(kd), problem, config)
 }
 
 /// Solve with LAPACK band Cholesky backend (f32).
 #[cfg(feature = "lapack")]
-pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut BandLapack::new(kd), problem, config)
 }
 
@@ -3698,7 +3678,7 @@ pub struct LmSession<T: Float, S: LmSolver<T>> {
     // Parameter count the caches were built for; a solve at any other count
     // invalidates first and runs cold.
     n: usize,
-    // The solve context, kept so the root's mirrors carry over.
+    // The solve context, kept so the root's stores carry over.
     ctx: crate::threads::Context,
 }
 
@@ -3719,7 +3699,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
     /// when that is valid).
     pub fn solve<P>(&mut self, model: &mut P, config: &LmConfig<T>) -> SolveResult<T>
     where
-        P: LmProblem<T> + RootProblem<T>,
+        P: LmProblemInternals<T> + RootProblem<T>,
     {
         let mut params = Vec::new();
         model.serialize(&mut params);
@@ -3734,7 +3714,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
     pub fn solve_x0(
         &mut self,
         x0: &[T],
-        problem: &mut impl LmProblem<T>,
+        problem: &mut impl LmProblemInternals<T>,
         config: &LmConfig<T>,
     ) -> SolveResult<T> {
         let n = x0.len();
@@ -3818,14 +3798,14 @@ impl LmSolver<f64> for SparseCoo {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
         let n = matrix.csc.n;
         if self.coo.n != n {
             self.coo = CooMatrix::new(n);
         } else {
             self.coo.clear();
         }
-        let cost = problem.calc_grad_hessian_sparse(params, grad, &mut self.coo);
+        let cost = problem.calc_grad_hessian_sparse_with_context(params, grad, &mut self.coo, ctx);
         matrix.csc = self.coo.to_csc()?;
         Ok(cost)
     }
@@ -3855,7 +3835,7 @@ impl LmSolver<f64> for SparseCoo {
 /// Cholesky fallback (f64). A validation baseline.
 #[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
 #[allow(deprecated)]
-pub fn solve_sparse_coo(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse_coo(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseCoo::new(), problem, config)
 }
 
@@ -3897,12 +3877,12 @@ impl LmSolver<f64> for SparseDirectCsc {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
         if !self.pattern_built {
             // First call: use COO to discover pattern
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse_with_context(params, grad, &mut coo, ctx);
             matrix.csc = coo.to_csc()?;
             self.pattern_built = true;
             Ok(cost)
@@ -3910,7 +3890,7 @@ impl LmSolver<f64> for SparseDirectCsc {
             // Subsequent calls: direct accumulate into existing CSC structure
             // (the generated code zeroes csc.vals before accumulating, which
             // also clears the damped diagonal left behind by solve_damped)
-            Ok(problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc))
+            Ok(problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc, ctx))
         }
     }
 
@@ -3939,7 +3919,7 @@ impl LmSolver<f64> for SparseDirectCsc {
 /// Solve with direct CSC assembly sparse solver, dense Cholesky fallback (f64).
 #[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
 #[allow(deprecated)]
-pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseDirectCsc::new(), problem, config)
 }
 
@@ -3960,17 +3940,18 @@ pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblem<f64>, co
 /// Returns the cost and the position map the caller must cache for the
 /// steady state.
 fn assemble_first_csc<T: Float>(
-    problem: &mut dyn LmProblem<T>,
+    problem: &mut dyn LmProblemInternals<T>,
+    ctx: &mut crate::threads::Context,
     params: &[T],
     grad: &mut [T],
     csc: &mut CscMatrix<T>,
 ) -> Result<(T, std::vec::Vec<ValueIndex>, bool), SolveError> {
     let n = csc.n;
-    if !problem.hessian_pattern_requires_compute() {
+    if !problem.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
         let mut cells = std::vec::Vec::new();
-        problem.collect_hessian_cells(&mut cells);
+        problem.collect_hessian_cells(&mut cells, ctx);
         let mut spans = std::vec::Vec::new();
-        problem.collect_param_block_spans(&mut spans);
+        problem.collect_param_block_spans(&mut spans, ctx);
         if !cells.is_empty() && !spans.is_empty() {
             let partition = block_partition_from_spans(&spans, n);
             let (built, mut resolver) = csc_from_cells::<T>(&partition, &cells);
@@ -3978,18 +3959,19 @@ fn assemble_first_csc<T: Float>(
             problem.bind_hessian_positions(
                 &mut crate::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                 &mut positions,
+                ctx,
             );
             *csc = built;
-            let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions);
+            let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions, ctx);
             return Ok((cost, positions, true));
         }
     }
     let mut coo = CooMatrix::new(n);
-    let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+    let cost = problem.calc_grad_hessian_sparse_with_context(params, grad, &mut coo, ctx);
     // A COO-built pattern stores only the coordinates that occur, so a block's
     // entries are not contiguous and there is no tile to walk: every block
     // binds to the map path.
-    let (built, positions) = coo.to_csc_with_positions(problem)?;
+    let (built, positions) = coo.to_csc_with_positions(problem, ctx)?;
     *csc = built;
     Ok((cost, positions, false))
 }
@@ -4010,12 +3992,13 @@ impl KeptCscPattern {
 
     fn assemble<T: Float>(
         &mut self,
-        problem: &mut dyn LmProblem<T>,
+        problem: &mut dyn LmProblemInternals<T>,
+    ctx: &mut crate::threads::Context,
         params: &[T],
         grad: &mut [T],
         csc: &mut CscMatrix<T>,
     ) -> T {
-        problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &self.positions)
+        problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &self.positions, ctx)
     }
 }
 
@@ -4712,7 +4695,7 @@ pub trait BackendScalar: Float {
     /// [`SolveError::SolverUnavailable`], parameters left untouched.
     fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<Self>) -> SolveResult<Self>
     where
-        P: LmProblem<Self> + RootProblem<Self>;
+        P: LmProblemInternals<Self> + RootProblem<Self>;
 }
 
 /// The failure for a backend that cannot run: nothing was attempted, the
@@ -4730,7 +4713,7 @@ fn solver_unavailable<T: Float>(
 impl BackendScalar for f64 {
     fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f64>) -> SolveResult<f64>
     where
-        P: LmProblem<f64> + RootProblem<f64>,
+        P: LmProblemInternals<f64> + RootProblem<f64>,
     {
         match kind {
             SolverKind::Dense => problem.solve_with(&mut Dense, config),
@@ -4786,7 +4769,7 @@ impl BackendScalar for f64 {
 impl BackendScalar for f32 {
     fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f32>) -> SolveResult<f32>
     where
-        P: LmProblem<f32> + RootProblem<f32>,
+        P: LmProblemInternals<f32> + RootProblem<f32>,
     {
         match kind {
             SolverKind::Dense => problem.solve_with(&mut Dense, config),
@@ -5097,7 +5080,7 @@ impl<T> SparseFaer<T> {
 
     /// Marginalize the parameter blocks fully inside `range`, instead of the
     /// ones the model's coupling graph would offer
-    /// ([`LmProblem::marginalize_candidates`]). May be called several times
+    /// ([`LmProblemInternals::marginalize_candidates`]). May be called several times
     /// for several ranges.
     ///
     /// This says WHICH blocks, not WHETHER marginalizing them is a good idea
@@ -5349,7 +5332,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     #[allow(clippy::too_many_arguments)]
     fn setup_full(
         &mut self,
-        problem: &mut dyn LmProblem<T>,
+        problem: &mut dyn LmProblemInternals<T>,
+    ctx: &mut crate::threads::Context,
         params: &[T],
         grad: &mut [T],
         matrix: &mut FaerMatrix<T>,
@@ -5384,13 +5368,14 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 problem.bind_hessian_positions(
                     &mut crate::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                     &mut positions,
+                    ctx,
                 );
                 (csc, positions, None)
             }
             None => {
                 let mut csc = CscMatrix::empty(n);
                 let t_a = self.measure.then(Instant::now);
-                let (cost, positions, _tiled) = assemble_first_csc(problem, params, grad, &mut csc)?;
+                let (cost, positions, _tiled) = assemble_first_csc(problem, ctx, params, grad, &mut csc)?;
                 if let Some(t) = t_a {
                     self.assembly_time += t.elapsed();
                 }
@@ -5450,7 +5435,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let cost = match coo_cost {
             // The COO route filled the values on its way to the pattern.
             Some(cost) => cost,
-            None => problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions),
+            None => problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions, ctx),
         };
         if let Some(t) = t_a {
             // The COO path already charged itself above; only the indexed pass is
@@ -5469,7 +5454,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     /// `with_narrow_band` is on and the whole system is banded.
     fn setup_whole_band(
         &mut self,
-        problem: &mut dyn LmProblem<T>,
+        problem: &mut dyn LmProblemInternals<T>,
+    ctx: &mut crate::threads::Context,
         params: &[T],
         grad: &mut [T],
         matrix: &mut FaerMatrix<T>,
@@ -5537,6 +5523,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 resolver.resolve_tile(i as usize, j as usize)
             }),
             &mut positions,
+            ctx,
         );
 
         self.plan = Some(SchurPlan {
@@ -5557,7 +5544,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         // First numeric fill. Everything above it was analysis.
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
         let t_a = self.measure.then(Instant::now);
-        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
         if let Some(t) = t_a {
             self.assembly_time = t.elapsed();
         }
@@ -5576,7 +5563,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     /// take the system first.
     fn setup_whole_supernodal(
         &mut self,
-        problem: &mut dyn LmProblem<T>,
+        problem: &mut dyn LmProblemInternals<T>,
+    ctx: &mut crate::threads::Context,
         params: &[T],
         grad: &mut [T],
         matrix: &mut FaerMatrix<T>,
@@ -5738,6 +5726,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 resolver.resolve_tile(i as usize, j as usize)
             }),
             &mut positions,
+            ctx,
         );
 
         self.plan = Some(SchurPlan {
@@ -5758,7 +5747,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         // First numeric fill. Everything above it was analysis.
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
         let t_a = self.measure.then(Instant::now);
-        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
         if let Some(t) = t_a {
             self.assembly_time = t.elapsed();
         }
@@ -5937,7 +5926,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         FaerMatrix { n, h: None, csc: None }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>) -> Result<T, SolveError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SolveError> {
         // Report how much of this call was assembly; the solver takes the rest to
         // be structural analysis. In the steady state the whole call is assembly.
         self.assembly_time = Duration::ZERO;
@@ -5946,7 +5935,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if let Some(positions) = &self.positions {
             if let Some(h) = matrix.h.as_mut() {
                 let cost =
-                    problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions);
+                    problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions, ctx);
                 if let Some(t) = t_a {
                     self.assembly_time = t.elapsed();
                 }
@@ -5954,7 +5943,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
             if let Some(csc) = matrix.csc.as_mut() {
                 let cost = problem
-                    .calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, positions);
+                    .calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, positions, ctx);
                 if let Some(t) = t_a {
                     self.assembly_time = t.elapsed();
                 }
@@ -5995,9 +5984,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // way.
         let mut cells = std::vec::Vec::new();
         let mut spans = std::vec::Vec::new();
-        if !problem.hessian_pattern_requires_compute() {
-            problem.collect_hessian_cells(&mut cells);
-            problem.collect_param_block_spans(&mut spans);
+        if !problem.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
+            problem.collect_hessian_cells(&mut cells, ctx);
+            problem.collect_param_block_spans(&mut spans, ctx);
         }
         if cells.is_empty() || spans.is_empty() {
             assert!(
@@ -6024,7 +6013,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 envelope: false,
                 block_supernodal: false,
             });
-            return self.setup_full(problem, params, grad, matrix, n, None, None, vb);
+            return self.setup_full(problem, ctx, params, grad, matrix, n, None, None, vb);
         }
         let partition = block_partition_from_spans(&spans, n);
         let nblk = partition.len() - 1;
@@ -6116,12 +6105,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 if self.narrow_band_enabled {
                     let band = block_half_bandwidth(&hsym);
                     if matches!(ordering_for(hsym.val_count(), n, band), ReducedOrdering::NaturalBanded) {
-                        return self.setup_whole_band(problem, params, grad, matrix, &partition, hsym, band, vb);
+                        return self.setup_whole_band(problem, ctx, params, grad, matrix, &partition, hsym, band, vb);
                     }
                 }
                 if self.sn_take() {
                     return self.setup_whole_supernodal(
-                        problem, params, grad, matrix, &partition, hsym, &eliminated, None, vb,
+                        problem,
+                        ctx, params, grad, matrix, &partition, hsym, &eliminated, None, vb,
                     );
                 }
             }
@@ -6140,7 +6130,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 block_supernodal: false,
             });
             return self.setup_full(
-                problem, params, grad, matrix, n, Some((&partition, &cells)), None, vb,
+                problem,
+                ctx, params, grad, matrix, n, Some((&partition, &cells)), None, vb,
             );
         }
 
@@ -6491,7 +6482,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // route reuses that analysis instead of rebuilding it.
             let cost = if self.sn_take() {
                 let cost = self.setup_whole_supernodal(
-                    problem, params, grad, matrix, &partition, hsym, &eliminated,
+                    problem,
+                    ctx, params, grad, matrix, &partition, hsym, &eliminated,
                     declined_nd.map(|nd| nd.block_order().to_vec()), vb,
                 );
                 // The route setup writes a bare whole-system plan; the
@@ -6505,7 +6497,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             } else {
                 drop(hsym);
                 self.setup_full(
-                    problem, params, grad, matrix, n, Some((&partition, &cells)), prebuilt, vb,
+                    problem,
+                    ctx, params, grad, matrix, n, Some((&partition, &cells)), prebuilt, vb,
                 )
             };
             if vb {
@@ -6644,6 +6637,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 resolver.resolve_tile(i as usize, j as usize)
             }),
             &mut positions,
+            ctx,
         );
         if vb {
             info!(
@@ -6825,7 +6819,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // First numeric fill. Everything above it in this call was analysis.
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
         let t_a = self.measure.then(Instant::now);
-        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
         if let Some(t) = t_a {
             self.assembly_time = t.elapsed();
         }
@@ -7059,24 +7053,24 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 /// Solve with the default sparse backend ([`SparseFaer`], f64) -- the
 /// free-function twin of `model.solve_sparse(&cfg)`. Marginalizes what
 /// the model offers when that pays.
-pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
 }
 
 /// Solve with the default sparse backend ([`SparseFaer`], f32).
-pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut SparseFaerF32::new(), problem, config)
 }
 
 /// Renamed: the default sparse solve now carries the plain name.
 #[deprecated(since = "0.7.3", note = "renamed to `solve_sparse`")]
-pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     solve_sparse(x0, problem, config)
 }
 
 /// Renamed: the default sparse solve now carries the plain name.
 #[deprecated(since = "0.7.3", note = "renamed to `solve_sparse_f32`")]
-pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     solve_sparse_f32(x0, problem, config)
 }
 
@@ -7222,7 +7216,7 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> Result<T, SolveError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SolveError> {
         if let Some(kept) = &mut self.positions {
             return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
         }
@@ -7271,7 +7265,7 @@ impl LmSolver<f64> for SparseCholmod {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
         if let Some(kept) = &mut self.positions {
             return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
         }
@@ -7290,19 +7284,19 @@ impl LmSolver<f64> for SparseCholmod {
 
 /// Solve with Eigen SimplicialLLT sparse Cholesky backend (f64).
 #[cfg(feature = "eigen")]
-pub fn solve_sparse_eigen(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse_eigen(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseEigen::new(), problem, config)
 }
 
 /// Solve with Eigen SimplicialLLT sparse Cholesky backend (f32).
 #[cfg(feature = "eigen")]
-pub fn solve_sparse_eigen_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
+pub fn solve_sparse_eigen_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut SparseEigenF32::new(), problem, config)
 }
 
 /// Solve with CHOLMOD sparse Cholesky backend (f64).
 #[cfg(feature = "cholmod")]
-pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseCholmod::new(), problem, config)
 }
 
@@ -7342,7 +7336,7 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
         if let Some(kept) = &mut self.positions {
             return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
         }
@@ -7364,7 +7358,7 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
 /// **WARNING (license):** the Supernodal module is **GPL-licensed**; a binary
 /// built with the `cholmod-gpl` feature is subject to the GPL.
 #[cfg(feature = "cholmod-gpl")]
-pub fn solve_sparse_cholmod_supernodal(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
+pub fn solve_sparse_cholmod_supernodal(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseCholmodSupernodal::new(), problem, config)
 }
 
@@ -7519,19 +7513,20 @@ impl<T: Float> CooMatrix<T> {
 
     /// Convert to CSC and bind `problem`'s blocks to the result, giving the
     /// pattern and the position stream
-    /// [`calc_grad_hessian_sparse_indexed`](LmProblem::calc_grad_hessian_sparse_indexed)
+    /// [`calc_grad_hessian_sparse_indexed`](LmProblemInternals::calc_grad_hessian_sparse_indexed)
     /// reads.
     ///
     /// [`to_csc_with_map`](Self::to_csc_with_map) gives one position per
     /// emitted entry; the indexed assembly reads a stream that also carries
     /// each block's scatter target, which binding the model against that map
     /// produces. A problem with no blocks binds nothing and gets the map back.
-    pub fn to_csc_with_positions<P: LmProblem<T> + ?Sized>(
+    pub fn to_csc_with_positions<P: LmProblemInternals<T> + ?Sized>(
         &self,
         problem: &mut P,
+        ctx: &mut crate::threads::Context,
     ) -> Result<(CscMatrix<T>, Vec<ValueIndex>), SolveError> {
         let (csc, map) = self.to_csc_with_map()?;
-        let positions = problem.positions_from_map(&map);
+        let positions = problem.positions_from_map(&map, ctx);
         Ok((csc, positions))
     }
 
@@ -7964,16 +7959,19 @@ mod tests {
                 hessian.copy_from_slice(&[2.0, 0.0, 0.0, 2.0]);
                 self.calc_cost(p)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> {
-                unreachable!("dense-only test problem")
-            }
             fn calc_grad_hessian_sparse(&mut self, _: &[f64], _: &mut [f64], _: &mut CooMatrix<f64>) -> f64 {
                 unreachable!("dense-only test problem")
             }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 {
+        }
+
+        impl LmProblemInternals<f64> for Quad {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize, _ctx: &mut crate::threads::Context) -> Result<f64, BandOverflow> {
                 unreachable!("dense-only test problem")
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 {
+            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>, _ctx: &mut crate::threads::Context) -> f64 {
+                unreachable!("dense-only test problem")
+            }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
                 unreachable!("dense-only test problem")
             }
         }
@@ -8710,11 +8708,6 @@ mod tests {
                 hess[0] = 2.0; hess[1] = 0.0; hess[2] = 0.0; hess[3] = 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> {
-                unimplemented!()
-            }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
@@ -8723,6 +8716,8 @@ mod tests {
                 self.calc_cost(x)
             }
         }
+
+        impl LmProblemInternals<f64> for QuadProblem {}
 
         #[allow(deprecated)]
         let result = solve_sparse_coo(
@@ -8747,21 +8742,22 @@ mod tests {
                 hess[0] = 2.0; hess[1] = 0.0; hess[2] = 0.0; hess[3] = 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex]) -> f64 {
-                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
-                vals.iter_mut().for_each(|v| *v = 0.0);
-                // Same order as sparse COO push: (0,0)=2.0, (1,1)=2.0
-                vals[positions[0] as usize] += 2.0;
-                vals[positions[1] as usize] += 2.0;
-                self.calc_cost(x)
-            }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
                 coo.push(0, 0, 2.0);
                 coo.push(1, 1, 2.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for QuadProblem {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                // Same order as sparse COO push: (0,0)=2.0, (1,1)=2.0
+                vals[positions[0] as usize] += 2.0;
+                vals[positions[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
         }
@@ -8788,22 +8784,23 @@ mod tests {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
-                self.direct_calls += 1;
-                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
-                csc.vals.iter_mut().for_each(|v| *v = 0.0);
-                csc.vals[csc.diag_pos[0] as usize] += 2.0;
-                csc.vals[csc.diag_pos[1] as usize] += 2.0;
-                self.calc_cost(x)
-            }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 self.coo_calls += 1;
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
                 coo.push(0, 0, 2.0);
                 coo.push(1, 1, 2.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for CountingProblem {
+            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>, _ctx: &mut crate::threads::Context) -> f64 {
+                self.direct_calls += 1;
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                csc.vals.iter_mut().for_each(|v| *v = 0.0);
+                csc.vals[csc.diag_pos[0] as usize] += 2.0;
+                csc.vals[csc.diag_pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
         }
@@ -8833,26 +8830,28 @@ mod tests {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                coo.clear();
+                coo.push(0, 0, 2.0);
+                coo.push(1, 1, 2.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for QP {
+            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>, _ctx: &mut crate::threads::Context) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 csc.vals.iter_mut().for_each(|v| *v = 0.0);
                 csc.vals[csc.diag_pos[0] as usize] += 2.0;
                 csc.vals[csc.diag_pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[positions[0] as usize] += 2.0;
                 vals[positions[1] as usize] += 2.0;
-                self.calc_cost(x)
-            }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
-                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
-                coo.clear();
-                coo.push(0, 0, 2.0);
-                coo.push(1, 1, 2.0);
                 self.calc_cost(x)
             }
         }
@@ -8864,19 +8863,6 @@ mod tests {
                 (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2) + (x[2] - 3.0).powi(2) + (x[0] - x[2]).powi(2)
             }
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex]) -> f64 {
-                grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
-                grad[1] = 2.0 * (x[1] - 2.0);
-                grad[2] = 2.0 * (x[2] - 3.0) - 2.0 * (x[0] - x[2]);
-                vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[positions[0] as usize] += 4.0;
-                vals[positions[1] as usize] += 2.0;
-                vals[positions[2] as usize] += -2.0;
-                vals[positions[3] as usize] += 4.0;
-                self.calc_cost(x)
-            }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
                 grad[1] = 2.0 * (x[1] - 2.0);
@@ -8886,6 +8872,20 @@ mod tests {
                 coo.push(1, 1, 2.0);
                 coo.push(0, 2, -2.0);
                 coo.push(2, 2, 4.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for QP3 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+                grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
+                grad[1] = 2.0 * (x[1] - 2.0);
+                grad[2] = 2.0 * (x[2] - 3.0) - 2.0 * (x[0] - x[2]);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[positions[0] as usize] += 4.0;
+                vals[positions[1] as usize] += 2.0;
+                vals[positions[2] as usize] += -2.0;
+                vals[positions[3] as usize] += 4.0;
                 self.calc_cost(x)
             }
         }
@@ -8986,9 +8986,6 @@ mod tests {
                 h[3*4+0]=0.0; h[3*4+1]=-2.0;h[3*4+2]=0.0;  h[3*4+3]=4.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0] = 2.0*(x[0]-1.0) + 2.0*(x[0]-x[2]);
                 g[1] = 2.0*(x[1]-2.0) + 2.0*(x[1]-x[3]);
@@ -9005,6 +9002,8 @@ mod tests {
                 self.calc_cost(x)
             }
         }
+
+        impl LmProblemInternals<f64> for CoupledProblem {}
 
         let x = [0.0, 0.0, 0.0, 0.0];
         let n = 4;
@@ -9070,17 +9069,18 @@ mod tests {
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
-                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
-                vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
-                self.calc_cost(x)
-            }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 coo.clear(); coo.push(0,0,2.0); coo.push(1,1,2.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for QP {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
         }
@@ -9110,17 +9110,6 @@ mod tests {
                 h[12]=0.0;h[13]=-2.0;h[14]=0.0;h[15]=4.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
-                g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
-                g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
-                vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0] as usize] += 4.0; vals[pos[1] as usize] += -2.0;
-                vals[pos[2] as usize] += 4.0; vals[pos[3] as usize] += -2.0;
-                vals[pos[4] as usize] += 4.0; vals[pos[5] as usize] += 4.0;
-                self.calc_cost(x)
-            }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
                 g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
@@ -9128,6 +9117,18 @@ mod tests {
                 coo.push(0,0,4.0); coo.push(0,2,-2.0);
                 coo.push(1,1,4.0); coo.push(1,3,-2.0);
                 coo.push(2,2,4.0); coo.push(3,3,4.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for CP {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+                g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
+                g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[pos[0] as usize] += 4.0; vals[pos[1] as usize] += -2.0;
+                vals[pos[2] as usize] += 4.0; vals[pos[3] as usize] += -2.0;
+                vals[pos[4] as usize] += 4.0; vals[pos[5] as usize] += 4.0;
                 self.calc_cost(x)
             }
         }
@@ -9152,17 +9153,18 @@ mod tests {
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
-                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
-                vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
-                self.calc_cost(x)
-            }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 coo.clear(); coo.push(0,0,2.0); coo.push(1,1,2.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for QP {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
         }
@@ -9186,17 +9188,18 @@ mod tests {
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
-                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
-                vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
-                self.calc_cost(x)
-            }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 coo.clear(); coo.push(0,0,2.0); coo.push(1,1,2.0);
+                self.calc_cost(x)
+            }
+        }
+
+        impl LmProblemInternals<f64> for QP {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
         }

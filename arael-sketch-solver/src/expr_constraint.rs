@@ -3,11 +3,11 @@
 //! An ExpressionConstraint holds a symbolic expression (arael_sym::E)
 //! and its pre-computed symbolic derivatives. At each solver iteration,
 //! it evaluates the expression and derivatives numerically, accumulating
-//! into a TripletBlock.
+//! into the solve's COO list.
 
 use std::collections::HashMap;
 use arael_sym::E;
-use arael::model::TripletBlock;  // used in compute() parameter
+use arael::model::Coo;  // used in compute() parameter
 use crate::symbol_bag::SymbolBag;
 use crate::{RangeBound, RangeValue};
 
@@ -61,11 +61,11 @@ impl ExpressionConstraint {
 
     /// Compute the residual and derivatives, write grad directly into the
     /// global `grad` vector and push cross pairs into the shared
-    /// TripletBlock. Each param symbol is treated as its own "entity"
+    /// COO list. Each param symbol is treated as its own "entity"
     /// (per-param span boundaries), so every pair is cross → full upper
-    /// triangle stored in the TripletBlock.
+    /// triangle stored in the COO list.
     pub fn compute(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64,
-                   hb: &mut TripletBlock<f64>, grad: &mut [f64]) -> Result<(), String> {
+                   hb: &mut Coo<f64>, grad: &mut [f64]) -> Result<(), String> {
         let r = self.expr.eval(vars)? * constraint_isigma;
         let dr: Vec<f64> = self.param_derivs.iter()
             .map(|(_, deriv)| Ok::<_, String>(deriv.eval(vars)? * constraint_isigma))

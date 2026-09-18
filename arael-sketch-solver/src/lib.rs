@@ -49,7 +49,7 @@ pub use registry::{CollectionMeta, ConstraintArenas, ConstraintCollection, Endpo
     RefRole, SketchConstraint, decode_endpoint};
 
 use arael::simple_lm::RootProblem;
-use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
+use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock};
 
 /// Wall-clock lap timer for verbose tracing. The clock is polled only
 /// when verbose() was on at creation: otherwise every method is a no-op
@@ -357,9 +357,6 @@ pub struct Sketch {
     #[arael(skip)]
     #[serde(skip)]
     symbol_bag: Option<SymbolBag>,
-    // Shared TripletBlock for all expression constraints
-    #[serde(skip)]
-    pub expr_hb: TripletBlock<f64>,
     /// DOF cache, keyed to the structure generation it was computed
     /// at: a stale entry reads as absent through cached_dof(), so no
     /// consumer has to remember to clear it. Value-only mutation paths
@@ -826,7 +823,6 @@ impl Sketch {
             user_params: Vec::new(),
             expr_constraints: Vec::new(),
             symbol_bag: None,
-            expr_hb: TripletBlock::new(),
             cached_dof: None,
             fresh_slots: std::collections::HashSet::new(),
             structural_dof_disabled: false,
@@ -1383,14 +1379,14 @@ impl arael::model::ExtendedModel<f64> for Sketch {
         total
     }
 
-    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64],
+                        coo: &mut arael::model::Coo<f64>) {
         if self.expr_constraints.is_empty() { return; }
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
         let isigma = self.constraint_isigma;
-        let hb = &mut self.expr_hb;
         for ec in &self.expr_constraints {
-            if let Err(e) = ec.compute(&vars, isigma, hb, grad) {
+            if let Err(e) = ec.compute(&vars, isigma, coo, grad) {
                 eprintln!("expr constraint eval error: {}: {}", ec.description, e);
             }
         }

@@ -1,5 +1,5 @@
-//! `[hb, parent.<field>]` must name a TripletBlock field on the
-//! containing parent -- the (entity, parent) cross pairs live there.
+//! A `parent.<field>` secondary is no longer a way to place cross
+//! pairs: they go to COO, and the error says so.
 
 use arael::model::{Param, SelfBlock};
 

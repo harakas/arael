@@ -1,0 +1,24 @@
+error: a `Coo` is not a model field: the solve owns one per thread. A constraint reaches it with the `coo` keyword and an `extended_compute` hook is handed one.
+  --> tests/constraint_attr_errors/coo_as_a_model_field.rs:12:5
+   |
+12 |     spare: Coo<f64>,
+   |     ^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find type `N` in this scope
+  --> tests/constraint_attr_errors/coo_as_a_model_field.rs:18:26
+   |
+18 |     items: std::vec::Vec<N>,
+   |                          ^ not found in this scope
+   |
+help: you might be missing a type parameter
+   |
+17 | struct W<N> {
+   |         +++
+
+warning: unused imports: `Coo`, `Param`, and `SelfBlock`
+ --> tests/constraint_attr_errors/coo_as_a_model_field.rs:4:20
+  |
+4 | use arael::model::{Coo, Param, SelfBlock};
+  |                    ^^^  ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
