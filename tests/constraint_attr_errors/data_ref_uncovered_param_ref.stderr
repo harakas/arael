@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs:18: constraint on `struct Link` references param(s) outside its hessian block: [c.x.work()] — all missing params resolve through this struct's own `Ref<T>` fields, but there are more than CrossBlock<A, B> can cover. Switch the block to `TripletBlock<T>` to include every ref-referenced entity.
+error: $DIR/tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs:18: constraint on `struct Link` references param(s) outside its hessian block: [c.x.work()] -- every missing param resolves through this struct's own `Ref<T>` fields, more than one CrossBlock<A, B> covers. Name one CrossBlock per pair (`constraint([hb_ab, hb_ac, ..], ..)`), or `constraint(coo, ..)` to put every cross pair in the solve's COO list.
   --> tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs:29:1
    |
 29 | #[arael::model]

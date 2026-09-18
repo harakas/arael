@@ -909,6 +909,157 @@ fn the_dense_route_threads_its_assembly() {
     assert!(s.assembly.threaded, "and so do the assembly sweeps: {}", rep);
 }
 
+/// A thread count set on the context takes hold in `begin_with_context`:
+/// an assembly called directly on a context nobody began builds one
+/// store, whatever the count says.
+#[test]
+fn set_threads_without_begin_builds_one_store() {
+    let mut seq = build(12);
+    let mut m = build(12);
+    let mut x = Vec::new();
+    seq.serialize(&mut x);
+    let mut x2 = Vec::new();
+    m.serialize(&mut x2);
+    let mut ctx = context(4);
+    let n = x.len();
+    let (mut g1, mut h1) = (vec![0.0; n], vec![0.0; n * n]);
+    let (mut g2, mut h2) = (vec![0.0; n], vec![0.0; n * n]);
+    let c1 = seq.calc_grad_hessian_dense(&x, &mut g1, &mut h1);
+    let c2 = m.calc_grad_hessian_dense_with_context(&x, &mut g2, &mut h2, &mut ctx);
+    assert_eq!(ctx.blocks_list::<WebBlocks>().map(|v| v.len()), Some(1));
+    assert_eq!(ctx.sweeps().map(|s| s.threads), Some(1));
+    assert_eq!(c1, c2);
+    assert_eq!(g1, g2);
+    assert_eq!(h1, h2);
+    // Beginning it is what splits.
+    m.begin_with_context(&mut ctx);
+    assert_eq!(ctx.blocks_list::<WebBlocks>().map(|v| v.len()), Some(4));
+}
+
+/// A `par` root whose hook pushes COO entries: the sweeps thread over
+/// their stores, the hook's entries follow store 0's in the stream, and
+/// the pattern is discovered by a compute on every route.
+#[arael::model]
+#[arael(root, par, extended)]
+struct ExtCoo {
+    points: refs::Vec<Point>,
+    links: std::vec::Vec<Link>,
+    pull: f64,
+    anchor: f64,
+    drift: f64,
+    spring: f64,
+}
+
+impl ExtCoo {
+    /// The parameter indices of the first two points' x entries.
+    fn coupled(&self) -> (usize, usize) {
+        let i = self.points[self.points.ref_at(0)].pos.index() as usize;
+        let j = self.points[self.points.ref_at(1)].pos.index() as usize;
+        (i, j)
+    }
+}
+
+impl arael::model::ExtendedModel<f64> for ExtCoo {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64],
+                        coo: &mut arael::model::Coo<f64>) {
+        // One residual coupling the first two points' x entries.
+        let (i, j) = self.coupled();
+        let r = params[i] - params[j] - self.pull;
+        coo.add_residual(r, &[i as u32, j as u32], &[1.0, -1.0], grad);
+    }
+    fn extended_cost(&self, params: &[f64]) -> f64 {
+        let (i, j) = self.coupled();
+        let r = params[i] - params[j] - self.pull;
+        r * r
+    }
+}
+
+fn build_ext_coo(n: usize) -> ExtCoo {
+    let mut w = ExtCoo {
+        points: refs::Vec::new(),
+        links: std::vec::Vec::new(),
+        pull: 0.3,
+        anchor: 100.0,
+        drift: 0.01,
+        spring: 1.0,
+    };
+    for i in 0..n {
+        let pos = vect2d::new(i as f64 * 0.5, if i % 2 == 0 { 0.7 } else { -0.7 });
+        w.points.push(Point { pos: Param::new(pos), is_anchor: i == 0, hb: SelfBlock::new() });
+    }
+    for i in 1..n {
+        let (a, b) = (w.points.ref_at(i - 1), w.points.ref_at(i));
+        w.links.push(Link { a, b, rest: 1.0, hb: CrossBlock::new() });
+    }
+    w
+}
+
+#[test]
+fn a_pushing_hook_on_a_par_root_threads() {
+    let mut seq = build_ext_coo(24);
+    let mut par = build_ext_coo(24);
+    let mut x = Vec::new();
+    seq.serialize(&mut x);
+    let mut x2 = Vec::new();
+    par.serialize(&mut x2);
+    assert_eq!(x, x2);
+    // The probe sees the push.
+    assert!(LmProblemInternals::<f64>::extended_hook_writes_coo(&mut par, &x));
+    let mut ctx = context(4);
+    par.begin_with_context(&mut ctx);
+    assert_eq!(ctx.blocks_list::<ExtCooBlocks>().map(|v| v.len()), Some(4));
+
+    let n = x.len();
+    let (mut g1, mut h1) = (vec![0.0; n], vec![0.0; n * n]);
+    let (mut g2, mut h2) = (vec![0.0; n], vec![0.0; n * n]);
+    let c1 = seq.calc_grad_hessian_dense(&x, &mut g1, &mut h1);
+    let c2 = par.calc_grad_hessian_dense_with_context(&x, &mut g2, &mut h2, &mut ctx);
+    assert!(close(c1, c2, 1e-13), "cost {} vs {}", c1, c2);
+    assert_close("grad", &g1, &g2, 1e-12);
+    assert_close("hessian", &h1, &h2, 1e-12);
+
+    // The hook's pair is in the assembled Hessian, once: against the same
+    // model with a hook that pushes nothing (ExtWeb), the difference is
+    // exactly the hook's 2 dr dr^T.
+    let (i, j) = par.coupled();
+    let mut bare = ExtWeb {
+        points: refs::Vec::new(),
+        links: std::vec::Vec::new(),
+        pull: 0.3,
+        anchor: 100.0,
+        drift: 0.01,
+        spring: 1.0,
+    };
+    for p in par.points.iter() {
+        bare.points.push(Point { pos: Param::new(p.pos.value), is_anchor: p.is_anchor, hb: SelfBlock::new() });
+    }
+    for l in par.links.iter() {
+        // Refs belong to their collection: re-take them by slot.
+        let a = bare.points.ref_at(l.a.index() as usize);
+        let b = bare.points.ref_at(l.b.index() as usize);
+        bare.links.push(Link { a, b, rest: l.rest, hb: CrossBlock::new() });
+    }
+    let mut x3 = Vec::new();
+    bare.serialize(&mut x3);
+    assert_eq!(x, x3);
+    let (mut g0, mut h0) = (vec![0.0; n], vec![0.0; n * n]);
+    bare.calc_grad_hessian_dense(&x, &mut g0, &mut h0);
+    assert!(close(h2[i * n + j] - h0[i * n + j], -2.0, 1e-12), "the hook's cross pair");
+    assert!(close(h2[i * n + i] - h0[i * n + i], 2.0, 1e-12), "and its diagonal");
+    assert!(close(h2[j * n + j] - h0[j * n + j], 2.0, 1e-12), "both diagonals");
+
+    // Every route at four stores lands where the sequential solve does.
+    let cfg = |t: usize| LmConfig::<f64> { max_iters: 20, num_threads: t, ..Default::default() };
+    let s = build_ext_coo(24).solve_sparse(&cfg(1)).unwrap();
+    let p = build_ext_coo(24).solve_sparse(&cfg(4)).unwrap();
+    assert!(close(s.end_cost, p.end_cost, 1e-9), "sparse {} vs {}", s.end_cost, p.end_cost);
+    assert_close("sparse x", &s.x, &p.x, 1e-6);
+    assert!(!p.threads.fell_back(), "{}", p.report());
+    let d = build_ext_coo(24).solve_dense(&cfg(4)).unwrap();
+    assert!(close(s.end_cost, d.end_cost, 1e-9), "dense {} vs {}", s.end_cost, d.end_cost);
+    assert!(d.threads.sweeps.as_ref().is_some_and(|s| s.assembly.threaded), "{}", d.report());
+}
+
 /// Print the two reports, for eyeballing: `cargo test --features rayon
 /// --test par_assembly show_reports -- --nocapture --ignored`.
 #[test]

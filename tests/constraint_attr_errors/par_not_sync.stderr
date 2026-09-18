@@ -1,0 +1,28 @@
+error[E0277]: `Cell<u32>` cannot be shared between threads safely
+  --> tests/constraint_attr_errors/par_not_sync.rs:15:1
+   |
+15 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   | |
+   | `Cell<u32>` cannot be shared between threads safely
+   | within this `{closure@$DIR/tests/constraint_attr_errors/par_not_sync.rs:15:1: 15:16}`
+   |
+   = help: within `{closure@$DIR/tests/constraint_attr_errors/par_not_sync.rs:15:1: 15:16}`, the trait `Sync` is not implemented for `Cell<u32>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicU32` instead
+note: required because it appears within the type `W`
+  --> tests/constraint_attr_errors/par_not_sync.rs:17:8
+   |
+17 | struct W {
+   |        ^
+   = note: required because it appears within the type `&W`
+note: required because it's used within this closure
+  --> tests/constraint_attr_errors/par_not_sync.rs:15:1
+   |
+15 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+note: required by a bound in `run_indexed`
+  --> src/threads.rs
+   |
+   | pub fn run_indexed<M: Send>(par: bool, stores: &mut [M], f: impl Fn(usize, &mut M) + Sync) {
+   |                                                                                      ^^^^ required by this bound in `run_indexed`
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

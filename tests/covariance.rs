@@ -709,3 +709,76 @@ fn covariance_of_a_triplet_model_needs_no_prior_assembly() {
     assert!((got[(1, 1)] - want[(1, 1)]).abs() < 1e-10,
         "fresh {} vs primed {}", got[(1, 1)], want[(1, 1)]);
 }
+
+/// The same `coo` model as a `par` root: covariance runs on one store
+/// whatever the root can thread, and answers the same.
+#[arael::model]
+#[arael(root, par)]
+struct TriWPar {
+    pts: refs::Vec<Pt>,
+    tris: std::vec::Vec<Tri3>,
+}
+
+#[test]
+fn covariance_of_a_par_root_matches_the_plain_one() {
+    let mut plain = tri_world();
+    let want = plain.assemble_covariance(CovMode::PerQuery).unwrap()
+        .marginal_cov(&plain.pts[1]).unwrap();
+    let mut par = TriWPar { pts: refs::Vec::new(), tris: std::vec::Vec::new() };
+    for _ in 0..3 {
+        par.pts.push(Pt {
+            x: Param::new(0.0), y: Param::new(0.0),
+            ax: 1.0, ay: 2.0, isig: 0.5, hb: SelfBlock::new(),
+        });
+    }
+    par.tris.push(Tri3 { ta: par.pts.ref_at(0), tb: par.pts.ref_at(1), tc: par.pts.ref_at(2) });
+    let got = par.assemble_covariance(CovMode::PerQuery).unwrap()
+        .marginal_cov(&par.pts[1]).unwrap();
+    for i in 0..2 {
+        for j in 0..2 {
+            assert!((got[(i, j)] - want[(i, j)]).abs() < 1e-12,
+                "({i},{j}): par {} vs plain {}", got[(i, j)], want[(i, j)]);
+        }
+    }
+}
+
+/// An extended hook that pushes COO entries: the covariance must take
+/// the compute-first route, since the pattern is only knowable after the
+/// hook has run. Two params, one prior each, the hook coupling them.
+#[arael::model]
+#[arael(root, extended)]
+#[arael(constraint(hb, { [(cx.a - 1.0) * 2.0, (cx.b - 2.0) * 1.5] }))]
+struct Cx {
+    a: Param<f64>,
+    b: Param<f64>,
+    hb: SelfBlock<Cx>,
+}
+
+impl arael::model::ExtendedModel<f64> for Cx {
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64],
+                        coo: &mut arael::model::Coo<f64>) {
+        let (ia, ib) = (self.a.index(), self.b.index());
+        let r = params[ia as usize] - params[ib as usize];
+        coo.add_residual(r, &[ia, ib], &[1.0, -1.0], grad);
+    }
+    fn extended_cost(&self, params: &[f64]) -> f64 {
+        let r = params[self.a.index() as usize] - params[self.b.index() as usize];
+        r * r
+    }
+}
+
+#[test]
+fn covariance_with_a_pushing_hook() {
+    let mut m = Cx { a: Param::new(0.3), b: Param::new(0.9), hb: SelfBlock::new() };
+    let got = m.assemble_covariance(CovMode::PerQuery).unwrap().marginal_cov(&m).unwrap();
+    // J^T J over the rows (2, 0), (0, 1.5), (1, -1) is [[5, -1], [-1, 3.25]],
+    // and the covariance is its inverse.
+    let det = 5.0 * 3.25 - 1.0;
+    let want = [[3.25 / det, 1.0 / det], [1.0 / det, 5.0 / det]];
+    for i in 0..2 {
+        for j in 0..2 {
+            assert!((got[(i, j)] - want[i][j]).abs() < 1e-12,
+                "({i},{j}): {} vs {}", got[(i, j)], want[i][j]);
+        }
+    }
+}

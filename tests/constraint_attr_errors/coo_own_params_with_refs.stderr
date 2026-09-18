@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/coo_own_params_with_refs.rs:16: `constraint(coo, ..)` on `Dv` reads `Dv`'s own params, which have no block in this form: `coo` couples only the entities the `Ref` fields point at. A struct whose own params join the residual declares `hb: SelfBlock<Dv>` and writes `constraint(hb, ..)`, or `constraint([hb, coo], ..)` to couple them to the root or the containing parent
+  --> tests/constraint_attr_errors/coo_own_params_with_refs.rs:23:1
+   |
+23 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/coo_own_params_with_refs.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

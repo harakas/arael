@@ -357,7 +357,7 @@ impl Context {
     }
 
     /// This root's Hessian block stores, if the context holds them: one
-    /// per thread, plus the tail's. A solve that threads nothing has
+    /// per thread. A solve that threads nothing has
     /// exactly one, and every walk over the list reads the same whatever
     /// its length.
     pub fn blocks_list<S: BlockStore>(&self) -> Option<&[S]> {

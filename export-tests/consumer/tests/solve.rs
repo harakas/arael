@@ -5,7 +5,7 @@ use arael::utils::Float;
 use arael::matrix::matrixd;
 use arael::vect::{vect2, vect3, vect3d, vectd};
 use export_consumer::{Bias, BiasLink, MarkLink, World32, World64};
-use export_models::{Beacon, Cal, Dir, Kind, Mark, Spring};
+use export_models::{Beacon, Cal, Dir, Kind, Mark, Spring, Trio};
 
 fn target(k: usize) -> vect3d {
     vect3d::new(0.3, 1.0 + k as f64, -0.4 * k as f64).unit()
@@ -114,6 +114,56 @@ fn imported_models_solve_in_both_roots() {
     // The cross-crate BiasLink pulled the bias off its weak zero prior.
     let bias64 = w64.biases.iter().next().unwrap().v.value;
     assert!(bias64.abs() > 1e-3, "bias unmoved: {}", bias64);
+}
+
+/// The `coo` forms work across the crate boundary: an imported N-ary
+/// `coo` constraint over imported entities and a local `[hb, coo]` to a
+/// root param assemble the same Hessian on the sparse and dense routes
+/// and solve to the same place.
+#[test]
+fn coo_forms_cross_the_crate_boundary() {
+    use arael::simple_lm::LmProblemInternals;
+    use export_consumer::{Scaled, WorldCoo64};
+    let build = || {
+        let mut w = WorldCoo64 {
+            scale: Param::new(0.8),
+            beacons: refs::Vec::new(),
+            trios: std::vec::Vec::new(),
+            scaled: refs::Vec::new(),
+            hb: SelfBlock::new(),
+        };
+        let mut brefs = std::vec::Vec::new();
+        for k in 0..4 {
+            let m = target(k);
+            brefs.push(w.beacons.push(Beacon {
+                pos: Param::new(vect2::new(k as f64 + 0.4, -0.3)),
+                dir: Dir::new(vect3::new(1.0, 0.1, 0.0)),
+                prior: vect2::new(k as f64, 0.0),
+                target: vect3::new(m.x, m.y, m.z),
+                kind: Kind::Free,
+                hb: SelfBlock::new(),
+            }));
+        }
+        w.trios.push(Trio { a: brefs[0], b: brefs[1], c: brefs[2], sum: 3.3, w: 0.7 });
+        w.trios.push(Trio { a: brefs[1], b: brefs[2], c: brefs[3], sum: 6.1, w: 0.4 });
+        for k in 0..3 {
+            w.scaled.push(Scaled { v: Param::new(0.5 + k as f64), t: 1.0 + k as f64, hb: SelfBlock::new() });
+        }
+        w
+    };
+    let w = build();
+    assert!(LmProblemInternals::<f64>::hessian_pattern_requires_compute(&w));
+    let mut sparse = build();
+    let rs = sparse.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
+    assert!(matches!(rs.status, LmStatus::Converged), "{:?}", rs.status);
+    let mut dense = build();
+    let rd = dense.solve_dense(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
+    assert!((rs.end_cost - rd.end_cost).abs() < 1e-9, "sparse {} vs dense {}", rs.end_cost, rd.end_cost);
+    for (a, b) in std::iter::zip(&rs.x, &rd.x) {
+        assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+    }
+    // The coupling reached the solve: the root's scale left its prior.
+    assert!((sparse.scale.value - 0.8).abs() > 1e-3, "scale unmoved: {}", sparse.scale.value);
 }
 
 /// The imported param-less record is a data ref: no params, no block

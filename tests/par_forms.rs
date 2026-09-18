@@ -14,7 +14,7 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmConfig, LmProblemInternals, RootProblem};
+use arael::simple_lm::{LmConfig, LmProblem, LmProblemInternals, RootProblem};
 use arael::threads::Context;
 use arael::vect::vect2d;
 
@@ -928,4 +928,286 @@ fn a_parent_coupled_coo_constraint_threads() {
     threaded_matches_sequential("parent coo", build_coo_parent,
         &|c: &Context| c.blocks_list::<CooParentBlocks>().map_or(0, |v| v.len()));
     threaded_solve_matches("parent coo", build_coo_parent);
+}
+
+// ===========================================================================
+// Fixed params inside the `coo` forms: a fixed slot is `u32::MAX` in the
+// index arrays and every COO push skips it
+// ===========================================================================
+
+fn build_coo_nary_fixed() -> CooNary {
+    let mut m = build_coo_nary();
+    for (k, n) in m.nodes.iter_mut().enumerate() {
+        if k % 7 == 0 { n.x.optimize = false; }
+    }
+    m
+}
+
+#[test]
+fn an_nary_coo_constraint_with_fixed_params_threads() {
+    threaded_matches_sequential("nary coo, fixed", build_coo_nary_fixed,
+        &|c: &Context| c.blocks_list::<CooNaryBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("nary coo, fixed", build_coo_nary_fixed);
+}
+
+fn build_coo_root_fixed_root() -> CooRoot {
+    let mut m = build_coo_root();
+    m.shift.optimize = false;
+    m
+}
+
+fn build_coo_root_fixed_entities() -> CooRoot {
+    let mut m = build_coo_root();
+    for (k, n) in m.nodes.iter_mut().enumerate() {
+        if k % 3 == 0 { n.x.optimize = false; }
+    }
+    m
+}
+
+#[test]
+fn a_root_coupled_coo_constraint_with_a_fixed_root_threads() {
+    threaded_matches_sequential("root coo, fixed root", build_coo_root_fixed_root,
+        &|c: &Context| c.blocks_list::<CooRootBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("root coo, fixed root", build_coo_root_fixed_root);
+}
+
+#[test]
+fn a_root_coupled_coo_constraint_with_fixed_entities_threads() {
+    threaded_matches_sequential("root coo, fixed entities", build_coo_root_fixed_entities,
+        &|c: &Context| c.blocks_list::<CooRootBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("root coo, fixed entities", build_coo_root_fixed_entities);
+}
+
+// ===========================================================================
+// A robust loss on an N-ary `coo` constraint: the weight scales the COO
+// pairs as it scales the self blocks
+// ===========================================================================
+
+#[arael::model]
+#[arael(constraint(coo, loss = |s| loss_huber(s, ltri.k2), {
+    [(a.x + b.x + c.x - ltri.sum) * 0.3]
+}))]
+struct LTri {
+    #[arael(ref = root.nodes)] a: Ref<CNode>,
+    #[arael(ref = root.nodes)] b: Ref<CNode>,
+    #[arael(ref = root.nodes)] c: Ref<CNode>,
+    sum: f64,
+    k2: f64,
+}
+
+#[arael::model]
+#[arael(root, par)]
+struct CooNaryLoss {
+    nodes: refs::Vec<CNode>,
+    tris: std::vec::Vec<LTri>,
+}
+
+fn build_coo_nary_loss() -> CooNaryLoss {
+    let mut m = CooNaryLoss { nodes: refs::Vec::new(), tris: std::vec::Vec::new() };
+    for k in 0..300 {
+        m.nodes.push(CNode {
+            x: Param::new(0.1 * k as f64), prior: 0.05 * k as f64, hb: SelfBlock::new(),
+        });
+    }
+    for k in 0..200 {
+        m.tris.push(LTri {
+            a: m.nodes.ref_at(k),
+            b: m.nodes.ref_at((k + 97) % 300),
+            c: m.nodes.ref_at((k + 199) % 300),
+            sum: 1.0 + 0.01 * k as f64,
+            // Half the instances sit in the loss's nonlinear region.
+            k2: if k % 2 == 0 { 0.01 } else { 1e6 },
+        });
+    }
+    m
+}
+
+#[test]
+fn an_nary_coo_constraint_with_a_loss_threads() {
+    threaded_matches_sequential("nary coo, loss", build_coo_nary_loss,
+        &|c: &Context| c.blocks_list::<CooNaryLossBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("nary coo, loss", build_coo_nary_loss);
+}
+
+// ===========================================================================
+// Aliased refs in a `coo` constraint: two slots, one entity, so a cross
+// pair lands on the diagonal and carries both contributions
+// ===========================================================================
+
+#[arael::model]
+#[arael(constraint(coo, { [(a.x * b.x - apair.k) * 0.4] }))]
+struct APair {
+    #[arael(ref = root.nodes)] a: Ref<CNode>,
+    #[arael(ref = root.nodes)] b: Ref<CNode>,
+    k: f64,
+}
+
+#[arael::model]
+#[arael(root, par)]
+struct CooAliased {
+    nodes: refs::Vec<CNode>,
+    pairs: std::vec::Vec<APair>,
+}
+
+fn build_coo_aliased() -> CooAliased {
+    let mut m = CooAliased { nodes: refs::Vec::new(), pairs: std::vec::Vec::new() };
+    for k in 0..120 {
+        m.nodes.push(CNode {
+            x: Param::new(1.0 + 0.01 * k as f64), prior: 1.0, hb: SelfBlock::new(),
+        });
+    }
+    for k in 0..120 {
+        // Every third pair names the same node twice.
+        let b = if k % 3 == 0 { k } else { (k + 41) % 120 };
+        m.pairs.push(APair { a: m.nodes.ref_at(k), b: m.nodes.ref_at(b), k: 1.0 });
+    }
+    m
+}
+
+#[test]
+fn an_aliased_coo_constraint_threads() {
+    threaded_matches_sequential("aliased coo", build_coo_aliased,
+        &|c: &Context| c.blocks_list::<CooAliasedBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("aliased coo", build_coo_aliased);
+}
+
+// ===========================================================================
+// An f32 `par` root
+// ===========================================================================
+
+#[arael::model]
+#[arael(constraint(hb, { [(fnode.x - fnode.prior) * 0.1] }))]
+struct FNode {
+    x: Param<f32>,
+    prior: f32,
+    hb: SelfBlock<FNode, f32>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(r.x - l.x - fspan.d) * 0.9] }))]
+struct FSpan {
+    #[arael(ref = root.nodes)] l: Ref<FNode>,
+    #[arael(ref = root.nodes)] r: Ref<FNode>,
+    d: f32,
+    hb: CrossBlock<FNode, FNode, f32>,
+}
+
+#[arael::model]
+#[arael(root, par, f32)]
+struct F32Root {
+    nodes: refs::Vec<FNode>,
+    spans: std::vec::Vec<FSpan>,
+}
+
+fn build_f32() -> F32Root {
+    let mut m = F32Root { nodes: refs::Vec::new(), spans: std::vec::Vec::new() };
+    for k in 0..200 {
+        m.nodes.push(FNode {
+            x: Param::new(0.3 * k as f32), prior: 0.25 * k as f32, hb: SelfBlock::new(),
+        });
+    }
+    for k in 0..199 {
+        m.spans.push(FSpan {
+            l: m.nodes.ref_at(k), r: m.nodes.ref_at(k + 1), d: 0.25, hb: CrossBlock::new(),
+        });
+    }
+    m
+}
+
+#[test]
+fn an_f32_root_threads() {
+    let (mut seq, mut par) = (build_f32(), build_f32());
+    let (mut x, mut x2) = (Vec::new(), Vec::new());
+    seq.serialize(&mut x);
+    par.serialize(&mut x2);
+    assert_eq!(x, x2);
+    let mut ctx = Context::new();
+    ctx.set_threads(4);
+    par.begin_with_context(&mut ctx);
+    assert_eq!(ctx.blocks_list::<F32RootBlocks>().map_or(0, |v| v.len()), 4);
+    let n = x.len();
+    let (mut g1, mut h1) = (vec![0.0f32; n], vec![0.0f32; n * n]);
+    let (mut g2, mut h2) = (vec![0.0f32; n], vec![0.0f32; n * n]);
+    let c1 = seq.calc_grad_hessian_dense(&x, &mut g1, &mut h1);
+    let c2 = par.calc_grad_hessian_dense_with_context(&x, &mut g2, &mut h2, &mut ctx);
+    let close32 = |a: f32, b: f32| (a - b).abs() <= 1e-5 * (1.0 + a.abs().max(b.abs()));
+    assert!(close32(c1, c2), "f32 cost {c1} vs {c2}");
+    for i in 0..n { assert!(close32(g1[i], g2[i]), "f32 grad {i}: {} vs {}", g1[i], g2[i]); }
+    for i in 0..n * n { assert!(close32(h1[i], h2[i]), "f32 hessian {i}: {} vs {}", h1[i], h2[i]); }
+
+    let cfg = |t: usize| LmConfig::<f32> { max_iters: 40, num_threads: t, ..Default::default() };
+    let s = build_f32().solve_sparse(&cfg(1)).unwrap();
+    let p = build_f32().solve_sparse(&cfg(4)).unwrap();
+    assert!(close32(s.end_cost, p.end_cost), "f32 end cost {} vs {}", s.end_cost, p.end_cost);
+    for (i, (a, b)) in s.x.iter().zip(&p.x).enumerate() {
+        assert!((a - b).abs() < 1e-3, "f32 x[{i}]: {a} vs {b}");
+    }
+}
+
+// ===========================================================================
+// Container shapes: a Deque walked at the top level, an empty collection,
+// and one with fewer instances than stores
+// ===========================================================================
+
+#[arael::model]
+#[arael(constraint(hb, { [(dnode.x - dnode.prior) * 0.1] }))]
+struct DNode {
+    x: Param<f64>,
+    prior: f64,
+    hb: SelfBlock<DNode>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(r.x - l.x - dspan.d) * 0.9] }))]
+struct DSpan {
+    #[arael(ref = root.nodes)] l: Ref<DNode>,
+    #[arael(ref = root.nodes)] r: Ref<DNode>,
+    d: f64,
+    hb: CrossBlock<DNode, DNode>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(enode.x - enode.prior) * 0.1] }))]
+struct ENode {
+    x: Param<f64>,
+    prior: f64,
+    hb: SelfBlock<ENode>,
+}
+
+#[arael::model]
+#[arael(root, par)]
+struct Shapes {
+    nodes: refs::Deque<DNode>,
+    spans: std::vec::Vec<DSpan>,
+    empty: refs::Vec<ENode>,
+}
+
+fn build_shapes(n: usize) -> Shapes {
+    let mut m = Shapes {
+        nodes: refs::Deque::new(), spans: std::vec::Vec::new(), empty: refs::Vec::new(),
+    };
+    for k in 1..n {
+        m.nodes.push_back(DNode { x: Param::new(0.3 * k as f64), prior: 0.25 * k as f64, hb: SelfBlock::new() });
+    }
+    m.nodes.push_front(DNode { x: Param::new(0.0), prior: -0.1, hb: SelfBlock::new() });
+    let refs: std::vec::Vec<_> = m.nodes.refs().collect();
+    for k in 0..n - 1 {
+        m.spans.push(DSpan { l: refs[k], r: refs[k + 1], d: 0.3, hb: CrossBlock::new() });
+    }
+    m
+}
+
+#[test]
+fn a_deque_walk_threads() {
+    threaded_matches_sequential("deque", || build_shapes(60),
+        &|c: &Context| c.blocks_list::<ShapesBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("deque", || build_shapes(60));
+}
+
+#[test]
+fn fewer_instances_than_stores_threads() {
+    // Two nodes and one span over four stores: most ranges are empty.
+    threaded_matches_sequential("two instances", || build_shapes(2),
+        &|c: &Context| c.blocks_list::<ShapesBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("two instances", || build_shapes(2));
 }

@@ -45,6 +45,15 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/coo_no_co_entity.rs");
     t.compile_fail("tests/constraint_attr_errors/coo_reserved_field_name.rs");
     t.compile_fail("tests/constraint_attr_errors/coo_with_crossblocks.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_before_selfblock.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_twice.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_three_entries.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_dotted_companion.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_own_params_no_refs.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_own_params_with_refs.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_data_refs_only.rs");
+    t.compile_fail("tests/constraint_attr_errors/coo_nary_reads_root.rs");
+    t.compile_fail("tests/constraint_attr_errors/par_not_sync.rs");
     t.compile_fail("tests/constraint_attr_errors/option_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/nested_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_bad_field.rs");

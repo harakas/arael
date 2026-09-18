@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/coo_before_selfblock.rs:6: `coo` goes second: `constraint([<selfblock>, coo], { body })` -- the SelfBlock names the entity, `coo` where its pairs with the root or the containing parent go
+  --> tests/constraint_attr_errors/coo_before_selfblock.rs:12:1
+   |
+12 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

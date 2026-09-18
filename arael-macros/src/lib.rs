@@ -132,11 +132,6 @@ struct SymLayout {
     /// precision at this holding -- the layout alone loses the spelling,
     /// so the root check resolves "generic" through these records.
     inst_precisions: Vec<(String, String, String)>,
-    /// Names of `TripletBlock<T>` fields on this struct. Lets a child's
-    /// `[hb, parent.<field>]` block spec validate the named field against
-    /// the containing parent (block fields are `Skip` in `fields`, so the
-    /// name is otherwise unrecoverable from the layout).
-    triplet_block_fields: Vec<String>,
     /// `CrossBlock<A, B>` / `BoxedCrossBlock<A, B>` fields on this struct:
     /// (field name, A type, B type, `#[arael(cross = (a, b))]` ref-field
     /// override). Lets a child's `parent.<field>` block spec resolve a
@@ -1656,7 +1651,6 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         suspect_wrappers: suspect_wrappers_reg,
         block_precision: block_precision_reg,
         inst_precisions: inst_precisions_reg,
-        triplet_block_fields: std::vec::Vec::new(),
         cross_block_fields: cross_block_fields_reg,
         is_root: has_struct_attr_ident(&input.attrs, "root"),
         scalar_generic: scalar_generic.clone(),
@@ -2536,14 +2530,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // compute pass. An `extended` root is the other way entries can appear,
     // and nothing static settles that one: the solve runs its hook once
     // and records the answer on the context.
-    let has_triplet_block = root_precision.is_some()
-        && (containment_tree_has_triplet(fields)
+    let uses_coo = root_precision.is_some()
+        && (containment_tree_uses_coo(fields)
             || crate::constraint::struct_uses_coo(&name.to_string()));
 
     // A COO root emits no candidates: its Hessian pattern is only known
     // after a compute pass, so no static claim about coupling is possible
     // (the Schur backend refuses those models anyway).
-    let marginalize_candidates_fn = if root_precision.is_some() && !has_triplet_block {
+    let marginalize_candidates_fn = if root_precision.is_some() && !uses_coo {
         let cross = registry_cross_pairs();
         // Graph nodes are ENTITY types only: those owning a SelfBlock, i.e.
         // a diagonal Hessian block. Constraint structs (an Odo holding a
@@ -2687,7 +2681,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64,
-            &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block, par)?
+            &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?
     } else {
         quote! {}
     };
@@ -2731,7 +2725,7 @@ fn is_hessian_block_type(ty: &syn::Type) -> bool {
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return matches!(name.as_str(),
-                "SelfBlock" | "CrossBlock" | "TripletBlock" | "BoxedSelfBlock" | "BoxedCrossBlock");
+                "SelfBlock" | "CrossBlock" | "BoxedSelfBlock" | "BoxedCrossBlock");
         }
     false
 }
@@ -2837,7 +2831,7 @@ fn collect_wrapper_suspects(
         "Vec" | "Deque" | "Arena" | "Option" | "Ref" => {
             for t in type_args { collect_wrapper_suspects(t, scalar_generic, out); }
         }
-        "SelfBlock" | "CrossBlock" | "TripletBlock" | "BoxedSelfBlock" | "BoxedCrossBlock"
+        "SelfBlock" | "CrossBlock" | "BoxedSelfBlock" | "BoxedCrossBlock"
         | "Param" | "SimpleEulerAngleParam" | "EulerAngleParam" | "QuaternionParam"
         | "PhantomData" => {}
         _ => {
@@ -2854,16 +2848,15 @@ fn collect_wrapper_suspects(
 }
 
 /// Solve precision of a block field's user-spelled type (pre-rewrite):
-/// `SelfBlock<A[, S]>` / `CrossBlock<A, B[, S]>` / `TripletBlock[<S>]`,
-/// Boxed and Option-wrapped variants included. None if not a block field
-/// or the scalar spelling is unrecognized. A missing scalar is the f64
-/// default; the struct's own type parameter reads as "generic".
+/// `SelfBlock<A[, S]>` / `CrossBlock<A, B[, S]>`, Boxed and
+/// Option-wrapped variants included. None if not a block field or the
+/// scalar spelling is unrecognized. A missing scalar is the f64 default;
+/// the struct's own type parameter reads as "generic".
 fn block_field_precision(ty: &syn::Type, scalar_generic: Option<&str>) -> Option<String> {
     let ty = if let Some((inner, _)) = extract_wrapper_inner(ty, "Option") { inner } else { ty };
     let syn::Type::Path(tp) = ty else { return None };
     let seg = tp.path.segments.last()?;
     let scalar_pos = match seg.ident.to_string().as_str() {
-        "TripletBlock" => 0,
         "SelfBlock" | "BoxedSelfBlock" => 1,
         "CrossBlock" | "BoxedCrossBlock" => 2,
         _ => return None,
@@ -2912,11 +2905,11 @@ fn inst_precision_of(ty: &syn::Type) -> Option<(String, String)> {
 
 /// Extract the inner type T from a generic wrapper like Ref<T> or Option<T>.
 /// Returns the inner type and the last ident of T's path (e.g. "Pose").
-/// Whether any registered struct CONTAINED under these fields declares a
-/// TripletBlock: containment closure over the registry (collections,
-/// options, direct struct fields). The caller's derive walk checks the
-/// fields themselves; this walks what they hold.
-fn containment_tree_has_triplet(
+/// Whether any registered struct CONTAINED under these fields has a
+/// `coo` constraint: containment closure over the registry (collections,
+/// options, direct struct fields). The caller checks the struct's own
+/// constraints; this walks what its fields hold.
+fn containment_tree_uses_coo(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> bool {
     let mut queue: Vec<String> = Vec::new();
@@ -2937,7 +2930,6 @@ fn containment_tree_has_triplet(
     while let Some(t) = queue.pop() {
         if !seen.insert(t.clone()) { continue; }
         let Some(l) = registry_lookup(&t) else { continue };
-        if !l.triplet_block_fields.is_empty() { return true; }
         if crate::constraint::struct_uses_coo(&t) { return true; }
         for (_, sft) in &l.fields {
             match sft {

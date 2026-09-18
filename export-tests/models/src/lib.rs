@@ -149,4 +149,22 @@ pub struct Hidden {
     secret: f64,
 }
 
+/// An N-ary `coo` constraint over three beacons: the keyword rides the
+/// bundle, and the importing root must name its collection `beacons`.
+#[arael::model]
+#[arael(constraint(coo, {
+    [(a.pos.x + b.pos.x + c.pos.x - trio.sum) * trio.w]
+}))]
+#[derive(Clone)]
+pub struct Trio<T: Float> {
+    #[arael(ref = root.beacons)]
+    pub a: Ref<Beacon<T>>,
+    #[arael(ref = root.beacons)]
+    pub b: Ref<Beacon<T>>,
+    #[arael(ref = root.beacons)]
+    pub c: Ref<Beacon<T>>,
+    pub sum: T,
+    pub w: T,
+}
+
 arael::export_models!();

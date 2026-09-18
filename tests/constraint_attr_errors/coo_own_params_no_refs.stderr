@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/coo_own_params_no_refs.rs:8: `constraint(coo, ..)` on `C` couples the entities its `Ref` fields point at, and none of them has params. Its own params take `constraint(hb, ..)` with `hb: SelfBlock<C>`, and `constraint([hb, coo], ..)` when they couple to the root's or the containing parent's
+  --> tests/constraint_attr_errors/coo_own_params_no_refs.rs:14:1
+   |
+14 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
