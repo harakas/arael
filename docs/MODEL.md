@@ -358,7 +358,7 @@ That has two consequences worth knowing.
   `release_blocks()` on the root still exists and is still safe to
   call; there is simply nothing left for it to free.
 
-**Changed in 0.8.4.** Up to 0.8.3 a block field *was* the container:
+**Changed in 0.9.0.** Up to 0.8.3 a block field *was* the container:
 `SelfBlock` embedded its Hessian triangle in the entity struct as a
 fixed `[T; M]` array, and `CrossBlock` its rectangle, so a
 bundle-adjustment observation carried 296 bytes of Hessian and a model

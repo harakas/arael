@@ -1364,10 +1364,10 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
 /// Up to 0.8.3 a block field was the container: `SelfBlock` embedded its
 /// Hessian triangle in the entity struct as a fixed array, and this twin
 /// held the same behind a `Box` so it could be freed between solves and
-/// skipped for a frozen sub-tree. From 0.8.4 a block field declares a
+/// skipped for a frozen sub-tree. From 0.9.0 a block field declares a
 /// block and holds no values, so there is nothing to box and nothing to
 /// choose between. Use [`SelfBlock`].
-#[deprecated(since = "0.8.4", note = "a block declares, it does not store; use SelfBlock")]
+#[deprecated(since = "0.9.0", note = "a block declares, it does not store; use SelfBlock")]
 pub type BoxedSelfBlock<A, const N: usize, const M: usize, T = f64> = SelfBlock<A, N, M, T>;
 
 // The self-block arithmetic, shared by [`SelfBlock`] and the
@@ -2384,8 +2384,8 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
 // ---------------------------------------------------------------------------
 
 /// The heap-backed twin of [`CrossBlock`], kept as an alias of it. See
-/// [`BoxedSelfBlock`] for what changed in 0.8.4. Use [`CrossBlock`].
-#[deprecated(since = "0.8.4", note = "a block declares, it does not store; use CrossBlock")]
+/// [`BoxedSelfBlock`] for what changed in 0.9.0. Use [`CrossBlock`].
+#[deprecated(since = "0.9.0", note = "a block declares, it does not store; use CrossBlock")]
 pub type BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T = f64> =
     CrossBlock<A, B, NA, NB, P, T>;
 
