@@ -55,7 +55,7 @@ fn is_data_name(n: &str) -> bool {
 }
 
 /// Last generic argument of a spelling if it is a float name, else the
-/// default: `SelfBlock<Pose, f32>` -> "f32", `TripletBlock` -> "f64".
+/// default: `SelfBlock<Pose, f32>` -> "f32", `SelfBlock<Pose>` -> "f64".
 fn block_scalar(spelling: &str) -> &str {
     let inner = spelling.find('<')
         .map(|i| &spelling[i + 1..spelling.len().saturating_sub(1)])
@@ -153,9 +153,6 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
             parts.push(format!("\"a\": {}", q(args[0])));
             parts.push(format!("\"b\": {}", q(args[1])));
         }
-        parts.push(format!("\"scalar\": {}", q(block_scalar(bare))));
-    } else if head_last == "TripletBlock" {
-        parts.push("\"kind\": \"triplet_block\"".into());
         parts.push(format!("\"scalar\": {}", q(block_scalar(bare))));
     } else if layout.param_fields.iter().any(|f| f == fname) {
         let (variant, is_euler) = if layout.euler_angle_fields.iter().any(|f| f == fname) {

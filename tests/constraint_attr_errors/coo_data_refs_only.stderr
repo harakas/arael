@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/coo_data_refs_only.rs:12: `constraint(coo, ..)` on `L` couples the entities its `Ref` fields point at, and none of them has params. Its own params take `constraint(hb, ..)` with `hb: SelfBlock<L>`, and `constraint([hb, coo], ..)` when they couple to the root's or the containing parent's
+  --> tests/constraint_attr_errors/coo_data_refs_only.rs:18:1
+   |
+18 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/coo_data_refs_only.rs:4:19
+  |
+4 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

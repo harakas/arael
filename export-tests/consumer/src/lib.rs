@@ -5,7 +5,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
-use export_models::{Beacon, Cal, Mark, Spring};
+use export_models::{Beacon, Cal, Mark, Spring, Trio};
 
 export_models::arael_import!();
 // A second import of the same bundle must be harmless (diamond imports:
@@ -75,4 +75,28 @@ pub struct World32 {
     pub cals: refs::Vec<Cal<f32>>,
     pub marks: refs::Vec<Mark<f32>>,
     pub mark_links: std::vec::Vec<MarkLink<f32>>,
+}
+
+/// A local entity whose params couple to the root's through `[hb, coo]`.
+#[arael::model]
+#[arael(constraint([hb, coo], {
+    [(scaled.v * root.scale - scaled.t) * 2.0]
+}))]
+pub struct Scaled<T: Float> {
+    pub v: Param<T>,
+    pub t: T,
+    pub hb: SelfBlock<Scaled<T>, T>,
+}
+
+/// The `coo` forms across the crate boundary: the imported N-ary
+/// [`Trio`] and a local `[hb, coo]` to a root param.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, { [(worldcoo64.scale - 1.0) * 0.1] }))]
+pub struct WorldCoo64 {
+    pub scale: Param<f64>,
+    pub beacons: refs::Vec<Beacon<f64>>,
+    pub trios: std::vec::Vec<Trio<f64>>,
+    pub scaled: refs::Vec<Scaled<f64>>,
+    pub hb: SelfBlock<WorldCoo64>,
 }

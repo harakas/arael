@@ -74,14 +74,54 @@ struct MultiCrossCoupling {
     #[arael(cross = (b, c))] hb_bc: CrossBlock<Point, Point>,
 }
 
+// The same pair of forms under a robust loss: the weight must scale the
+// COO pairs exactly as it scales the tiles.
+#[arael::model]
+#[arael(constraint(coo, loss = |s| loss_huber(s, testmodel.k2), {
+    let dx_ab = a.pos.x - b.pos.x;
+    let dy_bc = b.pos.y - c.pos.y;
+    [(dx_ab + dy_bc) * testmodel.constraint_isigma,
+     (dx_ab * dy_bc) * testmodel.constraint_isigma]
+}))]
+struct TripletCouplingLoss {
+    #[arael(ref = root.points)]
+    a: arael::refs::Ref<Point>,
+    #[arael(ref = root.points)]
+    b: arael::refs::Ref<Point>,
+    #[arael(ref = root.points)]
+    c: arael::refs::Ref<Point>,
+}
+
+#[arael::model]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], loss = |s| loss_huber(s, testmodel.k2), {
+    let dx_ab = a.pos.x - b.pos.x;
+    let dy_bc = b.pos.y - c.pos.y;
+    [(dx_ab + dy_bc) * testmodel.constraint_isigma,
+     (dx_ab * dy_bc) * testmodel.constraint_isigma]
+}))]
+struct MultiCrossCouplingLoss {
+    #[arael(ref = root.points)]
+    a: arael::refs::Ref<Point>,
+    #[arael(ref = root.points)]
+    b: arael::refs::Ref<Point>,
+    #[arael(ref = root.points)]
+    c: arael::refs::Ref<Point>,
+    #[arael(cross = (a, b))] hb_ab: CrossBlock<Point, Point>,
+    #[arael(cross = (a, c))] hb_ac: CrossBlock<Point, Point>,
+    #[arael(cross = (b, c))] hb_bc: CrossBlock<Point, Point>,
+}
+
 #[arael::model]
 #[arael(root)]
 struct TestModel {
     points: arael::refs::Vec<Point>,
     triplet_coupling: arael::refs::Vec<TripletCoupling>,
     multi_cross_coupling: arael::refs::Vec<MultiCrossCoupling>,
+    triplet_loss: arael::refs::Vec<TripletCouplingLoss>,
+    multi_cross_loss: arael::refs::Vec<MultiCrossCouplingLoss>,
     drift_isigma: f64,
     constraint_isigma: f64,
+    k2: f64,
 }
 
 fn make_points() -> arael::refs::Vec<Point> {
@@ -104,14 +144,22 @@ fn make_points() -> arael::refs::Vec<Point> {
     pts
 }
 
-fn make_triplet_model() -> (TestModel, Vec<f64>) {
-    let mut model = TestModel {
+fn empty_model() -> TestModel {
+    TestModel {
         points: make_points(),
         triplet_coupling: arael::refs::Vec::new(),
         multi_cross_coupling: arael::refs::Vec::new(),
+        triplet_loss: arael::refs::Vec::new(),
+        multi_cross_loss: arael::refs::Vec::new(),
         drift_isigma: 1.0,
         constraint_isigma: 10.0,
-    };
+        // Well inside the residuals' scale, so the loss is nonlinear here.
+        k2: 0.5,
+    }
+}
+
+fn make_triplet_model() -> (TestModel, Vec<f64>) {
+    let mut model = empty_model();
     model.triplet_coupling.push(TripletCoupling {
         a: model.points.ref_at(0),
         b: model.points.ref_at(1),
@@ -123,13 +171,7 @@ fn make_triplet_model() -> (TestModel, Vec<f64>) {
 }
 
 fn make_multi_cross_model() -> (TestModel, Vec<f64>) {
-    let mut model = TestModel {
-        points: make_points(),
-        triplet_coupling: arael::refs::Vec::new(),
-        multi_cross_coupling: arael::refs::Vec::new(),
-        drift_isigma: 1.0,
-        constraint_isigma: 10.0,
-    };
+    let mut model = empty_model();
     model.multi_cross_coupling.push(MultiCrossCoupling {
         a: model.points.ref_at(0),
         b: model.points.ref_at(1),
@@ -179,4 +221,51 @@ fn test_multi_cross_grad_hessian_matches_triplet() {
                 "hess[{},{}] differs: triplet={}, multi-cross={}", i, j, th[idx], mh[idx]);
         }
     }
+}
+
+fn make_loss_models() -> (TestModel, TestModel, Vec<f64>) {
+    let mut coo = empty_model();
+    coo.triplet_loss.push(TripletCouplingLoss {
+        a: coo.points.ref_at(0), b: coo.points.ref_at(1), c: coo.points.ref_at(2),
+    });
+    let mut cross = empty_model();
+    cross.multi_cross_loss.push(MultiCrossCouplingLoss {
+        a: cross.points.ref_at(0), b: cross.points.ref_at(1), c: cross.points.ref_at(2),
+        hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
+    });
+    let mut params = Vec::new();
+    coo.serialize(&mut params);
+    let mut params2 = Vec::new();
+    cross.serialize(&mut params2);
+    assert_eq!(params, params2);
+    (coo, cross, params)
+}
+
+#[test]
+fn a_loss_weights_coo_pairs_like_cross_tiles() {
+    let (mut coo, mut cross, x) = make_loss_models();
+    let n = x.len();
+    let (mut cg, mut ch) = (vec![0.0; n], vec![0.0; n * n]);
+    let cc = coo.calc_grad_hessian_dense(&x, &mut cg, &mut ch);
+    let (mut mg, mut mh) = (vec![0.0; n], vec![0.0; n * n]);
+    let mc = cross.calc_grad_hessian_dense(&x, &mut mg, &mut mh);
+    assert!((cc - mc).abs() < 1e-10, "cost: coo={cc}, multi-cross={mc}");
+    // The loss is in its nonlinear region: the weight is not one.
+    let (mut ug, mut uh) = (vec![0.0; n], vec![0.0; n * n]);
+    let (mut plain, _) = make_triplet_model();
+    plain.calc_grad_hessian_dense(&x, &mut ug, &mut uh);
+    assert!(cc < plain.calc_cost(&x), "the loss must cut the cost");
+    for i in 0..n {
+        assert!((cg[i] - mg[i]).abs() < 1e-8, "grad[{i}]: coo={}, multi-cross={}", cg[i], mg[i]);
+    }
+    let mut off_diagonal_pairs = 0;
+    for i in 0..n {
+        for j in 0..n {
+            let idx = i * n + j;
+            assert!((ch[idx] - mh[idx]).abs() < 1e-6,
+                "hess[{i},{j}]: coo={}, multi-cross={}", ch[idx], mh[idx]);
+            if i / 2 != j / 2 && ch[idx] != 0.0 { off_diagonal_pairs += 1; }
+        }
+    }
+    assert!(off_diagonal_pairs > 0, "the cross pairs reached the Hessian");
 }

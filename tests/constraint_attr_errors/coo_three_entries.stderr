@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/coo_three_entries.rs:7: `coo` takes at most one companion, the constraint struct's own SelfBlock: `constraint([<selfblock>, coo], { body })`
+  --> tests/constraint_attr_errors/coo_three_entries.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

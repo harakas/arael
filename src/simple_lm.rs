@@ -1359,16 +1359,17 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     }
 
     /// Whether the Hessian pattern is only discoverable by running a
-    /// compute pass first (a TripletBlock anywhere in the model tree
-    /// fills its entries at runtime). An `extended` root WITHOUT
-    /// triplets keeps a static pattern: extended hooks can add Hessian
-    /// entries only through declared block fields. The pattern itself is frozen
-    /// after the first iteration by contract for EVERY model -- this
-    /// flag is about when it becomes knowable, not whether it changes.
-    /// When `false`, the structure walks below are complete before any
-    /// compute, and sparse backends may build their pattern without a
-    /// COO discovery pass. Defaults to `true` (unknown = assume
-    /// runtime-determined); the macro overrides it.
+    /// compute pass first: a `coo` constraint anywhere in the containment
+    /// tree pushes its entries at runtime. An `extended` root alone keeps
+    /// a static pattern; whether its hook pushes is a separate question,
+    /// answered per solve by
+    /// [`extended_hook_writes_coo`](Self::extended_hook_writes_coo). The
+    /// pattern itself is frozen after the first iteration by contract for
+    /// EVERY model -- this flag is about when it becomes knowable, not
+    /// whether it changes. When `false`, the structure walks below are
+    /// complete before any compute, and sparse backends may build their
+    /// pattern without a COO discovery pass. Defaults to `true` (unknown =
+    /// assume runtime-determined); the macro overrides it.
     fn hessian_pattern_requires_compute(&self) -> bool {
         true
     }
@@ -1785,9 +1786,8 @@ pub struct ThreadReport {
 
 impl ThreadReport {
     /// True when threads were asked for and the model cannot use them:
-    /// the sweeps ran over a single store however many were asked for.
-    /// Either the root did not ask for `par`, or it holds a form that
-    /// cannot thread yet (a `TripletBlock` anywhere in the model).
+    /// the sweeps ran over a single store however many were asked for,
+    /// because the root did not ask for `par`.
     pub fn fell_back(&self) -> bool {
         self.sweeps_asked > 1 && self.sweeps.as_ref().is_none_or(|s| s.threads <= 1)
     }
@@ -2891,7 +2891,7 @@ pub fn lm_solve_with_context<T: Float, S: LmSolver<T>>(
     // skips this reset.
     solver.reset();
     let mut matrix = solver.new_matrix(x0.len());
-    lm_solve_on(x0, solver, &mut matrix, problem, config, ctx)
+    lm_solve_on(x0, solver, &mut matrix, problem, config, ctx, None)
 }
 
 /// The solve loop proper, on caller-owned matrix storage and WITHOUT the
@@ -2905,6 +2905,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     problem: &mut impl LmProblemInternals<T>,
     config: &LmConfig<T>,
     ctx: &mut crate::threads::Context,
+    // A session's pinned store count: the count its cached pattern was
+    // built at, 0 before the first solve. `None` for a solve that keeps
+    // no pattern between calls.
+    pin: Option<&mut usize>,
 ) -> SolveResult<T> {
     // Drivers are stateful per solve; clone the config's prototype so the
     // shared config is untouched and a reused config starts each solve clean.
@@ -2925,6 +2929,25 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         ctx.set_timing(true);
     }
     problem.begin_with_context(ctx);
+    // A cached pattern is bound to the store count it was built at: a
+    // split store claims its own blocks, so the position stream is per
+    // store. A session keeps the pattern across solves and pins the count
+    // with it; a solve asking for another count is warned and run at the
+    // pinned one, since the pattern cannot serve any other.
+    if let Some(pin) = pin {
+        let stores = ctx.sweeps().map_or(1, |s| s.threads);
+        if *pin != 0 && stores != *pin {
+            warn!("LmSession: this solve asked for {} sweep thread(s), but the session's \
+                   cached Hessian pattern was built over {} block store(s) and serves that \
+                   count only. The sweep thread count is fixed for the life of a session: \
+                   solving with {}. To change it, call LmSession::invalidate() first (the \
+                   next solve then runs cold) or start a new session.",
+                ctx.threads(), *pin, *pin);
+            ctx.set_threads(*pin);
+            problem.begin_with_context(ctx);
+        }
+        *pin = ctx.sweeps().map_or(1, |s| s.threads);
+    }
     // An extended hook is handed the COO list and may push into it, which
     // only running it can tell. Ask once, here, so every route below
     // knows whether the Hessian pattern is knowable before a compute.
@@ -3662,6 +3685,14 @@ pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem
 /// removed, a different problem of the same size -- passes it undetected.
 /// Do not rely on it; call `invalidate` on every structural change.
 ///
+/// The sweep thread count is part of that structure: a `par` root's
+/// pattern is bound over one block store per thread, so the count the
+/// first solve used is fixed for the life of the session. A later solve
+/// asking for another count (`num_threads` or `assembly_threads`) is run at
+/// the pinned count, with a warning that says so. To change it, call
+/// `invalidate` first. The linear solve's own thread count is free to
+/// change between solves.
+///
 /// The config is re-read on every solve, so tolerances, iteration caps, or
 /// the damping driver may differ per call.
 ///
@@ -3678,6 +3709,9 @@ pub struct LmSession<T: Float, S: LmSolver<T>> {
     // Parameter count the caches were built for; a solve at any other count
     // invalidates first and runs cold.
     n: usize,
+    // Block stores the caches were bound over; 0 before the first solve.
+    // A later solve runs at this count whatever its config asks.
+    stores: usize,
     // The solve context, kept so the root's stores carry over.
     ctx: crate::threads::Context,
 }
@@ -3685,7 +3719,7 @@ pub struct LmSession<T: Float, S: LmSolver<T>> {
 impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
     /// Wrap a configured backend. Nothing is analyzed until the first solve.
     pub fn new(solver: S) -> Self {
-        LmSession { solver, matrix: None, n: 0, ctx: crate::threads::Context::new() }
+        LmSession { solver, matrix: None, n: 0, stores: 0, ctx: crate::threads::Context::new() }
     }
 
     /// The solve context the session carries between solves.
@@ -3729,7 +3763,8 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
             return Ok(lm_empty_result(x0, config));
         }
         let mut matrix = self.matrix.take().unwrap_or_else(|| self.solver.new_matrix(n));
-        let result = lm_solve_on(x0, &mut self.solver, &mut matrix, problem, config, &mut self.ctx);
+        let result = lm_solve_on(x0, &mut self.solver, &mut matrix, problem, config,
+                                 &mut self.ctx, Some(&mut self.stores));
         self.matrix = Some(matrix);
         result
     }
@@ -3742,6 +3777,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
         self.solver.reset();
         self.matrix = None;
         self.n = 0;
+        self.stores = 0;
     }
 
     /// The backend, e.g. to read its [`report`](LmSolver::report) after a
@@ -3928,8 +3964,8 @@ pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblemInternals
 /// compute -- see [`LmProblem::hessian_pattern_requires_compute`] -- get
 /// their CSC pattern and position map built straight from the block
 /// structure the macro exposes, with no COO pass and none of its
-/// transient memory. Everything else (TripletBlock models, hand-built
-/// problems) falls back to COO discovery.
+/// transient memory. Everything else (`coo` constraints, a hook that
+/// pushes entries, hand-built problems) falls back to COO discovery.
 ///
 /// The fast path's pattern is tile-expanded, so it carries the blocks'
 /// structural zeros as explicit entries (~1.2% more nonzeros on
@@ -4249,8 +4285,8 @@ pub enum SolverReport {
 pub enum SchurPolicy {
     /// Never reduce: assemble the whole system as one scalar CSC and
     /// factorize that. The plain sparse Cholesky, and the only route a
-    /// model with no block structure (hand-built problems, TripletBlock
-    /// models) can take anyway.
+    /// model with no block structure (hand-built problems, `coo`
+    /// constraints) can take anyway.
     ///
     /// A marginalize set is still honoured here -- not as a reduction, but
     /// as the factorization's ordering (see [`FaerOrdering`]): ordering
@@ -4438,7 +4474,7 @@ pub enum EnvelopeMode {
 /// one -- in the seats the scalar route otherwise holds: the whole Hessian,
 /// and a reduced Schur system the envelope route declined. The envelope and
 /// the iterative routes keep their precedence in every mode; models without
-/// block structure (hand-built problems, TripletBlock) always take the
+/// block structure (hand-built problems, `coo` constraints) always take the
 /// scalar route.
 ///
 /// Measured at or ahead of the scalar route on every benchmark, with a
@@ -4918,9 +4954,9 @@ pub struct SchurPlan {
 /// Neither step needs anything from the caller, and a model with no
 /// marginalizable blocks (a pose graph, a localization problem) skips both
 /// and costs exactly what a plain sparse Cholesky costs. Models with no
-/// block structure at all -- hand-built [`LmProblem`]s and TripletBlock
-/// models -- take the same plain route, discovering their pattern by a
-/// COO pass on the first assembly.
+/// block structure at all -- hand-built [`LmProblem`]s and models with
+/// `coo` constraints -- take the same plain route, discovering their
+/// pattern by a COO pass on the first assembly.
 ///
 /// [`SchurPolicy`] overrides the decision, [`FaerOrdering`] the ordering,
 /// and [`plan`](Self::plan) (or [`LmResult::solver`]) reports what
@@ -5208,8 +5244,8 @@ impl<T> SparseFaer<T> {
     /// take [`num_threads`](LmConfig::num_threads) on the panels big enough
     /// to pay for it. Routes that never factorize (iterative Schur) and the
     /// envelope routes, when they engage, keep precedence in every mode.
-    /// Models without block structure (hand-built problems, TripletBlock)
-    /// always take the scalar route.
+    /// Models without block structure (hand-built problems, `coo`
+    /// constraints) always take the scalar route.
     pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
         self.block_supernodal = mode;
         self
@@ -5979,9 +6015,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         // The model's block structure -- what everything below is decided
         // from. A model that has none (hand-built problems) or whose pattern
-        // only a compute can reveal (TripletBlock) has no blocks to
-        // marginalize either: whole system, pattern discovered the slow
-        // way.
+        // only a compute can reveal (`coo` constraints, a pushing hook)
+        // has no blocks to marginalize either: whole system, pattern
+        // discovered the slow way.
         let mut cells = std::vec::Vec::new();
         let mut spans = std::vec::Vec::new();
         if !problem.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
@@ -5993,8 +6029,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 !matches!(self.policy, SchurPolicy::Force),
                 "SparseFaer: SchurPolicy::Force, but this model has no block \
                  structure to marginalize -- it is hand-built, or its Hessian \
-                 pattern is only knowable after a compute (TripletBlock). \
-                 Use SchurPolicy::Auto or Never."
+                 pattern is only knowable after a compute (`coo` constraints, an \
+                 extended hook that pushes entries). Use SchurPolicy::Auto or Never."
             );
             if vb {
                 info!("schur: not reducing -- the model has no block structure");

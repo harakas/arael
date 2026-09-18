@@ -858,6 +858,36 @@ fn a_stream_binds_any_instance_of_the_shape() {
     assert_eq!(vals_a, vals_b);
 }
 
+/// `scatter_hessian_indexed` replays the stores' values through a stream
+/// without computing: what the last assembly into the context left, added
+/// into the buffer it is given.
+#[test]
+fn scatter_hessian_indexed_replays_the_last_assembly() {
+    let mut ctx = arael::threads::Context::new();
+    let mut w = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let n = params.len();
+    let mut grad = vec![0.0; n];
+    let mut coo = CooMatrix::new(n);
+    w.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
+    let (csc, positions) = coo.to_csc_with_positions(&mut w, &mut ctx).unwrap();
+    let mut vals = vec![0.0; csc.vals.len()];
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &positions, &mut ctx);
+    assert!(vals.iter().any(|v| *v != 0.0));
+
+    let mut again = vec![0.0; vals.len()];
+    w.scatter_hessian_indexed(&mut again, &positions, &mut ctx);
+    assert_eq!(again, vals, "a replay of the assembly is the assembly");
+
+    // It adds: scattering over the assembly doubles every value exactly.
+    let mut twice = vals.clone();
+    w.scatter_hessian_indexed(&mut twice, &positions, &mut ctx);
+    for (t, v) in std::iter::zip(&twice, &vals) {
+        assert_eq!(*t, v + v);
+    }
+}
+
 /// Scattering without a stream is a caller error, and a loud one: the
 /// blocks hold no fallback target, so a silent pass would write nothing
 /// and hand back an all-zero Hessian.

@@ -180,3 +180,57 @@ fn extended_with_coo_entries_solves_sparse() {
         "sparse {} vs dense {}", rs.end_cost, rd.end_cost);
     assert!((s.a.value - 3.0).abs() < 1e-9, "a = {}", s.a.value);
 }
+
+// ===========================================================================
+// The probe runs the hook once more per solve, alone, before the first
+// assembly
+// ===========================================================================
+
+#[arael::model]
+#[arael(root, extended)]
+#[arael(constraint(hb, { [(logged.a - 1.0) * 0.5] }))]
+struct Logged {
+    a: Param<f64>,
+    hb: SelfBlock<Logged>,
+    /// Every hook call, in order: "update", "compute" or "cost".
+    #[arael(skip)]
+    log: std::cell::RefCell<std::vec::Vec<&'static str>>,
+}
+
+impl ExtendedModel<f64> for Logged {
+    fn extended_update(&mut self, _params: &[f64]) {
+        self.log.borrow_mut().push("update");
+    }
+    fn extended_compute(&mut self, params: &[f64], grad: &mut [f64], coo: &mut Coo<f64>) {
+        self.log.borrow_mut().push("compute");
+        let i = self.a.index() as usize;
+        let r = params[i] - 3.0;
+        coo.add_residual(r, &[i as u32], &[1.0], grad);
+    }
+    fn extended_cost(&self, params: &[f64]) -> f64 {
+        self.log.borrow_mut().push("cost");
+        let r = params[self.a.index() as usize] - 3.0;
+        r * r
+    }
+}
+
+/// An assembly runs update, compute, cost; a cost evaluation runs update,
+/// cost. The probe is the one compute with no cost after it, and it comes
+/// first.
+#[test]
+fn the_probe_runs_the_hook_once_before_the_first_assembly() {
+    let mut m = Logged {
+        a: Param::new(0.0), hb: SelfBlock::new(), log: std::cell::RefCell::new(Vec::new()),
+    };
+    m.solve_sparse(&LmConfig { max_iters: 5, ..Default::default() }).unwrap();
+    let log = m.log.borrow();
+    let computes: Vec<usize> = log.iter().enumerate()
+        .filter(|(_, e)| **e == "compute").map(|(i, _)| i).collect();
+    assert!(computes.len() >= 2, "a probe and at least one assembly: {:?}", *log);
+    let bare: Vec<usize> = computes.iter().copied()
+        .filter(|&i| log.get(i + 1) != Some(&"cost")).collect();
+    assert_eq!(bare, vec![computes[0]], "exactly one compute has no cost after it, \
+        the probe, and it is the first: {:?}", *log);
+    assert_eq!(log.get(computes[0].wrapping_sub(1)), Some(&"update"),
+        "the probe updates the params first: {:?}", *log);
+}

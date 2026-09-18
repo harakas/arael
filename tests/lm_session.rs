@@ -486,3 +486,61 @@ fn thread_count_change_between_warm_solves() {
         assert!((a - b).abs() < 1e-8, "param {}: {} vs {}", i, a, b);
     }
 }
+
+// --- the same model as a `par` root: its pattern is bound per store ---
+
+#[arael::model]
+#[arael(root, par)]
+struct WorldPar {
+    poses: refs::Vec<Pose>,
+    landmarks: refs::Vec<Landmark>,
+    odos: std::vec::Vec<Odo>,
+    obs: std::vec::Vec<Obs>,
+}
+
+fn build_par(off: f64) -> WorldPar {
+    let w = build(off);
+    WorldPar { poses: w.poses, landmarks: w.landmarks, odos: w.odos, obs: w.obs }
+}
+
+/// A `par` root's cached pattern serves the store count it was built
+/// over, so the session pins the sweep thread count of its first solve:
+/// a later solve asking for another count runs at the pinned one (with a
+/// warning), and lands where a cold solve does. `invalidate` releases it.
+#[cfg(feature = "rayon")]
+#[test]
+fn a_par_root_keeps_its_store_count_across_warm_solves() {
+    let stores = |r: &LmResult<f64>| r.threads.sweeps.as_ref().map(|s| s.threads);
+    let threaded = |t: usize| LmConfig { num_threads: t, ..cfg() };
+    let mut cold_ref = build_par(0.15);
+    let cold = cold_ref.solve_with(&mut SparseFaer::new(), &cfg()).unwrap();
+
+    let mut session = LmSession::new(SparseFaer::new());
+    let first = session.solve(&mut build_par(0.05), &threaded(4)).unwrap();
+    assert_eq!(stores(&first), Some(4));
+
+    // Asked for one thread, run at the pinned four.
+    let warm = session.solve(&mut build_par(0.15), &threaded(1)).unwrap();
+    assert_eq!(stores(&warm), Some(4), "{}", warm.report());
+    assert_eq!(warm.threads.sweeps_asked, 4);
+    for (i, (a, b)) in std::iter::zip(&warm.x, &cold.x).enumerate() {
+        assert!((a - b).abs() < 1e-8, "param {}: {} vs {}", i, a, b);
+    }
+
+    // `assembly_threads` is pinned the same way; the linear count is free.
+    let cfg2 = LmConfig { num_threads: 1, assembly_threads: Some(2), ..cfg() };
+    let warm2 = session.solve(&mut build_par(0.15), &cfg2).unwrap();
+    assert_eq!(stores(&warm2), Some(4), "{}", warm2.report());
+    assert_eq!(warm2.threads.linear, 1);
+
+    // Released: the next solve runs cold at what it asks for.
+    session.invalidate();
+    let fresh = session.solve(&mut build_par(0.15), &threaded(1)).unwrap();
+    assert_eq!(stores(&fresh), Some(1), "{}", fresh.report());
+    for (i, (a, b)) in std::iter::zip(&fresh.x, &cold.x).enumerate() {
+        assert!((a - b).abs() < 1e-8, "param {}: {} vs {}", i, a, b);
+    }
+    // And pins the new count.
+    let warm3 = session.solve(&mut build_par(0.05), &threaded(4)).unwrap();
+    assert_eq!(stores(&warm3), Some(1), "{}", warm3.report());
+}

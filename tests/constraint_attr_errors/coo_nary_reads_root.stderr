@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/coo_nary_reads_root.rs:16: constraint on `struct D` references param(s) outside its hessian block: [w.s.work()] (a SelfBlock<A> covers A's own params; CrossBlock<A, B> covers A and B; `constraint(coo, ..)` covers every entity a `Ref` field of this struct points at. The root's or the containing parent's params join an entity only through `constraint([<selfblock>, coo], ..)`, with the body reading them; a `coo` constraint over refs cannot read them)
+  --> tests/constraint_attr_errors/coo_nary_reads_root.rs:21:1
+   |
+21 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/coo_nary_reads_root.rs:5:19
+  |
+5 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

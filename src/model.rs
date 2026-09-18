@@ -197,10 +197,9 @@ impl<T: ParamType + std::fmt::Debug> std::fmt::Debug for Param<T> {
 ///   [`Context`](crate::threads::Context), so a model holds no assembly
 ///   memory of its own to free.
 ///
-/// The parameter-vector and Hessian methods are generic over the solve
-/// precision `F`; Hessian storage keeps the block's own precision and
-/// converts on accumulation (an identity after monomorphization when the
-/// widths match).
+/// The parameter-vector methods are generic over the solve precision `F`.
+/// A model holds no Hessian entries: the block fields are markers, and the
+/// values live in the block store the solve owns.
 pub trait Model {
     fn serialize_params<F: crate::utils::Float>(&mut self, _data: &mut std::vec::Vec<F>) {}
     fn deserialize_params<F: crate::utils::Float>(&mut self, _data: &[F]) {}
@@ -1235,9 +1234,9 @@ fn push_tile(out: &mut std::vec::Vec<ValueIndex>, pos: TilePosition) {
 #[inline]
 fn take_tile(positions: &[ValueIndex], cursor: &mut usize) -> TilePosition {
     assert!(*cursor + 2 <= positions.len(),
-        "Hessian scatter ran past the bound pattern: the blocks were never bound \
-         to it (Model::bind_hessian_positions), or their emission order changed \
-         within the solve");
+        "Hessian scatter ran past the bound pattern: the stores were never bound \
+         to it (LmProblemInternals::bind_hessian_positions), their emission order \
+         changed within the solve, or the pattern was bound at another store count");
     let pos = TilePosition { base: positions[*cursor], stride: positions[*cursor + 1] };
     *cursor += 2;
     pos
@@ -1258,8 +1257,8 @@ fn tile_start(indices: &[u32]) -> u32 {
     u32::MAX
 }
 
-/// How a backend hands out scatter targets during
-/// [`Model::bind_hessian_positions`].
+/// How a backend hands out scatter targets when a root binds its block
+/// stores to an assembled pattern (`LmProblemInternals::bind_hessian_positions`).
 pub enum HessianBinder<'a> {
     /// Tile-expanded pattern: every stored cell holds a full dense tile, so
     /// one lookup fixes a whole block and only the tile's origin and column
@@ -1565,10 +1564,9 @@ fn self_mapped<const N: usize, const M: usize, T: crate::utils::Float, F: crate:
 
 /// A slab of self blocks with the indices apart from the values: per
 /// entity its container slot and its N parameter indices in one array,
-/// the M entries of its upper triangle in one flat array. A root's
-/// generated block store holds one per entity container, for the
-/// entities its range writes; the gradient does not live here, each
-/// store keeps a vector of its own (see [`crate::threads`]).
+/// the M entries of its upper triangle and its N gradient entries in one
+/// flat array. A root's generated block store holds one per entity
+/// container, for the entities its range writes (see [`crate::threads`]).
 ///
 /// The build pushes the indices only and then calls
 /// [`finish`](Self::finish), which sizes the value array in one zeroed
@@ -1684,10 +1682,6 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
              in the slab", slot);
         k as usize
     }
-
-    /// True if this slab holds every entity, so a marker's slot addresses
-    /// it directly and no map is needed.
-    pub fn is_whole(&self) -> bool { self.map.is_empty() }
 
     /// Size the value array to the entities pushed: a fresh zeroed
     /// allocation when the length changed, else the existing storage,
@@ -2439,7 +2433,7 @@ impl<T: crate::utils::Float> Default for Coo<T> {
 }
 
 impl<T: crate::utils::Float> Coo<T> {
-    /// Create an empty triplet block.
+    /// An empty list.
     pub fn new() -> Self {
         Coo { hessian: std::vec::Vec::new() }
     }
@@ -3365,7 +3359,6 @@ mod tests {
         let mut whole: SelfBlockArray<3, 6, f64> = SelfBlockArray::new();
         for e in 0..4u32 { whole.push(e, &[3 * e, 3 * e + 1, 3 * e + 2]); }
         whole.finish();
-        assert!(whole.is_whole(), "no map means the slot addresses it directly");
 
         // Partial: entities 1 and 3 only, in the order first met.
         let mut part: SelfBlockArray<3, 6, f64> = SelfBlockArray::new();
@@ -3373,7 +3366,6 @@ mod tests {
         part.push_at(3, 3, &[9, 10, 11]);
         part.push_at(1, 1, &[3, 4, 5]);
         part.finish();
-        assert!(!part.is_whole());
         assert_eq!(part.slab_of(3), 0);
         assert_eq!(part.slab_of(1), 1);
 
@@ -3592,6 +3584,39 @@ mod tests {
         assert_eq!(densify_band(&band, n, kd), dense,
             "COO band accumulation must use the same upper-band \
              layout as SelfBlock/CrossBlock and the band solvers");
+    }
+
+    #[test]
+    fn coo_band_rejects_an_entry_outside_the_band() {
+        let mut blk: Coo<f64> = Coo::new();
+        blk.hessian.push((0, 1, 1.0));
+        blk.hessian.push((0, 3, 1.0));
+        let n = 4;
+        let kd = 1;
+        let mut band = vec![0.0; (kd + 1) * n];
+        let err = blk.accumulate_hessian_band(&mut band, kd).unwrap_err();
+        assert_eq!((err.row, err.col, err.kd), (0, 3, 1));
+    }
+
+    #[test]
+    fn coo_loss_weight_scales_gradient_and_pairs() {
+        let n = 4;
+        let (idx, dr) = ([0u32, 2, 3], [1.0_f64, -0.5, 0.25]);
+        let (r, w) = (0.7_f64, 0.3_f64);
+        let mut plain: Coo<f64> = Coo::new();
+        let mut g_plain = vec![0.0; n];
+        plain.add_residual(r, &idx, &dr, &mut g_plain);
+        let mut lossy: Coo<f64> = Coo::new();
+        let mut g_lossy = vec![0.0; n];
+        lossy.add_residual_with_loss(w, r, &idx, &dr, &mut g_lossy);
+        assert_eq!(plain.len(), lossy.len());
+        for (a, b) in std::iter::zip(&plain.hessian, &lossy.hessian) {
+            assert_eq!((a.0, a.1), (b.0, b.1), "same cells in the same order");
+            assert!((w * a.2 - b.2).abs() < 1e-15, "{} vs {}", w * a.2, b.2);
+        }
+        for (a, b) in std::iter::zip(&g_plain, &g_lossy) {
+            assert!((w * a - b).abs() < 1e-15);
+        }
     }
 
     #[test]

@@ -2160,6 +2160,40 @@ fn parse_constraint_inner_impl(
              `constraint([a, b, ...], { body })`"));
     }
 
+    // `coo` names the solve's COO list, and a list holds it in exactly two
+    // shapes: alone (the N-ary form over the constraint's refs) or second
+    // behind the constraint struct's own SelfBlock. Anything else is
+    // rejected here, before the resolution paths see it: each of them
+    // reads one slot and would take a stray `coo` for a form it is not.
+    let coo_count = block_fields.iter().filter(|b| *b == "coo").count();
+    if coo_count > 1 {
+        return Err(syn::Error::new_spanned(err_span,
+            "`coo` is named twice -- the COO list is one place: write \
+             `constraint(coo, { body })` for the cross pairs of every Ref \
+             field, or `constraint([<selfblock>, coo], { body })` for an \
+             entity's pairs with the root or its containing parent"));
+    }
+    if coo_count == 1 && block_fields.len() > 2 {
+        return Err(syn::Error::new_spanned(err_span,
+            "`coo` takes at most one companion, the constraint struct's own \
+             SelfBlock: `constraint([<selfblock>, coo], { body })`"));
+    }
+    if coo_count == 1 && block_fields.len() == 2 {
+        if block_fields[0] == "coo" {
+            return Err(syn::Error::new_spanned(err_span,
+                "`coo` goes second: `constraint([<selfblock>, coo], { body })` \
+                 -- the SelfBlock names the entity, `coo` where its pairs with \
+                 the root or the containing parent go"));
+        }
+        if block_fields[0].contains('.') {
+            return Err(syn::Error::new_spanned(err_span, format!(
+                "`[{}, coo]`: the companion of `coo` is this struct's own \
+                 SelfBlock field, not a `root.` or `parent.` block -- \
+                 `constraint([<selfblock>, coo], {{ body }})`, with the root's \
+                 or the parent's params read in the body", block_fields[0])));
+        }
+    }
+
     // Parse the body block
     let body_group = match tokens.get(pos) {
         Some(proc_macro2::TokenTree::Group(g)) => g,
@@ -3008,10 +3042,6 @@ pub(crate) fn cse_stmts(
 fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String>)> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
-            // TripletBlock has no entity type args — all entities come from Ref fields
-            if seg.ident == "TripletBlock" {
-                return Ok(("__triplet__".to_string(), None));
-            }
             if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                 let type_args: Vec<&syn::Type> = args.args.iter()
                     .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
@@ -3027,7 +3057,7 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
                 }
             }
         }
-    Err(syn::Error::new_spanned(ty, "expected SelfBlock<A>, CrossBlock<A, B>, or TripletBlock"))
+    Err(syn::Error::new_spanned(ty, "expected SelfBlock<A> or CrossBlock<A, B>"))
 }
 
 /// A `parent.<crossblock>` primary resolved against the containing parent:
@@ -3111,9 +3141,7 @@ fn detect_mixed_parent(
         {
             blocks.push((syn::Ident::new(rest, proc_macro2::Span::call_site()),
                 a.clone(), b.clone(), over.clone()));
-        } else if playout.triplet_block_fields.contains(&rest.to_string())
-            || playout.self_block_field.as_deref() == Some(rest)
-        {
+        } else if playout.self_block_field.as_deref() == Some(rest) {
             return Ok(None);
         } else {
             let have: Vec<String> = playout.cross_block_fields.iter()
@@ -3174,11 +3202,6 @@ fn detect_mixed_parent(
                 "`{}` must be a `CrossBlock<A, B>` -- the mixed parent-cross form takes \
                  own CrossBlocks and `parent.<crossblock>` entries only", bf)));
         };
-        if a == "__triplet__" {
-            return Err(err(format!(
-                "`{}` is a TripletBlock -- the mixed parent-cross form takes own \
-                 CrossBlocks and `parent.<crossblock>` entries only", bf)));
-        }
         own_side_types.push(a);
         own_side_types.push(b);
     }
@@ -3534,10 +3557,6 @@ whose pairs you want tiled, or `coo` alone for all of them"));
                     block_name, struct_ident)))?;
 
         let (a_type, b_type_opt) = extract_block_type_args(&field.ty)?;
-        if a_type == "__triplet__" {
-            return Err(syn::Error::new_spanned(struct_ident,
-                format!("field `{}` is a TripletBlock -- multi-block constraints currently require CrossBlock fields only", block_name)));
-        }
         let b_type = b_type_opt.ok_or_else(|| syn::Error::new_spanned(struct_ident,
             format!("field `{}` must be CrossBlock<A, B>, not SelfBlock (SelfBlock<Self> lives on the entity struct, not here)", block_name)))?;
 
@@ -4106,7 +4125,7 @@ pub fn generate_root_methods(
     cost_f64: bool,
     marginalize_hint_fn: &Option<TokenStream2>,
     marginalize_candidates_fn: &Option<TokenStream2>,
-    has_triplet_block: bool,
+    uses_coo: bool,
     par: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
@@ -4695,14 +4714,6 @@ pub fn generate_root_methods(
                                 sc.attr_file, sc.attr_line, rest, a)));
                     }
                 }
-                "TripletBlock" => {
-                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                        format!("{}:{}: `root.{}` is a TripletBlock -- cross pairs go to \
-                                 COO through the `coo` keyword: \
-                                 `constraint([<local_self_block>, coo], ...)`, with the \
-                                 root's params read in the body",
-                            sc.attr_file, sc.attr_line, rest)));
-                }
                 _ => {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
                         format!("{}:{}: a `root.<field>` primary block must name the \
@@ -4946,13 +4957,6 @@ pub fn generate_root_methods(
                     field: syn::Ident::new(&rest, proc_macro2::Span::call_site()),
                     parent_type, a_type: ca, b_type: cb, parent_refs,
                 });
-            } else if playout.triplet_block_fields.contains(&rest) {
-                return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: `parent.{}` is a TripletBlock -- cross pairs go to COO \
-                             through the `coo` keyword: \
-                             `constraint([<local_self_block>, coo], ...)`, with the \
-                             parent's params read in the body",
-                        sc.attr_file, sc.attr_line, rest)));
             } else {
                 let mut have: Vec<String> = Vec::new();
                 if let Some(sb) = &playout.self_block_field {
@@ -4960,9 +4964,6 @@ pub fn generate_root_methods(
                 }
                 for (n, a, b, _) in &playout.cross_block_fields {
                     have.push(format!("CrossBlock<{}, {}> `{}`", a, b, n));
-                }
-                for n in &playout.triplet_block_fields {
-                    have.push(format!("TripletBlock `{}` (secondary slot only)", n));
                 }
                 let have = if have.is_empty() { "no block fields".to_string() }
                     else { have.join(", ") };
@@ -5061,13 +5062,6 @@ pub fn generate_root_methods(
                         constraint.primary_block_field(), sc.struct_name)));
             };
             let (a, b) = extract_block_type_args(&block_field_obj.unwrap().ty)?;
-            if a == "__triplet__" {
-                return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: `{}` is a `TripletBlock` -- a constraint puts its cross \
-                             pairs in COO with the `coo` keyword, which declares nothing on \
-                             the struct: `constraint(coo, ...)`",
-                        sc.attr_file, sc.attr_line, constraint.primary_block_field())));
-            }
             (a, b, None)
         };
 
@@ -7651,7 +7645,7 @@ pub fn generate_root_methods(
             // of the other kind on the same struct is rejected.
             if group.is_multi_cross != is_mcb {
                 return Err(syn::Error::new_spanned(&struct_ident,
-                    format!("on `{}`: cannot mix TripletBlock and multi-CrossBlock constraint attributes on the same struct", struct_ident)));
+                    format!("on `{}`: cannot mix `coo` and multi-CrossBlock constraint attributes on the same struct", struct_ident)));
             }
             if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
             group.cost_entries.push(cost_entry);
@@ -9174,12 +9168,11 @@ pub fn generate_root_methods(
         quote! {}
     };
 
-    // The Hessian pattern is only knowable after a compute when a
-    // TripletBlock exists anywhere in the containment tree (its entries
-    // are runtime COO). `extended` alone does NOT force it: extended
-    // hooks can add Hessian entries only through declared block fields,
-    // and every static-shaped block is covered by the structure walks.
-    let requires_compute = has_triplet_block;
+    // The Hessian pattern is only knowable after a compute when a `coo`
+    // constraint exists anywhere in the containment tree (its entries are
+    // pushed at runtime). `extended` alone does NOT force it: whether a
+    // hook pushes is observed by the probe below, once per solve.
+    let requires_compute = uses_coo;
 
     // An `extended` root's hook is handed the COO list, and only running
     // it says whether it pushes. The probe runs it alone -- no sweeps, no
@@ -9500,8 +9493,9 @@ pub fn generate_root_methods(
                 // silently wrong Hessian.
                 assert!(cursor == positions.len(),
                     "sparsity pattern changed between iterations: {} Hessian entries \
-                     accumulated but the cached pattern has {} (TripletBlock / extended \
-                     constraint entry counts must stay constant within one solve)",
+                     accumulated but the cached pattern has {} (the entries a `coo` \
+                     constraint or an extended hook pushes must stay constant within \
+                     one solve, and a cached pattern serves one store count)",
                     cursor, positions.len());
                 __cost
             }
@@ -9797,6 +9791,35 @@ fn interpret_constraint_body(
     // whichever the body reads params of -- the same question the
     // traversal side answers, asked the same way.
     let coo_join = coo_secondary_join(constraint, &struct_name.to_string(), root_type_name);
+
+    // `constraint(coo, ..)`: the participants are the `Ref` fields whose
+    // targets carry params. The constraint struct's own params have no
+    // block in this form, and a struct with no such ref couples nothing,
+    // so both are errors here rather than terms the sweep silently drops.
+    if a_type == "__triplet__" && constraint.block_fields.len() == 1 {
+        let own = struct_name.to_string();
+        let participants = fields.iter().filter(|f| {
+            extract_wrapper_inner(&f.ty, "Ref")
+                .is_some_and(|(_, inner)| param_total(&inner.to_string()) > 0)
+        }).count();
+        if participants == 0 {
+            return Err(syn::Error::new_spanned(struct_name, format!(
+                "`constraint(coo, ..)` on `{}` couples the entities its `Ref` fields point \
+                 at, and none of them has params. Its own params take `constraint(hb, ..)` \
+                 with `hb: SelfBlock<{}>`, and `constraint([hb, coo], ..)` when they couple \
+                 to the root's or the containing parent's", own, own)));
+        }
+        let self_vars = [own.to_lowercase(), "self".to_string()];
+        if param_total(&own) > 0 && body_reads_params(&constraint.body_stmts, &self_vars, &own) {
+            return Err(syn::Error::new_spanned(struct_name, format!(
+                "`constraint(coo, ..)` on `{}` reads `{}`'s own params, which have no \
+                 block in this form: `coo` couples only the entities the `Ref` fields point \
+                 at. A struct whose own params join the residual declares `hb: \
+                 SelfBlock<{}>` and writes `constraint(hb, ..)`, or `constraint([hb, coo], \
+                 ..)` to couple them to the root or the containing parent",
+                own, own, own)));
+        }
+    }
 
     // Multi-cross vs single-cross discriminator — needed before building
     // var_infos so we can skip the parent_name entry in multi-cross
@@ -10309,9 +10332,16 @@ pub(crate) fn check_residual_coverage(
     let all_via_struct_refs = !ref_field_names.is_empty()
         && list.iter().all(|m| ref_field_names.contains(&head_of(m)));
     let hint = if all_via_struct_refs {
-        " — all missing params resolve through this struct's own `Ref<T>` fields, but there are more than CrossBlock<A, B> can cover. Switch the block to `TripletBlock<T>` to include every ref-referenced entity.".to_string()
+        " -- every missing param resolves through this struct's own `Ref<T>` fields, \
+         more than one CrossBlock<A, B> covers. Name one CrossBlock per pair \
+         (`constraint([hb_ab, hb_ac, ..], ..)`), or `constraint(coo, ..)` to put every \
+         cross pair in the solve's COO list.".to_string()
     } else {
-        " (SelfBlock<A> covers A; CrossBlock<A, B> covers A and B; TripletBlock<T> covers every Ref<T> field on the constraint struct; root-level params have no block slot yet)".to_string()
+        " (a SelfBlock<A> covers A's own params; CrossBlock<A, B> covers A and B; \
+         `constraint(coo, ..)` covers every entity a `Ref` field of this struct points \
+         at. The root's or the containing parent's params join an entity only through \
+         `constraint([<selfblock>, coo], ..)`, with the body reading them; a `coo` \
+         constraint over refs cannot read them)".to_string()
     };
 
     let msg = format!(

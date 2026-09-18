@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/coo_dotted_companion.rs:8: `[parent.hb, coo]`: the companion of `coo` is this struct's own SelfBlock field, not a `root.` or `parent.` block -- `constraint([<selfblock>, coo], { body })`, with the root's or the parent's params read in the body
+  --> tests/constraint_attr_errors/coo_dotted_companion.rs:21:1
+   |
+21 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `arael::refs`
+ --> tests/constraint_attr_errors/coo_dotted_companion.rs:5:5
+  |
+5 | use arael::refs;
+  |     ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -308,6 +308,64 @@ struct W {
     isigma: f64,
 }
 
+// The same residuals through an aliased `coo` constraint: the pair's
+// shared parameter collapses two cross pairs onto the diagonal, which the
+// COO push doubles like the tile does.
+#[arael::model]
+#[arael(constraint(coo, {
+    [(a.x * b.x + a.y * b.y - wc.k) * wc.isigma,
+     (a.x + a.y - 2.0 * b.x + 0.5 * b.y) * wc.isigma]
+}))]
+struct PairQCoo {
+    #[arael(ref = root.q2s)]
+    a: Ref<Q2>,
+    #[arael(ref = root.q2s)]
+    b: Ref<Q2>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct WC {
+    q2s: refs::Vec<Q2>,
+    pairs: std::vec::Vec<PairQCoo>,
+    k: f64,
+    isigma: f64,
+}
+
+#[test]
+fn aliased_coo_equals_self_formulation() {
+    let (x, y) = (0.7, -1.3);
+    let mut ws = W {
+        p2s: refs::Vec::new(), q2s: refs::Vec::new(),
+        pairs: std::vec::Vec::new(), k: 2.0, isigma: 1.3,
+    };
+    ws.p2s.push(P2 { x: Param::new(x), y: Param::new(y), hb: SelfBlock::new() });
+    let mut params_s = Vec::new();
+    ws.serialize(&mut params_s);
+    let n = params_s.len();
+    let mut g_s = vec![0.0; n];
+    let mut h_s = vec![0.0; n * n];
+    let c_s = ws.calc_grad_hessian_dense(&params_s, &mut g_s, &mut h_s);
+
+    let mut wc = WC { q2s: refs::Vec::new(), pairs: std::vec::Vec::new(), k: 2.0, isigma: 1.3 };
+    wc.q2s.push(Q2 { x: Param::new(x), y: Param::new(y), hb: SelfBlock::new() });
+    wc.pairs.push(PairQCoo { a: wc.q2s.ref_at(0), b: wc.q2s.ref_at(0) });
+    let mut params_c = Vec::new();
+    wc.serialize(&mut params_c);
+    assert_eq!(params_s, params_c);
+    let mut g_c = vec![0.0; n];
+    let mut h_c = vec![0.0; n * n];
+    let c_c = wc.calc_grad_hessian_dense(&params_c, &mut g_c, &mut h_c);
+
+    assert!((c_s - c_c).abs() < 1e-12, "cost self {c_s} vs coo {c_c}");
+    for i in 0..n {
+        assert!((g_s[i] - g_c[i]).abs() < 1e-10, "grad[{i}]: self {} vs coo {}", g_s[i], g_c[i]);
+    }
+    for i in 0..n * n {
+        assert!((h_s[i] - h_c[i]).abs() < 1e-9, "hess[{i}]: self {} vs coo {}", h_s[i], h_c[i]);
+    }
+}
+
 fn print_h(label: &str, h: &[f64], n: usize) {
     println!("{}:", label);
     for i in 0..n {
