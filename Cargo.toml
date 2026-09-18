@@ -1,9 +1,25 @@
 [workspace]
 members = ["arael-faer", "arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch", "arael-sketch-backend", "arael-sketch-solver", "cargo-arael"]
 
+# One version for every crate of the workspace. A `-dev` suffix marks the
+# tree between releases: cargo never picks a pre-release for a plain
+# `"0.9"` requirement, so nothing built from here is mistaken for a
+# release. Cutting one sets the number here and in the table below.
+[workspace.package]
+version = "0.9.0-dev"
+
+[workspace.dependencies]
+arael = { version = "0.9.0-dev", path = "." }
+arael-macros = { version = "0.9.0-dev", path = "arael-macros" }
+arael-sym = { version = "0.9.0-dev", path = "arael-sym" }
+arael-sym-macros = { version = "0.9.0-dev", path = "arael-sym-macros" }
+arael-faer = { version = "0.9.0-dev", path = "arael-faer" }
+arael-sketch-solver = { version = "0.9.0-dev", path = "arael-sketch-solver" }
+arael-sketch-backend = { version = "0.9.0-dev", path = "arael-sketch-backend" }
+
 [package]
 name = "arael"
-version = "0.8.4"
+version.workspace = true
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 description = "Nonlinear optimization framework with compile-time symbolic differentiation"
@@ -31,9 +47,9 @@ cholmod-gpl = ["cholmod"]
 rayon = ["dep:rayon", "faer/rayon", "arael-faer/rayon", "arael-macros/rayon"]
 
 [dependencies]
-arael-macros = { version = "0.8.4", path = "arael-macros" }
-arael-sym = { version = "0.8.4", path = "arael-sym" }
-arael-faer = { version = "0.8.4", path = "arael-faer" }
+arael-macros = { workspace = true }
+arael-sym = { workspace = true }
+arael-faer = { workspace = true }
 inventory = "0.3"
 rayon = { version = "1.11", optional = true }
 num = "0.4"
