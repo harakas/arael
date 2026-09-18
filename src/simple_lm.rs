@@ -4029,7 +4029,7 @@ impl KeptCscPattern {
     fn assemble<T: Float>(
         &mut self,
         problem: &mut dyn LmProblemInternals<T>,
-    ctx: &mut crate::threads::Context,
+        ctx: &mut crate::threads::Context,
         params: &[T],
         grad: &mut [T],
         csc: &mut CscMatrix<T>,
@@ -7254,9 +7254,9 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     }
     fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SolveError> {
         if let Some(kept) = &mut self.positions {
-            return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
+            return Ok(kept.assemble(problem, ctx, params, grad, &mut matrix.csc));
         }
-        let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
+        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, &mut matrix.csc)?;
         self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
@@ -7303,9 +7303,9 @@ impl LmSolver<f64> for SparseCholmod {
     }
     fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
         if let Some(kept) = &mut self.positions {
-            return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
+            return Ok(kept.assemble(problem, ctx, params, grad, &mut matrix.csc));
         }
-        let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
+        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, &mut matrix.csc)?;
         self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
@@ -7374,9 +7374,9 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     }
     fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SolveError> {
         if let Some(kept) = &mut self.positions {
-            return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
+            return Ok(kept.assemble(problem, ctx, params, grad, &mut matrix.csc));
         }
-        let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
+        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, &mut matrix.csc)?;
         self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
