@@ -53,7 +53,11 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/coo_own_params_with_refs.rs");
     t.compile_fail("tests/constraint_attr_errors/coo_data_refs_only.rs");
     t.compile_fail("tests/constraint_attr_errors/coo_nary_reads_root.rs");
-    t.compile_fail("tests/constraint_attr_errors/par_not_sync.rs");
+    // A `par` root is only generated threaded under the `rayon` feature;
+    // without it the root is sequential, needs no `Sync`, and compiles.
+    if cfg!(feature = "rayon") {
+        t.compile_fail("tests/constraint_attr_errors/par_not_sync.rs");
+    }
     t.compile_fail("tests/constraint_attr_errors/option_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/nested_after_root.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_cross_bad_field.rs");
