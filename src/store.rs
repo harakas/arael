@@ -1274,14 +1274,14 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     /// Add one residual's cross pairs `2 dr_a dr_b^T` into the tile. The
     /// residual itself belongs to the two entities' gradients, not here.
     #[inline]
-    pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+    pub fn add_residual_cross(&mut self, dr_a: &[T; NA], dr_b: &[T; NB]) {
         cross_add(self.values, T::two(), dr_a, dr_b);
     }
 
     /// [`add_residual_cross`](Self::add_residual_cross) with the pairs
     /// scaled by the loss weight `w`. `w = 1` is the plain form.
     #[inline]
-    pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+    pub fn add_residual_cross_with_loss(&mut self, w: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
         cross_add(self.values, T::two() * w, dr_a, dr_b);
     }
 }
@@ -1683,8 +1683,8 @@ mod tests {
         for slot in 2..4usize {
             let dr_a = [1.0 + slot as f64, -0.5];
             let dr_b = [0.25, 2.0 - slot as f64];
-            whole.block_mut(false, slot).add_residual_cross(0.0, &dr_a, &dr_b);
-            run.block_mut(true, slot).add_residual_cross(0.0, &dr_a, &dr_b);
+            whole.block_mut(false, slot).add_residual_cross(&dr_a, &dr_b);
+            run.block_mut(true, slot).add_residual_cross(&dr_a, &dr_b);
         }
         assert_eq!(whole.values(2), run.values(0), "slot 2 is the run's first block");
         assert_eq!(whole.values(3), run.values(1));
@@ -1752,7 +1752,7 @@ mod tests {
             // The slot is the marker's either way; the array resolves it.
             selfs.add_residual(split, a, r, &dr_a);
             selfs.add_residual(split, b, r, &dr_b);
-            cross.block_mut(split, i).add_residual_cross(r, &dr_a, &dr_b);
+            cross.block_mut(split, i).add_residual_cross(&dr_a, &dr_b);
         }
         selfs.accumulate_hessian(hess);
         cross.accumulate_hessian(hess);
@@ -1822,8 +1822,8 @@ mod tests {
         let mut arr: CrossBlockArray<2, 2, 4, f64> = CrossBlockArray::new();
         arr.push(&[0, 1], &[2, 3]);
         arr.finish();
-        arr.block_mut(false, 0).add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
-        arr.block_mut(false, 0).add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
+        arr.block_mut(false, 0).add_residual_cross(&[1.0, -0.5], &[0.25, 2.0]);
+        arr.block_mut(false, 0).add_residual_cross(&[0.3, 0.7], &[-0.6, 0.1]);
 
         let mut dense = vec![0.0; n * n];
         arr.accumulate_hessian(&mut dense);
