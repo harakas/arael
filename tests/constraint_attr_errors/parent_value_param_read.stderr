@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/parent_value_param_read.rs:19: `parent.scale`: `Group.scale` is a Param -- reading it here would drop its derivative pairs; couple parent params through `parent.<selfblock>` or `[hb, parent.<triplet>]`
+error: $DIR/tests/constraint_attr_errors/parent_value_param_read.rs:19: `parent.scale`: `Group.scale` is a Param -- reading it here would drop its derivative pairs; couple parent params through `parent.<selfblock>` or `[hb, coo]`
   --> tests/constraint_attr_errors/parent_value_param_read.rs:36:1
    |
 36 | #[arael::model]

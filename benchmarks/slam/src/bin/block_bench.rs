@@ -10,7 +10,7 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem, LmProblemInternals};
+use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use scene::SceneConfig;
 use std::time::Instant;

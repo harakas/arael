@@ -15,7 +15,7 @@ mod bal;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, LmProblem, RootProblem, LmProblemInternals};
+use arael::simple_lm::{block_partition_from_spans, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use arael_faer::faer;
 use arael_faer::faer::dyn_stack::MemStack;

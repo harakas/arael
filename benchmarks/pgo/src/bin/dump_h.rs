@@ -13,7 +13,7 @@ mod g2o3;
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, LmProblem, RootProblem, LmProblemInternals};
+use arael::simple_lm::{block_partition_from_spans, csc_from_cells, RootProblem, LmProblemInternals};
 
 // The 2D pose graph, same shape as the benchmark's.
 #[arael::model]
@@ -54,12 +54,14 @@ struct Graph {
 }
 
 fn main() {
-    let mut ctx = arael::threads::Context::new();
     let dir = std::env::var("SCHUR_DUMP_DIR").expect("set SCHUR_DUMP_DIR");
     for (name, path) in [
         ("pgo-m3500", "datasets/input_M3500_g2o.g2o"),
         ("pgo-city10000", "datasets/city10000.g2o"),
     ] {
+        // A context is tied to the structure it was built for, so each
+        // graph gets its own.
+        let mut ctx = arael::threads::Context::new();
         let ds = g2o::load(path, false);
         let mut g = Graph { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
         for p in &ds.poses {
