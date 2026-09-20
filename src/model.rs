@@ -1651,9 +1651,16 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         k
     }
 
+    /// Record that global `slot` sits at slab slot `k`. The build sizes
+    /// the map first ([`map_resize`](Self::map_resize)) to what the
+    /// numbering can reach, so growing here means that count was short;
+    /// a debug build says so, a release build grows and carries on.
     #[inline]
     fn map_to(&mut self, slot: u32, k: u32) {
         if self.map.len() <= slot as usize {
+            debug_assert!(false,
+                "slot {} lies past the map's {} entries: the build presized it short",
+                slot, self.map.len());
             self.map.resize(slot as usize + 1, u32::MAX);
         }
         self.map[slot as usize] = k;
