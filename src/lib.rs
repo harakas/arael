@@ -2439,9 +2439,8 @@ pub mod prelude {
         FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
         RootProblem,
     };
-    // Hidden from the docs, but a hand-written problem has to name it to
-    // write its one empty impl.
-    #[doc(hidden)]
+    // Inner API, in the prelude because a hand-written problem has to
+    // name it to write its one empty impl.
     pub use crate::simple_lm::LmProblemInternals;
     pub use crate::angle::{AngleParam, AngleParamF};
     pub use crate::transform::{
