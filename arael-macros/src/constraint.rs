@@ -6202,16 +6202,14 @@ pub fn generate_root_methods(
         } else {
             quote! { add_residual_cross }
         };
-        // A write into the store picks its addressing from the sweep's
-        // `MAPPED`: a whole store takes the marker's slot as it stands, a
-        // thread's resolves it through the map. The constant is the
-        // instantiation's, so neither copy carries a test. Writes that do
-        // not go to the store (a mirror partial, a model TripletBlock)
-        // keep `m_add` / `m_cross`.
+        // A write into the store names the entity by the marker's global
+        // slot; the array resolves it (a map for a self block, a base for a
+        // cross tile), so one sweep serves a whole store and a thread's
+        // alike.
         let s_add: TokenStream2 = if loss_present {
-            quote! { add_residual_with_loss_at::<MAPPED> }
+            quote! { add_residual_with_loss }
         } else {
-            quote! { add_residual_at::<MAPPED> }
+            quote! { add_residual }
         };
         // Build the finalize statements (compute rho, and for the gh path the
         // weight) from the loss expression, sharing the residual pipeline:
@@ -6507,7 +6505,7 @@ pub fn generate_root_methods(
                     let access = entity_access_expr(&var_id.to_string())?;
                     let arr = store_array_ident(&type_id.to_string(), &hb);
                     triplet_calls.push(quote! {
-                        __store.#arr.#s_add(
+                        __store.#arr.#s_add(__split,
                             #access.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                     });
                 }
@@ -6563,7 +6561,7 @@ pub fn generate_root_methods(
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                         let arr = store_array_ident(&type_id_str, &hb);
                         self_block_calls.push(quote! {
-                            __store.#arr.#s_add(
+                            __store.#arr.#s_add(__split,
                                 self.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
                         continue;
@@ -6576,7 +6574,7 @@ pub fn generate_root_methods(
                             .unwrap_or_default();
                         let arr = store_array_ident(&type_id_str, &rhb);
                         remote_self_block_call = Some(quote! {
-                            __store.#arr.#s_add(#rtw.slot() as usize, #wr, &[#(#entity_dr),*]);
+                            __store.#arr.#s_add(__split,#rtw.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
                         // The mirror form wrote it above, in entity order.
                         continue;
@@ -6589,7 +6587,7 @@ pub fn generate_root_methods(
                     let access = entity_access_expr(&var_id.to_string())?;
                     let arr = store_array_ident(&type_id_str, &hb);
                     self_block_calls.push(quote! {
-                        __store.#arr.#s_add(
+                        __store.#arr.#s_add(__split,
                             #access.#hb_ident.slot() as usize, #wr, &[#(#entity_dr),*]);
                     });
                 }
@@ -6615,7 +6613,7 @@ pub fn generate_root_methods(
                     };
                     let arr = store_array_ident(&holder, &block.to_string());
                     cross_block_calls.push(quote! {
-                        __store.#arr.block_mut_at::<MAPPED>(#target.slot() as usize).#m_cross(
+                        __store.#arr.block_mut(__split,#target.slot() as usize).#m_cross(
                             #wr,
                             &[#(#dr_a),*],
                             &[#(#dr_b),*],
@@ -6634,7 +6632,7 @@ pub fn generate_root_methods(
                     let rty = remote_block_info.as_ref().unwrap().2.clone();
                     let arr = store_array_ident(&rty, &block_ident.to_string());
                     deferred_writes.push(GhStmt::Seq(quote! {
-                        __store.#arr.#s_add(#rtw.slot() as usize, #wr, &[#(#dr_f64),*]);
+                        __store.#arr.#s_add(__split,#rtw.slot() as usize, #wr, &[#(#dr_f64),*]);
                     }));
                 }
             } else if is_self_block {
@@ -6674,7 +6672,7 @@ pub fn generate_root_methods(
                                 .skip(*s_start).take(*s_count).cloned().collect();
                             let arr = store_array_ident(&a_type, &block_ident.to_string());
                             quote! {
-                                __store.#arr.#s_add(
+                                __store.#arr.#s_add(__split,
                                     __item.#block_ident.slot() as usize, #wr, &[#(#dr_self),*]);
                             }
                         }
@@ -6686,7 +6684,7 @@ pub fn generate_root_methods(
                                 .skip(*r_start).take(*r_count).cloned().collect();
                             let arr = store_array_ident(&joined_type, &joined_hb);
                             quote! {
-                                __store.#arr.#s_add(
+                                __store.#arr.#s_add(__split,
                                     #joined_accessor.#joined_hb_ident.slot() as usize, #wr, &[#(#dr_root),*]);
                             }
                         }
@@ -6720,7 +6718,7 @@ pub fn generate_root_methods(
                 } else if !all_zero {
                     let arr = store_array_ident(&a_type, &block_ident.to_string());
                     let writes = GhStmt::Seq(quote! {
-                        __store.#arr.#s_add(
+                        __store.#arr.#s_add(__split,
                             __item.#block_ident.slot() as usize, #wr, &[#(#dr_f64),*]);
                     });
                     if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
@@ -6744,10 +6742,10 @@ pub fn generate_root_methods(
                 let a_arr = store_array_ident(&a_type, &a_hb_name);
                 let b_arr = store_array_ident(b_type.as_deref().unwrap_or(""), &b_hb_name);
                 let a_call = if a_zero { quote! {} } else { quote! {
-                    __store.#a_arr.#s_add(#a_target.slot() as usize, #wr, &[#(#dr_a),*]);
+                    __store.#a_arr.#s_add(__split,#a_target.slot() as usize, #wr, &[#(#dr_a),*]);
                 }};
                 let b_call = if b_zero { quote! {} } else { quote! {
-                    __store.#b_arr.#s_add(#b_target.slot() as usize, #wr, &[#(#dr_b),*]);
+                    __store.#b_arr.#s_add(__split,#b_target.slot() as usize, #wr, &[#(#dr_b),*]);
                 }};
                 // The cross tile: the constraint's own block, or the shared
                 // parent-owned block reached through the prefix binding
@@ -6762,7 +6760,7 @@ pub fn generate_root_methods(
                     };
                 let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
-                    __store.#cross_arr.block_mut_at::<MAPPED>(#cross_target.slot() as usize)
+                    __store.#cross_arr.block_mut(__split,#cross_target.slot() as usize)
                         .#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
                 // The mirror form: the partials through the leaf's slots,
@@ -8693,42 +8691,50 @@ pub fn generate_root_methods(
             root_name, cost_loops.len(), grad_hessian_loops.len())));
     }
     let mut gh_sweep_methods: Vec<TokenStream2> = Vec::new();
-    // The same calls against a shared binding of the model, which is what a
-    // dispatched task holds.
+    // The calls against a shared binding of the model, which is what a
+    // dispatched task holds and what the sequential loop binds the same
+    // way: one list per instantiation.
     let mut gh_calls_m: Vec<TokenStream2> = Vec::new();
-    let mut gh_calls_mapped_m: Vec<TokenStream2> = Vec::new();
+    let mut gh_calls_split_m: Vec<TokenStream2> = Vec::new();
     for (i, sweep) in grad_hessian_loops.iter().enumerate() {
         let name = syn::Ident::new(
             &format!("__compute_sweep{i}"), proc_macro2::Span::call_site());
+        // `SPLIT` says whether the store holds part of its container (a
+        // thread's) or all of it, which decides how every write addresses
+        // its array. A constant of the instantiation rather than a flag:
+        // a single body with both paths in it costs the short residuals a
+        // few percent of the sweep however the flag reaches the write,
+        // and the whole-store copy must not pay for the map at all.
         gh_sweep_methods.push(quote! {
             #[inline(never)]
             #[allow(unused_variables)]
-            fn #name<const MAPPED: bool>(#sweep_self, __store: &mut #store_ty, params: &[#prec_type], __ranges: &[(u32, u32)]) -> #sweep_ret_ty {
+            fn #name<const SPLIT: bool>(#sweep_self, __store: &mut #store_ty, params: &[#prec_type], __ranges: &[(u32, u32)]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
                 use arael::threads::Leaves as _;
                 #sweep_self_ref
+                let __split: bool = SPLIT;
                 #cost_decl
                 #sweep
                 #sweep_ret
             }
         });
         gh_calls_m.push(sweep_call(quote! { __model.#name::<false>(__store, params, __ranges) }));
-        gh_calls_mapped_m.push(sweep_call(quote! { __model.#name::<true>(__store, params, __ranges) }));
+        gh_calls_split_m.push(sweep_call(quote! { __model.#name::<true>(__store, params, __ranges) }));
     }
 
-    // A store is addressed whole or through its map, and which it is falls
-    // out of whether a cut was built. Only a root that can thread ever has
-    // a mapped store, so only it carries the second copy of the sweeps.
-    let sweep_dispatch2 = if par {
+    // A whole store is an empty cut, the same test the build makes. Only
+    // a root that can thread ever has a split store, so only it carries
+    // the second instantiation.
+    let gh_dispatch = if par {
         quote! {
-            if __cut.is_empty() { #(#gh_calls_m)* } else { #(#gh_calls_mapped_m)* }
+            if __cut.is_empty() { #(#gh_calls_m)* } else { #(#gh_calls_split_m)* }
         }
     } else {
         quote! { #(#gh_calls_m)* }
     };
-    // A task's own accumulator, and the merge of every store's into the
-    // caller's, in store order.
-    let cost_decl2 = cost_decl.clone();
+
+    // The merge of every store's accumulator into the caller's, in store
+    // order.
     let cost_gather = if cost_kahan {
         let m = cost_merge(quote! { __store.__cost.0 }, quote! { __store.__cost.1 });
         quote! { for __store in __stores.iter() { #m } }
@@ -8737,42 +8743,9 @@ pub fn generate_root_methods(
         quote! { for __store in __stores.iter() { #m } }
     };
 
-    // Dispatching over the stores asks the model for `Sync`, which a root
-    // that never asked for `par` should not have to be -- one holding an
-    // `Rc` is a perfectly good sequential model. So only a `par` root gets
-    // the dispatch; the rest walk their one store in place.
-    let region = if par {
-        quote! {
-            let __model = &*self;
-            arael::threads::run_indexed(__par, __stores, |__si, __store| {
-                let __ranges = __cut.store(__si);
-                let __ts = __clock.start();
-                #cost_decl2
-                #sweep_dispatch2
-                __store.__cost = #sweep_ret;
-                __store.__time = __clock.stop(__ts);
-            });
-        }
-    } else {
-        quote! {
-            let __model = &*self;
-            for (__si, __store) in __stores.iter_mut().enumerate() {
-                let __ranges = __cut.store(__si);
-                let __ts = __clock.start();
-                #cost_decl2
-                #sweep_dispatch2
-                __store.__cost = #sweep_ret;
-                __store.__time = __clock.stop(__ts);
-            }
-        }
-    };
-
     // The cost-only sweeps are split the same way. They only read, so
     // they take a shared borrow and rebind the reborrow the bodies use.
     let mut cost_sweep_methods: Vec<TokenStream2> = Vec::new();
-    let mut cost_sweep_calls: Vec<TokenStream2> = Vec::new();
-    // The same calls against a shared binding of the model, which is what
-    // a dispatched task holds.
     let mut cost_sweep_calls_m: Vec<TokenStream2> = Vec::new();
     for (i, sweep) in cost_loops.iter().enumerate() {
         let name = syn::Ident::new(
@@ -8789,9 +8762,38 @@ pub fn generate_root_methods(
                 #sweep_ret
             }
         });
-        cost_sweep_calls.push(sweep_call(quote! { self.#name(params, __ranges) }));
         cost_sweep_calls_m.push(sweep_call(quote! { __model.#name(params, __ranges) }));
     }
+
+    // One region shape for the assembly and the cost: every store sweeps
+    // its own ranges into its own accumulator, and the join after it
+    // merges the stores in order. Dispatching asks the model for `Sync`,
+    // which a root that never asked for `par` should not have to be -- one
+    // holding an `Rc` is a perfectly good sequential model -- so only a
+    // `par` root gets the dispatch; the rest walk their one store in place.
+    let region_over = |calls: TokenStream2| -> TokenStream2 {
+        let task = quote! {
+            let __ranges = __cut.store(__si);
+            let __ts = __clock.start();
+            #cost_decl
+            #calls
+            __store.__cost = #sweep_ret;
+            __store.__time = __clock.stop(__ts);
+        };
+        if par {
+            quote! {
+                let __model = &*self;
+                arael::threads::run_indexed(__par, __stores, |__si, __store| { #task });
+            }
+        } else {
+            quote! {
+                let __model = &*self;
+                for (__si, __store) in __stores.iter_mut().enumerate() { #task }
+            }
+        }
+    };
+    let region = region_over(gh_dispatch);
+    let cost_region = region_over(quote! { #(#cost_sweep_calls_m)* });
 
     // The store's arrays and the walk that fills them: one array per
     // containment path and block field, read-only, in the same container
@@ -8958,12 +8960,19 @@ pub fn generate_root_methods(
         }
     }
 
-    // A root that did not ask for `par` keeps one store: the split
-    // addressing is only emitted where it can be used.
-    let store_count = if par {
-        quote! { ctx.threads() }
+    // A root that did not ask for `par` keeps one store and no cut: an
+    // empty cut is the whole model in one store, which is what every walk
+    // reads it as.
+    let begin_cut = if par {
+        quote! {
+            let __n = ctx.threads();
+            self.__build_cut(ctx.cut_mut(), __n);
+        }
     } else {
-        quote! { 1usize }
+        quote! {
+            let __n = 1usize;
+            ctx.cut_mut().clear();
+        }
     };
 
     let cross_idx: Vec<syn::Index> =
@@ -9042,6 +9051,36 @@ pub fn generate_root_methods(
     }).collect();
     let n_containers = container_counts.len();
 
+    // The cut and what it is built from exist for a root that splits its
+    // walks; every other root reads an empty cut as the whole model and
+    // needs none of this.
+    let cut_methods = if par {
+        quote! {
+            /// How many cross arrays a store holds, so a caller can size the
+            /// running base.
+            pub const __CROSS_ARRAYS: usize = #n_cross;
+
+            /// How many slots each container has, in the order a cut keys
+            /// its ranges by.
+            pub fn __container_counts(&self) -> [u32; #n_containers] {
+                [#(#container_counts),*]
+            }
+
+            /// Divide every container evenly among `stores`. A weighted
+            /// split replaces the even one; the shape is the same either
+            /// way, one range per store per container.
+            pub fn __build_cut(&self, __cut: &mut arael::threads::Cut, stores: usize) {
+                // One store is the whole model, and an empty cut is how
+                // every other part of the solve is told so.
+                if stores <= 1 { __cut.clear(); return; }
+                __cut.reset(stores, #n_containers);
+                #(#cut_walks)*
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let slot_walks: Vec<TokenStream2> = {
         let mut walks: Vec<TokenStream2> = Vec::new();
         let mut types: Vec<&String> = reachable.iter().collect();
@@ -9087,13 +9126,6 @@ pub fn generate_root_methods(
         walks
     };
 
-    // The mirrors are gone: a threading root splits its walks across the
-    // stores the context holds instead of re-describing itself as leaves
-    // and roles. These tokens stay only until their use sites go with them.
-    let par_types: TokenStream2 = quote! {};
-    let par_methods: TokenStream2 = quote! {};
-    let par_root_methods: TokenStream2 = quote! {};
-    let par_begin: TokenStream2 = quote! {};
 
     // advance(): fold accepted-step euler angle deltas. Recurses through
     // the whole model tree via Model::advance_params, so EA params at any
@@ -9121,46 +9153,6 @@ pub fn generate_root_methods(
             arael::model::ExtendedModel::extended_compute(
                 self, params, grad, &mut __stores[0].__coo);
         };
-
-    // The cost region: every store sums its own ranges into its own
-    // accumulator, and the merge after the join is the same one the
-    // assembly uses. A cost sweep only reads the model, so nothing here
-    // depends on which store a walk lands in -- the split is for the
-    // parallelism alone. Emitted only for a root that can thread; every
-    // other one keeps forwarding to the plain `calc_cost`.
-    let cost_region = if par {
-        let cost_decl3 = cost_decl.clone();
-        quote! {
-            arael::model::Model::update_params(self, params);
-            #extended_update_call
-            let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
-            let __par = __stores.len() > 1;
-            let __clock = arael::threads::Clock::new(__tm.on);
-            let __t = __clock.start();
-            {
-                let __model = &*self;
-                arael::threads::run_indexed(__par, __stores, |__si, __store| {
-                    let __ranges = __cut.store(__si);
-                    let __ts = __clock.start();
-                    #cost_decl3
-                    #(#cost_sweep_calls_m)*
-                    __store.__cost = #sweep_ret;
-                    __store.__time = __clock.stop(__ts);
-                });
-            }
-            let __region = __clock.stop(__t);
-            __tm.cost.record(__region, __par, __stores.iter().map(|__s| __s.__time));
-            #cost_decl
-            #cost_gather
-            #extended_cost_call_acc
-            #cost_ret
-        }
-    } else {
-        quote! {
-            let _ = &ctx;
-            arael::simple_lm::LmProblem::calc_cost(self, params)
-        }
-    };
 
     let extended_jacobian_call = if custom {
         quote! { arael::model::ExtendedModel::extended_jacobian(self, params, &mut __jac_rows, &mut __jac_cid); }
@@ -9201,7 +9193,6 @@ pub fn generate_root_methods(
     // via UFCS -- it carries no width in its signature).
     let mut tokens = quote! {
         #(#constraint_impls)*
-        #par_types
 
         /// Every Hessian block of this root, as one array per container
         /// and block field. Owned by the solve context, not the model.
@@ -9290,14 +9281,11 @@ pub fn generate_root_methods(
                 arael::model::Model::collect_param_blocks(self, &mut __out);
                 __out
             }
-            #par_root_methods
             #marginalize_hint_fn
             #ref_issue_walker
         }
 
         impl #root_name {
-            #par_methods
-
             fn __set_block_indices(&mut self) {
                 let mut __cid: u32 = 0;
                 let _ = &__cid; // suppress unused warning when no constraint_index fields
@@ -9314,20 +9302,19 @@ pub fn generate_root_methods(
                 #(#slot_walks)*
             }
 
-            /// Fill the store: every block's parameter indices, pushed in
-            /// the container order `__assign_block_slots` numbers by, so a
-            /// block's slot is where its entry landed. Read-only in the
-            /// model -- a reference can point into the very collection
-            /// being walked.
-            #[doc(hidden)]
-            #[allow(unused_variables, dead_code)]
-            /// Fill one store from the units `__ranges` gives it.
+            /// Fill one store from the units `__ranges` gives it: every
+            /// block's parameter indices, pushed in the container order
+            /// `__assign_block_slots` numbers by, so a block's slot is where
+            /// its entry landed. Read-only in the model -- a reference can
+            /// point into the very collection being walked.
             ///
             /// `__base` carries the global slot each cross array has
             /// reached, so a store built after another opens where that one
             /// ended -- the runs are contiguous in walk order, so this is
             /// the marker's slot for the first block a store holds. Build
             /// the stores in order and it is right by construction.
+            #[doc(hidden)]
+            #[allow(unused_variables, dead_code)]
             pub fn __build_blocks_at(&self, __store: &mut #store_ty,
                                      __ranges: &[(u32, u32)], __base: &mut [u32]) {
                 use arael::threads::Leaves as _;
@@ -9355,26 +9342,7 @@ pub fn generate_root_methods(
                 self.__build_blocks_at(__store, &[], &mut __base);
             }
 
-            /// How many cross arrays a store holds, so a caller can size the
-            /// running base.
-            pub const __CROSS_ARRAYS: usize = #n_cross;
-
-            /// How many slots each container has, in the order a cut keys
-            /// its ranges by.
-            pub fn __container_counts(&self) -> [u32; #n_containers] {
-                [#(#container_counts),*]
-            }
-
-            /// Divide every container evenly among `stores`. A weighted
-            /// split replaces the even one; the shape is the same either
-            /// way, one range per store per container.
-            pub fn __build_cut(&self, __cut: &mut arael::threads::Cut, stores: usize) {
-                // One store is the whole model, and an empty cut is how
-                // every other part of the solve is told so.
-                if stores <= 1 { __cut.clear(); return; }
-                __cut.reset(stores, #n_containers);
-                #(#cut_walks)*
-            }
+            #cut_methods
 
             /// Make sure `ctx` holds this root's blocks. A solve builds
             /// them in `begin_with_context` and this returns at once; a
@@ -9390,7 +9358,7 @@ pub fn generate_root_methods(
             #[doc(hidden)]
             pub fn __blocks_in(&self, ctx: &mut arael::threads::Context) {
                 if ctx.blocks_list::<#store_ty>().is_some() { return; }
-                self.__build_cut(ctx.cut_mut(), 1);
+                ctx.cut_mut().clear();
                 let (__stores, __cut) = ctx.blocks_and_cut_mut::<#store_ty>(1);
                 let mut __base = [0u32; #n_cross];
                 for (__s, __store) in __stores.iter_mut().enumerate() {
@@ -9404,15 +9372,17 @@ pub fn generate_root_methods(
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
                 use arael::utils::{Float as _, SelectIndex as _};
+                let __clock = arael::threads::Clock::new(__tm.on);
+                let __t = __clock.start();
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
+                __tm.assembly_update += __clock.stop(__t);
                 for __store in __stores.iter_mut() { __store.zero(); }
                 // Each store sweeps the ranges the cut gave it. An unbuilt
                 // cut hands every walk the whole of its container, which is
                 // one store covering the model. Dispatch only when there is
                 // more than one to run.
                 let __par = __stores.len() > 1;
-                let __clock = arael::threads::Clock::new(__tm.on);
                 let __t = __clock.start();
                 #region
                 let __region = __clock.stop(__t);
@@ -9425,6 +9395,28 @@ pub fn generate_root_methods(
                 for __store in __stores.iter() { __store.scatter_grad(grad); }
                 __tm.gather_grad += __clock.stop(__t);
                 #extended_compute_call
+                #cost_ret
+            }
+
+            /// The cost over the stores: each sweeps its own ranges into
+            /// its own accumulator and the join merges them in store
+            /// order, the shape the assembly has. A cost sweep only reads
+            /// the model, so the split is for the parallelism alone.
+            fn __cost_in(&mut self, params: &[#prec_type], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+                use arael::utils::{Float as _, SelectIndex as _};
+                let __clock = arael::threads::Clock::new(__tm.on);
+                let __t = __clock.start();
+                arael::model::Model::update_params(self, params);
+                #extended_update_call
+                __tm.cost_update += __clock.stop(__t);
+                let __par = __stores.len() > 1;
+                let __t = __clock.start();
+                #cost_region
+                let __region = __clock.stop(__t);
+                __tm.cost.record(__region, __par, __stores.iter().map(|__s| __s.__time));
+                #cost_decl
+                #cost_gather
+                #extended_cost_call_acc
                 #cost_ret
             }
 
@@ -9590,19 +9582,12 @@ pub fn generate_root_methods(
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
-                // Generated expressions may call Float trait methods
-                // (e.g. heaviside from safe-function derivatives).
-                use arael::utils::{Float as _, SelectIndex as _};
-                arael::model::Model::update_params(self, params);
-                #extended_update_call
-                // Read-only traversal: a plain shared reborrow suffices.
-                let __self_ref = &*self;
-                let _ = __self_ref;
-                let __ranges: &[(u32, u32)] = &[];
-                #cost_decl
-                #(#cost_sweep_calls)*
-                #extended_cost_call_acc
-                #cost_ret
+                // One store, empty (a cost writes no block), the whole
+                // model in it.
+                let mut __stores = [#store_ty::default()];
+                let __cut = arael::threads::Cut::new();
+                let mut __tm = arael::threads::ParTiming::default();
+                self.__cost_in(params, &mut __stores, &__cut, &mut __tm)
             }
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
                 let mut __stores = [#store_ty::default()];
@@ -9634,9 +9619,7 @@ pub fn generate_root_methods(
             #marginalize_hint_fn
             #marginalize_candidates_fn
             fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
-                #par_begin
-                let __n = #store_count;
-                self.__build_cut(ctx.cut_mut(), __n);
+                #begin_cut
                 let (__stores, __cut) = ctx.blocks_and_cut_mut::<#store_ty>(__n);
                 let mut __base = [0u32; #n_cross];
                 // In store order: a run opens where the previous one ended.
@@ -9645,10 +9628,8 @@ pub fn generate_root_methods(
                 }
             }
             fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
-                // Generated expressions may call Float trait methods
-                // (e.g. heaviside from safe-function derivatives).
-                use arael::utils::{Float as _, SelectIndex as _};
-                #cost_region
+                let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                self.__cost_in(params, __stores, __cut, __tm)
             }
             fn calc_grad_hessian_dense_with_context(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
                 self.__blocks_in(ctx);
