@@ -2383,6 +2383,7 @@ pub mod unitvec;
 /// Levenberg-Marquardt solver with dense, band, and sparse backends.
 pub mod simple_lm;
 pub mod threads;
+pub mod store;
 pub use threads::Context;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;

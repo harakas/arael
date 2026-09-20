@@ -3936,13 +3936,13 @@ fn unit_count_expr(prefix: &[AccessSegment], inner: &syn::Ident) -> TokenStream2
         return quote! { 1u64 };
     };
     let mut body = quote! {
-        __n += arael::threads::Leaves::count(&__c.#inner) as u64;
+        __n += arael::store::Leaves::count(&__c.#inner) as u64;
     };
     for seg in prefix[k + 1..].iter().rev() {
         let f = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
         body = if seg.collection || seg.optional {
             quote! {
-                for __c in arael::threads::Leaves::range_iter(&__c.#f, 0, u32::MAX) { #body }
+                for __c in arael::store::Leaves::range_iter(&__c.#f, 0, u32::MAX) { #body }
             }
         } else {
             quote! { { let __c = &__c.#f; #body } }
@@ -3962,7 +3962,7 @@ fn slot_count_expr(path: &[AccessSegment]) -> TokenStream2 {
     };
     let f = syn::Ident::new(&last.field, proc_macro2::Span::call_site());
     let mut body = if last.collection || last.optional {
-        quote! { __n += arael::threads::Leaves::count(&__c.#f) as u64; }
+        quote! { __n += arael::store::Leaves::count(&__c.#f) as u64; }
     } else {
         quote! { let _ = &__c.#f; __n += 1u64; }
     };
@@ -3970,7 +3970,7 @@ fn slot_count_expr(path: &[AccessSegment]) -> TokenStream2 {
         let f = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
         body = if seg.collection || seg.optional {
             quote! {
-                for __c in arael::threads::Leaves::range_iter(&__c.#f, 0, u32::MAX) { #body }
+                for __c in arael::store::Leaves::range_iter(&__c.#f, 0, u32::MAX) { #body }
             }
         } else {
             quote! { { let __c = &__c.#f; #body } }
@@ -7165,7 +7165,7 @@ pub fn generate_root_methods(
             loop_weights.push(if parent_is_root {
                 quote! { 1u64 }
             } else {
-                quote! { arael::threads::Leaves::count(&__u.#frines_ident) as u64 }
+                quote! { arael::store::Leaves::count(&__u.#frines_ident) as u64 }
             });
             if parent_is_root {
                 let mk = |it: &TokenStream2| quote! {
@@ -7943,7 +7943,7 @@ pub fn generate_root_methods(
         {
             let own = unit_count_expr(prefix, coll);
             let nested: Vec<TokenStream2> = group.nested_colls.iter()
-                .map(|c| quote! { arael::threads::Leaves::count(&__u.#c) as u64 })
+                .map(|c| quote! { arael::store::Leaves::count(&__u.#c) as u64 })
                 .collect();
             merged_weights.push(quote! { #own #( + #nested )* });
         }
@@ -8039,7 +8039,7 @@ pub fn generate_root_methods(
             let walk = wrap_in_prefix_ranged(prefix, false, body, None, false, Some(&r));
             self_claim_walks.push(quote! {
                 if __split {
-                    let __r = arael::threads::walk_range(__ranges, #cid);
+                    let __r = arael::store::walk_range(__ranges, #cid);
                     #walk
                 }
             });
@@ -8340,7 +8340,7 @@ pub fn generate_root_methods(
             let bound = wrap(accessor_read, inner);
             self_claim_walks.push(quote! {
                 if __split {
-                    let __r = arael::threads::walk_range(__ranges, #cid);
+                    let __r = arael::store::walk_range(__ranges, #cid);
                     if __r.0 == 0 { #bound }
                 }
             });
@@ -8542,7 +8542,7 @@ pub fn generate_root_methods(
             let walk = wrap_in_prefix_ranged(prefix, false, body, None, false, Some(&r));
             self_claim_walks.push(quote! {
                 if __split {
-                    let __r = arael::threads::walk_range(__ranges, #cid);
+                    let __r = arael::store::walk_range(__ranges, #cid);
                     #walk
                 }
             });
@@ -8653,7 +8653,7 @@ pub fn generate_root_methods(
             let c = walk_containers.get(k).copied().unwrap_or(0);
             quote! {
             {
-                let __r = arael::threads::walk_range(__ranges, #c);
+                let __r = arael::store::walk_range(__ranges, #c);
                 let _ = &__r;
                 #w
             }
@@ -8738,7 +8738,7 @@ pub fn generate_root_methods(
             #[allow(unused_variables)]
             fn #name<const SPLIT: bool>(#sweep_self, __store: &mut #store_ty, params: &[#prec_type], __ranges: &[(u32, u32)]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
-                use arael::threads::Leaves as _;
+                use arael::store::Leaves as _;
                 #sweep_self_ref
                 let __split: bool = SPLIT;
                 #cost_decl
@@ -8783,7 +8783,7 @@ pub fn generate_root_methods(
             #[allow(unused_variables)]
             fn #name(&self, params: &[#prec_type], __ranges: &[(u32, u32)]) -> #sweep_ret_ty {
                 use arael::utils::{Float as _, SelectIndex as _};
-                use arael::threads::Leaves as _;
+                use arael::store::Leaves as _;
                 let __self_ref = &*self;
                 #cost_decl
                 #sweep
@@ -8811,7 +8811,7 @@ pub fn generate_root_methods(
         if par {
             quote! {
                 let __model = &*self;
-                arael::threads::run_indexed(__par, __stores, |__si, __store| { #task });
+                arael::store::run_indexed(__par, __stores, |__si, __store| { #task });
             }
         } else {
             quote! {
@@ -8906,7 +8906,7 @@ pub fn generate_root_methods(
                         if store_seen.insert(name.to_string()) {
                             store_self_names.push(name.clone());
                             store_names.push(name);
-                            store_tys.push(quote! { arael::model::SelfBlockArray<#n, #m, #cast_type> });
+                            store_tys.push(quote! { arael::store::SelfBlockArray<#n, #m, #cast_type> });
                         }
                     }
                 }
@@ -8960,7 +8960,7 @@ pub fn generate_root_methods(
                         store_cross_names.push(name.clone());
                         store_names.push(name);
                         store_tys.push(quote! {
-                            arael::model::CrossBlockArray<#na, #nb, #pcount, #cast_type>
+                            arael::store::CrossBlockArray<#na, #nb, #pcount, #cast_type>
                         });
                     }
                 }
@@ -8984,7 +8984,7 @@ pub fn generate_root_methods(
                     };
                     build_walks.push(quote! {
                         {
-                            let __r = arael::threads::walk_range(__ranges, #cid);
+                            let __r = arael::store::walk_range(__ranges, #cid);
                             let _ = &__r;
                             #walk
                         }
@@ -9044,22 +9044,22 @@ pub fn generate_root_methods(
         };
         quote! {
             {
-                let __n = arael::threads::Leaves::count(&self.#f) as u32;
+                let __n = arael::store::Leaves::count(&self.#f) as u32;
                 let mut __total = 0u64;
-                arael::threads::Leaves::each(&self.#f, |_, __u| { __total += #weight; });
+                arael::store::Leaves::each(&self.#f, |_, __u| { __total += #weight; });
                 if __total == 0 {
                     // Nothing to weigh; an even split of the slots is as
                     // good an answer as any.
                     for __s in 0..stores {
-                        let __lo = arael::threads::cut(__n as usize, stores, __s) as u32;
-                        let __hi = arael::threads::cut(__n as usize, stores, __s + 1) as u32;
+                        let __lo = arael::store::cut(__n as usize, stores, __s) as u32;
+                        let __hi = arael::store::cut(__n as usize, stores, __s + 1) as u32;
                         __cut.set(__s, #cid, __lo, __hi);
                     }
                 } else {
                     let mut __acc = 0u64;
                     let mut __s = 0usize;
                     let mut __lo = 0u32;
-                    arael::threads::Leaves::each(&self.#f, |__slot, __u| {
+                    arael::store::Leaves::each(&self.#f, |__slot, __u| {
                         __acc += #weight;
                         let __end = __slot + 1;
                         // A unit heavier than a whole share closes more
@@ -9087,7 +9087,7 @@ pub fn generate_root_methods(
             quote! { 1u32 }
         } else {
             let f = syn::Ident::new(k, proc_macro2::Span::call_site());
-            quote! { arael::threads::Leaves::count(&self.#f) as u32 }
+            quote! { arael::store::Leaves::count(&self.#f) as u32 }
         }
     }).collect();
     let n_containers = container_counts.len();
@@ -9110,7 +9110,7 @@ pub fn generate_root_methods(
             /// Divide every container evenly among `stores`. A weighted
             /// split replaces the even one; the shape is the same either
             /// way, one range per store per container.
-            pub fn __build_cut(&self, __cut: &mut arael::threads::Cut, stores: usize) {
+            pub fn __build_cut(&self, __cut: &mut arael::store::Cut, stores: usize) {
                 // One store is the whole model, and an empty cut is how
                 // every other part of the solve is told so.
                 if stores <= 1 { __cut.clear(); return; }
@@ -9257,7 +9257,7 @@ pub fn generate_root_methods(
             __time: std::time::Duration,
         }
 
-        impl arael::threads::BlockStore for #store_ty {}
+        impl arael::store::BlockStore for #store_ty {}
 
         #[doc(hidden)]
         #[allow(dead_code)]
@@ -9279,7 +9279,7 @@ pub fn generate_root_methods(
                 #(self.#store_names.collect_hessian_cells(out);)*
                 self.__coo.collect_hessian_cells(out);
             }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
+            fn bind_hessian_positions(&mut self, binder: &mut arael::store::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
                 #(self.#store_names.bind_hessian_positions(binder, out);)*
                 self.__coo.bind_hessian_positions(binder, out);
             }
@@ -9358,7 +9358,7 @@ pub fn generate_root_methods(
             #[allow(unused_variables, dead_code)]
             pub fn __build_blocks_at(&self, __store: &mut #store_ty,
                                      __ranges: &[(u32, u32)], __base: &mut [u32]) {
-                use arael::threads::Leaves as _;
+                use arael::store::Leaves as _;
                 // A range table means the solve divided its walks, so the
                 // stores are addressed as slices rather than as the whole.
                 let __split = !__ranges.is_empty();
@@ -9405,7 +9405,7 @@ pub fn generate_root_methods(
             pub fn __blocks_in(&self, ctx: &mut arael::threads::Context) {
                 if ctx.blocks_list::<#store_ty>().is_some() { return; }
                 ctx.cut_mut().clear();
-                let (__stores, __cut) = ctx.blocks_and_cut_mut::<#store_ty>(1);
+                let (__stores, __cut) = ctx.stores_mut::<#store_ty>(1);
                 let mut __base = [0u32; #n_cross];
                 for (__s, __store) in __stores.iter_mut().enumerate() {
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
@@ -9414,11 +9414,11 @@ pub fn generate_root_methods(
 
             /// Returns the cost (sum of squared residuals, excluding
             /// extended-model residuals) as a byproduct of the sweep.
-            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
                 use arael::utils::{Float as _, SelectIndex as _};
-                let __clock = arael::threads::Clock::new(__tm.on);
+                let __clock = arael::store::Clock::new(__tm.on);
                 let __t = __clock.start();
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
@@ -9448,9 +9448,9 @@ pub fn generate_root_methods(
             /// its own accumulator and the join merges them in store
             /// order, the shape the assembly has. A cost sweep only reads
             /// the model, so the split is for the parallelism alone.
-            fn __cost_in(&mut self, params: &[#prec_type], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __cost_in(&mut self, params: &[#prec_type], __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 use arael::utils::{Float as _, SelectIndex as _};
-                let __clock = arael::threads::Clock::new(__tm.on);
+                let __clock = arael::store::Clock::new(__tm.on);
                 let __t = __clock.start();
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
@@ -9470,57 +9470,57 @@ pub fn generate_root_methods(
             // whether that is the solve context's or one of its own.
             // The store's arrays come first in every walk that shares the
             // position stream, then the model's own for its TripletBlocks.
-            fn __gh_dense_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __gh_dense_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 hessian.iter_mut().for_each(|h| *h = 0.0);
-                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                { let __c = arael::store::Clock::new(__tm.on); let __t = __c.start();
                   for __store in __stores.iter() { __store.accumulate_hessian(hessian); }
                   __tm.scatter += __c.stop(__t); }
                 __cost
             }
 
-            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 band.iter_mut().for_each(|b| *b = 0.0);
-                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                { let __c = arael::store::Clock::new(__tm.on); let __t = __c.start();
                   for __store in __stores.iter() { __store.accumulate_hessian_band(band, kd)?; }
                   __tm.scatter += __c.stop(__t); }
                 Ok(__cost)
             }
 
-            fn __gh_sparse_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __gh_sparse_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>, __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 coo.clear();
-                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                { let __c = arael::store::Clock::new(__tm.on); let __t = __c.start();
                   for __store in __stores.iter() { __store.accumulate_hessian_sparse(coo); }
                   __tm.scatter += __c.stop(__t); }
                 __cost
             }
 
-            fn __gh_direct_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __gh_direct_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>, __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                { let __c = arael::store::Clock::new(__tm.on); let __t = __c.start();
                   for __store in __stores.iter() { __store.accumulate_hessian_sparse_direct(csc); }
                   __tm.scatter += __c.stop(__t); }
                 __cost
             }
 
-            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], __stores: &mut [#store_ty], __cut: &arael::threads::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
-                { let __c = arael::threads::Clock::new(__tm.on); let __t = __c.start();
+                { let __c = arael::store::Clock::new(__tm.on); let __t = __c.start();
                   for __store in __stores.iter() { __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); }
                   __tm.scatter += __c.stop(__t); }
                 // The cached position map is replayed by cursor and assumes
@@ -9631,13 +9631,13 @@ pub fn generate_root_methods(
                 // One store, empty (a cost writes no block), the whole
                 // model in it.
                 let mut __stores = [#store_ty::default()];
-                let __cut = arael::threads::Cut::new();
+                let __cut = arael::store::Cut::new();
                 let mut __tm = arael::threads::ParTiming::default();
                 self.__cost_in(params, &mut __stores, &__cut, &mut __tm)
             }
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
                 let mut __stores = [#store_ty::default()];
-                let __cut = arael::threads::Cut::new();
+                let __cut = arael::store::Cut::new();
                 let mut __tm = arael::threads::ParTiming::default();
                 let __tm = &mut __tm;
                 self.__build_blocks(&mut __stores[0]);
@@ -9645,7 +9645,7 @@ pub fn generate_root_methods(
             }
             fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) -> #prec_type {
                 let mut __stores = [#store_ty::default()];
-                let __cut = arael::threads::Cut::new();
+                let __cut = arael::store::Cut::new();
                 let mut __tm = arael::threads::ParTiming::default();
                 let __tm = &mut __tm;
                 self.__build_blocks(&mut __stores[0]);
@@ -9666,7 +9666,7 @@ pub fn generate_root_methods(
             #marginalize_candidates_fn
             fn begin_with_context(&mut self, ctx: &mut arael::threads::Context) {
                 #begin_cut
-                let (__stores, __cut) = ctx.blocks_and_cut_mut::<#store_ty>(__n);
+                let (__stores, __cut) = ctx.stores_mut::<#store_ty>(__n);
                 let mut __base = [0u32; #n_cross];
                 // In store order: a run opens where the previous one ended.
                 for (__s, __store) in __stores.iter_mut().enumerate() {
@@ -9708,10 +9708,10 @@ pub fn generate_root_methods(
                     for __store in __stores.iter() { __store.collect_hessian_cells(out); }
                 }
             }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
+            fn bind_hessian_positions(&mut self, binder: &mut arael::store::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
                 self.__blocks_in(ctx);
                 // Reads the solve's stores; must not narrow the list.
-                let __stores = ctx.blocks_active_mut::<#store_ty>();
+                let __stores = ctx.sweep_parts_mut::<#store_ty>().0;
                 for __store in __stores.iter_mut() { __store.bind_hessian_positions(binder, out); }
             }
             fn scatter_hessian_indexed(&self, vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) {

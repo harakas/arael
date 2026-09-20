@@ -6,7 +6,8 @@
 // from SymbolicSparseBlockColMat::from_scalar_coords over the entity
 // partition (RootProblem::param_block_spans + block_partition_from_spans).
 
-use arael::model::{CrossBlock, HessianBinder, Param, SelfBlock};
+use arael::model::{CrossBlock, Param, SelfBlock};
+use arael::store::HessianBinder;
 use arael::refs::{self, Ref};
 use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};

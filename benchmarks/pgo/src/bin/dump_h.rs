@@ -94,7 +94,7 @@ fn main() {
         let (mut csc, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
         let mut positions = std::vec::Vec::new();
         LmProblemInternals::bind_hessian_positions(&mut g,
-            &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+            &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut positions,
             &mut ctx,
         );

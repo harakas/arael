@@ -117,7 +117,7 @@ fn main() {
     let mut positions: Vec<arael::ValueIndex> = Vec::new();
     LmProblemInternals::bind_hessian_positions(
         &mut path,
-        &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
+        &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
         &mut positions,
         &mut hctx,
     );

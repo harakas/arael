@@ -214,7 +214,7 @@ impl LmProblemInternals<f64> for BindCounter<'_> {
     }
     fn bind_hessian_positions(
         &mut self,
-        binder: &mut arael::model::HessianBinder,
+        binder: &mut arael::store::HessianBinder,
         out: &mut Vec<arael::ValueIndex>,
         ctx: &mut arael::threads::Context,
     ) {
