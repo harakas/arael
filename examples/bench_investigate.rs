@@ -410,7 +410,7 @@ fn main() {
             let mut grad = vec![0.0f64; n];
             let mut hessian = vec![0.0f64; n * n];
             let t0 = std::time::Instant::now();
-            path.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+            path.calc_grad_hessian_dense_with_context(&params, &mut grad, &mut hessian, &mut ctx);
             dense_times.push(t0.elapsed().as_nanos() as f64 / 1000.0);
         }
 
@@ -420,7 +420,7 @@ fn main() {
             let mut grad = vec![0.0f64; n];
             let mut coo2 = arael::simple_lm::CooMatrix::new(n);
             let t0 = std::time::Instant::now();
-            path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo2);
+            path.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo2, &mut ctx);
             let _csc2 = coo2.to_csc().unwrap();
             coo_times.push(t0.elapsed().as_nanos() as f64 / 1000.0);
         }
