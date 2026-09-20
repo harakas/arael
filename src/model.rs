@@ -1617,13 +1617,14 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
 
     /// Drop every entity's indices; the value storage stays for `finish`.
     ///
-    /// The map is reset too, because the build reads it to ask whether it
-    /// has already given a slot a place. A stale entry from the last solve
-    /// would answer yes and the entity would never be pushed.
+    /// The map goes too (its allocation stays): a whole build never
+    /// touches it and must find it empty, and a split build reads it to
+    /// ask whether it has already given a slot a place, where a stale
+    /// entry from the last solve would answer yes.
     pub fn clear(&mut self) {
         self.entity.clear();
         self.indices.clear();
-        for m in &mut self.map { *m = u32::MAX; }
+        self.map.clear();
     }
 
     /// True if `slot` already has a place in this slab.
@@ -1639,13 +1640,23 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
     }
 
     /// Append the entity at container slot `entity` with its parameter
-    /// indices, and return the slab slot it took.
+    /// indices, and return the slab slot it took. A store holding a whole
+    /// container is built this way, in container order, so the marker's
+    /// slot is the slab slot and no map is kept.
     #[inline]
     pub fn push(&mut self, entity: u32, indices: &[u32; N]) -> u32 {
         let k = self.entity.len() as u32;
         self.entity.push(entity);
         self.indices.push(*indices);
         k
+    }
+
+    #[inline]
+    fn map_to(&mut self, slot: u32, k: u32) {
+        if self.map.len() <= slot as usize {
+            self.map.resize(slot as usize + 1, u32::MAX);
+        }
+        self.map[slot as usize] = k;
     }
 
     /// Room for `n` global slots in the map.
@@ -1658,24 +1669,31 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         if self.map.len() < n { self.map.resize(n, u32::MAX); }
     }
 
-    /// Take global `slot` into this slab, returning where it landed.
+    /// Take global `slot` into this slab, returning where it landed. A
+    /// store holding part of a container is built this way, and the map
+    /// it fills is what makes the slab addressable by the marker's slot.
     pub fn push_at(&mut self, slot: u32, entity: u32, indices: &[u32; N]) -> u32 {
         let k = self.push(entity, indices);
-        if self.map.len() <= slot as usize {
-            self.map.resize(slot as usize + 1, u32::MAX);
-        }
-        self.map[slot as usize] = k;
+        self.map_to(slot, k);
         k
     }
 
-    /// Where global `slot` sits in this slab.
+    /// Where global `slot` sits in this slab: the slot itself in a slab
+    /// holding the whole container, else through the map. `split` says
+    /// which; the sweep decides it once from its range table and hands
+    /// it to every write, so the test is on a register and nothing is
+    /// reloaded from the slab it is writing.
     ///
-    /// A slot the build never claimed lands here as `u32::MAX` and the
-    /// write would run off the end. That means the build's idea of which
-    /// entities a store touches disagrees with what its sweep writes, so
-    /// it says which slot rather than panicking on an index far away.
+    /// A slot a split build never claimed lands here as `u32::MAX` and
+    /// the write would run off the end. That means the build's idea of
+    /// which entities a store touches disagrees with what its sweep
+    /// writes, so it says which slot rather than panicking on an index
+    /// far away.
     #[inline(always)]
-    pub fn slab_of(&self, slot: usize) -> usize {
+    pub fn slab_of(&self, split: bool, slot: usize) -> usize {
+        if !split {
+            return slot;
+        }
         let k = self.map[slot];
         debug_assert!(k != u32::MAX,
             "slot {} is written by this store's sweep but the build gave it no place \
@@ -1710,58 +1728,23 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         (&self.data[base..base + M]).try_into().unwrap()
     }
 
-    /// Add one residual's contribution to entity `k`: `2 r dr` into its
-    /// gradient stash and `2 dr dr^T` into its triangle, every slot,
-    /// fixed or not. Branch-free: a fixed parameter's row is accumulated
-    /// like any other and dropped by
-    /// [`scatter_grad`](Self::scatter_grad) and the Hessian walks, which
-    /// read the indices.
+    /// Add one residual's contribution to the entity at global `slot`
+    /// (the marker's; see [`slab_of`](Self::slab_of)): `2 r dr` into its
+    /// gradient stash and `2 dr dr^T` into its triangle, every parameter,
+    /// fixed or not. A fixed parameter's row is accumulated like any
+    /// other and dropped by [`scatter_grad`](Self::scatter_grad) and the
+    /// Hessian walks, which read the indices.
     #[inline]
-    pub fn add_residual(&mut self, k: usize, r: T, dr: &[T; N]) {
-        self.add_scaled(k, T::two(), r, dr);
-    }
-
-    /// [`add_residual`](Self::add_residual) against a slab holding only
-    /// some of the entities: `slot` is the marker's, the map says where
-    /// it sits here.
-    #[inline]
-    pub fn add_residual_mapped(&mut self, slot: usize, r: T, dr: &[T; N]) {
-        let k = self.slab_of(slot);
+    pub fn add_residual(&mut self, split: bool, slot: usize, r: T, dr: &[T; N]) {
+        let k = self.slab_of(split, slot);
         self.add_scaled(k, T::two(), r, dr);
     }
 
     /// [`add_residual`](Self::add_residual) scaled by the loss weight `w`.
     #[inline]
-    pub fn add_residual_with_loss(&mut self, k: usize, w: T, r: T, dr: &[T; N]) {
+    pub fn add_residual_with_loss(&mut self, split: bool, slot: usize, w: T, r: T, dr: &[T; N]) {
+        let k = self.slab_of(split, slot);
         self.add_scaled(k, T::two() * w, r, dr);
-    }
-
-    /// [`add_residual_with_loss`](Self::add_residual_with_loss) through
-    /// the map, as [`add_residual_mapped`](Self::add_residual_mapped).
-    #[inline]
-    pub fn add_residual_with_loss_mapped(&mut self, slot: usize, w: T, r: T, dr: &[T; N]) {
-        let k = self.slab_of(slot);
-        self.add_scaled(k, T::two() * w, r, dr);
-    }
-
-    // The two forms a sweep picks between, as one call it can make without
-    // knowing which store it has. `MAPPED` is a constant of the sweep's
-    // instantiation, so each copy keeps one arm and no test survives.
-
-    /// [`add_residual`](Self::add_residual), through the map or not.
-    #[inline(always)]
-    pub fn add_residual_at<const MAPPED: bool>(&mut self, slot: usize, r: T, dr: &[T; N]) {
-        if MAPPED { self.add_residual_mapped(slot, r, dr) } else { self.add_residual(slot, r, dr) }
-    }
-
-    /// [`add_residual_with_loss`](Self::add_residual_with_loss), likewise.
-    #[inline(always)]
-    pub fn add_residual_with_loss_at<const MAPPED: bool>(&mut self, slot: usize, w: T, r: T, dr: &[T; N]) {
-        if MAPPED {
-            self.add_residual_with_loss_mapped(slot, w, r, dr)
-        } else {
-            self.add_residual_with_loss(slot, w, r, dr)
-        }
     }
 
     #[inline]
@@ -2278,9 +2261,14 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         self.values.fill(T::zero());
     }
 
-    /// Block `k` for writing.
+    /// The block at the marker's global `slot`, for writing. An array
+    /// covering one run of the walk (`split`) opens on its
+    /// [`base`](Self::base); a whole one is addressed by the slot as it
+    /// stands. The sweep decides `split` once from its range table, as
+    /// for [`SelfBlockArray::slab_of`].
     #[inline]
-    pub fn block_mut(&mut self, k: usize) -> CrossBlockMut<'_, NA, NB, P, T> {
+    pub fn block_mut(&mut self, split: bool, slot: usize) -> CrossBlockMut<'_, NA, NB, P, T> {
+        let k = if split { slot - self.base as usize } else { slot };
         let values: &mut [T; P] = (&mut self.values[k * P..(k + 1) * P]).try_into().unwrap();
         CrossBlockMut { values }
     }
@@ -2290,20 +2278,6 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
 
     /// Set the global slot this array opens on.
     pub fn set_base(&mut self, base: u32) { self.base = base; }
-
-    /// [`block_mut`](Self::block_mut) by the marker's global slot, for an
-    /// array covering one run of the walk rather than all of it.
-    #[inline]
-    pub fn block_mut_based(&mut self, slot: usize) -> CrossBlockMut<'_, NA, NB, P, T> {
-        self.block_mut(slot - self.base as usize)
-    }
-
-    /// [`block_mut`](Self::block_mut), off the base or not. `MAPPED` is a
-    /// constant of the sweep's instantiation, so each copy keeps one arm.
-    #[inline(always)]
-    pub fn block_mut_at<const MAPPED: bool>(&mut self, slot: usize) -> CrossBlockMut<'_, NA, NB, P, T> {
-        if MAPPED { self.block_mut_based(slot) } else { self.block_mut(slot) }
-    }
 
     /// The indices of block `k`.
     pub fn indices(&self, k: usize) -> (&[u32; NA], &[u32; NB]) {
@@ -3366,18 +3340,18 @@ mod tests {
         part.push_at(3, 3, &[9, 10, 11]);
         part.push_at(1, 1, &[3, 4, 5]);
         part.finish();
-        assert_eq!(part.slab_of(3), 0);
-        assert_eq!(part.slab_of(1), 1);
+        assert_eq!(part.slab_of(true, 3), 0);
+        assert_eq!(part.slab_of(true, 1), 1);
 
         let rows = [(1usize, 0.5, [1.0, -0.25, 0.75]), (3, -0.4, [0.2, 1.5, -0.6]),
                     (1, 0.9, [-1.0, 0.3, 0.1])];
         for (slot, r, dr) in rows {
-            whole.add_residual(slot, r, &dr);
-            part.add_residual_mapped(slot, r, &dr);
+            whole.add_residual(false, slot, r, &dr);
+            part.add_residual(true, slot, r, &dr);
         }
         for (slot, r, dr) in rows {
-            whole.add_residual_with_loss(slot, 0.25, r, &dr);
-            part.add_residual_with_loss_mapped(slot, 0.25, r, &dr);
+            whole.add_residual_with_loss(false, slot, 0.25, r, &dr);
+            part.add_residual_with_loss(true, slot, 0.25, r, &dr);
         }
 
         let n = 12;
@@ -3400,7 +3374,7 @@ mod tests {
         // solve and the entries outlive it.
         arr.map_resize(4);
         arr.map_resize(2);
-        assert_eq!(arr.slab_of(2), 0);
+        assert_eq!(arr.slab_of(true, 2), 0);
     }
 
     // A cross array covering one run of the walk is addressed by the same
@@ -3421,8 +3395,8 @@ mod tests {
         for slot in 2..4usize {
             let dr_a = [1.0 + slot as f64, -0.5];
             let dr_b = [0.25, 2.0 - slot as f64];
-            whole.block_mut(slot).add_residual_cross(0.0, &dr_a, &dr_b);
-            run.block_mut_based(slot).add_residual_cross(0.0, &dr_a, &dr_b);
+            whole.block_mut(false, slot).add_residual_cross(0.0, &dr_a, &dr_b);
+            run.block_mut(true, slot).add_residual_cross(0.0, &dr_a, &dr_b);
         }
         assert_eq!(whole.values(2), run.values(0), "slot 2 is the run's first block");
         assert_eq!(whole.values(3), run.values(1));
@@ -3445,15 +3419,17 @@ mod tests {
         (0.1 * (i as f64 + 1.0), [1.0 + i as f64, -0.5], [0.25, 2.0 - i as f64])
     }
 
-    /// Sweep instances `[lo, hi)` into one store. `MAPPED` says whether the
-    /// store holds a slice of the walk (a thread's) or all of it.
-    fn sweep<const MAPPED: bool>(
+    /// Sweep instances `[lo, hi)` into one store. `split` says whether the
+    /// store holds a slice of the walk (a thread's) or all of it; the
+    /// writes are the same either way.
+    fn sweep(
+        split: bool,
         lo: usize, hi: usize,
         hess: &mut [f64], grad: &mut [f64],
     ) {
         let mut selfs: SelfBlockArray<2, 3, f64> = SelfBlockArray::new();
         let mut cross: CrossBlockArray<2, 2, 4, f64> = CrossBlockArray::new();
-        if MAPPED {
+        if split {
             // The build claims a slab place the first time this range meets
             // an entity, and the cross array opens on the range's first slot.
             selfs.map_resize(6);
@@ -3485,10 +3461,10 @@ mod tests {
         for i in lo..hi {
             let (a, b) = PAIRS[i];
             let (r, dr_a, dr_b) = residual(i);
-            // The slot is the marker's either way; only the addressing differs.
-            selfs.add_residual_at::<MAPPED>(a, r, &dr_a);
-            selfs.add_residual_at::<MAPPED>(b, r, &dr_b);
-            cross.block_mut_at::<MAPPED>(i).add_residual_cross(r, &dr_a, &dr_b);
+            // The slot is the marker's either way; the array resolves it.
+            selfs.add_residual(split, a, r, &dr_a);
+            selfs.add_residual(split, b, r, &dr_b);
+            cross.block_mut(split, i).add_residual_cross(r, &dr_a, &dr_b);
         }
         selfs.accumulate_hessian(hess);
         cross.accumulate_hessian(hess);
@@ -3499,13 +3475,13 @@ mod tests {
     fn disjoint_ranges_sum_to_the_whole_walk() {
         let n = 12;
         let (mut hw, mut gw) = (vec![0.0; n * n], vec![0.0; n]);
-        sweep::<false>(0, 8, &mut hw, &mut gw);
+        sweep(false, 0, 8, &mut hw, &mut gw);
 
         // Every way of cutting the walk in two must rebuild it.
         for cut in 1..8usize {
             let (mut h, mut g) = (vec![0.0; n * n], vec![0.0; n]);
-            sweep::<true>(0, cut, &mut h, &mut g);
-            sweep::<true>(cut, 8, &mut h, &mut g);
+            sweep(true,0, cut, &mut h, &mut g);
+            sweep(true,cut, 8, &mut h, &mut g);
             for k in 0..n * n {
                 assert!((h[k] - hw[k]).abs() < 1e-12,
                     "cut at {}: hessian[{}] {} vs whole {}", cut, k, h[k], hw[k]);
@@ -3521,10 +3497,10 @@ mod tests {
     fn three_ranges_sum_to_the_whole_walk() {
         let n = 12;
         let (mut hw, mut gw) = (vec![0.0; n * n], vec![0.0; n]);
-        sweep::<false>(0, 8, &mut hw, &mut gw);
+        sweep(false, 0, 8, &mut hw, &mut gw);
         let (mut h, mut g) = (vec![0.0; n * n], vec![0.0; n]);
         for (lo, hi) in [(0, 3), (3, 3), (3, 6), (6, 8)] {   // one empty range
-            sweep::<true>(lo, hi, &mut h, &mut g);
+            sweep(true,lo, hi, &mut h, &mut g);
         }
         for k in 0..n * n {
             assert!((h[k] - hw[k]).abs() < 1e-12, "hessian[{}] {} vs {}", k, h[k], hw[k]);
@@ -3541,8 +3517,8 @@ mod tests {
         let mut arr: SelfBlockArray<3, 6, f64> = SelfBlockArray::new();
         arr.push(0, &[0, 1, 2]);
         arr.finish();
-        arr.add_residual(0, 0.3, &[1.0, 0.5, -0.25]);
-        arr.add_residual(0, -0.7, &[0.2, -1.5, 0.75]);
+        arr.add_residual(false, 0, 0.3, &[1.0, 0.5, -0.25]);
+        arr.add_residual(false, 0, -0.7, &[0.2, -1.5, 0.75]);
 
         let mut dense = vec![0.0; n * n];
         arr.accumulate_hessian(&mut dense);
@@ -3558,8 +3534,8 @@ mod tests {
         let mut arr: CrossBlockArray<2, 2, 4, f64> = CrossBlockArray::new();
         arr.push(&[0, 1], &[2, 3]);
         arr.finish();
-        arr.block_mut(0).add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
-        arr.block_mut(0).add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
+        arr.block_mut(false, 0).add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
+        arr.block_mut(false, 0).add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
 
         let mut dense = vec![0.0; n * n];
         arr.accumulate_hessian(&mut dense);
@@ -3672,7 +3648,7 @@ mod tests {
         let mut arr: SelfBlockArray<3, 6, f64> = SelfBlockArray::new();
         arr.push(0, &idx);
         arr.finish();
-        arr.add_residual(0, r, &dr);
+        arr.add_residual(false, 0, r, &dr);
         let mut g_self = vec![0.0; n];
         arr.scatter_grad(&mut g_self);
 
