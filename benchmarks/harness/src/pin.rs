@@ -51,6 +51,9 @@ pub fn enforce_cores() {
 
     // The LAST n cores: core 0 preferentially receives timer ticks and IRQs, so a
     // benchmark that lands there shares its core with kernel housekeeping.
+    // Linux only: the other platforms have no affinity call, so the thread
+    // caps above are all the budget there is.
+    #[cfg(target_os = "linux")]
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut set);
