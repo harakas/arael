@@ -74,14 +74,16 @@ impl FormTiming {
 
 /// Where a solve's sweeps spent their time, recorded only when the
 /// context's timing is on ([`Context::set_timing`]); the call counts are
-/// kept either way. Per assembly: the parameter update, the sweep
-/// region, the gradient gather and the Hessian scatter; per cost
-/// evaluation: the update and the sweep region.
+/// kept either way. Per assembly: the parameter update, the store
+/// zeroing, the sweep region, the gradient gather and the Hessian
+/// scatter; per cost evaluation: the update and the sweep region.
 #[derive(Clone, Debug, Default)]
 pub struct ParTiming {
     /// Whether the clocks run.
     pub on: bool,
     pub assembly_update: Duration,
+    /// Zeroing every store's tiles and gradient stashes before the sweep.
+    pub assembly_zero: Duration,
     pub assembly: PhaseTiming,
     pub gather_grad: Duration,
     pub scatter: Duration,
@@ -94,9 +96,10 @@ impl ParTiming {
     pub fn report(&self, threads: usize) -> String {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let per = |d: Duration, n: usize| ms(d) / n.max(1) as f64;
-        format!("assembly [{}] update {:.3}, grad gather {:.3}, scatter {:.3}; cost [{}] update {:.3}",
+        format!("assembly [{}] update {:.3}, zero {:.3}, grad gather {:.3}, scatter {:.3}; cost [{}] update {:.3}",
             self.assembly.report(threads),
             per(self.assembly_update, self.assembly.calls()),
+            per(self.assembly_zero, self.assembly.calls()),
             per(self.gather_grad, self.assembly.calls()),
             per(self.scatter, self.assembly.calls()),
             self.cost.report(threads),

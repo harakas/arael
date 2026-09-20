@@ -74,7 +74,6 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 }
 
 fn main() {
-    let mut hctx = arael::threads::Context::new();
     let datasets = [
         ("Ladybug-49", "datasets/problem-49-7776-pre.txt"),
         ("Ladybug-138", "datasets/problem-138-19878-pre.txt"),
@@ -96,6 +95,8 @@ fn main() {
         let mut params: Vec<f64> = Vec::new();
         scene.serialize(&mut params);
         let n = params.len();
+        // A context holds one structure: one per dataset.
+        let mut hctx = arael::threads::Context::new();
 
         let mut spans = Vec::new();
         scene.collect_param_block_spans(&mut spans, &mut hctx);

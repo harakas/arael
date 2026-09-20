@@ -9134,7 +9134,9 @@ pub fn generate_root_methods(
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
                 __tm.assembly_update += __clock.stop(__t);
+                let __t = __clock.start();
                 for __store in __stores.iter_mut() { __store.zero(); }
+                __tm.assembly_zero += __clock.stop(__t);
                 // Each store sweeps the ranges the cut gave it. An unbuilt
                 // cut hands every walk the whole of its container, which is
                 // one store covering the model. Dispatch only when there is

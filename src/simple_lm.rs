@@ -1096,9 +1096,20 @@ pub trait LmProblem<T> {
     /// cost at `params` -- the residual values are in hand during assembly,
     /// so the cost is a free byproduct (macro-generated models compute it
     /// in the same sweep; hand-written impls should return it likewise).
+    ///
+    /// A generated root builds its block structure on every call of
+    /// this form and drops it after. For repeated assemblies hold a
+    /// [`Context`](crate::threads::Context) and call
+    /// [`calc_grad_hessian_dense_with_context`](LmProblemInternals::calc_grad_hessian_dense_with_context),
+    /// which builds once per context; a solve does the same.
     fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T;
     /// Assemble gradient and upper-triangle Hessian as COO triplets.
     /// Returns the cost at `params`.
+    ///
+    /// Builds the block structure on every call, like
+    /// [`calc_grad_hessian_dense`](Self::calc_grad_hessian_dense);
+    /// repeated assemblies go through
+    /// [`calc_grad_hessian_sparse_with_context`](LmProblemInternals::calc_grad_hessian_sparse_with_context).
     fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>) -> T;
     /// Called after each accepted LM step to let the problem update internal state.
     /// Default: no-op.
