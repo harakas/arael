@@ -2928,7 +2928,20 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     if config.gather_timing {
         ctx.set_timing(true);
     }
+    // A warm session's context was built for the structure its cached
+    // pattern serves; a model of another shape means `invalidate` was
+    // missed. A tripwire, not a structure check (see `LmSession`).
+    let built_for: Option<std::vec::Vec<u64>> = match pin.as_deref() {
+        Some(&p) if p != 0 => Some(ctx.shape().to_vec()),
+        _ => None,
+    };
     problem.begin_with_context(ctx);
+    if let Some(prev) = built_for && prev != ctx.shape() {
+        panic!("LmSession: the problem's structure changed without invalidate(): its block \
+                counts differ from the ones the session's cached pattern was built over -- \
+                call LmSession::invalidate() after a structural change (the next solve \
+                then runs cold)");
+    }
     // A cached pattern is bound to the store count it was built at: a
     // split store claims its own blocks, so the position stream is per
     // store. A session keeps the pattern across solves and pins the count
@@ -3679,11 +3692,11 @@ pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem
 /// map) to a panic. After any structural change, call
 /// [`invalidate`](Self::invalidate) (or drop the session).
 ///
-/// A changed parameter count is caught as a backstop (the caches are dropped
-/// and that solve runs cold), but that is a heuristic, not a structure
-/// comparison: a change that keeps the count -- a constraint added or
-/// removed, a different problem of the same size -- passes it undetected.
-/// Do not rely on it; call `invalidate` on every structural change.
+/// A changed parameter count, or a changed count of any block array,
+/// panics: it cannot be the same structure, so `invalidate` was missed.
+/// That is a tripwire, not a structure comparison: a change that keeps
+/// every count -- a ref rewired, a different problem of the same shape --
+/// passes it undetected. Call `invalidate` on every structural change.
 ///
 /// The sweep thread count is part of that structure: a `par` root's
 /// pattern is bound over one block store per thread, so the count the
@@ -3752,13 +3765,16 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
         config: &LmConfig<T>,
     ) -> SolveResult<T> {
         let n = x0.len();
-        if n != self.n {
-            // A different parameter count cannot be the same structure:
-            // drop the caches and run cold. A backstop, not a structure
-            // check -- same-count changes pass through (see the type docs).
-            self.invalidate();
-            self.n = n;
+        // A different parameter count cannot be the same structure, so
+        // `invalidate` was missed. A tripwire, not a structure check:
+        // same-count changes pass through (see the type docs).
+        if self.n != 0 && n != self.n {
+            panic!("LmSession: the problem's parameter count changed from {} to {} without \
+                    invalidate(): a session holds one structure -- call \
+                    LmSession::invalidate() after a structural change (the next solve \
+                    then runs cold)", self.n, n);
         }
+        self.n = n;
         if n == 0 {
             return Ok(lm_empty_result(x0, config));
         }

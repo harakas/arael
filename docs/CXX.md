@@ -239,8 +239,9 @@ views are named by their container's nature: `PathPosesDeque`,
   `sess.solve(model, cfg)` keeps the sparsity analysis (pattern,
   ordering, symbolic factorization, Schur plan) across solves, so
   only the first pays for it. Warm solves are bit-identical to cold
-  ones. A parameter-count change re-analyzes by itself; call
-  `invalidate()` after a structural change at the same count.
+  ones. Call `invalidate()` after any structural change: a changed
+  parameter or block count without it fails the solve, and a change
+  that keeps every count solves warm through stale analysis.
 - **cost_table()** -- only when the root is `#[arael(root, jacobian)]`:
   per-constraint cost breakdown, label -> that group's robustified
   cost, sorted by label and summing to `cost()`. Labels come from

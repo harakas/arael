@@ -1453,9 +1453,10 @@ class LmSession:
     \"\"\"Warm reuse over repeated sparse solves: keeps the analysis
     (pattern, ordering, symbolic factorization, Schur plan) across
     solves, so only the first pays for it. Warm solves are
-    bit-identical to cold ones. A parameter-count change re-analyzes
-    by itself; call invalidate() after a structural change at the
-    same count (solving warm through one is undefined).\"\"\"
+    bit-identical to cold ones. Call invalidate() after any structural
+    change: a changed parameter or block count without it fails the
+    solve, and a change that keeps every count solves warm through
+    stale analysis (undefined).\"\"\"
 
     def __init__(self, opts=None):
         load()

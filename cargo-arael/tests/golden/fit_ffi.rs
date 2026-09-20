@@ -1058,10 +1058,11 @@ pub unsafe extern "C" fn fit_solve_sparse(
 /// A warm-reuse session over the sparse backend (Rust's LmSession):
 /// keeps the analysis -- pattern, ordering, symbolic factorization,
 /// Schur plan -- across solves, so only the first pays for it. Warm
-/// solves are bit-identical to cold ones. A parameter-count change
-/// re-analyzes by itself; fit_session_invalidate covers a
-/// structural change at the same count (solving warm through one is
-/// undefined).
+/// solves are bit-identical to cold ones. Call
+/// fit_session_invalidate after any structural change: a
+/// changed parameter or block count without it fails the solve, and a
+/// change that keeps every count solves warm through stale analysis
+/// (undefined).
 pub struct FitSession {
     // Err carries a construction panic (a bad options tag), reported
     // by the first solve.

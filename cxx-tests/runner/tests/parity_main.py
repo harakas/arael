@@ -260,6 +260,8 @@ for i in range(len(f13.items)):
     f13.items[i].v = 0.0
 rs3 = sess.solve(f13, cfg)
 pi("sess_invalidate_agrees", 1 if rs3.end_cost == rs1.end_cost else 0)
+# The push changes the structure: a warm solve through it fails.
+sess.invalidate()
 n13 = f13.items.push()
 n13.t = 0.5
 n13.w = 1.0

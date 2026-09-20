@@ -1,9 +1,9 @@
 // LmSession keeps the structure a backend learns (pattern, position map,
 // ordering, symbolic factorization, Schur plan) across solves. Everything it
 // reuses is value-independent, so a warm solve must compute exactly what a
-// cold one does -- the tests compare bit-for-bit, not to a tolerance. The
-// session must also run cold again by itself when the parameter count
-// changes, and invalidate() must make a same-size structure change safe.
+// cold one does -- the tests compare bit-for-bit, not to a tolerance. A
+// changed parameter count or block count without invalidate() must panic,
+// and invalidate() must make any structure change safe.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
@@ -415,19 +415,35 @@ fn warm_solve_skips_discovery() {
     assert_eq!(fingerprint(&r2), fingerprint(&cold));
 }
 
-/// The parameter-count backstop: a different count drops the caches, and the
-/// session rediscovers and solves correctly. (This is a heuristic only --
-/// same-count structure changes are NOT caught; see invalidate below.)
+/// The parameter-count tripwire: a different count cannot be the same
+/// structure, so a warm solve with one panics instead of running through
+/// the stale caches. (A tripwire only -- same-count structure changes
+/// are NOT caught; see invalidate below.)
 #[test]
-fn parameter_count_change_runs_cold() {
+#[should_panic(expected = "parameter count changed from 3 to 4 without invalidate()")]
+fn parameter_count_change_without_invalidate_panics() {
     let mut session = LmSession::new(SparseFaer::new());
 
     let mut p3 = Spy::new(&TARGET3, &[(0, 1)]);
     session.solve_x0(&[0.0; 3], &mut p3, &cfg()).unwrap();
 
     let mut p4 = Spy::new(&[1.0, 2.0, 3.0, 4.0], &[(0, 1), (2, 3)]);
+    let _ = session.solve_x0(&[0.0; 4], &mut p4, &cfg());
+}
+
+/// invalidate() between problems of different sizes: the next solve
+/// rediscovers and matches a cold solve of the new problem.
+#[test]
+fn invalidate_handles_a_parameter_count_change() {
+    let mut session = LmSession::new(SparseFaer::new());
+
+    let mut p3 = Spy::new(&TARGET3, &[(0, 1)]);
+    session.solve_x0(&[0.0; 3], &mut p3, &cfg()).unwrap();
+
+    let mut p4 = Spy::new(&[1.0, 2.0, 3.0, 4.0], &[(0, 1), (2, 3)]);
+    session.invalidate();
     let r = session.solve_x0(&[0.0; 4], &mut p4, &cfg()).unwrap();
-    assert_eq!(p4.coo_calls, 1, "the size change must force a fresh discovery");
+    assert_eq!(p4.coo_calls, 1, "invalidate must force a fresh discovery");
 
     let mut fresh = Spy::new(&[1.0, 2.0, 3.0, 4.0], &[(0, 1), (2, 3)]);
     let cold = lm_solve(&[0.0; 4], &mut SparseFaer::new(), &mut fresh, &cfg()).unwrap();
@@ -452,6 +468,21 @@ fn invalidate_handles_a_same_size_structure_change() {
     let mut fresh = Spy::new(&TARGET3, &[(0, 2)]);
     let cold = lm_solve(&[0.0; 3], &mut SparseFaer::new(), &mut fresh, &cfg()).unwrap();
     assert_eq!(fingerprint(&r), fingerprint(&cold));
+}
+
+/// The block-count tripwire on a generated root: one constraint fewer is
+/// the same parameter count but another shape, and a warm solve with it
+/// panics instead of running through the stale pattern.
+#[test]
+#[should_panic(expected = "structure changed without invalidate()")]
+fn structure_change_without_invalidate_panics() {
+    let mut session = LmSession::new(SparseFaer::new());
+    let mut w1 = build(0.05);
+    session.solve(&mut w1, &cfg()).unwrap();
+
+    let mut w2 = build(0.15);
+    w2.odos.pop();
+    let _ = session.solve(&mut w2, &cfg());
 }
 
 /// An empty problem through a session: the empty result, no state disturbed.

@@ -126,6 +126,10 @@ pub struct Context {
     /// says how much of it this solve uses.
     pub(crate) blocks: Option<Box<dyn AnyStore>>,
     pub(crate) blocks_len: usize,
+    /// The shape the stores were built for: the model's count per
+    /// block array, as the generated `__shape` reads it. A direct call
+    /// with a model of another shape trips on it.
+    pub(crate) shape: Vec<u64>,
     pub(crate) cut: Cut,
     pub(crate) sweeps: ParTiming,
 }
@@ -177,6 +181,7 @@ impl Clone for Context {
             runtime_coo: self.runtime_coo,
             blocks: self.blocks.as_ref().map(|b| b.store_clone()),
             blocks_len: self.blocks_len,
+            shape: self.shape.clone(),
             cut: self.cut.clone(),
             sweeps: self.sweeps.clone(),
         }
@@ -194,7 +199,7 @@ impl Context {
     pub fn new() -> Self {
         Context {
             threads: 1, timing: false, runtime_coo: false,
-            blocks: None, blocks_len: 0, cut: Cut::new(),
+            blocks: None, blocks_len: 0, shape: Vec::new(), cut: Cut::new(),
             sweeps: ParTiming::default(),
         }
     }

@@ -72,13 +72,17 @@ const N_POSES: usize = 4;
 const N_LANDMARKS: usize = 6;
 
 fn build() -> World {
+    build_with(N_POSES, N_LANDMARKS)
+}
+
+fn build_with(n_poses: usize, n_landmarks: usize) -> World {
     let mut w = World {
         poses: refs::Vec::new(),
         landmarks: refs::Vec::new(),
         odos: std::vec::Vec::new(),
         obs: std::vec::Vec::new(),
     };
-    for i in 0..N_POSES {
+    for i in 0..n_poses {
         w.poses.push(Pose {
             x: Param::new(i as f64),
             y: Param::new(0.1 * i as f64),
@@ -87,14 +91,14 @@ fn build() -> World {
             hb: SelfBlock::new(),
         });
     }
-    for j in 0..N_LANDMARKS {
+    for j in 0..n_landmarks {
         w.landmarks.push(Landmark {
             x: Param::new(0.6 * j as f64),
             y: Param::new(1.0 + 0.05 * j as f64),
             hb: SelfBlock::new(),
         });
     }
-    for i in 1..N_POSES {
+    for i in 1..n_poses {
         w.odos.push(Odo {
             a: w.poses.ref_at(i - 1),
             b: w.poses.ref_at(i),
@@ -103,8 +107,8 @@ fn build() -> World {
             hb: CrossBlock::new(),
         });
     }
-    for j in 0..N_LANDMARKS {
-        for pi in [j % N_POSES, (j + 1) % N_POSES] {
+    for j in 0..n_landmarks {
+        for pi in [j % n_poses, (j + 1) % n_poses] {
             w.obs.push(Obs {
                 p: w.poses.ref_at(pi),
                 l: w.landmarks.ref_at(j),
@@ -115,6 +119,42 @@ fn build() -> World {
         }
     }
     w
+}
+
+/// A context is tied to the structure it was built for: the same model
+/// through it again reuses the stores and lands where a fresh context
+/// does.
+fn dense_through(w: &mut World, ctx: &mut arael::threads::Context) -> (Vec<f64>, Vec<f64>) {
+    let mut params = Vec::new();
+    w.serialize(&mut params);
+    let n = params.len();
+    let mut grad = vec![0.0; n];
+    let mut h = vec![0.0; n * n];
+    w.calc_grad_hessian_dense_with_context(&params, &mut grad, &mut h, ctx);
+    (grad, h)
+}
+
+#[test]
+fn a_direct_assembly_reuses_a_context_of_the_same_shape() {
+    let mut w = build();
+    let fresh = dense_through(&mut w, &mut arael::threads::Context::new());
+    let mut ctx = arael::threads::Context::new();
+    assert_eq!(dense_through(&mut w, &mut ctx), fresh);
+    assert_eq!(dense_through(&mut w, &mut ctx), fresh, "the second pass reuses the stores");
+}
+
+/// A model of another shape through a used context trips: the stores
+/// hold the first model's indices and a smaller model would assemble
+/// through them without a bounds error. The same counts with other refs
+/// are not caught; one structure per context is the contract.
+#[test]
+#[should_panic(expected = "a Context holds the structure it was built for")]
+fn a_direct_assembly_through_a_context_of_another_shape_panics() {
+    let mut big = build_with(N_POSES + 3, N_LANDMARKS + 2);
+    let mut small = build_with(N_POSES, N_LANDMARKS);
+    let mut ctx = arael::threads::Context::new();
+    dense_through(&mut big, &mut ctx);
+    dense_through(&mut small, &mut ctx);
 }
 
 /// Densify arael's scalar CSC (upper triangle as stored; no mirroring,
