@@ -29,6 +29,8 @@ fn pin_single_core() {
     for var in ["RAYON_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"] {
         std::env::set_var(var, "1");
     }
+    // Linux only: the other platforms have no affinity call.
+    #[cfg(target_os = "linux")]
     unsafe {
         let core = std::thread::available_parallelism().map(|n| n.get() - 1).unwrap_or(0);
         let mut set: libc::cpu_set_t = std::mem::zeroed();
