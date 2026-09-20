@@ -3951,6 +3951,34 @@ fn unit_count_expr(prefix: &[AccessSegment], inner: &syn::Ident) -> TokenStream2
     quote! { { let mut __n = 0u64; let __c = __u; #body __n } }
 }
 
+/// How many slots the entities along one containment path take, as an
+/// expression over `self`: the count of the last level, summed over every
+/// instance of the levels above it. A single-instance level counts one.
+/// An arena counts its holes, so this bounds the dense numbering from
+/// above, which is what presizing a split store's map needs.
+fn slot_count_expr(path: &[AccessSegment]) -> TokenStream2 {
+    let Some((last, above)) = path.split_last() else {
+        return quote! { 1u64 };
+    };
+    let f = syn::Ident::new(&last.field, proc_macro2::Span::call_site());
+    let mut body = if last.collection || last.optional {
+        quote! { __n += arael::threads::Leaves::count(&__c.#f) as u64; }
+    } else {
+        quote! { let _ = &__c.#f; __n += 1u64; }
+    };
+    for seg in above.iter().rev() {
+        let f = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
+        body = if seg.collection || seg.optional {
+            quote! {
+                for __c in arael::threads::Leaves::range_iter(&__c.#f, 0, u32::MAX) { #body }
+            }
+        } else {
+            quote! { { let __c = &__c.#f; #body } }
+        };
+    }
+    quote! { { let mut __n = 0u64; let __c = &*self; #body __n } }
+}
+
 fn store_array_ident(type_name: &str, field: &str) -> syn::Ident {
     syn::Ident::new(&format!("__a_{}__{}", type_name.to_lowercase(), field),
         proc_macro2::Span::call_site())
@@ -8804,6 +8832,10 @@ pub fn generate_root_methods(
     let mut store_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The self arrays alone carry gradient stashes.
     let mut store_self_names: Vec<syn::Ident> = Vec::new();
+    // Per self array, one slot-count term per path to its type: a split
+    // store sizes its map to their sum before it claims.
+    let mut store_self_counts: std::collections::HashMap<String, Vec<TokenStream2>> =
+        std::collections::HashMap::new();
     // The cross arrays, in a stable order, so a store's run can be told
     // which global slot it opens on.
     let mut store_cross_names: Vec<syn::Ident> = Vec::new();
@@ -8869,6 +8901,8 @@ pub fn generate_root_methods(
                                 }
                             }
                         });
+                        store_self_counts.entry(name.to_string()).or_default()
+                            .push(slot_count_expr(&path));
                         if store_seen.insert(name.to_string()) {
                             store_self_names.push(name.clone());
                             store_names.push(name);
@@ -8959,6 +8993,13 @@ pub fn generate_root_methods(
             }
         }
     }
+
+    // The slot count of each self array, in the arrays' order: the sum
+    // over every path to its type.
+    let store_self_slot_counts: Vec<TokenStream2> = store_self_names.iter().map(|name| {
+        let terms = &store_self_counts[&name.to_string()];
+        quote! { (0u64 #(+ #terms)*) as usize }
+    }).collect();
 
     // A root that did not ask for `par` keeps one store and no cut: an
     // empty cut is the whole model in one store, which is what every walk
@@ -9327,6 +9368,11 @@ pub fn generate_root_methods(
                 let __self_ref = &*self;
                 let _ = __self_ref;
                 #(__store.#store_names.clear();)*
+                // A split store's maps, sized once to what the numbering
+                // can reach, so a claim never grows them.
+                if __split {
+                    #(__store.#store_self_names.map_resize(#store_self_slot_counts);)*
+                }
                 #(#self_claim_walks)*
                 #(#build_walks)*
                 #(__store.#store_names.finish();)*
