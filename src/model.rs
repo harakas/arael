@@ -1354,7 +1354,7 @@ pub struct Coo<T: crate::utils::Float = f64> {
     /// `SelfBlock`). Callers that manage their own flat param layout
     /// without per-entity blocks can pass each param as its own "entity"
     /// (entity_offsets = [0, 1, 2, ..., N]) to make every pair cross.
-    pub hessian: std::vec::Vec<(u32, u32, T)>,
+    hessian: std::vec::Vec<(u32, u32, T)>,
 }
 
 impl<T: crate::utils::Float> Default for Coo<T> {
@@ -1377,6 +1377,9 @@ impl<T: crate::utils::Float> Coo<T> {
 
     /// True while nothing has been pushed.
     pub fn is_empty(&self) -> bool { self.hessian.is_empty() }
+
+    /// The entries as pushed: `(lo, hi, value)` per upper-triangle pair.
+    pub fn entries(&self) -> &[(u32, u32, T)] { &self.hessian }
 
     /// No-op: the entries are a heap `Vec` cleared each step, so there is
     /// nothing to release. Present for symmetry with the block markers.
@@ -1438,7 +1441,7 @@ impl<T: crate::utils::Float> Coo<T> {
     /// `entity_offsets` is the cumulative span boundary list
     /// (e.g. `[0, 6, 12, 18]` for three 6-param entities). Pairs `(i, j)`
     /// where `i` and `j` fall inside the same entity span are skipped.
-    pub fn add_residual_cross(&mut self, _r: T, indices: &[u32], dr: &[T], entity_offsets: &[u32]) {
+    pub fn add_residual_cross(&mut self, indices: &[u32], dr: &[T], entity_offsets: &[u32]) {
         let two = T::two();
         let n = indices.len();
         let span_of = |i: u32| -> u32 {
@@ -1475,8 +1478,8 @@ impl<T: crate::utils::Float> Coo<T> {
     /// Robust-weighted variant of
     /// [`add_residual_cross`](Self::add_residual_cross): scales the
     /// across-entity Hessian pairs by the loss weight `w`. `w = 1` is
-    /// bit-identical. `_r` is ignored (present for uniform macro routing).
-    pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, indices: &[u32], dr: &[T], entity_offsets: &[u32]) {
+    /// bit-identical.
+    pub fn add_residual_cross_with_loss(&mut self, w: T, indices: &[u32], dr: &[T], entity_offsets: &[u32]) {
         let two_w = T::two() * w;
         let n = indices.len();
         let span_of = |i: u32| -> u32 {
@@ -2332,7 +2335,6 @@ mod tests {
         let mut blk: Coo<f64> = Coo::new();
         // Slots: [a0, a1, b0, b1] with both spans on params [0, 1].
         blk.add_residual_cross(
-            0.3,
             &[0, 1, 0, 1],
             &[da[0], da[1], db[0], db[1]],
             &[0, 2],

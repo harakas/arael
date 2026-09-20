@@ -6427,6 +6427,9 @@ pub fn generate_root_methods(
             } else {
                 quote! { #r_ident as #cast_type }
             };
+            // A cross write takes no residual: only the weight, when a
+            // loss is on.
+            let w_only: TokenStream2 = if loss_present { quote! { __w, } } else { quote! {} };
 
             // Structurally-zero derivatives (residual does not touch the
             // parameter) are known post-simplify: skip their declarations,
@@ -6480,7 +6483,7 @@ pub fn generate_root_methods(
                     .count();
                 let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
                     __store.__coo.#m_cross(
-                        #wr,
+                        #w_only
                         &__all_idx,
                         &[#(#dr_f64),*],
                         &__entity_offsets,
@@ -6578,7 +6581,7 @@ pub fn generate_root_methods(
                     let arr = store_array_ident(&holder, &block.to_string());
                     cross_block_calls.push(quote! {
                         __store.#arr.block_mut(__split,#target.slot() as usize).#m_cross(
-                            #wr,
+                            #w_only
                             &[#(#dr_a),*],
                             &[#(#dr_b),*],
                         );
@@ -6664,7 +6667,7 @@ pub fn generate_root_methods(
                             if !span_zero(*ss, *sc_) && !span_zero(*rs, *rc) => quote! {
                                 __store.__coo
                                     .#m_cross(
-                                        #wr,
+                                        #w_only
                                         &__all_idx,
                                         &[#(#dr_f64),*],
                                         &__entity_offsets,
@@ -6724,7 +6727,7 @@ pub fn generate_root_methods(
                 let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
                     __store.#cross_arr.block_mut(__split,#cross_target.slot() as usize)
-                        .#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
+                        .#m_cross(#w_only &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
                 // The partials through the entities' slots, the cross tile
                 // on the constraint's.
