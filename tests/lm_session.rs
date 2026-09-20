@@ -498,6 +498,7 @@ struct WorldPar {
     obs: std::vec::Vec<Obs>,
 }
 
+#[cfg(feature = "rayon")]
 fn build_par(off: f64) -> WorldPar {
     let w = build(off);
     WorldPar { poses: w.poses, landmarks: w.landmarks, odos: w.odos, obs: w.obs }

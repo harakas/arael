@@ -23,7 +23,7 @@ use arael::simple_lm::RootProblem;
 use arael::model::{CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
-use arael::simple_lm::{self, LmConfig, LmProblem, LmProblemInternals, LmTiming};
+use arael::simple_lm::{self, LmConfig, LmProblemInternals, LmTiming};
 use arael::vect::{vect2d, vect3d};
 use scene::Scene;
 use std::time::Duration;

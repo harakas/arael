@@ -15,7 +15,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::simple_lm::{
-    LmProblemInternals,self, BandOverflow, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
+    LmProblemInternals,self, BandOverflow, CooMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
 // The bad-diagonal diagnostic goes through arael's process-global log sink.

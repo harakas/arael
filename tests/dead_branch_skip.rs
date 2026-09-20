@@ -6,7 +6,7 @@
 
 use arael::model::{Param, SelfBlock};
 use arael::refs;
-use arael::simple_lm::{CooMatrix, LmProblem, RootProblem, LmProblemInternals};
+use arael::simple_lm::{CooMatrix, RootProblem, LmProblemInternals};
 
 const TOL: f64 = 1e-9;
 

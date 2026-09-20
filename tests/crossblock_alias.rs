@@ -376,8 +376,6 @@ fn print_h(label: &str, h: &[f64], n: usize) {
 
 #[test]
 fn aliased_cross_equals_self_formulation() {
-
-    let mut ctx = arael::threads::Context::new();
     let (x, y) = (0.7, -1.3);
 
     // Self formulation.

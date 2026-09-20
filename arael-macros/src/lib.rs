@@ -15,7 +15,8 @@
 //!   `CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>` (two const
 //!   generics — NA and NB are stored separately so the cross Hessian is
 //!   a rectangular NA*NB block).
-//!   `TripletBlock` is passed through as-is (COO sparse, for 3+ entity constraints).
+//!   There is no COO field: a constraint names the solve's COO list with
+//!   the `coo` keyword.
 //! - Requires every params-having struct to declare exactly one
 //!   `SelfBlock<Self>` field (the canonical home for its gradient +
 //!   within-entity Hessian diagonal). Exemptions: `#[arael(fit(...))]`
@@ -106,9 +107,9 @@ struct SymLayout {
     constraint_index_field: Option<String>,
     /// Field name of the struct's `SelfBlock<Self>` — detected automatically
     /// during `#[arael::model]` expansion. Required for every params-having
-    /// Model after the CrossBlock/TripletBlock refactor: the self-block is
-    /// the single home for that entity's gradient + A-A Hessian diagonal,
-    /// so cross constraints need to know the field name to write to it.
+    /// Model: the self-block is the single home for that entity's gradient
+    /// + A-A Hessian diagonal, so cross constraints need to know the field
+    /// name to write to it.
     self_block_field: Option<String>,
     /// Fields whose type is an UNRECOGNIZED generic wrapper naming another
     /// type: (field, wrapper, held type name). Containers are dispatched by
@@ -697,10 +698,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// Generates the `Model` trait implementation, rewrites `SelfBlock<A>` to
 /// `SelfBlock<A, {A_PARAM_COUNT}>` and `CrossBlock<A, B>` to
 /// `CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>` (two separate
-/// const generics so the cross Hessian is a rectangular NA*NB block;
-/// TripletBlock is recognized but not rewritten), emits a
-/// `const StructName_PARAM_COUNT: usize = ...;`, and produces the symbolic
-/// companion struct with `ModelSym` impl.
+/// const generics so the cross Hessian is a rectangular NA*NB block),
+/// emits a `const StructName_PARAM_COUNT: usize = ...;`, and produces the
+/// symbolic companion struct with `ModelSym` impl.
 ///
 /// # Struct-level attributes
 ///
@@ -733,8 +733,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   same (A, B) pair; with none, the parent's own ref fields fill
 ///   the slots and bodies read `parent.<ref>.<field>` (parent data as
 ///   `parent.<field>`).
-/// - `[hb, root.<field>]` / `[hb, parent.<field>]` naming a
-///   `TripletBlock` -- (entity, root/parent) cross pairs in COO form.
+/// - `[hb, coo]` -- the (entity, root) or (entity, containing parent)
+///   cross pairs in COO form, the co-entity being the one whose params
+///   the body reads.
 /// - `[hb_ab, hb_ac, parent.hb_bc]` -- the mixed form: own CrossBlocks
 ///   beside CrossBlocks owned by the containing parent. The entities
 ///   are the own refs, the parent's refs (`parent.<ref>`) and, when
@@ -878,9 +879,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// ```
 ///
 /// Safety net: if a `skip_self_block` struct is later pulled into a
-/// `CrossBlock<A, B>` or `TripletBlock` constraint, the cross-block
+/// `CrossBlock<A, B>` or `coo` constraint, the cross-block
 /// emitter still errors ("type `X` must declare a `SelfBlock<Self>`
-/// field"). The opt-out cannot silently break cross/triplet usage.
+/// field"). The opt-out cannot silently break cross or COO usage.
 ///
 /// ## `#[arael(constraint_index)]`
 ///
@@ -2052,13 +2053,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut update_phase1: Vec<TokenStream2> = Vec::new();
     let mut update_self_phase1: Vec<TokenStream2> = Vec::new();
     let mut compute_stmts: Vec<TokenStream2> = Vec::new();
-    let mut zero_blocks_stmts: Vec<TokenStream2> = Vec::new();
     let mut release_blocks_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_band_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_direct_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_hessian_sparse_indexed_stmts: Vec<TokenStream2> = Vec::new();
     let mut advance_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_count_terms: Vec<TokenStream2> = Vec::new();
     let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
@@ -2076,11 +2071,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // `Param` fields and its `#[arael(component)]` fields, in
     // declaration order, which is the order they serialize in.
     let mut span_fold_stmts: Vec<TokenStream2> = Vec::new();
-    // Per-struct recursion for the structure-only Hessian walks (cells
-    // and scatter positions), mirroring the accumulate stmt list exactly
-    // -- emission order is the invariant.
-    let mut collect_cells_stmts: Vec<TokenStream2> = Vec::new();
-    let mut positions_stmts: Vec<TokenStream2> = Vec::new();
 
     // The struct's scalar type parameter, when generic: a bare `T` data
     // field is excluded from the Model walks below -- for concrete scalars
@@ -2214,10 +2204,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 size_walk.push((ident.clone(), quote! {
                     arael::model::Model::serialize_size(&self.#ident) as usize
                 }, elem_name));
-                // Also recurse into sub-models for zero/accumulate
-                zero_blocks_stmts.push(quote! {
-                    arael::model::Model::zero_blocks(&mut self.#ident);
-                });
                 // The self block no longer reports the span: this struct
                 // does, from its own parameters, below. Every other field
                 // recurses, so entities nested in a sub-model are reached.
@@ -2226,29 +2212,8 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         arael::model::Model::collect_param_blocks(&self.#ident, out);
                     });
                 }
-                collect_cells_stmts.push(quote! {
-                    arael::model::Model::collect_hessian_cells(&self.#ident, out);
-                });
-                positions_stmts.push(quote! {
-                    arael::model::Model::bind_hessian_positions(&mut self.#ident, binder, out);
-                });
                 release_blocks_stmts.push(quote! {
                     arael::model::Model::release_blocks(&mut self.#ident);
-                });
-                accumulate_hessian_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian(&self.#ident, hessian);
-                });
-                accumulate_hessian_band_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_band(&self.#ident, band, kd)?;
-                });
-                accumulate_hessian_sparse_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse(&self.#ident, coo);
-                });
-                accumulate_hessian_sparse_direct_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse_direct(&self.#ident, csc);
-                });
-                accumulate_hessian_sparse_indexed_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_sparse_indexed(&self.#ident, vals, positions, cursor);
                 });
             }
         }

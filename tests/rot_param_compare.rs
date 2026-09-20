@@ -11,7 +11,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::model::{SelfBlock, CrossBlock, EulerAngleParam, SimpleEulerAngleParam, QuaternionParam};
-use arael::simple_lm::{self, LmConfig, LmProblem, LmProblemInternals};
+use arael::simple_lm::{self, LmConfig, LmProblemInternals};
 use arael::vect::vect3d;
 use arael::matrix::matrix3d;
 use arael::quatern::quaternd;

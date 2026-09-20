@@ -2149,7 +2149,7 @@ fn parse_constraint_inner_impl(
     }
 
     // Positional block lists are restricted to N = 1. Any N >= 2 list
-    // (including `(<local>, root.<triplet>)`) must use the bracketed
+    // (including `(<local>, coo)`) must use the bracketed
     // form `constraint([a, b, ...], { body })` so the attribute has one
     // unambiguous shape for multi-block constraints.
     if !was_bracketed && positional_spans.len() >= 2 {
@@ -2217,7 +2217,6 @@ fn parse_constraint_inner_impl(
 }
 
 /// Generate the debug `constraints()` function that returns symbolic expressions.
-#[allow(dead_code)]
 pub fn generate_constraint_impl(
     struct_name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
@@ -3106,7 +3105,7 @@ impl MixedParent {
 }
 
 /// Recognize the mixed parent-cross form and validate its rules. `None`
-/// hands the list to the other forms (the owned-triplet secondary, the
+/// hands the list to the other forms (the `coo` secondary, the
 /// single parent-cross primary, remote blocks), which report their own
 /// errors.
 fn detect_mixed_parent(
@@ -3118,8 +3117,8 @@ fn detect_mixed_parent(
 ) -> syn::Result<Option<MixedParent>> {
     let err = |msg: String| syn::Error::new(proc_macro2::Span::call_site(),
         format!("{}: {}", loc, msg));
-    // A primary that is the constraint's own SelfBlock is the owned-
-    // triplet shape `[hb, parent.hbt]`, never this form.
+    // A primary that is the constraint's own SelfBlock is the `coo`
+    // shape `[hb, coo]`, never this form.
     let primary = constraint.primary_block_field();
     if !primary.contains('.')
         && let Some(field) = fields.named.iter()
@@ -3169,7 +3168,7 @@ fn detect_mixed_parent(
         return Err(err(format!(
             "`parent.{}`: `{}` has its own Param fields -- the parent of a shared \
              CrossBlock is a plain container; couple its params from a constraint \
-             held below it through `parent.parent`, or through `[hb, parent.<triplet>]`",
+             held below it through `parent.parent`, or through `[hb, coo]`",
             blocks[0].0, parent_type)));
     }
     if let Some(bf) = constraint.block_fields.iter()
@@ -3286,7 +3285,7 @@ enum ParentBinding {
     /// "the parent" is ambiguous; any `parent.` read errors.
     Ambiguous,
     /// The containing parent is already a coupled entity bound under
-    /// `var` (frine-style, `parent.<selfblock>`, `[hb, parent.<triplet>]`,
+    /// `var` (frine-style, `parent.<selfblock>`, `[hb, coo]`,
     /// remote primary): `parent` aliases that binding -- full access,
     /// Params differentiated.
     Entity { var: String, type_name: String },
@@ -3317,7 +3316,7 @@ fn register_parent_data_bindings(
             ctx.poisoned.push((format!("{}.{}", key_root, fname), format!(
                 "`{}.{}` is a Param -- reading it here would drop its derivative \
                  pairs; couple parent params through `parent.<selfblock>` or \
-                 `[hb, parent.<triplet>]`", type_name, fname)));
+                 `[hb, coo]`", type_name, fname)));
             continue;
         }
         let key = format!("{}.{}", key_root, fname);
@@ -3871,7 +3870,7 @@ fn add_param_symbols(base: &str, sft: &SymFieldType, out: &mut Vec<String>) {
 /// Generate `calc_cost` and `calc_grad_hessian` methods on the root struct.
 /// `precision` is "f32" or "f64".
 /// A statement of the block assembly as emitted for the sequential sweep
-/// and for the mirror sweep of a `par` root: shared, sequential only, or
+/// and for the split-store sweep of a `par` root: shared, sequential only, or
 /// one form each.
 enum GhStmt {
     Both(TokenStream2),
@@ -4282,48 +4281,6 @@ pub fn generate_root_methods(
     let outer_mc = range_it.clone();
     let outer_plain = range_it.clone();
 
-    // Root SelfBlock index setup: when the root struct has its own
-    // Params + a SelfBlock<Self>, its set_indices must be called at
-    // __set_block_indices time so any constraint that touches root
-    // params (including nested multi-cross constraints referencing
-    // the root) finds valid global indices on the root's self-block.
-    // The existing per-constraint set_block_indices_loops only fires
-    // when a constraint is attached to the root itself; this prelude
-    // runs unconditionally whenever the root has Params and the
-    // mandatory SelfBlock<Self> field.
-    let root_self_block_prelude: TokenStream2 = {
-        let root_layout = registry_lookup(&root_name.to_string());
-        let root_hb_field = root_layout.as_ref().and_then(|l| l.self_block_field.clone());
-        let root_param_fields = root_layout.as_ref().map(|l| l.param_fields.clone()).unwrap_or_default();
-        let _ = &root_param_fields;
-        if let Some(hb) = root_hb_field.as_ref().filter(|_| param_total(&root_name.to_string()) > 0) {
-            let _hb_ident = syn::Ident::new(hb, proc_macro2::Span::call_site());
-            let layout = root_layout.as_ref().unwrap();
-            let mut count: usize = 0;
-            let mut idx_stmts: Vec<TokenStream2> = Vec::new();
-            let _ = layout;
-            for slot in param_slots(&root_name.to_string()) {
-                let size = param_slot_size(&slot.sft);
-                let offset = count;
-                let end = offset + size;
-                let access = slot_access(quote! { self }, &slot.path);
-                idx_stmts.push(quote! {
-                    #access.write_indices(&mut __root_self_idx[#offset..#end]);
-                });
-                count += size;
-            }
-            if count == 0 {
-                quote! {}
-            } else {
-                quote! {
-                }
-            }
-        } else {
-            quote! {}
-        }
-    };
-
-    let constraint_impls: Vec<TokenStream2> = Vec::new();
     let mut cost_loops: Vec<TokenStream2> = Vec::new();
     // calc_cost_table twins: the same traversals with each constraint's
     // cost shadowed into a per-label table entry (jacobian roots only).
@@ -4373,26 +4330,22 @@ pub fn generate_root_methods(
     // last-ulp numeric drift between recompiles.
     let mut cross_groups: std::collections::BTreeMap<String, CrossCollectionGroup> = std::collections::BTreeMap::new();
 
-    // Grouping for TripletBlock constraints on the same collection.
-    //
-    // Also used for multi-cross constraints (N-entity constraint declared
-    // with multiple CrossBlock fields instead of a single TripletBlock):
-    // when `is_multi_cross` holds, the final TripletBlock.add_residual_cross
-    // call in the gh loop is replaced by per-pair CrossBlock.add_residual_cross
-    // calls (emitted into gh_entries), which reach their tiles through the
-    // store and so read no index array.
+    // Grouping for the N-ary constraints on the same collection: `coo`
+    // and multi-cross (N entities coupled through CrossBlock fields).
+    // When `is_multi_cross` holds, the one COO write in the gh loop is
+    // replaced by per-pair CrossBlock.add_residual_cross calls (emitted
+    // into gh_entries), which reach their tiles through the store and
+    // so read no index array.
     struct TripletCollectionGroup {
         rc_ident: syn::Ident,
         /// Outer hops to the constraint collection when it sits below the
         /// root (the mixed parent-cross form); empty for a root collection.
         prefix: Vec<AccessSegment>,
         triplet_param_count: usize,
-        block_ident: syn::Ident,
         constraint_index_field: Option<syn::Ident>,
         triplet_idx_stmts: Vec<TokenStream2>,
         entity_offsets: Vec<u32>,           // cumulative entity span boundaries
         resolve_stmts: Vec<TokenStream2>,
-        entity_index_copies: Vec<TokenStream2>,
         root_var_ident: syn::Ident,
         cost_entries: Vec<TokenStream2>,
         ct_entries: Vec<TokenStream2>,
@@ -4402,7 +4355,7 @@ pub fn generate_root_methods(
         /// blocks of the participants these entries write through refs.
         claim_entries: Vec<TokenStream2>,
         /// The constraint declared its own CrossBlock fields rather than
-        /// one TripletBlock. Mixing the two on a struct is rejected.
+        /// `coo`. Mixing the two on a struct is rejected.
         is_multi_cross: bool,
     }
     let mut triplet_groups: std::collections::BTreeMap<String, TripletCollectionGroup> = std::collections::BTreeMap::new();
@@ -4451,7 +4404,6 @@ pub fn generate_root_methods(
     struct SelfBlockInfo {
         a_param_count: usize,
         a_idx_stmts: Vec<TokenStream2>,
-        block_ident: syn::Ident,
     }
     let mut collection_groups: std::collections::BTreeMap<String, CollectionGroup> = std::collections::BTreeMap::new();
 
@@ -4470,7 +4422,6 @@ pub fn generate_root_methods(
         root_var_ident: syn::Ident,
         a_param_count: usize,
         a_idx_stmts: Vec<TokenStream2>,
-        block_ident: syn::Ident,
         /// The entity's type, so a split store can be told which slab to
         /// give it a place in.
         type_name: String,
@@ -4481,10 +4432,6 @@ pub fn generate_root_methods(
         jac_entries: Vec<TokenStream2>,
     }
     let mut single_instance_groups: std::collections::BTreeMap<String, SingleInstanceGroup> = std::collections::BTreeMap::new();
-
-    let mut _generated_constraints_fn: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // `par`: what the mirror holds (see `ParEntity` / `ParContainer`).
 
     // Collect all types reachable from this root (for multi-root support).
     // Seeded with the root alone: its layout was registered earlier in this
@@ -4516,6 +4463,13 @@ pub fn generate_root_methods(
         }
         set
     };
+
+    // Constraint ids exist for the `constraint_index` fields. The walk
+    // that numbers them is one sequence over every group, so it is all
+    // or nothing: without a taker there is nothing to number.
+    let has_ci = reachable.iter().any(|t| registry_lookup(t)
+        .map(|l| l.constraint_index_field.is_some()).unwrap_or(false));
+    let cid_bump = if has_ci { quote! { __cid += 1; } } else { quote! {} };
 
     // The block store's walk: every container that holds blocks, visited
     // once, assigning each block instance its slot in that container's
@@ -4758,9 +4712,8 @@ pub fn generate_root_methods(
                 return Err(syn::Error::new(proc_macro2::Span::call_site(),
                     format!("{}:{}: `{}` has its own Param fields, so a `root.{}` \
                              constraint would drop the (entity, root) cross pairs -- \
-                             declare a `SelfBlock<{}>` on `{}` and route through a \
-                             root-owned TripletBlock: \
-                             `constraint([<self_block>, root.<triplet>], ...)`",
+                             declare a `SelfBlock<{}>` on `{}` and write \
+                             `constraint([<self_block>, coo], ...)`",
                         sc.attr_file, sc.attr_line, sc.struct_name, rest,
                         sc.struct_name, sc.struct_name)));
             }
@@ -4844,7 +4797,10 @@ pub fn generate_root_methods(
                 // cannot hold, and dropping them is never acceptable.
                 if entity_has_params {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                        format!("{}:{}: `{}` has its own Param fields, so a `parent.{}`                                  constraint would drop the (entity, parent) cross pairs --                                  declare a `SelfBlock<{}>` on `{}` and couple through a                                  CrossBlock/TripletBlock instead",
+                        format!("{}:{}: `{}` has its own Param fields, so a `parent.{}` \
+                                 constraint would drop the (entity, parent) cross pairs -- \
+                                 declare a `SelfBlock<{}>` on `{}` and write \
+                                 `constraint([<self_block>, coo], ...)`",
                             sc.attr_file, sc.attr_line, sc.struct_name, rest,
                             sc.struct_name, sc.struct_name)));
                 }
@@ -4883,7 +4839,7 @@ pub fn generate_root_methods(
                             format!("{}:{}: `parent.{}`: `{}` has its own Param fields -- \
                                      the parent of a shared CrossBlock is a plain container; \
                                      couple parent params through `parent.<selfblock>` or \
-                                     `[hb, parent.<triplet>]` instead",
+                                     `[hb, coo]` instead",
                                 sc.attr_file, sc.attr_line, rest, parent_type)));
                     }
                     // The parent's Ref fields in declaration order, with types.
@@ -5102,10 +5058,10 @@ pub fn generate_root_methods(
 
         // Multi-cross: constraint declares multiple block fields. Valid
         // only when the non-remote block fields are all CrossBlock (mixing
-        // TripletBlock in a multi-block list is out of scope). Overrides
+        // `coo` into a multi-block list is out of scope). Overrides
         // the primary-block-driven flags: in multi-cross mode, cross pairs
-        // are routed per-block, not to a single CrossBlock or
-        // TripletBlock. The entity-span setup (__all_idx +
+        // are routed per-block, not to a single CrossBlock or the COO
+        // list. The entity-span setup (__all_idx +
         // triplet_entities) is shared with is_triplet. Multi-cross may
         // coexist with is_remote_block when the *primary* block is a
         // dotted-path remote reference (e.g. `pose.hb_pose`) and the
@@ -5131,7 +5087,7 @@ pub fn generate_root_methods(
         // The entity has its own params, the cross pairs go to the store's
         // COO list, and the co-entity is whichever of the root or the
         // containing parent the body reads PARAMS of -- reading both is
-        // an error, as coupling to two owned triplets always was.
+        // an error.
         let coo_join = if is_self_block {
             coo_secondary_join(&constraint, &sc.struct_name, &root_type_str)
         } else { None };
@@ -5155,15 +5111,12 @@ pub fn generate_root_methods(
         } else { (false, false) };
         let coo_ident = || syn::Ident::new("coo", proc_macro2::Span::call_site());
 
-        // Self-primary + root-owned TripletBlock shape:
-        //   #[arael(constraint(<local_self_block>, root.<triplet>, {...}))]
-        // Primary block is the entity's own SelfBlock<Self>, secondary
-        // is `root.<field>` naming a TripletBlock<T> on root. Body
-        // touches both self params and root params; diagonal writes
-        // land on each entity's SelfBlock<Self>, cross pairs go to the
-        // root's TripletBlock (COO). Self is treated like an implicit
-        // entity — parallel to `has_root_entity` for CrossBlock-backed
-        // multi-cross, but with COO storage and no per-pair routing.
+        // `[hb, coo]` joined to the root: the body touches both self
+        // params and root params; diagonal writes land on each entity's
+        // SelfBlock<Self>, cross pairs go to the COO list. Self is treated
+        // like an implicit entity -- parallel to `has_root_entity` for
+        // CrossBlock-backed multi-cross, but with COO storage and no
+        // per-pair routing.
         let root_triplet_field: Option<syn::Ident> =
             if coo_joins_root { Some(coo_ident()) } else { None };
         let is_root_triplet_self = root_triplet_field.is_some();
@@ -5182,13 +5135,10 @@ pub fn generate_root_methods(
                     constraint.primary_block_field())));
         }
 
-        // Self-primary + parent-owned TripletBlock shape:
-        //   #[arael(constraint([<local_self_block>, parent.<triplet>], {...}))]
-        // The non-root analog of `[hb, root.<triplet>]`: the entity has
+        // `[hb, coo]` joined to the containing parent: the entity has
         // its own params (SelfBlock primary), the coupled co-entity is
         // the CONTAINING parent, and the (entity, parent) cross pairs go
-        // to a TripletBlock field on that parent. (field ident, parent
-        // type name.)
+        // to the COO list. (field ident, parent type name.)
         let parent_triplet: Option<(syn::Ident, String)> = if coo_joins_parent {
             Some((coo_ident(), coo_parent.clone().unwrap_or_default()))
         } else if is_self_block && parent_self_primary.is_none() && mixed.is_none() {
@@ -5213,8 +5163,8 @@ pub fn generate_root_methods(
                             format!("{}:{}: parent type `{}` not in registry",
                                 sc.attr_file, sc.attr_line, parent_type)))?;
                     let _ = &playout;
-                    // A `parent.` secondary named a parent-owned TripletBlock;
-                    // those pairs go to COO now, and which co-entity they
+                    // A `parent.` secondary names nothing: the (entity,
+                    // parent) pairs go to COO, and which co-entity they
                     // couple comes from the params the body reads.
                     Err(syn::Error::new(proc_macro2::Span::call_site(),
                         format!("{}:{}: `parent.{}` is not a block a constraint can name \
@@ -5226,20 +5176,6 @@ pub fn generate_root_methods(
                 })
                 .transpose()?
         } else { None };
-        if parent_triplet.is_some() {
-            if is_root_triplet_self {
-                return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: a constraint couples to at most one owned triplet -- \
-                             `root.<triplet>` and `parent.<triplet>` cannot be combined",
-                        sc.attr_file, sc.attr_line)));
-            }
-            if constraint.block_fields.len() != 2 {
-                return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("{}:{}: a `parent.<triplet>` secondary allows exactly \
-                             `[<self_block>, parent.<triplet>]` -- {} block fields given",
-                        sc.attr_file, sc.attr_line, constraint.block_fields.len())));
-            }
-        }
 
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
@@ -5344,7 +5280,7 @@ pub fn generate_root_methods(
                 && (is_triplet || is_multi_cross))
             && !matches!(entity_location,
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. }) {
-            // TripletBlock / CrossBlock constraints drive their iteration
+            // `coo` and CrossBlock constraints drive their iteration
             // from the constraint struct's containing collection, so a
             // single-instance location (direct field, Option field, the
             // root itself without a remote block) has no loop to emit.
@@ -5994,7 +5930,7 @@ pub fn generate_root_methods(
         let n_params = param_symbols.len();
         let n_residuals = residual_exprs.len();
 
-        // TripletBlock per-entity span info (needed by gh_stmts emission below).
+        // COO per-entity span info (needed by gh_stmts emission below).
         // Built alongside triplet_idx_stmts later in this same iteration —
         // collect it here so the emission has access. Each entry:
         // (ref-field ident bound in scope, entity type ident, dr-slice start,
@@ -6002,7 +5938,7 @@ pub fn generate_root_methods(
         let mut triplet_entities: Vec<(syn::Ident, syn::Ident, usize, usize)> = Vec::new();
         let multi_cross_routing: Vec<MultiCrossRouting>;
         // A `parent.`-coupled constraint entity (`parent.<selfblock>`
-        // primary or `[hb, parent.<triplet>]`) must live in a collection
+        // primary or `[hb, coo]` joined to the parent) must live in a collection
         // (or Option) INSIDE its parent, so the sweep has the parent
         // instance in scope as a prefix binding.
         let parent_prefix: Option<Vec<AccessSegment>> = if parent_self_primary.is_some()
@@ -6022,12 +5958,12 @@ pub fn generate_root_methods(
             }
         } else { None };
         // The joined co-entity of a self-primary form: the root
-        // (`root.<selfblock>` / `[hb, root.<triplet>]`, accessed as
-        // `self`) or the containing parent (`parent.<selfblock>` /
-        // `[hb, parent.<triplet>]`, accessed as the innermost prefix
-        // binding). For `parent.<selfblock>` the `parent =` attribute
-        // names the parent binding (the entity keeps its own name); for
-        // `[hb, parent.<triplet>]` the parent binds as its lowercased
+        // (`root.<selfblock>` / `[hb, coo]` reading root params, accessed
+        // as `self`) or the containing parent (`parent.<selfblock>` /
+        // `[hb, coo]` reading parent params, accessed as the innermost
+        // prefix binding). For `parent.<selfblock>` the `parent =`
+        // attribute names the parent binding (the entity keeps its own
+        // name); for `[hb, coo]` the parent binds as its lowercased
         // type name, like the root does in the root forms.
         let (joined_accessor, joined_type, joined_var): (TokenStream2, String, String) =
             if let Some((_, ptype)) = &parent_self_primary {
@@ -6338,8 +6274,8 @@ pub fn generate_root_methods(
         let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
 
         // The sequential sweep's statements and, for a `par` root, the
-        // mirror sweep's: the same computes, the writes redirected into
-        // the mirror, and no rereads (the model is never written there).
+        // split-store sweep's: the same computes, the writes into the
+        // store's slots, and no rereads (the model is never written there).
         let mut gh: Vec<GhStmt> = Vec::new();
         gh.push(GhStmt::Both(block_cost_decl.clone()));
 
@@ -6396,11 +6332,11 @@ pub fn generate_root_methods(
         // dead-branch test is off.
         let skip_split = gh.len();
 
-        // Pre-residual setup for the owned-triplet forms ([hb, root.hbt]
-        // and [hb, parent.hbt]): build __all_idx (concatenation of entity
+        // Pre-residual setup for the `[hb, coo]` forms (joined to the
+        // root or to the parent): build __all_idx (concatenation of entity
         // param indices, self-first, joined co-entity second) and
         // __entity_offsets once per __item iteration, so per-residual
-        // TripletBlock.add_residual_cross calls can pass them directly.
+        // Coo::add_residual_cross calls can pass them directly.
         if is_root_triplet_self || parent_triplet.is_some() {
             let self_layout = registry_lookup(&sc.struct_name)
                 .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
@@ -6517,14 +6453,14 @@ pub fn generate_root_methods(
             };
             let all_zero = span_zero(0, n_params);
             if is_triplet {
-                // TripletBlock: per-entity SelfBlock writes grad + within-entity
-                // diagonals; triplet block gets only cross-entity pairs.
+                // `coo`: per-entity SelfBlock writes grad + within-entity
+                // diagonals; the COO list gets only cross-entity pairs.
                 let mut triplet_calls: Vec<TokenStream2> = Vec::new();
                 for (var_id, type_id, start, count) in &triplet_entities {
                     let hb = registry_lookup(&type_id.to_string())
                         .and_then(|l| l.self_block_field.clone())
                         .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as triplet participant)", type_id)))?;
+                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as a `coo` participant)", type_id)))?;
                     let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                     if span_zero(*start, *count) { continue; }
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
@@ -6604,7 +6540,7 @@ pub fn generate_root_methods(
                         remote_self_block_call = Some(quote! {
                             __store.#arr.#s_add(__split,#rtw.slot() as usize, #wr, &[#(#entity_dr),*]);
                         });
-                        // The mirror form wrote it above, in entity order.
+                        // Written above, in entity order.
                         continue;
                     }
                     let hb = registry_lookup(&type_id_str)
@@ -6676,9 +6612,9 @@ pub fn generate_root_methods(
                     //   2. self.<hb_root>.add_residual -- (root, root)
                     //      diagonal + grad (root fields are disjoint from
                     //      the iterated collection).
-                    //   3. self.<hbt>.add_residual_cross -- the (self,
-                    //      root) across-entity block, COO storage; only
-                    //      when a triplet is declared and both spans live.
+                    //   3. the COO write -- the (self, root) across-entity
+                    //      pairs; only for `[hb, coo]` and when both spans
+                    //      live.
                     let self_entry = triplet_entities.iter()
                         .find(|(v, _, _, _)| *v == "__item").cloned();
                     let root_entry = triplet_entities.iter()
@@ -6718,10 +6654,9 @@ pub fn generate_root_methods(
                         }
                         _ => quote! {},
                     };
-                    // The (self, joined) cross pairs need a declared
-                    // triplet -- the root's or the parent's -- and both
-                    // spans live. The declaration says the pairs are COO;
-                    // the entries themselves go to the store's list.
+                    // The (self, joined) cross pairs need `coo` in the
+                    // list -- joined to the root or to the parent -- and
+                    // both spans live. The entries go to the store's list.
                     let owned_triplet: Option<syn::Ident> = root_triplet_field.clone()
                         .or_else(|| parent_triplet.as_ref().map(|(i, _)| i.clone()));
                     let cross_call = match (&owned_triplet, &self_entry, &root_entry) {
@@ -6791,8 +6726,8 @@ pub fn generate_root_methods(
                     __store.#cross_arr.block_mut(__split,#cross_target.slot() as usize)
                         .#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
-                // The mirror form: the partials through the leaf's slots,
-                // the cross tile on the leaf.
+                // The partials through the entities' slots, the cross tile
+                // on the constraint's.
                 let writes = GhStmt::Seq(quote! {
                     #a_call
                     #b_call
@@ -6970,7 +6905,7 @@ pub fn generate_root_methods(
         let a_param_count = param_total(&a_type);
         let b_param_count = b_type.as_ref().map(|b| param_total(b)).unwrap_or(0);
 
-        // TripletBlock: build flat index array from all ref fields.
+        // `coo`: build the flat index array from all ref fields.
         // Entity span layout is computed above for gh_stmts; here we emit the
         // write_indices() calls per-param-field.
         let mut triplet_idx_stmts: Vec<TokenStream2> = Vec::new();
@@ -7076,7 +7011,7 @@ pub fn generate_root_methods(
                 let replacement = if is_self_block {
                     self_var_name.clone()
                 } else {
-                    // CrossBlock/TripletBlock: `self` is the constraint struct (__frine)
+                    // CrossBlock / `coo`: `self` is the constraint struct (__frine)
                     "__frine".to_string()
                 };
                 rewrite_guard_self(&mut e, &replacement);
@@ -7109,31 +7044,7 @@ pub fn generate_root_methods(
             // over it and the parent binding is the root itself.
             let parent_is_root = matches!(entity_location, EntityLocation::RootSelf);
             let parent_rename_to = if parent_is_root { "self" } else { "__lm" };
-            let (ref_field_name, _, target_type) = remote_block_info.as_ref().unwrap();
-            let ref_field_ident = syn::Ident::new(ref_field_name, proc_macro2::Span::call_site());
-            let _target_type_ident = syn::Ident::new(target_type, proc_macro2::Span::call_site());
-
-            // Find the root collection that contains the target type (for resolving the ref)
-            let target_coll = find_root_collection(root_fields, target_type);
-            let target_coll_ident = target_coll.map(|name|
-                syn::Ident::new(&name, proc_macro2::Span::call_site()));
-
-            // Index setup for the target type's params. `param_slots` walks
-            // into `#[arael(component)]` fields, so a component's params sit
-            // in the target's span exactly as they do for a self/cross block.
-            let _target_param_count = param_total(target_type);
-
-            let mut target_idx_stmts = Vec::new();
-            let mut offset = 0usize;
-            for slot in param_slots(target_type) {
-                let size = param_slot_size(&slot.sft);
-                let end = offset + size;
-                let access = slot_access(quote! { __target_ref }, &slot.path);
-                target_idx_stmts.push(quote! {
-                    #access.write_indices(&mut __a_idx[#offset..#end]);
-                });
-                offset = end;
-            }
+            let (_, _, target_type) = remote_block_info.as_ref().unwrap();
 
             let marker = source_marker(sc);
 
@@ -7205,37 +7116,21 @@ pub fn generate_root_methods(
             // remote block + extra local CrossBlocks), switch to
             // iter_mut so __frine.<local_cross>.add_residual_cross and
             // set_indices see a &mut Frine.
-            let _target_coll_id = target_coll_ident.unwrap();
             let marker_gh = marker.clone();
-            let _entity_self_indices: Vec<TokenStream2> = {
-                // Per-entity SelfBlock set_indices + __all_idx setup,
-                // needed when any Ref entity (other than the remote
-                // target) participates in a local CrossBlock and so
-                // needs its hb.indices set. Only populated when
-                // is_multi_cross.
-                if is_multi_cross {
-                    let root_ident_str_local = root_name.to_string();
-                    let mut v: Vec<TokenStream2> = Vec::new();
-                    for (_var_id, type_id, start, count) in &triplet_entities {
-                        if type_id.to_string() == root_ident_str_local { continue; }
-                        if *count == 0 { continue; }
-                        // Remote target's SelfBlock is set via __target_block below; skip.
-                        if type_id.to_string() == *target_type { continue; }
-                        let hb = registry_lookup(&type_id.to_string())
-                            .and_then(|l| l.self_block_field.clone())
-                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                                format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross/remote participant for set_indices)", type_id)))?;
-                        let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                        let end = start + count;
-                        let cnt = *count;
-                        let _ = (&hb_ident, &cnt, &start, &end);
-                        v.push(quote! {});
-                    }
-                    v
-                } else { Vec::new() }
-            };
-            let _tp_remote = triplet_param_count;
-            let _triplet_idx_stmts_remote = triplet_idx_stmts.clone();
+            // Every other entity a local CrossBlock couples needs its
+            // own SelfBlock for the diagonal writes.
+            if is_multi_cross {
+                let root_ident_str_local = root_name.to_string();
+                for (_var_id, type_id, _start, count) in &triplet_entities {
+                    if type_id.to_string() == root_ident_str_local { continue; }
+                    if *count == 0 { continue; }
+                    if type_id.to_string() == *target_type { continue; }
+                    registry_lookup(&type_id.to_string())
+                        .and_then(|l| l.self_block_field.clone())
+                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as a multi-cross/remote participant)", type_id)))?;
+                }
+            }
             // Remote-target writes go through the owning collection slot
             // (built into gh_stmts as `self.<coll>[__frine.<ref>].<block>`),
             // a temporary exclusive borrow per call -- disjoint from the
@@ -7275,55 +7170,9 @@ pub fn generate_root_methods(
             grad_hessian_loops.push(gh_loop);
 
 
-            if is_multi_cross {
-                // Multi-cross remote: emit per-CrossBlock set_indices on
-                // each frine alongside the target (remote) set_indices.
-                let mcb_calls: Vec<TokenStream2> = multi_cross_routing.iter().map(|r| {
-                    let block = &r.block_ident;
-                    let a_start = r.a_start; let a_end = r.a_start + r.a_count;
-                    let b_start = r.b_start; let b_end = r.b_start + r.b_count;
-                    let _ = (&block, &a_start, &a_end, &b_start, &b_end);
-                    quote! {}
-                }).collect();
-                let _rtw = remote_target_write.as_ref().unwrap();
-                let sbi_body = quote! {
-                    #(#entity_index_copies)*
-                    #(#resolve_stmts)*
-                    let __target_ref = #ref_field_ident;
-                    #(#mcb_calls)*
-                };
-                let sbi_loop = if parent_is_root {
-                    quote! { for __frine in self.#frines_ident.iter_mut() { #sbi_body } }
-                } else {
-                    quote! {
-                        for __lm in self.#coll_ident.iter_mut() {
-                            for __frine in __lm.#frines_ident.iter_mut() { #sbi_body }
-                        }
-                    }
-                };
-                let sbi_loop = rename_ident(
-                    rename_ident(sbi_loop, &parent_name, parent_rename_to), &root_var_name, "self");
-                set_block_indices_loops.push(sbi_loop);
-            } else {
-                let _rtw = remote_target_write.as_ref().unwrap();
-                let sbi_body = quote! {
-                    #(#entity_index_copies)*
-                    #(#resolve_stmts)*
-                    let __target_ref = #ref_field_ident;
-                };
-                let sbi_loop = if parent_is_root {
-                    quote! { for __frine in self.#frines_ident.iter() { #sbi_body } }
-                } else {
-                    quote! {
-                        for __lm in self.#coll_ident.iter() {
-                            for __frine in __lm.#frines_ident.iter() { #sbi_body }
-                        }
-                    }
-                };
-                let sbi_loop = rename_ident(
-                    rename_ident(sbi_loop, &parent_name, parent_rename_to), &root_var_name, "self");
-                set_block_indices_loops.push(sbi_loop);
-            }
+            // The remote form wires nothing at serialize: the store holds
+            // the indices and the marker its slot.
+            let _ = remote_target_write.as_ref().unwrap();
         } else if is_self_block {
             let self_var = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
             let marker = source_marker(sc);
@@ -7419,23 +7268,19 @@ pub fn generate_root_methods(
                             group.resolve_stmts = self_resolve_stmts.clone();
                         }
                         // A root./parent.<selfblock> constraint has no entity
-                        // block: registering one would emit set_indices on a
-                        // field the entity does not have. (The root's own
-                        // SelfBlock is wired by root_self_block_prelude; a
-                        // parent's by the passive nested wiring.) The block it
-                        // writes is the ancestor's, so that is what a split
-                        // store has to claim.
+                        // block of its own: the block it writes is the
+                        // ancestor's, so that is what a split store has to
+                        // claim.
                         if group.self_block.is_none() && root_self_primary.is_none()
                             && parent_self_primary.is_none() {
                             group.self_block = Some(SelfBlockInfo {
                                 a_param_count,
                                 a_idx_stmts: a_idx_stmts.clone(),
-                                block_ident: block_ident.clone(),
                             });
                         }
                         // The COO forms write the joined co-entity's
-                        // diagonal too -- `[hb, root.<triplet>]` the
-                        // root's, `[hb, parent.<triplet>]` the parent's --
+                        // diagonal too -- the root's or the parent's,
+                        // whichever the body reads params of --
                         // so every store sweeping this collection claims
                         // it, not just the one whose range opens on it.
                         let ancestor = if root_self_primary.is_some() || is_root_triplet_self {
@@ -7527,7 +7372,6 @@ pub fn generate_root_methods(
                         root_var_ident: root_var_ident.clone(),
                         a_param_count,
                         a_idx_stmts: a_idx_stmts.clone(),
-                        block_ident: block_ident.clone(),
                         type_name: a_type.clone(),
                         constraint_index_field: ci_field,
                         cost_entries: Vec::new(), ct_entries: Vec::new(),
@@ -7541,10 +7385,10 @@ pub fn generate_root_methods(
                 }
             }
         } else if is_triplet || is_multi_cross {
-            // TripletBlock or multi-CrossBlock: N-ary constraint, flat
+            // `coo` or multi-CrossBlock: N-ary constraint, flat
             // iteration on root collection. Both share the outer loop +
             // __all_idx setup; emission differs only in the gh_stmts
-            // contents (single TripletBlock call vs. per-pair CrossBlock
+            // contents (one COO call vs. per-pair CrossBlock
             // calls). set_block_indices is populated with per-CrossBlock
             // set_indices when multi_cross_blocks is non-empty.
             let rc_ident = frines_ident.unwrap();
@@ -7626,7 +7470,7 @@ pub fn generate_root_methods(
             } else { None };
 
             // The constraint declared CrossBlock fields of its own; empty
-            // for single-TripletBlock constraints.
+            // for `coo` constraints.
             let is_mcb = !multi_cross_routing.is_empty();
 
             // Every participant carries its own diagonal and gradient, so
@@ -7640,7 +7484,7 @@ pub fn generate_root_methods(
                 registry_lookup(&type_id.to_string())
                     .and_then(|l| l.self_block_field.clone())
                     .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                        format!("type `{}` must declare a `SelfBlock<Self>` field (required as a multi-cross/triplet participant)", type_id)))?;
+                        format!("type `{}` must declare a `SelfBlock<Self>` field (required as a multi-cross or `coo` participant)", type_id)))?;
                 entity_access_expr(&var_id.to_string())?;
             }
 
@@ -7653,12 +7497,10 @@ pub fn generate_root_methods(
                     rc_ident: rc_ident.clone(),
                     prefix: cross_prefix.clone(),
                     triplet_param_count,
-                    block_ident: block_ident.clone(),
                     constraint_index_field: ci_field,
                     triplet_idx_stmts: triplet_idx_stmts.clone(),
                     entity_offsets: triplet_entity_offsets.clone(),
                     resolve_stmts: resolve_stmts.clone(),
-                    entity_index_copies: entity_index_copies.clone(),
                     root_var_ident: root_var_ident.clone(),
                     cost_entries: Vec::new(), ct_entries: Vec::new(),
                     gh_entries: Vec::new(),
@@ -7870,7 +7712,7 @@ pub fn generate_root_methods(
             group.nested_colls.push(frines_ident.clone());
             if let Some(nj) = nested_jac { group.nested_jac_loops.push(nj); }
 
-            {
+            if has_ci {
                 let ci_set_nested = crate::registry_lookup(&sc.struct_name)
                     .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
                         let fi = syn::Ident::new(f, proc_macro2::Span::call_site());
@@ -8080,11 +7922,8 @@ pub fn generate_root_methods(
             }));
         }
 
-        // set_block_indices loop (only if there's a SelfBlock)
-        if let Some(ref sb) = group.self_block {
-            let _a_count = sb.a_param_count;
-            let _a_idx = &sb.a_idx_stmts;
-            let _block = &sb.block_ident;
+        // Constraint ids, one per instance (only if there's a SelfBlock).
+        if has_ci && group.self_block.is_some() {
             let a_type_name = a_type.to_string();
             let ci_set = crate::registry_lookup(&a_type_name)
                 .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
@@ -8097,166 +7936,6 @@ pub fn generate_root_methods(
                     __cid += 1;
                 }
             }));
-        }
-    }
-
-    // Auto-wire SelfBlock indices for "passive" entities: structs that have
-    // Param + SelfBlock<Self> but no self-constraint referencing that block,
-    // yet participate as A or B in some cross-block (e.g. landmarks in a
-    // BA-style problem where bearings are owned by a peer struct). Without
-    // this loop the macro emits add_residual calls into a SelfBlock whose
-    // parameter indices are still u32::MAX, so its contributions silently
-    // get dropped by accumulate_hessian -- the Hessian diagonal stays zero
-    // and Cholesky blows up.
-    //
-    // A self-constraint would have created a collection_group with self_block
-    // populated; the loop above already emits set_indices for those. Here we
-    // walk root's collections one more time and emit set_indices for any
-    // collection whose inner type has Param + SelfBlock but no group entry.
-    // No __cid bump -- this isn't a constraint, just index wiring.
-    {
-        let mut wired: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (key, group) in &collection_groups {
-            if group.self_block.is_some() { wired.insert(key.clone()); }
-        }
-        let root_fields_passive: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
-        for field in &root_fields_passive.named {
-            let field_ident = match field.ident.as_ref() {
-                Some(i) => i.clone(),
-                None => continue,
-            };
-            let field_name = field_ident.to_string();
-            if wired.contains(&field_name) { continue; }
-            // Pull T from Vec<T> / Deque<T> / refs::Vec<T> / refs::Deque<T>.
-            // Filter on the OUTER segment name so SelfBlock<Self> / CrossBlock<...>
-            // / Param<...> / Option<...> at the root don't get misread as
-            // collections of their first type argument.
-            let inner_name: Option<String> = if let syn::Type::Path(tp) = &field.ty
-                && let Some(seg) = tp.path.segments.last()
-                && matches!(seg.ident.to_string().as_str(), "Vec" | "Deque" | "Arena")
-                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-            { type_ident_name(inner).ok() } else { None };
-            let type_name = match inner_name { Some(s) => s, None => continue };
-            if !reachable.contains(&type_name) { continue; }
-            let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
-            // No `param_fields.is_empty()` pre-filter here: it counts only
-            // DIRECT Param fields, so an entity whose params live entirely
-            // inside an #[arael(component)] was skipped and its SelfBlock
-            // never got indices -- every gradient and Hessian contribution
-            // to it silently dropped. `param_slots` below walks components,
-            // and the `offset == 0` guard covers the param-less case.
-            let hb_field = match layout.self_block_field.clone() {
-                Some(s) => s, None => continue,
-            };
-            let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
-            let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();
-            let mut offset = 0usize;
-            for slot in param_slots(&type_name) {
-                let size = param_slot_size(&slot.sft);
-                if size == 0 { continue; }
-                let end = offset + size;
-                let access = slot_access(quote! { __item }, &slot.path);
-                a_idx_stmts.push(quote! {
-                    #access.write_indices(&mut __a_idx[#offset..#end]);
-                });
-                offset = end;
-            }
-            if offset == 0 { continue; }
-            let a_count = offset;
-            let _ = (&field_ident, &hb_ident, &a_count, &a_idx_stmts);
-        }
-
-        // Same pass for passive DIRECT-COMPOSED entities: a bare
-        // struct-typed root field holding Params + SelfBlock<Self> with no
-        // self-constraint kept u32::MAX indices (the exact silent-drop
-        // this wiring exists to prevent, in the DirectField location).
-        // set_indices is idempotent, so re-wiring an already-wired block
-        // is harmless.
-        for field in &root_fields_passive.named {
-            let field_ident = match field.ident.as_ref() {
-                Some(i) => i.clone(),
-                None => continue,
-            };
-            // Generic args are ignored: `pose: Pose<f32>` resolves the
-            // same layout as `pose: Pose` (shapes are precision-free).
-            let type_name = if let syn::Type::Path(tp) = &field.ty
-                && let Some(seg) = tp.path.segments.last()
-            { seg.ident.to_string() } else { continue };
-            if !reachable.contains(&type_name) { continue; }
-            let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
-            // No `param_fields.is_empty()` pre-filter here: it counts only
-            // DIRECT Param fields, so an entity whose params live entirely
-            // inside an #[arael(component)] was skipped and its SelfBlock
-            // never got indices -- every gradient and Hessian contribution
-            // to it silently dropped. `param_slots` below walks components,
-            // and the `offset == 0` guard covers the param-less case.
-            let hb_field = match layout.self_block_field.clone() {
-                Some(s) => s, None => continue,
-            };
-            let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
-            let mut idx_stmts: Vec<TokenStream2> = Vec::new();
-            let mut offset = 0usize;
-            for slot in param_slots(&type_name) {
-                let size = param_slot_size(&slot.sft);
-                if size == 0 { continue; }
-                let end = offset + size;
-                let access = slot_access(quote! { self.#field_ident }, &slot.path);
-                idx_stmts.push(quote! {
-                    #access.write_indices(&mut __d_idx[#offset..#end]);
-                });
-                offset = end;
-            }
-            if offset == 0 { continue; }
-            let d_count = offset;
-            let _ = (&field_ident, &hb_ident, &d_count, &idx_stmts);
-        }
-
-        // Passive NESTED entities: a block-bearing entity two or more hops
-        // below the root (e.g. root.paths[k].poses) with no self-constraint.
-        // The two passes above reach only the root's own collections / direct
-        // fields; walk the reachable set for anything whose location is Nested
-        // and wire its SelfBlock through the same prefix loops. Sorted
-        // iteration keeps emission deterministic (B11); the `wired` skip avoids
-        // double-wiring an entity a self-constraint already handled.
-        let mut nested_types: Vec<&String> = reachable.iter().collect();
-        nested_types.sort();
-        for type_name in nested_types {
-            let segments = match resolve_entity_location(root_fields, &root_name.to_string(), type_name) {
-                Some(EntityLocation::Nested { segments }) => segments,
-                _ => continue, // root-self / direct / one-hop handled above
-            };
-            let joined: String = segments.iter().map(|s| s.field.clone())
-                .collect::<Vec<_>>().join(".");
-            if wired.contains(&joined) { continue; }
-            let layout = match registry_lookup(type_name) { Some(l) => l, None => continue };
-            // No `param_fields.is_empty()` pre-filter here: it counts only
-            // DIRECT Param fields, so an entity whose params live entirely
-            // inside an #[arael(component)] was skipped and its SelfBlock
-            // never got indices -- every gradient and Hessian contribution
-            // to it silently dropped. `param_slots` below walks components,
-            // and the `offset == 0` guard covers the param-less case.
-            let hb_field = match layout.self_block_field.clone() { Some(s) => s, None => continue };
-            let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
-            let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();
-            let mut offset = 0usize;
-            for slot in param_slots(type_name) {
-                let size = param_slot_size(&slot.sft);
-                if size == 0 { continue; }
-                let end = offset + size;
-                let access = slot_access(quote! { __item }, &slot.path);
-                a_idx_stmts.push(quote! {
-                    #access.write_indices(&mut __a_idx[#offset..#end]);
-                });
-                offset = end;
-            }
-            if offset == 0 { continue; }
-            let a_count = offset;
-            let prefix = &segments[..segments.len() - 1];
-            let coll_ident = syn::Ident::new(&segments.last().unwrap().field,
-                proc_macro2::Span::call_site());
-            let _ctn = nested_container(prefix);
-            let _ = (&coll_ident, &hb_ident, &a_count, &a_idx_stmts);
         }
     }
 
@@ -8274,7 +7953,6 @@ pub fn generate_root_methods(
         let root_var = &group.root_var_ident;
         let a_count = group.a_param_count;
         let a_idx_stmts = &group.a_idx_stmts;
-        let block_ident = &group.block_ident;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
         let jac_entries = &group.jac_entries;
@@ -8366,11 +8044,12 @@ pub fn generate_root_methods(
             }));
         }
 
-        let _ = (&block_ident, &a_count, &a_idx_stmts);
-        merged_sbi.push(wrap(accessor_write, quote! {
-            #ci_set
-            __cid += 1;
-        }));
+        if has_ci {
+            merged_sbi.push(wrap(accessor_write, quote! {
+                #ci_set
+                __cid += 1;
+            }));
+        }
     }
 
     // Emit merged cross-constraint loops (one per collection, all attributes inside)
@@ -8380,7 +8059,6 @@ pub fn generate_root_methods(
         let ctn = nested_container(prefix);   // `self` (root-level) or `__seg{n-1}` (nested)
         let a_param_count = group.a_param_count;
         let b_param_count = group.b_param_count;
-        let _block_ident = &group.block_ident;
         let a_idx_stmts = &group.a_idx_stmts;
         let b_idx_stmts = &group.b_idx_stmts;
         let resolve_stmts = &group.resolve_stmts;
@@ -8444,71 +8122,56 @@ pub fn generate_root_methods(
             }));
         }
 
-        set_block_indices_loops.push(wrap_in_prefix(prefix, true,
-            if group.parent_refs_mode {
-                // Parent-refs form: resolve and wire once per parent (the
-                // pair is the parent's own, nothing to cross-check). An
-                // empty collection leaves the block unwired and inert. The
-                // per-instance loop only assigns constraint IDs.
-                quote! {
-                    for __frine in #ctn.#rc_ident.iter_mut() {
-                        let _ = &__frine;
-                        #ci_set
-                        __cid += 1;
-                    }
-                }
-            } else if let Some((cname, pdesc)) = &group.parent_cross_desc {
-                // Shared parent block: wire once per parent from the first
-                // instance's pair; every further instance must agree -- one
-                // accumulator holds exactly one (A, B) tile. Checked here
-                // (once per solve setup), not per iteration.
-                let msg = syn::LitStr::new(&format!(
-                    "{}: all instances under one parent must reference the same \
-                     entity pair -- they share the CrossBlock `{}`; the first \
-                     instance wired param indices ({{:?}}, {{:?}}), a later \
-                     instance has ({{:?}}, {{:?}})",
-                    cname, pdesc), proc_macro2::Span::call_site());
-                quote! {
-                    let mut __wired: Option<([u32; #a_param_count], [u32; #b_param_count])> = None;
-                    for __frine in #ctn.#rc_ident.iter_mut() {
-                        #(#resolve_stmts)*
-                        let mut __a_idx = [0u32; #a_param_count];
-                        #(#a_idx_stmts)*
-                        let mut __b_idx = [0u32; #b_param_count];
-                        #(#b_idx_stmts)*
-                        match &__wired {
-                            None => {
-                                __wired = Some((__a_idx, __b_idx));
-                            }
-                            Some((__wa, __wb)) => {
-                                if *__wa != __a_idx || *__wb != __b_idx {
-                                    panic!(#msg, __wa, __wb, __a_idx, __b_idx);
-                                }
+        if !group.parent_refs_mode && let Some((cname, pdesc)) = &group.parent_cross_desc {
+            // Shared parent block: every instance under one parent must
+            // agree on its pair -- one accumulator holds exactly one
+            // (A, B) tile. Checked once per solve setup, not per
+            // iteration. (The parent-refs form has nothing to check: the
+            // pair is the parent's own.)
+            let msg = syn::LitStr::new(&format!(
+                "{}: all instances under one parent must reference the same \
+                 entity pair -- they share the CrossBlock `{}`; the first \
+                 instance wired param indices ({{:?}}, {{:?}}), a later \
+                 instance has ({{:?}}, {{:?}})",
+                cname, pdesc), proc_macro2::Span::call_site());
+            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+                let mut __wired: Option<([u32; #a_param_count], [u32; #b_param_count])> = None;
+                for __frine in #ctn.#rc_ident.iter_mut() {
+                    #(#resolve_stmts)*
+                    let mut __a_idx = [0u32; #a_param_count];
+                    #(#a_idx_stmts)*
+                    let mut __b_idx = [0u32; #b_param_count];
+                    #(#b_idx_stmts)*
+                    match &__wired {
+                        None => {
+                            __wired = Some((__a_idx, __b_idx));
+                        }
+                        Some((__wa, __wb)) => {
+                            if *__wa != __a_idx || *__wb != __b_idx {
+                                panic!(#msg, __wa, __wb, __a_idx, __b_idx);
                             }
                         }
-                        #ci_set
-                        __cid += 1;
                     }
+                    #ci_set
+                    #cid_bump
                 }
-            } else {
-                quote! {
-                    for __frine in #ctn.#rc_ident.iter_mut() {
-                        #ci_set
-                        __cid += 1;
-                    }
+            }));
+        } else if has_ci {
+            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+                for __frine in #ctn.#rc_ident.iter_mut() {
+                    #ci_set
+                    __cid += 1;
                 }
-            }
-        ));
+            }));
+        }
     }
 
-    // Emit merged TripletBlock loops (one per collection, with set_block_indices)
+    // Emit the merged N-ary loops, one per collection.
     for group in triplet_groups.values() {
         let rc_ident = &group.rc_ident;
         let tp = group.triplet_param_count;
-        let block_ident = &group.block_ident;
         let triplet_idx_stmts = &group.triplet_idx_stmts;
         let resolve_stmts = &group.resolve_stmts;
-        let entity_index_copies = &group.entity_index_copies;
         let root_var = &group.root_var_ident;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
@@ -8569,7 +8232,7 @@ pub fn generate_root_methods(
 
         let entity_offsets = &group.entity_offsets;
         let entity_offsets_len = entity_offsets.len();
-        // Only a TripletBlock write reads the index array and the entity
+        // Only a COO write reads the index array and the entity
         // spans -- self and cross writes reach the store by their slot --
         // and the loop-level resolves are there to feed that build, the
         // entries re-establishing their own bindings. Several entry forms
@@ -8614,19 +8277,16 @@ pub fn generate_root_methods(
             }));
         }
 
-        // Nothing is wired here any more -- the store holds the indices,
-        // and the blocks their slot -- so what is left is the constraint
-        // id. The walk stays even when no field takes one: the ids are a
-        // single sequence over every group, so this collection still has
-        // to move the counter past its instances.
-        set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
-            for __frine in #ctn.#rc_ident.iter_mut() {
-                let _ = &__frine;
-                #ci_set
-                __cid += 1;
-            }
-        }));
-        let _ = (block_ident, triplet_idx_stmts, resolve_stmts, entity_index_copies);
+        // The store holds the indices and the blocks their slot, so what
+        // is left is the constraint id.
+        if has_ci {
+            set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+                for __frine in #ctn.#rc_ident.iter_mut() {
+                    #ci_set
+                    __cid += 1;
+                }
+            }));
+        }
     }
 
     // Prepend merged SelfBlock loops before cross/triplet loops
@@ -8665,6 +8325,22 @@ pub fn generate_root_methods(
     let jacobian_loops = ordered_jac;
     let mut ordered_sbi = merged_sbi; ordered_sbi.append(&mut set_block_indices_loops);
     let set_block_indices_loops = ordered_sbi;
+    // The numbering walk, and the parent-cross agreement check that rides
+    // it; nothing at all when neither applies.
+    let (number_constraints_fn, number_constraints_call) = if set_block_indices_loops.is_empty() {
+        (quote! {}, quote! {})
+    } else {
+        let cid_decl = if has_ci { quote! { let mut __cid: u32 = 0; } } else { quote! {} };
+        (quote! {
+            /// Number every constraint instance in walk order, for the
+            /// `constraint_index` fields, and check that the instances
+            /// sharing a parent's CrossBlock agree on their pair.
+            fn __number_constraints(&mut self) {
+                #cid_decl
+                #(#set_block_indices_loops)*
+            }
+        }, quote! { self.__number_constraints(); })
+    };
 
     // Generate methods on root -- precision-aware
     let prec_type: syn::Type = syn::parse_str(precision)
@@ -9129,7 +8805,6 @@ pub fn generate_root_methods(
         for type_name in types {
             let Some(layout) = registry_lookup(type_name) else { continue };
             // Every block field the type declares, in a stable order.
-            // TripletBlock keeps its own storage and takes no slot.
             let mut fields: Vec<String> = Vec::new();
             if let Some(hb) = &layout.self_block_field { fields.push(hb.clone()); }
             for (f, _, _, _) in &layout.cross_block_fields { fields.push(f.clone()); }
@@ -9233,7 +8908,6 @@ pub fn generate_root_methods(
     // appends the block wiring / the extended-deserialize hook (the latter
     // via UFCS -- it carries no width in its signature).
     let mut tokens = quote! {
-        #(#constraint_impls)*
 
         /// Every Hessian block of this root, as one array per container
         /// and block field. Owned by the solve context, not the model.
@@ -9273,8 +8947,7 @@ pub fn generate_root_methods(
             }
             // The three walks below share the position stream's cursor,
             // so they must agree on this order -- the arrays as declared,
-            // and the root's own walk after them for whatever
-            // `TripletBlock`s the model still holds.
+            // then the COO list.
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 #(self.#store_names.collect_hessian_cells(out);)*
                 self.__coo.collect_hessian_cells(out);
@@ -9311,7 +8984,8 @@ pub fn generate_root_methods(
         impl arael::simple_lm::RootProblem<#prec_type> for #root_name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
                 arael::model::Model::serialize_params(self, data);
-                self.__set_block_indices();
+                #number_constraints_call
+                self.__assign_block_slots();
             }
             fn deserialize(&mut self, data: &[#prec_type]) {
                 arael::model::Model::deserialize_params(self, data);
@@ -9327,13 +9001,7 @@ pub fn generate_root_methods(
         }
 
         impl #root_name {
-            fn __set_block_indices(&mut self) {
-                let mut __cid: u32 = 0;
-                let _ = &__cid; // suppress unused warning when no constraint_index fields
-                #root_self_block_prelude
-                #(#set_block_indices_loops)*
-                self.__assign_block_slots();
-            }
+            #number_constraints_fn
 
             /// Number every block by its position in its container's
             /// array of the solve's block store. One walk per containment
@@ -9469,7 +9137,7 @@ pub fn generate_root_methods(
             // One assembly against a given store: the caller decides
             // whether that is the solve context's or one of its own.
             // The store's arrays come first in every walk that shares the
-            // position stream, then the model's own for its TripletBlocks.
+            // position stream, then its COO list.
             fn __gh_dense_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type], __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
@@ -9525,7 +9193,7 @@ pub fn generate_root_methods(
                   __tm.scatter += __c.stop(__t); }
                 // The cached position map is replayed by cursor and assumes
                 // an identical entry sequence every iteration. A shorter
-                // sequence (a TripletBlock or extended constraint emitting
+                // sequence (a `coo` constraint or an extended hook emitting
                 // fewer entries than when the pattern was built) would
                 // scatter every subsequent block into wrong slots -- a
                 // silently wrong Hessian.
@@ -9895,15 +9563,14 @@ fn interpret_constraint_body(
         // = a_type.lower() is always a duplicate of a ref field on the
         // struct. For remote-block + multi-cross, parent_name names the
         // parent *type* (e.g. `lm` -> PointLandmark) which is distinct
-        // from the refs. For self-primary + `root.<triplet>`, there is
+        // from the refs. For `[hb, coo]` joined to the root, there is
         // no Ref<Self> field and parent_name is the only path that
         // resolves `<self_lc>.*` in the body.
         let has_root_triplet_block = constraint.block_fields.iter()
             .any(|bf| bf.starts_with("root."))
             || matches!(coo_join, Some((true, _, _)));
-        // `[hb, parent.<triplet>]`: a parent-owned triplet in the
-        // SECONDARY slot (a `parent.` primary is the selfblock or
-        // crossblock form, never a triplet).
+        // `[hb, coo]` joined to the parent (a `parent.` primary is the
+        // selfblock or crossblock form, never this).
         let has_parent_triplet_block = !is_parent_primary && mixed.is_none()
             && (constraint.block_fields.iter().any(|bf| bf.starts_with("parent."))
                 || matches!(coo_join, Some((false, true, _))));
@@ -10090,7 +9757,7 @@ fn interpret_constraint_body(
     let is_multi_cross = constraint.block_fields.len() > 1 || mixed.is_some();
 
     // Root-as-entity: if any declared local CrossBlock references the
-    // root type, OR any block is `root.<triplet>`, include root's
+    // root type, OR `coo` joins the root, include root's
     // Params in the symbol set too.
     let has_root_entity = is_multi_cross && (matches!(coo_join, Some((true, _, _)))
         || constraint.block_fields.iter().any(|bf| {
@@ -10103,7 +9770,7 @@ fn interpret_constraint_body(
     }));
 
     if is_triplet || is_multi_cross {
-        // TripletBlock / multi-cross: collect params from ALL ref fields
+        // `coo` / multi-cross: collect params from ALL ref fields
         // (no A/B distinction). Root's Params are included when a
         // declared CrossBlock<X, Root> opts the root into the constraint
         // (has_root_entity) — the root is bound as `<root_lc>` in the
@@ -10344,8 +10011,8 @@ pub(crate) fn check_residual_coverage(
     // Tailor the hint to the shape of the mismatch. Three cases:
     //  (1) Every missing param's top-level binding is a `Ref<T>` field on the
     //      constraint struct itself — so the user HAS enough refs declared,
-    //      just too many of them for a CrossBlock. Switching the block to
-    //      `TripletBlock<T>` covers all ref-referenced entities at once.
+    //      just too many of them for a CrossBlock. `coo` covers all
+    //      ref-referenced entities at once.
     //  (2) Some missing param references something not in the struct's refs
     //      (typically a root-level ident like `path.foo`) — root-level params
     //      don't have a block slot yet.

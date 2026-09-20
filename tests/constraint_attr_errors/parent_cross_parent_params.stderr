@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/parent_cross_parent_params.rs:18: `parent.hb`: `Pair` has its own Param fields -- the parent of a shared CrossBlock is a plain container; couple parent params through `parent.<selfblock>` or `[hb, parent.<triplet>]` instead
+error: $DIR/tests/constraint_attr_errors/parent_cross_parent_params.rs:18: `parent.hb`: `Pair` has its own Param fields -- the parent of a shared CrossBlock is a plain container; couple parent params through `parent.<selfblock>` or `[hb, coo]` instead
   --> tests/constraint_attr_errors/parent_cross_parent_params.rs:35:1
    |
 35 | #[arael::model]

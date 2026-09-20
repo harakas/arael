@@ -11,7 +11,7 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, LmProblem, RootProblem, LmProblemInternals};
+use arael::simple_lm::{block_partition_from_spans, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use arael_faer::schur::{schur_backsub, schur_reduce, schur_symbolic, SchurContext};
 use scene::SceneConfig;
