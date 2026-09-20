@@ -9371,7 +9371,7 @@ pub fn generate_root_methods(
 
         // The solver-facing half: the routes a backend picks, the
         // context forms, the structure walks and the elimination
-        // hints. Hidden from the docs, generated in full here.
+        // hints. Inner API, generated in full here.
         impl arael::simple_lm::LmProblemInternals<#prec_type> for #root_name {
             fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
             #extended_probe_fn

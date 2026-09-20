@@ -1319,9 +1319,9 @@ pub trait LmProblem<T> {
 /// ```
 ///
 /// `#[arael(root)]` models get a real implementation from the macro.
-/// Hidden from the docs on purpose -- it is arael's own interface, not
-/// an API to program against, and it may change without a major bump.
-#[doc(hidden)]
+/// Inner API: arael's own interface, public so a caller can reach the
+/// context forms and the structure walks, not an API to program against.
+/// It may change without a major bump.
 pub trait LmProblemInternals<T>: LmProblem<T> {
     /// Assemble gradient and Hessian in upper-band format (column-major, (kd+1)*n).
     /// Returns the cost at `params`, or Err if any block exceeds the
@@ -1351,19 +1351,19 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     /// the context's thread count, builds the cut that divides its walks
     /// among them, and fills them here. Default: nothing.
     fn begin_with_context(&mut self, _ctx: &mut crate::threads::Context) {}
-    /// [`calc_cost`](Self::calc_cost) under a solve context. A root
+    /// [`calc_cost`](LmProblem::calc_cost) under a solve context. A root
     /// evaluates over the context's stores; the default ignores the
     /// context. The solve entries call these forms of the evaluations
     /// and the structure walks; the plain ones stay for direct use.
     fn calc_cost_with_context(&mut self, params: &[T], _ctx: &mut crate::threads::Context) -> T {
         self.calc_cost(params)
     }
-    /// [`calc_grad_hessian_dense`](Self::calc_grad_hessian_dense) under a
+    /// [`calc_grad_hessian_dense`](LmProblem::calc_grad_hessian_dense) under a
     /// solve context.
     fn calc_grad_hessian_dense_with_context(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T], _ctx: &mut crate::threads::Context) -> T {
         self.calc_grad_hessian_dense(params, grad, hessian)
     }
-    /// [`calc_grad_hessian_sparse`](Self::calc_grad_hessian_sparse) under
+    /// [`calc_grad_hessian_sparse`](LmProblem::calc_grad_hessian_sparse) under
     /// a solve context.
     fn calc_grad_hessian_sparse_with_context(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>, _ctx: &mut crate::threads::Context) -> T {
         self.calc_grad_hessian_sparse(params, grad, coo)
