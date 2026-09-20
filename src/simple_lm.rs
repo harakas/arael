@@ -1403,7 +1403,7 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     /// Must be redone whenever the pattern or the indices change.
     fn bind_hessian_positions(
         &mut self,
-        _binder: &mut crate::model::HessianBinder,
+        _binder: &mut crate::store::HessianBinder,
         _out: &mut std::vec::Vec<ValueIndex>,
         _ctx: &mut crate::threads::Context,
     ) {}
@@ -1424,7 +1424,7 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
         let mut k = 0usize;
         let mut positions = std::vec::Vec::new();
         self.bind_hessian_positions(
-            &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
+            &mut crate::store::HessianBinder::Scalar(&mut |_, _| {
                 let p = map[k];
                 k += 1;
                 p as usize
@@ -3993,7 +3993,7 @@ fn assemble_first_csc<T: Float>(
             let (built, mut resolver) = csc_from_cells::<T>(&partition, &cells);
             let mut positions = std::vec::Vec::new();
             problem.bind_hessian_positions(
-                &mut crate::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+                &mut crate::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                 &mut positions,
                 ctx,
             );
@@ -5402,7 +5402,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 let (csc, mut resolver) = csc_from_cells::<T>(partition, cells);
                 let mut positions = std::vec::Vec::new();
                 problem.bind_hessian_positions(
-                    &mut crate::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+                    &mut crate::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                     &mut positions,
                     ctx,
                 );
@@ -5555,7 +5555,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
         let mut positions = std::vec::Vec::new();
         problem.bind_hessian_positions(
-            &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+            &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)
             }),
             &mut positions,
@@ -5758,7 +5758,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
         let mut positions = std::vec::Vec::new();
         problem.bind_hessian_positions(
-            &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+            &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)
             }),
             &mut positions,
@@ -6669,7 +6669,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
         let mut positions = std::vec::Vec::new();
         problem.bind_hessian_positions(
-            &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+            &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)
             }),
             &mut positions,

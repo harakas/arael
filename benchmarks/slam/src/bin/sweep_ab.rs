@@ -13,7 +13,7 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::model::HessianBinder;
+use arael::store::HessianBinder;
 use arael::simple_lm::{block_partition_from_spans, csc_from_cells, LmProblemInternals, RootProblem};
 use arael::threads::{Context, ParTiming};
 use scene::{SceneConfig, Trajectory};

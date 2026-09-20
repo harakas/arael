@@ -853,7 +853,7 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     let mut positions = Vec::new();
     LmProblemInternals::bind_hessian_positions(
         m,
-        &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+        &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
             resolver.resolve_tile(i as usize, j as usize)
         }),
         &mut positions,

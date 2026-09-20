@@ -123,7 +123,7 @@ fn main() {
         let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_block.len());
         LmProblemInternals::bind_hessian_positions(
             &mut path,
-            &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
+            &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
             &mut out,
             &mut ctx,
         );
@@ -143,7 +143,7 @@ fn main() {
         let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_scalar.len());
         LmProblemInternals::bind_hessian_positions(
             &mut path,
-            &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+            &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut out,
             &mut ctx,
         );
