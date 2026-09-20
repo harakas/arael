@@ -382,6 +382,8 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         let rs3 = sess.solve(&mut f13, &cfg).unwrap();
         assert_eq!(rs3.end_cost, rs1.end_cost, "cold-again must agree");
         assert_eq!(g("sess_invalidate_agrees"), 1.0);
+        // The push changes the structure: a warm solve through it fails.
+        sess.invalidate();
         f13.items.push(N {
             v: Param::default(),
             t: 0.5,

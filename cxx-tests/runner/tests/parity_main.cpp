@@ -269,6 +269,8 @@ int main() {
         f13.items()[i].set_v(0.0);
     LmResult rs3 = sess.solve(f13, cfg).value();
     pi("sess_invalidate_agrees", rs3.end_cost == rs1.end_cost ? 1 : 0);
+    // The push changes the structure: a warm solve through it fails.
+    sess.invalidate();
     auto n13 = f13.items().push();
     n13.set_t(0.5);
     n13.set_w(1.0);

@@ -8515,6 +8515,10 @@ pub fn generate_root_methods(
     // The cross arrays, in a stable order, so a store's run can be told
     // which global slot it opens on.
     let mut store_cross_names: Vec<syn::Ident> = Vec::new();
+    // Per cross array, one count term per path to its type, for the
+    // shape a build is recorded under.
+    let mut store_cross_counts: std::collections::HashMap<String, Vec<TokenStream2>> =
+        std::collections::HashMap::new();
     let mut build_walks: Vec<TokenStream2> = Vec::new();
     {
         let mut types: Vec<&String> = reachable.iter().collect();
@@ -8632,6 +8636,8 @@ pub fn generate_root_methods(
                             __store.#name.push(&#ai, &#bi);
                         }
                     });
+                    store_cross_counts.entry(name.to_string()).or_default()
+                        .push(slot_count_expr(&path));
                     if store_seen.insert(name.to_string()) {
                         store_cross_names.push(name.clone());
                         store_names.push(name);
@@ -8676,6 +8682,17 @@ pub fn generate_root_methods(
         let terms = &store_self_counts[&name.to_string()];
         quote! { (0u64 #(+ #terms)*) as usize }
     }).collect();
+    // The model's shape: the count of every block array, self arrays
+    // then cross arrays. A build is recorded under it, and a direct call
+    // with a model of another shape trips on it. Counts only: the same
+    // counts with other refs pass, so it is a tripwire, not the contract
+    // (a context is for one structure).
+    let store_shape_terms: Vec<TokenStream2> = store_self_names.iter()
+        .map(|name| &store_self_counts[&name.to_string()])
+        .chain(store_cross_names.iter().map(|name| &store_cross_counts[&name.to_string()]))
+        .map(|terms| quote! { (0u64 #(+ #terms)*) })
+        .collect();
+    let n_shape = store_shape_terms.len();
 
     // A root that did not ask for `par` keeps one store and no cut: an
     // empty cut is the whole model in one store, which is what every walk
@@ -9068,16 +9085,39 @@ pub fn generate_root_methods(
             /// is filled once and then reused, so a model whose blocks
             /// have changed -- a fixed parameter, a collection resized
             /// -- needs a fresh one, which is what every solve gets in
-            /// `begin_with_context`.
+            /// `begin_with_context`. A model of another shape, by its
+            /// block-array counts, panics here; the same counts with
+            /// other refs are not told apart.
             #[doc(hidden)]
             pub fn __blocks_in(&self, ctx: &mut arael::threads::Context) {
-                if ctx.blocks_list::<#store_ty>().is_some() { return; }
+                let __shape = self.__shape();
+                if ctx.blocks_list::<#store_ty>().is_some() {
+                    // Stale stores hold another model's parameter indices
+                    // and the sweep would write through them. A model of
+                    // the same counts but other refs is not told apart,
+                    // so this is a tripwire, not a repair.
+                    assert!(ctx.shape() == &__shape[..],
+                        "{}: a Context holds the structure it was built for, and this \
+                         model's block counts differ from it -- use a fresh Context for \
+                         another model (a solve builds its own)",
+                        stringify!(#root_name));
+                    return;
+                }
                 ctx.cut_mut().clear();
                 let (__stores, __cut) = ctx.stores_mut::<#store_ty>(1);
                 let mut __base = [0u32; #n_cross];
                 for (__s, __store) in __stores.iter_mut().enumerate() {
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
+                ctx.set_shape(&__shape);
+            }
+
+            /// The model's count per block array, self arrays then cross
+            /// arrays: what a build is recorded under, so a context can
+            /// tell a model of another shape from the one it holds.
+            #[doc(hidden)]
+            pub fn __shape(&self) -> [u64; #n_shape] {
+                [#(#store_shape_terms),*]
             }
 
             /// Returns the cost (sum of squared residuals, excluding
@@ -9340,6 +9380,7 @@ pub fn generate_root_methods(
                 for (__s, __store) in __stores.iter_mut().enumerate() {
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
+                ctx.set_shape(&self.__shape());
             }
             fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
                 let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();

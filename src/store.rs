@@ -223,6 +223,16 @@ impl Context {
 
     /// The cut, to build.
     pub fn cut_mut(&mut self) -> &mut Cut { &mut self.cut }
+
+    /// The shape the stores were built for: the model's count per block
+    /// array, in array order. Empty until a build records one.
+    pub fn shape(&self) -> &[u64] { &self.shape }
+
+    /// Record the shape a build was made for.
+    pub fn set_shape(&mut self, shape: &[u64]) {
+        self.shape.clear();
+        self.shape.extend_from_slice(shape);
+    }
 }
 
 /// The store list for `S` in `blocks`, `n` long at least, replacing

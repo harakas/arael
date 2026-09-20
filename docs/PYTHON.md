@@ -385,9 +385,10 @@ r.plan                       # the SchurPlan the backend used; None for dense an
 
 `LmSession(opts=None)` keeps the sparsity analysis (pattern,
 ordering, symbolic factorization, Schur plan) across repeated solves
-of the same structure; warm solves are bit-identical to cold ones. A
-parameter-count change re-analyzes by itself; call `invalidate()`
-after a structural change at the same count:
+of the same structure; warm solves are bit-identical to cold ones.
+Call `invalidate()` after any structural change: a changed parameter
+or block count without it fails the solve, and a change that keeps
+every count solves warm through stale analysis:
 
 ```python
 sess = fit.LmSession()

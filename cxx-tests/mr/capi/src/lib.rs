@@ -1037,10 +1037,11 @@ pub unsafe extern "C" fn decay_solve_sparse(
 /// A warm-reuse session over the sparse backend (Rust's LmSession):
 /// keeps the analysis -- pattern, ordering, symbolic factorization,
 /// Schur plan -- across solves, so only the first pays for it. Warm
-/// solves are bit-identical to cold ones. A parameter-count change
-/// re-analyzes by itself; decay_session_invalidate covers a
-/// structural change at the same count (solving warm through one is
-/// undefined).
+/// solves are bit-identical to cold ones. Call
+/// decay_session_invalidate after any structural change: a
+/// changed parameter or block count without it fails the solve, and a
+/// change that keeps every count solves warm through stale analysis
+/// (undefined).
 pub struct DecaySession {
     // Err carries a construction panic (a bad options tag), reported
     // by the first solve.
@@ -2776,10 +2777,11 @@ pub unsafe extern "C" fn line_solve_sparse(
 /// A warm-reuse session over the sparse backend (Rust's LmSession):
 /// keeps the analysis -- pattern, ordering, symbolic factorization,
 /// Schur plan -- across solves, so only the first pays for it. Warm
-/// solves are bit-identical to cold ones. A parameter-count change
-/// re-analyzes by itself; line_session_invalidate covers a
-/// structural change at the same count (solving warm through one is
-/// undefined).
+/// solves are bit-identical to cold ones. Call
+/// line_session_invalidate after any structural change: a
+/// changed parameter or block count without it fails the solve, and a
+/// change that keeps every count solves warm through stale analysis
+/// (undefined).
 pub struct LineSession {
     // Err carries a construction panic (a bad options tag), reported
     // by the first solve.
