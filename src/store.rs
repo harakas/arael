@@ -150,16 +150,56 @@ pub(crate) trait AnyStore: Any + Send + Sync {
     fn store_any(&self) -> &dyn Any;
     fn store_any_mut(&mut self) -> &mut dyn Any;
     fn store_clone(&self) -> Box<dyn AnyStore>;
+    /// The footprints of the first `n` stores held.
+    fn store_footprints(&self, n: usize) -> std::vec::Vec<StoreFootprint>;
+}
+
+/// What a store holds: its block counts and the bytes of its arrays.
+/// Summed over a solve's stores and set against the whole model, it
+/// says how much the split stores duplicate: a self block every store
+/// whose range touches its entity claims, a cross block exactly one
+/// store holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreFootprint {
+    /// Self blocks held (entities with a tile and a gradient stash).
+    pub self_blocks: usize,
+    /// Cross blocks held.
+    pub cross_blocks: usize,
+    /// COO entries held after the last sweep.
+    pub coo_entries: usize,
+    /// Bytes of the arrays: tiles, stashes, indices, maps and the COO list.
+    pub bytes: usize,
+}
+
+impl StoreFootprint {
+    /// Add another store's footprint to this one.
+    pub fn add(&mut self, other: StoreFootprint) {
+        self.self_blocks += other.self_blocks;
+        self.cross_blocks += other.cross_blocks;
+        self.coo_entries += other.coo_entries;
+        self.bytes += other.bytes;
+    }
+
+    /// The sum over stores.
+    pub fn sum<'a>(stores: impl IntoIterator<Item = &'a StoreFootprint>) -> StoreFootprint {
+        let mut total = StoreFootprint::default();
+        for s in stores { total.add(*s); }
+        total
+    }
 }
 
 /// What a generated block store is: the macro implements it on the type
 /// it emits per root.
-pub trait BlockStore: Clone + Default + Send + Sync + 'static {}
+pub trait BlockStore: Clone + Default + Send + Sync + 'static {
+    /// The store's block counts and bytes.
+    fn footprint(&self) -> StoreFootprint;
+}
 
 impl<S: BlockStore> AnyStore for S {
     fn store_any(&self) -> &dyn Any { self }
     fn store_any_mut(&mut self) -> &mut dyn Any { self }
     fn store_clone(&self) -> Box<dyn AnyStore> { Box::new(self.clone()) }
+    fn store_footprints(&self, _n: usize) -> std::vec::Vec<StoreFootprint> { vec![self.footprint()] }
 }
 
 // The context's payload is the whole list, not one store. Spelled out
@@ -170,6 +210,9 @@ impl<S: BlockStore> AnyStore for std::vec::Vec<S> {
     fn store_any(&self) -> &dyn Any { self }
     fn store_any_mut(&mut self) -> &mut dyn Any { self }
     fn store_clone(&self) -> Box<dyn AnyStore> { Box::new(self.clone()) }
+    fn store_footprints(&self, n: usize) -> std::vec::Vec<StoreFootprint> {
+        self[..n.min(self.len())].iter().map(|s| s.footprint()).collect()
+    }
 }
 
 
@@ -227,6 +270,21 @@ impl Context {
     /// The shape the stores were built for: the model's count per block
     /// array, in array order. Empty until a build records one.
     pub fn shape(&self) -> &[u64] { &self.shape }
+
+    /// What each of this solve's stores holds, in store order; empty
+    /// when the context holds no stores.
+    pub fn footprints(&self) -> std::vec::Vec<StoreFootprint> {
+        self.blocks.as_ref().map_or_else(std::vec::Vec::new, |b| b.store_footprints(self.blocks_len.max(1)))
+    }
+
+    /// What one whole store of the model holds: the model's block
+    /// counts and the bytes they take with nothing duplicated, as the
+    /// build records it. Set against [`footprints`](Self::footprints)
+    /// summed, the difference is what the split stores duplicate.
+    pub fn whole(&self) -> StoreFootprint { self.whole }
+
+    /// Record the whole model's footprint a build was made for.
+    pub fn set_whole(&mut self, whole: StoreFootprint) { self.whole = whole; }
 
     /// Record the shape a build was made for.
     pub fn set_shape(&mut self, shape: &[u64]) {
@@ -744,6 +802,21 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
 
     /// The number of entities.
     pub fn len(&self) -> usize { self.entity.len() }
+
+    /// Bytes one block takes in a whole store: its triangle and stash,
+    /// its indices and its entity slot.
+    pub const BLOCK_BYTES: usize = Self::STRIDE * std::mem::size_of::<T>() + N * 4 + 4;
+
+    /// The blocks held and the bytes of the arrays, the map included.
+    pub fn footprint(&self) -> StoreFootprint {
+        StoreFootprint {
+            self_blocks: self.entity.len(),
+            cross_blocks: 0,
+            coo_entries: 0,
+            bytes: self.data.len() * std::mem::size_of::<T>()
+                + self.indices.len() * N * 4 + self.entity.len() * 4 + self.map.len() * 4,
+        }
+    }
 
     /// True if the slab holds no entity.
     pub fn is_empty(&self) -> bool { self.entity.is_empty() }
@@ -1303,6 +1376,19 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     /// The number of blocks.
     pub fn len(&self) -> usize { self.a.len() }
 
+    /// Bytes one block takes: its tile and its two index rows.
+    pub const BLOCK_BYTES: usize = P * std::mem::size_of::<T>() + (NA + NB) * 4;
+
+    /// The blocks held and the bytes of the arrays.
+    pub fn footprint(&self) -> StoreFootprint {
+        StoreFootprint {
+            self_blocks: 0,
+            cross_blocks: self.a.len(),
+            coo_entries: 0,
+            bytes: self.values.len() * std::mem::size_of::<T>() + self.a.len() * NA * 4 + self.b.len() * NB * 4,
+        }
+    }
+
     /// True if the list holds no block.
     pub fn is_empty(&self) -> bool { self.a.is_empty() }
 
@@ -1510,7 +1596,9 @@ mod tests {
 
     #[derive(Clone, Default, Debug, PartialEq)]
     struct TestStore { tag: u32 }
-    impl BlockStore for TestStore {}
+    impl BlockStore for TestStore {
+        fn footprint(&self) -> StoreFootprint { StoreFootprint::default() }
+    }
 
     #[test]
     fn the_store_list_keeps_its_stores_and_uses_the_front() {
@@ -1551,7 +1639,9 @@ mod tests {
     fn another_roots_store_starts_over() {
         #[derive(Clone, Default)]
         struct OtherStore;
-        impl BlockStore for OtherStore {}
+        impl BlockStore for OtherStore {
+            fn footprint(&self) -> StoreFootprint { StoreFootprint::default() }
+        }
 
         let mut ctx = Context::new();
         ctx.stores_mut::<TestStore>(2).0[1].tag = 5;

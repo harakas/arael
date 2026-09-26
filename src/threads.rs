@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 use crate::store::{AnyStore, Cut};
+pub use crate::store::StoreFootprint;
 
 /// Timing of one threaded phase over a solve, summed over its calls:
 /// the region from dispatch to join (or the sequential run of the
@@ -133,6 +134,8 @@ pub struct Context {
     /// block array, as the generated `__shape` reads it. A direct call
     /// with a model of another shape trips on it.
     pub(crate) shape: Vec<u64>,
+    /// What one whole store of the model holds, as the build records it.
+    pub(crate) whole: StoreFootprint,
     pub(crate) cut: Cut,
     pub(crate) sweeps: ParTiming,
 }
@@ -170,6 +173,11 @@ pub struct SweepReport {
     /// or [`Context::set_timing`]); all zero otherwise, and `on` says
     /// which.
     pub timing: ParTiming,
+    /// What each store holds, in store order.
+    pub held: Vec<StoreFootprint>,
+    /// What one whole store of the model would hold; summed `held`
+    /// against it is the duplication of the split.
+    pub whole: StoreFootprint,
 }
 
 impl Default for Context {
@@ -185,6 +193,7 @@ impl Clone for Context {
             blocks: self.blocks.as_ref().map(|b| b.store_clone()),
             blocks_len: self.blocks_len,
             shape: self.shape.clone(),
+            whole: self.whole,
             cut: self.cut.clone(),
             sweeps: self.sweeps.clone(),
         }
@@ -202,8 +211,8 @@ impl Context {
     pub fn new() -> Self {
         Context {
             threads: 1, timing: false, runtime_coo: false,
-            blocks: None, blocks_len: 0, shape: Vec::new(), cut: Cut::new(),
-            sweeps: ParTiming::default(),
+            blocks: None, blocks_len: 0, shape: Vec::new(), whole: StoreFootprint::default(),
+            cut: Cut::new(), sweeps: ParTiming::default(),
         }
     }
 
@@ -256,6 +265,8 @@ impl Context {
             assembly: phase(&self.sweeps.assembly),
             cost: phase(&self.sweeps.cost),
             timing: self.sweeps.clone(),
+            held: self.footprints(),
+            whole: self.whole,
         })
     }
 
