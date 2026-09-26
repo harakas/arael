@@ -3923,6 +3923,29 @@ fn self_claim(type_name: &str, acc: &TokenStream2, idx: &syn::Ident) -> TokenStr
     }
 }
 
+/// Claim `acc`'s place in its type's self slab, filling its parameter
+/// indices on the spot. `None` when the type declares no self block or
+/// has no parameters: there is no slab to hold it.
+fn claim_entity(type_name: &str, acc: &TokenStream2) -> Option<TokenStream2> {
+    let hb = registry_lookup(type_name).and_then(|l| l.self_block_field.clone())?;
+    let n = param_total(type_name);
+    if n == 0 { return None; }
+    let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+    let arr = store_array_ident(type_name, &hb);
+    let idx = syn::Ident::new("__cl_idx", proc_macro2::Span::call_site());
+    let (_, stmts) = store_idx_stmts(type_name, acc, &idx);
+    Some(quote! {
+        {
+            let __g = #acc.#hb_id.slot();
+            if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
+                let mut #idx = [u32::MAX; #n];
+                #(#stmts)*
+                __store.#arr.push_at(__g, __g, &#idx);
+            }
+        }
+    })
+}
+
 /// How many constraint instances of this walk sit under one unit of the
 /// container it is cut by, as an expression over `__u`.
 ///
@@ -4288,6 +4311,9 @@ pub fn generate_root_methods(
     let mut grad_hessian_loops: Vec<TokenStream2> = Vec::new();
     let mut jacobian_loops: Vec<TokenStream2> = Vec::new();
     let mut set_block_indices_loops: Vec<TokenStream2> = Vec::new();
+    // What a split store claims before it sweeps: a place in a self slab
+    // for every entity its sweeps write, in the walk that writes it.
+    let mut self_claim_walks: Vec<TokenStream2> = Vec::new();
 
     // Grouping for root-level cross-constraints on the same collection.
     // Merges multiple #[arael(constraint(...))] attributes into one loop per collection.
@@ -7081,6 +7107,52 @@ pub fn generate_root_methods(
             } else {
                 quote! { arael::store::Leaves::count(&__u.#frines_ident) as u64 }
             });
+            // A split store claims what its sweep writes: the entity each
+            // remote block's ref names, and the other participants of the
+            // multi-cross form, all in containers cut on their own. The
+            // claim takes the sweep's own walk, cut to this store's range.
+            {
+                let (ref_field_name, _, target_type) = remote_block_info.as_ref().unwrap();
+                let mut claims: Vec<TokenStream2> = Vec::new();
+                let target = entity_access_expr(ref_field_name)?;
+                claims.extend(claim_entity(target_type, &quote! { #target }));
+                for (var_id, type_id, _start, count) in &triplet_entities {
+                    let ty = type_id.to_string();
+                    if *count == 0 || ty == *target_type { continue; }
+                    let acc = if ty == root_name.to_string() {
+                        quote! { (*self) }
+                    } else {
+                        let a = entity_access_expr(&var_id.to_string())?;
+                        quote! { #a }
+                    };
+                    claims.extend(claim_entity(&ty, &acc));
+                }
+                if !claims.is_empty() {
+                    let cid = container_id(&[], &if parent_is_root {
+                        frines_ident.to_string()
+                    } else {
+                        coll_ident.to_string()
+                    });
+                    let body = quote! { #(#entity_index_copies)* #(#claims)* };
+                    let walk = if parent_is_root {
+                        quote! { for __frine in self.#frines_ident.range_iter(__r.0, __r.1) { #body } }
+                    } else {
+                        quote! {
+                            for __lm in self.#coll_ident.range_iter(__r.0, __r.1) {
+                                for __frine in __lm.#frines_ident.iter() { #body }
+                            }
+                        }
+                    };
+                    let walk = rename_ident(
+                        rename_ident(walk, &parent_name, parent_rename_to), &root_var_name, "self");
+                    self_claim_walks.push(quote! {
+                        if __split {
+                            let __r = arael::store::walk_range(__ranges, #cid);
+                            #walk
+                        }
+                    });
+                }
+            }
             if parent_is_root {
                 let mk = |it: &TokenStream2| quote! {
                     {
@@ -7430,10 +7502,6 @@ pub fn generate_root_methods(
             for (var_id, type_id, _start, count) in &triplet_entities {
                 if *count == 0 { continue; }
                 let ty = type_id.to_string();
-                let n = param_total(&ty);
-                if n == 0 { continue; }
-                let Some(hb) = registry_lookup(&ty).and_then(|l| l.self_block_field.clone())
-                else { continue };
                 // The root joins as an implicit participant and has no ref
                 // to resolve: it is reached where every walk reaches it.
                 let acc = if ty == root_name.to_string() {
@@ -7442,20 +7510,7 @@ pub fn generate_root_methods(
                     let a = entity_access_expr(&var_id.to_string())?;
                     quote! { #a }
                 };
-                let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                let arr = store_array_ident(&ty, &hb);
-                let idx = syn::Ident::new("__cl_idx", proc_macro2::Span::call_site());
-                let (_, stmts) = store_idx_stmts(&ty, &acc, &idx);
-                claim_entries.push(quote! {
-                    {
-                        let __g = #acc.#hb_id.slot();
-                        if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
-                            let mut #idx = [u32::MAX; #n];
-                            #(#stmts)*
-                            __store.#arr.push_at(__g, __g, &#idx);
-                        }
-                    }
-                });
+                claim_entries.extend(claim_entity(&ty, &acc));
             }
             let claim_entry = if claim_entries.is_empty() {
                 None
@@ -7762,7 +7817,6 @@ pub fn generate_root_methods(
     // A self-block constraint writes an entity that no cross block need
     // mention, so its container is claimed here -- otherwise a split store
     // could sweep an entity it was never given a place for.
-    let mut self_claim_walks: Vec<TokenStream2> = Vec::new();
     let mut merged_cost: Vec<TokenStream2> = Vec::new();
     let mut merged_ct: Vec<TokenStream2> = Vec::new();
     let mut merged_gh: Vec<TokenStream2> = Vec::new();
@@ -7849,27 +7903,10 @@ pub fn generate_root_methods(
                 AncestorSelfBlock::Parent { type_name } => (type_name.clone(), quote! { #ctn }),
                 AncestorSelfBlock::Root => (root_name.to_string(), quote! { (*self) }),
             };
-            let n = param_total(&ty);
-            let Some(hb) = registry_lookup(&ty).and_then(|l| l.self_block_field.clone())
-            else { continue };
-            if n == 0 { continue; }
-            let hb_id = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-            let arr = store_array_ident(&ty, &hb);
-            let idx = syn::Ident::new("__anc_idx", proc_macro2::Span::call_site());
-            let (_, stmts) = store_idx_stmts(&ty, &acc, &idx);
-            // One ancestor, many children: test the claim before filling the
-            // indices, so a parent is indexed once per store, not once per
-            // child.
-            claims.push(quote! {
-                {
-                    let __g = #acc.#hb_id.slot();
-                    if __g != u32::MAX && !__store.#arr.holds(__g as usize) {
-                        let mut #idx = [u32::MAX; #n];
-                        #(#stmts)*
-                        __store.#arr.push_at(__g, __g, &#idx);
-                    }
-                }
-            });
+            // One ancestor, many children: the claim tests before it fills
+            // the indices, so a parent is indexed once per store, not once
+            // per child.
+            claims.extend(claim_entity(&ty, &acc));
         }
         if !claims.is_empty() {
             let cid = container_id(prefix, &coll.to_string());
