@@ -8,9 +8,9 @@
 // The model covers every form the sweeps take: self-block constraints
 // on a collection (one guarded), a flat cross constraint (one instance
 // aliased to a single point), constraints nested under a parent held in
-// an arena (with a robust loss), a remote block through an Option, a
-// three-entity multi-cross constraint, and a constraint on the root's
-// own parameter. The stores live in a solve `Context`, never in the
+// an arena (with a robust loss), a remote block through an Option and
+// one nested under a parent, a three-entity multi-cross constraint, and
+// a constraint on the root's own parameter. The stores live in a solve `Context`, never in the
 // root. A root without `par` keeps one store at any thread count.
 #![cfg(feature = "rayon")]
 
@@ -56,6 +56,27 @@ struct Landmark {
     prior: vect2d,
     frines: std::vec::Vec<Frine>,
     hb: SelfBlock<Landmark>,
+}
+
+// A remote self block nested under a parent without parameters, the
+// localization shape: the observation reads its beacon's constants and
+// writes the point it refers to, which sits in a container cut on its
+// own and may lie in any store's range.
+#[arael::model]
+#[arael(constraint(point.hb, parent = beacon, {
+    let d = point.pos - beacon.pos - obs.meas;
+    [d.x * obs.w, d.y * obs.w]
+}))]
+struct Obs {
+    #[arael(ref = root.points)] point: Ref<Point>,
+    meas: vect2d,
+    w: f64,
+}
+
+#[arael::model]
+struct Beacon {
+    pos: vect2d,
+    obs: std::vec::Vec<Obs>,
 }
 
 #[arael::model]
@@ -104,6 +125,7 @@ struct Tri {
 struct Web {
     points: refs::Vec<Point>,
     landmarks: refs::Arena<Landmark>,
+    beacons: refs::Vec<Beacon>,
     links: std::vec::Vec<Link>,
     tris: std::vec::Vec<Tri>,
     prior: Option<Prior>,
@@ -196,6 +218,7 @@ fn build(n: usize) -> Web {
     let mut w = Web {
         points: refs::Vec::new(),
         landmarks: refs::Arena::new(),
+        beacons: refs::Vec::new(),
         links: std::vec::Vec::new(),
         tris: std::vec::Vec::new(),
         prior: None,
@@ -232,6 +255,16 @@ fn build(n: usize) -> Web {
             hb: SelfBlock::new(),
         });
     }
+    // The observations point at the far end of the points, outside the
+    // range of the store that sweeps their beacon.
+    for i in 0..n / 3 {
+        let obs = (0..2).map(|k| Obs {
+            point: w.points.ref_at(n - 1 - (3 * i + k) % n),
+            meas: vect2d::new(0.1 * k as f64, 0.2),
+            w: 0.8,
+        }).collect();
+        w.beacons.push(Beacon { pos: vect2d::new(i as f64 * 1.5, -0.3), obs });
+    }
     for i in 0..n.saturating_sub(2) {
         w.tris.push(Tri {
             a: w.points.ref_at(i),
@@ -242,7 +275,9 @@ fn build(n: usize) -> Web {
             hb_bc: CrossBlock::new(),
         });
     }
-    w.prior = Some(Prior { p: w.points.ref_at(1), pos: vect2d::new(0.4, -0.6) });
+    // The last point: outside the range of the store that sweeps the
+    // single instance.
+    w.prior = Some(Prior { p: w.points.ref_at(n - 1), pos: vect2d::new(0.4, -0.6) });
     w
 }
 
@@ -432,6 +467,32 @@ fn the_split_holds_every_cross_block_once() {
     assert_eq!(held4.cross_blocks, r4.whole.cross_blocks, "a cross block sits in one store");
     assert!(held4.self_blocks >= r4.whole.self_blocks, "{} held, {} whole", held4.self_blocks, r4.whole.self_blocks);
     assert!(held4.bytes >= r4.whole.bytes);
+}
+
+/// A remote block writes the entity its ref names, which sits in a
+/// container cut on its own: the store that sweeps the constraint holds
+/// that entity whatever range of the container it was given.
+#[test]
+fn a_split_store_holds_the_targets_of_its_remote_blocks() {
+    let mut seq = build(30);
+    let mut x = Vec::new();
+    seq.serialize(&mut x);
+    let n = x.len();
+    let (mut g1, mut h1) = (vec![0.0; n], vec![0.0; n * n]);
+    let c1 = seq.calc_grad_hessian_dense(&x, &mut g1, &mut h1);
+    for threads in [2, 4, 8] {
+        let mut par = build(30);
+        let mut x2 = Vec::new();
+        par.serialize(&mut x2);
+        assert_eq!(x, x2);
+        let mut ctx = context(threads);
+        par.begin_with_context(&mut ctx);
+        let (mut g2, mut h2) = (vec![0.0; n], vec![0.0; n * n]);
+        let c2 = par.calc_grad_hessian_dense_with_context(&x, &mut g2, &mut h2, &mut ctx);
+        assert!(close(c1, c2, 1e-13), "{} stores: cost {} vs {}", threads, c1, c2);
+        assert_close("grad", &g1, &g2, 1e-12);
+        assert_close("hessian", &h1, &h2, 1e-12);
+    }
 }
 
 /// The cost over the stores agrees with the sequential cost, and
