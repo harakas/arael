@@ -405,6 +405,35 @@ fn assembly_matches_sequential() {
 
 }
 
+/// What the stores hold against the whole model: one store holds
+/// exactly the model, byte for byte; a split holds every cross block
+/// once and each self block in every store whose range touches its
+/// entity, so the self count and the bytes can only grow.
+#[test]
+fn the_split_holds_every_cross_block_once() {
+    let mut w = build(30);
+    let mut x = Vec::new();
+    w.serialize(&mut x);
+    let mut one = context(1);
+    w.begin_with_context(&mut one);
+    let r1 = one.sweeps().expect("a par root reports its sweeps");
+    let held1 = arael::store::StoreFootprint::sum(&r1.held);
+    assert_eq!(r1.held.len(), 1);
+    assert_eq!(held1.cross_blocks, r1.whole.cross_blocks);
+    assert_eq!(held1.self_blocks, r1.whole.self_blocks);
+    assert_eq!(held1.bytes, r1.whole.bytes, "one whole store is the model");
+
+    let mut four = context(4);
+    w.begin_with_context(&mut four);
+    let r4 = four.sweeps().unwrap();
+    let held4 = arael::store::StoreFootprint::sum(&r4.held);
+    assert_eq!(r4.held.len(), 4);
+    assert_eq!(r4.whole, r1.whole, "the whole does not depend on the split");
+    assert_eq!(held4.cross_blocks, r4.whole.cross_blocks, "a cross block sits in one store");
+    assert!(held4.self_blocks >= r4.whole.self_blocks, "{} held, {} whole", held4.self_blocks, r4.whole.self_blocks);
+    assert!(held4.bytes >= r4.whole.bytes);
+}
+
 /// The cost over the stores agrees with the sequential cost, and
 /// repeats exactly through the same context.
 #[test]

@@ -8508,6 +8508,9 @@ pub fn generate_root_methods(
     // entry landed.
     let mut store_names: Vec<syn::Ident> = Vec::new();
     let mut store_tys: Vec<TokenStream2> = Vec::new();
+    // Each array's type by name, for the bytes one whole store holds.
+    let mut store_ty_of: std::collections::HashMap<String, TokenStream2> =
+        std::collections::HashMap::new();
     let mut store_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The self arrays alone carry gradient stashes.
     let mut store_self_names: Vec<syn::Ident> = Vec::new();
@@ -8587,9 +8590,11 @@ pub fn generate_root_methods(
                         store_self_counts.entry(name.to_string()).or_default()
                             .push(slot_count_expr(&path));
                         if store_seen.insert(name.to_string()) {
+                            let ty = quote! { arael::store::SelfBlockArray<#n, #m, #cast_type> };
+                            store_ty_of.insert(name.to_string(), ty.clone());
                             store_self_names.push(name.clone());
                             store_names.push(name);
-                            store_tys.push(quote! { arael::store::SelfBlockArray<#n, #m, #cast_type> });
+                            store_tys.push(ty);
                         }
                     }
                 }
@@ -8642,11 +8647,11 @@ pub fn generate_root_methods(
                     store_cross_counts.entry(name.to_string()).or_default()
                         .push(slot_count_expr(&path));
                     if store_seen.insert(name.to_string()) {
+                        let ty = quote! { arael::store::CrossBlockArray<#na, #nb, #pcount, #cast_type> };
+                        store_ty_of.insert(name.to_string(), ty.clone());
                         store_cross_names.push(name.clone());
                         store_names.push(name);
-                        store_tys.push(quote! {
-                            arael::store::CrossBlockArray<#na, #nb, #pcount, #cast_type>
-                        });
+                        store_tys.push(ty);
                     }
                 }
                 if !body_self.is_empty() {
@@ -8696,6 +8701,29 @@ pub fn generate_root_methods(
         .map(|terms| quote! { (0u64 #(+ #terms)*) })
         .collect();
     let n_shape = store_shape_terms.len();
+    // What one whole store of the model holds, recorded with every
+    // build: the block counts and the bytes they take with nothing
+    // duplicated, so a solve's report can set the split stores against it.
+    let whole_self_terms: Vec<&TokenStream2> = store_self_names.iter()
+        .flat_map(|name| store_self_counts[&name.to_string()].iter()).collect();
+    let whole_cross_terms: Vec<&TokenStream2> = store_cross_names.iter()
+        .flat_map(|name| store_cross_counts[&name.to_string()].iter()).collect();
+    let whole_bytes_terms: Vec<TokenStream2> = store_self_names.iter().chain(store_cross_names.iter())
+        .map(|name| {
+            let key = name.to_string();
+            let ty = &store_ty_of[&key];
+            let terms = store_self_counts.get(&key).or_else(|| store_cross_counts.get(&key)).unwrap();
+            quote! { <#ty>::BLOCK_BYTES * ((0u64 #(+ #terms)*) as usize) }
+        })
+        .collect();
+    let set_whole = quote! {
+        ctx.set_whole(arael::store::StoreFootprint {
+            self_blocks: (0u64 #(+ #whole_self_terms)*) as usize,
+            cross_blocks: (0u64 #(+ #whole_cross_terms)*) as usize,
+            coo_entries: 0,
+            bytes: 0usize #(+ #whole_bytes_terms)*,
+        });
+    };
 
     // A root that did not ask for `par` keeps one store and no cut: an
     // empty cut is the whole model in one store, which is what every walk
@@ -8951,7 +8979,15 @@ pub fn generate_root_methods(
             __time: std::time::Duration,
         }
 
-        impl arael::store::BlockStore for #store_ty {}
+        impl arael::store::BlockStore for #store_ty {
+            fn footprint(&self) -> arael::store::StoreFootprint {
+                let mut __f = arael::store::StoreFootprint::default();
+                #(__f.add(self.#store_names.footprint());)*
+                __f.coo_entries = self.__coo.len();
+                __f.bytes += self.__coo.len() * std::mem::size_of::<(u32, u32, #cast_type)>();
+                __f
+            }
+        }
 
         #[doc(hidden)]
         #[allow(dead_code)]
@@ -9113,6 +9149,7 @@ pub fn generate_root_methods(
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
                 ctx.set_shape(&__shape);
+                #set_whole
             }
 
             /// The model's count per block array, self arrays then cross
@@ -9386,6 +9423,7 @@ pub fn generate_root_methods(
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
                 ctx.set_shape(&self.__shape());
+                #set_whole
             }
             fn calc_cost_with_context(&mut self, params: &[#prec_type], ctx: &mut arael::threads::Context) -> #prec_type {
                 let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();

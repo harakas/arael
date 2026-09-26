@@ -2062,6 +2062,19 @@ fn render_threads(t: &ThreadReport, style: Style) -> String {
     };
     out.push_str(&phase("assembly", &s.assembly));
     out.push_str(&phase("cost", &s.cost));
+    // What the split stores hold against the whole model: the self
+    // blocks several stores claim are the duplication.
+    if s.threads > 1 {
+        let held = crate::threads::StoreFootprint::sum(&s.held);
+        let w = &s.whole;
+        let mb = |b: usize| b as f64 / 1e6;
+        out.push_str(&format!(
+            "    stores      {} hold {} self blocks against the model's {} ({:.2}x), \
+             {} cross blocks against {}, {:.1} MB against {:.1}\n",
+            s.threads, held.self_blocks, w.self_blocks,
+            held.self_blocks as f64 / w.self_blocks.max(1) as f64,
+            held.cross_blocks, w.cross_blocks, mb(held.bytes), mb(w.bytes)));
+    }
     // What the sweeps' own clocks saw, when they ran. One line per
     // phase: the region is dispatch to join, and the task figures are
     // over the stores of one call.
@@ -2997,6 +3010,15 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     if config.verbose {
         info!("LM threads: sweeps {}, linear {}",
             threads_asked.sweeps_asked, threads_asked.linear);
+        if let Some(s) = ctx.sweeps().filter(|s| s.threads > 1) {
+            let held = crate::threads::StoreFootprint::sum(&s.held);
+            let w = s.whole;
+            info!("LM stores: {} hold {} self blocks against the model's {} ({:.2}x), \
+                   {} cross blocks against {}, {:.1} MB against {:.1}",
+                s.threads, held.self_blocks, w.self_blocks,
+                held.self_blocks as f64 / w.self_blocks.max(1) as f64,
+                held.cross_blocks, w.cross_blocks, held.bytes as f64 / 1e6, w.bytes as f64 / 1e6);
+        }
     }
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];

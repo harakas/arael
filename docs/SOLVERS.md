@@ -688,9 +688,16 @@ time went.
   threads   sweeps 4, linear 4
     assembly    threaded      7 calls
     cost        threaded      8 calls
+    stores      4 hold 1260 self blocks against the model's 1000 (1.26x), 4000 cross blocks against 4000, 2.1 MB against 1.9
     per assembly region 0.39 ms, tasks max 0.22 mean 0.19, gather 0.02, scatter 0.42
     per cost    region 0.16 ms, tasks max 0.06 mean 0.06
 ```
+
+`stores` is what the split stores hold against one whole store of the
+model. A cross block sits in one store; a self block sits in every store
+whose range touches its entity, so the self count above the model's is
+what the split duplicates. `SweepReport::held` and `whole` carry the
+same counts.
 
 `region` is dispatch to join; `tasks max` is the longest single thread of
 that region, so the gap between them is the dispatch and the wake-up, and
