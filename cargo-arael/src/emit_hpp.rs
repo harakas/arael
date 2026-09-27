@@ -804,6 +804,7 @@ private:
          bool {root_sn}_last_failure(const {root}*, SolveFailure*);\n\
          const char* {root_sn}_validate({root}*);\n\
          void {root_sn}_set_log_level(uint32_t);\n\
+         void {root_sn}_pool_shutdown(void);\n\
          void {root_sn}_sparse_options(SparseOptions*);\n\
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResultT<{fp}>*);\n\
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
@@ -924,6 +925,13 @@ inline SparseOptions::SparseOptions() {{
 /// the default). Process-wide: all models and roots share it.
 inline void set_log_level(LogLevel level) {{
     ffi::{root_sn}_set_log_level(uint32_t(level));
+}}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+inline void pool_shutdown() {{
+    ffi::{root_sn}_pool_shutdown();
 }}
 
 /// A completed solve: the plain result fields plus ownership of the

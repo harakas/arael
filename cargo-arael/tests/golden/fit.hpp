@@ -483,6 +483,7 @@ const char* fit_last_error(const Fit*);
 bool fit_last_failure(const Fit*, SolveFailure*);
 const char* fit_validate(Fit*);
 void fit_set_log_level(uint32_t);
+void fit_pool_shutdown(void);
 void fit_sparse_options(SparseOptions*);
 int32_t fit_solve_dense(Fit*, const LmConfig*, LmResultT<double>*);
 int32_t fit_solve_sparse(Fit*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -510,6 +511,13 @@ inline SparseOptions::SparseOptions() {
 /// the default). Process-wide: all models and roots share it.
 inline void set_log_level(LogLevel level) {
     ffi::fit_set_log_level(uint32_t(level));
+}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+inline void pool_shutdown() {
+    ffi::fit_pool_shutdown();
 }
 
 /// A completed solve: the plain result fields plus ownership of the

@@ -6,14 +6,23 @@
 //   cp cxx-tests/model/python/cxx_fit/fit.py cargo-arael/tests/golden/fit.py
 //   cp cxx-tests/model/python/cxx_fit/_fit_ffi.py cargo-arael/tests/golden/fit_ffi.py
 //   cp cxx-tests/model/cxx/include/fit.hpp cargo-arael/tests/golden/fit.hpp
+//   cp cxx-tests/model/wasm/src/lib.rs cargo-arael/tests/golden/fit_wasm.rs
 // (after `cargo arael export` in cxx-tests/model), and when the fixture
 // model itself changed, its sidecar too:
 //   cp cxx-tests/model/target/arael-sidecar/Fit.json cargo-arael/tests/golden/fit.json
 
-use cargo_arael::{emit_ffi, emit_hpp, emit_py, ir::Model};
+use cargo_arael::{emit_ffi, emit_hpp, emit_py, emit_wasm, ir::Model};
 
 fn model() -> Model {
     Model::parse(include_str!("golden/fit.json")).unwrap()
+}
+
+#[test]
+fn wasm_matches_golden() {
+    let got = emit_wasm::emit(&[&model()], "cxx_fit").unwrap();
+    let want = include_str!("golden/fit_wasm.rs");
+    assert!(got == want,
+        "wasm emitter drifted from golden (see file header for regeneration)");
 }
 
 #[test]

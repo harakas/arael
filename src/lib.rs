@@ -80,11 +80,14 @@
 //! - **Cross-crate models** -- `arael::export_models!()` bundles a
 //!   crate's pub models; the importing crate registers them all with one
 //!   `arael_import!()` and builds its own models and roots over them
-//! - **C++ and Python interfaces** -- `cargo arael export` generates full
-//!   bindings for a root model, exact solve parity against Rust; see
-//!   [docs/CXX.md](https://github.com/harakas/arael/blob/master/docs/CXX.md)
-//!   and
+//! - **C++, Python and JavaScript interfaces** -- `cargo arael export`
+//!   generates full bindings for a root model, exact solve parity against
+//!   Rust; the JavaScript one runs the solver in the browser as
+//!   WebAssembly. See
+//!   [docs/CXX.md](https://github.com/harakas/arael/blob/master/docs/CXX.md),
 //!   [docs/PYTHON.md](https://github.com/harakas/arael/blob/master/docs/PYTHON.md)
+//!   and
+//!   [docs/WASM.md](https://github.com/harakas/arael/blob/master/docs/WASM.md)
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
 //!   auto-differentiate symbolically, and optimize via `ExtendedModel`

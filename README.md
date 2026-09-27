@@ -51,7 +51,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
-- **C++ and Python interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md))
+- **C++, Python and JavaScript interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust; the JavaScript one runs the solver in the browser as WebAssembly ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md), [docs/WASM.md](docs/WASM.md))
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel`
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.

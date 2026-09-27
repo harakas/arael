@@ -42,6 +42,8 @@ int main() {
     // Log control crosses the FFI; Warn quiets the backend's INFO
     // chatter for this run.
     set_log_level(LogLevel::Warn);
+    // Links and runs; a no-op in this build, which has no worker threads.
+    pool_shutdown();
     pi("log_smoke", 1);
 
     // LmStatus helpers mirror Rust's is_success / as_str.

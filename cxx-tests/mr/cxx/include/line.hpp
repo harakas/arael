@@ -126,6 +126,7 @@ const char* line_last_error(const Line*);
 bool line_last_failure(const Line*, SolveFailure*);
 const char* line_validate(Line*);
 void line_set_log_level(uint32_t);
+void line_pool_shutdown(void);
 void line_sparse_options(SparseOptions*);
 int32_t line_solve_dense(Line*, const LmConfig*, LmResultT<double>*);
 int32_t line_solve_sparse(Line*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -153,6 +154,13 @@ inline SparseOptions::SparseOptions() {
 /// the default). Process-wide: all models and roots share it.
 inline void set_log_level(LogLevel level) {
     ffi::line_set_log_level(uint32_t(level));
+}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+inline void pool_shutdown() {
+    ffi::line_pool_shutdown();
 }
 
 /// A completed solve: the plain result fields plus ownership of the

@@ -1813,6 +1813,14 @@ pub extern \"C\" fn {root_sn}_set_log_level(level: u32) {{
     }});
 }}
 
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+#[no_mangle]
+pub extern \"C\" fn {root_sn}_pool_shutdown() {{
+    arael::pool::shutdown();
+}}
+
 /// Empty string when the model is clean, the Diagnostic text otherwise.
 #[no_mangle]
 pub unsafe extern \"C\" fn {root_sn}_validate(h: *mut {handle}) -> *const c_char {{

@@ -262,6 +262,7 @@ const char* path_last_error(const Path*);
 bool path_last_failure(const Path*, SolveFailure*);
 const char* path_validate(Path*);
 void path_set_log_level(uint32_t);
+void path_pool_shutdown(void);
 void path_sparse_options(SparseOptions*);
 int32_t path_solve_dense(Path*, const LmConfig*, LmResultT<float>*);
 int32_t path_solve_sparse(Path*, const LmConfig*, const SparseOptions*, LmResultT<float>*);
@@ -289,6 +290,13 @@ inline SparseOptions::SparseOptions() {
 /// the default). Process-wide: all models and roots share it.
 inline void set_log_level(LogLevel level) {
     ffi::path_set_log_level(uint32_t(level));
+}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+inline void pool_shutdown() {
+    ffi::path_pool_shutdown();
 }
 
 /// A completed solve: the plain result fields plus ownership of the

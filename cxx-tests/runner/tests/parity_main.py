@@ -13,6 +13,9 @@ from cxx_fit import fit  # noqa: E402
 from cxx_fit.arael import AraelError  # noqa: E402
 from cxx_fit.arael.math import matrix3d, quaternd, vect3d  # noqa: E402
 
+# Binds and runs; a no-op in this build, which has no worker threads.
+fit.pool_shutdown()
+
 
 def p(n, v):
     print("%s %.17e" % (n, v))
