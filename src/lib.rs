@@ -1342,7 +1342,8 @@
 //! Without the feature, anything but 1 warns and stays sequential.
 //!
 //! The cost evaluation and the assembly of the gradient and Hessian
-//! thread as well: each thread sweeps its own share of the model into
+//! thread as well, on arael's own worker threads, one per store and
+//! parked between sweeps: each sweeps its own share of the model into
 //! its own block store, and a serial pass adds the stores up. A
 //! threaded assembly adds up in a different order than the sequential
 //! one, so results differ in the last bits between thread counts.
@@ -2369,6 +2370,7 @@ pub mod unitvec;
 pub mod simple_lm;
 pub mod threads;
 pub mod store;
+pub mod pool;
 pub use threads::Context;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;

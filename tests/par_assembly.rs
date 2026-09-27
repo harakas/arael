@@ -170,6 +170,7 @@ struct Loose {
     loops: std::vec::Vec<Loop>,
     // Not `Sync`: a `seq` root is never handed to the pool.
     #[arael(skip)]
+    #[allow(dead_code)]
     scratch: std::cell::Cell<u32>,
     anchor: f64,
     drift: f64,

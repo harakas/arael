@@ -653,7 +653,7 @@ derivatives, and only a finite-difference comparison sees them disagree.
 
 Off by default: arael is a single-threaded solver. The `rayon` feature runs
 the linear solve on rayon's global thread pool, and the cost and assembly
-sweeps on it too.
+sweeps on arael's own worker threads.
 
 ```toml
 [dependencies]
@@ -675,8 +675,13 @@ the process.
 ### The sweeps
 
 The cost evaluation and the assembly of the gradient and Hessian run on
-the same threads as the linear solve. A root that should stay sequential
-says so, and keeps its linear solve threaded:
+arael's own workers: one thread per store beyond the calling thread,
+spawned on first use, parked between sweeps and kept for the life of
+the process, or until `arael::pool::shutdown()` joins them; the next
+threaded sweep spawns them again. One sweep dispatches at a time, so two
+solves running at once in one process take turns with their sweeps. A
+root that should stay sequential says so, and keeps its linear solve
+threaded:
 
 ```rust,ignore
 #[arael(root, seq)]
