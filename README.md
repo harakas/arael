@@ -943,7 +943,7 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     angle.rs        AngleParam: 2D heading with a cached rotation matrix
     transform.rs    TransformParam: rigid transform with a coupled 6-DOF twist step
     unitvec.rs      UnitVecParam: unit direction with 2 degrees of freedom
-    se3.rs          se(3) twists: compact rigid-transform form and conversions
+    twist.rs        twists: compact rigid-transform form and conversions
     simple_lm.rs    LM solver, LmProblem/RootProblem/FitProblem, Dense/Band/Sparse backends
                     (SparseFaer: sparse Cholesky + Schur marginalization)
     covariance.rs   Parameter covariance recovery (Sigma = 2 H^-1) at the solution

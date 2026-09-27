@@ -478,7 +478,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
         // rotation -- exact on the sphere for every delta.
         // A rigid transform: reference frame plus a coupled 6-DOF step.
         // The translation half of the step is carried through the rotation
-        // happening alongside it (see crate::se3).
+        // happening alongside it (see crate::twist).
         "TransformParam" | "TransformParamF" => Some(SymLayout {
             fields: vec![
                 ("ref_rotation".to_string(), SymFieldType::Mat3),
