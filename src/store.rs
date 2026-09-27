@@ -334,21 +334,16 @@ pub trait SweepsInParallel {}
 impl<T: Sync + ?Sized> SweepsInParallel for T {}
 
 /// Run `f` over every store with the model, told which store it is so it
-/// can take its own row of the cut: one task each on the rayon pool when
-/// `par`, else in order on the calling thread. The two forms do the same
-/// arithmetic in the same order per store -- the region is what changes,
-/// not the work.
+/// can take its own row of the cut: one task per store on the sweep
+/// workers ([`crate::pool`]) when `par`, else in order on the calling
+/// thread. The two forms do the same arithmetic in the same order per
+/// store -- the region is what changes, not the work.
 pub fn run_indexed<Mo: Sync + ?Sized, M: Send>(
     model: &Mo, par: bool, stores: &mut [M], f: impl Fn(&Mo, usize, &mut M) + Sync,
 ) {
     #[cfg(feature = "rayon")]
     if par {
-        rayon::in_place_scope(|s| {
-            for (i, m) in stores.iter_mut().enumerate() {
-                let f = &f;
-                s.spawn(move |_| f(model, i, m));
-            }
-        });
+        crate::pool::run_over(stores, |i, m| f(model, i, m));
         return;
     }
     let _ = par;

@@ -545,9 +545,10 @@ problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
 reference and a recipe for picking them.
 
 Arael is single-threaded by default. With the `rayon` feature the linear solve
-runs on rayon's thread pool, and so do the cost evaluation and the assembly of
-the gradient and Hessian: each thread sweeps its own share of the model into
-its own block store, and a serial pass adds the stores up. Set
+runs on rayon's thread pool, and the cost evaluation and the assembly of the
+gradient and Hessian on arael's own worker threads, one per store, parked
+between sweeps: each sweeps its own share of the model into its own block
+store, and a serial pass adds the stores up. Set
 `LmConfig::num_threads` (1 = sequential, the default; `n` = n threads; 0 =
 every core); `assembly_threads` gives the sweeps a count of their own.
 
