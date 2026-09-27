@@ -32,6 +32,29 @@ cargo build --release -p m3500-demo-capi
 python3 python/main.py
 ```
 
+Browser (`web/`): the same graph solved in the page as WebAssembly,
+through the generated JavaScript interface
+([docs/WASM.md](../../docs/WASM.md)). Drag a pose and a lock, a soft
+prior, follows the pointer and stays where it is released; `L` locks
+the selection in place, `F` fixes it (its parameters leave the solve),
+`C` clears; shift-click and shift-drag select; the wheel zooms, a
+middle double-click fits the view; any 2D g2o file can be loaded. The
+gauge is a very weak lock on pose 0, so every pose moves under a drag.
+Every re-solve runs through one `LmSession`.
+Build the wasm crate once (the target and the pinned CLI are named in
+`model/wasm/Cargo.toml`), then serve this directory; `web/datasets`
+links to the vendored g2o files under `benchmarks/pgo/datasets/`:
+
+```
+cd model/wasm
+cargo build --release --target wasm32-unknown-unknown
+wasm-bindgen --target web --weak-refs --out-dir pkg \
+    target/wasm32-unknown-unknown/release/m3500_demo_wasm.wasm
+cd ../..
+python3 -m http.server
+# http://localhost:8000/web/
+```
+
 After changing the model, regenerate the interfaces:
 
 ```
