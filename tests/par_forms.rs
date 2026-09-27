@@ -132,7 +132,7 @@ struct Path {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct Nested {
     paths: std::vec::Vec<Path>,
     anchors: refs::Vec<Anchor>,
@@ -221,7 +221,7 @@ struct PPair {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct ParentCross {
     pnodes: refs::Vec<PNode>,
     pairs: std::vec::Vec<PPair>,
@@ -273,7 +273,7 @@ struct Shared {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct RootSelf {
     shift: Param<f64>,
     obs: std::vec::Vec<Shared>,
@@ -321,7 +321,7 @@ struct CiLink {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct CiRoot {
     nodes: refs::Vec<CiNode>,
     links: std::vec::Vec<CiLink>,
@@ -378,7 +378,7 @@ struct Span {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct TwoColl {
     left: refs::Vec<TNode>,
     right: refs::Vec<TNode>,
@@ -439,7 +439,7 @@ struct Curve {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct CurveFit {
     curves: refs::Vec<Curve>,
 }
@@ -506,7 +506,7 @@ struct KPair {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct ChainRoot {
     nodes: refs::Arena<KNode>,
     pairs: std::vec::Vec<KPair>,
@@ -611,7 +611,7 @@ struct CObs {
 }
 
 #[arael::model]
-#[arael(root, par, marginalize(points))]
+#[arael(root, marginalize(points))]
 struct ColmapLike {
     poses: refs::Vec<CPose>,
     cams: refs::Vec<CCam>,
@@ -699,7 +699,7 @@ struct Branch {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct Tree {
     branches: std::vec::Vec<Branch>,
 }
@@ -743,7 +743,7 @@ struct NGroup {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct NRootSelf {
     shift: Param<f64>,
     groups: std::vec::Vec<NGroup>,
@@ -798,7 +798,7 @@ struct CTri {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct CooNary {
     nodes: refs::Vec<CNode>,
     tris: std::vec::Vec<CTri>,
@@ -842,7 +842,7 @@ struct RNode {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 #[arael(constraint(hb, { [(cooroot.shift - 1.0) * 0.2] }))]
 struct CooRoot {
     shift: Param<f64>,
@@ -896,7 +896,7 @@ struct Band {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct CooParent {
     bands: std::vec::Vec<Band>,
 }
@@ -996,7 +996,7 @@ struct LTri {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct CooNaryLoss {
     nodes: refs::Vec<CNode>,
     tris: std::vec::Vec<LTri>,
@@ -1043,7 +1043,7 @@ struct APair {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct CooAliased {
     nodes: refs::Vec<CNode>,
     pairs: std::vec::Vec<APair>,
@@ -1092,8 +1092,9 @@ struct FSpan {
     hb: CrossBlock<FNode, FNode, f32>,
 }
 
+// `cost_f64` widens the per-store cost accumulators and their merge.
 #[arael::model]
-#[arael(root, par, f32)]
+#[arael(root, f32, cost_f64)]
 struct F32Root {
     nodes: refs::Vec<FNode>,
     spans: std::vec::Vec<FSpan>,
@@ -1175,7 +1176,7 @@ struct ENode {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct Shapes {
     nodes: refs::Deque<DNode>,
     spans: std::vec::Vec<DSpan>,
@@ -1210,4 +1211,125 @@ fn fewer_instances_than_stores_threads() {
     threaded_matches_sequential("two instances", || build_shapes(2),
         &|c: &Context| c.blocks_list::<ShapesBlocks>().map_or(0, |v| v.len()));
     threaded_solve_matches("two instances", || build_shapes(2));
+}
+
+// ===========================================================================
+// A remote primary beside a cross block to the root: from under a parent
+// without parameters, the observation writes the point its ref names and
+// the (point, root) pair. The points sit in a container cut on its own.
+// ===========================================================================
+
+#[arael::model]
+#[arael(constraint(hb, { [(mpoint.x - mpoint.prior) * 0.05] }))]
+struct MPoint {
+    x: Param<f64>,
+    prior: f64,
+    hb: SelfBlock<MPoint>,
+}
+
+#[arael::model]
+#[arael(constraint([point.hb, hb_root], parent = beacon, {
+    [(point.x * root.scale - beacon.pos - mobs.meas) * mobs.w]
+}))]
+struct MObs {
+    #[arael(ref = root.points)] point: Ref<MPoint>,
+    meas: f64,
+    w: f64,
+    hb_root: CrossBlock<MPoint, RemoteCross>,
+}
+
+#[arael::model]
+struct MBeacon {
+    pos: f64,
+    obs: std::vec::Vec<MObs>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, { [(remotecross.scale - 1.0) * 0.2] }))]
+struct RemoteCross {
+    scale: Param<f64>,
+    points: refs::Vec<MPoint>,
+    beacons: refs::Vec<MBeacon>,
+    hb: SelfBlock<RemoteCross>,
+}
+
+fn build_remote_cross() -> RemoteCross {
+    let mut m = RemoteCross {
+        scale: Param::new(1.1),
+        points: refs::Vec::new(),
+        beacons: refs::Vec::new(),
+        hb: SelfBlock::new(),
+    };
+    for k in 0..120 {
+        m.points.push(MPoint {
+            x: Param::new(0.5 + 0.01 * k as f64),
+            prior: 0.5 + 0.012 * k as f64,
+            hb: SelfBlock::new(),
+        });
+    }
+    // Every beacon observes points at the far end of the list, outside
+    // the range of the store that sweeps it.
+    for b in 0..40 {
+        let obs = (0..3).map(|j| MObs {
+            point: m.points.ref_at(119 - (3 * b + j) % 120),
+            meas: 0.1 * j as f64,
+            w: 1.0 + 0.01 * b as f64,
+            hb_root: CrossBlock::new(),
+        }).collect();
+        m.beacons.push(MBeacon { pos: 0.2 * b as f64, obs });
+    }
+    m
+}
+
+#[test]
+fn a_remote_primary_with_a_cross_to_the_root_threads() {
+    threaded_matches_sequential("remote cross", build_remote_cross,
+        &|c: &Context| c.blocks_list::<RemoteCrossBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("remote cross", build_remote_cross);
+}
+
+// ===========================================================================
+// The `jacobian` and `cost_kahan` keywords beside the threaded sweeps: the
+// diagnostic walks are generated too, and each store sums its cost with
+// compensation before the merge
+// ===========================================================================
+
+#[arael::model]
+#[arael(root, jacobian, cost_kahan)]
+struct Compensated {
+    left: refs::Vec<TNode>,
+    right: refs::Vec<TNode>,
+    spans: std::vec::Vec<Span>,
+}
+
+fn build_compensated() -> Compensated {
+    let node = |i: usize, o: f64| TNode {
+        x: Param::new(o + 0.3 * i as f64),
+        prior: o + 0.25 * i as f64,
+        hb: SelfBlock::new(),
+    };
+    let mut m = Compensated {
+        left: refs::Vec::new(),
+        right: refs::Vec::new(),
+        spans: std::vec::Vec::new(),
+    };
+    for i in 0..20 { m.left.push(node(i, 0.0)); }
+    for i in 0..20 { m.right.push(node(i, 5.0)); }
+    for i in 0..20 {
+        m.spans.push(Span {
+            l: m.left.ref_at(i),
+            r: m.right.ref_at((i + 3) % 20),
+            d: 5.0,
+            hb: CrossBlock::new(),
+        });
+    }
+    m
+}
+
+#[test]
+fn a_jacobian_root_with_a_compensated_cost_threads() {
+    threaded_matches_sequential("compensated", build_compensated,
+        &|c: &Context| c.blocks_list::<CompensatedBlocks>().map_or(0, |v| v.len()));
+    threaded_solve_matches("compensated", build_compensated);
 }

@@ -1,28 +1,38 @@
+error[E0277]: `W` cannot be swept on several threads: it is not `Sync`
+  --> tests/constraint_attr_errors/par_not_sync.rs:17:8
+   |
+17 | struct W {
+   |        ^ this root's model is not `Sync`
+   |
+help: the trait `SweepsInParallel` is not implemented for `W`
+  --> tests/constraint_attr_errors/par_not_sync.rs:17:1
+   |
+17 | struct W {
+   | ^^^^^^^^
+   = note: opt the root out of the threaded sweeps with `#[arael(root, seq)]`, or replace the field that is not `Sync` (`Rc`, `Cell`, `RefCell`)
+note: required by a bound in `__sweeps_in_parallel`
+  --> tests/constraint_attr_errors/par_not_sync.rs:15:1
+   |
+15 | #[arael::model]
+   | ^^^^^^^^^^^^^^^ required by this bound in `__sweeps_in_parallel`
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: `Cell<u32>` cannot be shared between threads safely
   --> tests/constraint_attr_errors/par_not_sync.rs:15:1
    |
 15 | #[arael::model]
-   | ^^^^^^^^^^^^^^^
-   | |
-   | `Cell<u32>` cannot be shared between threads safely
-   | within this `{closure@$DIR/tests/constraint_attr_errors/par_not_sync.rs:15:1: 15:16}`
+   | ^^^^^^^^^^^^^^^ `Cell<u32>` cannot be shared between threads safely
    |
-   = help: within `{closure@$DIR/tests/constraint_attr_errors/par_not_sync.rs:15:1: 15:16}`, the trait `Sync` is not implemented for `Cell<u32>`
+   = help: within `W`, the trait `Sync` is not implemented for `Cell<u32>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicU32` instead
 note: required because it appears within the type `W`
   --> tests/constraint_attr_errors/par_not_sync.rs:17:8
    |
 17 | struct W {
    |        ^
-   = note: required because it appears within the type `&W`
-note: required because it's used within this closure
-  --> tests/constraint_attr_errors/par_not_sync.rs:15:1
-   |
-15 | #[arael::model]
-   | ^^^^^^^^^^^^^^^
 note: required by a bound in `run_indexed`
   --> src/store.rs
    |
-   | pub fn run_indexed<M: Send>(par: bool, stores: &mut [M], f: impl Fn(usize, &mut M) + Sync) {
-   |                                                                                      ^^^^ required by this bound in `run_indexed`
+   | pub fn run_indexed<Mo: Sync + ?Sized, M: Send>(
+   |                        ^^^^ required by this bound in `run_indexed`
    = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -318,24 +318,42 @@ fn ensure<'a, S: BlockStore>(
 // The dispatch
 // ---------------------------------------------------------------------------
 
-/// Run `f` over every store, told which one it is so it can take its own
-/// row of the cut: one task each on the rayon pool when `par`, else in
-/// order on the calling thread. The two forms do the same arithmetic in
-/// the same order per store -- the region is what changes, not the work.
-pub fn run_indexed<M: Send>(par: bool, stores: &mut [M], f: impl Fn(usize, &mut M) + Sync) {
+/// What the threaded sweeps need of a root's model: every store's task
+/// reads it at once, so it must be `Sync`. Every `Sync` type is one. A
+/// generated root asserts it, so a root holding an `Rc` or a `Cell` is
+/// told to opt out with `#[arael(root, seq)]`; the `Sync` error beside
+/// it names the field.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be swept on several threads: it is not `Sync`",
+    label = "this root's model is not `Sync`",
+    note = "opt the root out of the threaded sweeps with `#[arael(root, seq)]`, \
+            or replace the field that is not `Sync` (`Rc`, `Cell`, `RefCell`)"
+)]
+pub trait SweepsInParallel {}
+#[diagnostic::do_not_recommend]
+impl<T: Sync + ?Sized> SweepsInParallel for T {}
+
+/// Run `f` over every store with the model, told which store it is so it
+/// can take its own row of the cut: one task each on the rayon pool when
+/// `par`, else in order on the calling thread. The two forms do the same
+/// arithmetic in the same order per store -- the region is what changes,
+/// not the work.
+pub fn run_indexed<Mo: Sync + ?Sized, M: Send>(
+    model: &Mo, par: bool, stores: &mut [M], f: impl Fn(&Mo, usize, &mut M) + Sync,
+) {
     #[cfg(feature = "rayon")]
     if par {
         rayon::in_place_scope(|s| {
             for (i, m) in stores.iter_mut().enumerate() {
                 let f = &f;
-                s.spawn(move |_| f(i, m));
+                s.spawn(move |_| f(model, i, m));
             }
         });
         return;
     }
     let _ = par;
     for (i, m) in stores.iter_mut().enumerate() {
-        f(i, m);
+        f(model, i, m);
     }
 }
 // ---------------------------------------------------------------------------

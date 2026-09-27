@@ -150,7 +150,7 @@ struct RLink {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct NetR {
     nodes: refs::Arena<Node>,
     links: std::vec::Vec<RLink>,
@@ -438,7 +438,7 @@ struct SNode {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct NetSelf {
     nodes: refs::Arena<SNode>,
     tags: refs::Arena<Tag>,

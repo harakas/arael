@@ -521,7 +521,7 @@ fn thread_count_change_between_warm_solves() {
 // --- the same model as a `par` root: its pattern is bound per store ---
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct WorldPar {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<Landmark>,
