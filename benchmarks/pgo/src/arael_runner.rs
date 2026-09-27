@@ -58,7 +58,7 @@ struct Edge<T: Float> {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 #[derive(Clone)]
 pub struct Graph {
     poses: refs::Vec<Pose2<f64>>,
@@ -67,7 +67,7 @@ pub struct Graph {
 }
 
 #[arael::model]
-#[arael(root, f32, par)]
+#[arael(root, f32)]
 #[derive(Clone)]
 struct GraphF {
     poses: refs::Vec<Pose2<f32>>,

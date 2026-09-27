@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arael = { path = "../.." }
+arael = { path = "../..", features = ["rayon"] }
 bench-harness = { path = "../harness", features = ["factrs"] }
 factrs = "0.3.0"
 rand = "0.9"
