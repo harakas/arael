@@ -10,7 +10,7 @@ use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
 };
-use m3500_demo::{Edge, Graph, Pose2, Prior};
+use m3500_demo::{Edge, Graph, Lock, Pose2, Prior};
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the
@@ -924,6 +924,14 @@ pub extern "C" fn graph_set_log_level(level: u32) {
         2 => arael::log::Level::Warn,
         _ => arael::log::Level::Info,
     });
+}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+#[no_mangle]
+pub extern "C" fn graph_pool_shutdown() {
+    arael::pool::shutdown();
 }
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.
@@ -1999,6 +2007,217 @@ pub unsafe extern "C" fn graph_make_prior_slots(p: *mut GraphHandle, slots: *con
     a.as_mut().unwrap() as *mut Prior
 }
 #[no_mangle]
+pub unsafe extern "C" fn graph_locks_len(p: *const GraphHandle) -> u32 {
+    (*p).model.locks.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_reserve(p: *mut GraphHandle, additional: u32) {
+    (*p).model.locks.reserve(additional as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_push(p: *mut GraphHandle) -> *mut Lock {
+    let m = &mut (*p).model.locks;
+    m.push(Default::default());
+    m.last_mut().unwrap() as *mut Lock
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_at(p: *mut GraphHandle, i: u32) -> *mut Lock {
+    let m = &mut (*p).model.locks;
+    &mut m[i as usize] as *mut Lock
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_pop(p: *mut GraphHandle) -> bool {
+    (*p).model.locks.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_clear(p: *mut GraphHandle) {
+    (*p).model.locks.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_truncate(p: *mut GraphHandle, len: u32) {
+    (*p).model.locks.truncate(len as usize);
+}
+/// Appends `n` elements built from `n` slot records of 7 u64 each (mask
+/// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
+/// Returns the first new element's key: its packed ref on a refs::Vec,
+/// its index on a std::vec::Vec.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_push_n(p: *mut GraphHandle, slots: *const u64, n: u32) -> u32 {
+    let m = &mut (*p).model.locks;
+    let first = m.len();
+    m.reserve(n as usize);
+    for i in 0..n as usize {
+        let mut e: Lock = Default::default();
+        if !slots.is_null() {
+            assign_slots_lock(&mut e, slots.add(i * 7));
+        }
+        m.push(e);
+    }
+    first as u32
+}
+/// Sets `p` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_set_p_n(
+    p: *mut GraphHandle, start: u32, v: *const u32, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u32;
+        m[start + i].p = arael::refs::Ref::from_raw(std::ptr::read_unaligned(src));
+    }
+    true
+}
+/// Reads `p` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_get_p_n(
+    p: *const GraphHandle, start: u32, out: *mut u32, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u32;
+        std::ptr::write_unaligned(dst, m[start + i].p.to_raw());
+    }
+    true
+}
+/// Sets `pos` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_set_pos_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].pos = std::mem::transmute::<[f64; 2], CVec2F64>(std::ptr::read_unaligned(src as *const [f64; 2])).into();
+    }
+    true
+}
+/// Reads `pos` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_get_pos_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        let mv: CVec2F64 = m[start + i].pos.into();
+        std::ptr::write_unaligned(dst as *mut [f64; 2], std::mem::transmute::<CVec2F64, [f64; 2]>(mv));
+    }
+    true
+}
+/// Sets `th` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_set_th_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].th = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `th` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_get_th_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].th);
+    }
+    true
+}
+/// Sets `w` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_set_w_n(
+    p: *mut GraphHandle, start: u32, v: *const f64, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const f64;
+        m[start + i].w = std::ptr::read_unaligned(src);
+    }
+    true
+}
+/// Reads `w` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_get_w_n(
+    p: *const GraphHandle, start: u32, out: *mut f64, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut f64;
+        std::ptr::write_unaligned(dst, m[start + i].w);
+    }
+    true
+}
+/// Sets `on` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_set_on_n(
+    p: *mut GraphHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].on = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `on` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn graph_locks_get_on_n(
+    p: *const GraphHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.locks;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].on as u8);
+    }
+    true
+}
+#[no_mangle]
 pub unsafe extern "C" fn graph_edge_a(p: *const Edge) -> u32 {
     (*p).a.to_raw()
 }
@@ -2053,6 +2272,46 @@ pub unsafe extern "C" fn graph_edge_s2(p: *const Edge) -> CVec3F64 {
 #[no_mangle]
 pub unsafe extern "C" fn graph_edge_set_s2(p: *mut Edge, v: CVec3F64) {
     (*p).s2 = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_p(p: *const Lock) -> u32 {
+    (*p).p.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_set_p(p: *mut Lock, v: u32) {
+    (*p).p = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_pos(p: *const Lock) -> CVec2F64 {
+    (*p).pos.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_set_pos(p: *mut Lock, v: CVec2F64) {
+    (*p).pos = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_th(p: *const Lock) -> f64 {
+    (*p).th
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_set_th(p: *mut Lock, v: f64) {
+    (*p).th = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_w(p: *const Lock) -> f64 {
+    (*p).w
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_set_w(p: *mut Lock, v: f64) {
+    (*p).w = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_on(p: *const Lock) -> bool {
+    (*p).on
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_lock_set_on(p: *mut Lock, v: bool) {
+    (*p).on = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn graph_pose2_pos(p: *const Pose2) -> CVec2F64 {
@@ -2139,6 +2398,27 @@ unsafe fn assign_slots_edge(e: &mut Edge, s: *const u64) {
     }
     if *s.add(0) & (1u64 << 6) != 0 {
         e.s2 = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(12)), f64::from_bits(*s.add(13)), f64::from_bits(*s.add(14))]).into();
+    }
+}
+
+/// Assigns a slot record's masked leaves onto a `Lock`: 1 mask
+/// word(s), then 6 slot(s), one per leaf in field order.
+#[allow(dead_code)]
+unsafe fn assign_slots_lock(e: &mut Lock, s: *const u64) {
+    if *s.add(0) & (1u64 << 0) != 0 {
+        e.p = arael::refs::Ref::from_raw(*s.add(1) as u32);
+    }
+    if *s.add(0) & (1u64 << 1) != 0 {
+        e.pos = std::mem::transmute::<[f64; 2], CVec2F64>([f64::from_bits(*s.add(2)), f64::from_bits(*s.add(3))]).into();
+    }
+    if *s.add(0) & (1u64 << 2) != 0 {
+        e.th = f64::from_bits(*s.add(4));
+    }
+    if *s.add(0) & (1u64 << 3) != 0 {
+        e.w = f64::from_bits(*s.add(5));
+    }
+    if *s.add(0) & (1u64 << 4) != 0 {
+        e.on = *s.add(6) != 0;
     }
 }
 

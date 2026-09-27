@@ -64,6 +64,14 @@ def set_log_level(level):
     _f.graph_set_log_level(int(level))
 
 
+def pool_shutdown():
+    """Stop and join arael's sweep worker threads; the next threaded
+    solve spawns them again. Process-wide, and a no-op when arael was
+    built without the `rayon` feature."""
+    load()
+    _f.graph_pool_shutdown()
+
+
 def _raw(r):
     return r.raw if hasattr(r, "raw") else int(r)
 
@@ -218,6 +226,30 @@ class EdgeRef:
         return "EdgeRef(%s)" % (self.raw if self.valid else "null")
 
 
+class LockRef:
+    """Typed handle into the collection that issued it -- the Python
+    spelling of Rust's `Ref<Lock>`. Default-constructed it is the null
+    sentinel."""
+
+    __slots__ = ("raw",)
+
+    def __init__(self, raw=0xFFFFFFFF):
+        self.raw = raw
+
+    @property
+    def valid(self):
+        return self.raw != 0xFFFFFFFF
+
+    def __eq__(self, o):
+        return isinstance(o, LockRef) and o.raw == self.raw
+
+    def __hash__(self):
+        return hash((LockRef, self.raw))
+
+    def __repr__(self):
+        return "LockRef(%s)" % (self.raw if self.valid else "null")
+
+
 class Pose2Ref:
     """Typed handle into the collection that issued it -- the Python
     spelling of Rust's `Ref<Pose2>`. Default-constructed it is the null
@@ -366,6 +398,88 @@ class Edge:
     @s2.setter
     def s2(self, v):
         _f.graph_edge_set_s2(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+
+_lock_rec = struct.Struct("=QQddddQ")
+_lock_slots = (ctypes.c_uint64 * 7)()
+
+
+class Lock:
+    """A `Lock` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
+
+    __slots__ = ("_at", "_key")
+    param_count = 0
+
+    def __init__(self, at, key=None):
+        # Zero-argument callable returning a currently-valid pointer, and
+        # the key it resolves by (a LockRef or an index; None for a
+        # nested element).
+        self._at = at
+        self._key = key
+
+    @property
+    def _p(self):
+        return self._at()
+
+    @property
+    def ref(self):
+        """The LockRef this wrapper was looked up by (TypeError when it
+        was an index)."""
+        k = self._key
+        if isinstance(k, LockRef):
+            return k
+        raise TypeError("Lock addressed by index, not by ref")
+
+    @property
+    def index(self):
+        """The index this wrapper was looked up by (TypeError when it
+        was a LockRef)."""
+        k = self._key
+        if isinstance(k, int):
+            return k
+        raise TypeError("Lock addressed by ref, not by index")
+
+    @property
+    def p(self):
+        return Pose2Ref(_f.graph_lock_p(self._p))
+
+    @p.setter
+    def p(self, r):
+        _f.graph_lock_set_p(self._p, _raw(r))
+
+    @property
+    def pos(self):
+        return _f.graph_lock_pos(self._p)
+
+    @pos.setter
+    def pos(self, v):
+        _f.graph_lock_set_pos(self._p, v if isinstance(v, _m.vect2d) else _m.vect2d(v))
+
+    @property
+    def th(self):
+        return _f.graph_lock_th(self._p)
+
+    @th.setter
+    def th(self, v):
+        _f.graph_lock_set_th(self._p, v)
+
+    @property
+    def w(self):
+        return _f.graph_lock_w(self._p)
+
+    @w.setter
+    def w(self, v):
+        _f.graph_lock_set_w(self._p, v)
+
+    @property
+    def on(self):
+        return _f.graph_lock_on(self._p)
+
+    @on.setter
+    def on(self, v):
+        _f.graph_lock_set_on(self._p, v)
 
 
 _pose2_rec = struct.Struct("=QddQdQ")
@@ -1035,6 +1149,188 @@ class GraphEdgesVec:
         return _cols.column_finish(buf, "d", 3, n)
 
 
+class GraphLocksVec:
+    """View of `locks` (vec of Lock); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined.
+
+    Construction and bulk edits cross the FFI once per call: push(**fields)
+    fills the new element's fields in the same call as the push;
+    push_many(**arrays) appends many; set_<field>(values) / get_<field>()
+    move one column of the whole collection."""
+
+    __slots__ = ("_p",)
+
+    def __init__(self, p):
+        self._p = p
+
+    def __len__(self):
+        return _f.graph_locks_len(self._p)
+
+    def reserve(self, additional):
+        _f.graph_locks_reserve(self._p, additional)
+
+    def __getitem__(self, i):
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError(i)
+        return Lock(lambda i=i: _f.graph_locks_at(self._p, i), i)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield Lock(lambda i=i: _f.graph_locks_at(self._p, i), i)
+
+    def clear(self):
+        _f.graph_locks_clear(self._p)
+
+    def truncate(self, n):
+        _f.graph_locks_truncate(self._p, n)
+
+    def push(self, *, p=None, pos=None, th=None, w=None, on=None):
+        """Appends one element and returns it; each keyword sets that
+        field in the same call, an omitted one keeps the Rust default."""
+        m = 0
+        if p is None: p = 0
+        else: m |= 1 << 0; p = getattr(p, "raw", p)
+        if pos is None: pos = _Z2
+        else:
+            m |= 1 << 1; pos = tuple(pos)
+            if len(pos) != 2: pos = _cols.flat(pos, 2)
+        if th is None: th = 0.0
+        else: m |= 1 << 2
+        if w is None: w = 0.0
+        else: m |= 1 << 3
+        if on is None: on = 0
+        else: m |= 1 << 4; on = 1 if on else 0
+        _lock_rec.pack_into(_lock_slots, 0,
+            m, p, *pos, th, w, on)
+        i = _f.graph_locks_push_n(self._p, _lock_slots, 1)
+        return Lock(lambda i=i: _f.graph_locks_at(self._p, i), i)
+
+    def pop(self):
+        """Drops the last element; False when already empty."""
+        return _f.graph_locks_pop(self._p)
+
+    def push_many(self, n=None, *, p=None, pos=None, th=None, w=None, on=None):
+        """Appends `n` elements in one call. Each keyword is one value
+        for all of them or a sequence with one per element (a numpy
+        array of the matching dtype is read in place); `n` may be
+        omitted when some keyword is a sequence. Returns the index of
+        the first new element."""
+        n = _cols.count(n, (("p", p), ("pos", pos), ("th", th), ("w", w),
+                        ("on", on)))
+        i0 = len(self)
+        _f.graph_locks_push_n(self._p, None, n)
+        if p is not None:
+            self._set_p(i0, n, p)
+        if pos is not None:
+            self._set_pos(i0, n, pos)
+        if th is not None:
+            self._set_th(i0, n, th)
+        if w is not None:
+            self._set_w(i0, n, w)
+        if on is not None:
+            self._set_on(i0, n, on)
+        return i0
+
+    def _set_p(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "I", 1, n, "p")
+        if not _f.graph_locks_set_p_n(self._p, start, ptr, n, stride):
+            raise IndexError("p: %d + %d exceeds the collection" % (start, n))
+
+    def set_p(self, v):
+        """Sets `p` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_p(0, len(self), v)
+
+    def get_p(self):
+        """`p` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("I", 1, n)
+        _f.graph_locks_get_p_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "I", 1, n)
+
+    def _set_pos(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 2, n, "pos")
+        if not _f.graph_locks_set_pos_n(self._p, start, ptr, n, stride):
+            raise IndexError("pos: %d + %d exceeds the collection" % (start, n))
+
+    def set_pos(self, v):
+        """Sets `pos` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_pos(0, len(self), v)
+
+    def get_pos(self):
+        """`pos` of every element in one call, as an (n, 2) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 2, n)
+        _f.graph_locks_get_pos_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 2, n)
+
+    def _set_th(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "th")
+        if not _f.graph_locks_set_th_n(self._p, start, ptr, n, stride):
+            raise IndexError("th: %d + %d exceeds the collection" % (start, n))
+
+    def set_th(self, v):
+        """Sets `th` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_th(0, len(self), v)
+
+    def get_th(self):
+        """`th` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.graph_locks_get_th_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_w(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "d", 1, n, "w")
+        if not _f.graph_locks_set_w_n(self._p, start, ptr, n, stride):
+            raise IndexError("w: %d + %d exceeds the collection" % (start, n))
+
+    def set_w(self, v):
+        """Sets `w` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_w(0, len(self), v)
+
+    def get_w(self):
+        """`w` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("d", 1, n)
+        _f.graph_locks_get_w_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "d", 1, n)
+
+    def _set_on(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "on")
+        if not _f.graph_locks_set_on_n(self._p, start, ptr, n, stride):
+            raise IndexError("on: %d + %d exceeds the collection" % (start, n))
+
+    def set_on(self, v):
+        """Sets `on` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_on(0, len(self), v)
+
+    def get_on(self):
+        """`on` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.graph_locks_get_on_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
+
+
 class Graph:
     """The model. Owns the underlying Rust instance; free() (or GC)
     releases it. One model, one thread."""
@@ -1155,4 +1451,8 @@ class Graph:
 
     def clear_prior(self):
         _f.graph_clear_prior(self._p)
+
+    @property
+    def locks(self):
+        return GraphLocksVec(self._p)
 

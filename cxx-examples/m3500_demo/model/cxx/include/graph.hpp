@@ -91,6 +91,13 @@ struct EdgeRef {
     bool valid() const { return raw != UINT32_MAX; }
 };
 /// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Lock>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct LockRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
+/// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Pose2>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
 struct Pose2Ref {
@@ -108,6 +115,7 @@ struct PriorRef {
 namespace ffi {
 struct Graph;
 struct Edge;
+struct Lock;
 struct Pose2;
 struct Prior;
 
@@ -126,6 +134,16 @@ vect3d graph_edge_s1(const Edge*);
 void graph_edge_set_s1(Edge*, vect3d);
 vect3d graph_edge_s2(const Edge*);
 void graph_edge_set_s2(Edge*, vect3d);
+uint32_t graph_lock_p(const Lock*);
+void graph_lock_set_p(Lock*, uint32_t);
+vect2d graph_lock_pos(const Lock*);
+void graph_lock_set_pos(Lock*, vect2d);
+double graph_lock_th(const Lock*);
+void graph_lock_set_th(Lock*, double);
+double graph_lock_w(const Lock*);
+void graph_lock_set_w(Lock*, double);
+bool graph_lock_on(const Lock*);
+void graph_lock_set_on(Lock*, bool);
 vect2d graph_pose2_pos(const Pose2*);
 void graph_pose2_set_pos(Pose2*, vect2d);
 bool graph_pose2_pos_optimize(const Pose2*);
@@ -175,6 +193,13 @@ bool graph_has_prior(const Graph*);
 Prior* graph_make_prior(Graph*);
 void graph_clear_prior(Graph*);
 Prior* graph_prior(Graph*);
+uint32_t graph_locks_len(const Graph*);
+void graph_locks_reserve(Graph*, uint32_t);
+Lock* graph_locks_push(Graph*);
+Lock* graph_locks_at(Graph*, uint32_t);
+bool graph_locks_pop(Graph*);
+void graph_locks_clear(Graph*);
+void graph_locks_truncate(Graph*, uint32_t);
 double graph_cost(Graph*);
 int32_t graph_solve_band(Graph*, uint32_t, const LmConfig*, LmResultT<double>*);
 void graph_lm_config(uint32_t, LmConfig*);
@@ -184,6 +209,7 @@ const char* graph_last_error(const Graph*);
 bool graph_last_failure(const Graph*, SolveFailure*);
 const char* graph_validate(Graph*);
 void graph_set_log_level(uint32_t);
+void graph_pool_shutdown(void);
 void graph_sparse_options(SparseOptions*);
 int32_t graph_solve_dense(Graph*, const LmConfig*, LmResultT<double>*);
 int32_t graph_solve_sparse(Graph*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -211,6 +237,13 @@ inline SparseOptions::SparseOptions() {
 /// the default). Process-wide: all models and roots share it.
 inline void set_log_level(LogLevel level) {
     ffi::graph_set_log_level(uint32_t(level));
+}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+inline void pool_shutdown() {
+    ffi::graph_pool_shutdown();
 }
 
 /// A completed solve: the plain result fields plus ownership of the
@@ -300,6 +333,32 @@ public:
     void set_s2(vect3d v) { ffi::graph_edge_set_s2(h_, v); }
 private:
     ffi::Edge* h_;
+};
+
+/// A `Lock` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Lock {
+public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
+    Lock() : h_(nullptr) {}
+    explicit Lock(ffi::Lock* p) : h_(p) {}
+    /// False when default-constructed (e.g. inside an empty option).
+    bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer -- the relaxed escape hatch.
+    ffi::Lock* raw() const { return h_; }
+    Pose2Ref p() const { return Pose2Ref{ffi::graph_lock_p(h_)}; }
+    void set_p(Pose2Ref r) { ffi::graph_lock_set_p(h_, r.raw); }
+    vect2d pos() const { return ffi::graph_lock_pos(h_); }
+    void set_pos(vect2d v) { ffi::graph_lock_set_pos(h_, v); }
+    double th() const { return ffi::graph_lock_th(h_); }
+    void set_th(double v) { ffi::graph_lock_set_th(h_, v); }
+    double w() const { return ffi::graph_lock_w(h_); }
+    void set_w(double v) { ffi::graph_lock_set_w(h_, v); }
+    bool on() const { return ffi::graph_lock_on(h_); }
+    void set_on(bool v) { ffi::graph_lock_set_on(h_, v); }
+private:
+    ffi::Lock* h_;
 };
 
 /// A `Pose2` in its owner's storage; a thin pointer wrapper (validity
@@ -577,6 +636,88 @@ private:
     ffi::Graph* h_;
 };
 
+/// `Graph.locks`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
+class GraphLocksVec {
+public:
+    explicit GraphLocksVec(ffi::Graph* h) : h_(h) {}
+    uint32_t size() const { return ffi::graph_locks_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::graph_locks_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
+    Lock push() { return Lock(ffi::graph_locks_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
+    Lock operator[](uint32_t i) { return Lock(ffi::graph_locks_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    Lock front() { return (*this)[0]; }
+    Lock back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::graph_locks_pop(h_); }
+    void clear() { ffi::graph_locks_clear(h_); }
+    void truncate(uint32_t n) { ffi::graph_locks_truncate(h_, n); }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Lock), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Lock;
+        using difference_type = std::ptrdiff_t;
+        using reference = Lock;
+        struct arrow { Lock v; Lock* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Graph* h, uint32_t i) : h_(h), i_(i) {}
+        Lock operator*() const { return Lock(ffi::graph_locks_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Graph* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Lock;
+        using difference_type = std::ptrdiff_t;
+        using reference = Lock;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Lock operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+private:
+    ffi::Graph* h_;
+};
+
 /// The `Graph` model. Owns the Rust-side object; move-only.
 class Graph {
 public:
@@ -603,6 +744,7 @@ public:
         ffi::Prior* p = ffi::graph_prior(h_);
         return p ? option<Prior>(Prior(p)) : option<Prior>();
     }
+    GraphLocksVec locks() { return GraphLocksVec(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1); a caught Rust panic throws PanicError.

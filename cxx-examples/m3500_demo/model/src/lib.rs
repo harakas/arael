@@ -69,6 +69,25 @@ pub struct Edge {
     pub hb: CrossBlock<Pose2, Pose2>,
 }
 
+/// A lock on one pose: a prior pulling it to a target, weighted by `w`,
+/// in force while `on`. Made once per pose and left off, so switching
+/// one changes no structure and a session stays warm across it.
+#[arael::model]
+#[arael(constraint(p.hb, guard = self.on, {
+    [(p.pos.x - lock.pos.x) * lock.w,
+     (p.pos.y - lock.pos.y) * lock.w,
+     (p.rot.angle - lock.th) * lock.w]
+}))]
+#[derive(Default)]
+pub struct Lock {
+    #[arael(ref = root.poses)]
+    pub p: Ref<Pose2>,
+    pub pos: vect2d,
+    pub th: f64,
+    pub w: f64,
+    pub on: bool,
+}
+
 #[arael::model]
 #[arael(root)]
 #[derive(Default)]
@@ -76,4 +95,5 @@ pub struct Graph {
     pub poses: refs::Vec<Pose2>,
     pub edges: std::vec::Vec<Edge>,
     pub prior: Option<Prior>,
+    pub locks: std::vec::Vec<Lock>,
 }

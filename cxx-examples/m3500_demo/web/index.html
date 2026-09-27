@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m3500 in the browser</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #8884; }
+  header label { display: inline-flex; gap: 4px; align-items: center; }
+  main { flex: 1; min-height: 0; position: relative; }
+  canvas { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+  footer { padding: 6px 12px; border-top: 1px solid #8884; font-variant-numeric: tabular-nums; white-space: pre-wrap; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 10px; vertical-align: middle; }
+  kbd { padding: 0 4px; border: 1px solid #8886; border-radius: 3px; font-family: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <button id="solve">Solve</button>
+  <button id="reset">Reset</button>
+  <button id="recenter">Recenter</button>
+  <label><input type="checkbox" id="weighted"> information weighting</label>
+  <label><input type="checkbox" id="live" checked> re-solve while dragging</label>
+  <label>load g2o <input type="file" id="file" accept=".g2o,.txt"></label>
+  <span class="legend">
+    <span style="background:#3a7bd5"></span>pose
+    <span style="background:#e0a000"></span>locked
+    <span style="background:#d33"></span>fixed
+    <span style="background:#2c2"></span>selected
+  </span>
+  <span>drag a pose; <kbd>L</kbd> lock, <kbd>F</kbd> fix, <kbd>C</kbd> clear the selection; shift-click or shift-drag selects; wheel zooms, middle double-click fits</span>
+</header>
+<main><canvas id="view"></canvas></main>
+<footer id="status">loading…</footer>
+<script type="module" src="main.js"></script>
+</body>
+</html>
