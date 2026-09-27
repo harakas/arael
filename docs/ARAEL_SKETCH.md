@@ -34,8 +34,8 @@ offers:
   user types an expression such as `d0 * 2 + 3` as a dimension
   value. At set-up time the expression is parsed with
   `arael_sym::parse`, differentiated symbolically (`E::diff(...)`),
-  and plugged into the solver via `ExtendedModel` and a
-  `TripletBlock` on the root. Dimensions can reference each other,
+  and plugged into the solver via `ExtendedModel`, whose hook pushes
+  into the solve's COO list. Dimensions can reference each other,
   entity properties (`L0.length`, `A0.radius`), and arithmetic
   expressions; broken references (deleted entities) are detected and
   the dimension falls back to its last computed value.
@@ -48,8 +48,8 @@ Beyond the two differentiation modes, the sketch uses:
 - `SelfBlock` / `CrossBlock` for the dense per-entity Hessian blocks
   (see `Point`, `Line`, `Arc`, and the various coincidence / parallel
   / tangent structs).
-- `TripletBlock` on the root for the runtime expression-dimension
-  rows -- 3+-entity constraints written at runtime.
+- The solve's COO list for the runtime expression-dimension rows --
+  3+-entity constraints written at runtime through `ExtendedModel`.
 - `#[arael(root, jacobian)]` for DOF analysis, conflict detection,
   and the "blocker" diagnostics surfaced when a new constraint is
   rejected as redundant.
@@ -383,8 +383,8 @@ sketch.solve();
 The sketch solver uses Levenberg-Marquardt optimization with drift
 regularization and robust drag constraints. Geometric constraints
 are differentiated at compile time; parametric expression dimensions
-use runtime differentiation via `ExtendedModel` and a root-mounted
-`TripletBlock`.
+use runtime differentiation via `ExtendedModel`, whose hook pushes into
+the solve's COO list.
 
 ## Command panel & scripting
 

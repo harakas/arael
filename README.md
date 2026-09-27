@@ -53,9 +53,9 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
 - **C++ and Python interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md))
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
-- **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
+- **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel`
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
-- **Hessian blocks** -- markers declaring which parameters a constraint couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one entity with another, `TripletBlock` generic coupling. The solve owns the values the markers stand for
+- **Hessian blocks** -- markers declaring which parameters a constraint couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one entity with another, and the `coo` keyword for pairs a constraint does not name
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
 - **Parameter covariance** -- `assemble_covariance` recovers `Sigma = 2 H^-1` at the solution without forming the dense inverse; per-entity marginal / conditional / cross blocks and std devs, with a `PerQuery` / `AllMarginals` (selected inverse) / `TriDiagonal` (band, no factorization) mode per workload
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
@@ -433,7 +433,7 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[slam_demo](examples/slam_demo.rs)** -- full 3D monocular SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[slam_demo_gm](examples/slam_demo_gm.rs)** -- the same scene on newer machinery: selectable Geman-McClure / Cauchy block loss (`--loss gm|cauchy`) instead of the per-element starship wrap, a `TransformParam` pose, anchored inverse-depth landmarks (`UnitVecParam` direction + inverse range, re-anchored between ramp passes), trig-free chord residuals, and the graduated ramp through one `LmSession`.
 - **[loc_demo](examples/loc_demo.rs)** -- localisation with fixed known landmarks (no gauge freedom). Block-tridiagonal Hessian + band solver. Graduated-isigma optimisation via a root `frine_isigma_scale` field.
-- **[loc_global_demo](examples/loc_global_demo.rs)** -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` vs a root-owned `TripletBlock`) and a staged pass that optimises only the globals first.
+- **[loc_global_demo](examples/loc_global_demo.rs)** -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` on the constraint, or `[hb_pose, coo]` with no block field) and a staged pass that optimises only the globals first.
 - **[plane_slam_demo](examples/plane_slam_demo.rs)** -- plane SLAM with a user-defined component: `UnitVec<T>`, a 2-DOF unit direction on the sphere, demonstrating `#[arael(component)]`.
 - **[m3500_demo](examples/m3500_demo.rs)** -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints from a g2o file, the between-factor written symbolically, solved with sparse faer LM. The same model backs [benchmarks/pgo](benchmarks/pgo/README.md).
 - **[bal_demo](examples/bal_demo.rs)** -- bundle adjustment on a real Bundle-Adjustment-in-the-Large Ladybug problem (49 cameras, 7776 points, 31843 observations, from the vendored file). The Snavely reprojection residual written symbolically; verbose LM with the Nielsen driver drives the cost 1.70M -> 26.7k and the reprojection RMS 7.3 px -> 0.92 px in 22 steps, reaching the same optimum as Ceres. Same model as [benchmarks/bal](benchmarks/bal/README.md).
@@ -545,20 +545,20 @@ problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
 reference and a recipe for picking them.
 
 Arael is single-threaded by default. With the `rayon` feature the linear solve
-runs on rayon's thread pool -- set `LmConfig::num_threads` (1 = sequential, the
-default; `n` = n threads; 0 = every core).
+runs on rayon's thread pool, and so do the cost evaluation and the assembly of
+the gradient and Hessian: each thread sweeps its own share of the model into
+its own block store, and a serial pass adds the stores up. Set
+`LmConfig::num_threads` (1 = sequential, the default; `n` = n threads; 0 =
+every core); `assembly_threads` gives the sweeps a count of their own.
 
-The cost evaluation and the assembly of the gradient and Hessian can thread too,
-which a root asks for with `#[arael(root, par)]`. **This is experimental and
-covers a limited set of model forms**: a root that asks for it and uses a form
-the threaded sweeps do not cover fails to compile, naming the form. A threaded
-assembly also adds up in a different order than the sequential one, so the two
-match to rounding, not to the bit, and every `par` root must be `Sync`.
+A threaded assembly adds up in a different order than the sequential one, so
+results differ in the last bits between thread counts. The model is read from
+every thread at once, so a root must be `Sync`; one that is not, or that should
+stay sequential, says `#[arael(root, seq)]` and keeps its linear solve threaded.
 
 Threading has overhead: whether it helps, and by how much, depends on the model
-and its number of parameters. Each solve times both forms of each phase on its
-first calls and keeps the faster one. See
-[docs/SOLVERS.md](docs/SOLVERS.md#threads).
+and its number of parameters. Every solve's report says what the threads did.
+See [docs/SOLVERS.md](docs/SOLVERS.md#threads).
 
 ## Parameter Covariance
 
@@ -609,7 +609,7 @@ covariance section in each of their READMEs.
 
 Compile-time differentiation generates optimized Rust code with CSE at build time -- ideal when the model structure is fixed. But many applications need equations that are only known at runtime: user-typed formulas in a CAD parametric dimension, configuration-driven curve fitting, or symbolic constraints loaded from a file.
 
-Arael supports this through **runtime differentiation**: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait and `TripletBlock` provide the integration point with the LM solver.
+Arael supports this through **runtime differentiation**: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait is the integration point with the LM solver: the solve hands its hook a `Coo` list to push Hessian entries into.
 
 The sketch editor (`arael-sketch`) uses this extensively for parametric expression dimensions -- a user can type `d0 * 2 + 3` as a dimension value, and the solver constrains the geometry to satisfy the equation in real time, with full symbolic derivatives.
 
@@ -620,15 +620,15 @@ let residual = expr - arael_sym::symbol("y");
 let dr_da = residual.diff("a");  // symbolic derivative w.r.t. a
 let dr_db = residual.diff("b");  // symbolic derivative w.r.t. b
 
-// In ExtendedModel::extended_compute(params, grad) -- each solver iteration:
+// In ExtendedModel::extended_compute(params, grad, coo) -- each solver iteration:
 for &(x, y) in &data {
     vars.insert("x", x);
     vars.insert("y", y);
     let r = residual.eval(&vars)?;
     let dr = vec![dr_da.eval(&vars)?, dr_db.eval(&vars)?];
     // writes 2*r*dr into `grad` AND pushes upper-triangle Hessian
-    // into the TripletBlock -- one call, both done
-    hb.add_residual(r, &param_indices, &dr, grad);
+    // into `coo` -- one call, both done
+    coo.add_residual(r, &param_indices, &dr, grad);
 }
 ```
 
@@ -784,7 +784,7 @@ Python drivers over shared models. See [docs/CXX.md](docs/CXX.md) and
 
 ### Looking under the hood with `cargo expand`
 
-Mastering arael means being able to read what the macros actually generated for your equations. `#[arael::model]` does a lot: it interprets the constraint body symbolically, differentiates it against every reachable parameter, runs common-subexpression elimination, and emits Rust code for three call paths (`__compute_blocks`, `__set_block_indices`, `calc_jacobian`). [`cargo expand`](https://github.com/dtolnay/cargo-expand) (`cargo install cargo-expand`) prints the expansion exactly as the compiler sees it.
+Mastering arael means being able to read what the macros actually generated for your equations. `#[arael::model]` does a lot: it interprets the constraint body symbolically, differentiates it against every reachable parameter, runs common-subexpression elimination, and emits Rust code for three call paths (`__compute_blocks`, `__build_blocks`, `calc_jacobian`). [`cargo expand`](https://github.com/dtolnay/cargo-expand) (`cargo install cargo-expand`) prints the expansion exactly as the compiler sees it.
 
 ```bash
 cargo expand --example single_root_demo
@@ -847,7 +847,7 @@ Reading these tells you what the compiler *actually* has to evaluate -- useful f
 
 ### What to look for
 
-- **`__set_block_indices`** -- where each `SelfBlock` / `CrossBlock` / `TripletBlock` gets its global parameter indices written into place. A block that isn't touched here is invisible to the solver (its `u32::MAX` sentinel causes every `add_residual` to silently skip) -- a common failure mode.
+- **`__build_blocks`** -- where every declared `SelfBlock` / `CrossBlock` gets its place in the block store and its global parameter indices. A block absent here is not part of the Hessian.
 - **`__compute_blocks`** -- the grad + block-Hessian accumulation path. Each constraint is a nested block with its own CSE'd body.
 - **`calc_jacobian`** -- same body structure but builds a `JacobianRow` per residual instead of accumulating into the blocks. Generated only when you declare `#[arael(root, jacobian)]`.
 - **source markers** -- doc comments like `/// arael: PointFrine[<name>] @ path/to/file.rs:NNN` pinpoint the constraint attribute each block came from.
@@ -938,7 +938,7 @@ See [docs/ARAEL_SKETCH.md](docs/ARAEL_SKETCH.md) for the client configuration, t
 arael/              Main library (Levenberg-Marquardt solver + codegen)
   src/
     lib.rs          Crate documentation, arael::prelude
-    model.rs        Param<T>, rotation params, Model trait, SelfBlock, CrossBlock, TripletBlock
+    model.rs        Param<T>, rotation params, Model trait, SelfBlock, CrossBlock, Coo
     angle.rs        AngleParam: 2D heading with a cached rotation matrix
     transform.rs    TransformParam: rigid transform with a coupled 6-DOF twist step
     unitvec.rs      UnitVecParam: unit direction with 2 degrees of freedom

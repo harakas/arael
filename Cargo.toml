@@ -39,11 +39,10 @@ cholmod = ["eigen"]
 # module `cholmod` binds, which is LGPL). Enabling this feature makes the
 # resulting binary subject to the GPL. Enable knowingly.
 cholmod-gpl = ["cholmod"]
-# Run the linear solve on rayon's thread pool, and let a root opt its cost
-# and assembly sweeps in with `#[arael(root, par)]` (experimental, limited
-# model support). Off by default: arael is single-threaded, and an edge
-# target usually wants it that way. Without it `LmConfig::num_threads` must
-# stay 1, and a `par` root is the sequential one.
+# Run the linear solve and every root's cost and assembly sweeps on rayon's
+# thread pool; a root keeps its sweeps sequential with `#[arael(root, seq)]`.
+# Off by default: arael is single-threaded, and an edge target usually wants
+# it that way. Without it `LmConfig::num_threads` must stay 1.
 rayon = ["dep:rayon", "faer/rayon", "arael-faer/rayon", "arael-macros/rayon"]
 
 [dependencies]

@@ -138,9 +138,9 @@ happens when the block route does not apply.
 Nothing has to be set. It takes the seats the scalar route would
 otherwise hold -- the whole Hessian, and a reduced Schur system that the
 envelope route declined -- and the envelope and iterative routes keep
-their precedence. A model with no block structure (hand-built problems,
-`TripletBlock`) has nothing to factor in block form and takes the scalar
-route.
+their precedence. A model with no block structure (hand-built problems, or
+one whose Hessian entries all come through `coo`) has nothing to factor in
+block form and takes the scalar route.
 
 It measured at parity or ahead of the scalar route on every benchmark,
 per iteration and in peak memory, and its symbolic analysis is the
@@ -236,8 +236,8 @@ LmConfig {
 | `parameter_tolerance` | `None` | `Option<T>`. Stop when `\|step\|_2 <= tol * (\|x\|_2 + tol)` -- the parameters have stopped moving. A different question from the cost test: the cost can plateau while the step still does real work, and the step can vanish while the cost still creeps. Checked on an accepted step, before `advance()` re-centers. Respects `min_iters` |
 | `min_diagonal` | `None` | `Option<T>`. Floor under the DAMPING scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`. `None` leaves the scale at `H[i,i]` -- the classic multiplicative damping `(1 + lambda) * H[i,i]`. **Without it a parameter of zero curvature FAILS the solve** (`Err` with `SolveFailureKind::DegenerateDiagonal`) -- `(1 + lambda) * 0` is still 0, so the system is singular and no step can ever be accepted. With it, that parameter gets `lambda * min_diagonal` of damping, the factorization succeeds, and it simply does not move (its gradient is zero too). **A zero diagonal means the system is badly formulated -- a parameter nothing constrains -- so this is a bandaid and should be avoided**; the parameter it damps through stays unconstrained and its value is meaningless. Fix the model first: constrain it, hold it fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when a residual can legitimately switch itself off (a `branch` guarding an undefined observation, a saturated robustifier) and an entity can end one iteration with nothing reaching it. 1e-6 is reasonable. Rescues a ZERO diagonal only: NEGATIVE and NaN stay fatal, since `J^T J`'s diagonal is a sum of squares and either value means the assembly is poisoned |
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
-| `num_threads` | `1` | threads for the linear solve, and for the cost and assembly sweeps of a `par` root. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
-| `assembly_threads` | `None` | `Option<usize>`. A thread count for a `par` root's cost and assembly sweeps alone. `None` leaves them on `num_threads`; `Some(n)` gives the sweeps `n` and leaves the linear solve on `num_threads`. Same scale. The sweeps split by constraint count and the factorization by its elimination tree, so the count that suits one need not suit the other |
+| `num_threads` | `1` | threads for the linear solve and for the cost and assembly sweeps. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
+| `assembly_threads` | `None` | `Option<usize>`. A thread count for the cost and assembly sweeps alone. `None` leaves them on `num_threads`; `Some(n)` gives the sweeps `n` and leaves the linear solve on `num_threads`. Same scale. The sweeps split by constraint count and the factorization by its elimination tree, so the count that suits one need not suit the other |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 | `observer` | `None` | an [`LmObserver`](#iteration-observer) called once per damped attempt; can stop the solve. Set with `with_observer` |
 | `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
@@ -445,7 +445,7 @@ Reference "healthy" trace: run
 ## `LmProblem` -- the solver's interface
 
 ```rust,ignore
-pub trait LmProblem<T>: LmProblemInternals<T> {
+pub trait LmProblem<T> {
     fn calc_cost(&mut self, params: &[T]) -> T;
     fn calc_grad_hessian_dense(...) -> T;   // both assembly methods
     fn calc_grad_hessian_sparse(...) -> T;  // return the cost as a
@@ -456,14 +456,19 @@ pub trait LmProblem<T>: LmProblemInternals<T> {
 The `#[arael(root)]` macro generates all of these from your constraint
 attributes. You only call them via `solve*`; you never implement
 them by hand. The two assembly methods are also how you get a Hessian
-to look at: dense for a small model, COO sparse for a large one.
+to look at: dense for a small model, COO sparse for a large one. On a
+generated root each plain call builds the model's block store and drops
+it again; the `_with_context` forms keep it (see [What a solve
+keeps](#what-a-solve-keeps----context-and-lmsession)).
 
 `LmProblemInternals` is the other half -- the routes a backend picks
 (band, CSC, indexed), the context forms of the evaluations, the
 structure walks the sparse patterns are built from, and the elimination
-hints. It is `#[doc(hidden)]`: arael's own interface, not one to program
-against, and it may change without a major version bump. Every method
-has a default, so a hand-written problem opts in with one empty impl:
+hints. It is inner API, like `arael::store`: public so a caller can
+reach the context forms and the structure walks, not an interface to
+program against, and it may change without a major version bump. Every
+method has a default, so a hand-written problem opts in with one empty
+impl:
 
 ```rust,ignore
 impl LmProblem<f64> for MyProblem { /* cost, dense, sparse, advance */ }
@@ -480,6 +485,41 @@ reference rotation and their parameter slots reset to zero, which is
 what keeps the parameterization in its small-angle sweet spot on
 arbitrarily oriented problems. Hand-written `LmProblem` impls without
 re-centering state can leave it empty.
+
+## What a solve keeps -- `Context` and `LmSession`
+
+A solve of a generated root builds a block store: one array per
+declared block field, holding every Hessian block and gradient entry
+the sweeps write, and one store per thread when the sweeps thread. The
+plain entry points, `lm_solve` and the `solve_*` methods, build it per
+solve and drop it after. To keep it across solves of one model, hold an
+`arael::Context` and solve through `lm_solve_with_context`, or solve
+through an `LmSession`, which keeps one of its own. A solve through a
+context fills the same allocations again; the `_with_context`
+evaluations of `LmProblemInternals` panic on a model of another block
+count than the one the context was built for.
+
+`LmSession` keeps a backend and what it learns about one problem's
+structure -- the sparsity pattern, the position map, the ordering, the
+symbolic factorization, the Schur plan and the context -- so every
+solve after the first skips the analysis. The config is read on every
+solve, so tolerances, caps and the driver may change per call. The
+parameter values may change freely; that is what the session is for.
+The structure may not: after any change to the constraints, their
+couplings or the block layout, call `invalidate` first, or the next
+warm solve is undefined. A changed parameter count or block count
+panics, as it cannot be the same structure; a change that keeps every
+count passes unnoticed, so `invalidate` stays the rule. The sweep
+thread count is part of the structure too: the count the first solve
+used holds for the session's life, a later solve asking for another is
+run at the pinned count with a warning, and `invalidate` releases it.
+The linear solve's thread count is free to change.
+
+```rust,ignore
+let mut session = LmSession::new(SparseFaer::new());
+let r1 = session.solve(&mut model, &cfg); // cold: full analysis
+let r2 = session.solve(&mut model, &cfg); // warm: assembly + numerics
+```
 
 ## `LmResult`
 
@@ -612,8 +652,8 @@ derivatives, and only a finite-difference comparison sees them disagree.
 ## Threads
 
 Off by default: arael is a single-threaded solver. The `rayon` feature runs
-the linear solve on rayon's global thread pool, and lets a root opt its cost
-and assembly sweeps in as well.
+the linear solve on rayon's global thread pool, and the cost and assembly
+sweeps on it too.
 
 ```toml
 [dependencies]
@@ -632,21 +672,18 @@ sequentially -- it does not silently pretend. `num_threads: 0` resolves to
 `ThreadPoolBuilder` the application installed; the pool is shared with the rest of
 the process.
 
-### The sweeps -- experimental, limited model support
+### The sweeps
 
-The cost evaluation and the assembly of the gradient and Hessian thread
-only for a root that asks:
+The cost evaluation and the assembly of the gradient and Hessian run on
+the same threads as the linear solve. A root that should stay sequential
+says so, and keeps its linear solve threaded:
 
 ```rust,ignore
-#[arael(root, par)]
+#[arael(root, seq)]
 struct Scene { .. }
 ```
 
-**The threaded sweeps are experimental.** Dropping the keyword solves a
-model sequentially with its linear solve still threaded. A model holding
-a `TripletBlock` anywhere keeps the keyword but assembles on one thread:
-a triplet pushes into the model rather than into a store, so its sweeps
-cannot run side by side yet. The report says when that happened.
+The `par` keyword is accepted and means nothing.
 
 A solve divides every top-level collection into one contiguous range per
 thread, and each thread sweeps its own ranges into its own **store**: a
@@ -659,13 +696,11 @@ very different amounts of work still divides evenly.
 
 The cost evaluation of a trial step is split the same way, over the same
 ranges. It only reads, so it has nothing to gather afterwards but the
-sums. A sweep short enough that the worker threads are still waking runs
-on the calling thread instead, which costs about what the sequential
-walk costs.
+sums.
 
-The model is read-only during a sweep, so a `par` root must be `Sync`; a
-type that is not (a field with interior mutability) fails to compile and
-is named in the error.
+The model is read from every thread at once, so a root must be `Sync`. A
+root holding a `Cell`, `RefCell` or `Rc` fails to compile; the error
+names the field and says to opt out with `seq`.
 
 Summing each entity's contributions per range and then across the ranges
 reorders the additions: **a threaded assembly matches the sequential one to
@@ -703,15 +738,13 @@ same counts.
 that region, so the gap between them is the dispatch and the wake-up, and
 the gap between `max` and `mean` is the imbalance.
 
-A root without `par` prints a line saying so in place of the rows. The
+A `seq` root prints a line saying so in place of the rows. The
 same is in `LmResult::threads` for a caller that would rather read it
 than parse it, and `ThreadReport::fell_back` is the one-line test.
 
-To reuse what a solve allocates -- the stores above, holding every
-Hessian block -- across many solves of one model, keep an
-`arael::Context` and solve through
-`lm_solve_with_context`, or solve through an `LmSession`, which keeps one.
-The plain entry points make a context per solve.
+The stores are what a solve keeps across solves of one model, through a
+`Context` or an `LmSession`; see [What a solve
+keeps](#what-a-solve-keeps----context-and-lmsession).
 
 ### The linear solve
 

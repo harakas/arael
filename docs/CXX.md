@@ -92,6 +92,10 @@ else
     use(r->end_cost, fit.poses()[0].pos());
 ```
 
+`LmConfig` mirrors the Rust struct field for field, `num_threads` and
+`assembly_threads` included; both take effect when the exported crate is
+built with arael's `rayon` feature ([docs/SOLVERS.md](SOLVERS.md#threads)).
+
 ## The API surface
 
 The generated interface lives in a namespace named after the MODEL
