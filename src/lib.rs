@@ -87,12 +87,12 @@
 //!   [docs/PYTHON.md](https://github.com/harakas/arael/blob/master/docs/PYTHON.md)
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
-//!   auto-differentiate symbolically, and optimize via `ExtendedModel` +
-//!   `TripletBlock` (see `examples/runtime_fit_demo.rs`)
+//!   auto-differentiate symbolically, and optimize via `ExtendedModel`
+//!   (see `examples/runtime_fit_demo.rs`)
 //! - **Hessian blocks** -- markers declaring which parameters a constraint
 //!   couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one
-//!   entity with another, `TripletBlock` generic coupling. The solve
-//!   owns the values the markers stand for
+//!   entity with another, and the `coo` keyword for pairs a constraint
+//!   does not name
 //! - **Jacobian computation** -- `#[arael(root, jacobian)]` generates
 //!   `calc_jacobian()` returning a sparse [`Jacobian<T>`](model::Jacobian)
 //!   matrix for DOF analysis via SVD.
@@ -378,9 +378,9 @@
 //! equation string with `arael_sym::parse`, symbolically differentiate
 //! once at setup with `E::diff`, then evaluate the expression tree
 //! numerically each solver iteration. The
-//! [`ExtendedModel`](model::ExtendedModel) trait and
-//! [`TripletBlock`](model::TripletBlock) provide the integration point
-//! with the LM solver.
+//! [`ExtendedModel`](model::ExtendedModel) trait is the integration
+//! point with the LM solver: the solve hands its hook a
+//! [`Coo`](model::Coo) list to push Hessian entries into.
 //!
 //! The sketch editor (`arael-sketch`) uses this extensively for parametric
 //! expression dimensions -- a user can type `d0 * 2 + 3` as a dimension
@@ -389,22 +389,20 @@
 //!
 //! The model uses `#[arael(root, extended)]` and implements
 //! [`ExtendedModel`](model::ExtendedModel) to push residuals and
-//! derivatives into a [`TripletBlock`](model::TripletBlock) at each
-//! solver iteration:
+//! derivatives into the list at each solver iteration:
 //!
 //! ```ignore
 //! #[arael::model]
-//! #[arael(root, extended)]
+//! #[arael(root, extended, seq)]
 //! struct RegressionModel {
 //!     coeffs: refs::Vec<Coefficient>,         // optimizable parameters
-//!     hb: TripletBlock<f64>,                  // Gauss-Newton accumulator
 //!     residual_expr: Option<arael_sym::E>,    // parsed equation
 //!     derivs: Vec<(String, u32, arael_sym::E)>, // pre-computed derivatives
 //!     // ...
 //! }
 //!
 //! impl ExtendedModel<f64> for RegressionModel {
-//!     fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]) {
+//!     fn extended_compute(&mut self, params: &[f64], grad: &mut [f64], coo: &mut Coo<f64>) {
 //!         for &(x, y) in &self.data {
 //!             vars.insert("x", x);
 //!             vars.insert("y", y);
@@ -412,8 +410,8 @@
 //!             let dr: Vec<f64> = self.derivs.iter()
 //!                 .map(|(_, _, d)| d.eval(&vars).unwrap()).collect();
 //!             // writes 2*r*dr into grad AND pushes full upper-triangle
-//!             // Hessian into the TripletBlock (one call, both done)
-//!             self.hb.add_residual(r, &indices, &dr, grad);
+//!             // Hessian into coo (one call, both done)
+//!             coo.add_residual(r, &indices, &dr, grad);
 //!         }
 //!     }
 //! }
@@ -542,8 +540,8 @@
 //!   `SelfBlock<Ei>`. It is symmetric, so only its upper triangle is
 //!   kept, and every constraint touching `Ei`'s parameters adds to it.
 //! - **An off-diagonal block (`Ei != Ej`)** is declared by a
-//!   `CrossBlock<Ei, Ej>`, or by a `TripletBlock` that covers the
-//!   pair. One `CrossBlock<A, B>` declares both `H[A, B]` and its
+//!   `CrossBlock<Ei, Ej>`, or, unnamed, through the `coo` keyword.
+//!   One `CrossBlock<A, B>` declares both `H[A, B]` and its
 //!   transpose `H[B, A]`; the accumulator writes both halves from the
 //!   one rectangle.
 //!
@@ -557,12 +555,12 @@
 //! |---|---|---|
 //! | [`SelfBlock<T>`](model::SelfBlock) | the `(T, T)` diagonal block -- entity T coupled with itself | **mandatory on every params-having struct** |
 //! | [`CrossBlock<A, B>`](model::CrossBlock) | the `(A, B)` off-diagonal block, and its transpose | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One per unordered (A, B) entity pair; (A, A) / (B, B) diagonals stay on each entity's `SelfBlock` |
-//! | [`TripletBlock<T>`](model::TripletBlock) | across-entity pairs it is given at runtime, rather than one named pair | **always placed on the root** (one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the root's TripletBlock declares the (entity, root) cross pair; (2) runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel) that can't enumerate per-pair CrossBlocks statically -- `extended_compute` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** -- every entry is a `Vec` push |
+//! | `coo` (a keyword, not a field) | across-entity pairs a constraint does not name, kept as row, column and value in a list the solve owns | pairs between an entity's params and the root's or a containing parent's (`[hb, coo]`), N-ary constraints without a block per pair (`constraint(coo, ...)`), and the [`ExtendedModel`](model::ExtendedModel) hook, which is handed the list. Slower to assemble than a `CrossBlock`: every entry is a push |
 //!
 //! `SelfBlock<Self>` is required on every Model that has
 //! parameters -- omitting it is a compile-time error. An entity's
 //! diagonal block is always its own `SelfBlock`; `CrossBlock` and
-//! `TripletBlock` declare cross pairs only.
+//! `coo` carry cross pairs only.
 //!
 //! ```
 //! # use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
@@ -597,62 +595,53 @@
 //! # }
 //! ```
 //!
-//! ### Multi-CrossBlock vs TripletBlock
+//! ### Named pairs and the `coo` list
 //!
-//! `TripletBlock` is the general block: it couples any entities in
-//! any combination, settled while the solve runs rather than named in
-//! the model. The price is assembly speed. A `CrossBlock` names its
-//! two sides in the type, so it gets a packed tile of a size known in
-//! advance; a TripletBlock names nothing and so keeps each entry on
-//! its own, as a triplet of row, column and value -- the coordinate
-//! form (COO) a sparse matrix is built from, and what the name refers
-//! to. Every entry is a `Vec` push.
+//! A `CrossBlock` names its two sides in the type, so it gets a
+//! packed tile of a size known in advance and writes in place. The
+//! `coo` keyword names nothing: each entry is kept on its own, as a
+//! triplet of row, column and value, the coordinate form a sparse
+//! matrix is built from, in a list the solve owns. Every entry is a
+//! push, so it assembles slower than a tile.
 //!
-//! So name the pairs wherever they can be named, and reach for the
-//! TripletBlock where they cannot. For N-entity residuals the macro
-//! accepts both shapes:
+//! So name the pairs wherever they can be named, and use `coo` where
+//! they cannot. The macro accepts three shapes:
 //!
 //! - **`constraint([hb_ab, hb_ac, hb_bc], { ... })`** -- one
 //!   `CrossBlock<A, B>` field per unordered entity pair on the
-//!   constraint struct. Packed rectangular storage, one
-//!   `add_residual_cross` per pair.
-//! - **`constraint(..., root.hbt, { ... })`** -- route across-entity
-//!   pairs into a root-owned `TripletBlock<T>`. One COO
-//!   accumulator on the root absorbs cross pairs from every
-//!   constraint that references it. The `TripletBlock` always
-//!   lives on the root -- don't put one on a constraint struct
-//!   or an entity struct; the macro's `root.<field>` block spec is
-//!   the only correct way to reach a `TripletBlock`.
+//!   constraint struct. Packed rectangular storage, one write per
+//!   pair.
+//! - **`constraint(coo, { ... })`** -- every across-entity pair of
+//!   the constraint's refs goes to the list. Each participant keeps
+//!   its diagonal on its own `SelfBlock`.
+//! - **`constraint([hb, coo], { ... })`** -- the entity's own params
+//!   couple to the root's or to its containing parent's: the body
+//!   reads one of the two, and that is the co-entity. The pairs go to
+//!   the list, the diagonals to each side's own `SelfBlock`.
+//!   `parent = <name>` binds the parent under that name.
+//!
+//! `coo` stands alone or second behind the struct's own `SelfBlock`;
+//! no other block list holds it. A constraint whose body reads only
+//! the root's params, or only the parent's, names that block as its
+//! primary instead (`root.hb`, `parent.hb`): dense writes, no list.
 //!
 //! Prefer multi-`CrossBlock` whenever the set of cross-pairs is
-//! fixed and dense. The push grows a `Vec<(u32, u32, T)>` and gives
-//! up locality, whereas `CrossBlock` writes in place into a
-//! pre-sized `NA * NB` rectangle at a known offset; the rectangle
-//! also suits the CSC factorisation that follows. The same N-entity
-//! constraint assembles substantially faster through
-//! multi-`CrossBlock`.
+//! fixed and dense. The push grows a list and gives up locality,
+//! whereas `CrossBlock` writes in place into a pre-sized `NA * NB`
+//! rectangle at a known offset; the rectangle also suits the
+//! factorization that follows.
 //!
-//! Reach for the root-owned `TripletBlock` in two canonical
-//! situations:
+//! Reach for `coo` in two situations:
 //!
 //! 1. **The root has its own `Param` fields** and constraints
 //!    couple per-entity params with root params. The (entity, root)
-//!    cross pair has to live somewhere; a dedicated
-//!    `CrossBlock<Entity, Root>` per entity type is verbose and
-//!    scatters the cross storage, so the root TripletBlock is the
-//!    clean place for it. The `loc_global_demo` example uses this
-//!    -- `hbt: TripletBlock<f32>` on `Path` absorbs every
-//!    pose-to-globals cross pair emitted by the tilt and related
-//!    constraints.
+//!    pairs need a place; `[hb, coo]` gives them one without a block
+//!    field per entity type. A `CrossBlock<Entity, Root>` on the
+//!    constraint struct works too; `loc_global_demo` shows both.
 //! 2. **Runtime-parsed residuals via [`ExtendedModel`](model::ExtendedModel).**
-//!    When the residual body is a user-supplied expression parsed
-//!    at runtime, the macro cannot enumerate per-pair CrossBlocks
-//!    statically. `ExtendedModel::extended_compute` writes
-//!    directly into the root's TripletBlock instead -- see
+//!    The macro cannot enumerate pairs it does not see;
+//!    `extended_compute` is handed the list and pushes into it -- see
 //!    [examples/runtime_fit_demo.rs](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs).
-//!
-//! In both cases the triplet lives on the root, not on a constraint
-//! struct.
 //!
 //! Caveat for case 1 -- root-level `Param`s destroy sparsity.
 //! Every constraint that reads a root param introduces an
@@ -691,19 +680,9 @@
 //!     #[arael(cross = (b, c))] hb_bc: CrossBlock<Line, Line>,
 //! }
 //!
-//! // Root-owned TripletBlock: one COO accumulator on the root,
-//! // referenced by constraints that couple an entity with root
-//! // params (or where a per-pair CrossBlock layout doesn't fit).
-//! #[arael::model]
-//! #[arael(root)]
-//! struct Path {
-//!     poses: refs::Deque<Pose>,
-//!     /* ... */
-//!     hb:  SelfBlock<Path, f32>,
-//!     hbt: TripletBlock<f32>,   // shared across-entity accumulator
-//! }
-//!
-//! #[arael(constraint([hb_pose, root.hbt], { /* residual touching pose + root */ }))]
+//! // The coo list: the residual reads the root's params, so the
+//! // (pose, root) pairs go to the solve's list; no block field for them.
+//! #[arael(constraint([hb_pose, coo], { /* residual touching pose + root */ }))]
 //! struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 //! ```
 //!
@@ -777,7 +756,8 @@
 //! #[arael(constraint(hb, { body }))]                      // single local block
 //! #[arael(constraint([hb_ab, hb_ac, hb_bc], { body }))]   // bracketed multi-block (N ≥ 2)
 //! #[arael(constraint(pose.hb_pose, { body }))]            // remote SelfBlock via Ref field
-//! #[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
+//! #[arael(constraint([hb_pose, coo], { body }))]          // self-primary + coo pairs with the root or the parent
+//! #[arael(constraint(coo, { body }))]                     // every across-entity pair of the refs to the coo list
 //! ```
 //!
 //! The positional form carries a single block only; every N ≥ 2 block
@@ -791,10 +771,11 @@
 //! - **`<ref_field>.<block>`** -- reach through a `Ref<T>` field on
 //!   this struct to the target entity's `SelfBlock`. PointFrine uses
 //!   this to write grad / diagonal into the referenced Pose.
-//! - **`root.<triplet>`** -- the literal keyword `root` points at a
-//!   `TripletBlock` field on the root struct. Cross pairs between
-//!   this entity's params and root's params route into that
-//!   `TripletBlock` in COO.
+//! - **`coo`** -- the solve's COO list. Alone, every across-entity
+//!   pair of the constraint's refs goes there; second behind the
+//!   entity's own `SelfBlock`, the pairs between the entity's params
+//!   and the root's or the containing parent's, whichever the body
+//!   reads.
 //!
 //! ```ignore
 //! // Remote SelfBlock: PointFrine lives on PointLandmark but writes
@@ -810,10 +791,9 @@
 //!     hb_root: CrossBlock<Pose, Path, f32>,
 //! }
 //!
-//! // Self-primary + root-owned TripletBlock: tilt on Pose references
-//! // path.global_rot, so the pose<->path cross pair needs somewhere
-//! // to live. `root.hbt` names a TripletBlock field on the Path root.
-//! #[arael(constraint(hb_pose, root.hbt, {
+//! // Self-primary + coo: tilt on Pose reads path.global_rot, so the
+//! // (pose, path) pairs go to the solve's COO list.
+//! #[arael(constraint([hb_pose, coo], {
 //!     let mr_global = path.global_rot.rotation_matrix();
 //!     let mr2w_eff  = mr_global * pose.ea.rotation_matrix();
 //!     let ea_eff    = mr2w_eff.get_euler_angles();
@@ -1076,12 +1056,16 @@
 //!
 //! ```ignore
 //! fn extended_update(&mut self, params: &[f64]);
-//! fn extended_compute(&mut self, params: &[f64], grad: &mut [f64]);
+//! fn extended_compute(&mut self, params: &[f64], grad: &mut [f64], coo: &mut Coo<f64>);
 //! ```
 //!
-//! `extended_compute` evaluates residuals, writes directly into the
-//! LM-provided `grad` slice, and accumulates into a `TripletBlock`
-//! on the Model. See
+//! `extended_compute` evaluates residuals, writes into the solver's
+//! `grad` slice and pushes Hessian entries into `coo`, the solve's own
+//! list; `Coo::add_residual` does both for one residual. The entries
+//! it pushes must come in the same number and order on every call
+//! within one solve: the sparse solvers bind the pattern once and
+//! replay it by position. Before the first assembly the solve calls
+//! the hook once on its own to see whether it pushes anything. See
 //! [`examples/runtime_fit_demo.rs`](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs)
 //! for the full pattern: runtime parse + compile-time differentiation
 //! of the parsed expression.
@@ -1275,9 +1259,10 @@
 //!
 //! The `#[arael(root)]` macro generates the `LmProblem<T>` impl the
 //! solver needs; you never write it by hand. It also generates the
-//! hidden `LmProblemInternals<T>` half -- the routes a backend picks,
-//! the structure walks, the elimination hints -- which is arael's own
-//! interface rather than one to program against.
+//! [`LmProblemInternals<T>`](simple_lm::LmProblemInternals) half -- the
+//! context forms of the evaluations, the routes a backend picks, the
+//! structure walks, the elimination hints -- which is inner API:
+//! arael's own interface, public but not one to program against.
 //!
 //! ## [`LmConfig`](simple_lm::LmConfig) -- every field, with defaults
 //!
@@ -1293,8 +1278,8 @@
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
-//! | `num_threads` | `1` | threads for the linear solve, and for the sweeps of a `par` root (needs the `rayon` feature). Measure first -- see below |
-//! | `assembly_threads` | `None` | a thread count for a `par` root's sweeps alone; `None` leaves them on `num_threads` |
+//! | `num_threads` | `1` | threads for the linear solve and the sweeps (needs the `rayon` feature). Measure first -- see below |
+//! | `assembly_threads` | `None` | a thread count for the cost and assembly sweeps alone; `None` leaves them on `num_threads` |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. Turn on first whenever debugging |
 //! | `observer` | `None` | an [`LmObserver`](simple_lm::LmObserver) called once per damped attempt with the current state; can stop the solve. Set with `with_observer` |
@@ -1356,20 +1341,21 @@
 //!
 //! Without the feature, anything but 1 warns and stays sequential.
 //!
-//! The cost evaluation and the assembly of the gradient and Hessian can
-//! thread too, which a root asks for:
+//! The cost evaluation and the assembly of the gradient and Hessian
+//! thread as well: each thread sweeps its own share of the model into
+//! its own block store, and a serial pass adds the stores up. A
+//! threaded assembly adds up in a different order than the sequential
+//! one, so results differ in the last bits between thread counts.
+//! `assembly_threads` gives the sweeps a count of their own.
+//!
+//! The model is read from every thread at once, so a root must be
+//! [`Sync`]. A root that is not, or that should stay sequential, opts
+//! out and keeps its linear solve threaded:
 //!
 //! ```ignore
-//! #[arael(root, par)]
+//! #[arael(root, seq)]
 //! struct Scene { .. }
 //! ```
-//!
-//! **Experimental.** Each thread walks its own slice of the model and
-//! writes its own copy of the Hessian blocks; a serial pass adds them
-//! up. A `par` root must be [`Sync`], and its threaded assembly adds up
-//! in a different order than the sequential one, so the two match to
-//! rounding, not to the bit. Drop the keyword and the model solves
-//! sequentially with its linear solve still threaded.
 //!
 //! Threading has overhead: whether it helps, and by how much, depends on
 //! the model and its number of parameters. Every solve's report says
@@ -1838,7 +1824,7 @@
 //! interprets the constraint body symbolically, differentiates it
 //! against every reachable parameter, runs common-subexpression
 //! elimination, and emits Rust code for three call paths
-//! (`__compute_blocks`, `__set_block_indices`, `calc_jacobian`).
+//! (`__compute_blocks`, `__build_blocks`, `calc_jacobian`).
 //! [`cargo expand`](https://github.com/dtolnay/cargo-expand)
 //! (`cargo install cargo-expand`) prints the expansion exactly as
 //! the compiler sees it.
@@ -1920,11 +1906,10 @@
 //!
 //! ### What to look for
 //!
-//! - **`__set_block_indices`** -- where each `SelfBlock` /
-//!   `CrossBlock` / `TripletBlock` gets its global parameter indices
-//!   written into place. A block that isn't touched here is invisible
-//!   to the solver (its `u32::MAX` sentinel causes every `add_residual`
-//!   to silently skip) -- a common failure mode.
+//! - **`__build_blocks`** -- where every declared `SelfBlock` /
+//!   `CrossBlock` gets its place in the block store and its global
+//!   parameter indices. A block absent here is not part of the
+//!   Hessian.
 //! - **`__compute_blocks`** -- the grad + block-Hessian accumulation
 //!   path. Each constraint is a nested block with its own CSE'd body.
 //! - **`calc_jacobian`** -- same body structure but builds a
@@ -2238,9 +2223,9 @@
 //!   running example; every residual that reads the robot's world
 //!   pose composes the globals before evaluating. Shows the two
 //!   wiring shapes for pose<->root cross-Hessian pairs
-//!   (`CrossBlock<Pose, Path>` on the constraint struct, and a
-//!   root-owned `TripletBlock` named via the `root.<field>` block
-//!   spec) and a `Path::optimise_center` pass that freezes pose
+//!   (`CrossBlock<Pose, Path>` on the constraint struct, and
+//!   `[hb_pose, coo]` with no block field) and a
+//!   `Path::optimise_center` pass that freezes pose
 //!   params and optimises only the globals before the main sweep.
 //! - **[`plane_slam_demo`](https://github.com/harakas/arael/blob/master/examples/plane_slam_demo.rs)**
 //!   -- plane SLAM with a user-defined component: `UnitVec<T>`, a 2-DOF
