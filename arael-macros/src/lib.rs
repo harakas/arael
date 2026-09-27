@@ -2379,7 +2379,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             let mut cost_plain = false;
             let mut cost_kahan = false;
             let mut cost_f64 = false;
-            let mut par = false;
+            let mut seq = false;
             let mut marginalize: Vec<syn::Ident> = Vec::new();
             let mut pos = 1;
             while pos < tvec.len() {
@@ -2407,7 +2407,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         } else if kw_str == "cost_f64" {
                             cost_f64 = true;
                         } else if kw_str == "par" {
-                            par = true;
+                            // Accepted and means nothing: the threaded
+                            // sweeps are the default under `rayon`.
+                        } else if kw_str == "seq" {
+                            seq = true;
                         } else if kw_str == "marginalize" {
                             // Takes a parenthesized field list:
                             // marginalize(landmarks) or (a, b).
@@ -2435,7 +2438,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `par`, or `marginalize(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `par`, `seq`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -2454,7 +2457,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 return Some(Err(syn::Error::new(id.span(),
                     "`cost_plain` cannot be combined with `cost_kahan` or `cost_f64`")));
             }
-            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize, cost_kahan, cost_f64, par)));
+            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize, cost_kahan, cost_f64, seq)));
         }
         None
     });
@@ -2469,7 +2472,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e, _, _, _)| e.clone()).unwrap_or_default();
     let root_cost_kahan = root_info.as_ref().map(|(_, _, _, _, _, k, _, _)| *k).unwrap_or(false);
     let root_cost_f64 = root_info.as_ref().map(|(_, _, _, _, _, _, w, _)| *w).unwrap_or(false);
-    let root_par = root_info.as_ref().map(|(_, _, _, _, _, _, _, p)| *p).unwrap_or(false);
+    let root_seq = root_info.as_ref().map(|(_, _, _, _, _, _, _, s)| *s).unwrap_or(false);
 
     // Schur auto-detection: which parameter blocks may be marginalized.
     //
@@ -2638,11 +2641,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        // The threaded sweeps over per-thread block stores are opt-in:
-        // the root asks with `par` and arael must be built with the
-        // `rayon` feature. Without the keyword the root keeps one store
-        // and is the sequential one it always was.
-        let par = root_par && cfg!(feature = "rayon");
+        // The threaded sweeps over per-thread block stores are the
+        // default when arael is built with the `rayon` feature; a root
+        // opts out with `seq`. Without the feature, or with the keyword,
+        // the root keeps one store and is the sequential one.
+        let par = !root_seq && cfg!(feature = "rayon");
         constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64,

@@ -8512,9 +8512,9 @@ pub fn generate_root_methods(
     // One region shape for the assembly and the cost: every store sweeps
     // its own ranges into its own accumulator, and the join after it
     // merges the stores in order. Dispatching asks the model for `Sync`,
-    // which a root that never asked for `par` should not have to be -- one
-    // holding an `Rc` is a perfectly good sequential model -- so only a
-    // `par` root gets the dispatch; the rest walk their one store in place.
+    // which a `seq` root should not have to be -- one holding an `Rc` is
+    // a perfectly good sequential model -- so only a threaded root gets
+    // the dispatch; the rest walk their one store in place.
     let region_over = |calls: TokenStream2| -> TokenStream2 {
         let task = quote! {
             let __ranges = __cut.store(__si);
@@ -8526,8 +8526,7 @@ pub fn generate_root_methods(
         };
         if par {
             quote! {
-                let __model = &*self;
-                arael::store::run_indexed(__par, __stores, |__si, __store| { #task });
+                arael::store::run_indexed(&*self, __par, __stores, |__model, __si, __store| { #task });
             }
         } else {
             quote! {
@@ -8762,7 +8761,7 @@ pub fn generate_root_methods(
         });
     };
 
-    // A root that did not ask for `par` keeps one store and no cut: an
+    // A `seq` root, or a build without `rayon`, keeps one store and no cut: an
     // empty cut is the whole model in one store, which is what every walk
     // reads it as.
     let begin_cut = if par {
@@ -8856,6 +8855,20 @@ pub fn generate_root_methods(
     // The cut and what it is built from exist for a root that splits its
     // walks; every other root reads an empty cut as the whole model and
     // needs none of this.
+    // The pool reads the model from every task at once, so a threaded
+    // root must be `Sync`. Asserted through the marker trait, whose
+    // error names the way out; the `Sync` error beside it names the
+    // field.
+    let sync_check = if par {
+        quote! {
+            const _: fn() = {
+                fn __sweeps_in_parallel<T: ?Sized + arael::store::SweepsInParallel>() {}
+                __sweeps_in_parallel::<#root_name>
+            };
+        }
+    } else {
+        quote! {}
+    };
     let cut_methods = if par {
         quote! {
             /// How many cross arrays a store holds, so a caller can size the
@@ -9015,6 +9028,8 @@ pub fn generate_root_methods(
             /// what the cut left unbalanced.
             __time: std::time::Duration,
         }
+
+        #sync_check
 
         impl arael::store::BlockStore for #store_ty {
             fn footprint(&self) -> arael::store::StoreFootprint {

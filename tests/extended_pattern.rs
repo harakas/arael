@@ -186,8 +186,9 @@ fn extended_with_coo_entries_solves_sparse() {
 // assembly
 // ===========================================================================
 
+// The log is a `RefCell`, so the root is not `Sync` and says `seq`.
 #[arael::model]
-#[arael(root, extended)]
+#[arael(root, extended, seq)]
 #[arael(constraint(hb, { [(logged.a - 1.0) * 0.5] }))]
 struct Logged {
     a: Param<f64>,

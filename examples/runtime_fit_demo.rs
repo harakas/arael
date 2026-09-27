@@ -37,9 +37,11 @@ struct Coefficient {
     value: Param<f64>,
 }
 
-/// Regression model whose equation is parsed at runtime.
+/// Regression model whose equation is parsed at runtime. It holds the
+/// parsed expression behind an `Rc`, so it is not `Sync` and opts out of
+/// the threaded sweeps with `seq`.
 #[arael::model]
-#[arael(root, extended)]
+#[arael(root, extended, seq)]
 struct RegressionModel {
     coeffs: arael::refs::Vec<Coefficient>,
 

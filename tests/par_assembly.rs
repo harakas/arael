@@ -121,7 +121,7 @@ struct Tri {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct Web {
     points: refs::Vec<Point>,
     landmarks: refs::Arena<Landmark>,
@@ -135,7 +135,8 @@ struct Web {
 }
 
 // A root with a parameter of its own and a constraint on it: the root is
-// an entity of the store too.
+// an entity of the store too. The `par` keyword is accepted and means
+// nothing: the threaded sweeps are the default under `rayon`.
 #[arael::model]
 #[arael(root, par)]
 #[arael(constraint(hb, {
@@ -151,8 +152,8 @@ struct Knob {
     hb: SelfBlock<Knob>,
 }
 
-// A root that does not ask for `par` keeps one store whatever the
-// thread count.
+// A `seq` root keeps one store whatever the thread count, and need not
+// be `Sync`.
 #[arael::model]
 #[arael(constraint(coo, { [a.pos.x + b.pos.y + c.pos.x - 1.0] }))]
 struct Loop {
@@ -162,11 +163,14 @@ struct Loop {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, seq)]
 struct Loose {
     points: refs::Vec<Point>,
     links: std::vec::Vec<Link>,
     loops: std::vec::Vec<Loop>,
+    // Not `Sync`: a `seq` root is never handed to the pool.
+    #[arael(skip)]
+    scratch: std::cell::Cell<u32>,
     anchor: f64,
     drift: f64,
     spring: f64,
@@ -176,7 +180,7 @@ struct Loose {
 // this threads like any other root and must land on the sequential
 // answer.
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct Knot {
     points: refs::Vec<Point>,
     links: std::vec::Vec<Link>,
@@ -189,7 +193,7 @@ struct Knot {
 // A `par` root with extended hooks: the sweeps thread, and the hooks run
 // on the calling thread on either side of the region.
 #[arael::model]
-#[arael(root, par, extended)]
+#[arael(root, extended)]
 struct ExtWeb {
     points: refs::Vec<Point>,
     links: std::vec::Vec<Link>,
@@ -631,10 +635,10 @@ fn the_report_says_what_the_threads_did() {
         .unwrap();
     assert!(!quiet.report().contains("threads"), "{}", quiet.report());
 
-    // A root that did not ask for `par` reports that instead.
+    // A `seq` root reports that instead.
     let mut loose = Loose {
         points: refs::Vec::new(), links: std::vec::Vec::new(), loops: std::vec::Vec::new(),
-        anchor: 100.0, drift: 0.01, spring: 1.0,
+        scratch: std::cell::Cell::new(0), anchor: 100.0, drift: 0.01, spring: 1.0,
     };
     for i in 0..8 {
         let pos = vect2d::new(i as f64 * 0.5, 0.3);
@@ -679,15 +683,16 @@ fn timing_is_off_unless_asked() {
     assert!(t.scatter > std::time::Duration::ZERO);
 }
 
-/// A root that did not ask for `par` solves through the sequential
-/// path at every thread count, and its context keeps one store.
+/// A `seq` root solves through the sequential path at every thread
+/// count, and its context keeps one store.
 #[test]
-fn a_root_without_par_keeps_the_sequential_path() {
+fn a_seq_root_keeps_the_sequential_path() {
     let build = || {
         let mut l = Loose {
             points: refs::Vec::new(),
             links: std::vec::Vec::new(),
             loops: std::vec::Vec::new(),
+            scratch: std::cell::Cell::new(0),
             anchor: 100.0,
             drift: 0.01,
             spring: 1.0,
@@ -1030,7 +1035,7 @@ fn set_threads_without_begin_builds_one_store() {
 /// their stores, the hook's entries follow store 0's in the stream, and
 /// the pattern is discovered by a compute on every route.
 #[arael::model]
-#[arael(root, par, extended)]
+#[arael(root, extended)]
 struct ExtCoo {
     points: refs::Vec<Point>,
     links: std::vec::Vec<Link>,

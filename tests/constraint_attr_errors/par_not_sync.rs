@@ -1,5 +1,5 @@
-//! A `par` root is read by every sweep thread at once, so it must be
-//! `Sync`; a field with interior mutability is named in the error.
+//! Under `rayon` a root is read by every sweep thread at once, so it must
+//! be `Sync` unless it says `seq`; the error names the way out.
 
 use arael::model::{Param, SelfBlock};
 use arael::refs;
@@ -13,7 +13,7 @@ struct N {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct W {
     ns: refs::Vec<N>,
     #[arael(skip)]

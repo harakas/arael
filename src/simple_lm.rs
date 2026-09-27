@@ -1798,7 +1798,7 @@ pub struct ThreadReport {
 impl ThreadReport {
     /// True when threads were asked for and the model cannot use them:
     /// the sweeps ran over a single store however many were asked for,
-    /// because the root did not ask for `par`.
+    /// because the root is `seq` or arael was built without `rayon`.
     pub fn fell_back(&self) -> bool {
         self.sweeps_asked > 1 && self.sweeps.as_ref().is_none_or(|s| s.threads <= 1)
     }

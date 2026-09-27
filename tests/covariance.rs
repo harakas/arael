@@ -713,7 +713,7 @@ fn covariance_of_a_triplet_model_needs_no_prior_assembly() {
 /// The same `coo` model as a `par` root: covariance runs on one store
 /// whatever the root can thread, and answers the same.
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 struct TriWPar {
     pts: refs::Vec<Pt>,
     tris: std::vec::Vec<Tri3>,
