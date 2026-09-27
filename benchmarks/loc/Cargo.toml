@@ -10,7 +10,7 @@ publish = false
 [workspace]
 
 [dependencies]
-arael = { path = "../.." }
+arael = { path = "../..", features = ["rayon"] }
 bench-harness = { path = "../harness", features = ["factrs"] }
 tiny-solver = "0.18.0"
 factrs = "0.3.0"

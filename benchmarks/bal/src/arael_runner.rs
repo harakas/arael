@@ -54,7 +54,7 @@ struct Obs<T: Float> {
 }
 
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 #[derive(Clone)]
 pub struct Scene {
     cameras: refs::Vec<Camera<f64>>,
@@ -63,7 +63,7 @@ pub struct Scene {
 }
 
 #[arael::model]
-#[arael(root, f32, par)]
+#[arael(root, f32)]
 #[derive(Clone)]
 pub struct SceneF {
     cameras: refs::Vec<Camera<f32>>,

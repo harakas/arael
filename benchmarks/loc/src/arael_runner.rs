@@ -298,48 +298,61 @@ fn block_supernodal_lean() -> bool {
     std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
 }
 
-fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
+// Every route solves through the harness's context, so a `par` root's
+// stores are built once per row and reused across its probes.
+fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>,
+           ctx: &mut arael::threads::Context)
     -> Solved<f64> {
     match solver_kind().as_str() {
-        "faer" => arael::simple_lm::lm_solve(
+        "faer" => arael::simple_lm::lm_solve_with_context(
             params,
             &mut arael::simple_lm::SparseFaer::new()
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
-            path, cfg),
-        "narrow_band" => arael::simple_lm::lm_solve(
+                .with_block_supernodal_memory_lean(block_supernodal_lean()),
+            path, cfg, ctx),
+        "narrow_band" => arael::simple_lm::lm_solve_with_context(
             params,
             &mut arael::simple_lm::SparseFaer::new()
                 .with_narrow_band(true)
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
-            path, cfg),
-        _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
+                .with_block_supernodal_memory_lean(block_supernodal_lean()),
+            path, cfg, ctx),
+        _ => arael::simple_lm::lm_solve_with_context(
+            params, &mut arael::simple_lm::Band::new(BAND_KD), path, cfg, ctx),
     }
 }
 
-fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
+fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>,
+           ctx: &mut arael::threads::Context)
     -> Solved<f32> {
     match solver_kind().as_str() {
-        "faer" => arael::simple_lm::lm_solve(
+        "faer" => arael::simple_lm::lm_solve_with_context(
             params,
             &mut arael::simple_lm::SparseFaerF32::new()
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
-            path, cfg),
-        "narrow_band" => arael::simple_lm::lm_solve(
+                .with_block_supernodal_memory_lean(block_supernodal_lean()),
+            path, cfg, ctx),
+        "narrow_band" => arael::simple_lm::lm_solve_with_context(
             params,
             &mut arael::simple_lm::SparseFaerF32::new()
                 .with_narrow_band(true)
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
-            path, cfg),
-        _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
+                .with_block_supernodal_memory_lean(block_supernodal_lean()),
+            path, cfg, ctx),
+        _ => arael::simple_lm::lm_solve_with_context(
+            params, &mut arael::simple_lm::Band::new(BAND_KD), path, cfg, ctx),
     }
+}
+
+/// The sweep report of a row's context, once a threaded sweep has run.
+fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
+    let t = ctx.sweep_timing();
+    if t.assembly.calls() == 0 { return None; }
+    Some(t.report(ctx.threads()))
 }
 
 // ----------------------------------------------------------- covariance
@@ -376,7 +389,8 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let mut params: Vec<f64> = Vec::new();
     path.serialize(&mut params);
     let cfg = bench_harness::arael::config::<Path>(scene, 200);
-    let result = solve64(&params, &mut path, &cfg).expect("covariance solve failed");
+    let result = solve64(&params, &mut path, &cfg, &mut Default::default())
+        .expect("covariance solve failed");
     path.deserialize(&result.x);
     let np = path.poses.len();
     let last = np - 1;
@@ -447,9 +461,10 @@ impl bench_harness::arael::Model for Path {
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
+    fn par_timing(ctx: &arael::threads::Context) -> Option<String> { par_timing(ctx) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>,
-             _ctx: &mut arael::threads::Context)
-        -> Solved<f64> { solve64(params, m, cfg) }
+             ctx: &mut arael::threads::Context)
+        -> Solved<f64> { solve64(params, m, cfg, ctx) }
 }
 
 impl bench_harness::arael::Model for PathF {
@@ -469,9 +484,10 @@ impl bench_harness::arael::Model for PathF {
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
+    fn par_timing(ctx: &arael::threads::Context) -> Option<String> { par_timing(ctx) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>,
-             _ctx: &mut arael::threads::Context)
-        -> Solved<f32> { solve32(params, m, cfg) }
+             ctx: &mut arael::threads::Context)
+        -> Solved<f32> { solve32(params, m, cfg, ctx) }
 }
 
 /// `Err` is why the solve failed, for the table to show in place of the row.
