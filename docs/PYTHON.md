@@ -348,6 +348,9 @@ cfg.gradient_tolerance = 1e-8      # or None
 `LmConfig` mirrors the Rust struct field for field, `num_threads` and
 `assembly_threads` included; both take effect when the exported crate is
 built with arael's `rayon` feature ([docs/SOLVERS.md](SOLVERS.md#threads)).
+A threaded solve leaves arael's sweep workers parked for the life of the
+process; `pool_shutdown()` in the model's module joins them, and the next
+threaded solve spawns them again.
 
 `solve_dense(cfg)`, `solve_sparse(cfg, opts=None)` and
 `solve_band(kd, cfg)` (kd the half-bandwidth in scalar parameters)

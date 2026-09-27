@@ -5,6 +5,7 @@
 pub mod emit_ffi;
 pub mod emit_hpp;
 pub mod emit_py;
+pub mod emit_wasm;
 pub mod export;
 pub mod ir;
 pub mod leaves;

@@ -64,6 +64,14 @@ def set_log_level(level):
     _f.line_set_log_level(int(level))
 
 
+def pool_shutdown():
+    """Stop and join arael's sweep worker threads; the next threaded
+    solve spawns them again. Process-wide, and a no-op when arael was
+    built without the `rayon` feature."""
+    load()
+    _f.line_pool_shutdown()
+
+
 def _raw(r):
     return r.raw if hasattr(r, "raw") else int(r)
 

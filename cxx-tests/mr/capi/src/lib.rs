@@ -929,6 +929,14 @@ pub extern "C" fn decay_set_log_level(level: u32) {
     });
 }
 
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+#[no_mangle]
+pub extern "C" fn decay_pool_shutdown() {
+    arael::pool::shutdown();
+}
+
 /// Empty string when the model is clean, the Diagnostic text otherwise.
 #[no_mangle]
 pub unsafe extern "C" fn decay_validate(h: *mut DecayHandle) -> *const c_char {
@@ -2667,6 +2675,14 @@ pub extern "C" fn line_set_log_level(level: u32) {
         2 => arael::log::Level::Warn,
         _ => arael::log::Level::Info,
     });
+}
+
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide, and a no-op when arael was built
+/// without the `rayon` feature.
+#[no_mangle]
+pub extern "C" fn line_pool_shutdown() {
+    arael::pool::shutdown();
 }
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.

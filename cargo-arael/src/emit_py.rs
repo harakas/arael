@@ -1057,6 +1057,7 @@ class Covariance:
         "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_set_log_level"), &["ctypes.c_uint32"],
         "None");
+    sig(&mut py, &format!("{root_sn}_pool_shutdown"), &[], "None");
     sig(&mut py, &format!("{root_sn}_result_report"),
         &["ctypes.c_void_p", "ctypes.c_bool"], "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_result_plan"),
@@ -1404,6 +1405,14 @@ def set_log_level(level):
     share it.\"\"\"
     load()
     _f.{root_sn}_set_log_level(int(level))
+
+
+def pool_shutdown():
+    \"\"\"Stop and join arael's sweep worker threads; the next threaded
+    solve spawns them again. Process-wide, and a no-op when arael was
+    built without the `rayon` feature.\"\"\"
+    load()
+    _f.{root_sn}_pool_shutdown()
 
 
 def _raw(r):
