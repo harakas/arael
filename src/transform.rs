@@ -3,7 +3,7 @@
 //!
 //! A pose is a rotation and a translation that map points from one
 //! frame to another. [`TransformParam`] holds one as a single
-//! parameter: the solver steps it in local SE(3) [twist](crate::se3)
+//! parameter: the solver steps it in local SE(3) [twist](crate::twist)
 //! coordinates, so a step that turns while it moves follows the arc a
 //! body traces rather than the chord. [`ScaledTransformParam`] adds a
 //! uniform scale, the Sim(3) state of monocular loop closing.
@@ -67,7 +67,7 @@
 use crate::matrix::matrix3;
 use crate::model::{Component, Model, Param, ParamType};
 use crate::quatern::quatern;
-use crate::se3::{carry, se3};
+use crate::twist::{carry, twist3};
 use crate::utils::Float;
 use crate::vect::vect3;
 
@@ -240,7 +240,7 @@ where
     fn update(&mut self) {
         // The accepted step folds into the reference. The step is in the
         // pose's own frame, so its translation is taken there too.
-        let (t, q) = se3::new(self.d.value, self.w.value).translation_rotation();
+        let (t, q) = twist3::new(self.d.value, self.w.value).translation_rotation();
         self.ref_translation = self.ref_translation + self.ref_rotation * t;
         self.ref_value = (self.ref_value * q).unit();
         self.refresh();
@@ -253,7 +253,7 @@ where
         // The step is normally zero here (advance re-centres on every
         // accepted step); fold it anyway so a hand-driven deserialize is
         // exact too.
-        let (t, q) = se3::new(self.d.value, self.w.value).translation_rotation();
+        let (t, q) = twist3::new(self.d.value, self.w.value).translation_rotation();
         self.translation = self.ref_translation + self.ref_rotation * t;
         self.rotation = (self.ref_value * q).unit();
         self.rotation_matrix = self.rotation.rotation_matrix();
@@ -713,7 +713,7 @@ where
     }
 
     fn update(&mut self) {
-        let (t, q) = se3::new(self.d.value, self.w.value).translation_rotation();
+        let (t, q) = twist3::new(self.d.value, self.w.value).translation_rotation();
         self.ref_translation = self.ref_translation + self.ref_rotation * t;
         self.ref_value = (self.ref_value * q).unit();
         self.refresh();
@@ -724,7 +724,7 @@ where
     }
 
     fn finish(&mut self) {
-        let (t, q) = se3::new(self.d.value, self.w.value).translation_rotation();
+        let (t, q) = twist3::new(self.d.value, self.w.value).translation_rotation();
         self.translation = self.ref_translation + self.ref_rotation * t;
         self.rotation = (self.ref_value * q).unit();
         self.rotation_matrix = self.rotation.rotation_matrix();

@@ -7,15 +7,15 @@ use arael::matrix::{matrix2d, matrix3d};
 use arael::model::QuaternionParam;
 use arael::quatern::{quaternd, quaternf};
 use arael::refs;
-use arael::se3::{se3d, se3f};
+use arael::twist::{twist3d, twist3f};
 use arael::simple_lm::{Dense, LmConfig};
 use arael::vect::{vect3d, Similar};
 
 #[test]
 fn se3_cast_similar_finite() {
-    let t = se3d::new(vect3d::new(0.1, 0.2, 0.3), vect3d::new(0.01, 0.02, 0.03));
-    let f: se3f = t.cast();
-    let back: se3d = f.cast();
+    let t = twist3d::new(vect3d::new(0.1, 0.2, 0.3), vect3d::new(0.01, 0.02, 0.03));
+    let f: twist3f = t.cast();
+    let back: twist3d = f.cast();
     assert!(t.similar(back) || (t.d - back.d).norm() < 1e-6);
     assert!(t.is_finite());
     let mut bad = t;

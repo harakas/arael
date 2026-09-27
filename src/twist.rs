@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! let (t, q) = twist.translation_rotation();
-//! let twist  = se3d::from_translation_rotation(t, q);
+//! let twist  = twist3d::from_translation_rotation(t, q);
 //! ```
 //!
 //! The round trip is exact. Two things about the form are worth knowing.
@@ -34,6 +34,9 @@
 //! in these coordinates: it holds a reference frame and folds each
 //! accepted step into it, so the step is always expressed in the
 //! transform's own frame.
+//!
+//! The type was `se3` through 0.8; `se3`, `se3d`, `se3f` and the `se3`
+//! module remain as deprecated aliases through 0.9.
 
 use crate::quatern::quatern;
 use crate::utils::Float;
@@ -44,7 +47,7 @@ use crate::vect::vect3;
 #[derive(Clone, Copy, Debug)]
 #[allow(non_camel_case_types)]
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct se3<T: Float> {
+pub struct twist3<T: Float> {
     /// Rate of translation. The distance actually travelled is not this
     /// -- the frame turns as it moves; see the module docs.
     pub d: vect3<T>,
@@ -55,28 +58,41 @@ pub struct se3<T: Float> {
 }
 
 #[allow(non_camel_case_types)]
-pub type se3f = se3<f32>;
+pub type twist3f = twist3<f32>;
 #[allow(non_camel_case_types)]
-pub type se3d = se3<f64>;
+pub type twist3d = twist3<f64>;
+
+/// The name through 0.8.
+#[deprecated(since = "0.9.0", note = "renamed to `twist3`")]
+#[allow(non_camel_case_types)]
+pub type se3<T> = twist3<T>;
+/// The name through 0.8.
+#[deprecated(since = "0.9.0", note = "renamed to `twist3f`")]
+#[allow(non_camel_case_types)]
+pub type se3f = twist3<f32>;
+/// The name through 0.8.
+#[deprecated(since = "0.9.0", note = "renamed to `twist3d`")]
+#[allow(non_camel_case_types)]
+pub type se3d = twist3<f64>;
 
 fn c<T: Float>(x: f64) -> T {
     T::from(x).unwrap()
 }
 
-impl<T: Float> se3<T> {
+impl<T: Float> twist3<T> {
     /// A twist from its linear and angular rates.
-    pub fn new(d: vect3<T>, w: vect3<T>) -> se3<T> {
-        se3 { d, w }
+    pub fn new(d: vect3<T>, w: vect3<T>) -> twist3<T> {
+        twist3 { d, w }
     }
 
     /// The transform that changes nothing.
-    pub fn zero() -> se3<T> {
+    pub fn zero() -> twist3<T> {
         let z = vect3::new(T::zero(), T::zero(), T::zero());
-        se3 { d: z, w: z }
+        twist3 { d: z, w: z }
     }
 
     /// This transform as a translation and a rotation. Inverse of
-    /// [`from_translation_rotation`](se3::from_translation_rotation).
+    /// [`from_translation_rotation`](twist3::from_translation_rotation).
     pub fn translation_rotation(self) -> (vect3<T>, quatern<T>) {
         (self.translation(), self.rotation())
     }
@@ -93,22 +109,22 @@ impl<T: Float> se3<T> {
     }
 
     /// This translation and rotation in twist form. Inverse of
-    /// [`translation_rotation`](se3::translation_rotation).
+    /// [`translation_rotation`](twist3::translation_rotation).
     ///
     /// Undefined for a half turn, where the rotation's scalar part
     /// vanishes -- the same limit the pose parameter's chart has, and one
     /// its re-centring keeps a solver far away from.
-    pub fn from_translation_rotation(t: vect3<T>, q: quatern<T>) -> se3<T> {
+    pub fn from_translation_rotation(t: vect3<T>, q: quatern<T>) -> twist3<T> {
         let q = q.unit();
         let w = q.v * (c::<T>(2.0) / q.t);
-        se3 { d: carry_inverse(w, t), w }
+        twist3 { d: carry_inverse(w, t), w }
     }
 }
 
-impl<T: Float> se3<T> {
+impl<T: Float> twist3<T> {
     /// Converts all components to another float type.
-    pub fn cast<K: Float>(self) -> se3<K> {
-        se3 { d: self.d.cast(), w: self.w.cast() }
+    pub fn cast<K: Float>(self) -> twist3<K> {
+        twist3 { d: self.d.cast(), w: self.w.cast() }
     }
 
     /// Returns true if all components are finite (not NaN or infinity).
@@ -117,15 +133,15 @@ impl<T: Float> se3<T> {
     }
 }
 
-impl<T: Float> crate::vect::Similar for se3<T> {
+impl<T: Float> crate::vect::Similar for twist3<T> {
     fn similar(self, other: Self) -> bool {
         self.d.similar(other.d) && self.w.similar(other.w)
     }
 }
 
-impl<T: Float> Default for se3<T> {
+impl<T: Float> Default for twist3<T> {
     fn default() -> Self {
-        se3::zero()
+        twist3::zero()
     }
 }
 
@@ -169,9 +185,9 @@ mod tests {
             (vect3::new(1.3, 0.5, -0.9), vect3::new(0.31, 0.22, -0.44)),
             (vect3::new(2.0, -1.0, 0.5), vect3::new(1.2, -0.8, 0.6)),
         ] {
-            let twist = se3d::new(d, w);
+            let twist = twist3d::new(d, w);
             let (t, q) = twist.translation_rotation();
-            let back = se3d::from_translation_rotation(t, q);
+            let back = twist3d::from_translation_rotation(t, q);
             assert!((back.d - d).norm() < 1e-12, "d: {:?} vs {:?}",
                 (d.x, d.y, d.z), (back.d.x, back.d.y, back.d.z));
             assert!((back.w - w).norm() < 1e-12, "w: {:?} vs {:?}",
@@ -184,14 +200,14 @@ mod tests {
     /// the rate. With no rotation the translation IS the rate.
     #[test]
     fn a_turning_step_traces_the_arc() {
-        let turning = se3d::new(vect3::new(1.0, 0.0, 0.0),
+        let turning = twist3d::new(vect3::new(1.0, 0.0, 0.0),
             vect3::new(0.0, 0.0, std::f64::consts::FRAC_PI_2));
         let t = turning.translation();
         assert!(t.x > 0.55 && t.x < 0.75, "{:?}", (t.x, t.y));
         assert!(t.y > 0.55 && t.y < 0.85, "{:?}", (t.x, t.y));
         assert!(t.norm() < 1.0, "the arc displaces less than the chord");
 
-        let straight = se3d::new(vect3::new(1.0, 2.0, -3.0),
+        let straight = twist3d::new(vect3::new(1.0, 2.0, -3.0),
             vect3::new(0.0, 0.0, 0.0));
         assert!((straight.translation() - vect3::new(1.0, 2.0, -3.0)).norm() < 1e-15);
     }
@@ -203,9 +219,19 @@ mod tests {
         for w in [vect3::new(0.0, 0.0, 0.0),
                   vect3::new(0.05, -0.02, 0.03),
                   vect3::new(0.4, 0.25, -0.3)] {
-            let a = se3d::new(vect3::new(0.0, 0.0, 0.0), w).rotation();
+            let a = twist3d::new(vect3::new(0.0, 0.0, 0.0), w).rotation();
             let b = quatern::from_rotation_vector_small(w);
             assert!((a.v - b.v).norm() < 1e-15 && (a.t - b.t).abs() < 1e-15);
         }
+    }
+
+    /// The old names still spell the type.
+    #[test]
+    #[allow(deprecated)]
+    fn the_old_names_are_aliases() {
+        let a: se3d = twist3d::new(vect3::new(1.0, 2.0, 3.0), vect3::new(0.1, 0.2, 0.3));
+        let b: twist3<f64> = a;
+        let f: se3f = b.cast();
+        assert!((f.d.x - 1.0).abs() < 1e-6);
     }
 }

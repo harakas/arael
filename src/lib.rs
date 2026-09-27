@@ -2366,7 +2366,13 @@ pub use arael_faer::ValueIndex;
 /// Model trait, parameter types, and Hessian blocks.
 pub mod angle;
 pub mod model;
-pub mod se3;
+pub mod twist;
+/// The `twist` module's name through 0.8.
+#[deprecated(since = "0.9.0", note = "renamed to `twist`")]
+pub mod se3 {
+    #[allow(deprecated)]
+    pub use crate::twist::{se3, se3d, se3f};
+}
 pub mod transform;
 pub mod unitvec;
 /// Levenberg-Marquardt solver with dense, band, and sparse backends.
@@ -2441,6 +2447,8 @@ pub mod prelude {
     pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
     pub use crate::quatern::{quaternd, quaternf};
-    pub use crate::se3::{se3, se3d, se3f};
+    pub use crate::twist::{twist3, twist3d, twist3f};
+    #[allow(deprecated)]
+    pub use crate::twist::{se3, se3d, se3f};
     pub use crate::vect::{vect2d, vect2f, vect3d, vect3f, Similar};
 }

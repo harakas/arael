@@ -134,7 +134,7 @@ fn quaternion_param_serde_roundtrip() {
 use arael::matrix::matrix3d;
 use arael::model::SelfBlock;
 use arael::quatern::quaternd;
-use arael::se3::se3d;
+use arael::twist::twist3d;
 use arael::transform::TransformParam;
 use arael::unitvec::UnitVecParam;
 use arael::vect::{vect2d, vect3d};
@@ -143,12 +143,12 @@ fn rt<T: serde::Serialize + serde::de::DeserializeOwned>(v: &T) -> T {
     serde_json::from_str(&serde_json::to_string(v).unwrap()).unwrap()
 }
 
-// ------------------------------------------------------------------- se3
+// ----------------------------------------------------------------- twist
 
 #[test]
 fn se3_round_trips() {
-    let a = se3d::new(vect3d::new(1.3, 0.5, -0.9), vect3d::new(0.31, 0.22, -0.44));
-    let b: se3d = rt(&a);
+    let a = twist3d::new(vect3d::new(1.3, 0.5, -0.9), vect3d::new(0.31, 0.22, -0.44));
+    let b: twist3d = rt(&a);
     assert!((b.d - a.d).norm() < 1e-15);
     assert!((b.w - a.w).norm() < 1e-15);
     // And it still means the same transform.
