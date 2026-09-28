@@ -1347,10 +1347,12 @@
 //! The cost evaluation and the assembly of the gradient and Hessian
 //! thread as well, on arael's own worker threads, one per store and
 //! parked between sweeps: each sweeps its own share of the model into
-//! its own block store, and a serial pass adds the stores up. A
-//! threaded assembly adds up in a different order than the sequential
-//! one, so results differ in the last bits between thread counts.
-//! `assembly_threads` gives the sweeps a count of their own.
+//! its own block store, a serial pass adds the stores into the
+//! gradient, and the same threads write the sparse Hessian from them,
+//! one range of it each. A threaded assembly adds up in a different
+//! order than the sequential one, so results differ in the last bits
+//! between thread counts. `assembly_threads` gives the sweeps a count
+//! of their own.
 //!
 //! The model is read from every thread at once, so a root must be
 //! [`Sync`]. A root that is not, or that should stay sequential, opts

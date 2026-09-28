@@ -450,62 +450,295 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
 }
 
 
-/// Where a block scatters into the assembled Hessian's value buffer.
-///
-/// A block with a static tile shape needs no per-scalar position map: the
-/// whole tile follows from its origin and column stride, as
-/// `origin + (col - col_start) * stride + (row - row_start)`, with the two
-/// starts read off the block's own parameter indices. Storing this pair
-/// beside the indices replaces a map that runs about one entry per Hessian
-/// value.
-///
-/// A zero stride means there is no tile to walk, and the block scatters
-/// through the per-scalar map instead: either the pattern is not
-/// tile-expanded ([`MAPPED`](TilePosition::MAPPED)) or the block is entirely
-/// fixed and scatters nothing at all ([`UNBOUND`](TilePosition::UNBOUND)).
-#[derive(Clone, Copy, Debug)]
-struct TilePosition {
+/// One tiled block in the position stream: which block it is and where
+/// its tile lies in the assembled value buffer. The tile is the dense
+/// `rows` by `cols` rectangle the pattern stores for the block's cell,
+/// column-major from `base` with the columns `stride` apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TileEntry {
     base: ValueIndex,
     stride: ValueIndex,
+    /// The block's index in its array.
+    index: u32,
+    /// The store the block is in, and the array of that store.
+    store: u8,
+    array: u8,
+    rows: u8,
+    cols: u8,
 }
 
-impl TilePosition {
-    /// All parameters fixed: no tile, and the index walk emits nothing.
-    const UNBOUND: Self = TilePosition { base: ValueIndex::MAX, stride: 0 };
-    /// Pattern not tile-expanded: fall back to the per-scalar map.
-    const MAPPED: Self = TilePosition { base: 0, stride: 0 };
+/// The scatter targets of a bound pattern: what every assembly of a
+/// solve replays. Built by binding the root's block stores against the
+/// pattern (`LmProblemInternals::bind_hessian_positions`) and closed
+/// with [`finish`](Self::finish). The blocks keep nothing, so the stream
+/// is the whole binding and a fresh set of blocks of the same shape
+/// scatters through it as is.
+///
+/// Against a tile-expanded pattern ([`HessianBinder::Tiled`]) every
+/// block binds to its tile. The tiles are sorted by where they lie in
+/// the value buffer, so the blocks that land on one tile are neighbours
+/// in the stream: the scatter writes the first of them over the tile
+/// and adds the rest to it, and needs no zeroed buffer to add into. The
+/// sorted stream is cut into
+/// one range of the buffer per store, for the scatter to run on every
+/// thread ([`scatter_tiles`]). The COO list has no tiles and scatters
+/// through one position per entry after them. Against a pattern without
+/// tiles ([`HessianBinder::Scalar`]) every block and the COO list bind
+/// to one position per entry, and the stores replay them in walk order.
+#[derive(Clone, Debug, Default)]
+pub struct PositionStream {
+    /// One position per entry for the blocks without a tile and the COO
+    /// list, in walk order.
+    positions: std::vec::Vec<ValueIndex>,
+    /// The tiled blocks: in binding order until `finish`, by tile after.
+    tiles: std::vec::Vec<TileEntry>,
+    /// Per tiled block the first value index of its panel, the block
+    /// column its tile lies in. Emptied by `finish`, which cuts on it.
+    panels: std::vec::Vec<ValueIndex>,
+    /// Chunk `c` is the tiles `chunks[c].0..chunks[c + 1].0`, writing
+    /// the value buffer from `chunks[c].1` up to `chunks[c + 1].1`; the
+    /// last pair closes the table with `ValueIndex::MAX` for the
+    /// buffer's end.
+    chunks: std::vec::Vec<(u32, ValueIndex)>,
+    /// How many cells of the value buffer the tiles write.
+    covered: usize,
+    /// How many stores the tiles were bound from.
+    stores: usize,
+    /// Whether the blocks bound to tiles.
+    tiled: bool,
+}
 
-    /// True if this block scatters through its tile rather than the map.
-    #[inline]
-    fn tiled(&self) -> bool { self.stride != 0 }
+impl PositionStream {
+    pub fn new() -> Self { Self::default() }
 
-    /// Narrow a resolved position into the packed 32-bit slot.
-    #[inline]
-    fn bound(base: usize, stride: usize) -> Self {
-        TilePosition { base: value_index(base), stride: value_index(stride) }
+    /// The stream of a pattern given as one position per emitted entry,
+    /// a [`CooMatrix::to_csc_with_map`](crate::simple_lm::CooMatrix::to_csc_with_map)
+    /// map: the blocks and the COO list replay it in the order they
+    /// emitted.
+    pub fn from_map(map: &[ValueIndex]) -> Self {
+        PositionStream { positions: map.to_vec(), ..Default::default() }
+    }
+
+    /// The per-entry positions.
+    pub fn positions(&self) -> &[ValueIndex] { &self.positions }
+
+    /// How many blocks bound to tiles.
+    pub fn tiles(&self) -> usize { self.tiles.len() }
+
+    /// Whether the blocks bound to tiles rather than to per-entry
+    /// positions.
+    pub fn tiled(&self) -> bool { self.tiled }
+
+    /// Whether the tiles write every cell of a value buffer `len` long,
+    /// so that the scatter needs no zeroing before it.
+    pub fn covers(&self, len: usize) -> bool { self.tiled && self.covered == len }
+
+    /// How many chunks the tiles are cut into.
+    pub fn chunks(&self) -> usize { self.chunks.len().saturating_sub(1) }
+
+    /// The bytes the stream holds.
+    pub fn bytes(&self) -> usize {
+        self.positions.len() * std::mem::size_of::<ValueIndex>()
+            + self.tiles.len() * std::mem::size_of::<TileEntry>()
+            + self.chunks.len() * std::mem::size_of::<(u32, ValueIndex)>()
+    }
+
+    pub(crate) fn push_position(&mut self, position: usize) {
+        self.positions.push(value_index(position));
+    }
+
+    /// Room for `n` more tiles.
+    pub(crate) fn reserve_tiles(&mut self, n: usize) {
+        self.tiles.reserve(n);
+        self.panels.reserve(n);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_tile(
+        &mut self, base: usize, stride: usize, panel: usize,
+        store: usize, array: usize, index: usize, rows: usize, cols: usize,
+    ) {
+        assert!(store <= u8::MAX as usize && array <= u8::MAX as usize,
+            "the position stream holds up to {} stores of {} arrays", u8::MAX, u8::MAX);
+        assert!(rows <= u8::MAX as usize && cols <= u8::MAX as usize,
+            "a tile of {} by {}: an entity's block spans up to {} parameters", rows, cols, u8::MAX);
+        self.tiles.push(TileEntry {
+            base: value_index(base), stride: value_index(stride), index: index as u32,
+            store: store as u8, array: array as u8, rows: rows as u8, cols: cols as u8,
+        });
+        self.panels.push(value_index(panel));
+    }
+
+    /// Close a binding from `stores` stores: sort the tiles by where
+    /// they lie, count the cells they cover and cut them into `stores`
+    /// chunks of about equal length. A chunk starts where a panel does,
+    /// so no tile straddles two, and two chunks never write one cell.
+    pub fn finish(&mut self, stores: usize) {
+        self.stores = stores;
+        let n = self.tiles.len();
+        // By tile, and in binding order within one, so the sum over a
+        // tile's blocks is in one fixed order: the tile's base over the
+        // entry's place, as one key.
+        let mut keys: std::vec::Vec<u64> = self.tiles.iter().enumerate()
+            .map(|(k, t)| ((t.base as u64) << 32) | k as u64)
+            .collect();
+        sort_by_high_word(&mut keys);
+        let at = |key: u64| (key & 0xffff_ffff) as usize;
+        let tiles: std::vec::Vec<TileEntry> = keys.iter().map(|&key| self.tiles[at(key)]).collect();
+        let panels: std::vec::Vec<ValueIndex> = keys.iter().map(|&key| self.panels[at(key)]).collect();
+        self.tiles = tiles;
+        self.panels = std::vec::Vec::new();
+        // Every block on a tile writes the whole of it, so all agree on
+        // its shape, and the tile counts once.
+        self.covered = 0;
+        for k in 0..n {
+            let t = &self.tiles[k];
+            if k > 0 && self.tiles[k - 1].base == t.base {
+                let p = &self.tiles[k - 1];
+                assert!((p.stride, p.rows, p.cols) == (t.stride, t.rows, t.cols),
+                    "two blocks bound to one tile with different shapes");
+            } else {
+                self.covered += t.rows as usize * t.cols as usize;
+            }
+        }
+        let k = stores.max(1);
+        self.chunks.clear();
+        let mut prev = 0usize;
+        for c in 0..k {
+            let mut at = cut(n, k, c).max(prev);
+            while at > 0 && at < n && panels[at] == panels[at - 1] {
+                at += 1;
+            }
+            self.chunks.push((at as u32, if at < n { panels[at] } else { ValueIndex::MAX }));
+            prev = at;
+        }
+        self.chunks.push((n as u32, ValueIndex::MAX));
     }
 }
 
-/// Append a block's scatter target to the position stream: two words per
-/// block, ahead of the per-entry positions a mapped block also pushes.
-/// The block itself keeps nothing, so the stream is the whole binding and
-/// a fresh set of blocks scatters through it without being rebound.
-#[inline]
-fn push_tile(out: &mut std::vec::Vec<ValueIndex>, pos: TilePosition) {
-    out.push(pos.base);
-    out.push(pos.stride);
+/// Sort `keys` by their high 32 bits, keeping the order of equal ones:
+/// two passes of counting sort over 16-bit digits, each a count and a
+/// placement over the keys. The low 32 bits ride along.
+fn sort_by_high_word(keys: &mut std::vec::Vec<u64>) {
+    const DIGITS: usize = 1 << 16;
+    let mut tmp = vec![0u64; keys.len()];
+    for shift in [32u32, 48] {
+        let digit = |k: u64| ((k >> shift) & (DIGITS as u64 - 1)) as usize;
+        // Per digit, where its first key goes.
+        let mut start = vec![0u32; DIGITS + 1];
+        for &k in keys.iter() {
+            start[digit(k) + 1] += 1;
+        }
+        for d in 0..DIGITS {
+            start[d + 1] += start[d];
+        }
+        for &k in keys.iter() {
+            let d = digit(k);
+            tmp[start[d] as usize] = k;
+            start[d] += 1;
+        }
+        std::mem::swap(keys, &mut tmp);
+    }
 }
 
-/// Read the next block's scatter target from the position stream.
+/// The per-entry positions by entry: what a hand-written problem reads
+/// its map through.
+impl std::ops::Index<usize> for PositionStream {
+    type Output = ValueIndex;
+    fn index(&self, k: usize) -> &ValueIndex { &self.positions[k] }
+}
+
+/// A root's block store as the tiled scatter reads it: any block of any
+/// of its arrays, written into its tile. The tile lies in `vals`
+/// column-major from `base`, its columns `stride` apart. Implemented by
+/// the generated store.
+pub trait TileSource: Sync {
+    /// Write block `index` of array `array` over its tile: every cell
+    /// of the tile is assigned, the ones the block does not reach as
+    /// zeros.
+    fn assign_block<F: crate::utils::Float>(&self, array: u8, index: u32, vals: &mut [F], base: usize, stride: usize);
+    /// Add block `index` of array `array` to what its tile holds.
+    fn add_block<F: crate::utils::Float>(&self, array: u8, index: u32, vals: &mut [F], base: usize, stride: usize);
+}
+
+/// One store's share of the tiled scatter: a range of the value buffer
+/// and the sorted tiles that lie in it.
+struct TileChunk<'a, F> {
+    vals: &'a mut [F],
+    /// The value index `vals` starts at.
+    start: usize,
+    tiles: &'a [TileEntry],
+}
+
+/// Write every tiled block of `stream` into `vals`: the first block of
+/// a tile over the whole of it, the rest of its blocks added, so a cell
+/// of a tile owes nothing to what the buffer held. One chunk of the
+/// buffer per store the stream was bound from, each on a thread of its
+/// own when there are several ([`crate::pool`]).
+pub fn scatter_tiles<S: TileSource, F: crate::utils::Float + Send>(
+    stores: &[S], stream: &PositionStream, vals: &mut [F],
+) {
+    if stream.tiles.is_empty() {
+        return;
+    }
+    assert!(stream.stores == stores.len(),
+        "the position stream was bound from {} stores and is scattered from {}: \
+         a bound pattern serves one store count", stream.stores, stores.len());
+    let chunks = &stream.chunks;
+    let n = chunks.len() - 1;
+    let len = vals.len();
+    let at = |c: usize| {
+        let v = chunks[c].1;
+        if v == ValueIndex::MAX { len } else { v as usize }
+    };
+    let mut parts: std::vec::Vec<TileChunk<F>> = std::vec::Vec::with_capacity(n);
+    let mut rest: &mut [F] = vals;
+    let mut taken = 0usize;
+    for c in 0..n {
+        let (lo, hi) = (at(c), at(c + 1));
+        let (_, r) = std::mem::take(&mut rest).split_at_mut(lo - taken);
+        let (mine, r) = r.split_at_mut(hi - lo);
+        rest = r;
+        taken = hi;
+        parts.push(TileChunk {
+            vals: mine,
+            start: lo,
+            tiles: &stream.tiles[chunks[c].0 as usize..chunks[c + 1].0 as usize],
+        });
+    }
+    run_indexed(stores, n > 1, &mut parts, |stores, _, chunk| scatter_chunk(stores, chunk));
+}
+
+/// The scatter of one chunk, straight into its range of the buffer: the
+/// first entry of a tile assigns the tile, the entries after it on the
+/// same tile add. A chunk opens on a panel, so a tile's entries are all
+/// in one chunk and its first is the first the chunk sees.
+fn scatter_chunk<S: TileSource, F: crate::utils::Float>(stores: &[S], chunk: &mut TileChunk<F>) {
+    let vals = &mut *chunk.vals;
+    let mut tile = usize::MAX;
+    for e in chunk.tiles {
+        let store = &stores[e.store as usize];
+        let (base, stride) = (e.base as usize - chunk.start, e.stride as usize);
+        if e.base as usize != tile {
+            tile = e.base as usize;
+            store.assign_block(e.array, e.index, vals, base, stride);
+        } else {
+            store.add_block(e.array, e.index, vals, base, stride);
+        }
+    }
+}
+
+/// The next per-entry position of the stream, and the caller's error
+/// explained when there is none.
 #[inline]
-fn take_tile(positions: &[ValueIndex], cursor: &mut usize) -> TilePosition {
-    assert!(*cursor + 2 <= positions.len(),
-        "Hessian scatter ran past the bound pattern: the stores were never bound \
-         to it (LmProblemInternals::bind_hessian_positions), their emission order \
-         changed within the solve, or the pattern was bound at another store count");
-    let pos = TilePosition { base: positions[*cursor], stride: positions[*cursor + 1] };
-    *cursor += 2;
-    pos
+fn take_position(positions: &[ValueIndex], cursor: &mut usize) -> usize {
+    let Some(&p) = positions.get(*cursor) else {
+        panic!("Hessian scatter ran past the bound pattern: the stores were never bound \
+                to it (LmProblemInternals::bind_hessian_positions), their emission order \
+                changed within the solve, or the pattern was bound at another store count");
+    };
+    *cursor += 1;
+    p as usize
 }
 
 /// Smallest live index in `indices`, or `u32::MAX` if every slot is fixed.
@@ -526,50 +759,63 @@ fn tile_start(indices: &[u32]) -> u32 {
 /// How a backend hands out scatter targets when a root binds its block
 /// stores to an assembled pattern (`LmProblemInternals::bind_hessian_positions`).
 pub enum HessianBinder<'a> {
-    /// Tile-expanded pattern: every stored cell holds a full dense tile, so
-    /// one lookup fixes a whole block and only the tile's origin and column
-    /// stride need keeping.
-    Tiled(&'a mut dyn FnMut(u32, u32) -> (usize, usize)),
+    /// Tile-expanded pattern: every stored cell holds a full dense tile.
+    /// Given a tile's first scalar row and column: the tile's first value
+    /// index, the distance between its columns, and the first value index
+    /// of its panel, the block column it lies in, whose storage is one
+    /// range of the buffer that no other panel's interleaves with.
+    Tiled(&'a mut dyn FnMut(u32, u32) -> (usize, usize, usize)),
     /// Pattern built from a COO pass: a cell's entries are not contiguous in
     /// the value buffer, so every scalar needs its own position and the
     /// blocks fall back to the per-scalar map.
     Scalar(&'a mut dyn FnMut(u32, u32) -> usize),
 }
 
-/// Bind one tile, checking the ascending-index invariant that lets
-/// [`tile_start`] stop at the first live slot and lets the assembly derive a
-/// local coordinate by subtraction.
-#[inline]
-fn bind_tile(
-    bind: &mut dyn FnMut(u32, u32) -> (usize, usize),
-    row: &[u32],
-    col: &[u32],
-) -> TilePosition {
-    let (r, c) = (tile_start(row), tile_start(col));
-    if r == u32::MAX || c == u32::MAX {
-        return TilePosition::UNBOUND;
+/// The first live index in `indices` and how many follow it: the block's
+/// span along one side of its tile. `u32::MAX` and 0 when every slot is
+/// fixed. An entity's live parameters serialize as one run, which the
+/// tile arithmetic relies on, so a gap is an error here.
+fn tile_extent(indices: &[u32]) -> (u32, usize) {
+    let (mut first, mut last, mut live, mut ascends) = (u32::MAX, 0u32, 0usize, true);
+    for &i in indices {
+        if i == u32::MAX { continue; }
+        if live == 0 {
+            first = i;
+        } else {
+            ascends &= i > last;
+        }
+        last = i;
+        live += 1;
     }
-    // Runs once per block per setup, so it is cheap next to the map it
-    // replaces, and the failure it guards against is a silently wrong
-    // Hessian rather than a crash.
-    assert!(ascending(row) && ascending(col), "live parameter indices must ascend with slot order");
-    let (base, stride) = bind(r.min(c), r.max(c));
-    TilePosition::bound(base, stride)
+    if live == 0 {
+        return (u32::MAX, 0);
+    }
+    assert!(ascends && (last - first) as usize + 1 == live,
+        "live parameter indices must ascend with slot order and form one run");
+    (first, live)
 }
 
-/// True if the live entries of `indices` are strictly ascending.
-fn ascending(indices: &[u32]) -> bool {
-    let mut last = None;
-    for &i in indices {
-        if i == u32::MAX {
-            continue;
-        }
-        if last.is_some_and(|l| i <= l) {
-            return false;
-        }
-        last = Some(i);
+/// Bind one block to its tile: the block's spans from its indices, the
+/// tile from the binder. A block with a side entirely fixed has no tile
+/// and scatters nothing.
+#[inline]
+fn bind_tile(
+    bind: &mut dyn FnMut(u32, u32) -> (usize, usize, usize),
+    row: &[u32], col: &[u32],
+    out: &mut PositionStream, store: usize, array: usize, index: usize,
+) {
+    out.tiled = true;
+    let (r, rows) = tile_extent(row);
+    // A self block binds its indices on both sides.
+    let (c, cols) = if std::ptr::eq(row, col) { (r, rows) } else { tile_extent(col) };
+    if rows == 0 || cols == 0 {
+        return;
     }
-    true
+    // The tile holds the upper block triangle, so the lower-numbered span
+    // walks the rows.
+    let (r, rows, c, cols) = if r <= c { (r, rows, c, cols) } else { (c, cols, r, rows) };
+    let (base, stride, panel) = bind(r, c);
+    out.push_tile(base, stride, panel, store, array, index, rows, cols);
 }
 
 
@@ -609,20 +855,17 @@ fn self_cells<const N: usize>(indices: &[u32; N], out: &mut std::vec::Vec<(u32, 
     }
 }
 
-/// The block's scatter target, pushed into the stream; a scalar binder
-/// follows it with one position per entry.
+/// The block's scatter target: against a tiled pattern its tile, in the
+/// stream's tile list; otherwise one position per entry.
 #[inline]
 fn self_bind<const N: usize>(
-    indices: &[u32; N], binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>,
+    indices: &[u32; N], binder: &mut HessianBinder, out: &mut PositionStream,
+    store: usize, array: usize, index: usize,
 ) {
     let resolve = match binder {
-        HessianBinder::Tiled(bind) => {
-            push_tile(out, bind_tile(*bind, indices, indices));
-            return;
-        }
+        HessianBinder::Tiled(bind) => return bind_tile(*bind, indices, indices, out, store, array, index),
         HessianBinder::Scalar(resolve) => resolve,
     };
-    push_tile(out, TilePosition::MAPPED);
     for i in 0..N {
         let gi = indices[i];
         if gi == u32::MAX { continue; }
@@ -630,7 +873,38 @@ fn self_bind<const N: usize>(
             let gj = indices[j];
             if gj == u32::MAX { continue; }
             let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-            out.push(value_index(resolve(lo, hi)));
+            out.push_position(resolve(lo, hi));
+        }
+    }
+}
+
+/// Write one block's triangle into its tile in the value buffer, the
+/// cell `(r, c)` of the tile at `base + c * stride + r`. With `ASSIGN`
+/// the whole tile is written, its lower triangle as zeros; without, the
+/// triangle is added to what the tile holds.
+#[inline]
+fn self_tile<const ASSIGN: bool, const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    indices: &[u32; N], hessian: &[T; M], vals: &mut [F], base: usize, stride: usize,
+) {
+    let start = tile_start(indices) as usize;
+    for i in 0..N {
+        let gi = indices[i];
+        if gi == u32::MAX { continue; }
+        let r = gi as usize - start;
+        let tri = i * (2 * N - i - 1) / 2;
+        for j in i..N {
+            let gj = indices[j];
+            if gj == u32::MAX { continue; }
+            let c = gj as usize - start;
+            let val = F::from(hessian[tri + j]).unwrap();
+            if ASSIGN {
+                vals[base + c * stride + r] = val;
+                if r != c {
+                    vals[base + r * stride + c] = F::zero();
+                }
+            } else {
+                vals[base + c * stride + r] += val;
+            }
         }
     }
 }
@@ -719,41 +993,9 @@ fn self_direct<const N: usize, const M: usize, T: crate::utils::Float, F: crate:
     }
 }
 
-/// The indexed scatter of one block through the tile the stream holds for
-/// it; a mapped block falls back to the per-entry positions behind it.
-#[inline]
-fn self_indexed<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
-    indices: &[u32; N], hessian: &[T; M],
-    vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
-) {
-    let pos = take_tile(positions, cursor);
-    if !pos.tiled() {
-        return self_mapped(indices, hessian, vals, positions, cursor);
-    }
-    let start = tile_start(indices) as usize;
-    let (base, stride) = (pos.base as usize, pos.stride as usize);
-    // Column offset of each live slot: invariant across the outer loop.
-    let mut col = [0usize; N];
-    for (c, &g) in std::iter::zip(&mut col, indices) {
-        if g != u32::MAX {
-            *c = (g as usize - start) * stride;
-        }
-    }
-    for i in 0..N {
-        let gi = indices[i];
-        if gi == u32::MAX { continue; }
-        let row = base + (gi as usize - start);
-        let tri = i * (2 * N - i - 1) / 2;
-        for j in i..N {
-            if indices[j] == u32::MAX { continue; }
-            vals[row + col[j]] += F::from(hessian[tri + j]).unwrap();
-        }
-    }
-}
-
-/// The untiled case of [`self_indexed`]: one cached position per entry,
-/// `cursor` advancing in lockstep with the block traversal. An all-fixed
-/// block emits nothing and so consumes none.
+/// The scatter of one block through the per-entry positions, `cursor`
+/// advancing in lockstep with the block traversal. An all-fixed block
+/// emits nothing and so consumes none.
 #[inline]
 fn self_mapped<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
     indices: &[u32; N], hessian: &[T; M],
@@ -764,8 +1006,7 @@ fn self_mapped<const N: usize, const M: usize, T: crate::utils::Float, F: crate:
         if gi == u32::MAX { continue; }
         for j in i..N {
             if indices[j] == u32::MAX { continue; }
-            vals[positions[*cursor] as usize] += F::from(hessian[tri_idx(N, i, j)]).unwrap();
-            *cursor += 1;
+            vals[take_position(positions, cursor)] += F::from(hessian[tri_idx(N, i, j)]).unwrap();
         }
     }
 }
@@ -1023,12 +1264,26 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
     }
 
     /// Record where each entity's triangle scatters in the assembled value
-    /// buffer, over every entity. See
+    /// buffer, over every entity, as array `array` of store `store`. See
     /// [`LmProblemInternals::bind_hessian_positions`](crate::simple_lm::LmProblemInternals::bind_hessian_positions).
-    pub fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
-        for idx in &self.indices {
-            self_bind(idx, binder, out);
+    pub fn bind_hessian_positions(&self, binder: &mut HessianBinder, out: &mut PositionStream, store: usize, array: usize) {
+        out.reserve_tiles(self.indices.len());
+        for (k, idx) in self.indices.iter().enumerate() {
+            self_bind(idx, binder, out, store, array, k);
         }
+    }
+
+    /// Write entity `k`'s triangle over its tile, which lies in `vals`
+    /// from `base` with its columns `stride` apart (see [`TileSource`]).
+    #[inline]
+    pub fn assign_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        self_tile::<true, N, M, _, _>(&self.indices[k], self.block(k), vals, base, stride);
+    }
+
+    /// Add entity `k`'s triangle to what its tile holds.
+    #[inline]
+    pub fn add_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        self_tile::<false, N, M, _, _>(&self.indices[k], self.block(k), vals, base, stride);
     }
 
     /// Add every entity's triangle into the dense symmetric Hessian,
@@ -1068,11 +1323,12 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
     }
 
     /// Add every entity's triangle into the assembled value buffer through
-    /// the positions [`bind_hessian_positions`](Self::bind_hessian_positions)
-    /// recorded, reading them in the same order.
+    /// the per-entry positions [`bind_hessian_positions`](Self::bind_hessian_positions)
+    /// recorded against a pattern without tiles, reading them in the same
+    /// order.
     pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         for k in 0..self.entity.len() {
-            self_indexed(&self.indices[k], self.block(k), vals, positions, cursor);
+            self_mapped(&self.indices[k], self.block(k), vals, positions, cursor);
         }
     }
 }
@@ -1171,20 +1427,17 @@ fn cross_cells<const NA: usize, const NB: usize>(a: &[u32; NA], b: &[u32; NB], o
     }
 }
 
-/// The tile position of one block under `binder`; a scalar binder pushes
-/// one position per entry and marks the block mapped.
+/// The block's scatter target: against a tiled pattern its tile, in the
+/// stream's tile list; otherwise one position per entry.
 #[inline]
 fn cross_bind<const NA: usize, const NB: usize>(
-    a: &[u32; NA], b: &[u32; NB], binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>,
+    a: &[u32; NA], b: &[u32; NB], binder: &mut HessianBinder, out: &mut PositionStream,
+    store: usize, array: usize, index: usize,
 ) {
     let resolve = match binder {
-        HessianBinder::Tiled(bind) => {
-            push_tile(out, bind_tile(*bind, a, b));
-            return;
-        }
+        HessianBinder::Tiled(bind) => return bind_tile(*bind, a, b, out, store, array, index),
         HessianBinder::Scalar(resolve) => resolve,
     };
-    push_tile(out, TilePosition::MAPPED);
     for i in 0..NA {
         let gi = a[i];
         if gi == u32::MAX { continue; }
@@ -1192,7 +1445,65 @@ fn cross_bind<const NA: usize, const NB: usize>(
             let gj = b[j];
             if gj == u32::MAX { continue; }
             let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-            out.push(value_index(resolve(lo, hi)));
+            out.push_position(resolve(lo, hi));
+        }
+    }
+}
+
+/// Write one block into its tile in the value buffer, the cell `(r, c)`
+/// of the tile at `base + c * stride + r`. The tile holds the upper
+/// block triangle, so the lower-numbered entity walks the rows. With
+/// `ASSIGN` the whole tile is written; without, the block is added to
+/// what the tile holds.
+#[inline]
+fn cross_tile<const ASSIGN: bool, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
+    a: &[u32; NA], b: &[u32; NB], values: &[T; P], vals: &mut [F], base: usize, stride: usize,
+) {
+    let (sa, sb) = (tile_start(a) as usize, tile_start(b) as usize);
+    if sa == sb {
+        // Aliased: both slots index one entity, so the pairs land on a
+        // diagonal tile and which side is the row flips per element.
+        // Two pairs share a cell, so an assigning block clears the tile
+        // and adds.
+        if ASSIGN {
+            let n = a.iter().filter(|&&g| g != u32::MAX).count();
+            for c in 0..n {
+                vals[base + c * stride..base + c * stride + n].fill(F::zero());
+            }
+        }
+        for i in 0..NA {
+            let gi = a[i];
+            if gi == u32::MAX { continue; }
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = b[j];
+                if gj == u32::MAX { continue; }
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                let val = F::from(values[row + j]).unwrap();
+                // The triangle stores each symmetric pair once, so a pair
+                // that lands on the diagonal needs both contributions.
+                let val = if gi == gj { val + val } else { val };
+                vals[base + (hi as usize - sa) * stride + (lo as usize - sa)] += val;
+            }
+        }
+        return;
+    }
+    let (step_a, step_b) = if sa < sb { (1, stride) } else { (stride, 1) };
+    for i in 0..NA {
+        let gi = a[i];
+        if gi == u32::MAX { continue; }
+        let pa = base + (gi as usize - sa) * step_a;
+        let row = i * NB;
+        for j in 0..NB {
+            let gj = b[j];
+            if gj == u32::MAX { continue; }
+            let val = F::from(values[row + j]).unwrap();
+            let at = pa + (gj as usize - sb) * step_b;
+            if ASSIGN {
+                vals[at] = val;
+            } else {
+                vals[at] += val;
+            }
         }
     }
 }
@@ -1241,71 +1552,7 @@ fn cross_direct<const NA: usize, const NB: usize, const P: usize, T: crate::util
     }
 }
 
-/// The indexed scatter of one block through its bound tile; see the note
-/// on [`SelfBlock::accumulate_hessian_sparse_indexed`].
-#[inline]
-fn cross_indexed<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
-    a: &[u32; NA], b: &[u32; NB], values: &[T; P],
-    vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
-) {
-    let pos = take_tile(positions, cursor);
-    if !pos.tiled() {
-        return cross_mapped(a, b, values, vals, positions, cursor);
-    }
-    let (sa, sb) = (tile_start(a), tile_start(b));
-    let (base, stride) = (pos.base as usize, pos.stride as usize);
-    if sa == sb {
-        // Aliased: both slots index one entity, so the pairs land on a
-        // diagonal tile and which side is the row flips per element.
-        return cross_aliased(a, b, values, vals, base, stride, sa as usize);
-    }
-    // The tile holds the upper block triangle, so the lower-numbered
-    // entity walks the rows and the other walks the columns.
-    let (step_a, step_b) = if sa < sb { (1, stride) } else { (stride, 1) };
-    let (sa, sb) = (sa as usize, sb as usize);
-    // Offset of each live B slot: invariant across the outer loop.
-    let mut off_b = [0usize; NB];
-    for (o, &g) in std::iter::zip(&mut off_b, b) {
-        if g != u32::MAX {
-            *o = (g as usize - sb) * step_b;
-        }
-    }
-    for i in 0..NA {
-        let gi = a[i];
-        if gi == u32::MAX { continue; }
-        let pos = base + (gi as usize - sa) * step_a;
-        let row = i * NB;
-        for j in 0..NB {
-            if b[j] == u32::MAX { continue; }
-            vals[pos + off_b[j]] += F::from(values[row + j]).unwrap();
-        }
-    }
-}
-
-/// The aliased case of [`cross_indexed`]: one entity in both slots, every
-/// pair on its diagonal tile.
-#[inline]
-fn cross_aliased<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
-    a: &[u32; NA], b: &[u32; NB], values: &[T; P], vals: &mut [F], base: usize, stride: usize, start: usize,
-) {
-    for i in 0..NA {
-        let gi = a[i];
-        if gi == u32::MAX { continue; }
-        let row = i * NB;
-        for j in 0..NB {
-            let gj = b[j];
-            if gj == u32::MAX { continue; }
-            let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-            let val = F::from(values[row + j]).unwrap();
-            // The triangle stores each symmetric pair once, so a pair that
-            // lands on the diagonal needs both contributions.
-            let val = if gi == gj { val + val } else { val };
-            vals[base + (hi as usize - start) * stride + (lo as usize - start)] += val;
-        }
-    }
-}
-
-/// The untiled case of [`cross_indexed`]: one cached position per entry.
+/// The scatter of one block through the per-entry positions.
 #[inline]
 fn cross_mapped<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
     a: &[u32; NA], b: &[u32; NB], values: &[T; P], vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize,
@@ -1320,8 +1567,7 @@ fn cross_mapped<const NA: usize, const NB: usize, const P: usize, T: crate::util
             let val = F::from(values[row + j]).unwrap();
             // Aliased diagonal: see cross_band.
             let val = if gi == gj { val + val } else { val };
-            vals[positions[*cursor] as usize] += val;
-            *cursor += 1;
+            vals[take_position(positions, cursor)] += val;
         }
     }
 }
@@ -1484,12 +1730,26 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     }
 
     /// Record where each tile scatters in the assembled value buffer, over
-    /// every block. See
+    /// every block, as array `array` of store `store`. See
     /// [`LmProblemInternals::bind_hessian_positions`](crate::simple_lm::LmProblemInternals::bind_hessian_positions).
-    pub fn bind_hessian_positions(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
+    pub fn bind_hessian_positions(&self, binder: &mut HessianBinder, out: &mut PositionStream, store: usize, array: usize) {
+        out.reserve_tiles(self.a.len());
         for k in 0..self.a.len() {
-            cross_bind(&self.a[k], &self.b[k], binder, out);
+            cross_bind(&self.a[k], &self.b[k], binder, out, store, array, k);
         }
+    }
+
+    /// Write block `k` over its tile, which lies in `vals` from `base`
+    /// with its columns `stride` apart (see [`TileSource`]).
+    #[inline]
+    pub fn assign_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        cross_tile::<true, NA, NB, P, _, _>(&self.a[k], &self.b[k], self.block(k), vals, base, stride);
+    }
+
+    /// Add block `k` to what its tile holds.
+    #[inline]
+    pub fn add_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        cross_tile::<false, NA, NB, P, _, _>(&self.a[k], &self.b[k], self.block(k), vals, base, stride);
     }
 
     /// Add every tile into the dense symmetric Hessian, at `(A, B)` and
@@ -1526,12 +1786,13 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
         }
     }
 
-    /// Add every tile into the assembled value buffer through the positions
-    /// [`bind_hessian_positions`](Self::bind_hessian_positions) recorded,
-    /// reading them in the same order.
+    /// Add every block into the assembled value buffer through the
+    /// per-entry positions [`bind_hessian_positions`](Self::bind_hessian_positions)
+    /// recorded against a pattern without tiles, reading them in the same
+    /// order.
     pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
         for k in 0..self.a.len() {
-            cross_indexed(&self.a[k], &self.b[k], self.block(k), vals, positions, cursor);
+            cross_mapped(&self.a[k], &self.b[k], self.block(k), vals, positions, cursor);
         }
     }
 }
@@ -1939,4 +2200,234 @@ mod tests {
         assert_eq!(densify_band(&band, n, kd), dense);
     }
 
+    // A hand-written store for the tiled scatter: one self array of
+    // 2-wide entities and one cross array over pairs of them.
+    #[derive(Default)]
+    struct TwoArrays {
+        selfs: SelfBlockArray<2, 3, f64>,
+        cross: CrossBlockArray<2, 2, 4, f64>,
+    }
+
+    impl TileSource for TwoArrays {
+        fn assign_block<F: crate::utils::Float>(&self, array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            match array {
+                0 => self.selfs.assign_block(index as usize, vals, base, stride),
+                1 => self.cross.assign_block(index as usize, vals, base, stride),
+                _ => unreachable!(),
+            }
+        }
+        fn add_block<F: crate::utils::Float>(&self, array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            match array {
+                0 => self.selfs.add_block(index as usize, vals, base, stride),
+                1 => self.cross.add_block(index as usize, vals, base, stride),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// Three 2-wide entities over a dense 6 by 6 column-major buffer:
+    /// tile `(bi, bj)` at `12 bj + 2 bi`, its columns 6 apart, in the
+    /// panel of block column `bj` at `12 bj`.
+    const N6: usize = 6;
+    fn dense_tiles(i: u32, j: u32) -> (usize, usize, usize) {
+        ((j as usize) * N6 + i as usize, N6, (j as usize / 2) * 2 * N6)
+    }
+
+    /// Two stores that share entity 1: self blocks for entities 0 and 1
+    /// in the first, 1 and 2 in the second; cross blocks on the pair
+    /// (0, 1) in both, one aliased on entity 1 in the first, one with the
+    /// higher entity on its A side in the second.
+    fn two_stores() -> std::vec::Vec<TwoArrays> {
+        let mut s0 = TwoArrays::default();
+        s0.selfs.push(0, &[0, 1]);
+        s0.selfs.push(1, &[2, 3]);
+        s0.selfs.finish();
+        s0.selfs.add_residual(false, 0, 0.5, &[1.0, -0.25]);
+        s0.selfs.add_residual(false, 1, -0.4, &[0.2, 1.5]);
+        s0.cross.push(&[0, 1], &[2, 3]);
+        s0.cross.push(&[2, 3], &[2, 3]);
+        s0.cross.finish();
+        s0.cross.block_mut(false, 0).add_residual_cross(&[1.0, -0.5], &[0.25, 2.0]);
+        s0.cross.block_mut(false, 1).add_residual_cross(&[0.3, 0.7], &[-0.6, 0.1]);
+
+        let mut s1 = TwoArrays::default();
+        s1.selfs.push(1, &[2, 3]);
+        s1.selfs.push(2, &[4, 5]);
+        s1.selfs.finish();
+        s1.selfs.add_residual(false, 0, 0.9, &[-1.0, 0.3]);
+        s1.selfs.add_residual(false, 1, 0.1, &[0.4, -0.8]);
+        s1.cross.push(&[0, 1], &[2, 3]);
+        s1.cross.push(&[4, 5], &[2, 3]);
+        s1.cross.finish();
+        s1.cross.block_mut(false, 0).add_residual_cross(&[-0.2, 0.9], &[1.1, 0.4]);
+        s1.cross.block_mut(false, 1).add_residual_cross(&[0.6, -0.3], &[0.8, -1.2]);
+        vec![s0, s1]
+    }
+
+    fn bind_two_stores(stores: &[TwoArrays], chunks: usize) -> PositionStream {
+        let mut stream = PositionStream::new();
+        for (s, store) in stores.iter().enumerate() {
+            store.selfs.bind_hessian_positions(&mut HessianBinder::Tiled(&mut dense_tiles), &mut stream, s, 0);
+            store.cross.bind_hessian_positions(&mut HessianBinder::Tiled(&mut dense_tiles), &mut stream, s, 1);
+        }
+        stream.finish(chunks);
+        stream
+    }
+
+    /// What the tiled scatter must leave in the buffer: the upper
+    /// triangle of the dense sum on every cell of a tile some block
+    /// binds to, zero on the lower triangle of a diagonal tile, and
+    /// `garbage` where no tile lies.
+    fn expected_tiles(stores: &[TwoArrays], garbage: f64) -> std::vec::Vec<f64> {
+        let mut dense = vec![0.0; N6 * N6];
+        for s in stores {
+            s.selfs.accumulate_hessian(&mut dense);
+            s.cross.accumulate_hessian(&mut dense);
+        }
+        let mut out = vec![garbage; N6 * N6];
+        for (bi, bj) in [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2)] {
+            for i in 2 * bi..2 * bi + 2 {
+                for j in 2 * bj..2 * bj + 2 {
+                    out[j * N6 + i] = if i <= j { dense[i * N6 + j] } else { 0.0 };
+                }
+            }
+        }
+        out
+    }
+
+    /// The buffer against the expectation: a cell no tile writes and the
+    /// lower triangle of a diagonal tile exactly, a summed cell to
+    /// rounding (the dense reference adds an aliased pair and its
+    /// transpose one at a time, the tile adds them doubled).
+    fn assert_tiles(vals: &[f64], expected: &[f64]) {
+        assert_eq!(vals.len(), expected.len());
+        for (k, (v, e)) in std::iter::zip(vals, expected).enumerate() {
+            assert!((v - e).abs() <= 1e-14 * (1.0 + e.abs()), "cell {}: {} vs {}", k, v, e);
+        }
+    }
+
+    #[test]
+    fn the_tiled_scatter_sums_each_tile_once_from_every_store() {
+        let stores = two_stores();
+        let stream = bind_two_stores(&stores, 2);
+        assert!(stream.tiled());
+        assert_eq!(stream.tiles(), 8, "every block binds");
+        assert_eq!(stream.chunks(), 2);
+        assert!(!stream.covers(N6 * N6), "five tiles of four cells do not cover the buffer");
+        assert!(stream.positions().is_empty());
+        let mut vals = vec![9.0; N6 * N6];
+        scatter_tiles(&stores, &stream, &mut vals);
+        assert_tiles(&vals, &expected_tiles(&stores, 9.0));
+    }
+
+    #[test]
+    fn the_chunks_cut_at_panels_and_may_be_empty() {
+        let mut stores = two_stores();
+        // A third store with nothing in it. Eight entries over five tiles
+        // in three panels: the first cut, wanted after entry 3, moves to
+        // the panel boundary after entry 6, and the second, wanted after
+        // entry 6, is already there, so the middle chunk is empty.
+        stores.push(TwoArrays::default());
+        let stream = bind_two_stores(&stores, 3);
+        assert_eq!(stream.chunks(), 3);
+        let panel2 = 2 * N6 as ValueIndex * 2;
+        assert_eq!(stream.chunks[0], (0, 0));
+        assert_eq!(stream.chunks[1], (6, panel2), "the cut after the tiles of block column 1");
+        assert_eq!(stream.chunks[2], (6, panel2), "empty");
+        assert_eq!(stream.chunks[3], (8, ValueIndex::MAX));
+        let mut vals = vec![-1.0; N6 * N6];
+        scatter_tiles(&stores, &stream, &mut vals);
+        assert_tiles(&vals, &expected_tiles(&stores, -1.0));
+    }
+
+    /// An aliased cross block as the first writer of a diagonal tile:
+    /// two of its pairs share a cell, so it clears the tile and adds, and
+    /// the tile's lower triangle comes out zero whatever the buffer held.
+    #[test]
+    fn an_aliased_block_assigns_its_whole_tile() {
+        let mut s = TwoArrays::default();
+        s.selfs.finish();
+        s.cross.push(&[2, 3], &[2, 3]);
+        s.cross.finish();
+        s.cross.block_mut(false, 0).add_residual_cross(&[0.3, 0.7], &[-0.6, 0.1]);
+        let stores = vec![s];
+        let stream = bind_two_stores(&stores, 1);
+        assert_eq!(stream.tiles(), 1);
+        let mut vals = vec![5.0; N6 * N6];
+        scatter_tiles(&stores, &stream, &mut vals);
+        // values = 2 dr_a dr_b^T, row-major over (a, b).
+        let v = [2.0 * 0.3 * -0.6, 2.0 * 0.3 * 0.1, 2.0 * 0.7 * -0.6, 2.0 * 0.7 * 0.1];
+        let mut expected = vec![5.0; N6 * N6];
+        expected[2 * N6 + 2] = v[0] + v[0];
+        expected[3 * N6 + 2] = v[1] + v[2];
+        expected[2 * N6 + 3] = 0.0;
+        expected[3 * N6 + 3] = v[3] + v[3];
+        assert_tiles(&vals, &expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "one store count")]
+    fn a_stream_scatters_from_the_store_count_it_was_bound_at() {
+        let stores = two_stores();
+        let stream = bind_two_stores(&stores, 2);
+        let mut vals = vec![0.0; N6 * N6];
+        scatter_tiles(&stores[..1], &stream, &mut vals);
+    }
+
+    #[test]
+    fn a_pattern_without_tiles_binds_one_position_per_entry() {
+        let stores = two_stores();
+        let mut stream = PositionStream::new();
+        let mut scalar = |i: u32, j: u32| dense_tiles(i, j).0;
+        for (s, store) in stores.iter().enumerate() {
+            store.selfs.bind_hessian_positions(&mut HessianBinder::Scalar(&mut scalar), &mut stream, s, 0);
+            store.cross.bind_hessian_positions(&mut HessianBinder::Scalar(&mut scalar), &mut stream, s, 1);
+        }
+        stream.finish(2);
+        assert!(!stream.tiled());
+        assert_eq!(stream.tiles(), 0);
+        assert_eq!(stream.positions().len(), 4 * 3 + 4 * 4, "three per triangle, four per cross block");
+        assert!(!stream.covers(N6 * N6));
+        assert!(!stream.covers(0), "a pattern without tiles writes nothing on its own");
+        let map = PositionStream::from_map(&[3, 1, 2]);
+        assert_eq!(map[1], 1);
+        assert_eq!(map.positions(), &[3, 1, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "form one run")]
+    fn a_gap_in_an_entitys_live_indices_is_refused() {
+        tile_extent(&[0, u32::MAX, 2]);
+    }
+
+    /// The radix sort orders by the high word and keeps ties in place,
+    /// which with the entry's place in the low word is the plain sort of
+    /// the keys. Bases above the first digit exercise the second pass.
+    #[test]
+    fn the_key_sort_is_the_plain_sort() {
+        let mut x = 12345u64;
+        let keys: std::vec::Vec<u64> = (0..5000u64).map(|k| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let base = (x >> 40) % (1 << 20);
+            // Every fifth key repeats the previous base, a tile with
+            // several blocks.
+            let base = if k % 5 == 4 { (x >> 20) % 7 } else { base };
+            (base << 32) | k
+        }).collect();
+        let mut radix = keys.clone();
+        sort_by_high_word(&mut radix);
+        let mut plain = keys;
+        plain.sort_unstable();
+        assert_eq!(radix, plain);
+        let mut empty = std::vec::Vec::new();
+        sort_by_high_word(&mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn tile_extent_spans_the_live_run() {
+        assert_eq!(tile_extent(&[u32::MAX, 4, 5, 6]), (4, 3));
+        assert_eq!(tile_extent(&[7, u32::MAX, u32::MAX]), (7, 1));
+        assert_eq!(tile_extent(&[u32::MAX, u32::MAX]), (u32::MAX, 0));
+    }
 }

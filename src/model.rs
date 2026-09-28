@@ -1177,7 +1177,7 @@ impl<T: Model> Model for Option<T> {
 // ---------------------------------------------------------------------------
 
 
-use arael_faer::{value_index, ValueIndex};
+use arael_faer::ValueIndex;
 use crate::store::HessianBinder;
 /// Declares that one entity has a diagonal Hessian block.
 ///
@@ -1563,15 +1563,15 @@ impl<T: crate::utils::Float> Coo<T> {
     /// after a compute -- so this block keeps the per-scalar map that
     /// [`SelfBlock`] and [`CrossBlock`] no longer need.
     pub fn bind_hessian_positions(
-        &mut self,
+        &self,
         binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<ValueIndex>,
+        out: &mut crate::store::PositionStream,
     ) {
         for &(i, j, _) in &self.hessian {
-            out.push(value_index(match binder {
+            out.push_position(match binder {
                 HessianBinder::Tiled(bind) => bind(i, j).0,
                 HessianBinder::Scalar(resolve) => resolve(i, j),
-            }));
+            });
         }
     }
 

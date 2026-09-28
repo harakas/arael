@@ -76,32 +76,43 @@ impl FormTiming {
 /// Where a solve's sweeps spent their time, recorded only when the
 /// context's timing is on ([`Context::set_timing`]); the call counts are
 /// kept either way. Per assembly: the parameter update, the store
-/// zeroing, the sweep region, the gradient gather and the Hessian
-/// scatter; per cost evaluation: the update and the sweep region.
+/// zeroing, the sweep region, the gradient gather, the zeroing of the
+/// Hessian's value buffer and the Hessian scatter; per cost evaluation:
+/// the update and the sweep region; once per pattern, the binding of
+/// the stores to it.
 #[derive(Clone, Debug, Default)]
 pub struct ParTiming {
     /// Whether the clocks run.
     pub on: bool,
+    /// Binding the stores' blocks to an assembled pattern: the position
+    /// stream's build, with its sort and its cut into chunks.
+    pub bind: Duration,
     pub assembly_update: Duration,
     /// Zeroing every store's tiles and gradient stashes before the sweep.
     pub assembly_zero: Duration,
     pub assembly: PhaseTiming,
     pub gather_grad: Duration,
+    /// Zeroing the assembled Hessian's value buffer before the scatter,
+    /// on the routes that scatter into one.
+    pub assembly_zero_vals: Duration,
     pub scatter: Duration,
     pub cost_update: Duration,
     pub cost: PhaseTiming,
 }
 
 impl ParTiming {
-    /// One line, per-call means in milliseconds.
+    /// One line: the bind in full, the rest as per-call means, in
+    /// milliseconds.
     pub fn report(&self, threads: usize) -> String {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let per = |d: Duration, n: usize| ms(d) / n.max(1) as f64;
-        format!("assembly [{}] update {:.3}, zero {:.3}, grad gather {:.3}, scatter {:.3}; cost [{}] update {:.3}",
+        format!("bind {:.3}; assembly [{}] update {:.3}, zero {:.3}, grad gather {:.3}, zero vals {:.3}, scatter {:.3}; cost [{}] update {:.3}",
+            ms(self.bind),
             self.assembly.report(threads),
             per(self.assembly_update, self.assembly.calls()),
             per(self.assembly_zero, self.assembly.calls()),
             per(self.gather_grad, self.assembly.calls()),
+            per(self.assembly_zero_vals, self.assembly.calls()),
             per(self.scatter, self.assembly.calls()),
             self.cost.report(threads),
             per(self.cost_update, self.cost.calls()))

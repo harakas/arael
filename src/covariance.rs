@@ -850,7 +850,7 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     // One value slot per scalar entry the block traversal emits, in that
     // traversal's order -- what the indexed assembly writes through.
     let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-    let mut positions = Vec::new();
+    let mut positions = crate::store::PositionStream::new();
     LmProblemInternals::bind_hessian_positions(
         m,
         &mut crate::store::HessianBinder::Tiled(&mut |i, j| {

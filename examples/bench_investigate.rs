@@ -463,7 +463,7 @@ fn main() {
             let mut grad = vec![0.0f64; n];
             path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo2);
             let csc2 = coo2.to_csc().unwrap();
-            let positions = coo2.build_scatter_map(&csc2);
+            let positions = arael::store::PositionStream::from_map(&coo2.build_scatter_map(&csc2));
             let mut vals = vec![0.0f64; csc2.nnz()];
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();

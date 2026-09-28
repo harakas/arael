@@ -695,9 +695,15 @@ thread, and each thread sweeps its own ranges into its own **store**: a
 copy of the Hessian blocks and the gradient entries those constraints
 write, holding only the entities that range reaches. No two threads
 write the same value and nothing is locked. A serial pass then adds the
-stores into the Hessian and the gradient. The ranges are cut by the work
-under each slot, not by slot count, so a collection whose entries carry
-very different amounts of work still divides evenly.
+stores into the gradient. On the sparse routes the Hessian is written
+from the stores by the same threads: the pattern's tiles are sorted by
+where they lie in the value buffer and cut into one range of it per
+store, and each thread writes the first block of a tile over the tile
+and adds the rest of its blocks, so the buffer is never zeroed and no
+two threads write one value here either. The dense and band routes add the
+stores into the Hessian serially. The ranges are cut by the work under
+each slot, not by slot count, so a collection whose entries carry very
+different amounts of work still divides evenly.
 
 The cost evaluation of a trial step is split the same way, over the same
 ranges. It only reads, so it has nothing to gather afterwards but the
@@ -741,7 +747,10 @@ same counts.
 
 `region` is dispatch to join; `tasks max` is the longest single thread of
 that region, so the gap between them is the dispatch and the wake-up, and
-the gap between `max` and `mean` is the imbalance.
+the gap between `max` and `mean` is the imbalance. A `bind` line, when
+the solve bound its stores to a pattern, is that one-time binding: the
+scatter stream's build, with its sort and its cut into one range per
+thread.
 
 A `seq` root prints a line saying so in place of the rows. The
 same is in `LmResult::threads` for a caller that would rather read it

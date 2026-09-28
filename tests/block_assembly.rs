@@ -7,7 +7,7 @@
 // partition (RootProblem::param_block_spans + block_partition_from_spans).
 
 use arael::model::{CrossBlock, Param, SelfBlock};
-use arael::store::HessianBinder;
+use arael::store::{HessianBinder, PositionStream};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem, LmProblemInternals};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
@@ -208,7 +208,7 @@ fn block_assembly_matches_scalar() {
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
 
     // Scalar pipeline: CSC + positions, indexed refill.
-    let (mut csc, positions_scalar) = coo.to_csc_with_positions(&mut w, &mut ctx).unwrap();
+    let (mut csc, positions_scalar) = coo.to_csc_with_positions().unwrap();
     let mut grad_s = vec![0.0; n];
     let mut vals_s = vec![0.0; csc.vals.len()];
     let cost_s = w.calc_grad_hessian_sparse_indexed(&params, &mut grad_s, &mut vals_s, &positions_scalar, &mut ctx);
@@ -222,8 +222,8 @@ fn block_assembly_matches_scalar() {
         coo.nnz(),
         |k| (coo.rows[k] as usize, coo.cols[k] as usize),
     );
-    let positions_block = w.positions_from_map(&block_map, &mut ctx);
-    assert_eq!(positions_block.len(), positions_scalar.len());
+    let positions_block = PositionStream::from_map(&block_map);
+    assert_eq!(positions_block.positions().len(), positions_scalar.positions().len());
     let mut bsc = SparseBlockColMat::<usize, f64>::zeroed(sym);
     let mut grad_b = vec![0.0; n];
     let cost_b = w.calc_grad_hessian_sparse_indexed(&params, &mut grad_b, bsc.vals_mut(), &positions_block, &mut ctx);
@@ -281,7 +281,7 @@ fn two_scan_matches_coo_route() {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&sym2);
-    let mut pos2: Vec<arael::ValueIndex> = Vec::new();
+    let mut pos2 = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(&mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
@@ -293,7 +293,7 @@ fn two_scan_matches_coo_route() {
     assert_eq!(sym2.parts().2, sym_coo.parts().2);
     assert_eq!(sym2.parts().3, sym_coo.parts().3);
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
-    assert_eq!(pos2, LmProblemInternals::positions_from_map(&mut w, &pos_coo, &mut ctx));
+    assert_eq!(pos2.positions(), &pos_coo[..], "the bind against the block pattern is the COO map");
 
     // and a fixed param reshapes both routes identically
     let mut w = build();
@@ -322,14 +322,14 @@ fn two_scan_matches_coo_route() {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&sym2);
-    let mut pos2: Vec<arael::ValueIndex> = Vec::new();
+    let mut pos2 = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(&mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
         &mut ctx,
     );
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
-    assert_eq!(pos2, LmProblemInternals::positions_from_map(&mut w, &pos_coo, &mut ctx));
+    assert_eq!(pos2.positions(), &pos_coo[..], "the bind against the block pattern is the COO map");
 }
 
 /// The scalar fast path (tile-expanded CSC from cells, SparseFaer's new
@@ -350,7 +350,7 @@ fn scalar_fast_path_matches_coo_route() {
     let mut grad = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let (mut csc_ref, pos_ref) = coo.to_csc_with_positions(&mut w, &mut ctx).unwrap();
+    let (mut csc_ref, pos_ref) = coo.to_csc_with_positions().unwrap();
     let mut vals = vec![0.0; csc_ref.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &pos_ref, &mut ctx);
     csc_ref.vals = vals;
@@ -362,15 +362,15 @@ fn scalar_fast_path_matches_coo_route() {
     let mut cells = Vec::new();
     LmProblemInternals::collect_hessian_cells(&w, &mut cells, &mut ctx);
     let (mut csc_fast, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut positions: Vec<arael::ValueIndex> = Vec::new();
+    let mut positions = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(&mut w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
         &mut positions,
         &mut ctx,
     );
     // Every block here has a static tile shape, so nothing needs a map.
-    assert!(!positions.is_empty() && positions.len() % 2 == 0,
-        "a tiled bind emits one tile -- two words -- per block");
+    assert!(positions.tiled() && positions.tiles() > 0 && positions.positions().is_empty(),
+        "a tiled bind puts every block in the tile list and none in the map");
     let mut vals = vec![0.0; csc_fast.vals.len()];
     let mut grad_f = vec![0.0; n];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_f, &mut vals, &positions, &mut ctx);
@@ -411,7 +411,7 @@ fn assert_routes_agree(w: &mut World) {
     let mut grad_ref = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad_ref, &mut coo);
-    let (mut csc_ref, pos_ref) = coo.to_csc_with_positions(&mut *w, &mut ctx).unwrap();
+    let (mut csc_ref, pos_ref) = coo.to_csc_with_positions().unwrap();
     let mut vals = vec![0.0; csc_ref.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_ref, &mut vals, &pos_ref, &mut ctx);
     csc_ref.vals = vals;
@@ -420,15 +420,15 @@ fn assert_routes_agree(w: &mut World) {
     let mut cells = Vec::new();
     LmProblemInternals::collect_hessian_cells(w, &mut cells, &mut ctx);
     let (mut csc_fast, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut positions: Vec<arael::ValueIndex> = Vec::new();
+    let mut positions = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(
         w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
         &mut positions,
         &mut ctx,
     );
-    assert!(!positions.is_empty() && positions.len() % 2 == 0,
-        "a tiled bind emits one tile -- two words -- per block");
+    assert!(positions.tiled() && positions.tiles() > 0 && positions.positions().is_empty(),
+        "a tiled bind puts every block in the tile list and none in the map");
     let mut vals = vec![0.0; csc_fast.vals.len()];
     let mut grad_fast = vec![0.0; n];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_fast, &mut vals, &positions, &mut ctx);
@@ -458,7 +458,7 @@ fn assert_routes_agree(w: &mut World) {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&sym2);
-    let mut pos2: Vec<arael::ValueIndex> = Vec::new();
+    let mut pos2 = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(
         w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
@@ -467,7 +467,7 @@ fn assert_routes_agree(w: &mut World) {
     );
     assert_eq!(sym2.parts().3, sym_coo.parts().3);
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
-    assert_eq!(pos2, LmProblemInternals::positions_from_map(w, &pos_coo, &mut ctx));
+    assert_eq!(pos2.positions(), &pos_coo[..], "the bind against the block pattern is the COO map");
 }
 
 /// Blocks that keep only their tile origin and column stride must scatter
@@ -488,7 +488,7 @@ fn assert_tiled_matches_mapped(w: &mut World) {
 
     // Scalar CSC: same pattern, filled once through each path.
     let (csc, _) = csc_from_cells::<f64>(&partition, &cells);
-    let mut mapped: Vec<arael::ValueIndex> = Vec::new();
+    let mut mapped = PositionStream::new();
     {
         let (_, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
         LmProblemInternals::bind_hessian_positions(
@@ -502,18 +502,24 @@ fn assert_tiled_matches_mapped(w: &mut World) {
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_mapped, &mapped, &mut ctx);
 
     let (_, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut tiled: Vec<arael::ValueIndex> = Vec::new();
+    let mut tiled = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(
         w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
         &mut tiled,
         &mut ctx,
     );
-    assert!(tiled.len() < mapped.len(),
+    assert!(tiled.tiled() && !mapped.tiled() && tiled.tiles() < mapped.positions().len(),
         "a tiled block contributes its tile alone; a mapped one a position per entry");
     let mut vals_tiled = vec![0.0; csc.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_tiled, &tiled, &mut ctx);
     assert_eq!(vals_mapped, vals_tiled, "scalar CSC: tiled fill differs from mapped");
+    // The tiles write every cell of the pattern, so the fill owes nothing
+    // to what the buffer held before.
+    assert!(tiled.covers(csc.vals.len()), "the tiles cover the tile-expanded pattern");
+    let mut vals_dirty = vec![7.5; csc.vals.len()];
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_dirty, &tiled, &mut ctx);
+    assert_eq!(vals_mapped, vals_dirty, "scalar CSC: the tiled fill depends on the buffer's contents");
 
     // Block CSC: the other resolver, over the same cells.
     let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
@@ -522,7 +528,7 @@ fn assert_tiled_matches_mapped(w: &mut World) {
         cells.len(),
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
-    let mut bmapped: Vec<arael::ValueIndex> = Vec::new();
+    let mut bmapped = PositionStream::new();
     {
         let mut resolver = PositionResolver::new(&sym);
         LmProblemInternals::bind_hessian_positions(
@@ -536,20 +542,28 @@ fn assert_tiled_matches_mapped(w: &mut World) {
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_mapped.vals_mut(), &bmapped, &mut ctx);
 
     let mut resolver = PositionResolver::new(&sym);
-    let mut btiled: Vec<arael::ValueIndex> = Vec::new();
+    let mut btiled = PositionStream::new();
     LmProblemInternals::bind_hessian_positions(
         w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
         &mut btiled,
         &mut ctx,
     );
-    assert!(btiled.len() < bmapped.len(),
+    assert!(btiled.tiled() && !bmapped.tiled() && btiled.tiles() < bmapped.positions().len(),
         "a tiled block contributes its tile alone; a mapped one a position per entry");
-    let mut bsc_tiled = SparseBlockColMat::<usize, f64>::zeroed(sym);
+    let mut bsc_tiled = SparseBlockColMat::<usize, f64>::zeroed(sym.clone());
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_tiled.vals_mut(), &btiled, &mut ctx);
     assert_eq!(
         bsc_mapped.vals(), bsc_tiled.vals(),
         "block CSC: tiled fill differs from mapped",
+    );
+    assert!(btiled.covers(bsc_tiled.vals().len()), "the tiles cover the block pattern");
+    let mut bsc_dirty = SparseBlockColMat::<usize, f64>::zeroed(sym);
+    bsc_dirty.vals_mut().iter_mut().for_each(|v| *v = -3.25);
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_dirty.vals_mut(), &btiled, &mut ctx);
+    assert_eq!(
+        bsc_mapped.vals(), bsc_dirty.vals(),
+        "block CSC: the tiled fill depends on the buffer's contents",
     );
 }
 
@@ -884,7 +898,7 @@ fn a_stream_binds_any_instance_of_the_shape() {
     let mut grad = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     a.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let (csc, positions) = coo.to_csc_with_positions(&mut a, &mut ctx).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions().unwrap();
 
     let mut grad_a = vec![0.0; n];
     let mut vals_a = vec![0.0; csc.vals.len()];
@@ -900,8 +914,8 @@ fn a_stream_binds_any_instance_of_the_shape() {
 }
 
 /// `scatter_hessian_indexed` replays the stores' values through a stream
-/// without computing: what the last assembly into the context left, added
-/// into the buffer it is given.
+/// without computing: what the last assembly into the context left,
+/// written into the buffer it is given whatever that held.
 #[test]
 fn scatter_hessian_indexed_replays_the_last_assembly() {
     let mut ctx = arael::threads::Context::new();
@@ -912,7 +926,7 @@ fn scatter_hessian_indexed_replays_the_last_assembly() {
     let mut grad = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
-    let (csc, positions) = coo.to_csc_with_positions(&mut w, &mut ctx).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions().unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &positions, &mut ctx);
     assert!(vals.iter().any(|v| *v != 0.0));
@@ -921,12 +935,14 @@ fn scatter_hessian_indexed_replays_the_last_assembly() {
     w.scatter_hessian_indexed(&mut again, &positions, &mut ctx);
     assert_eq!(again, vals, "a replay of the assembly is the assembly");
 
-    // It adds: scattering over the assembly doubles every value exactly.
-    let mut twice = vals.clone();
-    w.scatter_hessian_indexed(&mut twice, &positions, &mut ctx);
-    for (t, v) in std::iter::zip(&twice, &vals) {
-        assert_eq!(*t, v + v);
-    }
+    // It writes: the buffer's contents before the scatter do not reach
+    // the result.
+    let mut dirty = vals.clone();
+    w.scatter_hessian_indexed(&mut dirty, &positions, &mut ctx);
+    assert_eq!(dirty, vals, "a replay over the assembly is the assembly");
+    let mut garbage = vec![-1.0e30; vals.len()];
+    w.scatter_hessian_indexed(&mut garbage, &positions, &mut ctx);
+    assert_eq!(garbage, vals, "a replay over garbage is the assembly");
 }
 
 /// Scattering without a stream is a caller error, and a loud one: the
@@ -942,5 +958,5 @@ fn scattering_through_no_stream_is_rejected() {
     let n = params.len();
     let mut grad = vec![0.0; n];
     let mut vals = vec![0.0; n * n];
-    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &[], &mut ctx);
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &PositionStream::new(), &mut ctx);
 }

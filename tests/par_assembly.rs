@@ -1156,6 +1156,47 @@ fn a_pushing_hook_on_a_par_root_threads() {
     assert!(d.threads.sweeps.as_ref().is_some_and(|s| s.assembly.threaded), "{}", d.report());
 }
 
+/// The tiled scatter at four stores: the stream is cut into one chunk
+/// per store, the chunks write every cell of the pattern, and the
+/// Hessian agrees with the one-store scatter to rounding (a tile summed
+/// from several stores adds in another order).
+#[test]
+fn tiled_scatter_matches_sequential_over_the_stores() {
+    use arael::simple_lm::{block_partition_from_spans, csc_from_cells};
+    use arael::store::{HessianBinder, PositionStream};
+    let fill = |threads: usize, dirty: bool| -> Vec<f64> {
+        let mut w = build(30);
+        let mut x = Vec::new();
+        w.serialize(&mut x);
+        let mut ctx = context(threads);
+        w.begin_with_context(&mut ctx);
+        let n = x.len();
+        let mut cells = Vec::new();
+        LmProblemInternals::collect_hessian_cells(&w, &mut cells, &mut ctx);
+        let mut spans = Vec::new();
+        LmProblemInternals::collect_param_block_spans(&w, &mut spans, &mut ctx);
+        let partition = block_partition_from_spans(&spans, n);
+        let (csc, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
+        let mut stream = PositionStream::new();
+        LmProblemInternals::bind_hessian_positions(
+            &mut w,
+            &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+            &mut stream,
+            &mut ctx,
+        );
+        assert_eq!(stream.chunks(), threads, "one chunk per store");
+        assert!(stream.covers(csc.vals.len()), "the tiles cover the pattern");
+        let mut vals = vec![if dirty { 1.0e9 } else { 0.0 }; csc.vals.len()];
+        let mut g = vec![0.0; n];
+        w.calc_grad_hessian_sparse_indexed(&x, &mut g, &mut vals, &stream, &mut ctx);
+        vals
+    };
+    let seq = fill(1, false);
+    let par = fill(4, false);
+    assert_close("tiled hessian", &seq, &par, 1e-12);
+    assert_eq!(par, fill(4, true), "the chunks write every cell, whatever it held");
+}
+
 /// Print the two reports, for eyeballing: `cargo test --features rayon
 /// --test par_assembly show_reports -- --nocapture --ignored`.
 #[test]
