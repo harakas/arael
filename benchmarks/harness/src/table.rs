@@ -35,6 +35,9 @@ pub struct Row<S> {
     /// gets harder as the outer one converges -- so one iteration does not
     /// stand for the rest and the table prints "-" for full-iter.
     pub inexact: bool,
+    /// The solver's own report of the full solve `solve_ms` timed, printed
+    /// under the row.
+    pub report: Option<String>,
     pub solution: S,
 }
 
@@ -49,8 +52,14 @@ impl<S> Row<S> {
             full_ms: None,
             peak_mb: None,
             inexact: false,
+            report: None,
             solution,
         }
+    }
+
+    pub fn report(mut self, report: Option<String>) -> Self {
+        self.report = report;
+        self
     }
 
     /// Mark the row as solved by an inexact (conjugate-gradient) route -- see
@@ -208,6 +217,10 @@ impl<'a, G: Geometry> Table<'a, G> {
         self.note_order(label);
         let cost = self.geometry.cost(&row.solution);
         if let Some((_, prev, _)) = self.cells.iter_mut().find(|(l, _, _)| l == label) {
+            // The report goes with the solve time it describes.
+            if row.solve_ms < prev.solve_ms {
+                prev.report = row.report;
+            }
             prev.solve_ms = prev.solve_ms.min(row.solve_ms);
             prev.first_iter_ms = prev.first_iter_ms.min(row.first_iter_ms);
             // t(2) must be minimized over rounds like t(1) is: full-iter is their
@@ -325,6 +338,9 @@ impl<'a, G: Geometry> Table<'a, G> {
                 label, row.solve_ms, iters,
                 row.solve_ms / row.iterations.max(1) as f64,
                 full, norm, fmt_ms(row.first_iter_ms), mem, cost, miss, w = w);
+            if let Some(text) = &row.report {
+                println!("{}", text);
+            }
         }
 
         // A row that missed is marked on its own line above and counted in
@@ -389,6 +405,21 @@ mod tests {
     fn an_inexact_route_has_no_full_iter() {
         assert_eq!(row(10.0, Some(18.0)).inexact(true).full_iter_ms(), None);
         assert_eq!(row(10.0, Some(18.0)).inexact(false).full_iter_ms(), Some(8.0));
+    }
+
+    /// Over the rounds a row keeps the report of the round its solve time
+    /// came from.
+    #[test]
+    fn the_report_is_the_fastest_rounds() {
+        let g = Scalar;
+        let mut t = Table::new(&g);
+        let round = |ms: f64, text: &str| Row::new(ms, 1.0, 2, 1.0).report(Some(text.to_string()));
+        t.record("arael LM f64", round(30.0, "first"));
+        t.record("arael LM f64", round(20.0, "second"));
+        t.record("arael LM f64", round(25.0, "third"));
+        let (_, row, _) = &t.cells[0];
+        assert_eq!(row.solve_ms, 20.0);
+        assert_eq!(row.report.as_deref(), Some("second"));
     }
 
     /// The reference row is named, and normalizing against it makes that row
