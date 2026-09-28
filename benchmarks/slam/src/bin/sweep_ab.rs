@@ -61,7 +61,7 @@ fn main() {
     path.collect_param_block_spans(&mut spans, &mut ctx);
     let partition = block_partition_from_spans(&spans, n);
     let (mut csc, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut positions = Vec::new();
+    let mut positions = arael::store::PositionStream::new();
     path.bind_hessian_positions(
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
         &mut positions,

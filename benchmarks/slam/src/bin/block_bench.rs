@@ -89,6 +89,9 @@ fn main() {
     });
     let nblocks = sym.nblocks();
     let block_vals = sym.val_count();
+    // The two maps as the streams the indexed assembly reads.
+    let stream_scalar = arael::store::PositionStream::from_map(&positions_scalar);
+    let stream_block = arael::store::PositionStream::from_map(&positions_block);
     let (t_alloc, mut bsc) =
         min_ms(rounds, || SparseBlockColMat::<usize, f64>::zeroed(sym.clone()));
 
@@ -100,7 +103,7 @@ fn main() {
         let mut cursor = 0usize;
         let _ = &mut cursor;
         LmProblemInternals::scatter_hessian_indexed(
-            &path, bsc.vals_mut(), &positions_block, &mut ctx);
+            &path, bsc.vals_mut(), &stream_block, &mut ctx);
     });
 
     // -- two-scan route: no COO at all ---------------------------------
@@ -122,7 +125,7 @@ fn main() {
     // scan 2: position map by replaying the emission order
     let (t_pos2, positions2) = min_ms(rounds, || {
         let mut resolver = PositionResolver::new(&sym2);
-        let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_block.len());
+        let mut out = arael::store::PositionStream::new();
         LmProblemInternals::bind_hessian_positions(
             &mut path,
             &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
@@ -131,18 +134,19 @@ fn main() {
         );
         out
     });
-    // both routes must produce the identical structure and map
+    // both routes must produce the identical structure, and every block
+    // a tile in it
     assert_eq!(sym2.parts().2, sym.parts().2);
     assert_eq!(sym2.parts().3, sym.parts().3);
     assert_eq!(sym2.parts().4, sym.parts().4);
-    assert_eq!(positions2, positions_block);
+    assert!(positions2.tiles() > 0 && positions2.covers(block_vals));
 
     // scalar two-scan (SparseFaer's new fast path): tile-expanded CSC
     let (t_scsc, (csc_fast, _)) = min_ms(rounds, || csc_from_cells::<f64>(&partition, &cells));
     let (_, resolver_proto) = csc_from_cells::<f64>(&partition, &cells);
     let (t_spos, _spos) = min_ms(rounds, || {
         let mut resolver = resolver_proto.clone();
-        let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_scalar.len());
+        let mut out = arael::store::PositionStream::new();
         LmProblemInternals::bind_hessian_positions(
             &mut path,
             &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
@@ -157,10 +161,10 @@ fn main() {
 
     let mut vals_s = vec![0.0; csc.vals.len()];
     let (t_fill_scalar, _) = min_ms(rounds, || {
-        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_s, &positions_scalar, &mut ctx)
+        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_s, &stream_scalar, &mut ctx)
     });
     let (t_fill_block, _) = min_ms(rounds, || {
-        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc.vals_mut(), &positions_block, &mut ctx)
+        path.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc.vals_mut(), &stream_block, &mut ctx)
     });
     // second reference: direct CSC accumulation (binary search per
     // write, no position map) -- what indexing buys

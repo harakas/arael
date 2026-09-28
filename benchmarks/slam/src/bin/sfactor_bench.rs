@@ -116,7 +116,7 @@ fn main() {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&hsym);
-    let mut positions: Vec<arael::ValueIndex> = Vec::new();
+    let mut positions = arael::store::PositionStream::new();
     LmProblemInternals::bind_hessian_positions(
         &mut path,
         &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
