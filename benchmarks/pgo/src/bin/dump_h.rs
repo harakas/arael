@@ -94,7 +94,7 @@ fn main() {
         LmProblemInternals::collect_param_block_spans(&mut g, &mut spans, &mut ctx);
         let partition = block_partition_from_spans(&spans, n);
         let (mut csc, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-        let mut positions = std::vec::Vec::new();
+        let mut positions = arael::store::PositionStream::new();
         LmProblemInternals::bind_hessian_positions(&mut g,
             &mut arael::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut positions,

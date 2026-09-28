@@ -8779,6 +8779,15 @@ pub fn generate_root_methods(
     let cross_idx: Vec<syn::Index> =
         (0..store_cross_names.len()).map(syn::Index::from).collect();
     let n_cross = store_cross_names.len();
+    // The tiled scatter names an array by its place in the store, in one
+    // byte.
+    if store_names.len() > u8::MAX as usize {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), format!(
+            "`{}`: {} block arrays; a root holds up to {}",
+            root_name, store_names.len(), u8::MAX)));
+    }
+    let array_ids: Vec<syn::Index> = (0..store_names.len()).map(syn::Index::from).collect();
+    let n_arrays = store_names.len();
 
     // Each container's slot count, in the order the ranges are keyed by.
     // Per container, what one of its units is worth: the instances every
@@ -9041,6 +9050,25 @@ pub fn generate_root_methods(
             }
         }
 
+        // The arrays by their place in the store, the order the binding
+        // names them in.
+        impl arael::store::TileSource for #store_ty {
+            #[inline]
+            fn assign_block<F: arael::utils::Float>(&self, array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+                match array {
+                    #(#array_ids => self.#store_names.assign_block(index as usize, vals, base, stride),)*
+                    _ => unreachable!("block array {} of a store with {}", array, #n_arrays),
+                }
+            }
+            #[inline]
+            fn add_block<F: arael::utils::Float>(&self, array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+                match array {
+                    #(#array_ids => self.#store_names.add_block(index as usize, vals, base, stride),)*
+                    _ => unreachable!("block array {} of a store with {}", array, #n_arrays),
+                }
+            }
+        }
+
         #[doc(hidden)]
         #[allow(dead_code)]
         impl #store_ty {
@@ -9060,8 +9088,8 @@ pub fn generate_root_methods(
                 #(self.#store_names.collect_hessian_cells(out);)*
                 self.__coo.collect_hessian_cells(out);
             }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::store::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
-                #(self.#store_names.bind_hessian_positions(binder, out);)*
+            fn bind_hessian_positions(&self, binder: &mut arael::store::HessianBinder, out: &mut arael::store::PositionStream, __store: usize) {
+                #(self.#store_names.bind_hessian_positions(binder, out, __store, #array_ids);)*
                 self.__coo.bind_hessian_positions(binder, out);
             }
             fn accumulate_hessian<F: arael::utils::Float>(&self, hessian: &mut [F]) {
@@ -9083,8 +9111,14 @@ pub fn generate_root_methods(
                 #(self.#store_names.accumulate_hessian_sparse_direct(csc);)*
                 self.__coo.accumulate_hessian_sparse_direct(csc);
             }
-            fn accumulate_hessian_sparse_indexed<F: arael::utils::Float>(&self, vals: &mut [F], positions: &[arael::ValueIndex], cursor: &mut usize) {
-                #(self.#store_names.accumulate_hessian_sparse_indexed(vals, positions, cursor);)*
+            // The per-entry part of the scatter: the arrays only against a
+            // pattern without tiles (arael::store::scatter_tiles writes
+            // them otherwise), the COO list always.
+            fn accumulate_hessian_sparse_indexed<F: arael::utils::Float>(&self, vals: &mut [F], stream: &arael::store::PositionStream, cursor: &mut usize) {
+                let positions = stream.positions();
+                if !stream.tiled() {
+                    #(self.#store_names.accumulate_hessian_sparse_indexed(vals, positions, cursor);)*
+                }
                 self.__coo.accumulate_hessian_sparse_indexed(vals, positions, cursor);
             }
         }
@@ -9316,28 +9350,45 @@ pub fn generate_root_methods(
                 __cost
             }
 
-            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
+            fn __gh_indexed_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &arael::store::PositionStream, __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
-                vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                let mut cursor = 0usize;
-                { let __c = arael::store::Clock::new(__tm.on); let __t = __c.start();
-                  for __store in __stores.iter() { __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); }
-                  __tm.scatter += __c.stop(__t); }
-                // The cached position map is replayed by cursor and assumes
+                let __c = arael::store::Clock::new(__tm.on);
+                // The tiles write every cell they cover, so a buffer they
+                // cover whole is never zeroed.
+                let __t = __c.start();
+                if !positions.covers(vals.len()) {
+                    vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                }
+                __tm.assembly_zero_vals += __c.stop(__t);
+                let __t = __c.start();
+                let cursor = Self::__scatter_indexed(vals, positions, __stores);
+                __tm.scatter += __c.stop(__t);
+                // The per-entry positions are replayed by cursor and assume
                 // an identical entry sequence every iteration. A shorter
                 // sequence (a `coo` constraint or an extended hook emitting
                 // fewer entries than when the pattern was built) would
                 // scatter every subsequent block into wrong slots -- a
                 // silently wrong Hessian.
-                assert!(cursor == positions.len(),
+                assert!(cursor == positions.positions().len(),
                     "sparsity pattern changed between iterations: {} Hessian entries \
                      accumulated but the cached pattern has {} (the entries a `coo` \
                      constraint or an extended hook pushes must stay constant within \
                      one solve, and a cached pattern serves one store count)",
-                    cursor, positions.len());
+                    cursor, positions.positions().len());
                 __cost
+            }
+
+            /// The scatter of the stores' blocks into an assembled value
+            /// buffer through a bound stream: the tiles, then what
+            /// scatters through per-entry positions. Returns how many of
+            /// those were used.
+            fn __scatter_indexed(vals: &mut [#prec_type], positions: &arael::store::PositionStream, __stores: &[#store_ty]) -> usize {
+                arael::store::scatter_tiles(__stores, positions, vals);
+                let mut cursor = 0usize;
+                for __store in __stores.iter() { __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor); }
+                cursor
             }
 
             #(#gh_sweep_methods)*
@@ -9501,7 +9552,7 @@ pub fn generate_root_methods(
                 let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
                 self.__gh_direct_in(params, grad, csc, __stores, __cut, __tm)
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) -> #prec_type {
+            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &arael::store::PositionStream, ctx: &mut arael::threads::Context) -> #prec_type {
                 self.__blocks_in(ctx);
                 let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
                 self.__gh_indexed_in(params, grad, vals, positions, __stores, __cut, __tm)
@@ -9512,22 +9563,27 @@ pub fn generate_root_methods(
                     for __store in __stores.iter() { __store.collect_hessian_cells(out); }
                 }
             }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::store::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>, ctx: &mut arael::threads::Context) {
+            fn bind_hessian_positions(&mut self, binder: &mut arael::store::HessianBinder, out: &mut arael::store::PositionStream, ctx: &mut arael::threads::Context) {
                 self.__blocks_in(ctx);
                 // Reads the solve's stores; must not narrow the list.
-                let __stores = ctx.sweep_parts_mut::<#store_ty>().0;
-                for __store in __stores.iter_mut() { __store.bind_hessian_positions(binder, out); }
+                let (__stores, _, __tm) = ctx.sweep_parts_mut::<#store_ty>();
+                let __c = arael::store::Clock::new(__tm.on);
+                let __t = __c.start();
+                for (__s, __store) in __stores.iter().enumerate() { __store.bind_hessian_positions(binder, out, __s); }
+                out.finish(__stores.len());
+                __tm.bind += __c.stop(__t);
             }
-            fn scatter_hessian_indexed(&self, vals: &mut [#prec_type], positions: &[arael::ValueIndex], ctx: &mut arael::threads::Context) {
+            fn scatter_hessian_indexed(&self, vals: &mut [#prec_type], positions: &arael::store::PositionStream, ctx: &mut arael::threads::Context) {
+                if !positions.covers(vals.len()) {
+                    vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
+                }
                 let mut cursor = 0usize;
                 if let Some(__stores) = ctx.blocks_list::<#store_ty>() {
-                    for __store in __stores.iter() {
-                        __store.accumulate_hessian_sparse_indexed(vals, positions, &mut cursor);
-                    }
+                    cursor = Self::__scatter_indexed(vals, positions, __stores);
                 }
-                assert!(cursor == positions.len(),
+                assert!(cursor == positions.positions().len(),
                     "scatter_hessian_indexed: {} entries against a stream of {}",
-                    cursor, positions.len());
+                    cursor, positions.positions().len());
             }
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut arael::threads::Context) {
                 arael::model::Model::collect_param_blocks(self, out)

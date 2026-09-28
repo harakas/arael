@@ -257,7 +257,7 @@ fn pattern_drift_detected_in_indexed_assembly() {
     let mut grad = vec![0.0; n];
     let mut coo = simple_lm::CooMatrix::new(n);
     w.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
-    let (csc, positions) = coo.to_csc_with_positions(&mut w, &mut ctx).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions().unwrap();
 
     // Mid-solve structure change: the guard flips off, the constraint
     // emits nothing this iteration.

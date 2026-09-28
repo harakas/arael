@@ -57,7 +57,7 @@ where
         }
     }
 
-    let (csc, positions) = coo.to_csc_with_positions(m, &mut ctx).unwrap();
+    let (csc, positions) = coo.to_csc_with_positions().unwrap();
     let mut gi = vec![0.0; n];
     let mut vals = vec![0.0; csc.vals.len()];
     let ci = m.calc_grad_hessian_sparse_indexed(&x, &mut gi, &mut vals, &positions, &mut ctx);

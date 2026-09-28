@@ -38,6 +38,7 @@
 //!     result.start_cost, result.end_cost, result.iterations);
 //! ```
 
+use crate::store::PositionStream;
 use crate::utils::Float;
 use arael_faer::{value_index, SparseIndex, ValueIndex};
 use std::fmt;
@@ -861,14 +862,17 @@ impl ScalarCscResolver {
         self.col_ptr[j] + self.memo_prefix + (i - self.memo_row_start)
     }
 
-    /// Position of scalar (row, col) plus the column stride of its tile. Every
-    /// scalar column of a block column stores the same rows, so the stride is
-    /// the block column's height and the tile is affine in both coordinates.
+    /// Position of scalar (row, col), the column stride of its tile and
+    /// the first position of its panel, the block column's storage. Every
+    /// scalar column of a block column stores the same rows, so the stride
+    /// is the block column's height, the tile is affine in both coordinates
+    /// and the block column's columns are one range of the buffer.
     #[inline]
-    pub fn resolve_tile(&mut self, i: u32, j: u32) -> (usize, usize) {
+    pub fn resolve_tile(&mut self, i: u32, j: u32) -> (usize, usize, usize) {
         let pos = self.resolve(i, j);
         let j = j as usize;
-        (pos, self.col_ptr[j + 1] - self.col_ptr[j])
+        let panel = self.col_ptr[self.row_part[self.blk_of[j] as usize]];
+        (pos, self.col_ptr[j + 1] - self.col_ptr[j], panel)
     }
 }
 
@@ -1342,7 +1346,7 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     /// Assemble gradient and accumulate Hessian into CSC vals using a
     /// precomputed position map. Returns the cost at `params`.
     /// Defaults like [`calc_grad_hessian_band`](Self::calc_grad_hessian_band).
-    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> T {
+    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &PositionStream, _ctx: &mut crate::threads::Context) -> T {
         unimplemented!("this problem assembles no indexed Hessian; solve through a dense or COO sparse route")
     }
 
@@ -1406,55 +1410,27 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     /// wraps it for the solve; a root called directly builds a store for
     /// the walk and drops it.
     fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut crate::threads::Context) {}
-    /// Bind every block to its tile in the assembled value buffer, ready for
-    /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed).
-    /// `binder` hands out scatter targets (see `Model::bind_hessian_positions`):
-    /// against a tile-expanded pattern a block keeps its tile origin and
-    /// column stride, otherwise it pushes one position per entry into `out`.
-    /// Must be redone whenever the pattern or the indices change.
+    /// Bind every block to its place in the assembled value buffer, ready
+    /// for [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed):
+    /// against a tile-expanded pattern each block to its tile, otherwise
+    /// to one position per entry (see [`PositionStream`]). Must be redone
+    /// whenever the pattern, the indices or the store count change.
     fn bind_hessian_positions(
         &mut self,
         _binder: &mut crate::store::HessianBinder,
-        _out: &mut std::vec::Vec<ValueIndex>,
+        _out: &mut PositionStream,
         _ctx: &mut crate::threads::Context,
     ) {}
-    /// The position stream
-    /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed)
-    /// reads, from a pattern given as one position per emitted Hessian
-    /// entry -- a [`CooMatrix::to_csc_with_map`] map, or
-    /// `SymbolicSparseBlockColMat::from_scalar_coords` over the entity
-    /// partition.
-    ///
-    /// The scatter reads each block's target from the stream, so a bare
-    /// per-entry map is not enough: binding the blocks against the map
-    /// puts each block's target ahead of its entries. A problem with no
-    /// blocks binds nothing and gets the map back.
-    fn positions_from_map(&mut self, map: &[ValueIndex], ctx: &mut crate::threads::Context)
-        -> std::vec::Vec<ValueIndex>
-    {
-        let mut k = 0usize;
-        let mut positions = std::vec::Vec::new();
-        self.bind_hessian_positions(
-            &mut crate::store::HessianBinder::Scalar(&mut |_, _| {
-                let p = map[k];
-                k += 1;
-                p as usize
-            }),
-            &mut positions,
-            ctx,
-        );
-        if positions.is_empty() { map.to_vec() } else { positions }
-    }
     /// Scatter the Hessian this context's stores already hold through a
-    /// cached position stream, adding into `vals`. No compute: the values
-    /// are whatever the last assembly into this context left, so a caller
-    /// zeroes `vals` itself and pairs this with
+    /// bound stream into `vals`, as an assembly would. No compute: the
+    /// values are whatever the last assembly into this context left.
+    /// Pairs with
     /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed),
     /// which computes and scatters in one call. Default: nothing.
     fn scatter_hessian_indexed(
         &self,
         _vals: &mut [T],
-        _positions: &[ValueIndex],
+        _positions: &PositionStream,
         _ctx: &mut crate::threads::Context,
     ) {}
 
@@ -2096,6 +2072,9 @@ fn render_threads(t: &ThreadReport, style: Style) -> String {
         region("per assembly", &g.assembly, format!(", gather {:.2}, scatter {:.2}",
             per(g.gather_grad, n), per(g.scatter, n)));
         region("per cost", &g.cost, String::new());
+        if g.bind > Duration::ZERO {
+            out.push_str(&format!("    bind        {:.2} ms\n", ms(g.bind)));
+        }
     }
     out
 }
@@ -4030,7 +4009,7 @@ fn assemble_first_csc<T: Float>(
     params: &[T],
     grad: &mut [T],
     csc: &mut CscMatrix<T>,
-) -> Result<(T, std::vec::Vec<ValueIndex>, bool), SolveError> {
+) -> Result<(T, PositionStream, bool), SolveError> {
     let n = csc.n;
     if !problem.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
         let mut cells = std::vec::Vec::new();
@@ -4040,7 +4019,7 @@ fn assemble_first_csc<T: Float>(
         if !cells.is_empty() && !spans.is_empty() {
             let partition = block_partition_from_spans(&spans, n);
             let (built, mut resolver) = csc_from_cells::<T>(&partition, &cells);
-            let mut positions = std::vec::Vec::new();
+            let mut positions = PositionStream::new();
             problem.bind_hessian_positions(
                 &mut crate::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                 &mut positions,
@@ -4055,8 +4034,8 @@ fn assemble_first_csc<T: Float>(
     let cost = problem.calc_grad_hessian_sparse_with_context(params, grad, &mut coo, ctx);
     // A COO-built pattern stores only the coordinates that occur, so a block's
     // entries are not contiguous and there is no tile to walk: every block
-    // binds to the map path.
-    let (built, positions) = coo.to_csc_with_positions(problem, ctx)?;
+    // scatters through the map.
+    let (built, positions) = coo.to_csc_with_positions()?;
     *csc = built;
     Ok((cost, positions, false))
 }
@@ -4066,12 +4045,12 @@ fn assemble_first_csc<T: Float>(
 /// warm re-solve with a fresh model instance scatters through it as is.
 #[allow(dead_code)] // only the feature-gated scalar backends keep one
 struct KeptCscPattern {
-    positions: std::vec::Vec<ValueIndex>,
+    positions: PositionStream,
 }
 
 #[allow(dead_code)]
 impl KeptCscPattern {
-    fn new(positions: std::vec::Vec<ValueIndex>, _tiled: bool) -> Self {
+    fn new(positions: PositionStream, _tiled: bool) -> Self {
         Self { positions }
     }
 
@@ -5038,7 +5017,7 @@ pub struct SparseFaer<T = f64> {
     did_setup: bool,
     // Structure, built on the first compute of a solve and reused for
     // every following iteration and damping retry.
-    positions: Option<Vec<ValueIndex>>,
+    positions: Option<PositionStream>,
     bdiag_pos: Vec<ValueIndex>,
     schur: Option<arael_faer::schur::SchurSymbolic<SparseIndex>>,
     s: Option<arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>,
@@ -5449,7 +5428,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let (mut csc, positions, coo_cost) = match structure {
             Some((partition, cells)) => {
                 let (csc, mut resolver) = csc_from_cells::<T>(partition, cells);
-                let mut positions = std::vec::Vec::new();
+                let mut positions = PositionStream::new();
                 problem.bind_hessian_positions(
                     &mut crate::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                     &mut positions,
@@ -5602,7 +5581,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         }
         self.envelope_sym = Some(bsym);
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-        let mut positions = std::vec::Vec::new();
+        let mut positions = PositionStream::new();
         problem.bind_hessian_positions(
             &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)
@@ -5805,7 +5784,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         self.sn_sym = Some(sn);
 
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-        let mut positions = std::vec::Vec::new();
+        let mut positions = PositionStream::new();
         problem.bind_hessian_positions(
             &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)
@@ -6716,7 +6695,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Reduced route: the block position map (scatter targets into the
         // block Hessian) is built here, now that the reduction is going ahead.
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-        let mut positions = std::vec::Vec::new();
+        let mut positions = PositionStream::new();
         problem.bind_hessian_positions(
             &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
                 resolver.resolve_tile(i as usize, j as usize)
@@ -6726,9 +6705,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         );
         if vb {
             info!(
-                "assembly: {} residual scatter positions ({:.1} MB), against {} Hessian values",
-                positions.len(),
-                (positions.len() * std::mem::size_of::<usize>()) as f64 / 1e6,
+                "assembly: {} tiles and {} scatter positions ({:.1} MB), against {} Hessian values",
+                positions.tiles(),
+                positions.positions().len(),
+                positions.bytes() as f64 / 1e6,
                 hsym.val_count(),
             );
         }
@@ -7596,23 +7576,14 @@ impl<T: Float> CooMatrix<T> {
         map
     }
 
-    /// Convert to CSC and bind `problem`'s blocks to the result, giving the
-    /// pattern and the position stream
+    /// Convert to CSC, giving the pattern and the position stream
     /// [`calc_grad_hessian_sparse_indexed`](LmProblemInternals::calc_grad_hessian_sparse_indexed)
-    /// reads.
-    ///
-    /// [`to_csc_with_map`](Self::to_csc_with_map) gives one position per
-    /// emitted entry; the indexed assembly reads a stream that also carries
-    /// each block's scatter target, which binding the model against that map
-    /// produces. A problem with no blocks binds nothing and gets the map back.
-    pub fn to_csc_with_positions<P: LmProblemInternals<T> + ?Sized>(
-        &self,
-        problem: &mut P,
-        ctx: &mut crate::threads::Context,
-    ) -> Result<(CscMatrix<T>, Vec<ValueIndex>), SolveError> {
+    /// reads: the map of [`to_csc_with_map`](Self::to_csc_with_map), one
+    /// position per emitted entry, which the blocks and the COO list
+    /// replay in the order they emitted.
+    pub fn to_csc_with_positions(&self) -> Result<(CscMatrix<T>, PositionStream), SolveError> {
         let (csc, map) = self.to_csc_with_map()?;
-        let positions = problem.positions_from_map(&map, ctx);
-        Ok((csc, positions))
+        Ok((csc, PositionStream::from_map(&map)))
     }
 
     /// Convert to CSC and build scatter map in one pass using counting sort.
@@ -8056,7 +8027,7 @@ mod tests {
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>, _ctx: &mut crate::threads::Context) -> f64 {
                 unreachable!("dense-only test problem")
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 unreachable!("dense-only test problem")
             }
         }
@@ -8837,7 +8808,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for QuadProblem {
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 // Same order as sparse COO push: (0,0)=2.0, (1,1)=2.0
@@ -8932,7 +8903,7 @@ mod tests {
                 csc.vals[csc.diag_pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[positions[0] as usize] += 2.0;
@@ -8962,7 +8933,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for QP3 {
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
                 grad[1] = 2.0 * (x[1] - 2.0);
                 grad[2] = 2.0 * (x[2] - 3.0) - 2.0 * (x[0] - x[2]);
@@ -9162,7 +9133,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for QP {
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
@@ -9207,7 +9178,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for CP {
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
                 g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
                 vals.iter_mut().for_each(|v| *v = 0.0);
@@ -9246,7 +9217,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for QP {
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
@@ -9281,7 +9252,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for QP {
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex], _ctx: &mut crate::threads::Context) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &PositionStream, _ctx: &mut crate::threads::Context) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;

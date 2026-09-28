@@ -201,7 +201,7 @@ impl LmProblemInternals<f64> for BindCounter<'_> {
         self.inner.calc_grad_hessian_sparse_direct(x, g, csc, _ctx)
     }
     fn calc_grad_hessian_sparse_indexed(
-        &mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[arael::ValueIndex],
+        &mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &arael::store::PositionStream,
         _ctx: &mut arael::threads::Context,
     ) -> f64 {
         self.inner.calc_grad_hessian_sparse_indexed(x, g, vals, pos, _ctx)
@@ -215,7 +215,7 @@ impl LmProblemInternals<f64> for BindCounter<'_> {
     fn bind_hessian_positions(
         &mut self,
         binder: &mut arael::store::HessianBinder,
-        out: &mut Vec<arael::ValueIndex>,
+        out: &mut arael::store::PositionStream,
         ctx: &mut arael::threads::Context,
     ) {
         self.binds += 1;
@@ -366,7 +366,7 @@ impl LmProblem<f64> for Spy {
 }
 
 impl LmProblemInternals<f64> for Spy {
-    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex], _ctx: &mut arael::threads::Context) -> f64 {
+    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &arael::store::PositionStream, _ctx: &mut arael::threads::Context) -> f64 {
         self.indexed_calls += 1;
         grad.fill(0.0);
         vals.fill(0.0);

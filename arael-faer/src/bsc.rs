@@ -761,6 +761,8 @@ pub struct PositionResolver<'a, I: Index> {
     row_w: usize,
     row_start: usize,
     col_start: usize,
+    /// The first position of the block column's storage.
+    panel: usize,
 }
 
 impl<'a, I: Index> PositionResolver<'a, I> {
@@ -785,6 +787,7 @@ impl<'a, I: Index> PositionResolver<'a, I> {
             row_w: 0,
             row_start: 0,
             col_start: 0,
+            panel: 0,
         }
     }
 
@@ -807,17 +810,20 @@ impl<'a, I: Index> PositionResolver<'a, I> {
             self.row_w = self.sym.row_span(br).len();
             self.row_start = self.sym.row_span(br).start;
             self.col_start = self.sym.col_span(bc).start;
+            self.panel = self.sym.val_range(range.start).start;
         }
         self.base + (j - self.col_start) * self.row_w + (i - self.row_start)
     }
 
-    /// Position of scalar (i, j) plus the column stride of its tile, so a
-    /// caller holding the tile origin can derive every other position in the
-    /// tile as `origin + (c - col_start) * stride + (r - row_start)`.
+    /// Position of scalar (i, j), the column stride of its tile and the
+    /// first position of its panel, the block column's storage: a caller
+    /// holding the tile origin derives every other position in the tile
+    /// as `origin + (c - col_start) * stride + (r - row_start)`, and the
+    /// blocks of one block column are stored one after the other.
     #[inline]
-    pub fn resolve_tile(&mut self, i: usize, j: usize) -> (usize, usize) {
+    pub fn resolve_tile(&mut self, i: usize, j: usize) -> (usize, usize, usize) {
         let pos = self.resolve(i, j);
-        (pos, self.row_w)
+        (pos, self.row_w, self.panel)
     }
 }
 

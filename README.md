@@ -548,7 +548,8 @@ Arael is single-threaded by default. With the `rayon` feature the linear solve
 runs on rayon's thread pool, and the cost evaluation and the assembly of the
 gradient and Hessian on arael's own worker threads, one per store, parked
 between sweeps: each sweeps its own share of the model into its own block
-store, and a serial pass adds the stores up. Set
+store, a serial pass adds the stores into the gradient, and the same threads
+write the sparse Hessian from them, one range of it each. Set
 `LmConfig::num_threads` (1 = sequential, the default; `n` = n threads; 0 =
 every core); `assembly_threads` gives the sweeps a count of their own.
 

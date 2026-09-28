@@ -348,7 +348,7 @@ impl LmProblem<f64> for LineFit {
 
 impl LmProblemInternals<f64> for LineFit {
     fn calc_grad_hessian_sparse_indexed(
-        &mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex],
+        &mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &arael::store::PositionStream,
         _ctx: &mut arael::threads::Context,
     ) -> f64 {
         grad.fill(0.0);
