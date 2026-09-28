@@ -176,11 +176,13 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     let mut ctx = arael::threads::Context::new();
     ctx.set_timing(std::env::var("TIMING").is_ok());
 
-    // REPORT prints the report of the row's fastest solve after the row.
+    // REPORT keeps the report of the full solve, for the table to print
+    // under the row. The probes are capped solves and are not reported.
+    const FULL_ITERS: usize = 100;
     let report = std::env::var("REPORT").is_ok();
-    let mut best: Option<(f64, String)> = None;
+    let mut full_report: Option<String> = None;
     let mut failure: Option<String> = None;
-    let row = crate::solver::run(100, |max_iters| {
+    let row = crate::solver::run(FULL_ITERS, |max_iters| {
         // The clone and the config are the probe's reset, not the solve: the
         // clock starts below.
         let mut m = model.clone();
@@ -218,8 +220,8 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
                 println!("  [par] {}", par);
             }
         }
-        if report && best.as_ref().is_none_or(|(b, _)| ms < *b) {
-            best = Some((ms, r.pretty_report()));
+        if report && max_iters == FULL_ITERS {
+            full_report = Some(r.pretty_report());
         }
         m.deserialize(&r.x);
         crate::solver::Outcome {
@@ -229,12 +231,9 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
             solution: m.solution(),
         }
     });
-    if let Some((ms, text)) = &best {
-        println!("fastest solve of the row, {ms:.2} ms:\n{text}");
-    }
     match failure {
         Some(why) => Err(why),
-        None => Ok(row.inexact(M::inexact(input))),
+        None => Ok(row.inexact(M::inexact(input)).report(full_report)),
     }
 }
 
