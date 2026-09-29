@@ -8515,10 +8515,11 @@ pub fn generate_root_methods(
     // which a `seq` root should not have to be -- one holding an `Rc` is
     // a perfectly good sequential model -- so only a threaded root gets
     // the dispatch; the rest walk their one store in place.
-    let region_over = |calls: TokenStream2| -> TokenStream2 {
+    let region_over = |first: TokenStream2, calls: TokenStream2| -> TokenStream2 {
         let task = quote! {
             let __ranges = __cut.store(__si);
             let __ts = __clock.start();
+            #first
             #cost_decl
             #calls
             __store.__cost = #sweep_ret;
@@ -8535,8 +8536,15 @@ pub fn generate_root_methods(
             }
         }
     };
-    let region = region_over(gh_dispatch);
-    let cost_region = region_over(quote! { #(#cost_sweep_calls_m)* });
+    // An assembly's task zeroes its store before it sweeps, so the
+    // zeroing runs on every thread. A cost sweep writes no blocks and
+    // leaves the last assembly's in place.
+    let zero_first = quote! {
+        __store.zero();
+        __store.__zero = __clock.stop(__ts);
+    };
+    let region = region_over(zero_first, gh_dispatch);
+    let cost_region = region_over(quote! {}, quote! { #(#cost_sweep_calls_m)* });
 
     // The store's arrays and the walk that fills them: one array per
     // containment path and block field, read-only, in the same container
@@ -9036,6 +9044,9 @@ pub fn generate_root_methods(
             /// and the join; the spread between longest and shortest is
             /// what the cut left unbalanced.
             __time: std::time::Duration,
+            /// How much of that was the store's zeroing, the first step
+            /// of an assembly sweep.
+            __zero: std::time::Duration,
         }
 
         #sync_check
@@ -9257,18 +9268,16 @@ pub fn generate_root_methods(
                 arael::model::Model::update_params(self, params);
                 #extended_update_call
                 __tm.assembly_update += __clock.stop(__t);
-                let __t = __clock.start();
-                for __store in __stores.iter_mut() { __store.zero(); }
-                __tm.assembly_zero += __clock.stop(__t);
-                // Each store sweeps the ranges the cut gave it. An unbuilt
-                // cut hands every walk the whole of its container, which is
-                // one store covering the model. Dispatch only when there is
-                // more than one to run.
+                // Each store zeroes itself and sweeps the ranges the cut
+                // gave it. An unbuilt cut hands every walk the whole of its
+                // container, which is one store covering the model.
+                // Dispatch only when there is more than one to run.
                 let __par = __stores.len() > 1;
                 let __t = __clock.start();
                 #region
                 let __region = __clock.stop(__t);
                 __tm.assembly.record(__region, __par, __stores.iter().map(|__s| __s.__time));
+                __tm.assembly_zero += __stores.iter().map(|__s| __s.__zero).max().unwrap_or_default();
                 #cost_decl
                 #cost_gather
                 // The sweeps stash each entity's gradient beside its

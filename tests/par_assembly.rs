@@ -673,6 +673,7 @@ fn timing_is_off_unless_asked() {
     assert_eq!(t.assembly.par.region + t.assembly.seq.region, std::time::Duration::ZERO);
     assert_eq!(t.cost.par.region + t.cost.seq.region, std::time::Duration::ZERO);
     assert_eq!(t.scatter, std::time::Duration::ZERO);
+    assert_eq!(t.assembly_zero, std::time::Duration::ZERO);
     let mut timed = Context::new();
     timed.set_timing(true);
     arael::simple_lm::lm_solve_with_context(&x, &mut solver, &mut w, &cfg, &mut timed).unwrap();
@@ -682,6 +683,10 @@ fn timing_is_off_unless_asked() {
     assert!(t.assembly.par.task_max > std::time::Duration::ZERO);
     assert!(t.cost.par.region > std::time::Duration::ZERO);
     assert!(t.scatter > std::time::Duration::ZERO);
+    // A store is zeroed by its own sweep task, so the zeroing is a part
+    // of the task's time.
+    assert!(t.assembly_zero > std::time::Duration::ZERO);
+    assert!(t.assembly_zero <= t.assembly.par.task_max);
 }
 
 /// A `seq` root solves through the sequential path at every thread
