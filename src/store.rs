@@ -582,7 +582,7 @@ impl PositionStream {
         let mut keys: std::vec::Vec<u64> = self.tiles.iter().enumerate()
             .map(|(k, t)| ((t.base as u64) << 32) | k as u64)
             .collect();
-        sort_by_high_word(&mut keys);
+        arael_faer::sort_keys(&mut keys, 32..64);
         let at = |key: u64| (key & 0xffff_ffff) as usize;
         let tiles: std::vec::Vec<TileEntry> = keys.iter().map(|&key| self.tiles[at(key)]).collect();
         let panels: std::vec::Vec<ValueIndex> = keys.iter().map(|&key| self.panels[at(key)]).collect();
@@ -613,31 +613,6 @@ impl PositionStream {
             prev = at;
         }
         self.chunks.push((n as u32, ValueIndex::MAX));
-    }
-}
-
-/// Sort `keys` by their high 32 bits, keeping the order of equal ones:
-/// two passes of counting sort over 16-bit digits, each a count and a
-/// placement over the keys. The low 32 bits ride along.
-fn sort_by_high_word(keys: &mut std::vec::Vec<u64>) {
-    const DIGITS: usize = 1 << 16;
-    let mut tmp = vec![0u64; keys.len()];
-    for shift in [32u32, 48] {
-        let digit = |k: u64| ((k >> shift) & (DIGITS as u64 - 1)) as usize;
-        // Per digit, where its first key goes.
-        let mut start = vec![0u32; DIGITS + 1];
-        for &k in keys.iter() {
-            start[digit(k) + 1] += 1;
-        }
-        for d in 0..DIGITS {
-            start[d + 1] += start[d];
-        }
-        for &k in keys.iter() {
-            let d = digit(k);
-            tmp[start[d] as usize] = k;
-            start[d] += 1;
-        }
-        std::mem::swap(keys, &mut tmp);
     }
 }
 
@@ -2398,30 +2373,6 @@ mod tests {
     #[should_panic(expected = "form one run")]
     fn a_gap_in_an_entitys_live_indices_is_refused() {
         tile_extent(&[0, u32::MAX, 2]);
-    }
-
-    /// The radix sort orders by the high word and keeps ties in place,
-    /// which with the entry's place in the low word is the plain sort of
-    /// the keys. Bases above the first digit exercise the second pass.
-    #[test]
-    fn the_key_sort_is_the_plain_sort() {
-        let mut x = 12345u64;
-        let keys: std::vec::Vec<u64> = (0..5000u64).map(|k| {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let base = (x >> 40) % (1 << 20);
-            // Every fifth key repeats the previous base, a tile with
-            // several blocks.
-            let base = if k % 5 == 4 { (x >> 20) % 7 } else { base };
-            (base << 32) | k
-        }).collect();
-        let mut radix = keys.clone();
-        sort_by_high_word(&mut radix);
-        let mut plain = keys;
-        plain.sort_unstable();
-        assert_eq!(radix, plain);
-        let mut empty = std::vec::Vec::new();
-        sort_by_high_word(&mut empty);
-        assert!(empty.is_empty());
     }
 
     #[test]

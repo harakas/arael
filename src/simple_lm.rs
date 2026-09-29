@@ -835,6 +835,9 @@ pub struct ScalarCscResolver {
     blk_of: std::vec::Vec<u32>,
     /// sorted (block_col << 32 | block_row) keys of the stored cells
     keys: std::vec::Vec<u64>,
+    /// per block column, where its cells start in `keys`; one more entry
+    /// closes the last
+    col_cells: std::vec::Vec<u32>,
     /// per stored cell: scalar-row prefix of the tiles above it within
     /// its block column (column-independent)
     prefix: std::vec::Vec<usize>,
@@ -849,12 +852,15 @@ impl ScalarCscResolver {
     #[inline]
     pub fn resolve(&mut self, i: u32, j: u32) -> usize {
         let (i, j) = (i as usize, j as usize);
-        let key = ((self.blk_of[j] as u64) << 32) | self.blk_of[i] as u64;
+        let bc = self.blk_of[j] as usize;
+        let key = ((bc as u64) << 32) | self.blk_of[i] as u64;
         if key != self.memo_key {
             self.memo_key = key;
+            // The search is over the block column's own cells.
             // INVARIANT: the pattern holds every cell the macro emits; a miss is
             // a codegen bug, so fail loud rather than scatter into a wrong slot.
-            let c = self.keys.binary_search(&key)
+            let lo = self.col_cells[bc] as usize;
+            let c = lo + self.keys[lo..self.col_cells[bc + 1] as usize].binary_search(&key)
                 .expect("coordinate outside the built pattern");
             self.memo_prefix = self.prefix[c];
             self.memo_row_start = self.row_part[self.blk_of[i] as usize];
@@ -905,12 +911,14 @@ pub fn csc_from_cells<T: Float>(
             last = key;
         }
     }
-    keys.sort_unstable();
+    arael_faer::sort_keys(&mut keys, 0..64);
     keys.dedup();
 
-    // per-cell row prefix within its block column; per-column nnz
+    // per-cell row prefix within its block column; per-column nnz and
+    // cell count
     let mut prefix = vec![0usize; keys.len()];
     let mut col_ptr = vec![0usize; n + 1];
+    let mut col_cells = vec![0u32; nblk + 1];
     {
         let mut c = 0;
         while c < keys.len() {
@@ -923,6 +931,7 @@ pub fn csc_from_cells<T: Float>(
                 acc += partition[br + 1] - partition[br];
                 e += 1;
             }
+            col_cells[bc + 1] = (e - c) as u32;
             // every scalar column of this block column holds `acc` rows
             for j in partition[bc]..partition[bc + 1] {
                 col_ptr[j + 1] = acc;
@@ -932,6 +941,9 @@ pub fn csc_from_cells<T: Float>(
     }
     for j in 0..n {
         col_ptr[j + 1] += col_ptr[j];
+    }
+    for b in 0..nblk {
+        col_cells[b + 1] += col_cells[b];
     }
 
     // row indices: per block column, the tiles' row spans, repeated for
@@ -975,6 +987,7 @@ pub fn csc_from_cells<T: Float>(
         row_part: partition.to_vec(),
         blk_of,
         keys,
+        col_cells,
         prefix,
         memo_key: u64::MAX,
         memo_prefix: 0,
@@ -5453,7 +5466,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let nd = matches!(self.ordering, FaerOrdering::NestedDissection)
             .then(|| {
                 structure.map(|(partition, cells)| {
-                    let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+                    let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
                         partition_idx(partition),
                         partition_idx(partition),
                         cells.len(),
@@ -6160,7 +6173,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // for that -- both factor H in block form instead of flattening
             // it for faer's general sparse Cholesky.
             if self.narrow_band_enabled || self.sn_take() {
-                let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+                let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
                     partition_idx(&partition),
                     partition_idx(&partition),
                     cells.len(),
@@ -6202,7 +6215,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The block Hessian, and the scalar diagonal positions inside its
         // diagonal tiles (damping and extract_diagonal read and write
         // through those). Only the reducing route needs either.
-        let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+        let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
             partition_idx(&partition),
             partition_idx(&partition),
             cells.len(),
