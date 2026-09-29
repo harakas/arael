@@ -332,7 +332,7 @@ You don't need `use arael::matrix::matrix2sym;` -- the macro matches `matrix2sym
 
 ## Output Formatting / Code Generation
 
-Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls `powf` suffixes and literal formatting). Passing `""` omits the suffixes and lets literals infer from context. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
+Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
 
 ```rust
 sym! {
@@ -351,7 +351,7 @@ Output:
 ```text
 Display:  (-x + 1)^2 + 100 * (-x^2 + y)^2
 LaTeX:    \left(-x + 1\right)^{2} + 100 \cdot \left(-x^{2} + y\right)^{2}
-Rust f64: (-x + 1.0_f64).powf(2.0_f64) + 100.0_f64 * (-x.powf(2.0_f64) + y).powf(2.0_f64)
+Rust f64: (-x + 1.0_f64).powi(2) + 100.0_f64 * (-x.powi(2) + y).powi(2)
 ```
 
 ## Common Subexpression Elimination
@@ -387,8 +387,8 @@ Output:
 
 ```text
 let __x1 = -x + 1.0_f64;
-let __x0 = -x.powf(2.0_f64) + y;
-let f = __x1.powf(2.0_f64) + 100.0_f64 * __x0.powf(2.0_f64);
+let __x0 = -x.powi(2) + y;
+let f = __x1.powi(2) + 100.0_f64 * __x0.powi(2);
 let df_dx = -400.0_f64 * (x * __x0) - 2.0_f64 * __x1;
 let df_dy = 200.0_f64 * __x0;
 ```

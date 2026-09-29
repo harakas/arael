@@ -757,7 +757,32 @@ fn test_rust_const_f32() {
 fn test_rust_pow() {
     let x = symbol("x");
     let e = pow(x, constant(2.0));
-    assert_eq!(e.to_rust("f64"), "x.powf(2.0_f64)");
+    assert_eq!(e.to_rust("f64"), "x.powi(2)");
+}
+
+/// A whole exponent is emitted as `powi`, which compiles to
+/// multiplications; any other stays a `powf`.
+#[test]
+fn test_rust_pow_whole_exponents() {
+    let x = symbol("x");
+    let y = symbol("y");
+    assert_eq!(pow(x.clone(), constant(3.0)).to_rust("f64"), "x.powi(3)");
+    assert_eq!(pow(x.clone(), constant(4.0)).to_rust("f32"), "x.powi(4)");
+    assert_eq!(pow(x.clone(), constant(-2.0)).to_rust("f64"), "x.powi(-2)");
+    assert_eq!(pow(x.clone(), constant(3.0)).to_rust(""), "x.powi(3)");
+    assert_eq!(pow(x.clone(), constant(3.0)).to_rust_generic(), "x.powi(3)");
+    assert_eq!(pow(x.clone() + 1.0, constant(3.0)).to_rust("f64"), "(x + 1.0_f64).powi(3)");
+    assert_eq!(pow(x.clone(), constant(1.5)).to_rust("f64"), "x.powf(1.5_f64)");
+    assert_eq!(pow(x.clone(), constant(65.0)).to_rust("f64"), "x.powf(65.0_f64)");
+    assert_eq!(pow(x.clone(), y).to_rust("f64"), "x.powf(y)");
+
+    // The two forms agree to rounding where both apply.
+    for v in [0.3_f64, -1.7, 12.5] {
+        for n in [2, 3, 4, 7, -2, -3] {
+            let (a, b) = (v.powi(n), v.powf(n as f64));
+            assert!((a - b).abs() <= 1e-14 * b.abs(), "{}^{}: {} vs {}", v, n, a, b);
+        }
+    }
 }
 
 #[test]
