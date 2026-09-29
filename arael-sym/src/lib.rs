@@ -225,7 +225,7 @@
 //!     let safe = identity(1.0 - x * x) + epsilon * epsilon;
 //!     let code = safe.to_rust("f64");
 //!     // Body is wrapped in parens in generated code
-//!     assert!(code.contains("(-x.powf(2.0_f64) + 1.0_f64)"));
+//!     assert!(code.contains("(-x.powi(2) + 1.0_f64)"));
 //! };
 //! ```
 //!
@@ -248,7 +248,7 @@
 //!     assert_eq!(format!("{}", f), "square(x + 1)");
 //!     assert_eq!(format!("{}", f.diff(x)), "2 * (x + 1)");
 //!     // Codegen inlines the expanded body:
-//!     assert_eq!(f.to_rust("f64"), "(x + 1.0_f64).powf(2.0_f64)");
+//!     assert_eq!(f.to_rust("f64"), "(x + 1.0_f64).powi(2)");
 //! };
 //! ```
 //!
@@ -274,7 +274,7 @@
 //!     let (x, y) = symbols!(x, y);
 //!     let f = angle_diff(x * x, y);
 //!     assert_eq!(format!("{}", f.diff(x)), "2 * x");
-//!     assert_eq!(f.to_rust("f64"), "my_mod::angle_diff(x.powf(2.0_f64), y)");
+//!     assert_eq!(f.to_rust("f64"), "my_mod::angle_diff(x.powi(2), y)");
 //!     // eval uses the native eval_fn:
 //!     let vars = std::collections::HashMap::from([("x", 0.0), ("y", 6.283185307179586)]);
 //!     assert!(f.eval(&vars).unwrap().abs() < 1e-10); // 0 - 2pi wraps to 0
@@ -2919,7 +2919,7 @@ mod tests {
             let f = identity(c(1.0) - x * x) + epsilon * epsilon;
             let code = f.to_rust("f64");
             // identity forces parens around its body
-            assert!(code.contains("(-x.powf(2.0_f64) + 1.0_f64)"),
+            assert!(code.contains("(-x.powi(2) + 1.0_f64)"),
                 "expected parens around identity body, got: {}", code);
         }
     }

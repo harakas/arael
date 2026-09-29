@@ -68,6 +68,20 @@ fn push_wrapped_literal(buf: &mut String, v: f64) {
     buf.push(')');
 }
 
+/// A power's exponent, when it is a whole number of a size a chain of
+/// multiplications serves.
+fn whole_exponent(e: &Expr) -> Option<i32> {
+    let v = match e {
+        Expr::Const(v) => *v,
+        Expr::Neg(a) => match a.as_ref() {
+            Expr::Const(v) => -*v,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (v.fract() == 0.0 && v.abs() <= 64.0).then_some(v as i32)
+}
+
 fn rust_float_literal(v: f64, ft: &str) -> String {
     if !v.is_finite() {
         // `{v}` prints inf/NaN, which are not Rust tokens. Suffixed
@@ -502,7 +516,7 @@ impl Expr {
         // literal. NamedConsts (pi, epsilon, ...) deliberately survive
         // simplification, so trees like epsilon^2 reach codegen intact --
         // but an unsuffixed literal cannot take method calls
-        // (`2.2e-16.powf(2.0)` is an ambiguous numeric type), so the
+        // (`2.2e-16.powi(2)` is an ambiguous numeric type), so the
         // subtree must become one literal that infers its precision from
         // the surrounding expression.
         if (ft.is_empty() || ft == GENERIC_FT)
@@ -584,8 +598,15 @@ impl Expr {
             }
             Expr::Pow(a, b) => {
                 a.write_rust(buf, ft, 8);
-                buf.push_str(".powf(");
-                b.write_rust(buf, ft, 0);
+                // A whole exponent compiles to multiplications through
+                // `powi`; `powf` is a library call for all but the square.
+                if let Some(n) = whole_exponent(b) {
+                    buf.push_str(".powi(");
+                    buf.push_str(&n.to_string());
+                } else {
+                    buf.push_str(".powf(");
+                    b.write_rust(buf, ft, 0);
+                }
                 buf.push(')');
             }
             Expr::Sin(a) => Self::write_rust_method(buf, ft, a, "sin"),

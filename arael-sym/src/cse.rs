@@ -673,7 +673,7 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
         // subexpressions are never extracted: they cost nothing at
         // runtime (the compiler folds them), and hoisting one into its
         // own `let` strips the type context that unsuffixed literals in
-        // generated code rely on (e.g. `let __x = 2.2e-16.powf(2.0);` is
+        // generated code rely on (e.g. `let __x = 2.2e-16.powi(2);` is
         // an ambiguous numeric type, while the same expression inline
         // infers from its surroundings).
         // Rank by savings = (uses - 1) * cost -- how many ops we save;
