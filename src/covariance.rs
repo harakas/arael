@@ -701,7 +701,7 @@ fn block_graph(
         return None;
     }
     let part_idx: Vec<arael_faer::SparseIndex> = part.iter().map(|&p| p as _).collect();
-    let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+    let hsym = arael_faer::bsc::SymbolicSparseBlockColMat::covering(
         part_idx.clone(),
         part_idx,
         cells.len(),
