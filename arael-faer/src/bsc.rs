@@ -196,6 +196,60 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         n_coords: usize,
         coord: impl Fn(usize) -> (usize, usize),
     ) -> (Self, Vec<ValueIndex>) {
+        let (this, cells, blk_row_of, blk_col_of) =
+            Self::covering_with_cells(row_part, col_part, n_coords, &coord);
+        let key = |i: usize, j: usize| {
+            ((blk_col_of[j] as u64) << 32) | blk_row_of[i] as u64
+        };
+
+        // position pass: block index recovered by binary search in the
+        // sorted cell keys (block numbering == sorted order), memoized
+        // per run of same-cell coordinates -- one search per block
+        // object, arithmetic only for the scalars inside it
+        let mut positions = Vec::with_capacity(n_coords);
+        let mut last = u64::MAX;
+        let (mut base, mut row_w, mut row_start, mut col_start) = (0usize, 0usize, 0usize, 0usize);
+        for k in 0..n_coords {
+            let (i, j) = coord(k);
+            let c = key(i, j);
+            if c != last {
+                last = c;
+                let b = cells.binary_search(&c).unwrap();
+                let br = this.blk_row(b);
+                let bc = blk_col_of[j] as usize;
+                base = this.val_ptr[b].zx();
+                row_w = this.row_span(br).len();
+                row_start = this.row_span(br).start;
+                col_start = this.col_span(bc).start;
+            }
+            positions.push(value_index(base + (j - col_start) * row_w + (i - row_start)));
+        }
+
+        (this, positions)
+    }
+
+    /// The block structure covering a stream of scalar coordinates, as
+    /// [`from_scalar_coords`](Self::from_scalar_coords) builds it,
+    /// without the coordinates' positions: for a caller that binds its
+    /// values through a [`PositionResolver`] and has no use for the map.
+    /// `coord(k)` is called once per coordinate.
+    pub fn covering(
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+        n_coords: usize,
+        coord: impl Fn(usize) -> (usize, usize),
+    ) -> Self {
+        Self::covering_with_cells(row_part, col_part, n_coords, &coord).0
+    }
+
+    /// The structure, the sorted keys of its cells (block column over
+    /// block row) and the two scalar-to-block tables.
+    fn covering_with_cells(
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+        n_coords: usize,
+        coord: &impl Fn(usize) -> (usize, usize),
+    ) -> (Self, Vec<u64>, Vec<u32>, Vec<u32>) {
         // scalar index -> block index lookup tables, O(n) once
         let of = |part: &[I]| {
             let nblk = part.len() - 1;
@@ -231,7 +285,7 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
                 last = c;
             }
         }
-        cells.sort_unstable();
+        crate::sort_keys(&mut cells, 0..64);
         cells.dedup();
 
         let nblk_cols = col_part.len() - 1;
@@ -272,31 +326,7 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         let this = Self::new_checked(
             row_part, col_part, blk_col_ptr, blk_row_idx, val_ptr,
         );
-
-        // position pass: block index recovered by binary search in the
-        // sorted cell keys (block numbering == sorted order), memoized
-        // per run of same-cell coordinates -- one search per block
-        // object, arithmetic only for the scalars inside it
-        let mut positions = Vec::with_capacity(n_coords);
-        let mut last = u64::MAX;
-        let (mut base, mut row_w, mut row_start, mut col_start) = (0usize, 0usize, 0usize, 0usize);
-        for k in 0..n_coords {
-            let (i, j) = coord(k);
-            let c = key(i, j);
-            if c != last {
-                last = c;
-                let b = cells.binary_search(&c).unwrap();
-                let br = this.blk_row(b);
-                let bc = blk_col_of[j] as usize;
-                base = this.val_ptr[b].zx();
-                row_w = this.row_span(br).len();
-                row_start = this.row_span(br).start;
-                col_start = this.col_span(bc).start;
-            }
-            positions.push(value_index(base + (j - col_start) * row_w + (i - row_start)));
-        }
-
-        (this, positions)
+        (this, cells, blk_row_of, blk_col_of)
     }
 
     /// row partition: block-row `r` spans scalar rows
@@ -1008,6 +1038,23 @@ mod tests {
         );
         assert_eq!(back.symbolic().nblocks(), m.symbolic().nblocks());
         assert_eq!(back.vals(), m.vals());
+    }
+
+    /// `covering` builds the structure `from_scalar_coords` builds, from
+    /// coordinates in any order and with repeats, and it is the doodle's.
+    #[test]
+    fn covering_is_the_structure_of_from_scalar_coords() {
+        let part = vec![0usize, 2, 4, 5, 6, 7];
+        // One coordinate or more per doodle tile: D, L3, A twice, P2,
+        // C, L1, L2, P1.
+        let coords = [(3, 6), (6, 6), (1, 4), (2, 3), (0, 5), (4, 4), (5, 5), (0, 4), (1, 0)];
+        let (with, positions) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(
+            part.clone(), part.clone(), coords.len(), |k| coords[k]);
+        let alone = SymbolicSparseBlockColMat::<usize>::covering(
+            part.clone(), part, coords.len(), |k| coords[k]);
+        assert_eq!(alone.parts(), with.parts());
+        assert_eq!(alone.parts(), doodle().symbolic().parts());
+        assert_eq!(positions.len(), coords.len());
     }
 
     // The doodle's structure under the SYMMETRIC convention: producers write

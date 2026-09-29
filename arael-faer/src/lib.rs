@@ -229,12 +229,91 @@ pub fn value_index(p: usize) -> ValueIndex {
     })
 }
 
+/// Sort `keys` by their bits `bits`, keeping the order of the keys that
+/// are equal in them: counting sort over 16-bit digits, lowest first. A
+/// digit every key shares costs its count and no placement.
+pub fn sort_keys(keys: &mut Vec<u64>, bits: core::ops::Range<u32>) {
+    assert!(bits.end <= 64 && keys.len() <= u32::MAX as usize);
+    let n = keys.len() as u32;
+    let mut tmp: Vec<u64> = Vec::new();
+    let mut next = bits.start;
+    while next < bits.end {
+        let shift = next;
+        let width = (bits.end - shift).min(16);
+        next += width;
+        let mask = (1u64 << width) - 1;
+        let digit = |k: u64| ((k >> shift) & mask) as usize;
+        // Per digit, where its first key goes.
+        let mut start = vec![0u32; (1usize << width) + 1];
+        for &k in keys.iter() {
+            start[digit(k) + 1] += 1;
+        }
+        if start.iter().any(|&c| c == n) {
+            continue;
+        }
+        for d in 0..start.len() - 1 {
+            start[d + 1] += start[d];
+        }
+        tmp.resize(keys.len(), 0);
+        for &k in keys.iter() {
+            let d = digit(k);
+            tmp[start[d] as usize] = k;
+            start[d] += 1;
+        }
+        core::mem::swap(keys, &mut tmp);
+    }
+}
+
 pub mod envelope;
 pub mod bsc;
 pub mod cg;
 pub mod nd;
 pub mod schur;
 pub mod supernodal;
+
+#[cfg(test)]
+mod sort_keys_tests {
+    use super::*;
+
+    fn keys(n: u64, bits: u32) -> Vec<u64> {
+        let mut x = 12345u64;
+        (0..n).map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            if bits == 64 { x } else { (x >> 11) & ((1u64 << bits) - 1) }
+        }).collect()
+    }
+
+    /// Over every bit it is the plain sort, whatever the keys' range,
+    /// the digits all keys share included.
+    #[test]
+    fn over_every_bit_it_is_the_plain_sort() {
+        for bits in [64, 48, 33, 20, 16, 3] {
+            let mut radix = keys(5000, bits);
+            let mut plain = radix.clone();
+            sort_keys(&mut radix, 0..64);
+            plain.sort_unstable();
+            assert_eq!(radix, plain, "{} bits", bits);
+        }
+        let mut empty = Vec::new();
+        sort_keys(&mut empty, 0..64);
+        assert!(empty.is_empty());
+        let mut same = vec![7u64; 100];
+        sort_keys(&mut same, 0..64);
+        assert_eq!(same, vec![7u64; 100]);
+    }
+
+    /// Over a part of the bits the keys equal in it keep their order.
+    #[test]
+    fn keys_equal_in_the_sorted_bits_keep_their_order() {
+        // High word from a small range, low word the key's place.
+        let mut radix: Vec<u64> = keys(5000, 6).iter().enumerate()
+            .map(|(k, v)| (v << 32) | k as u64).collect();
+        let mut plain = radix.clone();
+        sort_keys(&mut radix, 32..64);
+        plain.sort_unstable();
+        assert_eq!(radix, plain);
+    }
+}
 
 #[cfg(test)]
 mod value_index_tests {
