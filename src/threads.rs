@@ -88,7 +88,9 @@ pub struct ParTiming {
     /// stream's build, with its sort and its cut into chunks.
     pub bind: Duration,
     pub assembly_update: Duration,
-    /// Zeroing every store's tiles and gradient stashes before the sweep.
+    /// Zeroing a store's tiles and gradient stashes, which each sweep
+    /// task does to its own store first: the longest store's, a part of
+    /// the sweep region and of that task's time.
     pub assembly_zero: Duration,
     pub assembly: PhaseTiming,
     pub gather_grad: Duration,
