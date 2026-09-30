@@ -264,8 +264,10 @@ pub struct LmConfig<T: Float> {
     ///
     /// The threaded sweeps assemble into per-thread block stores gathered
     /// serially, so they match the sequential ones to rounding, not to the
-    /// bit. Of the linear backends only `SparseFaer` reads the count; the
-    /// Schur reduction and the analysis are sequential.
+    /// bit. Of the linear backends only `SparseFaer` reads the count. Its
+    /// Schur reduction and back-substitution run on arael's own workers,
+    /// one range of the reduced system's block columns each, and give the
+    /// same answer at any count; the analysis is sequential.
     pub num_threads: usize,
     /// Threads for a `par` root's cost and assembly sweeps alone, when
     /// they want a count of their own. `None` (the default) leaves them on
@@ -5979,6 +5981,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.verbose = config.verbose;
         // The clock is only read when the caller asked for timing.
         self.measure = config.gather_timing;
+        // The reduction's own threads: 1 without the rayon feature.
+        self.ctx.set_threads(crate::threads::pool_size(config.num_threads));
         // Before the first compute, so size_llt_buffers sizes the scratch for
         // the same Par the factorization will run at.
         let par = faer_par(config.num_threads);

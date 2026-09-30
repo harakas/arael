@@ -544,14 +544,18 @@ performance/quality trade-off that actually matters for the
 problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
 reference and a recipe for picking them.
 
-Arael is single-threaded by default. With the `rayon` feature the linear solve
-runs on rayon's thread pool, and the cost evaluation and the assembly of the
-gradient and Hessian on arael's own worker threads, one per store, parked
-between sweeps: each sweeps its own share of the model into its own block
-store, a serial pass adds the stores into the gradient, and the same threads
-write the sparse Hessian from them, one range of it each. Set
-`LmConfig::num_threads` (1 = sequential, the default; `n` = n threads; 0 =
-every core); `assembly_threads` gives the sweeps a count of their own.
+### Threads
+
+Arael is single-threaded by default. With the `rayon` feature the
+factorization runs on rayon's thread pool, and the cost evaluation, the
+assembly of the gradient and Hessian and the Schur reduction on arael's own
+worker threads, parked between dispatches: each sweeps its own share of the
+model into its own block store, a serial pass adds the stores into the
+gradient, the same threads write the sparse Hessian from them, one range of
+it each, and then form the reduced system, one range of its block columns
+each. Set `LmConfig::num_threads` (1 = sequential, the default; `n` = n
+threads; 0 = every core); `assembly_threads` gives the sweeps a count of
+their own.
 
 A threaded assembly adds up in a different order than the sequential one, so
 results differ in the last bits between thread counts. The model is read from
