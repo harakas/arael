@@ -85,7 +85,12 @@ fn main() {
     println!("{:<14} {:>7} {:>8} {:>9} {:>7} {:>8} {:>10} {:>9} {:>9} {:>9} {:>8} {:>8}",
         "dataset", "cams", "S n", "S dens%", "pairs", "L_S MB", "reduce ms", "sym ms", "numer ms",
         "L_H MB", "L_S/L_H", "Hsym ms");
+    // BAL_ONLY=<substring> runs only the datasets whose name contains it.
+    let only = std::env::var("BAL_ONLY").ok();
     for (name, path) in datasets {
+        if only.as_deref().is_some_and(|o| !name.contains(o)) {
+            continue;
+        }
         if !std::path::Path::new(path).exists() {
             println!("{:<14} (missing)", name);
             continue;
@@ -168,6 +173,13 @@ fn main() {
         let sym = schur_symbolic(h.symbolic(), &eliminated).unwrap();
         let mut s = sym.alloc_s::<f64>();
         let mut ctx = SchurContext::new();
+        // SCHUR_THREADS and SCHUR_CHUNK as in slam's schur_bench.
+        ctx.set_threads(
+            std::env::var("SCHUR_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+        );
+        ctx.set_chunk_columns(
+            std::env::var("SCHUR_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        );
         let nk = sym.s.nrows();
         let mut rhs = vec![0.0; nk];
         let (t_reduce, _) = min_ms(rounds, || {

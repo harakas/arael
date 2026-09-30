@@ -5,6 +5,10 @@
 //! result is verified against a dense reference reduction.
 //!
 //!     SLAM_POSES=300 ROUNDS=20 cargo run -r --bin schur_bench
+//!
+//! SCHUR_THREADS=n runs the reduction and the back-substitution on n
+//! threads, unpinned. SCHUR_CHUNK=w walks each thread's columns w at a
+//! time (0, the default, all at once).
 
 #[path = "../scene.rs"]
 mod scene;
@@ -46,7 +50,11 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
 
 fn main() {
     let mut hctx = arael::threads::Context::new();
-    pin_single_core();
+    let threads: usize =
+        std::env::var("SCHUR_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    if threads <= 1 {
+        pin_single_core();
+    }
     let mut cfg = SceneConfig::default();
     if let Ok(n) = std::env::var("SLAM_POSES") {
         if let Ok(n) = n.parse() {
@@ -115,6 +123,10 @@ fn main() {
     // -- numeric reduce (per iteration and per damping retry) ----------
     let mut s = sym.alloc_s::<f64>();
     let mut ctx = SchurContext::new();
+    ctx.set_threads(threads);
+    ctx.set_chunk_columns(
+        std::env::var("SCHUR_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+    );
     let mut rhs_out = vec![0.0; s.symbolic().nrows()];
     let (t_reduce, _) = min_ms(rounds, || {
         schur_reduce(&sym, &h, &grad, &mut ctx, &mut s, &mut rhs_out).unwrap()
@@ -152,12 +164,8 @@ fn main() {
     let t = best.unwrap();
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
     println!("  reduce stages (best instrumented round, total {:.3} ms):", ms(t.total()));
-    println!("    seed   (zero S + Hkk/rhs copy)             {:7.3}", ms(t.seed));
-    println!("    factor (D_e Cholesky)                      {:7.3}", ms(t.factor));
-    println!("    panel  (gather + Z = D^-1 [C^T|b])         {:7.3}", ms(t.panel));
-    println!("    gemm   (pair contributions into S)         {:7.3}", ms(t.gemm));
-    println!("    rhs    (observer rhs updates)              {:7.3}", ms(t.rhs));
-    println!("    finish (re-zero diag lower)                {:7.3}", ms(t.finish));
+    println!("    factor  (D_e Cholesky and z_e)             {:7.3}", ms(t.factor));
+    println!("    columns (the kept columns of S)            {:7.3}", ms(t.columns));
 
     // -- factor + solve the reduced system --------------------------------
     // faer sparse LLT on S's scalar CSC, mirroring the SparseFaer
