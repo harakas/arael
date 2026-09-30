@@ -765,12 +765,18 @@ keeps](#what-a-solve-keeps----context-and-lmsession).
 Threads reach the block supernodal route two ways: independent subtrees
 of the elimination tree run on separate threads, and the dense kernels of
 the panels too big to chunk take the pool, size-gated. The factorization
-is the same one at every thread count and produces the same answer. The
-factorization and the triangular solve are handed the thread count and
-faer splits what it can; the Schur reduction and the analysis are
-sequential. On a landmark SLAM problem the reduction is the larger half of
-an iteration, so a problem that reduces gains less from threads there than
-one that does not.
+is the same one at every thread count and produces the same answer; its
+triangular solve runs on one thread. faer's scalar factorization and
+triangular solve are handed the thread count and faer splits what it
+can.
+
+The Schur reduction runs on arael's own workers: the reduced system's
+block columns are cut into one range per thread by the number of
+products that land in them, and each thread forms its own columns and
+its own part of the reduced right-hand side. The back-substitution
+recovers the marginalized blocks in ranges the same way. Both sum in
+the same order at any thread count, so the reduced system is the same
+one. The analysis is sequential.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.
