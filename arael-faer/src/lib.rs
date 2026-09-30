@@ -32,6 +32,10 @@
 //!   with no band and no small degrees, where minimum degree has nothing to
 //!   chew on. faer offers AMD, natural, or a custom permutation; this computes
 //!   the custom one.
+//! - **Worker threads** ([`pool`]) -- the threads the stages above that do
+//!   not run on faer's kernels dispatch to, and that arael's sweeps share.
+//!   Spawned on first use, parked between dispatches, one dispatch at a
+//!   time. faer's own kernels run on rayon's pool.
 //!
 //! # bsc -- block CSC
 //!
@@ -89,7 +93,11 @@
 //!   -- what the reduction will cost and how big S is -- free, from the
 //!   symbolic pass, for deciding whether to reduce at all
 //! * [`SchurContext`](schur::SchurContext) -- reusable workspace across
-//!   iterations; `enable_timing` breaks a reduction down by stage
+//!   iterations; `set_threads` runs the reduction and the
+//!   back-substitution on the pool, one range of S's block columns per
+//!   thread, same sums at any count; `set_chunk_columns` sets how many
+//!   columns a thread forms at a time; `enable_timing` breaks a
+//!   reduction down by stage
 //! * [`FIXED_SHAPES`](schur::FIXED_SHAPES) /
 //!   [`has_fixed_kernel`](schur::has_fixed_kernel) -- the tile shapes with a
 //!   fully unrolled GEMM kernel (the ones SLAM systems use: 3/6/7/9-wide
@@ -270,6 +278,7 @@ pub mod cg;
 pub mod nd;
 pub mod schur;
 pub mod supernodal;
+pub mod pool;
 
 #[cfg(test)]
 mod sort_keys_tests {

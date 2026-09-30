@@ -1,13 +1,15 @@
-//! The worker threads of the cost and assembly sweeps.
+//! The worker threads of arael's own threaded stages: the cost and
+//! assembly sweeps, and the linear solve's stages that do not run on
+//! faer's kernels.
 //!
-//! Inner API. Public so that the generated sweeps can reach it, and not
-//! stable.
+//! Inner API. Public so that arael and its generated sweeps can reach
+//! it, and not stable.
 //!
-//! One worker per store beyond the first, each parked on its own
+//! One worker per task beyond the first, each parked on its own
 //! condition variable with room for one job, never spinning; the
-//! calling thread runs the first store and blocks until every worker
+//! calling thread runs the first task and blocks until every worker
 //! has finished. The workers are spawned on first use, kept until
-//! [`shutdown`] joins them, and grown when a larger store count asks.
+//! [`shutdown`] joins them, and grown when a larger task count asks.
 //! One dispatch runs at a time: a second caller waits for the first to
 //! finish.
 //!
@@ -15,8 +17,8 @@
 //! calling thread once every worker has reported, so the tasks are
 //! never left running behind a returned call.
 //!
-//! The task borrows the model and the stores, and the workers outlive
-//! the call, so the pointer handed to them has its lifetime erased.
+//! The task borrows the caller's data, and the workers outlive the
+//! call, so the pointer handed to them has its lifetime erased.
 //! That is the contract of `std::thread::scope`, over threads that
 //! persist: it holds because [`run`] does not return before every
 //! worker has reported, whatever the tasks did. The erasure and the
@@ -71,7 +73,7 @@ struct Pool {
     done: Arc<Done>,
 }
 
-const WORKER_NAME: &str = "arael-sweep-";
+const WORKER_NAME: &str = "arael-pool-";
 
 /// A lock that survives a poisoned mutex: the state behind every mutex
 /// here is consistent whether or not its last holder panicked.
@@ -108,7 +110,7 @@ impl Pool {
             let thread = std::thread::Builder::new()
                 .name(format!("{}{}", WORKER_NAME, hands.len() + 1))
                 .spawn(move || worker_loop(w, done))
-                .expect("spawn a sweep worker");
+                .expect("spawn a pool worker");
             hands.push(Hand { worker, thread });
         }
         hands[..n].iter().map(|h| Arc::clone(&h.worker)).collect()
@@ -155,7 +157,7 @@ pub fn run(n: usize, task: &(dyn Fn(usize) + Sync)) {
         }
         return;
     }
-    assert!(!on_a_worker(), "pool::run from inside a sweep task would wait on itself");
+    assert!(!on_a_worker(), "pool::run from inside a pool task would wait on itself");
     let pool = pool();
     let _one_at_a_time = lock(&pool.dispatch);
     let workers = pool.ensure(n - 1);
@@ -198,7 +200,7 @@ pub fn run_over<M: Send>(items: &mut [M], f: impl Fn(usize, &mut M) + Sync) {
 /// progress to finish first. The next [`run`] that needs workers spawns
 /// them again. Not to be called from inside a task.
 pub fn shutdown() {
-    assert!(!on_a_worker(), "pool::shutdown from inside a sweep task would wait on itself");
+    assert!(!on_a_worker(), "pool::shutdown from inside a pool task would wait on itself");
     let pool = pool();
     let _one_at_a_time = lock(&pool.dispatch);
     let mut hands = lock(&pool.hands);

@@ -32,6 +32,10 @@ The block-structured pieces a large sparse solve needs:
 - **Nested dissection** (`nd`) -- a fill-reducing ordering for matrices with no
   band and no small degrees, where minimum degree has nothing to chew on. faer
   offers AMD, natural, or a custom permutation; this computes the custom one.
+- **Worker threads** (`pool`) -- the threads the stages above that do not run
+  on faer's kernels dispatch to, and that arael's sweeps share. Spawned on
+  first use, parked between dispatches, one dispatch at a time. faer's own
+  kernels run on rayon's pool.
 
 ## bsc -- block CSC
 
@@ -96,7 +100,7 @@ one independent contribution per eliminated block.
 | `schur_reduce(sym, h, rhs, ctx, s, rhs_out)` | numeric: fill S and the reduced right-hand side from a (damped) H |
 | `schur_backsub(sym, h, rhs, x_kept, ctx, x_full)` | recover the eliminated blocks once the reduced system is solved |
 | `SchurSymbolic::{kept_size, kept_bandwidth, reduce_flops, pair_count}` | what the reduction will cost and how big S is -- free, from the symbolic pass, for deciding whether to reduce at all |
-| `SchurContext` | reusable workspace across iterations; `enable_timing` breaks a reduction down by stage |
+| `SchurContext` | reusable workspace across iterations; `set_threads` runs the reduction and the back-substitution on the pool, one range of S's block columns per thread, same sums at any count; `set_chunk_columns` sets how many columns a thread forms at a time; `enable_timing` breaks a reduction down by stage |
 | `FIXED_SHAPES` / `has_fixed_kernel` | the tile shapes with a fully unrolled GEMM kernel. Anything else works, through the nano-gemm fallback, at about 1.2-1.4x |
 | `SchurSymbolic::gemm_shapes` | which shapes a given problem needs, and how many calls each carries -- so a caller can see whether it is on the slow path |
 

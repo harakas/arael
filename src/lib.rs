@@ -1330,7 +1330,7 @@
 //! ## Threads
 //!
 //! Arael is single-threaded by default. With the `rayon` feature the
-//! linear solve runs on rayon's global pool:
+//! factorization runs on rayon's global pool:
 //!
 //! ```toml
 //! arael = { version = "0.7", features = ["rayon"] }
@@ -1344,15 +1344,16 @@
 //!
 //! Without the feature, anything but 1 warns and stays sequential.
 //!
-//! The cost evaluation and the assembly of the gradient and Hessian
-//! thread as well, on arael's own worker threads, one per store and
-//! parked between sweeps: each sweeps its own share of the model into
-//! its own block store, a serial pass adds the stores into the
-//! gradient, and the same threads write the sparse Hessian from them,
-//! one range of it each. A threaded assembly adds up in a different
+//! The cost evaluation, the assembly of the gradient and Hessian and
+//! the Schur reduction thread as well, on arael's own worker threads,
+//! parked between dispatches: each sweeps its own share of the model
+//! into its own block store, a serial pass adds the stores into the
+//! gradient, the same threads write the sparse Hessian from them, one
+//! range of it each, and then form the reduced system, one range of
+//! its block columns each. A threaded assembly adds up in a different
 //! order than the sequential one, so results differ in the last bits
-//! between thread counts. `assembly_threads` gives the sweeps a count
-//! of their own.
+//! between thread counts; the reduction sums in the same order at any
+//! count. `assembly_threads` gives the sweeps a count of their own.
 //!
 //! The model is read from every thread at once, so a root must be
 //! [`Sync`]. A root that is not, or that should stay sequential, opts
@@ -2381,7 +2382,9 @@ pub mod unitvec;
 pub mod simple_lm;
 pub mod threads;
 pub mod store;
-pub mod pool;
+/// The worker threads of the sweeps and of the linear solve's own
+/// threaded stages ([`arael_faer::pool`]).
+pub use arael_faer::pool;
 pub use threads::Context;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;
