@@ -24,6 +24,7 @@
 //! S comes back in the same convention.
 
 use crate::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
+use crate::{value_index, ValueIndex};
 use faer::Index;
 use faer::traits::ComplexField;
 
@@ -33,6 +34,8 @@ use faer::traits::ComplexField;
 pub trait SchurReal:
     ComplexField
     + Copy
+    + Send
+    + Sync
     + PartialOrd
     + core::ops::Add<Output = Self>
     + core::ops::Sub<Output = Self>
@@ -258,15 +261,15 @@ pub struct SchurSymbolic<I: Index> {
     copy_src: Vec<I>,
     copy_dst: Vec<I>,
     /// per eliminated block, in `eliminated` order: H block index of
-    /// its diagonal tile, plus ranges into the obs_* / pair_off arrays
-    /// and the panel width (observer columns, without the rhs column)
+    /// its diagonal tile, its width, its range of the obs_* arrays and
+    /// the panel width (observer columns, without the rhs column)
     elim_diag: Vec<I>,
+    elim_w: Vec<I>,
     elim_obs_ptr: Vec<I>,
-    elim_pair_ptr: Vec<I>,
     elim_ncols: Vec<I>,
     /// per eliminated block, the observer width shared by all of its
     /// observers, or 0 when they differ -- 0 also when they differ in
-    /// storage orientation, which [`gemm_tri`] needs constant too.
+    /// storage orientation, which [`gemm_row`] needs constant too.
     /// `elim_utrans` is that shared orientation.
     elim_uw: Vec<I>,
     elim_utrans: Vec<bool>,
@@ -289,14 +292,24 @@ pub struct SchurSymbolic<I: Index> {
     obs_panel_col: Vec<I>,
     obs_kept_off: Vec<I>,
     obs_orig_off: Vec<I>,
-    /// where every observer-pair target starts in S's value array: per
-    /// eliminated block, for each observer b (ascending) all pairs
-    /// (a, b) with a <= b, a ascending -- the numeric pass consumes it
-    /// in this exact order
-    pair_off: Vec<I>,
-    /// S block indices of the kept diagonal tiles (for the final
-    /// zero-lower pass -- diagonal tiles are upper-only by convention)
-    s_diag: Vec<I>,
+    /// * `obs_kept` -- its kept block id, which the numeric pass turns
+    ///   into the target tile through a table of the column at hand
+    obs_kept: Vec<I>,
+    /// observer-pair products per reduction
+    pairs: usize,
+    /// per kept column, where the tile of each row from the column's
+    /// topmost stored row (`col_top`) down to the diagonal starts in S's
+    /// values, `ValueIndex::MAX` where the column has no such tile:
+    /// `col_at[col_at_ptr[b] + (a - col_top[b])]` is the tile `(a, b)`
+    col_at_ptr: Vec<usize>,
+    col_top: Vec<I>,
+    col_at: Vec<ValueIndex>,
+    /// pair products before each kept column, `nk + 1` entries: what a
+    /// column costs, for cutting the columns between threads
+    col_pairs: Vec<usize>,
+    /// where each kept column's entries of `copy_src` / `copy_dst`
+    /// start, `nk + 1` entries
+    copy_ptr: Vec<I>,
     /// workspace sizing: max panel elements / max eliminated width
     max_panel: usize,
     max_ew: usize,
@@ -317,7 +330,7 @@ impl<I: Index> SchurSymbolic<I> {
     /// number of observer-pair contributions per reduction (the flop
     /// driver: quadratic in observers-per-eliminated-block)
     pub fn pair_count(&self) -> usize {
-        self.pair_off.len()
+        self.pairs
     }
     /// The GEMM tile shapes this reduction needs, `((wa, we, wb), calls)`, in
     /// no particular order. A shape not in [`FIXED_SHAPES`] goes to the
@@ -365,13 +378,20 @@ impl<I: Index> SchurSymbolic<I> {
     }
 }
 
+/// The chunk width [`SchurContext`] starts with, in kept block columns:
+/// wide enough that a coupling tile is read few times, narrow enough
+/// that a chunk's tiles of S stay in cache while its products land. On a
+/// landmark trajectory and on bundle adjustment the curve is flat from
+/// about half of this to twice it.
+pub const DEFAULT_CHUNK_COLUMNS: usize = 128;
+
 /// reusable numeric workspaces for [`schur_reduce`]; grows to the
 /// symbolic sizes on first use, no allocation afterwards.
 pub struct SchurContext<T> {
     /// lower-LLT factor of the current diagonal tile, column-major
     dwork: Vec<T>,
     /// solve panel `Z = D^-1 [C^T | b_e]`, column-major, width
-    /// `sum(observer widths) + 1`
+    /// `sum(observer widths) + 1`, for the implicit routes
     panel: Vec<T>,
     /// every eliminated block's lower-LLT factor, concatenated in
     /// `elim_diag` order, written by [`schur_reduce`]. Kept so that
@@ -381,6 +401,20 @@ pub struct SchurContext<T> {
     efactors: Vec<T>,
     /// where each eliminated block's factor starts in `efactors`
     efactor_at: Vec<usize>,
+    /// every eliminated block's `z = D_e^-1 b_e`, concatenated in
+    /// `elim_diag` order, and the blocks [`schur_backsub`] recovers,
+    /// laid out the same way
+    z: Vec<T>,
+    xe: Vec<T>,
+    /// where each eliminated block's `z` and `xe` start
+    z_at: Vec<usize>,
+    /// one scratch per thread
+    workers: Vec<ColumnScratch<T>>,
+    /// threads for [`schur_reduce`] and [`schur_backsub`]
+    threads: usize,
+    /// kept columns a thread's range is walked in at a time, 0 for the
+    /// whole range
+    chunk: usize,
     /// S block index -> H block index for the kept-kept tiles, built lazily
     /// by the implicit product ([`schur_apply`]), which reads H through S's
     /// geometry. `usize::MAX` where S has a tile the elimination created.
@@ -397,6 +431,12 @@ impl<T> Default for SchurContext<T> {
             panel: Vec::new(),
             efactors: Vec::new(),
             efactor_at: Vec::new(),
+            z: Vec::new(),
+            xe: Vec::new(),
+            z_at: Vec::new(),
+            workers: Vec::new(),
+            threads: 1,
+            chunk: DEFAULT_CHUNK_COLUMNS,
             s_to_h: Vec::new(),
             timing: None,
         }
@@ -407,9 +447,27 @@ impl<T> SchurContext<T> {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Run [`schur_reduce`] and [`schur_backsub`] on `n` threads of
+    /// [`crate::pool`]; 1 (the default) runs them on the calling
+    /// thread. 0 counts as 1.
+    pub fn set_threads(&mut self, n: usize) {
+        self.threads = n.max(1);
+    }
+    /// The thread count [`set_threads`](Self::set_threads) gave.
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+    /// How many kept columns of S a thread of [`schur_reduce`] forms at
+    /// a time: its range in chunks of `n` columns, the eliminated blocks
+    /// walked once per chunk. 0 is the whole range; the default is
+    /// [`DEFAULT_CHUNK_COLUMNS`]. A narrow chunk keeps the writes local, a
+    /// wide one reads every coupling tile fewer times. The result is the
+    /// same at any width.
+    pub fn set_chunk_columns(&mut self, n: usize) {
+        self.chunk = n;
+    }
     /// gather a per-stage [`SchurTiming`] on every subsequent
-    /// [`schur_reduce`] call (costs a few clock reads per eliminated
-    /// block; leave off for production solves)
+    /// [`schur_reduce`] call (a few clock reads per call)
     pub fn enable_timing(&mut self) {
         self.timing = Some(SchurTiming::default());
     }
@@ -425,24 +483,16 @@ impl<T> SchurContext<T> {
 /// [`SchurContext::enable_timing`])
 #[derive(Clone, Debug, Default)]
 pub struct SchurTiming {
-    /// stage 1: zero S, copy the Hkk tiles and the kept rhs slices
-    pub seed: std::time::Duration,
-    /// stage 2a: dense Cholesky of every eliminated diagonal tile
+    /// stage 1: the dense Cholesky of every eliminated diagonal tile and
+    /// its `z = D_e^-1 b_e`
     pub factor: std::time::Duration,
-    /// stage 2b: gather each panel and triangular-solve it
-    /// (`Z = D_e^-1 [C^T | b_e]`)
-    pub panel: std::time::Duration,
-    /// stage 2c: the observer-pair GEMMs into S (the flop driver)
-    pub gemm: std::time::Duration,
-    /// stage 2d: the per-observer rhs updates
-    pub rhs: std::time::Duration,
-    /// stage 3: re-zero the strictly-lower part of S's diagonal tiles
-    pub finish: std::time::Duration,
+    /// stage 2: the kept columns, dispatch to join
+    pub columns: std::time::Duration,
 }
 
 impl SchurTiming {
     pub fn total(&self) -> std::time::Duration {
-        self.seed + self.factor + self.panel + self.gemm + self.rhs + self.finish
+        self.factor + self.columns
     }
 }
 
@@ -533,8 +583,8 @@ pub fn schur_symbolic<I: Index>(
 
     // per-eliminated flat lists (observer order = ascending block id)
     let mut elim_diag = Vec::with_capacity(ne);
+    let mut elim_w = Vec::with_capacity(ne);
     let mut elim_obs_ptr = Vec::with_capacity(ne + 1);
-    let mut elim_pair_ptr = Vec::with_capacity(ne + 1);
     let mut elim_ncols = Vec::with_capacity(ne);
     let mut elim_uw = Vec::with_capacity(ne);
     let mut elim_utrans = Vec::with_capacity(ne);
@@ -548,13 +598,13 @@ pub fn schur_symbolic<I: Index>(
     let mut obs_panel_col = Vec::with_capacity(n_obs);
     let mut obs_kept_off = Vec::with_capacity(n_obs);
     let mut obs_orig_off = Vec::with_capacity(n_obs);
+    let mut obs_kept = Vec::with_capacity(n_obs);
     let mut max_panel = 0usize;
     let mut max_ew = 0usize;
     let mut total_pairs = 0usize;
     let mut reduce_flops = 0.0f64;
     let mut shapes: Vec<((usize, usize, usize), usize)> = Vec::new();
     elim_obs_ptr.push(I::truncate(0));
-    elim_pair_ptr.push(I::truncate(0));
     for slot in 0..ne {
         let e = eliminated[slot];
         let d = diag[slot].ok_or(SchurError::MissingDiagonal { block: e })?;
@@ -570,6 +620,7 @@ pub fn schur_symbolic<I: Index>(
             obs_panel_col.push(I::truncate(panel_cols));
             obs_orig_off.push(I::truncate(span.start));
             obs_kept_off.push(I::truncate(kept_part[kept_of[oblk.zx()].zx()]));
+            obs_kept.push(kept_of[oblk.zx()]);
             panel_cols += span.len();
         }
         elim_ncols.push(I::truncate(panel_cols));
@@ -621,8 +672,8 @@ pub fn schur_symbolic<I: Index>(
         }
         max_ew = max_ew.max(ew);
         max_panel = max_panel.max(ew * panel_cols);
+        elim_w.push(I::truncate(ew));
         elim_obs_ptr.push(I::truncate(obs_trans.len()));
-        elim_pair_ptr.push(I::truncate(total_pairs));
     }
 
     // S structure and every target position in one column-major pass,
@@ -662,8 +713,9 @@ pub fn schur_symbolic<I: Index>(
     let mut blk_row_idx: Vec<I> = Vec::new();
     let mut val_ptr: Vec<I> = Vec::new();
     let mut copy_dst = vec![I::truncate(0); copy_kk.len()];
-    let mut pair_off = vec![I::truncate(0); total_pairs];
-    let mut s_diag = Vec::with_capacity(nk);
+    let mut copy_ptr = Vec::with_capacity(nk + 1);
+    let mut col_pairs = Vec::with_capacity(nk + 1);
+    col_pairs.push(0usize);
     blk_col_ptr.push(I::truncate(0));
     val_ptr.push(I::truncate(0));
     let mut vals_end = 0usize;
@@ -677,6 +729,7 @@ pub fn schur_symbolic<I: Index>(
     for kc in 0..nk {
         let stamp = kc as u32 + 1;
         let copy_begin = copy_cursor;
+        copy_ptr.push(I::truncate(copy_begin));
         touched.clear();
         let touch = |kr: usize, mark: &mut Vec<u32>, touched: &mut Vec<usize>| {
             if mark[kr] != stamp {
@@ -698,9 +751,6 @@ pub fn schur_symbolic<I: Index>(
         let colw = kept_part[kc + 1] - kept_part[kc];
         for &kr in &touched {
             blk_at[kr] = blk_row_idx.len() as u32;
-            if kr == kc {
-                s_diag.push(I::truncate(blk_row_idx.len()));
-            }
             blk_row_idx.push(I::truncate(kr));
             vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
             val_ptr.push(I::truncate(vals_end));
@@ -709,20 +759,14 @@ pub fn schur_symbolic<I: Index>(
         for ci in copy_begin..copy_cursor {
             copy_dst[ci] = I::truncate(blk_at[copy_kk[ci].1] as usize);
         }
-        for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
-            let start = elim_obs_ptr[slot as usize].zx();
-            let base =
-                elim_pair_ptr[slot as usize].zx() + (bi as usize) * (bi as usize + 1) / 2;
-            for ai in 0..=bi as usize {
-                let ka = kept_of[obs_block[start + ai].zx()].zx();
-                // the numeric pass wants the target's scalar start, not its
-                // block index. Every block of this column has its val_ptr
-                // entry by now, so resolve it here rather than in a second
-                // pass over all the pairs.
-                pair_off[base + ai] = val_ptr[blk_at[ka] as usize];
-            }
+        let mut pairs = col_pairs[kc];
+        for &(_, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
+            pairs += bi as usize + 1;
         }
+        col_pairs.push(pairs);
     }
+    debug_assert_eq!(*col_pairs.last().unwrap(), total_pairs);
+    copy_ptr.push(I::truncate(copy_cursor));
     let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();
     let s = SymbolicSparseBlockColMat::new_checked(
         kp.clone(),
@@ -731,6 +775,23 @@ pub fn schur_symbolic<I: Index>(
         blk_row_idx,
         val_ptr,
     );
+
+    // The tile table of every kept column, top row to diagonal.
+    let mut col_at_ptr = Vec::with_capacity(nk + 1);
+    let mut col_top = Vec::with_capacity(nk);
+    let mut col_at: Vec<ValueIndex> = Vec::new();
+    for kc in 0..nk {
+        let base = col_at.len();
+        col_at_ptr.push(base);
+        let col = s.col_range(kc);
+        let top = if col.is_empty() { kc } else { s.blk_row(col.start) };
+        col_top.push(I::truncate(top));
+        col_at.resize(base + (kc - top + 1), ValueIndex::MAX);
+        for b in col {
+            col_at[base + s.blk_row(b) - top] = value_index(s.val_range(b).start);
+        }
+    }
+    col_at_ptr.push(col_at.len());
     let copy_src: Vec<I> = copy_kk.iter().map(|&(hb, _, _)| hb).collect();
 
     Ok(SchurSymbolic {
@@ -740,8 +801,8 @@ pub fn schur_symbolic<I: Index>(
         copy_src,
         copy_dst,
         elim_diag,
+        elim_w,
         elim_obs_ptr,
-        elim_pair_ptr,
         elim_ncols,
         elim_uw,
         elim_utrans,
@@ -751,8 +812,13 @@ pub fn schur_symbolic<I: Index>(
         obs_panel_col,
         obs_kept_off,
         obs_orig_off,
-        pair_off,
-        s_diag,
+        obs_kept,
+        pairs: total_pairs,
+        col_at_ptr,
+        col_top,
+        col_at,
+        col_pairs,
+        copy_ptr,
         shapes,
         max_panel,
         max_ew,
@@ -1053,7 +1119,7 @@ fn note_fixed_kernel() {
 #[inline(always)]
 fn note_fixed_kernel() {}
 
-/// Counts eliminated blocks that took the uniform triangular path. Like
+/// Counts observer runs that took the uniform path ([`gemm_row`]). Like
 /// [`note_fixed_kernel`], the output cannot tell the two routes apart, so a
 /// missing dispatch arm would silently cost speed and no test would notice.
 /// Compiled out of every non-test build.
@@ -1187,7 +1253,7 @@ macro_rules! fixed_shapes {
 }
 
 /// The pair shapes, as `(observer, marginalized)` -- the third width is the
-/// observer width again. What [`gemm_tri`] dispatches on, and the same list as
+/// observer width again. What [`gemm_row`] dispatches on, and the same list as
 /// the `wb > 1` half of [`FIXED_SHAPES`]; a test checks every one of those
 /// reaches the uniform path, so the two cannot drift apart.
 macro_rules! uniform_pair_shapes {
@@ -1216,71 +1282,71 @@ macro_rules! uniform_pair_shapes {
     };
 }
 
-/// The whole triangular pair loop of one eliminated block whose observers all
-/// have the same width and storage orientation -- the ordinary case, since the
-/// entity marginalized out is usually seen by one kind of entity (poses through
-/// a landmark, cameras through a point). One dispatch covers every pair instead
-/// of one per pair, and the tile shape is a compile-time constant throughout.
+/// The run of pair products of one observer `b` of an eliminated block
+/// whose observers all have the same width and storage orientation -- the
+/// ordinary case, since the entity marginalized out is usually seen by one
+/// kind of entity (poses through a landmark, cameras through a point). One
+/// dispatch covers the run instead of one per pair, and the tile shape is a
+/// compile-time constant throughout.
 ///
-/// `pair_off`, `ca_off` and `panel_col` are this block's slices: the pair
-/// targets in `s_vals` (b-major, a ascending, a <= b -- the symbolic emission
-/// order), and per observer its coupling tile in `h_vals` and its column in
-/// `panel`.
+/// `zb` is `Z_b`, `kept` the run's observers `a <= b` as kept block ids,
+/// ascending, `ca_off` their coupling tiles in `h_vals`, and `at` the
+/// column's tile table from row `top` down. The targets are given from
+/// `vbase`: `s_vals` is the slice of S that starts there.
 #[inline]
-fn gemm_tri<T: SchurReal, I: Index, const W: usize, const WE: usize, const TRANS: bool>(
+fn gemm_row<T: SchurReal, I: Index, const W: usize, const WE: usize, const TRANS: bool>(
     s_vals: &mut [T],
+    vbase: usize,
     h_vals: &[T],
-    panel: &[T],
-    pair_off: &[I],
+    zb: &[T],
+    at: &[ValueIndex],
+    top: usize,
+    kept: &[I],
     ca_off: &[I],
-    panel_col: &[I],
 ) {
     note_uniform_run();
-    let mut pair = 0usize;
-    for bi in 0..ca_off.len() {
-        let pc = panel_col[bi].zx() * WE;
-        let zb = &panel[pc..pc + WE * W];
-        for &off in &ca_off[..=bi] {
-            let d = pair_off[pair].zx();
-            let a = off.zx();
-            if TRANS {
-                gemm_sub_fixed_trans::<T, W, WE, W>(
-                    &mut s_vals[d..d + W * W],
-                    &h_vals[a..a + W * WE],
-                    zb,
-                );
-            } else {
-                gemm_sub_fixed::<T, W, WE, W>(
-                    &mut s_vals[d..d + W * W],
-                    &h_vals[a..a + W * WE],
-                    zb,
-                );
-            }
-            pair += 1;
+    for (&k, &a) in core::iter::zip(kept, ca_off) {
+        let d = at[k.zx() - top] as usize - vbase;
+        let a = a.zx();
+        if TRANS {
+            gemm_sub_fixed_trans::<T, W, WE, W>(
+                &mut s_vals[d..d + W * W],
+                &h_vals[a..a + W * WE],
+                zb,
+            );
+        } else {
+            gemm_sub_fixed::<T, W, WE, W>(
+                &mut s_vals[d..d + W * W],
+                &h_vals[a..a + W * WE],
+                zb,
+            );
         }
     }
 }
 
-/// [`gemm_tri`] for a width and orientation only known at run time. Returns
+/// [`gemm_row`] for a width and orientation only known at run time. Returns
 /// false when the shape has no unrolled kernel, leaving the caller to run the
 /// pair-at-a-time loop.
-fn gemm_tri_dispatch<T: SchurReal, I: Index>(
+#[allow(clippy::too_many_arguments)]
+fn gemm_row_dispatch<T: SchurReal, I: Index>(
     w: usize,
     we: usize,
     trans: bool,
     s_vals: &mut [T],
+    vbase: usize,
     h_vals: &[T],
-    panel: &[T],
-    pair_off: &[I],
+    zb: &[T],
+    at: &[ValueIndex],
+    top: usize,
+    kept: &[I],
     ca_off: &[I],
-    panel_col: &[I],
 ) -> bool {
     macro_rules! run {
         ($w:literal, $we:literal, $tr:expr) => {{
             if $tr {
-                gemm_tri::<T, I, $w, $we, true>(s_vals, h_vals, panel, pair_off, ca_off, panel_col);
+                gemm_row::<T, I, $w, $we, true>(s_vals, vbase, h_vals, zb, at, top, kept, ca_off);
             } else {
-                gemm_tri::<T, I, $w, $we, false>(s_vals, h_vals, panel, pair_off, ca_off, panel_col);
+                gemm_row::<T, I, $w, $we, false>(s_vals, vbase, h_vals, zb, at, top, kept, ca_off);
             }
             true
         }};
@@ -1325,7 +1391,7 @@ pub fn schur_factor_eliminated<I: Index, T: SchurReal>(
 ) -> Result<(), SchurError> {
     let hs = h.symbolic();
     ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
-    size_efactors(sym, hs, ctx);
+    size_efactors(sym, ctx);
     for slot in 0..sym.elim_diag.len() {
         let d_blk = sym.elim_diag[slot].zx();
         let e = hs.blk_row(d_blk);
@@ -1463,7 +1529,7 @@ pub fn schur_prepare_implicit<I: Index, T: SchurReal>(
     assert_eq!(rhs_kept.len(), sym.s.nrows());
     ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
     ctx.panel.resize(sym.max_panel, T::ZERO);
-    size_efactors(sym, hs, ctx);
+    size_efactors(sym, ctx);
 
     // Seed: the kept rhs is b_kept, and S's diagonal starts as H's.
     spans.clear();
@@ -1554,25 +1620,110 @@ fn read_symmetric_tile<T: SchurReal>(tile: &[T], out: &mut [T], w: usize) {
     }
 }
 
-/// Size the eliminated-block factor buffer and its offsets. Widths come from
+/// Size the eliminated-block buffers (the factors, `z`, the recovered
+/// blocks) and their offsets, and one scratch per thread. Widths come from
 /// the structure, so this settles on the first call.
-fn size_efactors<I: Index, T: SchurReal>(
-    sym: &SchurSymbolic<I>,
-    hs: &SymbolicSparseBlockColMat<I>,
-    ctx: &mut SchurContext<T>,
-) {
-    if ctx.efactor_at.len() == sym.elim_diag.len() + 1 {
-        return;
-    }
-    ctx.efactor_at.clear();
-    let mut at = 0usize;
-    for slot in 0..sym.elim_diag.len() {
+fn size_efactors<I: Index, T: SchurReal>(sym: &SchurSymbolic<I>, ctx: &mut SchurContext<T>) {
+    let ne = sym.elim_diag.len();
+    if ctx.efactor_at.len() != ne + 1 || ctx.z_at.len() != ne + 1 {
+        ctx.efactor_at.clear();
+        ctx.z_at.clear();
+        let (mut at, mut zat) = (0usize, 0usize);
+        for slot in 0..ne {
+            ctx.efactor_at.push(at);
+            ctx.z_at.push(zat);
+            let we = sym.elim_w[slot].zx();
+            at += we * we;
+            zat += we;
+        }
         ctx.efactor_at.push(at);
-        let we = hs.col_span(hs.blk_row(sym.elim_diag[slot].zx())).len();
-        at += we * we;
+        ctx.z_at.push(zat);
+        ctx.efactors.resize(at, T::ZERO);
+        ctx.z.resize(zat, T::ZERO);
+        ctx.xe.resize(zat, T::ZERO);
     }
-    ctx.efactor_at.push(at);
-    ctx.efactors.resize(at, T::ZERO);
+    ctx.workers.resize_with(ctx.threads, ColumnScratch::default);
+    for w in ctx.workers.iter_mut() {
+        w.panel.resize(sym.max_panel.max(sym.max_ew), T::ZERO);
+    }
+}
+
+/// One thread's scratch: the solve panel `Z` of the eliminated block at
+/// hand, `we x (sum of its observers' widths in the range)`.
+struct ColumnScratch<T> {
+    panel: Vec<T>,
+}
+
+impl<T> Default for ColumnScratch<T> {
+    fn default() -> Self {
+        ColumnScratch { panel: Vec::new() }
+    }
+}
+
+/// Where kept column `j` of S starts in its value buffer; `j == nk` is
+/// the end.
+#[inline]
+fn col_vals<I: Index>(s: &SymbolicSparseBlockColMat<I>, j: usize) -> usize {
+    let (_, _, blk_col_ptr, _, val_ptr) = s.parts();
+    val_ptr[blk_col_ptr[j].zx()].zx()
+}
+
+/// Cut `0..n` into at most `threads` ranges of about equal weight, where
+/// `weight[i]` is the weight before item `i` (`n + 1` entries). Returns
+/// the boundaries, `n` last; empty ranges are left out.
+fn cut_by_weight(weight: &[usize], threads: usize) -> Vec<usize> {
+    let n = weight.len() - 1;
+    let total = weight[n];
+    let mut bounds = vec![0usize];
+    let mut c = 0usize;
+    for k in 1..threads {
+        let target = total * k / threads;
+        while c < n && weight[c] < target {
+            c += 1;
+        }
+        if c > *bounds.last().unwrap() && c < n {
+            bounds.push(c);
+        }
+    }
+    bounds.push(n);
+    bounds
+}
+
+/// Cut `0..n` into at most `threads` ranges of about equal count.
+fn cut_by_count(n: usize, threads: usize) -> Vec<usize> {
+    let mut bounds = vec![0usize];
+    for k in 1..threads {
+        let c = n * k / threads;
+        if c > *bounds.last().unwrap() && c < n {
+            bounds.push(c);
+        }
+    }
+    bounds.push(n);
+    bounds
+}
+
+/// Splits `buf` at the given ascending offsets, the first of which is
+/// where `buf` starts.
+fn split_at_offsets<'a, T>(mut buf: &'a mut [T], offsets: &[usize]) -> Vec<&'a mut [T]> {
+    let mut parts = Vec::with_capacity(offsets.len() - 1);
+    for w in offsets.windows(2) {
+        let (head, tail) = buf.split_at_mut(w[1] - w[0]);
+        parts.push(head);
+        buf = tail;
+    }
+    parts
+}
+
+/// One thread's share of the columns stage of [`schur_reduce`]: a range
+/// of kept columns, the values of S and the reduced rhs they cover, and
+/// the thread's panel scratch.
+struct ColumnTask<'a, T> {
+    cols: core::ops::Range<usize>,
+    vbase: usize,
+    rbase: usize,
+    s_vals: &'a mut [T],
+    rhs_out: &'a mut [T],
+    scratch: &'a mut ColumnScratch<T>,
 }
 
 /// S block index -> H block index for the kept-kept tiles, `usize::MAX` where
@@ -1594,38 +1745,39 @@ fn build_s_to_h<I: Index, T>(sym: &SchurSymbolic<I>, ctx: &mut SchurContext<T>) 
 /// with `bk - Hke Hee^-1 be`, from pre-damped `h` and `rhs`. `h` must
 /// have the exact symbolic structure `sym` was built from.
 ///
-/// The work runs in three stages:
+/// The work runs in two stages:
 ///
-/// 1. **seed** -- S is zeroed, the kept-kept tiles of H are copied in
-///    (S starts as `Hkk`), and the kept slices of `rhs` are copied to
-///    `rhs_out`.
+/// 1. **factor** -- for every eliminated block `e`, the dense Cholesky
+///    `D_e = L L^T` of its `w_e x w_e` diagonal tile (read
+///    symmetric-from-upper) and `z_e = D_e^-1 b_e`, both kept in the
+///    context: the columns below read them, and so does
+///    [`schur_backsub`], which would otherwise redo the factor.
 ///
-/// 2. **per eliminated block `e`** (independent of every other one,
-///    because `Hee` is block-diagonal). Writing `C_a = H(a, e)` for
-///    the coupling tile to observer `a` and `D_e = H(e, e)`:
+/// 2. **columns** -- the kept block columns of S, cut into one range per
+///    thread ([`SchurContext::set_threads`]) by pair count. A range's
+///    tiles are one range of S's values and its blocks one range of
+///    `rhs_out`, so the threads write disjoint ranges and nothing is
+///    locked. Each thread walks every eliminated block `e` in order and
+///    takes the observers `b` of `e` that lie in its range, writing
+///    `C_a = H(a, e)` for the coupling tile to observer `a`:
 ///
-///    - **factor**: dense Cholesky `D_e = L L^T` of the `w_e x w_e`
-///      diagonal tile (read symmetric-from-upper into `ctx.dwork`).
-///    - **panel**: the block's whole `Hee^-1`-application happens
-///      here, once, as `Z = D_e^-1 [C^T | b_e]`. The coupling tiles'
-///      transposes and the block's rhs slice are gathered into one
-///      `w_e x (sum w_a + 1)` panel, and each panel column gets a
-///      forward solve against `L` then a backward solve against
-///      `L^T` -- that pair of triangular solves IS the `D_e^-1`
-///      application; no inverse is ever formed. Afterwards panel
-///      column group `b` holds `Z_b = D_e^-1 C_b^T` and the last
-///      column holds `z = D_e^-1 b_e`.
-///    - **gemm**: for every observer pair `a <= b`,
-///      `S(a, b) -= C_a * Z_b` (i.e. `C_a D_e^-1 C_b^T`), the target
-///      tile found via the precomputed `pair_dst` map -- consumed
-///      sequentially, so the loop order must stay b-major exactly as
-///      the symbolic pass emitted it.
-///    - **rhs**: for every observer `a`, `rhs_out(a) -= C_a * z`.
+///    - the range of S and of `rhs_out` is zeroed first;
+///    - the panel `Z = D_e^-1 [C_b^T ..]` over those observers, one
+///      forward and one backward triangular solve per column -- that pair
+///      of solves IS the `D_e^-1` application; no inverse is ever formed;
+///    - `S(a, b) -= C_a Z_b` for every observer `a <= b` of `e`, the
+///      target found through the column's tile table, and
+///      `rhs_out(b) -= C_b z_e`;
+///    - afterwards the range's tiles of `Hkk` and its slice of the kept
+///      rhs are folded in, after the coupling terms, so f32 sums the many
+///      small contributions among themselves before meeting the large
+///      diagonal once, instead of rounding each contribution against it;
+///    - the `a == b` products wrote the diagonal tiles in full, so their
+///      strictly-lower parts are re-zeroed to restore the
+///      upper-only-within-tile convention.
 ///
-/// 3. **finish** -- diagonal-pair GEMMs wrote full tiles; the
-///    strictly-lower part of S's kept diagonal tiles is re-zeroed to
-///    restore the upper-only-within-tile convention.
-///
+/// Every tile receives its contributions in eliminated-block order
+/// whatever the cut, so the result is the same at any thread count.
 /// Per-stage wall time lands in [`SchurContext::timing`] when enabled.
 pub fn schur_reduce<I: Index, T: SchurReal>(
     sym: &SchurSymbolic<I>,
@@ -1639,168 +1791,207 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
     assert_eq!(rhs.len(), hs.nrows());
     assert_eq!(rhs_out.len(), sym.s.nrows());
     ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
-    ctx.panel.resize(sym.max_panel, T::ZERO);
-    size_efactors(sym, hs, ctx);
+    size_efactors(sym, ctx);
     let gather = ctx.timing.is_some();
     let mut t = SchurTiming::default();
     let mut sw = Stopwatch::new(gather);
 
-    // stage 1: zero S and rhs_out. Hkk and the kept rhs are folded in at
-    // stage 2.5, after the coupling terms have accumulated, so f32 sums the
-    // many small contributions among themselves before meeting the large
-    // diagonal once, instead of rounding each contribution against it.
-    s.vals_mut().iter_mut().for_each(|v| *v = T::ZERO);
-    rhs_out.iter_mut().for_each(|v| *v = T::ZERO);
-    sw.lap(&mut t.seed);
-
-    // stage 2: one eliminated block at a time
+    // stage 1: D_e = L L^T and z_e = D_e^-1 b_e for every eliminated block
+    // (diagonal tiles are stored upper-only within the tile, so read
+    // symmetric from the upper triangle)
     for slot in 0..sym.elim_diag.len() {
         let d_blk = sym.elim_diag[slot].zx();
         let e = hs.blk_row(d_blk);
-        let we = hs.col_span(e).len();
-
-        // 2a factor: D_e = L L^T (diagonal tiles are stored upper-only
-        // within the tile, so read symmetric from the upper triangle)
+        let we = sym.elim_w[slot].zx();
         let dwork = &mut ctx.dwork[..we * we];
-        let dtile = &h.vals()[hs.val_range(d_blk)];
-        for j in 0..we {
-            for i in 0..=j {
-                let v = dtile[i + j * we];
-                dwork[i + j * we] = v;
-                dwork[j + i * we] = v;
-            }
-        }
+        read_symmetric_tile(&h.vals()[hs.val_range(d_blk)], dwork, we);
         if !llt_in_place(dwork, we) {
             return Err(SchurError::NotPositiveDefinite { block: e });
         }
-        // Kept for back-substitution, which would otherwise redo it.
-        ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]]
-            .copy_from_slice(dwork);
-        sw.lap(&mut t.factor);
+        ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]].copy_from_slice(dwork);
+        let z = &mut ctx.z[ctx.z_at[slot]..ctx.z_at[slot + 1]];
+        z.copy_from_slice(&rhs[hs.col_span(e)]);
+        llt_solve_panel(dwork, z, we, 1);
+    }
+    sw.lap(&mut t.factor);
 
-        // 2b panel: gather [C^T | b_e], then Z = D_e^-1 [C^T | b_e]
-        // via one forward + one backward triangular solve per column
-        let orange = sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx();
-        let col = sym.elim_ncols[slot].zx();
-        for o in orange.clone() {
-            let wo = sym.obs_w[o].zx();
-            let ca = sym.obs_ca_off[o].zx();
-            let tile = &h.vals()[ca..ca + wo * we];
-            let ocol = sym.obs_panel_col[o].zx();
-            let dst = &mut ctx.panel[ocol * we..(ocol + wo) * we];
-            if sym.obs_trans[o] {
-                // stored (e, kept): the tile IS C^T (we x wo)
-                dst.copy_from_slice(tile);
-            } else {
-                // stored (kept, e) as wo x we: transpose into the panel
-                for cc in 0..wo {
-                    for rr in 0..we {
-                        dst[rr + cc * we] = tile[cc + rr * wo];
+    // stage 2: the kept columns, one range per thread
+    {
+        let SchurContext { efactors, efactor_at, z, z_at, workers, threads, chunk, .. } =
+            &mut *ctx;
+        let (efactors, efactor_at, z, z_at, chunk) = (&*efactors, &*efactor_at, &*z, &*z_at, *chunk);
+        let bounds = cut_by_weight(&sym.col_pairs, *threads);
+        let vbounds: Vec<usize> = bounds.iter().map(|&c| col_vals(&sym.s, c)).collect();
+        let rbounds: Vec<usize> = bounds.iter().map(|&c| sym.s.col_part()[c].zx()).collect();
+        let s_parts = split_at_offsets(s.vals_mut(), &vbounds);
+        let r_parts = split_at_offsets(rhs_out, &rbounds);
+        let mut tasks: Vec<ColumnTask<'_, T>> = Vec::with_capacity(bounds.len() - 1);
+        for (((w, s_vals), rhs_out), scratch) in
+            bounds.windows(2).zip(s_parts).zip(r_parts).zip(workers.iter_mut())
+        {
+            tasks.push(ColumnTask {
+                cols: w[0]..w[1],
+                vbase: col_vals(&sym.s, w[0]),
+                rbase: sym.s.col_part()[w[0]].zx(),
+                s_vals,
+                rhs_out,
+                scratch,
+            });
+        }
+        let h_vals = h.vals();
+        let nk = sym.kept.len();
+        let run = |task: &mut ColumnTask<'_, T>| {
+            let (vbase, rbase) = (task.vbase, task.rbase);
+            let (c0, c1) = (task.cols.start, task.cols.end);
+            let s_vals: &mut [T] = &mut *task.s_vals;
+            let rhs_out: &mut [T] = &mut *task.rhs_out;
+            let panel: &mut [T] = &mut task.scratch.panel;
+            s_vals.fill(T::ZERO);
+            rhs_out.fill(T::ZERO);
+            let width = if chunk == 0 { c1 - c0 } else { chunk }.max(1);
+
+            let mut k0 = c0;
+            while k0 < c1 {
+            let k1 = (k0 + width).min(c1);
+            let whole = k0 == 0 && k1 == nk;
+            for slot in 0..sym.elim_diag.len() {
+                let start = sym.elim_obs_ptr[slot].zx();
+                let end = sym.elim_obs_ptr[slot + 1].zx();
+                let kept = &sym.obs_kept[start..end];
+                // The block's observers in this chunk: they are ascending,
+                // so one contiguous run of its list.
+                let (lo, hi) = if whole {
+                    (0, kept.len())
+                } else if kept.is_empty() || kept[0].zx() >= k1 || kept[kept.len() - 1].zx() < k0 {
+                    continue;
+                } else {
+                    (
+                        kept.partition_point(|&k| k.zx() < k0),
+                        kept.partition_point(|&k| k.zx() < k1),
+                    )
+                };
+                if lo == hi {
+                    continue;
+                }
+                let we = sym.elim_w[slot].zx();
+
+                // Z = D_e^-1 [C_b^T for every observer b in the range]
+                let mut pc = 0usize;
+                for o in start + lo..start + hi {
+                    let wo = sym.obs_w[o].zx();
+                    let ca = sym.obs_ca_off[o].zx();
+                    let tile = &h_vals[ca..ca + wo * we];
+                    let dst = &mut panel[pc * we..(pc + wo) * we];
+                    if sym.obs_trans[o] {
+                        // stored (e, kept): the tile IS C^T (we x wo)
+                        dst.copy_from_slice(tile);
+                    } else {
+                        // stored (kept, e) as wo x we: transpose into the panel
+                        for cc in 0..wo {
+                            for rr in 0..we {
+                                dst[rr + cc * we] = tile[cc + rr * wo];
+                            }
+                        }
+                    }
+                    pc += wo;
+                }
+                let f = &efactors[efactor_at[slot]..efactor_at[slot + 1]];
+                llt_solve_panel(f, &mut panel[..pc * we], we, pc);
+                let z = &z[z_at[slot]..z_at[slot + 1]];
+                let uw = sym.elim_uw[slot].zx();
+                let utrans = sym.elim_utrans[slot];
+
+                let mut pc = 0usize;
+                for bi in lo..hi {
+                    let ob = start + bi;
+                    let wb = sym.obs_w[ob].zx();
+                    let b = kept[bi].zx();
+                    let zb = &panel[pc * we..(pc + wb) * we];
+                    let at = &sym.col_at[sym.col_at_ptr[b]..sym.col_at_ptr[b + 1]];
+                    let top = sym.col_top[b].zx();
+
+                    // S(a, b) -= C_a Z_b for every observer a <= b of e
+                    let krun = &sym.obs_kept[start..=ob];
+                    let cas = &sym.obs_ca_off[start..=ob];
+                    let uniform = uw != 0
+                        && gemm_row_dispatch(
+                            uw, we, utrans, s_vals, vbase, h_vals, zb, at, top, krun, cas,
+                        );
+                    if !uniform {
+                        for (ai, (&k, &ca)) in core::iter::zip(krun, cas).enumerate() {
+                            let oa = start + ai;
+                            let wa = sym.obs_w[oa].zx();
+                            let d = at[k.zx() - top] as usize - vbase;
+                            let ca = ca.zx();
+                            gemm_sub(
+                                &mut s_vals[d..d + wa * wb],
+                                &h_vals[ca..ca + wa * we],
+                                sym.obs_trans[oa],
+                                wa,
+                                we,
+                                zb,
+                                wb,
+                            );
+                        }
+                    }
+
+                    // rhs_out(b) -= C_b z_e
+                    let ca = sym.obs_ca_off[ob].zx();
+                    let off = sym.obs_kept_off[ob].zx() - rbase;
+                    gemm_sub(
+                        &mut rhs_out[off..off + wb],
+                        &h_vals[ca..ca + wb * we],
+                        sym.obs_trans[ob],
+                        wb,
+                        we,
+                        z,
+                        1,
+                    );
+                    pc += wb;
+                }
+            }
+            k0 = k1;
+            }
+
+            // Hkk's tiles and the kept rhs of the range's columns, on top of
+            // the accumulated coupling terms. Diagonal tiles are upper-only
+            // in H, so only S's upper triangle is touched.
+            for ci in sym.copy_ptr[c0].zx()..sym.copy_ptr[c1].zx() {
+                let src = hs.val_range(sym.copy_src[ci].zx());
+                let dst = sym.s.val_range(sym.copy_dst[ci].zx());
+                let sdst = &mut s_vals[dst.start - vbase..dst.end - vbase];
+                for (d, &v) in core::iter::zip(sdst.iter_mut(), &h_vals[src]) {
+                    *d = *d + v;
+                }
+            }
+            for kc in c0..c1 {
+                let src = hs.col_span(sym.kept[kc].zx());
+                let dst = sym.s.col_span(kc);
+                let w = dst.len();
+                let rdst = &mut rhs_out[dst.start - rbase..dst.end - rbase];
+                for (d, &v) in core::iter::zip(rdst.iter_mut(), &rhs[src]) {
+                    *d = *d + v;
+                }
+                // The diagonal tile is the column's last, when it has one.
+                let col = sym.s.col_range(kc);
+                if col.end > col.start && sym.s.blk_row(col.end - 1) == kc {
+                    let range = sym.s.val_range(col.end - 1);
+                    let tile = &mut s_vals[range.start - vbase..range.end - vbase];
+                    for j in 0..w {
+                        for i in j + 1..w {
+                            tile[i + j * w] = T::ZERO;
+                        }
                     }
                 }
             }
-        }
-        ctx.panel[col * we..col * we + we].copy_from_slice(&rhs[hs.col_span(e)]);
-        llt_solve_panel(dwork, &mut ctx.panel[..(col + 1) * we], we, col + 1);
-        sw.lap(&mut t.panel);
-
-        // 2c gemm: S(a, b) -= C_a * Z_b for every pair a <= b, b-major
-        // (pair_off is consumed sequentially in the symbolic emission
-        // order)
-        let mut pair = sym.elim_pair_ptr[slot].zx();
-        let s_vals = s.vals_mut();
-        let uw = sym.elim_uw[slot].zx();
-        let uniform = uw != 0
-            && gemm_tri_dispatch(
-                uw,
-                we,
-                sym.elim_utrans[slot],
-                s_vals,
-                h.vals(),
-                &ctx.panel,
-                &sym.pair_off[pair..pair + orange.len() * (orange.len() + 1) / 2],
-                &sym.obs_ca_off[orange.clone()],
-                &sym.obs_panel_col[orange.clone()],
-            );
-        if !uniform {
-            for o_b in orange.clone() {
-                let wb = sym.obs_w[o_b].zx();
-                let bcol = sym.obs_panel_col[o_b].zx();
-                let zb = &ctx.panel[bcol * we..(bcol + wb) * we];
-                for o_a in orange.start..=o_b {
-                    let wa = sym.obs_w[o_a].zx();
-                    let ca = sym.obs_ca_off[o_a].zx();
-                    let dst = sym.pair_off[pair].zx();
-                    gemm_sub(
-                        &mut s_vals[dst..dst + wa * wb],
-                        &h.vals()[ca..ca + wa * we],
-                        sym.obs_trans[o_a],
-                        wa,
-                        we,
-                        zb,
-                        wb,
-                    );
-                    pair += 1;
-                }
-            }
-        }
-        sw.lap(&mut t.gemm);
-
-        // 2d rhs: b'_a -= C_a * z for every observer
-        let z = &ctx.panel[col * we..col * we + we];
-        for o_a in orange.clone() {
-            let wa = sym.obs_w[o_a].zx();
-            let ca = sym.obs_ca_off[o_a].zx();
-            let out = sym.obs_kept_off[o_a].zx();
-            gemm_sub(
-                &mut rhs_out[out..out + wa],
-                &h.vals()[ca..ca + wa * we],
-                sym.obs_trans[o_a],
-                wa,
-                we,
-                z,
-                1,
-            );
-        }
-        sw.lap(&mut t.rhs);
-    }
-
-    // stage 2.5: fold Hkk and the kept rhs on top of the accumulated pot.
-    // The (large) diagonal blocks land once, after the (small) coupling
-    // contributions have summed among themselves. Diagonal tiles are
-    // upper-only in H, so only S's upper triangle is touched; stage 3 clears
-    // the lower.
-    for (hb, sb) in core::iter::zip(&sym.copy_src, &sym.copy_dst) {
-        let src = hs.val_range(hb.zx());
-        let dst = sym.s.val_range(sb.zx());
-        let hsrc = &h.vals()[src];
-        let sdst = &mut s.vals_mut()[dst];
-        for (d, &v) in core::iter::zip(sdst.iter_mut(), hsrc) {
-            *d = *d + v;
+        };
+        if tasks.len() == 1 {
+            run(&mut tasks[0]);
+        } else {
+            crate::pool::run_over(&mut tasks, |_, task| run(task));
         }
     }
-    for (k, &orig) in sym.kept.iter().enumerate() {
-        let src = hs.col_span(orig.zx());
-        let dst = sym.s.col_span(k);
-        for (d, &v) in core::iter::zip(rhs_out[dst].iter_mut(), &rhs[src]) {
-            *d = *d + v;
-        }
-    }
-    sw.lap(&mut t.seed);
-
-    // stage 3: diagonal-pair GEMMs wrote full tiles; restore the
-    // upper-only-within-tile convention on S's kept diagonal
-    for sb in &sym.s_diag {
-        let range = sym.s.val_range(sb.zx());
-        let w = sym.s.block_dims(sb.zx()).0;
-        let tile = &mut s.vals_mut()[range];
-        for j in 0..w {
-            for i in j + 1..w {
-                tile[i + j * w] = T::ZERO;
-            }
-        }
-    }
-    sw.lap(&mut t.finish);
+    sw.lap(&mut t.columns);
     if gather {
         ctx.timing = Some(t);
     }
@@ -1822,9 +2013,13 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
 /// `C_a`, back-substitution applies `C_a^T`, so the storage-orientation
 /// flag simply flips). `rhs` is the ORIGINAL full right-hand side;
 /// `x_full` (length `h.nrows()`) receives the kept slices of `x_kept`
-/// and the recovered eliminated blocks. `D_e` is re-factored here --
-/// caching the reduce-time factors in [`SchurContext`] is a deferred
-/// optimization (the factor stage costs ~1% of a reduction).
+/// and the recovered eliminated blocks. `D_e^-1` is applied on the
+/// factor the reduction computed -- a reduction on this `h` and context
+/// always precedes: `x_kept` is the solution of the system it produced.
+///
+/// The eliminated blocks are recovered in ranges, one per thread
+/// ([`SchurContext::set_threads`]), each into its own span of a context
+/// buffer, and copied into `x_full` afterwards.
 pub fn schur_backsub<I: Index, T: SchurReal>(
     sym: &SchurSymbolic<I>,
     h: &SparseBlockColMat<I, T>,
@@ -1837,8 +2032,7 @@ pub fn schur_backsub<I: Index, T: SchurReal>(
     assert_eq!(rhs.len(), hs.nrows());
     assert_eq!(x_full.len(), hs.nrows());
     assert_eq!(x_kept.len(), sym.s.nrows());
-    ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
-    ctx.panel.resize(sym.max_panel.max(sym.max_ew), T::ZERO);
+    size_efactors(sym, ctx);
 
     // kept blocks scatter back to their original spans first: the
     // eliminated recovery below reads them out of x_full
@@ -1848,36 +2042,61 @@ pub fn schur_backsub<I: Index, T: SchurReal>(
         x_full[dst].copy_from_slice(&x_kept[src]);
     }
 
-    for slot in 0..sym.elim_diag.len() {
-        let d_blk = sym.elim_diag[slot].zx();
-        let e = hs.blk_row(d_blk);
-        let we = hs.col_span(e).len();
-
-        // t = b_e - sum_a C_a^T x_a
-        let t = &mut ctx.panel[..we];
-        t.copy_from_slice(&rhs[hs.col_span(e)]);
-        for o in sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx() {
-            let wa = sym.obs_w[o].zx();
-            let ca = sym.obs_ca_off[o].zx();
-            let xoff = sym.obs_orig_off[o].zx();
-            gemm_sub(
-                t,
-                &h.vals()[ca..ca + wa * we],
-                !sym.obs_trans[o],
-                we,
-                wa,
-                &x_full[xoff..xoff + wa],
-                1,
-            );
+    let ne = sym.elim_diag.len();
+    {
+        let SchurContext { efactors, efactor_at, xe, z_at, workers, threads, .. } = &mut *ctx;
+        let (efactors, efactor_at, z_at) = (&*efactors, &*efactor_at, &*z_at);
+        let bounds = cut_by_count(ne, *threads);
+        let xbounds: Vec<usize> = bounds.iter().map(|&s| z_at[s]).collect();
+        let x_parts = split_at_offsets(xe, &xbounds);
+        let mut tasks: Vec<(core::ops::Range<usize>, &mut [T], &mut [T])> =
+            Vec::with_capacity(bounds.len() - 1);
+        for ((w, out), t) in bounds.windows(2).zip(x_parts).zip(workers.iter_mut()) {
+            tasks.push((w[0]..w[1], out, &mut t.panel));
         }
+        let h_vals = h.vals();
+        let x_full = &*x_full;
+        let run = |task: &mut (core::ops::Range<usize>, &mut [T], &mut [T])| {
+            let (slots, out, scratch) = task;
+            let xbase = z_at[slots.start];
+            for slot in slots.clone() {
+                let e = hs.blk_row(sym.elim_diag[slot].zx());
+                let we = sym.elim_w[slot].zx();
 
-        // x_e = D_e^-1 t, on the factor the reduction already computed for
-        // this block -- the same two triangular solves, without redoing the
-        // Cholesky. A reduction on this `h` and context always precedes us:
-        // `x_kept` is the solution of the system it produced.
-        let f = &ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]];
-        llt_solve_panel(f, t, we, 1);
-        x_full[hs.col_span(e)].copy_from_slice(t);
+                // t = b_e - sum_a C_a^T x_a
+                let t = &mut scratch[..we];
+                t.copy_from_slice(&rhs[hs.col_span(e)]);
+                for o in sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx() {
+                    let wa = sym.obs_w[o].zx();
+                    let ca = sym.obs_ca_off[o].zx();
+                    let xoff = sym.obs_orig_off[o].zx();
+                    gemm_sub(
+                        t,
+                        &h_vals[ca..ca + wa * we],
+                        !sym.obs_trans[o],
+                        we,
+                        wa,
+                        &x_full[xoff..xoff + wa],
+                        1,
+                    );
+                }
+
+                // x_e = D_e^-1 t: the same two triangular solves as the
+                // reduction's, on its factor
+                let f = &efactors[efactor_at[slot]..efactor_at[slot + 1]];
+                llt_solve_panel(f, t, we, 1);
+                out[z_at[slot] - xbase..z_at[slot + 1] - xbase].copy_from_slice(t);
+            }
+        };
+        if tasks.len() == 1 {
+            run(&mut tasks[0]);
+        } else {
+            crate::pool::run_over(&mut tasks, |_, task| run(task));
+        }
+    }
+    for slot in 0..ne {
+        let e = hs.blk_row(sym.elim_diag[slot].zx());
+        x_full[hs.col_span(e)].copy_from_slice(&ctx.xe[ctx.z_at[slot]..ctx.z_at[slot + 1]]);
     }
     Ok(())
 }
@@ -2267,7 +2486,7 @@ mod tests {
     }
 
     /// A pair shape with one observer width on both sides must reach
-    /// [`gemm_tri`], not just the pair-at-a-time loop: the two compute the
+    /// [`gemm_row`], not just the pair-at-a-time loop: the two compute the
     /// same values, so nothing in the output would show a missing arm in
     /// `uniform_pair_shapes!`. A mixed pair shape (two observer widths) has
     /// no uniform run; it must reach the unrolled kernel through the pair
@@ -2307,14 +2526,77 @@ mod tests {
                 let (h, rhs) = build_upper(&part, &cells, 3);
                 UNIFORM_RUN_HITS.with(|c| c.set(0));
                 check_vs_dense(&h, &rhs, &part, &[elim]);
+                // One run per observer: the block has two.
                 assert_eq!(
                     UNIFORM_RUN_HITS.with(|c| c.get()),
-                    1,
+                    2,
                     "({}, {}, {}) elim_first={} did not take the uniform run",
                     wa, we, wb, elim_first
                 );
             }
         }
+    }
+
+    /// A trajectory: `poses` poses of width 3, each landmark of width 2 seen
+    /// from `span` consecutive poses, so the kept columns carry unequal
+    /// pair counts for the cut to balance.
+    fn trajectory(poses: usize, landmarks: usize, span: usize) -> (SparseBlockColMat<usize, f64>, Vec<f64>, Vec<usize>) {
+        let mut part = vec![0usize];
+        for _ in 0..poses {
+            part.push(part.last().unwrap() + 3);
+        }
+        for _ in 0..landmarks {
+            part.push(part.last().unwrap() + 2);
+        }
+        let mut cells: Vec<(usize, usize)> = (0..poses + landmarks).map(|b| (b, b)).collect();
+        for p in 1..poses {
+            cells.push((p - 1, p));
+        }
+        for l in 0..landmarks {
+            let first = (l * (poses - span)) / landmarks.max(1);
+            for p in first..first + span {
+                cells.push((p, poses + l));
+            }
+        }
+        let (h, rhs) = build_upper(&part, &cells, 17);
+        (h, rhs, (poses..poses + landmarks).collect())
+    }
+
+    /// The columns run in the same order whatever the thread count, so a
+    /// threaded reduction and back-substitution match the sequential ones
+    /// to the bit -- with more threads than columns too, where the cut
+    /// leaves ranges out.
+    #[test]
+    fn every_thread_count_matches_the_sequential_reduction_to_the_bit() {
+        let (small, small_rhs) = fixture();
+        let (traj, traj_rhs, traj_elim) = trajectory(12, 30, 4);
+        for (h, rhs, elim) in [(small, small_rhs, vec![1usize, 4]), (traj, traj_rhs, traj_elim)] {
+            let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+            let reduce = |threads: usize, chunk: usize| {
+                let mut s = sym.alloc_s::<f64>();
+                let mut ctx = SchurContext::new();
+                ctx.set_threads(threads);
+                ctx.set_chunk_columns(chunk);
+                let mut rk = vec![0.0; s.symbolic().nrows()];
+                schur_reduce(&sym, &h, &rhs, &mut ctx, &mut s, &mut rk).unwrap();
+                // Any kept solution serves the back-substitution comparison.
+                let xk: Vec<f64> = rk.iter().map(|v| v * 0.5).collect();
+                let mut x_full = vec![0.0; h.symbolic().nrows()];
+                schur_backsub(&sym, &h, &rhs, &xk, &mut ctx, &mut x_full).unwrap();
+                (s.vals().to_vec(), rk, x_full)
+            };
+            let base = reduce(1, 0);
+            for (threads, chunk) in [(2, 0), (3, 0), (4, 0), (16, 0), (1, 1), (1, 3), (4, 2), (3, 5)] {
+                let got = reduce(threads, chunk);
+                assert_eq!(got.0, base.0, "S at {} threads, chunk {}", threads, chunk);
+                assert_eq!(got.1, base.1, "rhs at {} threads, chunk {}", threads, chunk);
+                assert_eq!(got.2, base.2, "x at {} threads, chunk {}", threads, chunk);
+            }
+        }
+        // And the trajectory's reduction is right at all.
+        let (h, rhs, elim) = trajectory(12, 30, 4);
+        let part: Vec<usize> = h.symbolic().col_part().iter().map(|&p| p).collect();
+        check_vs_dense(&h, &rhs, &part, &elim);
     }
 
     #[test]
