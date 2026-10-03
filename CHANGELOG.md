@@ -3,6 +3,88 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.9.0 - unreleased
+
+### Added
+
+- **Multithreaded solving.** With the `threads` feature (formerly
+  `rayon`) every stage of a solve runs on several threads, not just
+  the factorization. Off until `LmConfig::num_threads` is set.
+- The solve result reports what the threads did and where the time
+  went.
+- `Context`: where a solve keeps its working data -- the Hessian
+  blocks, the gradient, the per-thread stores -- instead of inside the
+  model.
+- Constraints whose Hessian entries do not fit a block use the `coo`
+  keyword. Replaces `TripletBlock`.
+- `ScaledTransformParam`: a pose with a scale, for similarity
+  transforms.
+- `TransformParam` and `ScaledTransformParam` can be used directly in
+  constraint formulas: transform a point, compose two transforms,
+  invert one.
+- Rust `match` syntax is now allowed in the symbolic math of
+  constraints and user functions.
+- Two new robust loss functions: `loss_soft_l1`, and `loss_select`,
+  which picks one of the built-in kernels by number.
+- User functions (`#[arael::function]`) can take and return vectors,
+  matrices, quaternions and tuples, and have multi-statement bodies.
+- Constraints can reach the entity two levels up (`parent.parent`),
+  share blocks with their parent in more ways, and be guarded on root
+  fields.
+- The cost is summed in a way that keeps its accuracy on large models;
+  Kahan and f64 summation are available.
+- Generic entities (`Pose<T>`) can be exported to C++ and Python.
+- The g2o reader accepts full information matrices.
+
+### Breaking
+
+- **Hessian blocks moved out of the model.** A `SelfBlock` or
+  `CrossBlock` field is now a marker that declares the block; the
+  solver holds the numbers. Models are smaller and keep no solver
+  memory between solves. The `Boxed*` names are now aliases.
+- **`TripletBlock` is gone.** Use `coo`.
+- `se3` is renamed `twist3`. The old name still works, deprecated.
+- For hand-written problems: `LmProblem` keeps the methods you
+  implement; the solver's own moved to `LmProblemInternals`, and a few
+  signatures changed (docs/SOLVERS.md).
+- arael-faer: the factorization and Schur APIs take a thread count.
+
+### Fixed
+
+- `validate()` left the model slightly moved.
+- `#[arael::function]` did not build outside arael's own workspace.
+- Two same-named collections under different parents conflicted.
+- Models with large repeated subexpressions took very long to compile.
+- On large models a step could be accepted or rejected on rounding
+  noise.
+
+### Performance
+
+- Multithreaded solves are much faster: 0.8.3 threaded the
+  factorization only, now every stage runs on threads.
+- Taking the Hessian blocks out of the model speeds up the cost and
+  assembly sweeps: they read only the parameters, not the block storage
+  that used to sit between them. The sparse Hessian is also written
+  without being zeroed first.
+- More block sizes have specialized inline kernels, covering the common
+  bundle adjustment layouts.
+- Only the taken side of a `branch` or `match` is computed; a
+  constraint switched off by its branch skips its rows entirely.
+- Whole-number powers compile to multiplications.
+- Very large models now compile properly, preserving inlining.
+
+### C++, Python and WebAssembly
+
+- **A JavaScript / WebAssembly export**, with classes shaped like the
+  Python package. See docs/WASM.md.
+- From C++ and Python a pose is an object you can multiply and invert.
+- Eigen conversions for every C++ math type.
+- Faster model building from Python: fill a whole collection in one
+  call, and read or write one field of every element at once as a
+  numpy array.
+- `cargo arael setup` sets the build profile that keeps model builds
+  fast; exports leave unchanged files alone.
+
 ## 0.8.3 - 2026-08-23
 
 ### Added
