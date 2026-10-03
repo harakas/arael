@@ -17,46 +17,46 @@
 # Per panel: (title, [ (label, full_iter_ms, first_iter_ms, kind) ]).
 # full-iter is one complete iteration (t(2 iters) - t(1 iter), setup cancelled).
 # first-iter is that same iteration plus the setup paid once. Their difference
-# is the setup, which the second chart draws. 2026-08-02, min of 32 rounds; one
+# is the setup, which the second chart draws. 2026-10-03, min of 32 rounds; one
 # row per system, its best validated configuration by total time.
 # kind: "arael" solid blue, "other" neutral, "arael*" adds a star to the value.
 # full_iter None -> italic text row (did not converge).
 PANELS = [
     ("M3500 (2D, 10.5k params)", [
-        ("arael (f32)", 1.36, 3.05, "arael"),
-        ("arael (f64)", 1.64, 3.28, "arael"),
-        ("SymForce (f32)", 3.38, 18.35, "other"),
-        ("g2o (GN)", 3.55, 7.29, "other"),
-        ("Ceres (LM)", 4.89, 12.29, "other"),
-        ("factrs (GN)", 6.37, 12.31, "other"),
-        ("GTSAM (GN)", 13.28, 14.27, "other"),
+        ("arael (f32)", 1.29, 3.09, "arael"),
+        ("arael (f64)", 1.59, 3.57, "arael"),
+        ("SymForce (f32)", 3.57, 18.33, "other"),
+        ("g2o (GN)", 3.67, 7.33, "other"),
+        ("Ceres (LM)", 5.09, 12.34, "other"),
+        ("factrs (GN)", 5.95, 12.04, "other"),
+        ("GTSAM (GN)", 13.58, 14.32, "other"),
     ]),
     ("city10000 (2D, 30k params)", [
-        ("arael (f32)", 6.91, 12.26, "arael"),
-        ("arael (f64)", 8.58, 14.16, "arael"),
-        ("g2o (GN)", 16.00, 30.91, "other"),
-        ("SymForce (f64)", 19.79, 86.38, "other"),
-        ("Ceres (LM)", 20.28, 45.04, "other"),
-        ("factrs (GN)", 22.23, 41.87, "other"),
+        ("arael (f32)", 6.99, 12.96, "arael"),
+        ("arael (f64)", 8.87, 15.14, "arael"),
+        ("g2o (GN)", 17.60, 33.25, "other"),
+        ("Ceres (LM)", 22.31, 48.95, "other"),
+        ("SymForce (f64)", 22.64, 93.81, "other"),
+        ("factrs (GN)", 23.20, 46.00, "other"),
         ("GTSAM", None, None, "other"),
     ]),
     ("sphere2500 (3D, 15k params)", [
-        ("arael (f32)", 10.78, 12.02, "arael"),
-        ("arael (f64)", 15.44, 16.78, "arael"),
-        ("g2o (LM)", 19.42, 23.66, "other"),
-        ("Ceres (LM)", 23.74, 35.63, "other"),
-        ("factrs (GN)", 26.20, 43.91, "other"),
-        ("GTSAM (GN)", 28.42, 27.96, "other"),
-        ("SymForce (f32)", 73.79, 96.07, "other"),
+        ("arael (f32)", 10.15, 11.34, "arael"),
+        ("arael (f64)", 14.85, 16.28, "arael"),
+        ("g2o (LM)", 19.14, 23.80, "other"),
+        ("Ceres (LM)", 23.62, 35.69, "other"),
+        ("GTSAM (GN)", 26.28, 28.03, "other"),
+        ("factrs (GN)", 26.43, 44.32, "other"),
+        ("SymForce (f32)", 74.00, 95.08, "other"),
     ]),
     ("parking-garage (3D, 10k params)", [
-        ("arael (f32)", 3.05, 3.93, "arael*"),
-        ("arael (f64)", 3.55, 4.83, "arael"),
-        ("g2o (GN)", 6.50, 12.07, "other"),
-        ("SymForce (f32)", 9.51, 28.54, "other"),
-        ("Ceres (LM)", 12.66, 26.79, "other"),
-        ("GTSAM (GN)", 13.18, 13.77, "other"),
-        ("factrs (GN)", 20.55, 43.36, "other"),
+        ("arael (f32)", 2.63, 3.61, "arael*"),
+        ("arael (f64)", 3.14, 4.28, "arael"),
+        ("g2o (GN)", 6.20, 11.92, "other"),
+        ("SymForce (f32)", 8.97, 27.85, "other"),
+        ("Ceres (LM)", 11.79, 26.18, "other"),
+        ("GTSAM (GN)", 12.67, 13.25, "other"),
+        ("factrs (GN)", 18.44, 44.07, "other"),
     ]),
 ]
 
@@ -220,7 +220,8 @@ def arael_version():
             if '[package]\nname = "arael"' in text or 'name = "arael"' in text:
                 m = re.search(r'^version = "([^"]+)"', text, re.M)
                 if m:
-                    return m.group(1)
+                    # A dev tree's chart is for the release it is heading to.
+                    return m.group(1).removesuffix("-dev")
         root = os.path.dirname(root)
     raise SystemExit("cannot find the arael version in any parent Cargo.toml")
 
