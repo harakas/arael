@@ -55,11 +55,22 @@ const NONE: u32 = u32::MAX;
 /// adjacency test never misses a mergeable chain; fill and flops are
 /// invariant under the relabeling. Costs one DFS over the block tree.
 /// Off exists for measurement only.
+///
+/// `window_update`, `window_solve`: a panel whose updates (the sum of
+/// `m * n * k` over its descendants), or whose triangular solve
+/// (`rows * q * q`), reach this much work is shared between the threads
+/// of a threaded factorization in windows: of its columns for the
+/// updates, of its rows below the diagonal block for the solve. On one
+/// thread every panel is whole. A window's products are smaller than the
+/// whole panel's, so the threaded factor matches the sequential one to
+/// rounding, not to the bit. `None` leaves every panel whole.
 #[derive(Clone, Debug)]
 pub struct SupernodalParams {
     pub relax: Option<Vec<(usize, f64)>>,
     pub batch_ratio: Option<f64>,
     pub postorder: bool,
+    pub window_update: Option<usize>,
+    pub window_solve: Option<usize>,
 }
 
 impl Default for SupernodalParams {
@@ -68,6 +79,8 @@ impl Default for SupernodalParams {
             relax: Some(vec![(4, 1.0), (16, 0.8), (48, 0.1), (usize::MAX, 0.05)]),
             batch_ratio: Some(1.5),
             postorder: true,
+            window_update: Some(20_000_000),
+            window_solve: Some(5_000_000),
         }
     }
 }
@@ -86,6 +99,18 @@ impl SupernodalParams {
             ..Default::default()
         }
     }
+}
+
+/// Most windows a panel is cut into, and the narrowest a window gets: in
+/// scalar columns for the updates, in scalar rows for the solve.
+const WINDOW_MAX: usize = 8;
+const WINDOW_MIN_COLS: usize = 16;
+const WINDOW_MIN_ROWS: usize = 64;
+
+/// Window `w` of `nw` over `0..len`.
+#[inline]
+fn window(len: usize, nw: usize, w: usize) -> (usize, usize) {
+    (len * w / nw, len * (w + 1) / nw)
 }
 
 /// A descendant wider than this never joins a batch: its own update is
@@ -178,6 +203,11 @@ pub struct SupernodalSymbolic {
     max_b_cat: usize,
     /// how many descendant pairs landed in multi-member buckets
     batched_pairs: usize,
+    /// per supernode, the windows its panel is computed in: of its
+    /// columns for the updates, of its rows below the diagonal block for
+    /// the solve. 1 is the whole panel.
+    ncw: Vec<u8>,
+    nrw: Vec<u8>,
     /// per stored tile of the matrix, its panel target
     tiles: Vec<TileTarget>,
     /// tile indices grouped by target supernode, `tile_ptr` bounds
@@ -536,6 +566,8 @@ impl SupernodalSymbolic {
         let mut desc_idx = vec![0u32; desc_ptr[ns] as usize];
         let mut desc_split = vec![(0u32, 0u32); desc_ptr[ns] as usize];
         let mut max_update = 0usize;
+        // per target, the work of its updates: m * n * k over its pairs
+        let mut upd_work = vec![0.0f64; ns];
         {
             // One entry per (target, descendant) pair, with the
             // descendant's pattern split precomputed so the numeric
@@ -565,9 +597,32 @@ impl SupernodalSymbolic {
                     let m = (nrows[s] - row_at(s, start)) as usize;
                     let k = (row_at(s, start + mid) - row_at(s, start)) as usize;
                     max_update = max_update.max(m * k);
+                    let dq = (sc_start[sup_begin[s + 1] as usize]
+                        - sc_start[sup_begin[s] as usize]) as usize;
+                    upd_work[t as usize] += (m * k * dq) as f64;
                 }
             }
         }
+        let (ncw, nrw): (Vec<u8>, Vec<u8>) = (0..ns)
+            .map(|s| {
+                let q = (sc_start[sup_begin[s + 1] as usize] - sc_start[sup_begin[s] as usize])
+                    as usize;
+                let below = nrows[s] as usize - q;
+                let cw = match params.window_update {
+                    Some(min) if upd_work[s] >= min as f64 && q >= 2 * WINDOW_MIN_COLS => {
+                        (q / WINDOW_MIN_COLS).min(WINDOW_MAX)
+                    }
+                    _ => 1,
+                };
+                let rw = match params.window_solve {
+                    Some(min) if below * q * q >= min && below >= 2 * WINDOW_MIN_ROWS => {
+                        (below / WINDOW_MIN_ROWS).min(WINDOW_MAX)
+                    }
+                    _ => 1,
+                };
+                (cw as u8, rw as u8)
+            })
+            .unzip();
 
         // The tile source map. A stored tile (i, j), i <= j, holds
         // A[rows(i), cols(j)]; in the permuted lower factor it lands at
@@ -794,6 +849,8 @@ impl SupernodalSymbolic {
             max_a_cat,
             max_b_cat,
             batched_pairs,
+            ncw,
+            nrw,
             tiles,
             tile_ptr,
             tile_order,
@@ -905,6 +962,15 @@ impl SupernodalSymbolic {
     /// (0 when batching is off or nothing qualified).
     pub fn batched_pairs(&self) -> usize {
         self.batched_pairs
+    }
+
+    /// How many panels are computed in windows, for their updates and
+    /// for their solve (see [`SupernodalParams`]).
+    pub fn windowed_panels(&self) -> (usize, usize) {
+        (
+            self.ncw.iter().filter(|&&w| w > 1).count(),
+            self.nrw.iter().filter(|&&w| w > 1).count(),
+        )
     }
 
     /// Where an old (unpermuted) block sits in the elimination order.
@@ -1043,24 +1109,40 @@ fn gate(work: usize, min: usize, par: faer::Par) -> faer::Par {
     if work >= min { par } else { faer::Par::Seq }
 }
 
-/// One descendant's contribution to the current panel: a triangular
-/// GEMM for the mid-by-mid lower half plus a rectangular one into
-/// packed scratch (the mid part's upper triangle lands in the diagonal
-/// block's unused storage, so the scatter needn't mask it), then a
-/// block-run scatter.
+/// The windows of a panel a call computes: `wins` of the `nw` windows of
+/// its `q` columns ([`window`]). `0..1` of 1 is the whole panel.
+#[derive(Clone)]
+struct Windows {
+    q: usize,
+    nw: usize,
+    wins: core::ops::Range<usize>,
+}
+
+/// One descendant's contribution to the current panel, over the given
+/// windows of the panel's columns. Per window, of the descendant's
+/// columns that land in it: a triangular GEMM for their lower half and a
+/// rectangular one for the rows below -- accumulated straight into the
+/// panel when the target rows and columns are each one contiguous range,
+/// otherwise into packed scratch (the mid part's upper triangle lands in
+/// the diagonal block's unused storage, so the scatter needn't mask it)
+/// and scattered by block runs.
+///
+/// Writes only the windows' columns of the panel.
 #[allow(clippy::too_many_arguments)]
 fn apply_pair<T: SchurReal>(
     sym: &SupernodalSymbolic,
     pi: usize,
     head: &[T],
-    panel: &mut [T],
+    panel: FactorPtr<T>,
     blk_row: &[u32],
     upd: &mut [T],
     runs: &mut Vec<(u32, u32, u32)>,
     h: usize,
     col0: u32,
+    win: &Windows,
     par: faer::Par,
 ) {
+    use faer::linalg::matmul::triangular::BlockStructure;
     let d = sym.desc_idx[pi] as usize;
     let (start, mid) = sym.desc_split[pi];
     let dq = {
@@ -1080,8 +1162,9 @@ fn apply_pair<T: SchurReal>(
     }) - r0;
     let dpanel = &head[sym.val_ptr[d] as usize..sym.val_ptr[d + 1] as usize];
 
-    let b_v = unsafe {
-        faer::MatRef::from_raw_parts(dpanel.as_ptr().add(r0), kw, dq, 1, dh as isize)
+    // Rows j0..j1 of the descendant's update rows, all its columns.
+    let rows = |j0: usize, j1: usize| unsafe {
+        faer::MatRef::from_raw_parts(dpanel.as_ptr().add(r0 + j0), j1 - j0, dq, 1, dh as isize)
     };
 
     // When the target rows and columns are each one contiguous range
@@ -1100,87 +1183,56 @@ fn apply_pair<T: SchurReal>(
         let cols_contig = (sym.sc_start[lmid + 1] - sym.sc_start[first]) as usize == kw;
         if rows_contig && cols_contig {
             let tc0 = (sym.sc_start[first] - col0) as usize;
-            let top = unsafe {
-                faer::MatMut::from_raw_parts_mut(
-                    panel.as_mut_ptr().add(tc0 * h + tc0),
-                    kw,
-                    kw,
-                    1,
-                    h as isize,
-                )
-            };
-            faer::linalg::matmul::triangular::matmul(
-                top,
-                faer::linalg::matmul::triangular::BlockStructure::TriangularLower,
-                faer::Accum::Add,
-                b_v,
-                faer::linalg::matmul::triangular::BlockStructure::Rectangular,
-                b_v.transpose(),
-                faer::linalg::matmul::triangular::BlockStructure::Rectangular,
-                minus_one::<T>(),
-                gate(kw * kw * dq, PAR_MIN_MATMUL, par),
-            );
-            if m > kw {
-                let a_bot = unsafe {
-                    faer::MatRef::from_raw_parts(
-                        dpanel.as_ptr().add(r0 + kw),
-                        m - kw,
-                        dq,
-                        1,
-                        dh as isize,
-                    )
-                };
-                let bot = unsafe {
+            for w in win.wins.clone() {
+                let (c_lo, c_hi) = window(win.q, win.nw, w);
+                let j0 = c_lo.saturating_sub(tc0).min(kw);
+                let j1 = c_hi.saturating_sub(tc0).min(kw);
+                if j0 >= j1 {
+                    continue;
+                }
+                let (wn, b_w) = (j1 - j0, rows(j0, j1));
+                let top = unsafe {
                     faer::MatMut::from_raw_parts_mut(
-                        panel.as_mut_ptr().add(tc0 * h + tc0 + kw),
-                        m - kw,
-                        kw,
+                        panel.0.add((tc0 + j0) * h + tc0 + j0),
+                        wn,
+                        wn,
                         1,
                         h as isize,
                     )
                 };
-                faer::linalg::matmul::matmul(
-                    bot,
+                faer::linalg::matmul::triangular::matmul(
+                    top,
+                    BlockStructure::TriangularLower,
                     faer::Accum::Add,
-                    a_bot,
-                    b_v.transpose(),
+                    b_w,
+                    BlockStructure::Rectangular,
+                    b_w.transpose(),
+                    BlockStructure::Rectangular,
                     minus_one::<T>(),
-                    gate((m - kw) * kw * dq, PAR_MIN_MATMUL, par),
+                    gate(wn * wn * dq, PAR_MIN_MATMUL, par),
                 );
+                if m > j1 {
+                    let bot = unsafe {
+                        faer::MatMut::from_raw_parts_mut(
+                            panel.0.add((tc0 + j0) * h + tc0 + j1),
+                            m - j1,
+                            wn,
+                            1,
+                            h as isize,
+                        )
+                    };
+                    faer::linalg::matmul::matmul(
+                        bot,
+                        faer::Accum::Add,
+                        rows(j1, m),
+                        b_w.transpose(),
+                        minus_one::<T>(),
+                        gate((m - j1) * wn * dq, PAR_MIN_MATMUL, par),
+                    );
+                }
             }
             return;
         }
-    }
-
-    let u_top = unsafe {
-        faer::MatMut::from_raw_parts_mut(upd.as_mut_ptr(), kw, kw, 1, m as isize)
-    };
-    faer::linalg::matmul::triangular::matmul(
-        u_top,
-        faer::linalg::matmul::triangular::BlockStructure::TriangularLower,
-        faer::Accum::Replace,
-        b_v,
-        faer::linalg::matmul::triangular::BlockStructure::Rectangular,
-        b_v.transpose(),
-        faer::linalg::matmul::triangular::BlockStructure::Rectangular,
-        one::<T>(),
-        gate(kw * kw * dq, PAR_MIN_MATMUL, par),
-    );
-    if m > kw {
-        let a_bot = unsafe {
-            faer::MatRef::from_raw_parts(dpanel.as_ptr().add(r0 + kw), m - kw, dq, 1, dh as isize)
-        };
-        let u_bot = unsafe {
-            faer::MatMut::from_raw_parts_mut(upd.as_mut_ptr().add(kw), m - kw, kw, 1, m as isize)
-        };
-        faer::linalg::matmul::matmul(
-            u_bot,
-            faer::Accum::Replace,
-            a_bot,
-            b_v.transpose(),
-            one::<T>(),
-            gate((m - kw) * kw * dq, PAR_MIN_MATMUL, par),
-        );
     }
 
     // Row runs: (target row, update row, width) per pattern block from
@@ -1192,31 +1244,96 @@ fn apply_pair<T: SchurReal>(
         let w = sym.sc_start[kb + 1] - sym.sc_start[kb];
         runs.push((blk_row[kb], dr as u32, w));
     }
-    let mut cc = 0usize;
-    for f in start as usize..kend as usize {
-        let kf = dpat_blk[f] as usize;
-        let wf = (sym.sc_start[kf + 1] - sym.sc_start[kf]) as usize;
-        let tc0 = (sym.sc_start[kf] - col0) as usize;
-        for c in 0..wf {
-            let pcol = (tc0 + c) * h;
-            let ucol = (cc + c) * m;
-            for &(tr, dr, w) in runs.iter() {
-                let dst = pcol + tr as usize;
-                let srcx = ucol + dr as usize;
-                for r in 0..w as usize {
-                    panel[dst + r] = panel[dst + r] - upd[srcx + r];
+    for w in win.wins.clone() {
+        let (c_lo, c_hi) = window(win.q, win.nw, w);
+        // The descendant's columns that land in the window. Its blocks
+        // ascend in target columns, so they are one run j0..j1.
+        let (mut j0, mut j1, mut cc) = (kw, 0usize, 0usize);
+        for f in start as usize..kend as usize {
+            let kf = dpat_blk[f] as usize;
+            let wf = (sym.sc_start[kf + 1] - sym.sc_start[kf]) as usize;
+            let tc = (sym.sc_start[kf] - col0) as usize;
+            let (lo, hi) = (c_lo.max(tc), c_hi.min(tc + wf));
+            if lo < hi {
+                j0 = j0.min(cc + lo - tc);
+                j1 = j1.max(cc + hi - tc);
+            }
+            cc += wf;
+        }
+        if j0 >= j1 {
+            continue;
+        }
+        let (wn, b_w) = (j1 - j0, rows(j0, j1));
+        let u_top = unsafe {
+            faer::MatMut::from_raw_parts_mut(upd.as_mut_ptr().add(j0 * m + j0), wn, wn, 1, m as isize)
+        };
+        faer::linalg::matmul::triangular::matmul(
+            u_top,
+            BlockStructure::TriangularLower,
+            faer::Accum::Replace,
+            b_w,
+            BlockStructure::Rectangular,
+            b_w.transpose(),
+            BlockStructure::Rectangular,
+            one::<T>(),
+            gate(wn * wn * dq, PAR_MIN_MATMUL, par),
+        );
+        if m > j1 {
+            let u_bot = unsafe {
+                faer::MatMut::from_raw_parts_mut(
+                    upd.as_mut_ptr().add(j0 * m + j1),
+                    m - j1,
+                    wn,
+                    1,
+                    m as isize,
+                )
+            };
+            faer::linalg::matmul::matmul(
+                u_bot,
+                faer::Accum::Replace,
+                rows(j1, m),
+                b_w.transpose(),
+                one::<T>(),
+                gate((m - j1) * wn * dq, PAR_MIN_MATMUL, par),
+            );
+        }
+
+        let mut cc = 0usize;
+        for f in start as usize..kend as usize {
+            let kf = dpat_blk[f] as usize;
+            let wf = (sym.sc_start[kf + 1] - sym.sc_start[kf]) as usize;
+            let tc0 = (sym.sc_start[kf] - col0) as usize;
+            for c in 0..wf {
+                if cc + c < j0 || cc + c >= j1 {
+                    continue;
+                }
+                let pcol = (tc0 + c) * h;
+                let ucol = (cc + c) * m;
+                for &(tr, dr, w) in runs.iter() {
+                    let dst = pcol + tr as usize;
+                    let srcx = ucol + dr as usize;
+                    for r in 0..w as usize {
+                        // SAFETY: a column of this call's windows, which
+                        // no other thread writes.
+                        unsafe {
+                            let p = panel.0.add(dst + r);
+                            *p = *p - upd[srcx + r];
+                        }
+                    }
                 }
             }
+            cc += wf;
         }
-        cc += wf;
     }
 }
 
 /// A bucket of consecutive descendants applied as ONE update: their
 /// panels packed (zero-padded) into a joint A and B over the union
-/// target span, then one GEMM accumulating straight into the panel --
-/// the span is a contiguous sub-panel, so no product buffer and no
-/// scatter, one pass over the target instead of one per member.
+/// target span, then one GEMM per window accumulating straight into the
+/// panel -- the span is a contiguous sub-panel, so no product buffer and
+/// no scatter, one pass over the target instead of one per member.
+///
+/// Writes only the windows' columns of the panel.
 #[allow(clippy::too_many_arguments)]
 fn apply_bucket<T: SchurReal>(
     sym: &SupernodalSymbolic,
@@ -1224,12 +1341,13 @@ fn apply_bucket<T: SchurReal>(
     p0: u32,
     p1: u32,
     head: &[T],
-    panel: &mut [T],
+    panel: FactorPtr<T>,
     blk_row: &[u32],
     a_cat: &mut [T],
     b_cat: &mut [T],
     h: usize,
     col0: u32,
+    win: &Windows,
     par: faer::Par,
 ) {
     let span = sym.bucket_span[b];
@@ -1237,6 +1355,14 @@ fn apply_bucket<T: SchurReal>(
     let rs = (span[1] - span[0]) as usize;
     let cs = (span[3] - span[2]) as usize;
     let kk = sym.bucket_k[b] as usize;
+    // Nothing to pack when the windows miss the bucket's columns.
+    let (lo, hi) = (
+        window(win.q, win.nw, win.wins.start).0,
+        window(win.q, win.nw, win.wins.end - 1).1,
+    );
+    if lo >= col_lo + cs || hi <= col_lo {
+        return;
+    }
     a_cat[..rs * kk].fill(T::ZERO);
     b_cat[..cs * kk].fill(T::ZERO);
 
@@ -1277,24 +1403,34 @@ fn apply_bucket<T: SchurReal>(
     debug_assert_eq!(koff, kk);
 
     let a_v = unsafe { faer::MatRef::from_raw_parts(a_cat.as_ptr(), rs, kk, 1, rs as isize) };
-    let b_v = unsafe { faer::MatRef::from_raw_parts(b_cat.as_ptr(), cs, kk, 1, cs as isize) };
-    let dst = unsafe {
-        faer::MatMut::from_raw_parts_mut(
-            panel.as_mut_ptr().add(col_lo * h + row_lo),
-            rs,
-            cs,
-            1,
-            h as isize,
-        )
-    };
-    faer::linalg::matmul::matmul(
-        dst,
-        faer::Accum::Add,
-        a_v,
-        b_v.transpose(),
-        minus_one::<T>(),
-        gate(rs * cs * kk, PAR_MIN_MATMUL, par),
-    );
+    for w in win.wins.clone() {
+        let (c_lo, c_hi) = window(win.q, win.nw, w);
+        let j0 = c_lo.saturating_sub(col_lo).min(cs);
+        let j1 = c_hi.saturating_sub(col_lo).min(cs);
+        if j0 >= j1 {
+            continue;
+        }
+        let b_v = unsafe {
+            faer::MatRef::from_raw_parts(b_cat.as_ptr().add(j0), j1 - j0, kk, 1, cs as isize)
+        };
+        let dst = unsafe {
+            faer::MatMut::from_raw_parts_mut(
+                panel.0.add((col_lo + j0) * h + row_lo),
+                rs,
+                j1 - j0,
+                1,
+                h as isize,
+            )
+        };
+        faer::linalg::matmul::matmul(
+            dst,
+            faer::Accum::Add,
+            a_v,
+            b_v.transpose(),
+            minus_one::<T>(),
+            gate(rs * (j1 - j0) * kk, PAR_MIN_MATMUL, par),
+        );
+    }
 }
 
 /// Reusable workspace for [`supernodal_factorize`] and
@@ -1339,6 +1475,14 @@ impl<T> Clone for FactorPtr<T> {
     }
 }
 impl<T> Copy for FactorPtr<T> {}
+impl<T> FactorPtr<T> {
+    /// The pointer, taken through the wrapper so that a closure captures
+    /// the wrapper and stays `Sync`.
+    #[inline]
+    fn ptr(&self) -> *mut T {
+        self.0
+    }
+}
 // SAFETY: see the invariant above; every worker writes a disjoint range.
 unsafe impl<T> Send for FactorPtr<T> {}
 unsafe impl<T> Sync for FactorPtr<T> {}
@@ -1386,9 +1530,54 @@ impl<T> Scratch<T> {
     }
 }
 
+/// Every descendant's contribution to panel `s`, over the given windows
+/// of its columns, in descendant order: pair by pair, or bucket by
+/// bucket when the analysis batched them.
+#[allow(clippy::too_many_arguments)]
+fn update_panel<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    s: usize,
+    head: &[T],
+    panel: FactorPtr<T>,
+    blk_row: &[u32],
+    upd: &mut [T],
+    runs: &mut Vec<(u32, u32, u32)>,
+    a_cat: &mut [T],
+    b_cat: &mut [T],
+    h: usize,
+    col0: u32,
+    win: &Windows,
+    par: faer::Par,
+) {
+    if sym.bucket_end.is_empty() {
+        for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
+            apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0, win, par);
+        }
+    } else {
+        let mut p0 = sym.desc_ptr[s];
+        for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
+            let p1 = sym.bucket_end[b as usize];
+            if p1 - p0 == 1 {
+                apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0, win, par);
+            } else {
+                apply_bucket(
+                    sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0, win,
+                    par,
+                );
+            }
+            p0 = p1;
+        }
+    }
+}
+
 /// One supernode: seed its panel from the matrix, subtract every
 /// descendant's contribution, factor the diagonal block and solve the
 /// panel below it.
+///
+/// With `team` -- the scratch of the threads that may help -- a panel
+/// the analysis cut into windows is shared out over the pool, each thread
+/// taking a run of its windows; alone, this thread computes every panel
+/// whole.
 fn factor_panel<T: SchurReal>(
     sym: &SupernodalSymbolic,
     asym: &SymbolicSparseBlockColMat<SparseIndex>,
@@ -1396,6 +1585,7 @@ fn factor_panel<T: SchurReal>(
     factor: FactorPtr<T>,
     s: usize,
     sc: &mut Scratch<T>,
+    team: &mut [Scratch<T>],
     par: faer::Par,
 ) -> Result<(), SupernodalError> {
     let (upd, blk_row, runs, a_cat, b_cat, chol_mem) = (
@@ -1453,33 +1643,35 @@ fn factor_panel<T: SchurReal>(
         }
     }
 
-    // Left-looking: subtract every descendant's contribution --
-    // pair by pair, or bucket by bucket when the analysis batched
-    // them.
-    if sym.bucket_end.is_empty() {
-        for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
-            apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0, par);
+    // Left-looking: subtract every descendant's contribution, the
+    // panel's column windows shared out between the threads at hand.
+    // SAFETY: from here on the panel is written through `pp` alone, and
+    // each thread writes the columns of its own windows.
+    let pp = FactorPtr(unsafe { factor.0.add(base) });
+    let blk_row: &[u32] = blk_row;
+    // Whole on one thread; in its windows when threads share it.
+    let nw = if team.is_empty() { 1 } else { sym.ncw[s] as usize };
+    let threads = (1 + team.len()).min(nw);
+    if threads > 1 {
+        let mut tasks = Vec::with_capacity(threads);
+        tasks.push((&mut *upd, &mut *runs, &mut *a_cat, &mut *b_cat));
+        for w in team.iter_mut().take(threads - 1) {
+            tasks.push((&mut w.upd, &mut w.runs, &mut w.a_cat, &mut w.b_cat));
         }
+        crate::pool::run_over(&mut tasks, |t, (upd, runs, a_cat, b_cat)| {
+            let win = Windows { q, nw, wins: nw * t / threads..nw * (t + 1) / threads };
+            update_panel(
+                sym, s, head, pp, blk_row, upd, runs, a_cat, b_cat, h, col0, &win,
+                faer::Par::Seq,
+            );
+        });
     } else {
-        let mut p0 = sym.desc_ptr[s];
-        for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
-            let p1 = sym.bucket_end[b as usize];
-            if p1 - p0 == 1 {
-                apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0, par);
-            } else {
-                apply_bucket(
-                    sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0,
-                    par,
-                );
-            }
-            p0 = p1;
-        }
+        let win = Windows { q, nw, wins: 0..nw };
+        update_panel(sym, s, head, pp, blk_row, upd, runs, a_cat, b_cat, h, col0, &win, par);
     }
 
     // Dense diagonal factor, then the panel below it.
-    let top = unsafe {
-        faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr(), q, q, 1, h as isize)
-    };
+    let top = unsafe { faer::MatMut::from_raw_parts_mut(pp.0, q, q, 1, h as isize) };
     let stack = faer::dyn_stack::MemStack::new(chol_mem);
     faer::linalg::cholesky::llt::factor::cholesky_in_place(
         top,
@@ -1490,16 +1682,36 @@ fn factor_panel<T: SchurReal>(
     )
     .map_err(|_| SupernodalError::NotPositiveDefinite)?;
     if h > q {
-        let l11 =
-            unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
-        let bot = unsafe {
-            faer::MatMut::from_raw_parts_mut(panel.as_mut_ptr().add(q), h - q, q, 1, h as isize)
+        // The rows below, in the panel's row windows.
+        let below = h - q;
+        let nrw = if team.is_empty() { 1 } else { sym.nrw[s] as usize };
+        let solve = |w: usize, par: faer::Par| {
+            let (r0, r1) = window(below, nrw, w);
+            // SAFETY: the diagonal block is only read from here on, and
+            // each thread writes the rows of its own windows.
+            let p = pp.ptr();
+            let l11 = unsafe { faer::MatRef::from_raw_parts(p as *const T, q, q, 1, h as isize) };
+            let bot = unsafe {
+                faer::MatMut::from_raw_parts_mut(p.add(q + r0), r1 - r0, q, 1, h as isize)
+            };
+            faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+                l11,
+                bot.transpose_mut(),
+                gate((r1 - r0) * q * q, PAR_MIN_TRSM, par),
+            );
         };
-        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-            l11,
-            bot.transpose_mut(),
-            gate((h - q) * q * q, PAR_MIN_TRSM, par),
-        );
+        let threads = (1 + team.len()).min(nrw);
+        if threads > 1 {
+            crate::pool::run(threads, &|t| {
+                for w in nrw * t / threads..nrw * (t + 1) / threads {
+                    solve(w, faer::Par::Seq);
+                }
+            });
+        } else {
+            for w in 0..nrw {
+                solve(w, par);
+            }
+        }
     }
 
     Ok(())
@@ -1537,12 +1749,20 @@ pub fn supernodal_factorize<T: SchurReal>(
     };
     ctx.main.size_for(sym, par);
     if workers > 1 {
+        // One scratch per thread: a subtree worker's, or a helper's on a
+        // windowed panel. Their kernels stay sequential.
+        ctx.workers.resize_with(workers, Scratch::new);
+        for w in ctx.workers.iter_mut() {
+            w.size_for(sym, faer::Par::Seq);
+        }
         if let Some(cut) = subtree_cut(sym, workers) {
             return factor_subtrees(sym, asym, vals, ptr, ctx, par, workers, &cut);
         }
     }
+    let helpers = (workers - 1).min(ctx.workers.len());
+    let team = &mut ctx.workers[..helpers];
     for s in 0..sym.ns {
-        factor_panel(sym, asym, vals, ptr, s, &mut ctx.main, par)?;
+        factor_panel(sym, asym, vals, ptr, s, &mut ctx.main, team, par)?;
     }
     Ok(())
 }
@@ -1669,13 +1889,8 @@ fn factor_subtrees<T: SchurReal>(
         "the cut lost supernodes",
     );
 
-    ctx.workers.resize_with(workers, Scratch::new);
-    for w in ctx.workers.iter_mut() {
-        // Inside a chunk the panels are small; the kernels stay sequential
-        // and the threads are spent on whole subtrees instead.
-        w.size_for(sym, faer::Par::Seq);
-    }
-
+    // Inside a chunk the panels are small; the kernels stay sequential
+    // and the threads are spent on whole subtrees instead.
     let next = core::sync::atomic::AtomicUsize::new(0);
     let failed = core::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
@@ -1693,7 +1908,9 @@ fn factor_subtrees<T: SchurReal>(
                         // SAFETY: `s` is in chunk `i`, which no other
                         // worker touches, and its contributors are in the
                         // same chunk.
-                        if factor_panel(sym, asym, vals, ptr_copy, s, w, faer::Par::Seq).is_err() {
+                        if factor_panel(sym, asym, vals, ptr_copy, s, w, &mut [], faer::Par::Seq)
+                            .is_err()
+                        {
                             failed.store(true, Relaxed);
                             return;
                         }
@@ -1706,8 +1923,10 @@ fn factor_subtrees<T: SchurReal>(
         return Err(SupernodalError::NotPositiveDefinite);
     }
 
+    // The top: its windowed panels shared between the same threads.
+    let team = &mut ctx.workers[..workers - 1];
     for &s in &cut.top {
-        factor_panel(sym, asym, vals, ptr, s, &mut ctx.main, par)?;
+        factor_panel(sym, asym, vals, ptr, s, &mut ctx.main, team, par)?;
     }
     Ok(())
 }
@@ -2563,11 +2782,12 @@ mod tests {
     /// A small problem never splits, so only a tree with real subtrees
     /// catches it; hence the sizes here, and the assert that they split.
     ///
-    /// Compared entry by entry EXCEPT the diagonal block's strictly upper
-    /// triangle, which the update scatter fills from scratch without
-    /// masking and the factor never reads: sequential reuses one scratch
-    /// buffer across panels while each worker has its own, so that
-    /// padding legitimately differs.
+    /// Compared entry by entry to rounding (the top's windowed panels
+    /// are products of other shapes), EXCEPT the diagonal block's
+    /// strictly upper triangle, which the update scatter fills from
+    /// scratch without masking and the factor never reads: sequential
+    /// reuses one scratch buffer across panels while each worker has its
+    /// own, so that padding legitimately differs.
     #[cfg(feature = "rayon")]
     #[test]
     fn the_parallel_path_matches_the_sequential_one() {
@@ -2595,8 +2815,9 @@ mod tests {
                 for c in 0..q {
                     for r in c..h {
                         let k = base + c * h + r;
-                        assert_eq!(seq[k], par_f[k],
-                                   "nblk {}: supernode {} entry ({}, {})", nblk, s, r, c);
+                        assert!((seq[k] - par_f[k]).abs() <= 1e-12 * (1.0 + seq[k].abs()),
+                                "nblk {}: supernode {} entry ({}, {}): {} vs {}",
+                                nblk, s, r, c, seq[k], par_f[k]);
                     }
                 }
             }
@@ -2605,7 +2826,9 @@ mod tests {
             let (mut xs, mut xp) = (rhs.clone(), rhs.clone());
             supernodal_solve(&sn, &seq, &mut xs, &mut ctx);
             supernodal_solve(&sn, &par_f, &mut xp, &mut ctx);
-            assert_eq!(xs, xp, "nblk {}: solutions differ", nblk);
+            for (i, (s, p)) in xs.iter().zip(&xp).enumerate() {
+                assert!((s - p).abs() <= 1e-9 * (1.0 + s.abs()), "nblk {}: x[{}] {} vs {}", nblk, i, s, p);
+            }
             let resid = rel_resid(&dense, n, &xp, &rhs);
             assert!(resid < 1e-10, "nblk {}: resid {}", nblk, resid);
         }

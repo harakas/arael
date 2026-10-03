@@ -703,21 +703,34 @@ fn two_components(comp: usize, seed: u64) -> SymbolicSparseBlockColMat<SparseInd
     structure(part, cells)
 }
 
-/// The lower triangles of two factors, entry by entry.
+/// The lower triangles of two factors agree entry by entry to `tol`,
+/// relative.
 #[cfg(feature = "rayon")]
-fn same_factor<T: SchurReal>(sn: &SupernodalSymbolic, a: &[T], b: &[T]) -> bool {
+fn same_factor<T: SchurReal>(sn: &SupernodalSymbolic, a: &[T], b: &[T], tol: f64) -> bool {
     (0..sn.n_supernodes()).all(|s| {
         let (q, h) = sn.supernode_dims(s);
         let base = sn.panel_range(s).start;
-        (0..q).all(|c| (c..h).all(|r| a[base + c * h + r].to_f64() == b[base + c * h + r].to_f64()))
+        (0..q).all(|c| {
+            (c..h).all(|r| {
+                let (x, y) = (a[base + c * h + r].to_f64(), b[base + c * h + r].to_f64());
+                (x - y).abs() <= tol * (1.0 + x.abs())
+            })
+        })
     })
 }
 
-/// Every thread count factors the same bits as the sequential path, run
-/// after run, in f64 and f32; the sequential factor matches faer's.
+/// Two solutions agree entry by entry to `tol`, relative.
+#[cfg(feature = "rayon")]
+fn same_solution(a: &[f64], b: &[f64], tol: f64) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol * (1.0 + x.abs()))
+}
+
+/// Every thread count factors what the sequential path does, to
+/// rounding, run after run, in f64 and f32; the sequential factor
+/// matches faer's.
 #[cfg(feature = "rayon")]
 #[test]
-fn every_thread_count_matches_the_sequential_factor_to_the_bit() {
+fn every_thread_count_matches_the_sequential_factor() {
     for (comp, seed) in [(150usize, 21u64), (300, 22)] {
         let sym = two_components(comp, seed);
         let (a, dense, rhs) = spd_on(sym.clone(), seed, 2.0);
@@ -734,10 +747,10 @@ fn every_thread_count_matches_the_sequential_factor_to_the_bit() {
                 let mut par = vec![f64::NAN; sn.factor_val_count()];
                 let mut ctx = SupernodalContext::new();
                 supernodal_factorize(&sn, &a, &mut par, &mut ctx, Par::rayon(threads)).unwrap();
-                assert!(same_factor(&sn, &seq, &par), "comp {comp} threads {threads} repeat {repeat}: factor differs");
+                assert!(same_factor(&sn, &seq, &par, 1e-12), "comp {comp} threads {threads} repeat {repeat}: factor differs");
                 let mut x = rhs.clone();
                 supernodal_solve(&sn, &par, &mut x, &mut ctx);
-                assert_eq!(x, x_seq, "comp {comp} threads {threads} repeat {repeat}: solution differs");
+                assert!(same_solution(&x, &x_seq, 1e-9), "comp {comp} threads {threads} repeat {repeat}: solution differs");
             }
         }
 
@@ -750,7 +763,7 @@ fn every_thread_count_matches_the_sequential_factor_to_the_bit() {
         for threads in [3usize, 8] {
             let mut par32 = vec![f32::NAN; sn.factor_val_count()];
             supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), Par::rayon(threads)).unwrap();
-            assert!(same_factor(&sn, &seq32, &par32), "f32 comp {comp} threads {threads}: factor differs");
+            assert!(same_factor(&sn, &seq32, &par32, 1e-4), "f32 comp {comp} threads {threads}: factor differs");
         }
     }
 }
@@ -812,4 +825,132 @@ fn a_failure_inside_a_worker_is_reported() {
     }
     let (a, dense, rhs) = spd_on(sym.clone(), 21, 2.0);
     check("after the failures", &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), Par::rayon(4));
+}
+
+/// A trajectory's reduced system in miniature: `nblk` 6-wide blocks, each
+/// coupled to the `band` before it.
+fn band(nblk: usize, band: usize) -> SymbolicSparseBlockColMat<SparseIndex> {
+    let part: Vec<SparseIndex> = (0..=nblk as SparseIndex).map(|b| b * 6).collect();
+    let mut cells = Vec::new();
+    for j in 0..nblk {
+        for i in j.saturating_sub(band)..=j {
+            cells.push((i * 6, j * 6));
+        }
+    }
+    structure(part, cells)
+}
+
+/// Every panel wide or tall enough to be cut into windows is.
+fn windowed() -> SupernodalParams {
+    SupernodalParams { window_update: Some(1), window_solve: Some(1), ..Default::default() }
+}
+
+/// Windowed panels against faer: a banded chain, whose updates accumulate
+/// in place; the wide clique fixture and random structures under several
+/// orders, whose updates go through the scratch and the batched path.
+#[test]
+fn windowed_panels_match_faer() {
+    let sym = band(70, 30);
+    let (a, dense, rhs) = spd_on(sym.clone(), 31, 2.0);
+    let sn = check("windowed band", &a, &dense, &rhs, None, &windowed(), Par::Seq);
+    let (cols, rows) = sn.windowed_panels();
+    assert!(cols > 0 && rows > 0, "the band must have windowed panels, got {cols} and {rows}");
+
+    let (sym, tail_first) = wide();
+    let (a, dense, rhs) = spd_on(sym.clone(), 4, 0.5);
+    let sn = check("windowed wide", &a, &dense, &rhs, Some(&tail_first), &windowed(), Par::Seq);
+    assert!(sn.windowed_panels().0 > 0, "the wide fixture must have a windowed panel");
+
+    let mut seen = 0usize;
+    let sym = random_structure(90, 9, 4, 41);
+    let (a, dense, rhs) = spd_on(sym.clone(), 41, 2.0);
+    for (oname, order) in orders(&sym, 41) {
+        if oname == "random" {
+            continue; // a dense factor, which the wide fixture already covers
+        }
+        let sn = check(
+            &format!("windowed random {oname}"),
+            &a, &dense, &rhs, Some(&order), &windowed(), Par::Seq,
+        );
+        seen += sn.windowed_panels().0;
+    }
+    assert!(seen > 0, "the random structure must have windowed panels");
+}
+
+/// Two bands that meet in a dense tail: two subtrees for the cut, and a
+/// top wide enough to be windowed.
+#[cfg(feature = "rayon")]
+fn two_bands_and_a_tail(nb: usize, band: usize, tail: usize) -> SymbolicSparseBlockColMat<SparseIndex> {
+    let nblk = 2 * nb + tail;
+    let part: Vec<SparseIndex> = (0..=nblk as SparseIndex).map(|b| b * 6).collect();
+    let mut cells = Vec::new();
+    for c in 0..2 {
+        for j in 0..nb {
+            for i in j.saturating_sub(band)..=j {
+                cells.push(((c * nb + i) * 6, (c * nb + j) * 6));
+            }
+        }
+    }
+    for t in 2 * nb..nblk {
+        for i in 0..=t {
+            cells.push((i * 6, t * 6));
+        }
+    }
+    structure(part, cells)
+}
+
+/// Windowed panels under every thread count match faer and the
+/// one-thread factor, which computes each panel whole, to rounding: on a
+/// chain, which the cut declines and whose panels the threads share
+/// window by window; on two subtrees under a windowed top; and on a
+/// random structure.
+#[cfg(feature = "rayon")]
+#[test]
+fn windowed_panels_agree_at_every_thread_count() {
+    let chain = band(70, 30);
+    let forest = two_bands_and_a_tail(40, 10, 8);
+    let random = random_structure(90, 9, 4, 41);
+    let random_order = nd_block_order(&random);
+    let cases: [(&str, &SymbolicSparseBlockColMat<SparseIndex>, Option<&[usize]>); 3] = [
+        ("chain", &chain, None),
+        ("forest", &forest, None),
+        ("random", &random, Some(&random_order)),
+    ];
+    for (name, sym, order) in cases {
+        let (a, _, rhs) = spd_on(sym.clone(), 33, 2.0);
+        let sn = SupernodalSymbolic::new(sym, order, &windowed()).unwrap();
+        assert!(sn.windowed_panels().0 > 0, "{name}: no windowed panel");
+        match name {
+            "chain" => assert_eq!(sn.subtree_chunks(4), 0, "a chain must not split"),
+            "forest" => assert!(sn.subtree_chunks(4) >= 2, "the two bands must split"),
+            _ => {}
+        }
+        let mut seq = vec![f64::NAN; sn.factor_val_count()];
+        let mut ctx = SupernodalContext::new();
+        supernodal_factorize(&sn, &a, &mut seq, &mut ctx, Par::Seq).unwrap();
+        let mut x_seq = rhs.clone();
+        supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx);
+        for threads in [2usize, 3, 4, 8, 16] {
+            let mut par = vec![f64::NAN; sn.factor_val_count()];
+            let mut ctx = SupernodalContext::new();
+            supernodal_factorize(&sn, &a, &mut par, &mut ctx, Par::rayon(threads)).unwrap();
+            let (max_rel, pads) = compare_with_faer(&a, &sn, &par);
+            assert!(max_rel < 1e-12, "{name} threads {threads}: factor differs from faer's by {max_rel:.3e}");
+            assert_eq!(pads, 0, "{name} threads {threads}: padded entries not exactly zero");
+            assert!(same_factor(&sn, &seq, &par, 1e-12), "{name} threads {threads}: factor differs");
+            let mut x = rhs.clone();
+            supernodal_solve(&sn, &par, &mut x, &mut ctx);
+            assert!(same_solution(&x, &x_seq, 1e-9), "{name} threads {threads}: solution differs");
+        }
+
+        let a32 = to_f32(&a);
+        for threads in [3usize, 8] {
+            let mut par32 = vec![f32::NAN; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), Par::rayon(threads))
+                .unwrap();
+            let (max_rel, pads) = compare_with_faer(&a32, &sn, &par32);
+            assert!(max_rel < 1e-4, "f32 {name} threads {threads}: factor differs from faer's f32 by {max_rel:.3e}");
+            assert_eq!(pads, 0);
+        }
+    }
 }
