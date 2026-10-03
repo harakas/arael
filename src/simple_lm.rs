@@ -267,7 +267,8 @@ pub struct LmConfig<T: Float> {
     /// bit. Of the linear backends only `SparseFaer` reads the count. Its
     /// Schur reduction and back-substitution run on arael's own workers,
     /// one range of the reduced system's block columns each, and give the
-    /// same answer at any count; the analysis is sequential.
+    /// same answer at any count; of the analysis, the route pricing's
+    /// symbolic factorizations run side by side, the rest is sequential.
     pub num_threads: usize,
     /// Threads for a `par` root's cost and assembly sweeps alone, when
     /// they want a count of their own. `None` (the default) leaves them on
@@ -5698,6 +5699,12 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             self.ordering,
             FaerOrdering::Auto | FaerOrdering::MarginalizeFirst
         ) && !named.is_empty();
+        let sn_params = arael_faer::supernodal::SupernodalParams {
+            batch_ratio: self.sn_batch_ratio,
+            ..self.sn_params_base()
+        };
+        // The symbolic of the winning order, when pricing built it already.
+        let mut priced: Option<arael_faer::supernodal::SupernodalSymbolic> = None;
         let block_order: Option<Vec<usize>> = match self.ordering {
             _ if block_order_in.is_some() => block_order_in,
             FaerOrdering::NestedDissection => Some(arael_faer::nd::order_graph(
@@ -5745,12 +5752,14 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                     }
                 }
                 let amd = arael_faer::supernodal::amd_block_order(&hsym);
-                let sn_params = arael_faer::supernodal::SupernodalParams::default();
                 // Detected-first leads, so it keeps a tie, as it always has.
+                // Priced with the route's own parameters, so the winner's
+                // symbolic is the one the route factors with.
                 let choice = arael_faer::supernodal::cheapest_block_order(
                     &hsym,
                     &sn_params,
                     vec![det_first, amd],
+                    self.ctx.threads(),
                 );
                 let (f_det, f_amd) = match &choice {
                     Some(c) => (c.flops[0], c.flops[1]),
@@ -5770,19 +5779,22 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 }
                 // No candidate produced a symbolic at all: leave the order
                 // unset and let the factorization below report the failure.
-                choice.map(|c| c.order)
+                choice.map(|c| {
+                    priced = Some(c.symbolic);
+                    c.order
+                })
             }
             _ => Some(arael_faer::supernodal::amd_block_order(&hsym)),
         };
-        let sn = arael_faer::supernodal::SupernodalSymbolic::new(
-            &hsym,
-            block_order.as_deref(),
-            &arael_faer::supernodal::SupernodalParams {
-                batch_ratio: self.sn_batch_ratio,
-                ..self.sn_params_base()
-            },
-        )
-        .map_err(|_| SolveError::SymbolicFactorization { reduced: false })?;
+        let sn = match priced {
+            Some(sn) => sn,
+            None => arael_faer::supernodal::SupernodalSymbolic::new(
+                &hsym,
+                block_order.as_deref(),
+                &sn_params,
+            )
+            .map_err(|_| SolveError::SymbolicFactorization { reduced: false })?,
+        };
         self.sn_factor.resize(sn.factor_val_count(), T::zero());
         self.sn_active = true;
         self.envelope_active = false;
@@ -6392,7 +6404,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         {
             use faer::sparse::linalg::cholesky::*;
             let supernodal = self.supernodal;
-            let analyze = |col_ptr: &[SparseIndex], row_idx: &[SparseIndex], dim: usize, ordering| {
+            let analyze = |col_ptr: &[SparseIndex],
+                           row_idx: &[SparseIndex],
+                           dim: usize,
+                           ordering: SymmetricOrdering<'_, SparseIndex>| {
                 let r = faer::sparse::SymbolicSparseColMatRef::new_checked(
                     dim, dim, col_ptr, None, row_idx,
                 );
@@ -6402,27 +6417,54 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let s_pat = schur.s.csc_pattern();
             let h_pat = hsym.csc_pattern();
             let nk = schur.s.nrows();
-            let t0 = vb.then(Instant::now);
             let s_ord = match &nd {
                 Some(nd) => SymmetricOrdering::Custom(nd.perm()),
                 None => ordering_for(s_pat.0.last().copied().unwrap_or(0) as usize, nk, band).faer(),
             };
-            let s_llt = analyze(&s_pat.0, &s_pat.1, nk, s_ord);
-            t_sym_reduced = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
-            let t0 = vb.then(Instant::now);
-            let h_amd = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
-            t_amd_full = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
-            // The whole route costs what its BEST ordering costs, and AMD is
-            // not always that. A trajectory that revisits -- a loop closure,
-            // a figure-8 crossing -- leaves a separator structure nested
-            // dissection exploits and AMD does not, and pricing the reduction
-            // against the worse of the two hands it the comparison.
-            let t0 = vb.then(Instant::now);
-            let nd_full = arael_faer::nd::NestedDissection::of_blocks(
-                &hsym, arael_faer::nd::NdParams::default(),
-            );
-            let h_nd = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Custom(nd_full.perm()));
-            t_nd_full = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
+            let ms = |t0: Option<Instant>| t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
+            // The three analyses: the reduced system under its ordering,
+            // and the whole system under AMD and under nested dissection --
+            // the whole route costs what its BEST ordering costs, and AMD
+            // is not always that. A trajectory that revisits -- a loop
+            // closure, a figure-8 crossing -- leaves a separator structure
+            // nested dissection exploits and AMD does not, and pricing the
+            // reduction against the worse of the two hands it the
+            // comparison. They are independent of each other, so with
+            // threads they run side by side on the pool.
+            let price_s = || {
+                let t0 = vb.then(Instant::now);
+                (analyze(&s_pat.0, &s_pat.1, nk, s_ord), ms(t0))
+            };
+            let price_amd = || {
+                let t0 = vb.then(Instant::now);
+                (analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd), ms(t0))
+            };
+            let price_nd = || {
+                let t0 = vb.then(Instant::now);
+                let nd_full = arael_faer::nd::NestedDissection::of_blocks(
+                    &hsym, arael_faer::nd::NdParams::default(),
+                );
+                let h_nd =
+                    analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Custom(nd_full.perm()));
+                (nd_full, h_nd, ms(t0))
+            };
+            let (s_llt, h_amd, nd_full, h_nd);
+            if self.ctx.threads() > 1 {
+                use std::sync::Mutex;
+                let (out_s, out_amd, out_nd) = (Mutex::new(None), Mutex::new(None), Mutex::new(None));
+                arael_faer::pool::run(3, &|i| match i {
+                    0 => *out_s.lock().unwrap() = Some(price_s()),
+                    1 => *out_amd.lock().unwrap() = Some(price_amd()),
+                    _ => *out_nd.lock().unwrap() = Some(price_nd()),
+                });
+                (s_llt, t_sym_reduced) = out_s.into_inner().unwrap().unwrap();
+                (h_amd, t_amd_full) = out_amd.into_inner().unwrap().unwrap();
+                (nd_full, h_nd, t_nd_full) = out_nd.into_inner().unwrap().unwrap();
+            } else {
+                (s_llt, t_sym_reduced) = price_s();
+                (h_amd, t_amd_full) = price_amd();
+                (nd_full, h_nd, t_nd_full) = price_nd();
+            }
             // Whichever ordering the whole route would actually run under.
             let (h_llt, nd_won) = match (h_amd, h_nd) {
                 (Some(a), Some(d)) => {

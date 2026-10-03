@@ -20,9 +20,9 @@ use arael_faer::faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use arael_faer::faer::{Par, Side};
 use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::{
-    amd_block_order, nd_block_order, supernodal_factorize, supernodal_solve,
-    supernodal_solve_multi, SupernodalContext, SupernodalError, SupernodalParams,
-    SupernodalSymbolic,
+    amd_block_order, cheapest_block_order, nd_block_order, supernodal_factorize,
+    supernodal_solve, supernodal_solve_multi, SupernodalContext, SupernodalError,
+    SupernodalParams, SupernodalSymbolic,
 };
 use arael_faer::SparseIndex;
 
@@ -953,4 +953,38 @@ fn windowed_panels_agree_at_every_thread_count() {
             assert_eq!(pads, 0);
         }
     }
+}
+
+/// Candidates priced side by side pick the winner the one-by-one pricing
+/// picks, with the same flops and the same factor out of the kept
+/// symbolic.
+#[test]
+fn candidates_priced_on_threads_pick_the_same_winner() {
+    let sym = random_structure(260, 9, 4, 43);
+    let (a, _, _) = spd_on(sym.clone(), 43, 2.0);
+    let nblk = sym.nblk_cols();
+    let candidates = || vec![(0..nblk).collect::<Vec<usize>>(), amd_block_order(&sym), nd_block_order(&sym)];
+    let one = cheapest_block_order(&sym, &SupernodalParams::default(), candidates(), 1).unwrap();
+    for threads in [2usize, 3, 8] {
+        let par = cheapest_block_order(&sym, &SupernodalParams::default(), candidates(), threads).unwrap();
+        assert_eq!(par.winner, one.winner, "{threads} threads");
+        assert_eq!(par.flops, one.flops, "{threads} threads");
+        assert_eq!(par.order, one.order, "{threads} threads");
+        assert_eq!(par.symbolic.factor_val_count(), one.symbolic.factor_val_count(), "{threads} threads");
+        let mut f1 = vec![f64::NAN; one.symbolic.factor_val_count()];
+        let mut f2 = vec![f64::NAN; par.symbolic.factor_val_count()];
+        supernodal_factorize(&one.symbolic, &a, &mut f1, &mut SupernodalContext::new(), Par::Seq).unwrap();
+        supernodal_factorize(&par.symbolic, &a, &mut f2, &mut SupernodalContext::new(), Par::Seq).unwrap();
+        assert!(same_factor_seq(&one.symbolic, &f1, &f2), "{threads} threads: the kept symbolic differs");
+    }
+}
+
+/// The lower triangles of two factors, entry by entry, to the bit: the
+/// same symbolic on one thread twice.
+fn same_factor_seq(sn: &SupernodalSymbolic, a: &[f64], b: &[f64]) -> bool {
+    (0..sn.n_supernodes()).all(|s| {
+        let (q, h) = sn.supernode_dims(s);
+        let base = sn.panel_range(s).start;
+        (0..q).all(|c| (c..h).all(|r| a[base + c * h + r] == b[base + c * h + r]))
+    })
 }
