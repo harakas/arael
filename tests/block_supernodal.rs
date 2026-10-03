@@ -254,7 +254,7 @@ fn auto_default_takes_the_supernodal_route() {
 /// mirrors sums each entity per thread and then across the threads, so
 /// it matches to rounding rather than to the bit. (Meaningful only with
 /// the rayon feature -- without it num_threads collapses to sequential.)
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn threads_do_not_change_the_supernodal_route_or_its_answer() {
     let solve = |num_threads| {

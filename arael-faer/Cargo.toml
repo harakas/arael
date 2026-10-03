@@ -23,9 +23,11 @@ categories = ["mathematics", "science", "algorithms"]
 x86-v4 = ["nano-gemm/x86-v4"]
 
 # faer's threaded kernels, and with them the supernodal factorization's own
-# subtree parallelism. Off by default: everything here is sequential unless
-# the caller asks for threads.
-rayon = ["faer/rayon"]
+# subtree and window parallelism. Off by default: everything here runs
+# sequentially whatever thread count the caller passes.
+threads = ["faer/rayon"]
+# The feature's name through 0.8; the same thing.
+rayon = ["threads"]
 
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }

@@ -399,7 +399,7 @@ fn data_ref_shapes_solve_agree() {
 // The mirror path binds the data refs of every shape like the
 // sequential sweep: the threaded solves land where the sequential ones
 // do.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn data_ref_shapes_agree_threaded() {
     use arael::simple_lm::{self, LmConfig};

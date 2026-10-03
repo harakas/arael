@@ -710,7 +710,7 @@ fn covariance_of_a_triplet_model_needs_no_prior_assembly() {
         "fresh {} vs primed {}", got[(1, 1)], want[(1, 1)]);
 }
 
-/// The same `coo` model as a `par` root: covariance runs on one store
+/// The same `coo` model as a threaded root: covariance runs on one store
 /// whatever the root can thread, and answers the same.
 #[arael::model]
 #[arael(root)]

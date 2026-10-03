@@ -1,6 +1,6 @@
 // The model forms the threaded sweeps used to refuse.
 //
-// `par` once rejected a list of shapes at compile time, because the mirror
+// The threaded sweeps once rejected a list of shapes at compile time, because the mirror
 // path re-derived the model in a second vocabulary and only covered some of
 // it. The sweeps walk the model's own structure now, so there is nothing
 // left to reject -- but nothing exercised these shapes threaded either.
@@ -10,7 +10,7 @@
 // Self blocks are summed per range and then across ranges, so they match to
 // rounding rather than to the bit; cross tiles have one writer and match
 // exactly.
-#![cfg(feature = "rayon")]
+#![cfg(feature = "threads")]
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
@@ -1072,7 +1072,7 @@ fn an_aliased_coo_constraint_threads() {
 }
 
 // ===========================================================================
-// An f32 `par` root
+// An f32 threaded root
 // ===========================================================================
 
 #[arael::model]

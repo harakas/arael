@@ -409,7 +409,7 @@ fn forest_and_isolated_blocks() {
 
 /// The parallel path on a forest: two disconnected random components give
 /// the cut two roots to work under.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn forest_and_isolated_blocks_threaded() {
     let comp = 300usize;
@@ -584,7 +584,7 @@ fn an_empty_matrix_factors_to_nothing() {
         let mut x: Vec<f64> = Vec::new();
         supernodal_solve(&sn, &factor, &mut x, &mut ctx);
         supernodal_solve_multi(&sn, &factor, &mut x, 3, &mut ctx);
-        #[cfg(feature = "rayon")]
+        #[cfg(feature = "threads")]
         supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::rayon(4)).unwrap();
     }
     let sn = SupernodalSymbolic::new(&sym, Some(&[]), &SupernodalParams::default()).unwrap();
@@ -681,7 +681,7 @@ fn late_indefiniteness_is_rejected() {
 
 /// Two disconnected random components: enough independent subtrees for the
 /// parallel path to split at any thread count.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 fn two_components(comp: usize, seed: u64) -> SymbolicSparseBlockColMat<SparseIndex> {
     let mut rng = Lcg(seed);
     let mut part: Vec<SparseIndex> = vec![0];
@@ -705,7 +705,7 @@ fn two_components(comp: usize, seed: u64) -> SymbolicSparseBlockColMat<SparseInd
 
 /// The lower triangles of two factors agree entry by entry to `tol`,
 /// relative.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 fn same_factor<T: SchurReal>(sn: &SupernodalSymbolic, a: &[T], b: &[T], tol: f64) -> bool {
     (0..sn.n_supernodes()).all(|s| {
         let (q, h) = sn.supernode_dims(s);
@@ -720,7 +720,7 @@ fn same_factor<T: SchurReal>(sn: &SupernodalSymbolic, a: &[T], b: &[T], tol: f64
 }
 
 /// Two solutions agree entry by entry to `tol`, relative.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 fn same_solution(a: &[f64], b: &[f64], tol: f64) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol * (1.0 + x.abs()))
 }
@@ -728,7 +728,7 @@ fn same_solution(a: &[f64], b: &[f64], tol: f64) -> bool {
 /// Every thread count factors what the sequential path does, to
 /// rounding, run after run, in f64 and f32; the sequential factor
 /// matches faer's.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn every_thread_count_matches_the_sequential_factor() {
     for (comp, seed) in [(150usize, 21u64), (300, 22)] {
@@ -770,7 +770,7 @@ fn every_thread_count_matches_the_sequential_factor() {
 
 /// A chain gives the cut nothing to split: with threads asked for, the
 /// sequential path runs with threaded dense kernels and still matches faer.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn a_declined_cut_factors_sequentially_under_threads() {
     let nblk = 200usize;
@@ -792,7 +792,7 @@ fn a_declined_cut_factors_sequentially_under_threads() {
 /// sequential one, from a poisoned diagonal and from indefiniteness that
 /// only shows after the updates; the poison sits in several places so that
 /// some of them land in a worker's chunk and some in the top.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn a_failure_inside_a_worker_is_reported() {
     let sym = two_components(200, 21);
@@ -879,7 +879,7 @@ fn windowed_panels_match_faer() {
 
 /// Two bands that meet in a dense tail: two subtrees for the cut, and a
 /// top wide enough to be windowed.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 fn two_bands_and_a_tail(nb: usize, band: usize, tail: usize) -> SymbolicSparseBlockColMat<SparseIndex> {
     let nblk = 2 * nb + tail;
     let part: Vec<SparseIndex> = (0..=nblk as SparseIndex).map(|b| b * 6).collect();
@@ -904,7 +904,7 @@ fn two_bands_and_a_tail(nb: usize, band: usize, tail: usize) -> SymbolicSparseBl
 /// chain, which the cut declines and whose panels the threads share
 /// window by window; on two subtrees under a windowed top; and on a
 /// random structure.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn windowed_panels_agree_at_every_thread_count() {
     let chain = band(70, 30);

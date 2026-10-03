@@ -217,7 +217,7 @@ LmConfig {
     parameter_tolerance: None,  // stop when |step| <= tol * (|x| + tol)
     min_diagonal:    None,   // floor under the damping scale
     time_limit:      None,   // wall-clock budget; None = no limit
-    num_threads:     1,      // threads for the linear solve (needs `rayon`)
+    num_threads:     1,      // threads for the linear solve and the sweeps (needs `threads`)
     verbose:         false,  // print per-iteration trace to stderr
     gather_timing:   false,  // collect per-phase timing into LmResult::timing
 }
@@ -236,7 +236,7 @@ LmConfig {
 | `parameter_tolerance` | `None` | `Option<T>`. Stop when `\|step\|_2 <= tol * (\|x\|_2 + tol)` -- the parameters have stopped moving. A different question from the cost test: the cost can plateau while the step still does real work, and the step can vanish while the cost still creeps. Checked on an accepted step, before `advance()` re-centers. Respects `min_iters` |
 | `min_diagonal` | `None` | `Option<T>`. Floor under the DAMPING scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`. `None` leaves the scale at `H[i,i]` -- the classic multiplicative damping `(1 + lambda) * H[i,i]`. **Without it a parameter of zero curvature FAILS the solve** (`Err` with `SolveFailureKind::DegenerateDiagonal`) -- `(1 + lambda) * 0` is still 0, so the system is singular and no step can ever be accepted. With it, that parameter gets `lambda * min_diagonal` of damping, the factorization succeeds, and it simply does not move (its gradient is zero too). **A zero diagonal means the system is badly formulated -- a parameter nothing constrains -- so this is a bandaid and should be avoided**; the parameter it damps through stays unconstrained and its value is meaningless. Fix the model first: constrain it, hold it fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when a residual can legitimately switch itself off (a `branch` guarding an undefined observation, a saturated robustifier) and an entity can end one iteration with nothing reaching it. 1e-6 is reasonable. Rescues a ZERO diagonal only: NEGATIVE and NaN stay fatal, since `J^T J`'s diagonal is a sum of squares and either value means the assembly is poisoned |
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
-| `num_threads` | `1` | threads for the linear solve and for the cost and assembly sweeps. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
+| `num_threads` | `1` | threads for the linear solve and for the cost and assembly sweeps. `1` sequential, `n` uses n, `0` uses every core. **Requires the `threads` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
 | `assembly_threads` | `None` | `Option<usize>`. A thread count for the cost and assembly sweeps alone. `None` leaves them on `num_threads`; `Some(n)` gives the sweeps `n` and leaves the linear solve on `num_threads`. Same scale. The sweeps split by constraint count and the factorization by its elimination tree, so the count that suits one need not suit the other |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 | `observer` | `None` | an [`LmObserver`](#iteration-observer) called once per damped attempt; can stop the solve. Set with `with_observer` |
@@ -651,13 +651,13 @@ derivatives, and only a finite-difference comparison sees them disagree.
 
 ## Threads
 
-Off by default: arael is a single-threaded solver. The `rayon` feature runs
+Off by default: arael is a single-threaded solver. The `threads` feature runs
 the linear solve on rayon's global thread pool, and the cost and assembly
 sweeps on arael's own worker threads.
 
 ```toml
 [dependencies]
-arael = { version = "0.7", features = ["rayon"] }
+arael = { version = "0.9", features = ["threads"] }
 ```
 
 ```rust,ignore
@@ -687,8 +687,6 @@ threaded:
 #[arael(root, seq)]
 struct Scene { .. }
 ```
-
-The `par` keyword is accepted and means nothing.
 
 A solve divides every top-level collection into one contiguous range per
 thread, and each thread sweeps its own ranges into its own **store**: a

@@ -3870,7 +3870,7 @@ fn add_param_symbols(base: &str, sft: &SymFieldType, out: &mut Vec<String>) {
 /// Generate `calc_cost` and `calc_grad_hessian` methods on the root struct.
 /// `precision` is "f32" or "f64".
 /// A statement of the block assembly as emitted for the sequential sweep
-/// and for the split-store sweep of a `par` root: shared, sequential only, or
+/// and for the split-store sweep of a threaded root: shared, sequential only, or
 /// one form each.
 enum GhStmt {
     Both(TokenStream2),
@@ -6299,7 +6299,7 @@ pub fn generate_root_methods(
         if let Some(q) = &off_guard { all_gh_exprs.push(q.clone()); }
         let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
 
-        // The sequential sweep's statements and, for a `par` root, the
+        // The sequential sweep's statements and, for a threaded root, the
         // split-store sweep's: the same computes, the writes into the
         // store's slots, and no rereads (the model is never written there).
         let mut gh: Vec<GhStmt> = Vec::new();

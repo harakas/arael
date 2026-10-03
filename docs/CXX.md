@@ -94,7 +94,7 @@ else
 
 `LmConfig` mirrors the Rust struct field for field, `num_threads` and
 `assembly_threads` included; both take effect when the exported crate is
-built with arael's `rayon` feature ([docs/SOLVERS.md](SOLVERS.md#threads)).
+built with arael's `threads` feature ([docs/SOLVERS.md](SOLVERS.md#threads)).
 A threaded solve leaves arael's sweep workers parked for the life of the
 process; `pool_shutdown()` in the model's namespace joins them, and the
 next threaded solve spawns them again.

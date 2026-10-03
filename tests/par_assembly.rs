@@ -1,5 +1,5 @@
 // The threaded cost and assembly sweeps over per-thread block stores,
-// which a `par` root gets under the `rayon` feature, must agree with the
+// which every root gets under the `threads` feature, must agree with the
 // sequential sweeps. A split store sums each entity's contributions in
 // its own range and the gather adds the ranges, so self blocks match to
 // rounding, not to the bit; cross tiles have one writer and match
@@ -11,8 +11,8 @@
 // an arena (with a robust loss), a remote block through an Option and
 // one nested under a parent, a three-entity multi-cross constraint, and
 // a constraint on the root's own parameter. The stores live in a solve `Context`, never in the
-// root. A root without `par` keeps one store at any thread count.
-#![cfg(feature = "rayon")]
+// root. A `seq` root keeps one store at any thread count.
+#![cfg(feature = "threads")]
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
@@ -135,10 +135,9 @@ struct Web {
 }
 
 // A root with a parameter of its own and a constraint on it: the root is
-// an entity of the store too. The `par` keyword is accepted and means
-// nothing: the threaded sweeps are the default under `rayon`.
+// an entity of the store too.
 #[arael::model]
-#[arael(root, par)]
+#[arael(root)]
 #[arael(constraint(hb, {
     [(knob.scale - 1.5) * knob.anchor]
 }))]
@@ -177,7 +176,7 @@ struct Loose {
     spring: f64,
 }
 
-// The same shape asking for `par`. Each store keeps its own COO list, so
+// The same shape with a COO constraint. Each store keeps its own COO list, so
 // this threads like any other root and must land on the sequential
 // answer.
 #[arael::model]
@@ -191,7 +190,7 @@ struct Knot {
     spring: f64,
 }
 
-// A `par` root with extended hooks: the sweeps thread, and the hooks run
+// A threaded root with extended hooks: the sweeps thread, and the hooks run
 // on the calling thread on either side of the region.
 #[arael::model]
 #[arael(root, extended)]
@@ -456,7 +455,7 @@ fn the_split_holds_every_cross_block_once() {
     w.serialize(&mut x);
     let mut one = context(1);
     w.begin_with_context(&mut one);
-    let r1 = one.sweeps().expect("a par root reports its sweeps");
+    let r1 = one.sweeps().expect("a threaded root reports its sweeps");
     let held1 = arael::store::StoreFootprint::sum(&r1.held);
     assert_eq!(r1.held.len(), 1);
     assert_eq!(held1.cross_blocks, r1.whole.cross_blocks);
@@ -875,7 +874,7 @@ fn a_fixed_root_param_matches_sequential() {
     assert_close("hessian", &h1, &h2, 1e-12);
 }
 
-/// A `par` root with a `coo` constraint threads like any other: each
+/// A threaded root with a `coo` constraint threads like any other: each
 /// store keeps its own COO list, so the sweeps split and the answer is
 /// the sequential one.
 #[test]
@@ -926,7 +925,7 @@ fn a_triplet_root_threads_its_sweeps() {
     assert!(!p.threads.fell_back(), "and does not report a fallback: {}", p.report());
 }
 
-/// A `par` root with `extended` hooks: the sweeps thread over their
+/// A threaded root with `extended` hooks: the sweeps thread over their
 /// stores and the hooks run once each on the calling thread, so the
 /// assembly matches the sequential one and carries the hook's cost and
 /// gradient.
@@ -997,7 +996,7 @@ fn an_extended_root_threads_its_sweeps() {
     assert_close("x", &s.x, &p.x, 1e-6);
 }
 
-/// Every backend assembles through the solve context, so a `par` root's
+/// Every backend assembles through the solve context, so a threaded root's
 /// assembly sweeps thread on the dense route exactly as they do on the
 /// sparse one.
 #[test]
@@ -1005,7 +1004,7 @@ fn the_dense_route_threads_its_assembly() {
     let cfg = LmConfig::<f64> { max_iters: 4, num_threads: 4, ..Default::default() };
     let r = build(24).solve_dense(&cfg).unwrap();
     let rep = r.report();
-    let s = r.threads.sweeps.expect("a par root reports its sweeps");
+    let s = r.threads.sweeps.expect("a threaded root reports its sweeps");
     assert!(s.cost.threaded, "the cost sweeps thread: {}", rep);
     assert!(s.assembly.threaded, "and so do the assembly sweeps: {}", rep);
 }
@@ -1037,7 +1036,7 @@ fn set_threads_without_begin_builds_one_store() {
     assert_eq!(ctx.blocks_list::<WebBlocks>().map(|v| v.len()), Some(4));
 }
 
-/// A `par` root whose hook pushes COO entries: the sweeps thread over
+/// A threaded root whose hook pushes COO entries: the sweeps thread over
 /// their stores, the hook's entries follow store 0's in the stream, and
 /// the pattern is discovered by a compute on every route.
 #[arael::model]

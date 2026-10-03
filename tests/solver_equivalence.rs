@@ -366,9 +366,9 @@ fn band_lapack_f32_matches_band() {
     }
 }
 
-/// Threaded faer factorization (`num_threads > 1`, `rayon` feature) must
+/// Threaded faer factorization (`num_threads > 1`, `threads` feature) must
 /// reach the same minimizer as the single-threaded solve.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn threaded_faer_matches_single_thread() {
     let run = |threads: usize| -> std::vec::Vec<f64> {

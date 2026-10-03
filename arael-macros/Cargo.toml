@@ -15,8 +15,8 @@ proc-macro = true
 
 [features]
 # Generate the threaded sweeps over per-thread block stores for every root.
-# Enabled by arael's `rayon` feature; not meant to be set by hand.
-rayon = []
+# Enabled by arael's `threads` feature; not meant to be set by hand.
+threads = []
 
 [dependencies]
 syn = { version = "2", features = ["full", "visit-mut"] }
