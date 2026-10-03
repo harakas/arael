@@ -7186,18 +7186,6 @@ pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, 
     lm_solve(x0, &mut SparseFaerF32::new(), problem, config)
 }
 
-/// Renamed: the default sparse solve now carries the plain name.
-#[deprecated(since = "0.7.3", note = "renamed to `solve_sparse`")]
-pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    solve_sparse(x0, problem, config)
-}
-
-/// Renamed: the default sparse solve now carries the plain name.
-#[deprecated(since = "0.7.3", note = "renamed to `solve_sparse_f32`")]
-pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    solve_sparse_f32(x0, problem, config)
-}
-
 // ---------------------------------------------------------------------------
 // SparseEigen / SparseCholmod — Eigen sparse Cholesky via C++ FFI
 // ---------------------------------------------------------------------------

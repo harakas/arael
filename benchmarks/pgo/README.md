@@ -219,8 +219,8 @@ gcc 13.3.0 on Ubuntu 24.04 aarch64.
 
 ## Precision
 
-arael solves the same models in f64 and f32 (`solve_sparse_faer` /
-`solve_sparse_faer_f32`), selected per model, both precisions in one
+arael solves the same models in f64 and f32 (`solve_sparse` /
+`solve_sparse_f32`), selected per model, both precisions in one
 binary; both rows are validated against the common optimum. Among the
 competitors only factrs offers single precision, as a crate-global
 `f32` feature (one precision per build -- hence the separate

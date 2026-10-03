@@ -1098,13 +1098,6 @@ impl<T> Arena<T> {
             Some(Cell { slot: Slot::Occupied(_), generation }) if *generation == r.generation())
     }
 
-    /// Deprecated alias for [`contains_ref`](Self::contains_ref) (renamed to
-    /// match `Deque::contains_ref`).
-    #[deprecated(note = "renamed to `contains_ref`")]
-    pub fn contains(&self, r: Ref<T>) -> bool {
-        self.contains_ref(r)
-    }
-
     /// Returns a reference to the element at `r`, or `None` if removed or out of bounds.
     pub fn get(&self, r: Ref<T>) -> Option<&T> {
         match self.slots.get(r.index() as usize) {
