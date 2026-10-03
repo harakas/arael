@@ -339,13 +339,13 @@ impl<T: Sync + ?Sized> SweepsInParallel for T {}
 
 /// Run `f` over every store with the model, told which store it is so it
 /// can take its own row of the cut: one task per store on the sweep
-/// workers ([`crate::pool`]) when `par`, else in order on the calling
+/// workers ([`crate::pool`]) when threaded, else in order on the calling
 /// thread. The two forms do the same arithmetic in the same order per
 /// store -- the region is what changes, not the work.
 pub fn run_indexed<Mo: Sync + ?Sized, M: Send>(
     model: &Mo, par: bool, stores: &mut [M], f: impl Fn(&Mo, usize, &mut M) + Sync,
 ) {
-    #[cfg(feature = "rayon")]
+    #[cfg(feature = "threads")]
     if par {
         crate::pool::run_over(stores, |i, m| f(model, i, m));
         return;

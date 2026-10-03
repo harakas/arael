@@ -2406,9 +2406,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             cost_kahan = true;
                         } else if kw_str == "cost_f64" {
                             cost_f64 = true;
-                        } else if kw_str == "par" {
-                            // Accepted and means nothing: the threaded
-                            // sweeps are the default under `rayon`.
                         } else if kw_str == "seq" {
                             seq = true;
                         } else if kw_str == "marginalize" {
@@ -2438,7 +2435,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `par`, `seq`, or `marginalize(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `seq`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -2642,10 +2639,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let constraint_impls = if let Some(ref precision) = root_precision {
         // The threaded sweeps over per-thread block stores are the
-        // default when arael is built with the `rayon` feature; a root
+        // default when arael is built with the `threads` feature; a root
         // opts out with `seq`. Without the feature, or with the keyword,
         // the root keeps one store and is the sequential one.
-        let par = !root_seq && cfg!(feature = "rayon");
+        let par = !root_seq && cfg!(feature = "threads");
         constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64,

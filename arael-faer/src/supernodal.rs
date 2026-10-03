@@ -1747,7 +1747,7 @@ pub fn supernodal_factorize<T: SchurReal>(
 
     let workers = match par {
         faer::Par::Seq => 1,
-        #[cfg(feature = "rayon")]
+        #[cfg(feature = "threads")]
         faer::Par::Rayon(n) => n.get(),
         #[allow(unreachable_patterns)]
         _ => 1,
@@ -2793,7 +2793,7 @@ mod tests {
     /// scratch without masking and the factor never reads: sequential
     /// reuses one scratch buffer across panels while each worker has its
     /// own, so that padding legitimately differs.
-    #[cfg(feature = "rayon")]
+    #[cfg(feature = "threads")]
     #[test]
     fn the_parallel_path_matches_the_sequential_one() {
         // extra=1 keeps the couplings sparse, like a trajectory: a denser

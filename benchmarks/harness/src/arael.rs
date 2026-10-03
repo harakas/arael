@@ -49,7 +49,7 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     /// benchmark that panics there loses every other row in the run.
     ///
     /// `ctx` is the row's solve context, one per model, kept across the
-    /// probes so what a solve reuses (a `par` root's mirrors) carries
+    /// probes so what a solve reuses (the root's block stores) carries
     /// over; pass it to `lm_solve_with_context`.
     fn solve(
         input: &Self::Input,
@@ -69,7 +69,7 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     fn inexact(_input: &Self::Input) -> bool { false }
 
     /// The threaded sweeps' timing of the last solve, read from the row's
-    /// context (a `par` root's mirrors' `timing`); printed under TIMING=1.
+    /// context (the context's sweep `timing`); printed under TIMING=1.
     fn par_timing(_ctx: &arael::threads::Context) -> Option<String> { None }
 }
 
@@ -106,7 +106,7 @@ pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scala
         gather_timing: true,
         // The same count every other system's pool was capped at (BENCH_THREADS,
         // resolved by pin::enforce_cores), so a threaded run stays a fair race.
-        // Needs arael built with the `rayon` feature, or it warns and runs
+        // Needs arael built with the `threads` feature, or it warns and runs
         // sequentially.
         num_threads: crate::pin::threads(),
         // The termination class every system in these benchmarks is held to.
@@ -171,7 +171,7 @@ pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     // One context for the row: the model is cloned per probe, the
-    // context is not, so a `par` root's mirrors carry over. Its phase
+    // context is not, so the block stores carry over. Its phase
     // timing runs only under TIMING, where it is printed.
     let mut ctx = arael::threads::Context::new();
     ctx.set_timing(std::env::var("TIMING").is_ok());

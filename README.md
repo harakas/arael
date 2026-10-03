@@ -546,7 +546,7 @@ reference and a recipe for picking them.
 
 ### Threads
 
-Arael is single-threaded by default. With the `rayon` feature the
+Arael is single-threaded by default. With the `threads` feature the
 factorization's dense kernels run on rayon's thread pool, and everything
 else that threads on arael's own worker threads, parked between dispatches:
 the cost evaluation and the assembly of the gradient and Hessian, each

@@ -1281,7 +1281,7 @@
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
-//! | `num_threads` | `1` | threads for the linear solve and the sweeps (needs the `rayon` feature). Measure first -- see below |
+//! | `num_threads` | `1` | threads for the linear solve and the sweeps (needs the `threads` feature). Measure first -- see below |
 //! | `assembly_threads` | `None` | a thread count for the cost and assembly sweeps alone; `None` leaves them on `num_threads` |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. Turn on first whenever debugging |
@@ -1329,11 +1329,11 @@
 //!
 //! ## Threads
 //!
-//! Arael is single-threaded by default. With the `rayon` feature the
+//! Arael is single-threaded by default. With the `threads` feature the
 //! factorization's dense kernels run on rayon's global pool:
 //!
 //! ```toml
-//! arael = { version = "0.7", features = ["rayon"] }
+//! arael = { version = "0.9", features = ["threads"] }
 //! ```
 //!
 //! ```no_run

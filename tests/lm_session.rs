@@ -499,7 +499,7 @@ fn empty_solve_is_a_no_op() {
 /// Changing num_threads between warm solves re-sizes the factorization
 /// scratch (it is sized per Par); the solve must run and agree with the
 /// single-threaded answer.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn thread_count_change_between_warm_solves() {
     let mut session = LmSession::new(SparseFaer::new());
@@ -518,7 +518,7 @@ fn thread_count_change_between_warm_solves() {
     }
 }
 
-// --- the same model as a `par` root: its pattern is bound per store ---
+// --- the same model as a threaded root: its pattern is bound per store ---
 
 #[arael::model]
 #[arael(root)]
@@ -529,17 +529,17 @@ struct WorldPar {
     obs: std::vec::Vec<Obs>,
 }
 
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 fn build_par(off: f64) -> WorldPar {
     let w = build(off);
     WorldPar { poses: w.poses, landmarks: w.landmarks, odos: w.odos, obs: w.obs }
 }
 
-/// A `par` root's cached pattern serves the store count it was built
+/// A threaded root's cached pattern serves the store count it was built
 /// over, so the session pins the sweep thread count of its first solve:
 /// a later solve asking for another count runs at the pinned one (with a
 /// warning), and lands where a cold solve does. `invalidate` releases it.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn a_par_root_keeps_its_store_count_across_warm_solves() {
     let stores = |r: &LmResult<f64>| r.threads.sweeps.as_ref().map(|s| s.threads);

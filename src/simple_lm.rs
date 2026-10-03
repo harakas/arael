@@ -252,11 +252,11 @@ pub struct LmConfig<T: Float> {
     /// non-positive-definite damped systems and catastrophic Gauss-Newton
     /// overshoots along the near-null directions.
     pub lambda_floor: T,
-    /// Threads for the linear solve, and for the cost and assembly sweeps
-    /// of a `#[arael(root, par)]` model. `1` (the default) is sequential;
+    /// Threads for the linear solve and for the cost and assembly sweeps.
+    /// `1` (the default) is sequential;
     /// `n > 1` uses `n`; `0` uses every core.
     ///
-    /// Requires the `rayon` cargo feature. Without it, anything other than 1 is
+    /// Requires the `threads` cargo feature. Without it, anything other than 1 is
     /// ignored with a warning and the solve stays sequential.
     ///
     /// Threading has overhead: whether it helps, and by how much, depends on the
@@ -270,7 +270,7 @@ pub struct LmConfig<T: Float> {
     /// same answer at any count; of the analysis, the route pricing's
     /// symbolic factorizations run side by side, the rest is sequential.
     pub num_threads: usize,
-    /// Threads for a `par` root's cost and assembly sweeps alone, when
+    /// Threads for the cost and assembly sweeps alone, when
     /// they want a count of their own. `None` (the default) leaves them on
     /// [`num_threads`](Self::num_threads); `Some(n)` gives the sweeps `n`
     /// and leaves the linear solve on `num_threads`. Same scale: `1` is
@@ -1768,15 +1768,15 @@ pub struct LmResult<T> {
 ///
 /// `sweeps` is `None` when the solve ran no generated sweep at all, and
 /// reports a single store when the model has no threaded sweep path:
-/// the root did not ask for one with `#[arael(root, par)]`, or arael was
-/// built without the `rayon` feature. Such a model assembles on one
-/// thread however many are asked for; its linear solve still threads.
+/// the root says `seq`, or arael was built without the `threads` feature.
+/// Such a model assembles on one thread however many are asked for; its
+/// linear solve still threads.
 /// [`fell_back`](ThreadReport::fell_back) is the test for that.
 #[derive(Clone, Debug, Default)]
 pub struct ThreadReport {
     /// Threads the cost and assembly sweeps were asked for
     /// ([`LmConfig::assembly_threads`], else [`LmConfig::num_threads`]),
-    /// resolved: 0 means every core, and without the `rayon` feature
+    /// resolved: 0 means every core, and without the `threads` feature
     /// every count is 1.
     pub sweeps_asked: usize,
     /// Threads the linear solve was given ([`LmConfig::num_threads`]),
@@ -2996,10 +2996,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     // below cannot fire: say that case separately, and only for
     // `assembly_threads`, since the linear solve's own warning already
     // covers `num_threads`.
-    #[cfg(not(feature = "rayon"))]
+    #[cfg(not(feature = "threads"))]
     if config.assembly_threads.is_some_and(|n| n != 1) {
-        warn!("LmConfig::assembly_threads is {}, but arael was built without the `rayon` \
-               feature -- assembling on one thread. Rebuild with --features rayon.",
+        warn!("LmConfig::assembly_threads is {}, but arael was built without the `threads` \
+               feature -- assembling on one thread. Rebuild with --features threads.",
             config.assembly_threads.unwrap());
     }
     if config.verbose {
@@ -3726,7 +3726,7 @@ pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem
 /// every count -- a ref rewired, a different problem of the same shape --
 /// passes it undetected. Call `invalidate` on every structural change.
 ///
-/// The sweep thread count is part of that structure: a `par` root's
+/// The sweep thread count is part of that structure: a threaded root's
 /// pattern is bound over one block store per thread, so the count the
 /// first solve used is fixed for the life of the session. A later solve
 /// asking for another count (`num_threads` or `assembly_threads`) is run at
@@ -4891,10 +4891,10 @@ impl BackendScalar for f32 {
 /// [`LmConfig::num_threads`] as a `faer::Par`. 1 is sequential, `n > 1` uses n,
 /// 0 uses every core. The whole cfg dance lives here so no call site repeats it.
 ///
-/// Without the `rayon` feature faer has no `Par::Rayon` variant at all, so a
+/// Without the `threads` feature faer has no `Par::Rayon` variant at all, so a
 /// request for threads cannot be honoured -- it warns and stays sequential
 /// rather than silently pretending.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 fn faer_par(num_threads: usize) -> faer::Par {
     match num_threads {
         1 => faer::Par::Seq,
@@ -4902,12 +4902,12 @@ fn faer_par(num_threads: usize) -> faer::Par {
     }
 }
 
-#[cfg(not(feature = "rayon"))]
+#[cfg(not(feature = "threads"))]
 fn faer_par(num_threads: usize) -> faer::Par {
     if num_threads != 1 {
         warn!(
-            "LmConfig::num_threads is {}, but arael was built without the `rayon` \
-             feature -- solving sequentially. Rebuild with --features rayon.",
+            "LmConfig::num_threads is {}, but arael was built without the `threads` \
+             feature -- solving sequentially. Rebuild with --features threads.",
             num_threads
         );
     }

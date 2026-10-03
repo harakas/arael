@@ -1,6 +1,6 @@
 //! The solve context and what it reports: the thread count of a solve,
 //! the block stores it keeps between solves, and where the threaded cost
-//! and assembly sweeps of a `#[arael(root, par)]` root spent their time.
+//! and assembly sweeps spent their time.
 //!
 //! A [`Context`] is what a caller holds across solves
 //! ([`LmSession`](crate::simple_lm::LmSession),
@@ -9,8 +9,8 @@
 //! no field for them, and the [`SweepReport`] a solve's result carries
 //! comes from it. The stores themselves, the cut that divides the walks
 //! among them and the accessors the generated code uses are the inner
-//! API in [`crate::store`]. Without the `rayon` feature, or without
-//! `par`, a solve has one store and it is the whole model.
+//! API in [`crate::store`]. Without the `threads` feature, or with
+//! `seq`, a solve has one store and it is the whole model.
 
 use std::time::Duration;
 use crate::store::{AnyStore, Cut};
@@ -289,16 +289,16 @@ impl Context {
 }
 
 /// The thread count a solve's `num_threads` setting means: 0 is the
-/// rayon pool's size. Without the `rayon` feature every count is 1.
+/// rayon pool's size. Without the `threads` feature every count is 1.
 pub fn pool_size(num_threads: usize) -> usize {
-    #[cfg(feature = "rayon")]
+    #[cfg(feature = "threads")]
     {
         match num_threads {
             0 => rayon::current_num_threads(),
             n => n,
         }
     }
-    #[cfg(not(feature = "rayon"))]
+    #[cfg(not(feature = "threads"))]
     {
         let _ = num_threads;
         1

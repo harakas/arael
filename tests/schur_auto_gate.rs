@@ -152,7 +152,7 @@ fn solve_on(n_lm: usize, num_threads: usize) -> (arael::simple_lm::SchurPlan, f6
 
 /// With threads the three analyses of the exact pricing run side by side;
 /// the plan they produce is the one the sequential pricing produces.
-#[cfg(feature = "rayon")]
+#[cfg(feature = "threads")]
 #[test]
 fn the_pricing_on_threads_reaches_the_same_plan() {
     let (one, cost_one) = solve(6);
