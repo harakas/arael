@@ -19,45 +19,45 @@
 # cancelled); first-iter is that same iteration plus the setup paid once.
 # Rows: arael first, then the rest, each group by full-iter ascending.
 PANELS = [
-    # The first three panels: 2026-08-05, min of 32 rounds at Ladybug-49, 8 at
+    # The first three panels: 2026-10-03, min of 32 rounds at Ladybug-49, 8 at
     # 138, 4 at 372.
     ("Ladybug-49 -- 23,769 params", 1, (60.0, 20.0), [
-        ("arael f32 Schur", 8.48, 11.39, "arael"),
-        ("arael f64 Schur", 10.42, 14.13, "arael"),
-        ("arael f32 sparse", 12.00, 29.62, "arael"),
-        ("arael f64 sparse", 15.42, 35.63, "arael"),
-        ("Ceres dense_schur", 19.88, 39.65, "other"),
-        ("g2o (Schur)", 20.22, 34.87, "other"),
-        ("Ceres sparse_schur", 20.42, 50.70, "other"),
+        ("arael f32 Schur", 7.21, 9.80, "arael"),
+        ("arael f64 Schur", 8.67, 11.93, "arael"),
+        ("arael f32 sparse", 10.35, 25.22, "arael"),
+        ("arael f64 sparse", 12.89, 27.94, "arael"),
+        ("Ceres dense_schur", 18.72, 37.01, "other"),
+        ("Ceres sparse_schur", 19.45, 48.01, "other"),
+        ("g2o (Schur)", 19.74, 32.91, "other"),
     ]),
     ("Ladybug-138 -- 60,876 params", 1, (200.0, 50.0), [
-        ("arael f32 Schur", 28.21, 38.39, "arael"),
-        ("arael f64 Schur", 40.37, 53.98, "arael"),
-        ("arael f32 sparse", 40.43, 92.76, "arael"),
-        ("arael f64 sparse", 54.05, 119.12, "arael"),
-        ("g2o (Schur)", 67.92, 124.02, "other"),
-        ("Ceres sparse_schur", 70.93, 170.59, "other"),
-        ("Ceres dense_schur", 76.59, 142.03, "other"),
+        ("arael f32 Schur", 25.17, 33.31, "arael"),
+        ("arael f64 Schur", 34.36, 42.62, "arael"),
+        ("arael f32 sparse", 36.46, 78.26, "arael"),
+        ("arael f64 sparse", 47.21, 90.71, "arael"),
+        ("g2o (Schur)", 67.42, 119.43, "other"),
+        ("Ceres sparse_schur", 69.47, 165.81, "other"),
+        ("Ceres dense_schur", 73.02, 134.34, "other"),
     ]),
     ("Ladybug-372 -- 145,617 params", 1, (800.0, 200.0), [
-        ("arael f32 Schur", 117.43, 161.61, "arael"),
-        ("arael f32 sparse", 139.18, 272.85, "arael"),
-        ("arael f64 Schur", 190.36, 247.42, "arael"),
-        ("arael f64 sparse", 213.06, 375.78, "arael"),
-        ("Ceres sparse_schur", 259.06, 556.56, "other"),
-        ("g2o (Schur)", 277.43, 427.21, "other"),
-        ("Ceres dense_schur", 459.18, 656.20, "other"),
+        ("arael f32 Schur", 115.71, 144.26, "arael"),
+        ("arael f32 sparse", 134.39, 249.80, "arael"),
+        ("arael f64 Schur", 177.61, 217.10, "arael"),
+        ("arael f64 sparse", 202.88, 324.57, "arael"),
+        ("Ceres sparse_schur", 261.19, 552.58, "other"),
+        ("g2o (Schur)", 275.77, 420.09, "other"),
+        ("Ceres dense_schur", 467.80, 643.84, "other"),
     ]),
-    # 2026-08-05, one round. Exploratory: no system meets the shared tolerances
+    # 2026-10-03, one round. Exploratory: no system meets the shared tolerances
     # here, and the f32 rows stop far above the plateau the f64 rows reach --
     # see the panel footnote.
     ("Ladybug-1723-clean -- 484,842 params (exploratory)", 0, (4500.0, 1500.0), [
-        ("arael f32 Schur", 995.23, 1156.64, "arael"),
-        ("arael f32 sparse", 1456.89, 1912.53, "arael"),
-        ("arael f64 Schur", 1714.16, 1926.34, "arael"),
-        ("arael f64 sparse", 2499.98, 2989.51, "arael"),
-        ("g2o (Schur)", 2291.90, 2926.35, "other"),
-        ("Ceres sparse_schur", 2913.95, 4136.18, "other"),
+        ("arael f32 Schur", 986.19, 1139.62, "arael"),
+        ("arael f32 sparse", 1436.12, 1843.05, "arael"),
+        ("arael f64 Schur", 1693.97, 1883.35, "arael"),
+        ("arael f64 sparse", 2469.42, 2892.48, "arael"),
+        ("g2o (Schur)", 2304.01, 2938.80, "other"),
+        ("Ceres sparse_schur", 2918.00, 4134.12, "other"),
     ]),
 ]
 
@@ -170,7 +170,8 @@ def arael_version():
             if 'name = "arael"' in text:
                 m = re.search(r'^version = "([^"]+)"', text, re.M)
                 if m:
-                    return m.group(1)
+                    # A dev tree's chart is for the release it is heading to.
+                    return m.group(1).removesuffix("-dev")
         root = os.path.dirname(root)
     raise SystemExit("cannot find the arael version in any parent Cargo.toml")
 
