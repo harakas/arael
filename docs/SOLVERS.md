@@ -778,7 +778,11 @@ products that land in them, and each thread forms its own columns and
 its own part of the reduced right-hand side. The back-substitution
 recovers the marginalized blocks in ranges the same way. Both sum in
 the same order at any thread count, so the reduced system is the same
-one. The analysis is sequential.
+one.
+
+Of the analysis, the exact pricing of the routes runs its three
+symbolic factorizations side by side, and the whole-system block route
+prices its candidate orderings the same way; the rest is sequential.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.

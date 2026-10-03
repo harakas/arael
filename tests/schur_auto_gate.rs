@@ -137,13 +137,34 @@ fn build(n_lm: usize) -> World {
 
 /// Returns (the plan, the end cost).
 fn solve(n_lm: usize) -> (arael::simple_lm::SchurPlan, f64) {
+    solve_on(n_lm, 1)
+}
+
+fn solve_on(n_lm: usize, num_threads: usize) -> (arael::simple_lm::SchurPlan, f64) {
     let mut w = build(n_lm);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
     let mut solver = SparseFaer::<f64>::new();
-    let cfg = LmConfig { max_iters: 60, ..Default::default() };
+    let cfg = LmConfig { max_iters: 60, num_threads, ..Default::default() };
     let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     (solver.plan().expect("a plan"), r.end_cost)
+}
+
+/// With threads the three analyses of the exact pricing run side by side;
+/// the plan they produce is the one the sequential pricing produces.
+#[cfg(feature = "rayon")]
+#[test]
+fn the_pricing_on_threads_reaches_the_same_plan() {
+    let (one, cost_one) = solve(6);
+    assert!(one.fill_ratio.is_some(), "this scene must price the routes exactly");
+    for threads in [2usize, 4] {
+        let (par, cost_par) = solve_on(6, threads);
+        assert_eq!(par.reduced, one.reduced, "{threads} threads");
+        assert_eq!(par.fill_ratio, one.fill_ratio, "{threads} threads");
+        assert_eq!(par.route_flops, one.route_flops, "{threads} threads");
+        assert_eq!(par.flop_ratio, one.flop_ratio, "{threads} threads");
+        assert!((cost_par - cost_one).abs() <= 1e-9 * (1.0 + cost_one.abs()), "{threads} threads: cost");
+    }
 }
 
 /// Few landmarks: the reduction removes almost nothing, so the routes must be

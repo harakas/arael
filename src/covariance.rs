@@ -753,7 +753,8 @@ fn block_order(
         CovOrdering::Auto => {
             let candidates = vec![sn::amd_block_order(hsym), sn::nd_block_order(hsym)];
             let n_candidates = candidates.len();
-            match sn::cheapest_block_order(hsym, params, candidates) {
+            // The covariance runs on one thread throughout.
+            match sn::cheapest_block_order(hsym, params, candidates, 1) {
                 Some(c) => {
                     let kept = if c.winner == 0 {
                         CovOrdering::Amd

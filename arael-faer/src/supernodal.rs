@@ -1019,6 +1019,8 @@ pub struct BlockOrderChoice {
 ///
 /// Earlier candidates win ties, so hand in the preferred ordering first.
 /// `None` when no candidate produced a symbolic factorization at all.
+/// With `threads > 1` the candidates are analysed side by side on
+/// [`crate::pool`].
 ///
 /// This is the one place that decides between orderings by price, so a solve
 /// and a covariance over the same matrix cannot reach different answers.
@@ -1026,23 +1028,26 @@ pub fn cheapest_block_order(
     a: &SymbolicSparseBlockColMat<SparseIndex>,
     params: &SupernodalParams,
     candidates: Vec<Vec<usize>>,
+    threads: usize,
 ) -> Option<BlockOrderChoice> {
-    let mut flops = vec![f64::INFINITY; candidates.len()];
-    let mut best: Option<(usize, SupernodalSymbolic)> = None;
-    for (i, order) in candidates.iter().enumerate() {
-        let Ok(s) = SupernodalSymbolic::new(a, Some(order), params) else {
-            continue;
-        };
-        flops[i] = s.flops();
-        let better = match &best {
-            None => true,
-            Some((b, _)) => flops[i] < flops[*b],
-        };
-        if better {
-            best = Some((i, s));
+    let mut symbolics: Vec<Option<SupernodalSymbolic>> = candidates.iter().map(|_| None).collect();
+    if threads > 1 && candidates.len() > 1 {
+        let mut tasks: Vec<(&Vec<usize>, &mut Option<SupernodalSymbolic>)> =
+            candidates.iter().zip(symbolics.iter_mut()).collect();
+        crate::pool::run_over(&mut tasks, |_, (order, out)| {
+            **out = SupernodalSymbolic::new(a, Some(order), params).ok();
+        });
+    } else {
+        for (order, out) in candidates.iter().zip(symbolics.iter_mut()) {
+            *out = SupernodalSymbolic::new(a, Some(order), params).ok();
         }
     }
-    let (winner, symbolic) = best?;
+    let flops: Vec<f64> =
+        symbolics.iter().map(|s| s.as_ref().map_or(f64::INFINITY, |s| s.flops())).collect();
+    let winner = (0..candidates.len())
+        .filter(|&i| symbolics[i].is_some())
+        .min_by(|&i, &j| flops[i].partial_cmp(&flops[j]).unwrap())?;
+    let symbolic = symbolics.swap_remove(winner).unwrap();
     let mut candidates = candidates;
     Some(BlockOrderChoice { order: std::mem::take(&mut candidates[winner]), symbolic, winner, flops })
 }
