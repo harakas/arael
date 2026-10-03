@@ -1330,7 +1330,7 @@
 //! ## Threads
 //!
 //! Arael is single-threaded by default. With the `rayon` feature the
-//! factorization runs on rayon's global pool:
+//! factorization's dense kernels run on rayon's global pool:
 //!
 //! ```toml
 //! arael = { version = "0.7", features = ["rayon"] }
@@ -1344,16 +1344,16 @@
 //!
 //! Without the feature, anything but 1 warns and stays sequential.
 //!
-//! The cost evaluation, the assembly of the gradient and Hessian and
-//! the Schur reduction thread as well, on arael's own worker threads,
-//! parked between dispatches: each sweeps its own share of the model
-//! into its own block store, a serial pass adds the stores into the
-//! gradient, the same threads write the sparse Hessian from them, one
-//! range of it each, and then form the reduced system, one range of
-//! its block columns each. A threaded assembly adds up in a different
-//! order than the sequential one, so results differ in the last bits
-//! between thread counts; the reduction sums in the same order at any
-//! count. `assembly_threads` gives the sweeps a count of their own.
+//! Everything else that threads runs on arael's own worker threads,
+//! parked between dispatches: the cost evaluation and the assembly of
+//! the gradient and Hessian, each thread sweeping its own share of the
+//! model into its own block store, a serial pass adding the stores
+//! into the gradient and the same threads writing the sparse Hessian
+//! from them, one range of it each; the Schur reduction, one range of
+//! the reduced system's block columns each; and the factorization's
+//! large panels, in windows. A threaded solve matches a sequential one
+//! to rounding, not to the bit. `assembly_threads` gives the sweeps a
+//! count of their own.
 //!
 //! The model is read from every thread at once, so a root must be
 //! [`Sync`]. A root that is not, or that should stay sequential, opts
