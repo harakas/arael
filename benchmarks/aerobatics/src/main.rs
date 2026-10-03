@@ -19,7 +19,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::model::{SelfBlock, CrossBlock, EulerAngleParam, SimpleEulerAngleParam, QuaternionParam};
-use arael::simple_lm::{self, LmConfig, LmProblem};
+use arael::simple_lm::{self, LmConfig, LmProblemInternals};
 use arael::vect::vect3d;
 use arael::matrix::matrix3d;
 use arael::quatern::quaternd;
@@ -52,7 +52,7 @@ fn cfg() -> LmConfig<f64> {
     LmConfig { max_iters: 500, ..Default::default() }
 }
 
-fn solve_timed<P: LmProblem<f64>>(path: &mut P, params: &[f64]) -> (usize, usize, f64, f64) {
+fn solve_timed<P: LmProblemInternals<f64>>(path: &mut P, params: &[f64]) -> (usize, usize, f64, f64) {
     let t0 = Instant::now();
     let r = simple_lm::solve_sparse(params, path, &cfg()).unwrap();
     let ms = t0.elapsed().as_secs_f64() * 1e3;
