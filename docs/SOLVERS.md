@@ -164,9 +164,9 @@ fraction of the update GEMMs are large enough for the pool, and the rest
 are parallel by living on different threads rather than inside one.
 Measured at four threads: the 1200-pose figure-8 2.2x, at 4800 poses
 2.5x, Ladybug-372's reduced system 1.5x (its tree is a near-chain, so
-there is little to chunk), a pose graph unchanged. The kernels split
-their output rather than their reduction and each chunk is
-self-contained, so the answer is bit-identical at every thread count.
+there is little to chunk), a pose graph unchanged. A panel too big to
+chunk is shared between the threads in windows of its columns, so the
+threaded factor matches the sequential one to rounding.
 
 Two further knobs, both for memory:
 
@@ -762,13 +762,15 @@ keeps](#what-a-solve-keeps----context-and-lmsession).
 
 ### The linear solve
 
-Threads reach the block supernodal route two ways: independent subtrees
-of the elimination tree run on separate threads, and the dense kernels of
-the panels too big to chunk take the pool, size-gated. The factorization
-is the same one at every thread count and produces the same answer; its
-triangular solve runs on one thread. faer's scalar factorization and
-triangular solve are handed the thread count and faer splits what it
-can.
+Threads reach the block supernodal route three ways: independent
+subtrees of the elimination tree run on separate threads; a panel with
+enough update work is shared between the threads in windows of its
+columns, and its triangular solve in windows of its rows; and the dense
+kernels of the few panels larger still take the pool, size-gated. The
+threaded factor matches the sequential one to rounding, not to the bit.
+The solve phase's triangular solve runs on one thread. faer's scalar
+factorization and triangular solve are handed the thread count and faer
+splits what it can.
 
 The Schur reduction runs on arael's own workers: the reduced system's
 block columns are cut into one range per thread by the number of
