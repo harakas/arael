@@ -47,10 +47,11 @@ PANELS = [
         ("factrs (LM)", 35.19, 54.99, "other"),
         ("GTSAM (LM)", 43.84, 50.22, "other"),
     ]),
+    # Pi Zero W panel: 2026-10-04, min of 16 rounds.
     ("60 poses, 1,080 params -- Raspberry Pi Zero W (ARMv6)", 1, (2000.0, 500.0), [
-        ("arael (f32)", 209.10, 252.33, "arael"),
-        ("arael (f64)", 330.07, 378.89, "arael"),
-        ("factrs (LM)", 1258.58, 1567.77, "other"),
+        ("arael (f32)", 198.25, 249.58, "arael"),
+        ("arael (f64)", 325.45, 372.72, "arael"),
+        ("factrs (LM)", 1264.96, 1574.62, "other"),
     ]),
 ]
 
