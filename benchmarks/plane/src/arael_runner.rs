@@ -15,7 +15,8 @@ use arael::refs::Ref;
 use arael::transform::TransformParam;
 use arael::unitvec::UnitVecParam;
 use arael::simple_lm::{
-    lm_solve, EnvelopeMode, LmConfig, LmResult, SchurPolicy, SolveFailure, SparseFaer,
+    lm_solve, lm_solve_with_context, EnvelopeMode, LmConfig, LmResult, SchurPolicy,
+    SolveFailure, SparseFaer,
 };
 use arael::matrix::matrix3;
 use arael::utils::Float;
@@ -357,14 +358,14 @@ impl bench_harness::arael::Model for World {
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>,
-             _ctx: &mut arael::threads::Context)
+             ctx: &mut arael::threads::Context)
         -> Result<LmResult<f64>, SolveFailure<f64>> {
-        lm_solve(params, &mut SparseFaer::<f64>::new()
+        lm_solve_with_context(params, &mut SparseFaer::<f64>::new()
             .with_policy(schur_policy())
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg)
+        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -440,14 +441,14 @@ impl bench_harness::arael::Model for WorldF {
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>,
-             _ctx: &mut arael::threads::Context)
+             ctx: &mut arael::threads::Context)
         -> Result<LmResult<f32>, SolveFailure<f32>> {
-        lm_solve(params, &mut SparseFaer::<f32>::new()
+        lm_solve_with_context(params, &mut SparseFaer::<f32>::new()
             .with_policy(schur_policy())
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg)
+        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;
