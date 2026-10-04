@@ -67,14 +67,14 @@ fn shared_entity_optimizes_under_both_roots() {
     alpha.shareds.push(Shared { x: Param::new(0.0), target: 2.0, isigma: 1.0, hb: SelfBlock::new() });
     let mut params = Vec::new();
     alpha.serialize(&mut params);
-    let ra = simple_lm::solve(&params, &mut alpha, &LmConfig::default()).unwrap();
+    let ra = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut alpha, &LmConfig::default()).unwrap();
     assert!(ra.end_cost < 1e-12, "shared under Alpha, cost={}", ra.end_cost);
 
     let mut beta = Beta { items: refs::Vec::new(), shareds: refs::Vec::new(), isigma: 1.0 };
     beta.shareds.push(Shared { x: Param::new(0.0), target: -3.0, isigma: 1.0, hb: SelfBlock::new() });
     let mut params = Vec::new();
     beta.serialize(&mut params);
-    let rb = simple_lm::solve(&params, &mut beta, &LmConfig::default()).unwrap();
+    let rb = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut beta, &LmConfig::default()).unwrap();
     assert!(rb.end_cost < 1e-12, "shared under Beta, cost={}", rb.end_cost);
     beta.deserialize(&rb.x);
     assert!((beta.shareds[0].x.value + 3.0).abs() < 1e-6);
@@ -86,7 +86,7 @@ fn first_root_optimizes() {
     alpha.items.push(AItem { x: Param::new(0.0), target: 5.0, hb: SelfBlock::new() });
     let mut params = Vec::new();
     alpha.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut alpha, &LmConfig::default()).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut alpha, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-12, "cost={}", result.end_cost);
     alpha.deserialize(&result.x);
     assert!((alpha.items[0].x.value - 5.0).abs() < 1e-6);
@@ -98,7 +98,7 @@ fn second_root_optimizes() {
     beta.items.push(BItem { x: Param::new(0.0), target: 5.0, hb: SelfBlock::new() });
     let mut params = Vec::new();
     beta.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut beta, &LmConfig::default()).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut beta, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-12,
         "second root must generate a working solver, cost={}", result.end_cost);
     beta.deserialize(&result.x);

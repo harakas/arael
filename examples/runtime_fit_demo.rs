@@ -299,7 +299,7 @@ fn main() {
         // conservative: a runtime-parsed user expression with no informed
         // starting values has unknown conditioning.
         let config = LmConfig::conservative().with_verbose(true);
-        let result = arael::simple_lm::solve_sparse(&params, &mut model, &config).unwrap();
+        let result = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::SparseFaer::new(), &mut model, &config).unwrap();
         model.deserialize(&result.x);
         result
     };

@@ -169,7 +169,7 @@ fn arena_passive_entity_is_wired() {
     // Pre-fix, the Arena entity's SelfBlock kept u32::MAX indices: its
     // diagonal stayed zero, which now terminates the solve immediately
     // (B20). Post-fix the solve converges: anchor -> 2, pt -> 0.5.
-    let result = simple_lm::solve(&params, &mut w, &LmConfig::default()).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut w, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-12, "cost={} iters={}", result.end_cost, result.iterations);
     assert!(result.iterations > 0, "solve must actually iterate");
     w.deserialize(&result.x);

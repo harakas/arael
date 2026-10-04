@@ -418,7 +418,7 @@ impl bench_harness::arael::Model for Scene {
             Route::SchurCgImplicit => solve64_schur_cg_implicit(params, m, cfg, ctx),
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl =>
-                arael::simple_lm::solve_sparse_cholmod_supernodal(params, m, cfg),
+                arael::simple_lm::lm_solve_with_context(params, &mut arael::simple_lm::SparseCholmodSupernodal::new(), m, cfg, ctx),
         }
     }
     fn inexact(p: &Problem) -> bool {

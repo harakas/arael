@@ -219,7 +219,7 @@ fn aliased_pair_converges() {
     m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(0), hb: CrossBlock::new() });
     let mut params = Vec::new();
     m.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut m, &LmConfig::default()).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::Dense, &mut m, &LmConfig::default()).unwrap();
     m.deserialize(&result.x);
     let n = params.len();
     let mut grad = vec![0.0; n];
@@ -249,7 +249,7 @@ fn distinct_entities_still_solve() {
     m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(1), hb: CrossBlock::new() });
     let mut params = Vec::new();
     m.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut m, &LmConfig::default()).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::Dense, &mut m, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-20, "cost={}", result.end_cost);
 }
 

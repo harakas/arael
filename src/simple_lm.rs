@@ -15,25 +15,23 @@
 //! # Example
 //!
 //! ```ignore
+//! use arael::simple_lm::{Band, Dense, LmConfig, LmProblem, SparseFaer};
+//!
 //! // After defining your model with #[arael(root)]:
-//! let mut params = Vec::new();
-//! path.serialize(&mut params);
+//! let config = LmConfig { verbose: true, ..Default::default() };
 //!
-//! let config = arael::simple_lm::LmConfig {
-//!     verbose: true,
-//!     ..Default::default()
-//! };
+//! // The default sparse backend (faer, pure Rust); the optimized values
+//! // are written back into the model:
+//! let result = path.solve_sparse(&config)?;
 //!
-//! // Dense solver:
-//! let result = arael::simple_lm::solve(&params, &mut path, &config);
+//! // Any backend instance: band for a block-tridiagonal system (kd =
+//! // half-bandwidth), dense for a handful of parameters:
+//! let result = path.solve_with(&mut Band::new(11), &config)?;
+//! let result = path.solve_with(&mut Dense, &config)?;
 //!
-//! // Band solver (for block-tridiagonal systems, kd = half-bandwidth):
-//! let result = arael::simple_lm::solve_band(&params, 11, &mut path, &config);
+//! // A hand-written problem, over a parameter vector of your own:
+//! let result = arael::simple_lm::lm_solve(&x0, &mut SparseFaer::new(), &mut problem, &config)?;
 //!
-//! // Sparse solver (faer, pure Rust):
-//! let result = arael::simple_lm::solve_sparse(&params, &mut path, &config);
-//!
-//! path.deserialize(&result.x);
 //! println!("cost: {} -> {} in {} iterations",
 //!     result.start_cost, result.end_cost, result.iterations);
 //! ```
@@ -1757,7 +1755,7 @@ pub struct LmResult<T> {
     /// What the linear solver did -- e.g. whether [`SparseFaer`]
     /// marginalized anything and on what evidence. `None` for backends that
     /// report nothing. Survives the convenience entry points
-    /// ([`solve_sparse`] and friends), which own their solver and
+    /// (`solve_sparse` and friends), which own their solver and
     /// would otherwise drop the information.
     pub solver: Option<SolverReport>,
     /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
@@ -3646,64 +3644,6 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     }
 }
 
-// Backward-compatible wrappers
-
-/// Solve with an automatically chosen backend (f64): dense Cholesky for
-/// tiny problems (<= 6 params, where sparse bookkeeping costs more than
-/// it saves), [`SparseFaer`] otherwise. Above 6 params the problem must
-/// implement the sparse assembly paths -- macro-generated models always
-/// do; a hand-written dense-only [`LmProblem`] should call
-/// [`solve_dense`] instead.
-pub fn solve(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    if x0.len() <= 6 {
-        solve_dense(x0, problem, config)
-    } else {
-        solve_sparse(x0, problem, config)
-    }
-}
-
-/// Solve with an automatically chosen backend (f32): dense for <= 6
-/// params, [`SparseFaer`] otherwise.
-pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    if x0.len() <= 6 {
-        solve_dense_f32(x0, problem, config)
-    } else {
-        solve_sparse_f32(x0, problem, config)
-    }
-}
-
-/// Solve with the dense Cholesky backend (f64).
-pub fn solve_dense(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut Dense, problem, config)
-}
-
-/// Solve with the dense Cholesky backend (f32).
-pub fn solve_dense_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    lm_solve(x0, &mut Dense, problem, config)
-}
-
-/// Solve with pure-Rust band Cholesky backend (f64).
-pub fn solve_band(x0: &[f64], kd: usize, problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut Band::new(kd), problem, config)
-}
-
-/// Solve with pure-Rust band Cholesky backend (f32).
-pub fn solve_band_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    lm_solve(x0, &mut Band::new(kd), problem, config)
-}
-
-/// Solve with LAPACK band Cholesky backend (f64).
-#[cfg(feature = "lapack")]
-pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut BandLapack::new(kd), problem, config)
-}
-
-/// Solve with LAPACK band Cholesky backend (f32).
-#[cfg(feature = "lapack")]
-pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    lm_solve(x0, &mut BandLapack::new(kd), problem, config)
-}
-
 // ---------------------------------------------------------------------------
 // LmSession -- warm re-solve: keep the learned structure across solves
 // ---------------------------------------------------------------------------
@@ -3916,14 +3856,6 @@ impl LmSolver<f64> for SparseCoo {
     }
 }
 
-/// Solve with the naive COO-assembly sparse backend ([`SparseCoo`]), dense
-/// Cholesky fallback (f64). A validation baseline.
-#[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
-#[allow(deprecated)]
-pub fn solve_sparse_coo(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut SparseCoo::new(), problem, config)
-}
-
 
 /// Sparse solver using direct CSC assembly (no COO intermediate after first iteration).
 /// First iteration: COO assembly to discover pattern, build CSC structure.
@@ -3999,13 +3931,6 @@ impl LmSolver<f64> for SparseDirectCsc {
         }
         solve_spd(n, &dense, grad, delta)
     }
-}
-
-/// Solve with direct CSC assembly sparse solver, dense Cholesky fallback (f64).
-#[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
-#[allow(deprecated)]
-pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut SparseDirectCsc::new(), problem, config)
 }
 
 /// First Hessian assembly of a solve, shared by every scalar-CSC backend
@@ -7179,18 +7104,6 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     }
 }
 
-/// Solve with the default sparse backend ([`SparseFaer`], f64) -- the
-/// free-function twin of `model.solve_sparse(&cfg)`. Marginalizes what
-/// the model offers when that pays.
-pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut SparseFaer::new(), problem, config)
-}
-
-/// Solve with the default sparse backend ([`SparseFaer`], f32).
-pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    lm_solve(x0, &mut SparseFaerF32::new(), problem, config)
-}
-
 // ---------------------------------------------------------------------------
 // SparseEigen / SparseCholmod — Eigen sparse Cholesky via C++ FFI
 // ---------------------------------------------------------------------------
@@ -7399,24 +7312,6 @@ impl LmSolver<f64> for SparseCholmod {
     }
 }
 
-/// Solve with Eigen SimplicialLLT sparse Cholesky backend (f64).
-#[cfg(feature = "eigen")]
-pub fn solve_sparse_eigen(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut SparseEigen::new(), problem, config)
-}
-
-/// Solve with Eigen SimplicialLLT sparse Cholesky backend (f32).
-#[cfg(feature = "eigen")]
-pub fn solve_sparse_eigen_f32(x0: &[f32], problem: &mut impl LmProblemInternals<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
-    lm_solve(x0, &mut SparseEigenF32::new(), problem, config)
-}
-
-/// Solve with CHOLMOD sparse Cholesky backend (f64).
-#[cfg(feature = "cholmod")]
-pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut SparseCholmod::new(), problem, config)
-}
-
 /// Eigen CholmodSupernodalLLT sparse Cholesky solver (f64 only).
 ///
 /// **WARNING (license):** this binds CHOLMOD's Supernodal module, which is
@@ -7468,15 +7363,6 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
         for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, &matrix.csc, grad, delta)
     }
-}
-
-/// Solve with CHOLMOD's supernodal sparse Cholesky (f64).
-///
-/// **WARNING (license):** the Supernodal module is **GPL-licensed**; a binary
-/// built with the `cholmod-gpl` feature is subject to the GPL.
-#[cfg(feature = "cholmod-gpl")]
-pub fn solve_sparse_cholmod_supernodal(x0: &[f64], problem: &mut impl LmProblemInternals<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
-    lm_solve(x0, &mut SparseCholmodSupernodal::new(), problem, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -8084,7 +7970,7 @@ mod tests {
             }
         }
         let cfg = LmConfig::<f64>::default();
-        let r = solve(&[0.0, 0.0], &mut Quad, &cfg).unwrap();
+        let r = lm_solve(&[0.0, 0.0], &mut Dense, &mut Quad, &cfg).unwrap();
         assert!(r.accepted_iterations > 0);
         assert!(r.accepted_iterations <= r.iterations);
         assert!((r.x[0] - 3.0).abs() < 1e-8 && (r.x[1] + 1.0).abs() < 1e-8);
@@ -8342,8 +8228,8 @@ mod tests {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             },
         };
-        let result = solve(
-            &[0.0, 0.0],
+        let result = lm_solve(
+            &[0.0, 0.0], &mut Dense,
             &mut p,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
         ).unwrap();
@@ -8375,8 +8261,8 @@ mod tests {
                 }
             },
         };
-        let result = solve(
-            &[-1.0, 1.0],
+        let result = lm_solve(
+            &[-1.0, 1.0], &mut Dense,
             &mut p,
             &LmConfig { abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001, ..Default::default() },
         ).unwrap();
@@ -8390,7 +8276,7 @@ mod tests {
         // Rosenbrock takes several accepted steps, so every phase runs at
         // least once -- a good fixture for the timing instrumentation.
         let mut p = rosenbrock_problem();
-        let result = solve(&[-1.2, 1.0], &mut p, &LmConfig {
+        let result = lm_solve(&[-1.2, 1.0], &mut Dense, &mut p, &LmConfig {
             abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001,
             gather_timing: true, ..Default::default()
         }).unwrap();
@@ -8431,7 +8317,7 @@ mod tests {
     fn timing_off_by_default() {
         // gather_timing defaults to false: no clock is read, timing is None.
         let mut p = rosenbrock_problem();
-        let result = solve(&[-1.2, 1.0], &mut p, &LmConfig {
+        let result = lm_solve(&[-1.2, 1.0], &mut Dense, &mut p, &LmConfig {
             abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001, ..Default::default()
         }).unwrap();
         assert!(result.timing.is_none());
@@ -8449,8 +8335,8 @@ mod tests {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             },
         };
-        let result = solve_f32(
-            &[0.0f32, 0.0],
+        let result = lm_solve(
+            &[0.0f32, 0.0], &mut Dense,
             &mut p,
             &LmConfig { abs_precision: 1e-4, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
         ).unwrap();
@@ -8828,8 +8714,8 @@ mod tests {
         impl LmProblemInternals<f64> for QuadProblem {}
 
         #[allow(deprecated)]
-        let result = solve_sparse_coo(
-            &[0.0, 0.0],
+        let result = lm_solve(
+            &[0.0, 0.0], &mut SparseCoo::new(),
             &mut QuadProblem,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
         ).unwrap();
@@ -8870,8 +8756,8 @@ mod tests {
             }
         }
 
-        let result = solve_sparse(
-            &[0.0, 0.0],
+        let result = lm_solve(
+            &[0.0, 0.0], &mut SparseFaer::new(),
             &mut QuadProblem,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
         ).unwrap();
@@ -8915,7 +8801,7 @@ mod tests {
 
         let mut problem = CountingProblem { coo_calls: 0, direct_calls: 0 };
         #[allow(deprecated)]
-        let result = solve_sparse_direct_csc(&[0.0, 0.0], &mut problem, &LmConfig::default()).unwrap();
+        let result = lm_solve(&[0.0, 0.0], &mut SparseDirectCsc::new(), &mut problem, &LmConfig::default()).unwrap();
         assert!((result.x[0] - 3.0).abs() < 1e-6);
         assert!((result.x[1] - 7.0).abs() < 1e-6);
         assert_eq!(problem.coo_calls, 1, "COO assembly must run exactly once");
@@ -9155,9 +9041,9 @@ mod tests {
         // hand-written problem implements only the dense and COO paths,
         // so it exercises the explicit dense and COO-baseline entries.
         let config = LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() };
-        let r_dense = solve_dense(&x, &mut CoupledProblem, &config).unwrap();
+        let r_dense = lm_solve(&x, &mut Dense, &mut CoupledProblem, &config).unwrap();
         #[allow(deprecated)]
-        let r_sparse = solve_sparse_coo(&x, &mut CoupledProblem, &config).unwrap();
+        let r_sparse = lm_solve(&x, &mut SparseCoo::new(), &mut CoupledProblem, &config).unwrap();
         for i in 0..n {
             assert!((r_dense.x[i] - r_sparse.x[i]).abs() < 1e-6,
                 "x[{}]: dense={}, sparse={}", i, r_dense.x[i], r_sparse.x[i]);
@@ -9192,7 +9078,7 @@ mod tests {
                 self.calc_cost(x)
             }
         }
-        let r = solve_sparse_eigen(&[0.0,0.0], &mut QP,
+        let r = lm_solve(&[0.0,0.0], &mut SparseEigen::new(), &mut QP,
             &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()}).unwrap();
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
@@ -9241,8 +9127,8 @@ mod tests {
             }
         }
         let cfg = LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()};
-        let rd = solve(&[0.0;4], &mut CP, &cfg).unwrap();
-        let re = solve_sparse_eigen(&[0.0;4], &mut CP, &cfg).unwrap();
+        let rd = lm_solve(&[0.0;4], &mut Dense, &mut CP, &cfg).unwrap();
+        let re = lm_solve(&[0.0;4], &mut SparseEigen::new(), &mut CP, &cfg).unwrap();
         for i in 0..4 {
             assert!((rd.x[i]-re.x[i]).abs()<1e-6, "x[{}]: dense={}, eigen={}", i, rd.x[i], re.x[i]);
         }
@@ -9276,7 +9162,7 @@ mod tests {
                 self.calc_cost(x)
             }
         }
-        let r = solve_sparse_cholmod(&[0.0,0.0], &mut QP,
+        let r = lm_solve(&[0.0,0.0], &mut SparseCholmod::new(), &mut QP,
             &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()}).unwrap();
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
@@ -9311,7 +9197,7 @@ mod tests {
                 self.calc_cost(x)
             }
         }
-        let r = solve_sparse_cholmod_supernodal(&[0.0,0.0], &mut QP,
+        let r = lm_solve(&[0.0,0.0], &mut SparseCholmodSupernodal::new(), &mut QP,
             &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()}).unwrap();
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);

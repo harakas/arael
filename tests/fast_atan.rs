@@ -124,7 +124,7 @@ fn fast_model_solves_to_the_optimum() {
     };
     let mut params = Vec::new();
     mf.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut mf,
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut mf,
         &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     mf.deserialize(&result.x);
 

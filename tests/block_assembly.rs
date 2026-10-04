@@ -814,7 +814,7 @@ fn schur_solve_with_fixed_params() {
 #[cfg(feature = "eigen")]
 #[test]
 fn eigen_backend_matches_dense() {
-    use arael::simple_lm::{solve_sparse_eigen, LmConfig};
+    use arael::simple_lm::{lm_solve, LmConfig, SparseEigen};
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build();
@@ -823,7 +823,7 @@ fn eigen_backend_matches_dense() {
     let mut we = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut we, &mut params);
-    let re = solve_sparse_eigen(&params, &mut we, &cfg).unwrap();
+    let re = lm_solve(&params, &mut SparseEigen::new(), &mut we, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - re.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
@@ -836,7 +836,7 @@ fn eigen_backend_matches_dense() {
 #[cfg(feature = "cholmod")]
 #[test]
 fn cholmod_backend_matches_dense() {
-    use arael::simple_lm::{solve_sparse_cholmod, LmConfig};
+    use arael::simple_lm::{lm_solve, LmConfig, SparseCholmod};
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build();
@@ -845,7 +845,7 @@ fn cholmod_backend_matches_dense() {
     let mut wc = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wc, &mut params);
-    let rc = solve_sparse_cholmod(&params, &mut wc, &cfg).unwrap();
+    let rc = lm_solve(&params, &mut SparseCholmod::new(), &mut wc, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - rc.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
@@ -858,7 +858,7 @@ fn cholmod_backend_matches_dense() {
 #[cfg(feature = "cholmod-gpl")]
 #[test]
 fn cholmod_supernodal_backend_matches_dense() {
-    use arael::simple_lm::{solve_sparse_cholmod_supernodal, LmConfig};
+    use arael::simple_lm::{lm_solve, LmConfig, SparseCholmodSupernodal};
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build();
@@ -867,7 +867,7 @@ fn cholmod_supernodal_backend_matches_dense() {
     let mut wc = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wc, &mut params);
-    let rc = solve_sparse_cholmod_supernodal(&params, &mut wc, &cfg).unwrap();
+    let rc = lm_solve(&params, &mut SparseCholmodSupernodal::new(), &mut wc, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - rc.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),

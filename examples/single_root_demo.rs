@@ -88,7 +88,7 @@ fn main() {
     }
 
     let config = LmConfig::well_conditioned().with_verbose(true);
-    let result = simple_lm::solve(&params, &mut m, &config).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::Dense, &mut m, &config).unwrap();
     m.deserialize(&result.x);
 
     println!(

@@ -45,7 +45,7 @@ fn fixed_euler_angle_param_does_not_panic_in_advance() {
 
     let mut params = Vec::new();
     w.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut w, &LmConfig::default()).unwrap();
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut w, &LmConfig::default()).unwrap();
     w.deserialize(&result.x);
 
     let free = &w.nodes[0];
@@ -83,7 +83,7 @@ fn fixed_euler_angle_param_drives_constraints() {
     };
     let mut params = Vec::new();
     w.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut w,
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut w,
         &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     w.deserialize(&result.x);
 
@@ -144,7 +144,7 @@ fn root_level_euler_angle_param_advances_through_gimbal() {
     };
     let mut params = Vec::new();
     rig.serialize(&mut params);
-    let result = simple_lm::solve(&params, &mut rig,
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut rig,
         &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     rig.deserialize(&result.x);
 
@@ -251,7 +251,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
 
     let mut params = Vec::new();
     sky.serialize(&mut params);
-    let result = simple_lm::solve_sparse(&params, &mut sky,
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut sky,
         // VERBOSE=1 cargo test -r --test euler_param aerobatics -- --nocapture
         // prints the LM iteration trace.
         &LmConfig {
@@ -356,7 +356,7 @@ fn aerobatics_slam_f32() {
 
     let mut params = Vec::new();
     sky.serialize(&mut params);
-    let result = simple_lm::solve_sparse_f32(&params, &mut sky, &LmConfig {
+    let result = simple_lm::lm_solve(&params, &mut simple_lm::SparseFaer::new(), &mut sky, &LmConfig {
         max_iters: 500,
         verbose: std::env::var("VERBOSE").is_ok(),
         ..Default::default()

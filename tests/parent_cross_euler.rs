@@ -202,12 +202,12 @@ fn parent_refs_euler_solve_matches_own_refs() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
     let mut xa = Vec::new();
     RootProblem::serialize(&mut ma, &mut xa);
-    let ra = simple_lm::solve(&xa, &mut ma, &cfg).unwrap();
+    let ra = simple_lm::lm_solve(&xa, &mut simple_lm::SparseFaer::new(), &mut ma, &cfg).unwrap();
     ma.deserialize(&ra.x);
 
     let mut xb = Vec::new();
     RootProblem::serialize(&mut mb, &mut xb);
-    let rb = simple_lm::solve(&xb, &mut mb, &cfg).unwrap();
+    let rb = simple_lm::lm_solve(&xb, &mut simple_lm::SparseFaer::new(), &mut mb, &cfg).unwrap();
     mb.deserialize(&rb.x);
 
     assert!(ra.iterations > 1, "solve must take steps (recentering exercised)");

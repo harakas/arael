@@ -1163,15 +1163,18 @@
 //! `#[arael(root)]` model gets it: the macro implements
 //! [`RootProblem`](simple_lm::RootProblem) (the parameter round trip),
 //! which unlocks the solve methods LmProblem provides. `solve_sparse`
-//! and `solve_dense` are conveniences over `solve_with`, and the
-//! `simple_lm::solve_*` free functions run the same solves over a raw
-//! parameter vector you manage yourself:
+//! and `solve_dense` are conveniences over `solve_with`,
+//! `solve(SolverKind, &cfg)` picks the backend at run time, and
+//! `lm_solve` runs the same solve over a raw parameter vector you
+//! manage yourself:
 //!
 //! ```rust,ignore
 //! use arael::simple_lm::LmProblem; // or `use arael::prelude::*;`
 //! let result = model.solve_with(&mut Band::new(11), &cfg)?; // any LmSolver backend
 //! let result = model.solve_sparse(&cfg)?; // = solve_with(SparseFaer): the default backend
 //! let result = model.solve_dense(&cfg)?;  // = solve_with(Dense)
+//! let result = model.solve(SolverKind::Dense, &cfg)?; // a backend named at run time
+//! let result = lm_solve(&x0, &mut SparseFaer::new(), &mut problem, &cfg)?; // the raw form
 //! ```
 //!
 //! Every solve returns [`SolveResult`](simple_lm::SolveResult) --
@@ -1188,16 +1191,16 @@
 //! model they take `f32` configs and `solve_sparse` uses
 //! [`SparseFaer<f32>`](simple_lm::SparseFaer).
 //!
-//! | Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
-//! |---|---|---|
-//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **[`solve_sparse[_f32]`](simple_lm::solve_sparse)** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`FaerOrdering`](simple_lm::FaerOrdering) override it |
-//! | [`Dense`](simple_lm::Dense) | [`solve[_f32]`](simple_lm::solve) | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
-//! | [`Band`](simple_lm::Band)`::new(kd)` | [`solve_band[_f32]`](simple_lm::solve_band) | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
-//! | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
-//! | `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
-//! | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
-//! | `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
-//! | [`SparseCoo`](simple_lm::SparseCoo)`::new()` / [`SparseDirectCsc`](simple_lm::SparseDirectCsc)`::new()` | [`solve_sparse_coo`](simple_lm::solve_sparse_coo) / [`solve_sparse_direct_csc`](simple_lm::solve_sparse_direct_csc) | COO / direct-CSC assembly over a dense solve -- validation baselines, deprecated in favour of `SparseFaer` (the root's `.solve_sparse()`) |
+//! | Backend (`solve_with(&mut ..., &cfg)`) | What it is |
+//! |---|---|
+//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`FaerOrdering`](simple_lm::FaerOrdering) override it |
+//! | [`Dense`](simple_lm::Dense) | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
+//! | [`Band`](simple_lm::Band)`::new(kd)` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
+//! | `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
+//! | `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` (feature `eigen`) |
+//! | `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
+//! | `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
+//! | [`SparseCoo`](simple_lm::SparseCoo)`::new()` / [`SparseDirectCsc`](simple_lm::SparseDirectCsc)`::new()` | COO / direct-CSC assembly over a dense solve -- validation baselines, deprecated in favour of `SparseFaer` (the root's `.solve_sparse()`) |
 //!
 //! ## Damping-schedule drivers
 //!
@@ -1558,7 +1561,7 @@
 //! // main loop:
 //! for scale in [0.01, 0.1, 1.0] {
 //!     path.frine_isigma_scale = scale;
-//!     let result = solve_sparse_f32(&params, &mut path, &cfg);
+//!     let result = path.solve_sparse(&cfg)?;
 //! }
 //! ```
 //!
@@ -1635,7 +1638,7 @@
 //!
 //!   ```ignore
 //!   let cfg = arael::simple_lm::LmConfig::conservative().with_verbose(true);
-//!   let result = arael::simple_lm::solve_sparse_f32(&x0, &mut model, &cfg);
+//!   let result = model.solve_sparse(&cfg);
 //!   ```
 //!
 //!   A healthy pass looks like steady cost drops with rising /

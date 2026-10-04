@@ -461,14 +461,17 @@ read from the model and written back) and takes any backend instance.
 Every `#[arael(root)]` model gets it: the macro implements `RootProblem`
 (the parameter round trip), which unlocks the solve methods LmProblem
 provides. `solve_sparse` and `solve_dense` are conveniences over
-`solve_with`, and the `simple_lm::solve_*` free functions run the same
-solves over a raw parameter vector you manage yourself:
+`solve_with`, `solve(SolverKind, &cfg)` picks the backend at run time,
+and `lm_solve` runs the same solve over a raw parameter vector you
+manage yourself:
 
 ```rust,ignore
 use arael::simple_lm::LmProblem; // or `use arael::prelude::*;`
 let result = model.solve_with(&mut Band::new(11), &cfg)?; // any LmSolver backend
 let result = model.solve_sparse(&cfg)?; // = solve_with(SparseFaer): the default backend
 let result = model.solve_dense(&cfg)?;  // = solve_with(Dense)
+let result = model.solve(SolverKind::Dense, &cfg)?; // a backend named at run time
+let result = lm_solve(&x0, &mut SparseFaer::new(), &mut problem, &cfg)?; // the raw form
 ```
 
 Every solve returns `Result<LmResult, SolveFailure>`: `Ok` when the solve
@@ -483,16 +486,16 @@ faer is pure Rust with no external dependency. The generated methods
 match the root's precision: on an `#[arael(root, f32)]` model they take
 `f32` configs and `solve_sparse` uses `SparseFaer<f32>`.
 
-| Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
-|---|---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `FaerOrdering` / `BlockSupernodalMode` override it |
-| `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
-| `Band::new(kd)` | `solve_band[_f32]` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
-| `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
-| `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
-| `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
-| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
-| `SparseCoo::new()` / `SparseDirectCsc::new()` | `solve_sparse_coo` / `solve_sparse_direct_csc` | COO / direct-CSC assembly over a dense solve -- validation baselines, deprecated in favour of `SparseFaer` (the root's `.solve_sparse()`) |
+| Backend (`solve_with(&mut ..., &cfg)`) | What it is |
+|---|---|
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `FaerOrdering` / `BlockSupernodalMode` override it |
+| `Dense` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
+| `Band::new(kd)` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
+| `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
+| `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` (feature `eigen`) |
+| `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
+| `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
+| `SparseCoo::new()` / `SparseDirectCsc::new()` | COO / direct-CSC assembly over a dense solve -- validation baselines, deprecated in favour of `SparseFaer` (the root's `.solve_sparse()`) |
 
 ### Damping-schedule drivers
 
