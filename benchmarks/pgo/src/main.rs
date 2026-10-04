@@ -394,8 +394,12 @@ fn print_header(rounds: usize, only: &Option<String>) {
 /// The pin line. Takes the resolved count instead of reading it here so a
 /// test can hold it fixed.
 fn core_line(threads: usize) -> String {
-    format!("pinned to core    : {} (every thread pool capped at {}) [BENCH_THREADS]",
-        std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string()), threads)
+    let core = std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string());
+    if bench_harness::pin::pinned() {
+        format!("pinned to core    : {} (every thread pool capped at {}) [BENCH_THREADS, BENCH_PIN]", core, threads)
+    } else {
+        format!("pinned to core    : no, BENCH_PIN=0 (cpus allowed {}; every thread pool capped at {}) [BENCH_THREADS]", core, threads)
+    }
 }
 
 #[cfg(test)]

@@ -656,6 +656,7 @@ what produced it.
 | `SLAM_ORDERING` | `auto` (default), `amd`, `nd`, `natural` or `marginalize-first` -- elimination ordering of whichever system is factorized |
 | `SLAM_CG_TOL`, `SLAM_CG_MAXITER`, `SLAM_CG_RESTART` | the `arael CG` rows' inner solve; tolerance defaults to 1e-4 |
 | `BENCH_THREADS` | cores to pin to, and `num_threads` for the solve (1 default; 0 is every core) |
+| `BENCH_PIN` | `0` drops the core pin and keeps the thread caps |
 | `SLAM_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |

@@ -31,8 +31,12 @@ impl Header {
     /// And the pin, which every timing depends on.
     pub fn core(self) -> Self {
         let n = crate::pin::threads();
-        self.line("pinned to core", format!("{} (every thread pool capped at {}) [BENCH_THREADS]",
-            std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string()), n))
+        let core = std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string());
+        if crate::pin::pinned() {
+            self.line("pinned to core", format!("{} (every thread pool capped at {}) [BENCH_THREADS, BENCH_PIN]", core, n))
+        } else {
+            self.line("pinned to core", format!("no, BENCH_PIN=0 (cpus allowed {}; every thread pool capped at {}) [BENCH_THREADS]", core, n))
+        }
     }
 
     pub fn print(&self) {
