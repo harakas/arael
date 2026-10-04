@@ -348,6 +348,8 @@ cfg.gradient_tolerance = 1e-8      # or None
 `LmConfig` mirrors the Rust struct field for field, `num_threads` and
 `assembly_threads` included; both take effect when the exported crate is
 built with arael's `threads` feature ([docs/SOLVERS.md](SOLVERS.md#threads)).
+The defaults are the Rust ones, so `ARAEL_NUM_THREADS` in the environment
+sets `num_threads` here too.
 A threaded solve leaves arael's sweep workers parked for the life of the
 process; `pool_shutdown()` in the model's module joins them, and the next
 threaded solve spawns them again.

@@ -1281,7 +1281,7 @@
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
-//! | `num_threads` | `1` | threads for the linear solve and the sweeps (needs the `threads` feature). Measure first -- see below |
+//! | `num_threads` | `1`, or `ARAEL_NUM_THREADS` | threads for the linear solve and the sweeps (needs the `threads` feature). Measure first -- see below |
 //! | `assembly_threads` | `None` | a thread count for the cost and assembly sweeps alone; `None` leaves them on `num_threads` |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. Turn on first whenever debugging |
@@ -1343,6 +1343,8 @@
 //! ```
 //!
 //! Without the feature, anything but 1 warns and stays sequential.
+//! `ARAEL_NUM_THREADS` in the environment sets the default, and yields
+//! to a count set in code.
 //!
 //! Everything else that threads runs on arael's own worker threads,
 //! parked between dispatches: the cost evaluation and the assembly of

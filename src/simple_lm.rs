@@ -269,6 +269,10 @@ pub struct LmConfig<T: Float> {
     /// one range of the reduced system's block columns each, and give the
     /// same answer at any count; of the analysis, the route pricing's
     /// symbolic factorizations run side by side, the rest is sequential.
+    ///
+    /// The default is `ARAEL_NUM_THREADS` when the environment sets it,
+    /// else 1 ([`threads::default_num_threads`](crate::threads::default_num_threads));
+    /// a count set here wins over it.
     pub num_threads: usize,
     /// Threads for the cost and assembly sweeps alone, when
     /// they want a count of their own. `None` (the default) leaves them on
@@ -350,7 +354,8 @@ impl<T: Float> LmConfig<T> {
     /// [`DefaultLambdaDriver`]. All
     /// tolerances (`gradient_tolerance`, `parameter_tolerance`,
     /// `predicted_reduction_tolerance`) and `min_diagonal` are off; `num_threads`
-    /// 1.
+    /// is `ARAEL_NUM_THREADS` when the environment sets it, else 1
+    /// ([`threads::default_num_threads`](crate::threads::default_num_threads)).
     pub fn conservative() -> Self {
         LmConfig {
             abs_precision: T::from(1e-6).unwrap(),
@@ -366,7 +371,7 @@ impl<T: Float> LmConfig<T> {
             min_diagonal: None,
             time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
-            num_threads: 1,
+            num_threads: crate::threads::default_num_threads(),
             assembly_threads: None,
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
