@@ -37,14 +37,15 @@ PANELS = [
         ("SymForce (f64)", 130.80, 226.64, "other"),
         ("GTSAM (LM)", 159.15, 168.74, "other"),
     ]),
+    # Pi 5 panel: 2026-10-04, min of 16 rounds.
     ("60 poses, 1,080 params -- Raspberry Pi 5", 1, (64.0, 16.0), [
-        ("arael (f32)", 5.95, 7.98, "arael"),
-        ("arael (f64)", 8.00, 10.37, "arael"),
-        ("g2o (LM)", 16.85, 29.49, "other"),
-        ("SymForce (f64)", 17.09, 51.75, "other"),
-        ("Ceres (LM)", 24.59, 43.33, "other"),
-        ("factrs (LM)", 35.55, 54.72, "other"),
-        ("GTSAM (LM)", 43.01, 48.91, "other"),
+        ("arael (f32)", 5.88, 7.65, "arael"),
+        ("arael (f64)", 7.51, 9.82, "arael"),
+        ("g2o (LM)", 17.17, 29.54, "other"),
+        ("SymForce (f64)", 17.35, 52.88, "other"),
+        ("Ceres (LM)", 24.67, 43.32, "other"),
+        ("factrs (LM)", 35.19, 54.99, "other"),
+        ("GTSAM (LM)", 43.84, 50.22, "other"),
     ]),
     ("60 poses, 1,080 params -- Raspberry Pi Zero W (ARMv6)", 1, (2000.0, 500.0), [
         ("arael (f32)", 209.10, 252.33, "arael"),

@@ -74,8 +74,8 @@ each system's damping schedule.
 cannot be compared one on one.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-setup-dark.svg">
-  <img alt="Two bar charts, landmark SLAM and localization: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.2/slam-loc-setup-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/slam-loc-setup-dark.svg">
+  <img alt="Two bar charts, landmark SLAM and localization: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.9.0/slam-loc-setup-light.svg">
 </picture>
 
 The same two panels as the chart on the front page, with the setup drawn
@@ -150,20 +150,20 @@ a row's later iterations, as the totals give them, is that sampling.
 | factrs LM             |    90.23 |   3(3) |   30.08 |     23.73 |    12.045 |       41.91 |    64.8 | 25269.0409 |
 | gtsam LM              |    85.51 |   3(3) |   28.50 |     26.72 |    13.558 |       31.99 |    58.9 | 25269.0409 |
 
-### Raspberry Pi 5 (Cortex-A76, single core, 60 poses; ROUNDS=32, ARAEL_LAMBDA0=1e-2, default damping)
+### Raspberry Pi 5 (2026-10-04; Cortex-A76, single core, 60 poses; ROUNDS=32, ARAEL_LAMBDA0=1e-2, default damping)
 
 | system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f32 (band)   |     3.06 |   3(3) |    1.02 |      1.02 |     0.962 |        1.02 |     4.3 |  3274.6025 |
-| arael LM f64 (band)   |     3.16 |   3(3) |    1.05 |      1.06 |     1.000 |        1.06 |     4.9 |  3274.6025 |
-| symforce LM f64       |    19.45 |   3(3) |    6.48 |      1.34 |     1.264 |       16.38 |    20.5 |  3274.6025 |
-| symforce LM f32       |    18.03 |   3(3) |    6.01 |      1.35 |     1.274 |       14.87 |    18.2 |  3274.6025 |
-| g2o LM                |    16.22 |   3(3) |    5.41 |      4.04 |     3.811 |        7.84 |    10.1 |  3274.6025 |
-| ceres sparse_cholesky |    18.56 |   3(3) |    6.19 |      5.34 |     5.038 |       11.42 |    11.5 |  3274.6025 |
-| ceres sparse_schur    |    19.78 |   3(3) |    6.59 |      5.73 |     5.406 |       11.82 |    11.3 |  3274.6025 |
-| ceres iterative_schur\* |  19.64 |   3(3) |    6.55 |         - |         - |       11.34 |    11.0 |  3274.6025 |
-| gtsam LM              |    44.29 |   3(3) |   14.76 |     13.74 |    12.962 |       16.34 |    15.4 |  3274.6025 |
-| factrs LM             |    46.16 |   3(3) |   15.39 |     13.06 |    12.321 |       20.47 |    12.1 |  3274.6025 |
+| arael LM f64 (band)   |     2.86 |   3(3) |    0.95 |      0.96 |     1.000 |        0.96 |     5.1 |  3274.6025 |
+| arael LM f32 (band)   |     2.89 |   3(3) |    0.96 |      0.96 |     1.000 |        0.96 |     4.4 |  3274.6025 |
+| symforce LM f64       |    19.81 |   3(3) |    6.60 |      1.27 |     1.320 |       16.66 |    20.4 |  3274.6025 |
+| symforce LM f32       |    18.12 |   3(3) |    6.04 |      1.45 |     1.509 |       14.99 |    18.1 |  3274.6025 |
+| g2o LM                |    16.09 |   3(3) |    5.36 |      4.02 |     4.167 |        7.80 |    10.0 |  3274.6025 |
+| ceres sparse_cholesky |    18.97 |   3(3) |    6.32 |      5.41 |     5.618 |       11.69 |    11.0 |  3274.6025 |
+| ceres sparse_schur    |    20.07 |   3(3) |    6.69 |      5.77 |     5.990 |       12.02 |    11.2 |  3274.6025 |
+| ceres iterative_schur\* |  19.96 |   3(3) |    6.65 |         - |         - |       11.54 |    10.9 |  3274.6025 |
+| factrs LM             |    45.19 |   3(3) |   15.06 |     12.41 |    12.879 |       20.32 |    12.0 |  3274.6025 |
+| gtsam LM              |    44.20 |   3(3) |   14.73 |     13.71 |    14.232 |       16.37 |    15.1 |  3274.6025 |
 
 ### Raspberry Pi Zero (ARM1176, ARMv6, single core, 60 poses; ROUNDS=10, ARAEL_LAMBDA0=1e-2)
 
