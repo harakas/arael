@@ -202,7 +202,7 @@ pub fn block_supernodal_batch() -> Option<f64> {
 }
 
 /// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+/// supernodal route (SparseFaerOptions::with_block_supernodal_memory_lean).
 
 pub fn block_supernodal_lean() -> bool {
     std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
@@ -360,12 +360,12 @@ impl bench_harness::arael::Model for World {
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>,
              ctx: &mut arael::threads::Context)
         -> Result<LmResult<f64>, SolveFailure<f64>> {
-        lm_solve_with_context(params, &mut SparseFaer::<f64>::new()
+        lm_solve_with_context(params, &mut SparseFaer::<f64>::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(schur_policy())
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg, ctx)
+        .with_block_supernodal_memory_lean(block_supernodal_lean())), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -387,10 +387,10 @@ pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let cfg = bench_harness::arael::config::<World>(raw, max_iters);
     let r = lm_solve(
         &params,
-        &mut SparseFaer::<f64>::new()
+        &mut SparseFaer::<f64>::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())),
         &mut world,
         &cfg,
     )
@@ -406,10 +406,10 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let cfg = bench_harness::arael::config::<WorldF>(raw, max_iters);
     let r = lm_solve(
         &params,
-        &mut SparseFaer::<f32>::new()
+        &mut SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())),
         &mut world,
         &cfg,
     )
@@ -443,12 +443,12 @@ impl bench_harness::arael::Model for WorldF {
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>,
              ctx: &mut arael::threads::Context)
         -> Result<LmResult<f32>, SolveFailure<f32>> {
-        lm_solve_with_context(params, &mut SparseFaer::<f32>::new()
+        lm_solve_with_context(params, &mut SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(schur_policy())
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()), m, cfg, ctx)
+        .with_block_supernodal_memory_lean(block_supernodal_lean())), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;
@@ -509,9 +509,9 @@ mod tests {
             let mut world = super::build(&raw);
             let mut params: Vec<f64> = Vec::new();
             world.serialize(&mut params);
-            let mut solver = SparseFaer::<f64>::new()
+            let mut solver = SparseFaer::<f64>::from_options(&arael::simple_lm::SparseFaerOptions::default()
                 .with_policy(policy)
-                .with_envelope_schur(EnvelopeMode::Always);
+                .with_envelope_schur(EnvelopeMode::Always));
             let mut cfg = LmConfig::<f64>::default();
             cfg.max_iters = 1;
             let r = lm_solve(&params, &mut solver, &mut world, &cfg);

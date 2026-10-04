@@ -434,11 +434,11 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             // other row.
             arael::simple_lm::lm_solve_with_context(
                 params,
-                &mut arael::simple_lm::SparseFaer::new()
+                &mut arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
                     .with_policy(arael::simple_lm::SchurPolicy::Never)
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())),
                 path,
                 cfg,
                 ctx,
@@ -450,14 +450,14 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             // factorizing only the reduced pose system.
             arael::simple_lm::lm_solve_with_context(
                 params,
-                &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled())
+                &mut arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(narrow_band_enabled())
                     .with_policy(schur_policy())
                     .with_ordering(ordering())
                     .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())),
                 path,
                 cfg,
                 ctx,
@@ -536,25 +536,25 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
         return arael::simple_lm::lm_solve_with_context(
             params,
-            &mut arael::simple_lm::SparseFaerF32::new()
+            &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
                 .with_policy(arael::simple_lm::SchurPolicy::Never)
                 .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())),
             path,
             cfg,
             ctx,
         );
     }
     arael::simple_lm::lm_solve_with_context(
-        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled())
+        params, &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(narrow_band_enabled())
                     .with_policy(schur_policy())
                     .with_ordering(ordering())
                     .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()), path, cfg, ctx)
+        .with_block_supernodal_memory_lean(block_supernodal_lean())), path, cfg, ctx)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
@@ -643,9 +643,9 @@ impl Route {
             // the benchmark wants the route it asked for.
             Route::Cg => arael::simple_lm::lm_solve_with_context(
                 params,
-                &mut arael::simple_lm::SparseFaer::new()
+                &mut arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
-                    .with_iterative_schur(cg_options()),
+                    .with_iterative_schur(cg_options())),
                 path,
                 cfg,
                 ctx,
@@ -660,9 +660,9 @@ impl Route {
             Route::Factorize => solve32(params, path, cfg, ctx),
             Route::Cg => arael::simple_lm::lm_solve_with_context(
                 params,
-                &mut arael::simple_lm::SparseFaerF32::new()
+                &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
-                    .with_iterative_schur(cg_options()),
+                    .with_iterative_schur(cg_options())),
                 path,
                 cfg,
                 ctx,

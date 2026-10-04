@@ -258,17 +258,17 @@ fn warm_equals_cold_sparse_auto() {
 
 #[test]
 fn warm_equals_cold_whole_system() {
-    warm_equals_cold(|| SparseFaer::new().with_policy(SchurPolicy::Never), "whole system");
+    warm_equals_cold(|| SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never)), "whole system");
 }
 
 #[test]
 fn warm_equals_cold_schur() {
-    warm_equals_cold(|| SparseFaer::new().with_policy(SchurPolicy::Force), "schur");
+    warm_equals_cold(|| SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force)), "schur");
 }
 
 #[test]
 fn warm_equals_cold_narrow_band() {
-    let mk = || SparseFaer::new().with_policy(SchurPolicy::Force).with_narrow_band(true);
+    let mk = || SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force).with_narrow_band(true));
     warm_equals_cold(mk, "narrow band");
 
     // Prove the sweep exercised the narrow-band route, not a fallback.

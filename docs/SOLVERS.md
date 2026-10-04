@@ -108,9 +108,14 @@ Name the blocks yourself when you know better than the graph does:
 or on the backend, as parameter ranges:
 
 ```rust,ignore
-let mut solver = SparseFaer::new().with_marginalize(lm_params..n);
-let result = model.solve_with(&mut solver, &cfg)?;
+let opts = SparseFaerOptions::default().with_marginalize(lm_params..n);
+let result = model.solve_with(&mut SparseFaer::from_options(&opts), &cfg)?;
 ```
+
+`SparseFaerOptions` is the one configuration of the sparse backend: plain
+fields with a builder each, `Default` for the analysis deciding everything.
+`SparseFaer::new()` is that default as a solver, `SparseFaer::from_options`
+any other; `SolverKind::Sparse` carries the same struct.
 
 A named set is used as given, and it must be legal -- the blocks in it may
 not couple to each other, or marginalizing them is not defined and the
@@ -171,9 +176,9 @@ threaded factor matches the sequential one to rounding.
 Two further knobs, both for memory:
 
 ```rust,ignore
-SparseFaer::new()
-    .with_block_supernodal_batching(None)          // off; default is Some(1.5)
-    .with_block_supernodal_memory_lean(true)       // smaller factor, a little slower
+SparseFaer::from_options(&SparseFaerOptions::default()
+    .with_block_supernodal_batching(None)          // off; the default is Some(1.5)
+    .with_block_supernodal_memory_lean(true))      // smaller factor, a little slower
 ```
 
 Batching packs consecutive small updates into one GEMM, which is worth

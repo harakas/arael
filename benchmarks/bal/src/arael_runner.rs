@@ -209,7 +209,7 @@ pub fn block_supernodal_batch() -> Option<f64> {
 }
 
 /// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+/// supernodal route (SparseFaerOptions::with_block_supernodal_memory_lean).
 
 pub fn block_supernodal_lean() -> bool {
     std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
@@ -238,11 +238,11 @@ type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFa
 fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
-    let mut solver = arael::simple_lm::SparseFaer::new()
+    let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean());
+        .with_block_supernodal_memory_lean(block_supernodal_lean()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
@@ -258,12 +258,12 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
         arael::simple_lm::SchurPolicy::Force
     };
     let ordering = schur_ordering();
-    let mut solver = arael::simple_lm::SparseFaer::new()
+    let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(policy)
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean());
+        .with_block_supernodal_memory_lean(block_supernodal_lean()));
     let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -297,10 +297,10 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
     // says so rather than falling back, and the benchmark wants the route it
     // asked for.
     let ordering = schur_ordering();
-    let mut solver = arael::simple_lm::SparseFaer::new()
+    let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
-        .with_iterative_schur(cg_options());
+        .with_iterative_schur(cg_options()));
     let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -311,10 +311,10 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
 }
 
 fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>, ctx: &mut arael::threads::Context) -> Solved<f64> {
-    let mut solver = arael::simple_lm::SparseFaer::new()
+    let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(schur_ordering())
-        .with_implicit_schur(cg_options());
+        .with_implicit_schur(cg_options()));
     let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -325,41 +325,41 @@ fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_
 }
 
 fn solve32_schur_cg_implicit(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
-    let mut solver = arael::simple_lm::SparseFaerF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(schur_ordering())
-        .with_implicit_schur(cg_options());
+        .with_implicit_schur(cg_options()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
 fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
-    let mut solver = arael::simple_lm::SparseFaerF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
-        .with_iterative_schur(cg_options());
+        .with_iterative_schur(cg_options()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
 fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
-    let mut solver = arael::simple_lm::SparseFaerF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean());
+        .with_block_supernodal_memory_lean(block_supernodal_lean()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
-    let mut solver = arael::simple_lm::SparseFaerF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean());
+        .with_block_supernodal_memory_lean(block_supernodal_lean()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 

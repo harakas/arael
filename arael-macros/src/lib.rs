@@ -856,9 +856,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   parameter blocks coupled to other parameters but never to each
 ///   other) for the sparse solver to eliminate first. Generates
 ///   `RootProblem::marginalize_hint()` with the fields' parameter
-///   ranges; `solve_sparse` feeds it to
-///   `SparseFaer::with_marginalize`, which orders those parameters
-///   first in the factorization (replacing AMD).
+///   ranges, which the sparse solver takes as its marginalize set (as
+///   `SparseFaerOptions::with_marginalize` would name it), ordering
+///   those parameters first in the factorization (replacing AMD).
 ///
 /// ## `#[arael(skip_self_block)]`
 ///

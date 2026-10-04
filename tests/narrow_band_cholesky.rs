@@ -167,12 +167,12 @@ fn envelope_route_is_the_default_when_naturally_ordered() {
 /// for, so Auto must take it -- and reach the same answer as forcing it.
 #[test]
 fn auto_takes_the_envelope_on_a_banded_reduction() {
-    let mut auto = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
+    let mut auto = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Auto));
     let (x_auto, c_auto) = solve(&mut auto, WIN);
     assert!(auto.plan().expect("a plan").envelope,
             "a banded reduction is what the envelope route is for");
 
-    let mut always = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let mut always = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Always));
     let (x_always, c_always) = solve(&mut always, WIN);
     assert!(c_auto < 1e-12 && c_always < 1e-12, "{} {}", c_auto, c_always);
     for (a, b) in std::iter::zip(&x_auto, &x_always) {
@@ -185,7 +185,7 @@ fn auto_takes_the_envelope_on_a_banded_reduction() {
 /// system to the block supernodal instead -- which must reach the same answer.
 #[test]
 fn auto_declines_the_envelope_on_a_band_dense_reduction() {
-    let mut auto = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
+    let mut auto = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Auto));
     let (x_auto, c_auto) = solve(&mut auto, 30);
     let plan = auto.plan().expect("a plan");
     assert!(!plan.envelope,
@@ -193,7 +193,7 @@ fn auto_declines_the_envelope_on_a_band_dense_reduction() {
     assert!(plan.block_supernodal,
             "the declined envelope hands the system to the block supernodal");
 
-    let mut always = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let mut always = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Always));
     let (x_always, c_always) = solve(&mut always, 30);
     assert!(c_auto < 1e-12 && c_always < 1e-12, "{} {}", c_auto, c_always);
     for (a, b) in std::iter::zip(&x_auto, &x_always) {
@@ -207,14 +207,14 @@ fn auto_declines_the_envelope_on_a_band_dense_reduction() {
 #[test]
 fn auto_prices_against_whichever_route_would_run() {
     use arael::simple_lm::BlockSupernodalMode;
-    let mut scalar = SparseFaer::new()
+    let mut scalar = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Auto)
-        .with_block_supernodal(BlockSupernodalMode::Never);
+        .with_block_supernodal(BlockSupernodalMode::Never));
     let (x_scalar, c_scalar) = solve(&mut scalar, 30);
     let plan = scalar.plan().expect("a plan");
     assert!(!plan.block_supernodal, "the supernodal route is switched off");
 
-    let mut block = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
+    let mut block = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Auto));
     let (x_block, c_block) = solve(&mut block, 30);
     assert!(block.plan().expect("a plan").block_supernodal);
 
@@ -230,7 +230,7 @@ fn every_envelope_mode_reaches_the_same_optimum() {
     let modes = [EnvelopeMode::Auto, EnvelopeMode::Always, EnvelopeMode::Never];
     let mut first: Option<Vec<f64>> = None;
     for m in modes {
-        let mut s = SparseFaer::new().with_envelope_schur(m);
+        let mut s = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(m));
         let (x, c) = solve(&mut s, WIN);
         assert!(c < 1e-12, "{:?} end_cost {}", m, c);
         match &first {
@@ -246,13 +246,13 @@ fn every_envelope_mode_reaches_the_same_optimum() {
 /// reach the same optimum.
 #[test]
 fn envelope_route_can_be_switched_off() {
-    let mut off = SparseFaer::new().with_envelope_schur(EnvelopeMode::Never);
+    let mut off = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Never));
     let (x_faer, c_faer) = solve(&mut off, WIN);
     let plan = off.plan().expect("a plan");
     assert!(plan.reduced);
     assert!(!plan.envelope, "EnvelopeMode::Never must not take it");
 
-    let mut on = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let mut on = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Always));
     let (x_env, c_env) = solve(&mut on, WIN);
     assert!(on.plan().expect("a plan").envelope);
 
@@ -291,7 +291,7 @@ fn band_route_matches_faer_route() {
     for win in [WIN, 5, 6] {
         let (faer, c_faer) = solve(&mut SparseFaer::new(), win);
 
-        let mut band_solver = SparseFaer::new().with_narrow_band(true);
+        let mut band_solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(true));
         let (band, c_band) = solve(&mut band_solver, win);
 
         let plan = band_solver.plan().expect("a plan");
@@ -321,7 +321,7 @@ fn band_route_matches_faer_route() {
 fn wider_band_still_agrees() {
     let win = 5;
     let (faer, _) = solve(&mut SparseFaer::new(), win);
-    let mut band_solver = SparseFaer::new().with_narrow_band(true);
+    let mut band_solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(true));
     let (band, cost) = solve(&mut band_solver, win);
     let plan = band_solver.plan().expect("a plan");
     assert!(plan.envelope && plan.kept_bandwidth >= 2, "bandwidth {}", plan.kept_bandwidth);
@@ -381,9 +381,9 @@ fn solve_chain(solver: &mut SparseFaer<f64>) -> (Vec<f64>, f64) {
 /// [`EnvelopeMode`], and the ordering line looks identical for both.
 #[test]
 fn the_report_says_how_the_reduced_system_was_factored() {
-    let mut on = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let mut on = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Always));
     let (_, _) = solve(&mut on, WIN);
-    let mut off = SparseFaer::new().with_envelope_schur(EnvelopeMode::Never);
+    let mut off = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Never));
     let (_, _) = solve(&mut off, WIN);
 
     let on_txt = format!("{:?}", on.plan().expect("a plan"));
@@ -398,9 +398,9 @@ fn the_report_says_how_the_reduced_system_was_factored() {
 #[test]
 fn envelope_mode_does_not_reach_the_whole_system_band_route() {
     for mode in [EnvelopeMode::Auto, EnvelopeMode::Always, EnvelopeMode::Never] {
-        let mut s = SparseFaer::new()
+        let mut s = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_narrow_band(true)
-            .with_envelope_schur(mode);
+            .with_envelope_schur(mode));
         let (_, cost) = solve_chain(&mut s);
         let plan = s.plan().expect("a plan");
         assert!(!plan.reduced, "a pose chain marginalizes nothing");
@@ -414,7 +414,7 @@ fn envelope_mode_does_not_reach_the_whole_system_band_route() {
 fn whole_system_band_route_matches_faer() {
     let (faer, c_faer) = solve_chain(&mut SparseFaer::new());
 
-    let mut band_solver = SparseFaer::new().with_narrow_band(true);
+    let mut band_solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(true));
     let (band, c_band) = solve_chain(&mut band_solver);
 
     let plan = band_solver.plan().expect("a plan");

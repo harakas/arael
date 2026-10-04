@@ -155,7 +155,7 @@
 //! narrow, and more once it widens, so the choice is worth pricing:
 //! [`envelope_flops`](envelope::envelope_flops) costs one pass over the
 //! pattern. `arael::simple_lm::EnvelopeMode` does that for the reduced Schur
-//! system; `SparseFaer::with_narrow_band` takes the whole Hessian and warns
+//! system; `SparseFaerOptions::with_narrow_band` takes the whole Hessian and warns
 //! when its band is too wide to pay.
 //!
 //! # supernodal -- supernodal block Cholesky

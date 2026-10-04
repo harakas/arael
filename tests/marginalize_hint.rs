@@ -196,10 +196,11 @@ fn explicit_hints_are_safe() {
         let mut w = build(0.05);
         let mut params = Vec::new();
         RootProblem::serialize(&mut w, &mut params);
-        let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
+        let mut opts = arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never);
         for r in ranges.clone() {
-            solver = solver.with_marginalize(r);
+            opts = opts.with_marginalize(r);
         }
+        let mut solver = SparseFaer::from_options(&opts);
         let result = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
         assert!(result.end_cost < 1e-14,
             "hint {:?}: end_cost {}", ranges, result.end_cost);

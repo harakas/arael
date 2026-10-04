@@ -292,7 +292,7 @@ fn forced_schur_matches_dense() {
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
-    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force));
     let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     let plan = solver.plan().unwrap();
@@ -315,10 +315,10 @@ fn declined_schur_falls_back_to_full_system() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
     let mut solver =
-        SparseFaer::new().with_policy(SchurPolicy::Auto {
+        SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Auto {
             flop_margin: 0.0,
             obvious_flop_ratio: 0.0, // never short-circuit: force the comparison
-        });
+        }));
     let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     let plan = solver.plan().unwrap();

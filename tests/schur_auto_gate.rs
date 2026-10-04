@@ -202,8 +202,8 @@ fn both_gate_outcomes_reach_the_same_optimum() {
         let mut w = build(n_lm);
         let mut params = Vec::new();
         RootProblem::serialize(&mut w, &mut params);
-        let mut forced = SparseFaer::<f64>::new()
-            .with_policy(arael::simple_lm::SchurPolicy::Never);
+        let mut forced = SparseFaer::<f64>::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_policy(arael::simple_lm::SchurPolicy::Never));
         let cfg = LmConfig { max_iters: 60, ..Default::default() };
         let whole = lm_solve(&params, &mut forced, &mut w, &cfg).unwrap().end_cost;
         assert!((auto - whole).abs() < 1e-9 * whole.abs().max(1.0),

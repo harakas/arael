@@ -172,7 +172,7 @@ fn decide(scene: &Scene, policy: SchurPolicy) -> SchurPlan {
     let mut params = std::vec::Vec::new();
     arael::simple_lm::RootProblem::serialize(&mut w, &mut params);
     let cfg = LmConfig { max_iters: 1, ..Default::default() };
-    let mut solver = SparseFaer::new().with_policy(policy);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(policy));
     lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     solver.plan().expect("the first compute must leave a plan")
 }

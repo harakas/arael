@@ -420,7 +420,8 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         let mut f15 = Fit::default();
         fill(&mut f15);
         let mut s15 = SparseFaer::from_options(
-            &SparseFaerOptions::forced_schur()
+            &SparseFaerOptions::default()
+                .with_policy(arael::simple_lm::SchurPolicy::Force)
                 .with_iterative_schur(CgOptions::default()));
         let r15 = f15.solve_with(&mut s15, &cfg).unwrap();
         assert_eq!(g("cg_end"), r15.end_cost);
