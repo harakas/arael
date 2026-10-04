@@ -288,6 +288,36 @@ impl Context {
 
 }
 
+/// The thread count a new [`LmConfig`](crate::simple_lm::LmConfig) starts
+/// from: `ARAEL_NUM_THREADS` when the environment sets it, else 1. On the
+/// scale of `num_threads` (1 sequential, `n` threads, 0 every core), read
+/// once per process. A count set in code wins over it, as with
+/// `RAYON_NUM_THREADS` and `OMP_NUM_THREADS`. A value that is not a count
+/// is an error, not 1.
+pub fn default_num_threads() -> usize {
+    static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DEFAULT.get_or_init(|| match std::env::var_os("ARAEL_NUM_THREADS") {
+        None => 1,
+        Some(v) => {
+            let text = v.to_str()
+                .unwrap_or_else(|| panic!("ARAEL_NUM_THREADS is not valid text: {:?}", v));
+            num_threads_from(text).unwrap_or_else(|why| panic!("ARAEL_NUM_THREADS: {}", why))
+        }
+    })
+}
+
+/// `ARAEL_NUM_THREADS`'s text as a count: a non-negative integer, blanks
+/// around it ignored; empty is unset.
+fn num_threads_from(text: &str) -> Result<usize, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Ok(1);
+    }
+    t.parse::<usize>().map_err(|_| {
+        format!("expected a thread count (1 sequential, n threads, 0 every core), got {:?}", text)
+    })
+}
+
 /// The thread count a solve's `num_threads` setting means: 0 is the
 /// rayon pool's size. Without the `threads` feature every count is 1.
 pub fn pool_size(num_threads: usize) -> usize {
@@ -302,5 +332,27 @@ pub fn pool_size(num_threads: usize) -> usize {
     {
         let _ = num_threads;
         1
+    }
+}
+
+#[cfg(test)]
+mod num_threads_tests {
+    use super::num_threads_from;
+
+    #[test]
+    fn a_count_is_read_and_empty_is_unset() {
+        assert_eq!(num_threads_from("4"), Ok(4));
+        assert_eq!(num_threads_from("0"), Ok(0));
+        assert_eq!(num_threads_from(" 8 "), Ok(8));
+        assert_eq!(num_threads_from(""), Ok(1));
+        assert_eq!(num_threads_from("  "), Ok(1));
+    }
+
+    #[test]
+    fn anything_else_is_an_error() {
+        for bad in ["four", "-1", "2.5", "1e3", "0x4"] {
+            let why = num_threads_from(bad).expect_err(bad);
+            assert!(why.contains(bad), "{}", why);
+        }
     }
 }

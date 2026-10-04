@@ -555,8 +555,9 @@ serial pass adding the stores into the gradient and the same threads
 writing the sparse Hessian from them, one range of it each; the Schur
 reduction, one range of the reduced system's block columns each; and the
 factorization's large panels, in windows. Set `LmConfig::num_threads` (1 =
-sequential, the default; `n` = n threads; 0 = every core);
-`assembly_threads` gives the sweeps a count of their own.
+sequential, the default; `n` = n threads; 0 = every core), or
+`ARAEL_NUM_THREADS` in the environment, which sets the default and yields to
+a count set in code; `assembly_threads` gives the sweeps a count of their own.
 
 A threaded assembly adds up in a different order than the sequential one, so
 results differ in the last bits between thread counts. The model is read from

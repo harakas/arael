@@ -10,6 +10,8 @@ is cut.
 - **Multithreaded solving.** With the `threads` feature (formerly
   `rayon`) every stage of a solve runs on several threads, not just
   the factorization. Off until `LmConfig::num_threads` is set.
+- `ARAEL_NUM_THREADS` in the environment sets the default thread count;
+  a count set in code still wins.
 - The solve result reports what the threads did and where the time
   went.
 - `Context`: where a solve keeps its working data -- the Hessian
