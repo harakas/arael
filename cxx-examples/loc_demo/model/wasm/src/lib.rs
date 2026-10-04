@@ -324,10 +324,8 @@ impl Path {
     pub fn solve_band(&self, kd: u32, cfg: &LmConfig) -> Result<LmResult, JsValue> {
         let c = cfg.to_config();
         let mut g = self.root.borrow_mut();
-        let mut x0 = Vec::new();
-        g.serialize(&mut x0);
-        arael::simple_lm::solve_band_f32(&x0, kd as usize, &mut *g, &c)
-            .map(|r| { g.deserialize(&r.x); LmResult { r } })
+        g.solve_with(&mut arael::simple_lm::Band::new(kd as usize), &c)
+            .map(|r| LmResult { r })
             .map_err(failure)
     }
     /// The covariance at the current parameters; `mode` 0 PerQuery,

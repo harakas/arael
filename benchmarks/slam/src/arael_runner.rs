@@ -411,19 +411,19 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
     match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
         Ok("eigen") => {
             #[cfg(feature = "eigen")]
-            return arael::simple_lm::solve_sparse_eigen(params, path, cfg);
+            return arael::simple_lm::lm_solve_with_context(params, &mut arael::simple_lm::SparseEigen::new(), path, cfg, ctx);
             #[cfg(not(feature = "eigen"))]
             panic!("SLAM_ARAEL_SOLVER=eigen requires building with --features eigen");
         }
         Ok("cholmod") => {
             #[cfg(feature = "cholmod")]
-            return arael::simple_lm::solve_sparse_cholmod(params, path, cfg);
+            return arael::simple_lm::lm_solve_with_context(params, &mut arael::simple_lm::SparseCholmod::new(), path, cfg, ctx);
             #[cfg(not(feature = "cholmod"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod requires building with --features cholmod");
         }
         Ok("cholmod_gpl") => {
             #[cfg(feature = "cholmod-gpl")]
-            return arael::simple_lm::solve_sparse_cholmod_supernodal(params, path, cfg);
+            return arael::simple_lm::lm_solve_with_context(params, &mut arael::simple_lm::SparseCholmodSupernodal::new(), path, cfg, ctx);
             #[cfg(not(feature = "cholmod-gpl"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }

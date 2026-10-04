@@ -647,14 +647,14 @@ fn main() {
             .with_verbose(true)
             .with_rel_precision(1e-6);
         let result = match solver_name.as_str() {
-            "dense" => arael::simple_lm::solve(&params64, &mut path, &config),
-            "faer" => arael::simple_lm::solve_sparse(&params64, &mut path, &config),
+            "dense" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::Dense, &mut path, &config),
+            "faer" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::SparseFaer::new(), &mut path, &config),
             #[cfg(feature = "eigen")]
-            "eigen" => arael::simple_lm::solve_sparse_eigen(&params64, &mut path, &config),
+            "eigen" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::SparseEigen::new(), &mut path, &config),
             #[cfg(not(feature = "eigen"))]
             "eigen" => { eprintln!("Eigen solver requires --features eigen"); return; }
             #[cfg(feature = "cholmod")]
-            "cholmod" => arael::simple_lm::solve_sparse_cholmod(&params64, &mut path, &config),
+            "cholmod" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::SparseCholmod::new(), &mut path, &config),
             #[cfg(not(feature = "cholmod"))]
             "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
             _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }

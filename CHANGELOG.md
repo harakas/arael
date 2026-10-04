@@ -49,6 +49,10 @@ is cut.
 - For hand-written problems: `LmProblem` keeps the methods you
   implement; the solver's own moved to `LmProblemInternals`, and a few
   signatures changed (docs/SOLVERS.md).
+- The free `simple_lm::solve_*` functions are gone. A root solves
+  through its `solve_sparse`, `solve_dense`, `solve_with` or
+  `solve(SolverKind, ..)`; a hand-written problem through `lm_solve`
+  with a backend instance.
 - arael-faer: the factorization and Schur APIs take a thread count.
 
 ### Fixed

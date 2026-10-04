@@ -56,7 +56,7 @@ fn zero_diagonal_terminates_immediately() {
             (x[0] - 1.0).powi(2)
         },
     };
-    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default())
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Dense, &mut p, &LmConfig::default())
         .expect_err("a zero diagonal must fail the solve");
     // Errs before spending any iterations (the old behavior burned
     // 20 inner failures per outer iteration until max_iters); the partial
@@ -100,7 +100,7 @@ fn min_diagonal_lets_a_zero_diagonal_solve() {
         min_iters: 0,
         ..Default::default()
     };
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg)
+    let result = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Dense, &mut p, &cfg)
         .expect("the floor should have damped through it");
     assert!(result.iterations > 0, "it should actually iterate now");
     // The parameter that HAS curvature reaches its minimum...
@@ -119,7 +119,7 @@ fn without_the_floor_the_same_problem_still_dies() {
     let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     // The contrast: None is the default and is unchanged.
     let mut p = zero_diagonal_problem();
-    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default())
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Dense, &mut p, &LmConfig::default())
         .expect_err("without the floor the zero diagonal is fatal");
     assert_eq!(e.kind,
         SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Zero });
@@ -141,7 +141,7 @@ fn min_diagonal_does_not_rescue_a_negative_diagonal() {
         },
     };
     let cfg = LmConfig::<f64> { min_diagonal: Some(1e-6), ..Default::default() };
-    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg)
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Dense, &mut p, &cfg)
         .expect_err("a negative diagonal must stay fatal even with a floor");
     assert_eq!(e.kind,
         SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Negative });
@@ -169,7 +169,7 @@ fn a_nan_diagonal_is_not_reported_as_a_zero() {
         },
     };
     // No floor -- this is the arm the first version of the message got wrong.
-    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default())
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Dense, &mut p, &LmConfig::default())
         .expect_err("a NaN diagonal is fatal");
     assert_eq!(e.kind,
         SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Nan });
@@ -199,7 +199,7 @@ fn min_diagonal_does_not_rescue_a_nan_diagonal() {
         },
     };
     let cfg = LmConfig::<f64> { min_diagonal: Some(1e-6), ..Default::default() };
-    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg)
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Dense, &mut p, &cfg)
         .expect_err("a NaN diagonal must stay fatal even with a floor");
     assert_eq!(e.kind,
         SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Nan });
@@ -289,7 +289,7 @@ impl LmProblemInternals<f64> for BandOverflowProblem {
 #[test]
 fn band_overflow_is_a_setup_failure() {
     let mut p = BandOverflowProblem;
-    let e = simple_lm::solve_band(&[0.0, 0.0], 0, &mut p, &LmConfig::default())
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Band::new(0), &mut p, &LmConfig::default())
         .expect_err("band overflow must fail at setup");
     assert_eq!(e.kind,
         SolveFailureKind::Setup(SolveError::BandOverflow { row: 0, col: 1, kd: 0 }));
@@ -314,7 +314,7 @@ impl LmProblemInternals<f64> for UnconstrainedSparseProblem {}
 #[allow(deprecated)] // exercises the COO validation baseline
 fn unconstrained_parameter_is_a_setup_failure_through_solve() {
     let mut p = UnconstrainedSparseProblem;
-    let e = simple_lm::solve_sparse_coo(&[0.0, 0.0], &mut p, &LmConfig::default())
+    let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::SparseCoo::new(), &mut p, &LmConfig::default())
         .expect_err("an unconstrained parameter must fail at setup");
     assert_eq!(e.kind,
         SolveFailureKind::Setup(SolveError::UnconstrainedParameter { param: 1 }));

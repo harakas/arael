@@ -1204,7 +1204,6 @@ fn root_class(out: &mut String, cx: &Ctx) -> Result<(), String> {
     let ty = cx.root();
     let fp = cx.fp;
     let p = &cx.prefix;
-    let band_fn = if fp == "f32" { "solve_band_f32" } else { "solve_band" };
     let t = model.types.get(root).ok_or("root type missing from the sidecar")?;
     let o = Owner { ty: ty.clone(), is_root: true };
     out.push_str(&format!(
@@ -1259,10 +1258,8 @@ impl {cls} {{
     pub fn solve_band(&self, kd: u32, cfg: &{p}LmConfig) -> Result<{p}LmResult, JsValue> {{
         let c = cfg.to_config();
         let mut g = self.root.borrow_mut();
-        let mut x0 = Vec::new();
-        g.serialize(&mut x0);
-        arael::simple_lm::{band_fn}(&x0, kd as usize, &mut *g, &c)
-            .map(|r| {{ g.deserialize(&r.x); {p}LmResult {{ r }} }})
+        g.solve_with(&mut arael::simple_lm::Band::new(kd as usize), &c)
+            .map(|r| {p}LmResult {{ r }})
             .map_err(failure)
     }}
     /// The covariance at the current parameters; `mode` 0 PerQuery,

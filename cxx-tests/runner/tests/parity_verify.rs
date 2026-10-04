@@ -574,7 +574,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     fill(&mut fitb);
     let mut x0 = std::vec::Vec::new();
     fitb.serialize(&mut x0);
-    let rb2 = arael::simple_lm::solve_band(&x0, 4, &mut fitb, &cfg).unwrap();
+    let rb2 = arael::simple_lm::lm_solve(&x0, &mut arael::simple_lm::Band::new(4), &mut fitb, &cfg).unwrap();
     fitb.deserialize(&rb2.x);
     assert_eq!(g("band_status"), code(&rb2.status));
     assert_eq!(g("band_end"), rb2.end_cost);

@@ -378,13 +378,13 @@ fn data_ref_shapes_solve_agree() {
 
     let mut xr = Vec::new();
     RootProblem::serialize(&mut mr, &mut xr);
-    let rr = simple_lm::solve(&xr, &mut mr, &cfg).unwrap();
+    let rr = simple_lm::lm_solve(&xr, &mut simple_lm::SparseFaer::new(), &mut mr, &cfg).unwrap();
     let mut xs = Vec::new();
     RootProblem::serialize(&mut ms, &mut xs);
-    let rs = simple_lm::solve(&xs, &mut ms, &cfg).unwrap();
+    let rs = simple_lm::lm_solve(&xs, &mut simple_lm::SparseFaer::new(), &mut ms, &cfg).unwrap();
     let mut xp = Vec::new();
     RootProblem::serialize(&mut mp, &mut xp);
-    let rp = simple_lm::solve(&xp, &mut mp, &cfg).unwrap();
+    let rp = simple_lm::lm_solve(&xp, &mut simple_lm::SparseFaer::new(), &mut mp, &cfg).unwrap();
 
     assert!((rr.end_cost - rs.end_cost).abs() < 1e-10,
         "end cost R {} != S {}", rr.end_cost, rs.end_cost);
@@ -410,9 +410,9 @@ fn data_ref_shapes_agree_threaded() {
         let cfg = cfg(t);
         let mut x = Vec::new();
         match shape {
-            0 => { let mut m = build_r(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::solve(&x, &mut m, &cfg).unwrap() }
-            1 => { let mut m = build_s(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::solve(&x, &mut m, &cfg).unwrap() }
-            _ => { let mut m = build_p(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::solve(&x, &mut m, &cfg).unwrap() }
+            0 => { let mut m = build_r(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::lm_solve(&x, &mut simple_lm::SparseFaer::new(), &mut m, &cfg).unwrap() }
+            1 => { let mut m = build_s(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::lm_solve(&x, &mut simple_lm::SparseFaer::new(), &mut m, &cfg).unwrap() }
+            _ => { let mut m = build_p(&d); RootProblem::serialize(&mut m, &mut x); simple_lm::lm_solve(&x, &mut simple_lm::SparseFaer::new(), &mut m, &cfg).unwrap() }
         }
     };
     let pairs = [(run(0, 1), run(0, 4)), (run(1, 1), run(1, 4)), (run(2, 1), run(2, 4))];

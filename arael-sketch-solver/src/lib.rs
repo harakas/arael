@@ -2866,14 +2866,12 @@ impl Sketch {
                 gather_timing: verbose(),
                 ..Default::default()
             };
-            // The session follows the BACKEND, not a size threshold of our
-            // own: simple_lm::solve is dense only at 6 parameters or fewer and
-            // is the same sparse backend above that, so anything larger has an
-            // analysis worth keeping.
+            // Dense at 6 parameters or fewer; above that the session's sparse
+            // backend, whose analysis is worth keeping across the stages.
             let stage_result = if n > 6 {
                 session.solve_x0(&params, self, &config)
             } else {
-                arael::simple_lm::solve(&params, self, &config)
+                arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::Dense, self, &config)
             };
             match stage_result {
                 Ok(r) => {

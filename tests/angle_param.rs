@@ -110,7 +110,7 @@ fn solves_the_loop() {
     let mut params = std::vec::Vec::new();
     g.serialize(&mut params);
     let cfg = arael::simple_lm::LmConfig::default();
-    let r = arael::simple_lm::solve_dense(&params, &mut g, &cfg).unwrap();
+    let r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::Dense, &mut g, &cfg).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!(r.end_cost < r.start_cost * 1e-3,
         "cost {} -> {}", r.start_cost, r.end_cost);

@@ -1155,12 +1155,7 @@ pub unsafe extern "C" fn path_solve_band(
     let c = (*cfg).to_config();
     zero_result(out);
     match catch_unwind(AssertUnwindSafe(|| {
-        let mut x0 = Vec::new();
-        hh.model.serialize(&mut x0);
-        arael::simple_lm::solve_band(&x0, kd as usize, &mut hh.model, &c).map(|r| {
-            hh.model.deserialize(&r.x);
-            r
-        })
+        hh.model.solve_with(&mut arael::simple_lm::Band::new(kd as usize), &c)
     })) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);

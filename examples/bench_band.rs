@@ -349,14 +349,14 @@ fn main() {
             path.serialize(&mut params);
             n = params.len();
             let t0 = std::time::Instant::now();
-            let _r = arael::simple_lm::solve_f32(&params, &mut path, &solve_config).unwrap();
+            let _r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::Dense, &mut path, &solve_config).unwrap();
             dense_times.push(t0.elapsed().as_micros() as f64);
 
             let mut path = build_path(&cfg);
             let mut params: Vec<f32> = Vec::new();
             path.serialize(&mut params);
             let t0 = std::time::Instant::now();
-            let _r = arael::simple_lm::solve_band_f32(&params, kd, &mut path, &solve_config).unwrap();
+            let _r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::Band::new(kd), &mut path, &solve_config).unwrap();
             band_times.push(t0.elapsed().as_micros() as f64);
 
             #[cfg(feature = "lapack")]
@@ -365,7 +365,7 @@ fn main() {
                 let mut params: Vec<f32> = Vec::new();
                 path.serialize(&mut params);
                 let t0 = std::time::Instant::now();
-                let _r = arael::simple_lm::solve_band_lapack_f32(&params, kd, &mut path, &solve_config).unwrap();
+                let _r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::BandLapack::new(kd), &mut path, &solve_config).unwrap();
                 lapack_times.push(t0.elapsed().as_micros() as f64);
             }
         }

@@ -15,7 +15,7 @@ fn quadratic_converges_fast() {
             (x[0] - 3.0).powi(2) + (x[1] - 7.0).powi(2)
         },
     };
-    let result = solve(&[0.0, 0.0], &mut p, &LmConfig::default()).unwrap();
+    let result = lm_solve(&[0.0, 0.0], &mut Dense, &mut p, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-10, "cost={}", result.end_cost);
     assert!(result.iterations <= 30, "iters={}", result.iterations);
 }
@@ -36,8 +36,8 @@ fn rosenbrock_converges() {
             (1.0 - p[0]).powi(2) + 100.0 * (p[1] - p[0] * p[0]).powi(2)
         },
     };
-    let result = solve(
-        &[-1.0, 1.0], &mut p,
+    let result = lm_solve(
+        &[-1.0, 1.0], &mut Dense, &mut p,
         &LmConfig { max_iters: 500, ..Default::default() },
     ).unwrap();
     assert!((result.x[0] - 1.0).abs() < 1e-3, "x={}", result.x[0]);
@@ -66,7 +66,7 @@ fn high_dimensional_quadratic() {
     let x0: Vec<f64> = vec![0.0; n];
     // FnProblem implements only the dense path; the adaptive `solve` would
     // route 20 params to the sparse backend.
-    let result = solve_dense(&x0, &mut p, &LmConfig::default()).unwrap();
+    let result = lm_solve(&x0, &mut Dense, &mut p, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-10, "cost={}", result.end_cost);
     assert!(result.iterations <= 30, "iters={}", result.iterations);
     for i in 0..n {
@@ -86,7 +86,7 @@ fn solver_does_not_waste_iterations_on_converged_problem() {
             x[0].powi(2) + x[1].powi(2)
         },
     };
-    let result = solve(&[0.0, 0.0], &mut p, &LmConfig::default()).unwrap();
+    let result = lm_solve(&[0.0, 0.0], &mut Dense, &mut p, &LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-15, "cost={}", result.end_cost);
     assert!(result.iterations <= 20, "iters={} (should stop early at minimum)", result.iterations);
 }

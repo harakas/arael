@@ -8,26 +8,26 @@ brief.
 
 ## TL;DR -- which backend?
 
-**Default to `solve_sparse_f32` (or `solve_sparse` for f64).** For most real problems the Hessian is sparse enough that
+**Default to `solve_sparse`.** For most real problems the Hessian is sparse enough that
 sparse Cholesky is the right choice, and `faer` is the best-supported
 backend -- pure Rust, no external dependency, benchmarks cleanly, and
 handles the full sparsity pattern of a SLAM-like problem.
 
 Pick anything else only when you have a specific reason. Every backend
-comes in two forms: an `LmSolver` instance for the root's `solve_with`
-(the main API -- see below) and a `simple_lm::` free function over a raw
-parameter vector.
+is an `LmSolver` instance: a root hands it to `solve_with` (the main
+API -- see below), a hand-written problem to `lm_solve` with its
+parameter vector, and `SolverKind` names one at run time.
 
-| Backend (`solve_with(&mut ..., &cfg)`) | Free function | When |
-|---|---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after; the factorization itself runs in block form (the supernodal block route below) |
-| `Dense` | `solve_dense[_f32]` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small. The free `solve[_f32]` picks by itself: dense for <= 6 params, SparseFaer otherwise |
-| `Band::new(kd)` | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
-| `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
-| `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
-| `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
-| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL |
-| `SparseCoo::new()` / `SparseDirectCsc::new()` | `solve_sparse_coo` / `solve_sparse_direct_csc` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. (the root's `.solve_sparse()` method is faer) |
+| Backend (`solve_with(&mut ..., &cfg)`) | When |
+|---|---|
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after; the factorization itself runs in block form (the supernodal block route below) |
+| `Dense` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small |
+| `Band::new(kd)` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
+| `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
+| `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
+| `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
+| `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL |
+| `SparseCoo::new()` / `SparseDirectCsc::new()` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. (the root's `.solve_sparse()` method is faer) |
 
 ## Basic usage
 
@@ -183,17 +183,34 @@ speed for a smaller factor. `SchurPlan::block_supernodal` reports which
 route ran.
 
 **Manage the parameter vector yourself.** The generated methods own the
-serialize -> solve -> deserialize round trip. Drop to the free `solve_*`
-functions when you need the flat parameter vector directly -- warm-starting
-from a previous estimate, reusing one buffer across many solves, or timing
-the first iteration on its own:
+serialize -> solve -> deserialize round trip. Drop to `lm_solve`, the raw
+form every method is built on, when you need the flat parameter vector
+directly -- warm-starting from a previous estimate, reusing one buffer
+across many solves, or timing the first iteration on its own. It takes
+the vector, a backend instance and the problem:
 
 ```rust,ignore
 let mut params = Vec::<f32>::new();
-model.serialize(&mut params);                               // RootProblem
-let result = solve_sparse_f32(&params, &mut model, &cfg);   // free function
+model.serialize(&mut params);                                            // RootProblem
+let result = lm_solve(&params, &mut SparseFaer::<f32>::new(), &mut model, &cfg)?;
 model.deserialize(&result.x);
 ```
+
+`lm_solve_with_context` is the same solve under a caller-owned `Context`
+(see [Threads](#threads)).
+
+**Pick the backend at run time.** `SolverKind` names a backend as a value
+-- `Dense`, `Band { kd }`, `BandLapack { kd }`, `Sparse(SparseFaerOptions)`,
+`Eigen`, `Cholmod`, `CholmodSupernodal` -- for a choice made from a config
+file or a command line:
+
+```rust,ignore
+let result = model.solve(SolverKind::Sparse(SparseFaerOptions::default()), &cfg)?;
+```
+
+A kind that is not compiled in, or not available at the model's scalar,
+returns `SolveError::SolverUnavailable` with the parameters untouched,
+instead of failing to build.
 
 ## `LmConfig` -- every field, with defaults
 
@@ -975,7 +992,7 @@ let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
 // main loop:
 for scale in [0.01, 0.1, 1.0] {
     path.frine_isigma_scale = scale;
-    let result = solve_sparse_f32(&params, &mut path, &cfg);
+    let result = path.solve_sparse(&cfg)?;
     // ...
 }
 ```

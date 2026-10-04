@@ -6,8 +6,8 @@
 // (SelfBlock) -- is pushed through every LmProblem code path:
 //
 //   assembly: dense / band / COO sparse / direct CSC / indexed CSC
-//   solvers:  solve / solve_band / solve_sparse_coo / solve_sparse_direct_csc /
-//             solve_sparse
+//   solvers:  Dense / Band / SparseCoo / SparseDirectCsc / SparseFaer,
+//             each through lm_solve
 //
 // All assembly formats must produce the identical gradient and Hessian,
 // and all solvers must reach the same minimizer. One point is fixed
@@ -219,11 +219,11 @@ fn solvers_reach_same_minimizer() {
         chain.serialize(&mut p);
         #[allow(deprecated)] // the COO/direct baselines are the point here
         let r = match which {
-            "dense" => simple_lm::solve_dense(&p, &mut chain, &cfg),
-            "band" => simple_lm::solve_band(&p, KD, &mut chain, &cfg),
-            "sparse" => simple_lm::solve_sparse_coo(&p, &mut chain, &cfg),
-            "direct" => simple_lm::solve_sparse_direct_csc(&p, &mut chain, &cfg),
-            "faer" => simple_lm::solve_sparse(&p, &mut chain, &cfg),
+            "dense" => simple_lm::lm_solve(&p, &mut simple_lm::Dense, &mut chain, &cfg),
+            "band" => simple_lm::lm_solve(&p, &mut simple_lm::Band::new(KD), &mut chain, &cfg),
+            "sparse" => simple_lm::lm_solve(&p, &mut simple_lm::SparseCoo::new(), &mut chain, &cfg),
+            "direct" => simple_lm::lm_solve(&p, &mut simple_lm::SparseDirectCsc::new(), &mut chain, &cfg),
+            "faer" => simple_lm::lm_solve(&p, &mut simple_lm::SparseFaer::new(), &mut chain, &cfg),
             _ => unreachable!(),
         };
         let r = r.unwrap();
@@ -261,12 +261,12 @@ fn band_lapack_matches_dense() {
     let mut chain = build();
     let mut p = std::vec::Vec::new();
     chain.serialize(&mut p);
-    let reference = simple_lm::solve_dense(&p, &mut chain, &cfg).unwrap().x;
+    let reference = simple_lm::lm_solve(&p, &mut simple_lm::Dense, &mut chain, &cfg).unwrap().x;
 
     let mut chain = build();
     let mut p = std::vec::Vec::new();
     chain.serialize(&mut p);
-    let r = simple_lm::solve_band_lapack(&p, KD, &mut chain, &cfg).unwrap();
+    let r = simple_lm::lm_solve(&p, &mut simple_lm::BandLapack::new(KD), &mut chain, &cfg).unwrap();
     assert!(r.end_cost < r.start_cost, "lapack: no improvement");
     for i in 0..reference.len() {
         assert!((r.x[i] - reference[i]).abs() < 1e-6,
@@ -351,13 +351,13 @@ fn band_lapack_f32_matches_band() {
     let mut c = build_f32();
     let mut p = std::vec::Vec::new();
     c.serialize(&mut p);
-    let reference = simple_lm::solve_band_f32(&p, kd, &mut c, &cfg).unwrap();
+    let reference = simple_lm::lm_solve(&p, &mut simple_lm::Band::new(kd), &mut c, &cfg).unwrap();
     assert!(reference.end_cost < reference.start_cost, "band f32: no improvement");
 
     let mut c = build_f32();
     let mut p = std::vec::Vec::new();
     c.serialize(&mut p);
-    let r = simple_lm::solve_band_lapack_f32(&p, kd, &mut c, &cfg).unwrap();
+    let r = simple_lm::lm_solve(&p, &mut simple_lm::BandLapack::new(kd), &mut c, &cfg).unwrap();
     assert!(r.end_cost < r.start_cost, "lapack f32: no improvement");
     for i in 0..reference.x.len() {
         assert!((r.x[i] - reference.x[i]).abs() < 1e-4,
@@ -382,7 +382,7 @@ fn threaded_faer_matches_single_thread() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize(&mut p);
-        let r = simple_lm::solve_sparse(&p, &mut chain, &cfg).unwrap();
+        let r = simple_lm::lm_solve(&p, &mut simple_lm::SparseFaer::new(), &mut chain, &cfg).unwrap();
         assert!(r.end_cost < r.start_cost, "threads={threads}: no improvement");
         r.x
     };
@@ -413,7 +413,7 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize(&mut p);
-        simple_lm::solve_dense(&p, &mut chain, &cfg).unwrap().x
+        simple_lm::lm_solve(&p, &mut simple_lm::Dense, &mut chain, &cfg).unwrap().x
     };
 
     // solve_dense writes the solution back into the model.
@@ -432,7 +432,7 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize(&mut p);
-        simple_lm::solve_sparse(&p, &mut chain, &cfg).unwrap().x
+        simple_lm::lm_solve(&p, &mut simple_lm::SparseFaer::new(), &mut chain, &cfg).unwrap().x
     };
     let mut chain = build();
     let r = chain.solve_sparse(&cfg).unwrap();
@@ -454,7 +454,7 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize(&mut p);
-        simple_lm::solve_sparse(&p, &mut chain, &nielsen_cfg).unwrap().x
+        simple_lm::lm_solve(&p, &mut simple_lm::SparseFaer::new(), &mut chain, &nielsen_cfg).unwrap().x
     };
     let mut chain = build();
     let r = chain.solve_sparse(&nielsen_cfg).unwrap();
@@ -479,11 +479,11 @@ fn solver_kind_dispatches_to_the_named_backend() {
         run(&p, &mut c).unwrap().x
     };
     let cases: [(SolverKind, std::vec::Vec<f64>); 3] = [
-        (SolverKind::Dense, free(&|p, c| simple_lm::solve_dense(p, c, &cfg))),
-        (SolverKind::Band { kd: KD }, free(&|p, c| simple_lm::solve_band(p, KD, c, &cfg))),
+        (SolverKind::Dense, free(&|p, c| simple_lm::lm_solve(p, &mut simple_lm::Dense, c, &cfg))),
+        (SolverKind::Band { kd: KD }, free(&|p, c| simple_lm::lm_solve(p, &mut simple_lm::Band::new(KD), c, &cfg))),
         (
             SolverKind::Sparse(SparseFaerOptions::auto()),
-            free(&|p, c| simple_lm::solve_sparse(p, c, &cfg)),
+            free(&|p, c| simple_lm::lm_solve(p, &mut simple_lm::SparseFaer::new(), c, &cfg)),
         ),
     ];
     for (kind, reference) in cases {
@@ -512,7 +512,7 @@ fn sparse_auto_options_equal_default_faer() {
         let mut c = build();
         let mut p = std::vec::Vec::new();
         c.serialize(&mut p);
-        simple_lm::solve_sparse(&p, &mut c, &cfg).unwrap().x
+        simple_lm::lm_solve(&p, &mut simple_lm::SparseFaer::new(), &mut c, &cfg).unwrap().x
     };
     let mut chain = build();
     let r = chain.solve(SolverKind::Sparse(SparseFaerOptions::auto()), &cfg).unwrap();
