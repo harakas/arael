@@ -238,21 +238,37 @@ pub fn value_index(p: usize) -> ValueIndex {
 }
 
 /// Sort `keys` by their bits `bits`, keeping the order of the keys that
-/// are equal in them: counting sort over 16-bit digits, lowest first. A
-/// digit every key shares costs its count and no placement.
+/// are equal in them: counting sort, lowest digit first. The digit is as
+/// wide as the key count asks for, 8 to 16 bits, so the histogram holds
+/// about one counter per key; the passes stop at the highest bit any key
+/// sets in the range, and a digit every key shares costs its count and
+/// no placement.
 pub fn sort_keys(keys: &mut Vec<u64>, bits: core::ops::Range<u32>) {
     assert!(bits.end <= 64 && keys.len() <= u32::MAX as usize);
     let n = keys.len() as u32;
+    if n < 2 || bits.start >= bits.end {
+        return;
+    }
+    let below = (1u64 << bits.start) - 1;
+    let within = if bits.end == 64 { u64::MAX } else { (1u64 << bits.end) - 1 };
+    let set = keys.iter().fold(0u64, |acc, &k| acc | k) & within & !below;
+    if set == 0 {
+        return;
+    }
+    let end = 64 - set.leading_zeros();
+    let width_max = (u32::BITS - n.leading_zeros()).clamp(8, 16);
+    let mut counts = vec![0u32; (1usize << width_max) + 1];
     let mut tmp: Vec<u64> = Vec::new();
     let mut next = bits.start;
-    while next < bits.end {
+    while next < end {
         let shift = next;
-        let width = (bits.end - shift).min(16);
+        let width = (end - shift).min(width_max);
         next += width;
         let mask = (1u64 << width) - 1;
         let digit = |k: u64| ((k >> shift) & mask) as usize;
         // Per digit, where its first key goes.
-        let mut start = vec![0u32; (1usize << width) + 1];
+        let start = &mut counts[..(1usize << width) + 1];
+        start.fill(0);
         for &k in keys.iter() {
             start[digit(k) + 1] += 1;
         }
@@ -315,11 +331,35 @@ mod sort_keys_tests {
     #[test]
     fn keys_equal_in_the_sorted_bits_keep_their_order() {
         // High word from a small range, low word the key's place.
-        let mut radix: Vec<u64> = keys(5000, 6).iter().enumerate()
-            .map(|(k, v)| (v << 32) | k as u64).collect();
+        for n in [5000, 455, 9, 2] {
+            let mut radix: Vec<u64> = keys(n, 6).iter().enumerate()
+                .map(|(k, v)| (v << 32) | k as u64).collect();
+            let mut plain = radix.clone();
+            sort_keys(&mut radix, 32..64);
+            plain.sort_unstable();
+            assert_eq!(radix, plain, "{} keys", n);
+        }
+    }
+
+    /// A few keys take narrow digits and few passes; the result is the
+    /// plain sort all the same, keys above the sorted range included.
+    #[test]
+    fn few_keys_sort_the_same() {
+        for n in [2, 3, 7, 100, 455, 4000] {
+            for bits in [64, 40, 33, 16, 9, 3] {
+                let mut radix = keys(n, bits);
+                let mut plain = radix.clone();
+                sort_keys(&mut radix, 0..64);
+                plain.sort_unstable();
+                assert_eq!(radix, plain, "{} keys, {} bits", n, bits);
+            }
+        }
+        // Bits above the range are not sorted on, however high they are.
+        let mut radix: Vec<u64> = keys(300, 20).iter().enumerate()
+            .map(|(k, v)| (((k % 3) as u64) << 60) | (v << 16) | k as u64).collect();
         let mut plain = radix.clone();
-        sort_keys(&mut radix, 32..64);
-        plain.sort_unstable();
+        sort_keys(&mut radix, 16..36);
+        plain.sort_by_key(|k| (k >> 16) & 0xf_ffff);
         assert_eq!(radix, plain);
     }
 }
