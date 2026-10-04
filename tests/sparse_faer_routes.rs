@@ -161,7 +161,7 @@ fn auto_marginalizes_what_it_finds() {
 fn never_solves_the_whole_system_to_the_same_answer() {
     let (reduced, c_reduced) = solved_params(&mut SparseFaer::new());
 
-    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never));
     let (whole, c_whole) = solved_params(&mut solver);
 
     let plan = solver.plan().expect("a plan");
@@ -180,7 +180,7 @@ fn never_solves_the_whole_system_to_the_same_answer() {
 /// filter, nothing in the plan but the reduction itself.
 #[test]
 fn force_skips_the_analysis() {
-    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force));
     let (_, cost) = solved_params(&mut solver);
     assert!(cost < 1e-14, "end_cost {}", cost);
     let plan = solver.plan().expect("a plan");
@@ -199,11 +199,11 @@ fn every_ordering_of_the_whole_system_agrees() {
         FaerOrdering::MarginalizeFirst,
         FaerOrdering::Natural,
     ] {
-        let mut solver = SparseFaer::new()
+        let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Never)
             .with_ordering(ordering)
             // Named, so MarginalizeFirst has something to put first.
-            .with_marginalize(2 * N_POSES..2 * (N_POSES + N_LANDMARKS));
+            .with_marginalize(2 * N_POSES..2 * (N_POSES + N_LANDMARKS)));
         let (got, cost) = solved_params(&mut solver);
         assert!(cost < 1e-14, "{:?}: end_cost {}", ordering, cost);
         for (i, (a, b)) in std::iter::zip(&got, &reference).enumerate() {
@@ -219,9 +219,9 @@ fn every_ordering_of_the_whole_system_agrees() {
 fn naming_coupled_blocks_is_rejected() {
     // Odometry joins consecutive poses directly, so the poses are not a legal
     // marginalize set.
-    let mut solver = SparseFaer::new()
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
-        .with_marginalize(0..2 * N_POSES);
+        .with_marginalize(0..2 * N_POSES));
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
     let mut w = build(0.05);
     let mut params = Vec::new();
@@ -397,7 +397,7 @@ fn hand_built_problem_solves_through_the_plain_route() {
 fn forcing_a_reduction_on_a_hand_built_problem_is_rejected() {
     let mut p = LineFit { pts: vec![(0.0, 1.0), (1.0, 3.0)] };
     let cfg = LmConfig { max_iters: 5, ..Default::default() };
-    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force));
     lm_solve(&[0.0, 0.0], &mut solver, &mut p, &cfg).unwrap();
 }
 
@@ -496,7 +496,7 @@ fn deque_arena_world_reduced_and_whole_routes_agree() {
     assert_eq!(plan.eliminated_blocks, DA_LANDMARKS);
     assert_eq!(plan.kept_params, 2 * DA_POSES);
 
-    let mut never = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let mut never = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never));
     let (whole, c_whole) = solved_params_da(&mut never);
     assert!(c_whole < 1e-14, "whole end_cost {}", c_whole);
     for (i, (a, b)) in std::iter::zip(&whole, &reduced).enumerate() {

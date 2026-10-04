@@ -433,15 +433,19 @@ fn assert_steps_agree<T: Float>(label: &str, lambdas: &[T], block: &[Option<Vec<
     }
 }
 
+fn whole_h_opts(mode: BlockSupernodalMode) -> arael::simple_lm::SparseFaerOptions {
+    arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(mode)
+}
+
 fn whole_h(mode: BlockSupernodalMode) -> SparseFaer<f64> {
-    SparseFaer::new().with_policy(SchurPolicy::Never).with_block_supernodal(mode)
+    SparseFaer::from_options(&whole_h_opts(mode))
 }
 
 fn reduced(mode: BlockSupernodalMode) -> SparseFaer<f64> {
-    SparseFaer::new()
+    SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(mode)
+        .with_block_supernodal(mode))
 }
 
 /// M3500, whole Hessian: 3-wide poses with loop closures under block AMD
@@ -492,8 +496,8 @@ fn landmarks_first_whole_hessian_steps_agree() {
     let lm_start = 2 * w.poses.len();
     let n = params.len();
     let lambdas = [1e-2, 1e-4, 1e-6, 1e-10, 0.0];
-    let mut block = whole_h(BlockSupernodalMode::Always).with_marginalize(lm_start..n);
-    let mut scalar = whole_h(BlockSupernodalMode::Never).with_marginalize(lm_start..n);
+    let mut block = SparseFaer::from_options(&whole_h_opts(BlockSupernodalMode::Always).with_marginalize(lm_start..n));
+    let mut scalar = SparseFaer::from_options(&whole_h_opts(BlockSupernodalMode::Never).with_marginalize(lm_start..n));
     let b = steps(&mut block, &mut w, &params, &lambdas);
     let s = steps(&mut scalar, &mut w, &params, &lambdas);
     let plan = block.plan().unwrap();
@@ -512,14 +516,14 @@ fn f32_steps_agree() {
     RootProblem::serialize(&mut w, &mut params);
     let lambdas = [1e-2f32, 1e-4, 1e-6];
 
-    let mut block = SparseFaerF32::new()
+    let mut block = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
-    let mut scalar = SparseFaerF32::new()
+        .with_block_supernodal(BlockSupernodalMode::Always));
+    let mut scalar = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Never);
+        .with_block_supernodal(BlockSupernodalMode::Never));
     let b = steps(&mut block, &mut w, &params, &lambdas);
     let s = steps(&mut scalar, &mut w, &params, &lambdas);
     let plan = block.plan().unwrap();
@@ -527,8 +531,8 @@ fn f32_steps_agree() {
     assert!(!scalar.plan().unwrap().block_supernodal);
     assert_steps_agree("f32 reduced", &lambdas, &b, &s, 1e-3);
 
-    let mut block = SparseFaerF32::new().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Always);
-    let mut scalar = SparseFaerF32::new().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Never);
+    let mut block = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Always));
+    let mut scalar = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Never));
     let b = steps(&mut block, &mut w, &params, &lambdas);
     let s = steps(&mut scalar, &mut w, &params, &lambdas);
     let plan = block.plan().unwrap();
@@ -547,8 +551,8 @@ fn bal_steps_agree(label: &str, window: Option<usize>) {
     let mut params = Vec::new();
     RootProblem::serialize(&mut bundle, &mut params);
     let lambdas = [1e-2, 1e-4, 1e-6, 1e-8];
-    let mut block = SparseFaer::new().with_envelope_schur(EnvelopeMode::Never).with_block_supernodal(BlockSupernodalMode::Always);
-    let mut scalar = SparseFaer::new().with_envelope_schur(EnvelopeMode::Never).with_block_supernodal(BlockSupernodalMode::Never);
+    let mut block = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Never).with_block_supernodal(BlockSupernodalMode::Always));
+    let mut scalar = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_envelope_schur(EnvelopeMode::Never).with_block_supernodal(BlockSupernodalMode::Never));
     let b = steps(&mut block, &mut bundle, &params, &lambdas);
     let s = steps(&mut scalar, &mut bundle, &params, &lambdas);
     let plan = block.plan().unwrap();

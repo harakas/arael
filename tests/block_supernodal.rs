@@ -218,10 +218,10 @@ fn supernodal_schur_route_matches_the_default() {
     // REDUCED system, and Auto prices the whole system under nested
     // dissection too -- on this scene it wins, leaving nothing reduced to
     // factorize.
-    let mut sn = SparseFaer::new()
+    let mut sn = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_sn, c_sn) = solve(&mut sn, 2);
     let plan = sn.plan().expect("a plan");
     assert!(plan.reduced, "the landmarks should marginalize");
@@ -239,7 +239,7 @@ fn supernodal_schur_route_matches_the_default() {
 /// it without being asked.
 #[test]
 fn auto_default_takes_the_supernodal_route() {
-    let mut auto = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let mut auto = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never));
     let (_, c) = solve(&mut auto, 2);
     assert!(c < 1e-12, "end_cost {}", c);
     assert!(
@@ -262,7 +262,7 @@ fn threads_do_not_change_the_supernodal_route_or_its_answer() {
         let mut w = build(0.1, 2);
         let mut params = Vec::new();
         RootProblem::serialize(&mut w, &mut params);
-        let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
+        let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never));
         let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
         let took = solver.plan().expect("a plan").block_supernodal;
         (r.end_cost, r.x, took)
@@ -284,10 +284,10 @@ fn threads_do_not_change_the_supernodal_route_or_its_answer() {
 /// the scalar route. A zero flop margin forces the decline.
 #[test]
 fn a_declined_reduction_still_takes_the_supernodal() {
-    let mut auto = SparseFaer::new().with_policy(SchurPolicy::Auto {
+    let mut auto = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Auto {
         flop_margin: 0.0,
         obvious_flop_ratio: 0.0,
-    });
+    }));
     let (x_a, c_a) = solve(&mut auto, 2);
     let plan = auto.plan().expect("a plan");
     assert!(!plan.reduced, "a zero margin must decline the reduction");
@@ -296,9 +296,9 @@ fn a_declined_reduction_still_takes_the_supernodal() {
         "the declined-reduction path must reach the supernodal route",
     );
 
-    let mut scalar = SparseFaer::new()
+    let mut scalar = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Auto { flop_margin: 0.0, obvious_flop_ratio: 0.0 })
-        .with_block_supernodal(BlockSupernodalMode::Never);
+        .with_block_supernodal(BlockSupernodalMode::Never));
     let (x_s, c_s) = solve(&mut scalar, 2);
     assert!(!scalar.plan().expect("a plan").block_supernodal);
 
@@ -312,15 +312,15 @@ fn a_declined_reduction_still_takes_the_supernodal() {
 /// directly. BlockSupernodalMode::Never restores the scalar route.
 #[test]
 fn supernodal_whole_system_matches_the_scalar_route() {
-    let mut scalar = SparseFaer::new()
+    let mut scalar = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Never)
-        .with_block_supernodal(BlockSupernodalMode::Never);
+        .with_block_supernodal(BlockSupernodalMode::Never));
     let (x_sc, c_sc) = solve(&mut scalar, 2);
     assert!(!scalar.plan().expect("a plan").block_supernodal);
 
-    let mut sn = SparseFaer::new()
+    let mut sn = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_sn, c_sn) = solve(&mut sn, 2);
     let plan = sn.plan().expect("a plan");
     assert!(!plan.reduced);
@@ -358,15 +358,15 @@ fn whole_system_orders_a_named_set_first() {
     let n = params.len();
     let lm_start = 2 * N_POSES;
 
-    let mut amd = SparseFaer::new()
+    let mut amd = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_amd, c_amd) = solve(&mut amd, 2);
 
-    let mut mf = SparseFaer::new()
+    let mut mf = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Never)
         .with_marginalize(lm_start..n)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_mf, c_mf) = solve(&mut mf, 2);
     let plan = mf.plan().expect("a plan");
     assert!(!plan.reduced, "SchurPolicy::Never must not reduce");
@@ -382,15 +382,15 @@ fn whole_system_orders_a_named_set_first() {
 /// the answer, only how the updates are applied.
 #[test]
 fn batching_can_be_disabled_without_changing_the_answer() {
-    let mut on = SparseFaer::new()
+    let mut on = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_on, c_on) = solve(&mut on, 2);
 
-    let mut off = SparseFaer::new()
+    let mut off = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Never)
         .with_block_supernodal(BlockSupernodalMode::Always)
-        .with_block_supernodal_batching(None);
+        .with_block_supernodal_batching(None));
     let (x_off, c_off) = solve(&mut off, 2);
     assert!(off.plan().expect("a plan").block_supernodal);
 
@@ -404,15 +404,15 @@ fn batching_can_be_disabled_without_changing_the_answer() {
 /// supernodes pad, never the answer.
 #[test]
 fn memory_lean_changes_nothing_about_the_answer() {
-    let mut dflt = SparseFaer::new()
+    let mut dflt = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_d, c_d) = solve(&mut dflt, 2);
 
-    let mut lean = SparseFaer::new()
+    let mut lean = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Never)
         .with_block_supernodal(BlockSupernodalMode::Always)
-        .with_block_supernodal_memory_lean(true);
+        .with_block_supernodal_memory_lean(true));
     let (x_l, c_l) = solve(&mut lean, 2);
     assert!(lean.plan().expect("a plan").block_supernodal);
 
@@ -430,9 +430,9 @@ fn f32_supernodal_schur_route_solves() {
     let mut w = build_f32(0.1, 2);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
-    let mut solver = arael::simple_lm::SparseFaerF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always);
+        .with_block_supernodal(BlockSupernodalMode::Always));
     let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     assert!(solver.plan().expect("a plan").block_supernodal);
     assert!(r.end_cost < 1e-6, "end_cost {}", r.end_cost);

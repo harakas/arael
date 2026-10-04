@@ -772,7 +772,7 @@ pub trait RootProblem<T: Float> {
     /// Parameter index ranges of fields marked `#[arael(root,
     /// marginalize(field))]`: small mutually uncoupled blocks
     /// (landmark-style entities) that a sparse backend may eliminate
-    /// first (see [`SparseFaer::with_marginalize`]). Empty by
+    /// first (see [`SparseFaerOptions::with_marginalize`]). Empty by
     /// default; the macro overrides it for marked fields.
     fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
         std::vec::Vec::new()
@@ -1462,7 +1462,7 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     /// read this themselves at the first compute, so declaring it on the
     /// model is all that is needed: no caller has to carry it from the model
     /// into the solver. An explicit
-    /// [`SparseFaer::with_marginalize`] still overrides it.
+    /// [`SparseFaerOptions::with_marginalize`] still overrides it.
     ///
     /// Default: no hint (and then the Schur backend detects what it can --
     /// see [`marginalize_candidates`](Self::marginalize_candidates)).
@@ -4536,17 +4536,16 @@ pub struct SparseFaerOptions {
     /// How to factor the reduced Schur system -- see [`EnvelopeMode`].
     pub envelope: EnvelopeMode,
     /// Block-column panel width for the envelope factorization; `None` picks
-    /// it automatically (see [`SparseFaer::with_envelope_panel_width`]).
+    /// it automatically (see [`Self::with_envelope_panel_width`]).
     pub envelope_panel_width: Option<usize>,
     /// When the supernodal block Cholesky factorizes instead of faer's
-    /// scalar one (see [`SparseFaer::with_block_supernodal`]).
+    /// scalar one (see [`Self::with_block_supernodal`]).
     pub block_supernodal: BlockSupernodalMode,
     /// Update-batching acceptance ratio for the supernodal block route;
-    /// `None` disables batching (see
-    /// [`SparseFaer::with_block_supernodal_batching`]).
+    /// `None` disables batching (see [`Self::with_block_supernodal_batching`]).
     pub block_supernodal_batch: Option<f64>,
     /// Memory-lean amalgamation for the supernodal block route (see
-    /// [`SparseFaer::with_block_supernodal_memory_lean`]). Off by default.
+    /// [`Self::with_block_supernodal_memory_lean`]). Off by default.
     pub block_supernodal_memory_lean: bool,
     /// Parameter ranges to marginalize, named explicitly rather than left to
     /// the policy to detect.
@@ -4578,6 +4577,20 @@ impl SparseFaerOptions {
         }
     }
 
+    /// Set the marginalization policy: [`SchurPolicy::Force`] to marginalize
+    /// no matter what the analysis says, [`SchurPolicy::Never`] to
+    /// factorize the whole system and not marginalize at all.
+    pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Set how the reduced system is solved ([`SchurSolve`]).
+    pub fn with_schur_solve(mut self, schur_solve: SchurSolve) -> Self {
+        self.schur_solve = schur_solve;
+        self
+    }
+
     /// Solve the reduced system by preconditioned conjugate gradients instead
     /// of factorizing it ([`SchurSolve::Iterative`]). Pair with
     /// [`SchurPolicy::Force`]: without a reduction there is nothing for it to
@@ -4594,69 +4607,156 @@ impl SparseFaerOptions {
         self
     }
 
-    /// Never marginalize: factorize the whole system ([`SchurPolicy::Never`]).
-    pub fn whole_system() -> Self {
-        SparseFaerOptions { policy: SchurPolicy::Never, ..Self::auto() }
-    }
-
-    /// Marginalize unconditionally ([`SchurPolicy::Force`]).
-    pub fn forced_schur() -> Self {
-        SparseFaerOptions { policy: SchurPolicy::Force, ..Self::auto() }
-    }
-
-    /// Set the marginalization policy ([`SchurPolicy`]).
-    pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
-        self.policy = policy;
-        self
-    }
-    /// Set the elimination ordering ([`FaerOrdering`]).
+    /// Set the elimination ordering of whichever system gets factorized.
+    /// See [`FaerOrdering`] -- the default picks it from the system in hand.
     pub fn with_ordering(mut self, ordering: FaerOrdering) -> Self {
         self.ordering = ordering;
         self
     }
-    /// Toggle the supernodal factorization kernel (see
-    /// [`SparseFaer::with_supernodal`] for the reasoning).
+
+    /// Factorize supernodally -- gather the factor into dense panels and run
+    /// BLAS3 over them -- rather than one column at a time. On by default.
+    ///
+    /// faer decides this for itself from a flop-count heuristic, and on the
+    /// sparse systems this crate produces the heuristic is too conservative: it
+    /// picks the column-at-a-time route where the panels would have been 2.6x
+    /// faster (a 3D pose graph, 6.1 ms against 2.3), and never picks it where
+    /// the columns are actually better. Measured across every benchmark we
+    /// have, forcing panels is a large win twice and a wash everywhere else, so
+    /// it is the default. Turn it off to hand the choice back to faer.
     pub fn with_supernodal(mut self, on: bool) -> Self {
         self.supernodal = on;
         self
     }
-    /// Toggle the narrow-band route for banded systems (see
-    /// [`SparseFaer::with_narrow_band`]).
+
+    /// Factor a banded system with a narrow-band Cholesky instead of faer's
+    /// general sparse Cholesky. Off by default. Applies to whichever system
+    /// the backend factorizes -- the reduced Schur system when it reduces,
+    /// the whole Hessian when it does not.
+    ///
+    /// A trajectory with local features is banded in natural order (the whole
+    /// pose system for a localization or pose graph, the reduced pose system
+    /// after landmarks are marginalized). A narrow-band factorization confines
+    /// fill to the band by construction and skips the symbolic analysis,
+    /// ordering, and scalar-CSC round trip the general sparse route needs -- a
+    /// win when the band is narrow, growing on the first iteration where the
+    /// symbolic work lives.
+    ///
+    /// This is the caller's explicit choice: whenever the system to factorize
+    /// is banded ([`ReducedOrdering::NaturalBanded`]), the narrow-band route is
+    /// used, whatever the bandwidth. Past roughly a hundred scalars of
+    /// half-bandwidth faer's supernodal factorization is faster, and enabling
+    /// this on such a system logs a warning. A non-banded system always stays
+    /// on the faer route.
+    ///
+    /// Distinct from the whole-system scalar band solver ([`Band`]): that
+    /// factorizes the entire Hessian in LAPACK band storage with a caller-given
+    /// bandwidth; this works in block form and finds the bandwidth itself.
     pub fn with_narrow_band(mut self, on: bool) -> Self {
         self.narrow_band = on;
         self
     }
-    /// Set how the reduced Schur system is factored (see
-    /// [`SparseFaer::with_envelope_schur`]).
+
+    /// Factorize the reduced Schur system under its own envelope, in block
+    /// form, instead of handing it to faer's sparse Cholesky. The same scheme
+    /// is called a profile or skyline factorization elsewhere. On suitable
+    /// systems it significantly reduces memory usage.
+    ///
+    /// The envelope route keeps no scalar copy of S, no scalar pattern, no
+    /// symbolic analysis and no supernodal scratch -- it factors the block
+    /// matrix in place, in panels sized to the envelope. See [`EnvelopeMode`]
+    /// for what that saves, what it costs, and how the default decides.
+    ///
+    /// Applies only where the reduction leaves a naturally-ordered system. A
+    /// reduction that wants AMD or nested dissection is reordered, which
+    /// leaves no envelope to exploit, and this is ignored. So are the
+    /// iterative routes, which never form a factor.
+    ///
+    /// Distinct from [`with_narrow_band`](Self::with_narrow_band), which is
+    /// the whole-system route for a Hessian banded before any reduction.
     pub fn with_envelope_schur(mut self, mode: EnvelopeMode) -> Self {
         self.envelope = mode;
         self
     }
-    /// Set the envelope factorization's panel width (see
-    /// [`SparseFaer::with_envelope_panel_width`]).
+
+    /// Super-panel width, in scalar columns, for the envelope factorization.
+    ///
+    /// `None` (the default) derives it from the envelope, which is what a
+    /// caller should normally leave alone: a wide panel makes the update GEMM
+    /// efficient but factorizes more of the structural zeros it snaps over, so
+    /// the useful width is bounded by the band it sits on and by where the
+    /// GEMM stops gaining. Set it to measure that curve on a given machine.
+    ///
+    /// Ignored unless the envelope route runs at all.
     pub fn with_envelope_panel_width(mut self, width: Option<usize>) -> Self {
         self.envelope_panel_width = width;
         self
     }
-    /// Set when the supernodal block Cholesky factorizes (see
-    /// [`SparseFaer::with_block_supernodal`]).
+
+    /// Factor with the supernodal block Cholesky instead of flattening to
+    /// scalar CSC and using faer's.
+    ///
+    /// The factorization runs directly on the block matrix -- the reduced
+    /// Schur system when the solve reduces, the whole block Hessian when it
+    /// does not -- under a block-level ordering (nested dissection when that
+    /// is the ordering, block-AMD otherwise), so the scalar pattern, the
+    /// scalar symbolic analysis and the per-attempt scalar copies are never
+    /// built. Measured at or ahead of the scalar route on every benchmark
+    /// matrix (1.0-1.3x per attempt), with a 2-10x cheaper symbolic phase;
+    /// see docs/dev/BLOCK.md and [`BlockSupernodalMode`].
+    ///
+    /// Default [`BlockSupernodalMode::Auto`]: the supernodal route wherever
+    /// the scalar one would run, at any thread count -- its dense kernels
+    /// take [`num_threads`](LmConfig::num_threads) on the panels big enough
+    /// to pay for it. Routes that never factorize (iterative Schur) and the
+    /// envelope routes, when they engage, keep precedence in every mode.
+    /// Models without block structure (hand-built problems, `coo`
+    /// constraints) always take the scalar route.
     pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
         self.block_supernodal = mode;
         self
     }
-    /// Set or disable the supernodal route's update batching (see
-    /// [`SparseFaer::with_block_supernodal_batching`]).
+
+    /// Set the supernodal block route's update-batching acceptance ratio,
+    /// or disable batching with `None`.
+    ///
+    /// Batching packs neighboring small descendant updates into one GEMM
+    /// over their joint span while the zero-padding stays within this factor
+    /// of the members' own flops -- fewer passes over the shared target
+    /// region, at the price of the padding's arithmetic and a packing
+    /// buffer. The default is 1.5; ratios past ~2 lose outright. Ignored
+    /// unless the supernodal route runs at all.
     pub fn with_block_supernodal_batching(mut self, ratio: Option<f64>) -> Self {
         self.block_supernodal_batch = ratio;
         self
     }
-    /// Toggle the supernodal route's memory-lean amalgamation (see
-    /// [`SparseFaer::with_block_supernodal_memory_lean`]).
+
+    /// Trade a little supernode amalgamation for factor memory on the
+    /// supernodal block route ([`SupernodalParams::memory_lean`]): on
+    /// wide-block systems (bundle adjustment) it matches the default's
+    /// speed while holding ~16% less factor; on narrow-block systems the
+    /// default's amalgamation is worth 10-20% of the factorization time,
+    /// which is why this is an opt-in and not an auto-pick. Off by
+    /// default; ignored unless the supernodal route runs at all.
+    ///
+    /// [`SupernodalParams::memory_lean`]: arael_faer::supernodal::SupernodalParams::memory_lean
     pub fn with_block_supernodal_memory_lean(mut self, on: bool) -> Self {
         self.block_supernodal_memory_lean = on;
         self
     }
-    /// Add a parameter range to marginalize (may be called several times).
+
+    /// Marginalize the parameter blocks fully inside `range`, instead of the
+    /// ones the model's coupling graph would offer
+    /// ([`LmProblemInternals::marginalize_candidates`]). May be called several
+    /// times for several ranges.
+    ///
+    /// This says WHICH blocks, not WHETHER marginalizing them is a good idea
+    /// -- that stays with the policy, and the default
+    /// ([`SchurPolicy::Auto`]) still weighs it. Naming the blocks is not
+    /// evidence that eliminating them pays: on a large enough kept system it
+    /// does not (Ladybug-1723 is 1.6x slower reduced), and the check is free
+    /// on the problems where the answer is obvious. Add
+    /// `.with_policy(SchurPolicy::Force)` to skip it anyway.
     pub fn with_marginalize(mut self, range: std::ops::Range<usize>) -> Self {
         self.marginalize.push(range);
         self
@@ -4888,15 +4988,15 @@ pub struct SchurPlan {
     /// rather than by faer's general sparse Cholesky.
     ///
     /// Which system depends on [`reduced`](Self::reduced): the reduced one
-    /// when there was a reduction ([`SparseFaer::with_envelope_schur`]), the
+    /// when there was a reduction ([`SparseFaerOptions::with_envelope_schur`]), the
     /// whole Hessian when there was not
-    /// ([`SparseFaer::with_narrow_band`], which additionally requires the band
+    /// ([`SparseFaerOptions::with_narrow_band`], which additionally requires the band
     /// to be narrow). False when the system was reordered (AMD or nested
     /// dissection leave no envelope), when an iterative route ran, or when the
     /// envelope route was declined.
     pub envelope: bool,
     /// Whether the system was factorized by the supernodal block Cholesky
-    /// ([`SparseFaer::with_block_supernodal`]) instead of faer's scalar one.
+    /// ([`SparseFaerOptions::with_block_supernodal`]) instead of faer's scalar one.
     /// As with [`envelope`](Self::envelope), which system depends on
     /// [`reduced`](Self::reduced).
     pub block_supernodal: bool,
@@ -4915,7 +5015,7 @@ pub struct SchurPlan {
 ///    coupling graph, so this is a graph question, not a guess, and a
 ///    model can have several such families at once (bundle adjustment has
 ///    two). Name a set yourself with
-///    [`with_marginalize`](Self::with_marginalize) or
+///    [`with_marginalize`](SparseFaerOptions::with_marginalize) or
 ///    `#[arael(root, marginalize(field))]` and it is used as given.
 /// 2. **Whether marginalizing pays.** It does not always: it forces
 ///    "marginalized first" as the elimination order, and on a big enough
@@ -5088,143 +5188,6 @@ impl<T> SparseFaer<T> {
         }
     }
 
-    /// Marginalize the parameter blocks fully inside `range`, instead of the
-    /// ones the model's coupling graph would offer
-    /// ([`LmProblemInternals::marginalize_candidates`]). May be called several times
-    /// for several ranges.
-    ///
-    /// This says WHICH blocks, not WHETHER marginalizing them is a good idea
-    /// -- that stays with the policy, and the default
-    /// ([`SchurPolicy::Auto`]) still weighs it. Naming the blocks is not
-    /// evidence that eliminating them pays: on a large enough kept system it
-    /// does not (Ladybug-1723 is 1.6x slower reduced), and the check is free
-    /// on the problems where the answer is obvious. Add
-    /// `.with_policy(SchurPolicy::Force)` to skip it anyway.
-    pub fn with_marginalize(mut self, range: std::ops::Range<usize>) -> Self {
-        self.marginalize.push(range);
-        self
-    }
-
-    /// Override the decision policy: [`SchurPolicy::Force`] to marginalize
-    /// no matter what the analysis says, [`SchurPolicy::Never`] to
-    /// factorize the whole system and not marginalize at all.
-    pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
-        self.policy = policy;
-        self
-    }
-
-    /// Override the elimination ordering of whichever system gets
-    /// factorized. See [`FaerOrdering`] -- the default picks it from the
-    /// system in hand.
-    pub fn with_ordering(mut self, ordering: FaerOrdering) -> Self {
-        self.ordering = ordering;
-        self
-    }
-
-    /// Factorize supernodally -- gather the factor into dense panels and run
-    /// BLAS3 over them -- rather than one column at a time. On by default.
-    ///
-    /// faer decides this for itself from a flop-count heuristic, and on the
-    /// sparse systems this crate produces the heuristic is too conservative: it
-    /// picks the column-at-a-time route where the panels would have been 2.6x
-    /// faster (a 3D pose graph, 6.1 ms against 2.3), and never picks it where
-    /// the columns are actually better. Measured across every benchmark we
-    /// have, forcing panels is a large win twice and a wash everywhere else, so
-    /// it is the default. Turn it off to hand the choice back to faer.
-    pub fn with_supernodal(mut self, on: bool) -> Self {
-        self.supernodal = on;
-        self
-    }
-
-    /// Factor a banded system with a narrow-band Cholesky instead of faer's
-    /// general sparse Cholesky. Off by default. Applies to whichever system
-    /// this backend factorizes -- the reduced Schur system when it reduces,
-    /// the whole Hessian when it does not.
-    ///
-    /// A trajectory with local features is banded in natural order (the whole
-    /// pose system for a localization or pose graph, the reduced pose system
-    /// after landmarks are marginalized). A narrow-band factorization confines
-    /// fill to the band by construction and skips the symbolic analysis,
-    /// ordering, and scalar-CSC round trip the general sparse route needs -- a
-    /// win when the band is narrow, growing on the first iteration where the
-    /// symbolic work lives.
-    ///
-    /// This is the caller's explicit choice: whenever the system to factorize
-    /// is banded ([`ReducedOrdering::NaturalBanded`]), the narrow-band route is
-    /// used, whatever the bandwidth. Past roughly a hundred scalars of
-    /// half-bandwidth faer's supernodal factorization is faster, and enabling
-    /// this on such a system logs a warning. A non-banded system always stays
-    /// on the faer route.
-    ///
-    /// Distinct from the whole-system scalar band solver ([`Band`]): that
-    /// factorizes the entire Hessian in LAPACK band storage with a caller-given
-    /// bandwidth; this works in block form and finds the bandwidth itself.
-    pub fn with_narrow_band(mut self, on: bool) -> Self {
-        self.narrow_band_enabled = on;
-        self
-    }
-
-    /// Factorize the reduced Schur system under its own envelope, in block
-    /// form, instead of handing it to faer's sparse Cholesky. The same scheme
-    /// is called a profile or skyline factorization elsewhere. On suitable
-    /// systems it significantly reduces memory usage.
-    ///
-    /// The envelope route keeps no scalar copy of S, no scalar pattern, no
-    /// symbolic analysis and no supernodal scratch -- it factors the block
-    /// matrix in place, in panels sized to the envelope. See [`EnvelopeMode`]
-    /// for what that saves, what it costs, and how the default decides.
-    ///
-    /// Applies only where the reduction leaves a naturally-ordered system. A
-    /// reduction that wants AMD or nested dissection is reordered, which
-    /// leaves no envelope to exploit, and this is ignored. So are the
-    /// iterative routes, which never form a factor.
-    ///
-    /// Distinct from [`with_narrow_band`](Self::with_narrow_band), which is
-    /// the whole-system route for a Hessian banded before any reduction.
-    pub fn with_envelope_schur(mut self, mode: EnvelopeMode) -> Self {
-        self.envelope_mode = mode;
-        self
-    }
-
-
-    /// Super-panel width, in scalar columns, for the envelope factorization.
-    ///
-    /// `None` (the default) derives it from the envelope, which is what a
-    /// caller should normally leave alone: a wide panel makes the update GEMM
-    /// efficient but factorizes more of the structural zeros it snaps over, so
-    /// the useful width is bounded by the band it sits on and by where the
-    /// GEMM stops gaining. Set it to measure that curve on a given machine.
-    ///
-    /// Ignored unless the envelope route runs at all.
-    pub fn with_envelope_panel_width(mut self, width: Option<usize>) -> Self {
-        self.envelope_panel_width = width;
-        self
-    }
-
-    /// Factor with the supernodal block Cholesky instead of flattening to
-    /// scalar CSC and using faer's. Off by default.
-    ///
-    /// The factorization runs directly on the block matrix -- the reduced
-    /// Schur system when the solve reduces, the whole block Hessian when it
-    /// does not -- under a block-level ordering (nested dissection when that
-    /// is the ordering, block-AMD otherwise), so the scalar pattern, the
-    /// scalar symbolic analysis and the per-attempt scalar copies are never
-    /// built. Measured at or ahead of the scalar route on every benchmark
-    /// matrix (1.0-1.3x per attempt), with a 2-10x cheaper symbolic phase;
-    /// see docs/dev/BLOCK.md and [`BlockSupernodalMode`].
-    ///
-    /// Default [`BlockSupernodalMode::Auto`]: the supernodal route wherever
-    /// the scalar one would run, at any thread count -- its dense kernels
-    /// take [`num_threads`](LmConfig::num_threads) on the panels big enough
-    /// to pay for it. Routes that never factorize (iterative Schur) and the
-    /// envelope routes, when they engage, keep precedence in every mode.
-    /// Models without block structure (hand-built problems, `coo`
-    /// constraints) always take the scalar route.
-    pub fn with_block_supernodal(mut self, mode: BlockSupernodalMode) -> Self {
-        self.block_supernodal = mode;
-        self
-    }
-
     /// Whether this solve takes the supernodal block route where the scalar
     /// factorization would otherwise run.
     fn sn_take(&self) -> bool {
@@ -5242,72 +5205,26 @@ impl<T> SparseFaer<T> {
         }
     }
 
-    /// Trade a little supernode amalgamation for factor memory on the
-    /// supernodal block route ([`SupernodalParams::memory_lean`]): on
-    /// wide-block systems (bundle adjustment) it matches the default's
-    /// speed while holding ~16% less factor; on narrow-block systems the
-    /// default's amalgamation is worth 10-20% of the factorization time,
-    /// which is why this is an opt-in and not an auto-pick. Off by
-    /// default; ignored unless the supernodal route runs at all.
-    ///
-    /// [`SupernodalParams::memory_lean`]: arael_faer::supernodal::SupernodalParams::memory_lean
-    pub fn with_block_supernodal_memory_lean(mut self, on: bool) -> Self {
-        self.sn_memory_lean = on;
-        self
-    }
-
-    /// Set the supernodal block route's update-batching acceptance ratio,
-    /// or disable batching with `None`.
-    ///
-    /// Batching packs neighboring small descendant updates into one GEMM
-    /// over their joint span while the zero-padding stays within this factor
-    /// of the members' own flops -- fewer passes over the shared target
-    /// region, at the price of the padding's arithmetic and a packing
-    /// buffer. The default (1.2) is the memory-lean end of the measured
-    /// optimum; ratios past ~2 lose outright. Ignored unless the supernodal
-    /// route runs at all.
-    pub fn with_block_supernodal_batching(mut self, ratio: Option<f64>) -> Self {
-        self.sn_batch_ratio = ratio;
-        self
-    }
-
     /// What the first compute decided (`None` before the first compute).
     pub fn plan(&self) -> Option<SchurPlan> {
         self.plan
     }
 
-    /// Build a solver from a [`SparseFaerOptions`], applying every field.
+    /// A solver configured by a [`SparseFaerOptions`], every field applied.
     pub fn from_options(opts: &SparseFaerOptions) -> Self {
-        let mut solver = SparseFaer::new()
-            .with_policy(opts.policy)
-            .with_ordering(opts.ordering)
-            .with_supernodal(opts.supernodal)
-            .with_narrow_band(opts.narrow_band)
-            .with_envelope_schur(opts.envelope)
-            .with_envelope_panel_width(opts.envelope_panel_width)
-            .with_block_supernodal(opts.block_supernodal)
-            .with_block_supernodal_batching(opts.block_supernodal_batch)
-            .with_block_supernodal_memory_lean(opts.block_supernodal_memory_lean);
+        let mut solver = SparseFaer::new();
+        solver.policy = opts.policy;
+        solver.ordering = opts.ordering;
+        solver.supernodal = opts.supernodal;
+        solver.narrow_band_enabled = opts.narrow_band;
+        solver.envelope_mode = opts.envelope;
+        solver.envelope_panel_width = opts.envelope_panel_width;
+        solver.block_supernodal = opts.block_supernodal;
+        solver.sn_batch_ratio = opts.block_supernodal_batch;
+        solver.sn_memory_lean = opts.block_supernodal_memory_lean;
         solver.schur_solve = opts.schur_solve;
-        for range in &opts.marginalize {
-            solver = solver.with_marginalize(range.clone());
-        }
+        solver.marginalize = opts.marginalize.clone();
         solver
-    }
-
-    /// Solve the reduced system by preconditioned conjugate gradients
-    /// ([`SchurSolve::Iterative`]) instead of factorizing it. See
-    /// [`SparseFaerOptions::with_iterative_schur`].
-    pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
-        self.schur_solve = SchurSolve::Iterative(cg);
-        self
-    }
-
-    /// As [`Self::with_iterative_schur`], but never forming the reduced
-    /// system ([`SchurSolve::IterativeImplicit`]).
-    pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
-        self.schur_solve = SchurSolve::IterativeImplicit(cg);
-        self
     }
 }
 

@@ -150,7 +150,7 @@ fn iterative_matches_the_factorizing_route() {
     let mut wf = build(0.05);
     let rf = lm_solve(
         &x0_of(&mut wf),
-        &mut SparseFaer::new().with_policy(SchurPolicy::Force),
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force)),
         &mut wf,
         &cfg,
     )
@@ -160,9 +160,9 @@ fn iterative_matches_the_factorizing_route() {
     let mut wi = build(0.05);
     let ri = lm_solve(
         &x0_of(&mut wi),
-        &mut SparseFaer::new()
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Force)
-            .with_iterative_schur(cg(1e-10)),
+            .with_iterative_schur(cg(1e-10))),
         &mut wi,
         &cfg,
     )
@@ -191,9 +191,9 @@ fn cg_iterations_are_reported() {
     let mut wi = build(0.05);
     let ri = lm_solve(
         &x0_of(&mut wi),
-        &mut SparseFaer::new()
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Force)
-            .with_iterative_schur(cg(1e-10)),
+            .with_iterative_schur(cg(1e-10))),
         &mut wi,
         &cfg,
     )
@@ -208,7 +208,7 @@ fn cg_iterations_are_reported() {
     let mut wf = build(0.05);
     let rf = lm_solve(
         &x0_of(&mut wf),
-        &mut SparseFaer::new().with_policy(SchurPolicy::Force),
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force)),
         &mut wf,
         &cfg,
     )
@@ -228,7 +228,7 @@ fn implicit_matches_the_other_routes() {
     let mut wf = build(0.05);
     let rf = lm_solve(
         &x0_of(&mut wf),
-        &mut SparseFaer::new().with_policy(SchurPolicy::Force),
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force)),
         &mut wf,
         &cfg,
     )
@@ -238,9 +238,9 @@ fn implicit_matches_the_other_routes() {
     let mut wi = build(0.05);
     let ri = lm_solve(
         &x0_of(&mut wi),
-        &mut SparseFaer::new()
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Force)
-            .with_implicit_schur(cg(1e-10)),
+            .with_implicit_schur(cg(1e-10))),
         &mut wi,
         &cfg,
     )
@@ -276,9 +276,9 @@ fn iterative_orders_nothing() {
     let mut wi = build(0.05);
     let ri = lm_solve(
         &x0_of(&mut wi),
-        &mut SparseFaer::new()
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Force)
-            .with_iterative_schur(cg(1e-10)),
+            .with_iterative_schur(cg(1e-10))),
         &mut wi,
         &cfg,
     )
@@ -295,7 +295,7 @@ fn iterative_orders_nothing() {
     let mut wf = build(0.05);
     let rf = lm_solve(
         &x0_of(&mut wf),
-        &mut SparseFaer::new().with_policy(SchurPolicy::Force),
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Force)),
         &mut wf,
         &cfg,
     )
@@ -314,9 +314,9 @@ fn iterative_without_a_reduction_is_an_error() {
     let mut w = build(0.05);
     let err = lm_solve(
         &x0_of(&mut w),
-        &mut SparseFaer::new()
+        &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Never)
-            .with_iterative_schur(cg(1e-10)),
+            .with_iterative_schur(cg(1e-10))),
         &mut w,
         &cfg,
     )
@@ -341,9 +341,9 @@ fn tolerance_trades_inner_work() {
         let mut w = build(0.05);
         let r = lm_solve(
             &x0_of(&mut w),
-            &mut SparseFaer::new()
+            &mut SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
                 .with_policy(SchurPolicy::Force)
-                .with_iterative_schur(cg(tol)),
+                .with_iterative_schur(cg(tol))),
             &mut w,
             &cfg,
         )

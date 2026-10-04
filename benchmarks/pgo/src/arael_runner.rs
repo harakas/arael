@@ -178,7 +178,7 @@ pub(crate) fn block_supernodal_batch() -> Option<f64> {
 }
 
 /// ARAEL_BLOCK_SUPERNODAL_LEAN=1 uses the memory-lean amalgamation on the
-/// supernodal route (SparseFaer::with_block_supernodal_memory_lean).
+/// supernodal route (SparseFaerOptions::with_block_supernodal_memory_lean).
 
 pub(crate) fn block_supernodal_lean() -> bool {
     std::env::var("ARAEL_BLOCK_SUPERNODAL_LEAN").as_deref() == Ok("1")
@@ -206,12 +206,12 @@ pub fn solve_f64<P: arael::simple_lm::LmProblemInternals<f64>>(
     cfg: &arael::simple_lm::LmConfig<f64>,
     ctx: &mut arael::threads::Context,
 ) -> Solved<f64> {
-    let mut solver = arael::simple_lm::SparseFaer::new()
+    let mut solver = arael::simple_lm::SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_ordering(ordering())
         .with_policy(schur_policy())
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean());
+        .with_block_supernodal_memory_lean(block_supernodal_lean()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 
@@ -221,12 +221,12 @@ pub fn solve_f32<P: arael::simple_lm::LmProblemInternals<f32>>(
     cfg: &arael::simple_lm::LmConfig<f32>,
     ctx: &mut arael::threads::Context,
 ) -> Solved<f32> {
-    let mut solver = arael::simple_lm::SparseFaerF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_ordering(ordering())
         .with_policy(schur_policy())
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean());
+        .with_block_supernodal_memory_lean(block_supernodal_lean()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 

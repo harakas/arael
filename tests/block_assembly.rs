@@ -740,7 +740,7 @@ fn schur_solve_matches_sparse() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
     let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
-    let mut solver = SparseFaer::new().with_marginalize(lm_start..params.len());
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_marginalize(lm_start..params.len()));
     let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     assert!(
@@ -785,7 +785,7 @@ fn schur_solve_with_fixed_params() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
     let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
-    let mut solver = SparseFaer::new().with_marginalize(lm_start..params.len());
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_marginalize(lm_start..params.len()));
     let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     assert!(

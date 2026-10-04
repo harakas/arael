@@ -53,6 +53,11 @@ is cut.
   through its `solve_sparse`, `solve_dense`, `solve_with` or
   `solve(SolverKind, ..)`; a hand-written problem through `lm_solve`
   with a backend instance.
+- `SparseFaerOptions` is the one way to configure the sparse backend:
+  `SparseFaer::new()` for the defaults, `SparseFaer::from_options` for
+  anything else. The `SparseFaer::with_*` builders and the
+  `whole_system` / `forced_schur` presets are gone; the options gain
+  `with_schur_solve`.
 - arael-faer: the factorization and Schur APIs take a thread count.
 
 ### Fixed
