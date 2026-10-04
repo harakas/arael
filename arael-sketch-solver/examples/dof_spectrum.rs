@@ -62,7 +62,7 @@ fn main() {
         let t_jac = t.elapsed();
 
         let t = std::time::Instant::now();
-        let mut svs: Vec<f64> = jacobian.singular_values_column_normalised();
+        let mut svs: Vec<f64> = jacobian.singular_values_column_normalized();
         let t_svd = t.elapsed();
         svs.sort_by(|a: &f64, b| a.partial_cmp(b).unwrap());
 

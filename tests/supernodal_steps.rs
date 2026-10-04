@@ -16,7 +16,7 @@ use arael::refs::{self, Ref};
 use arael::simple_lm::{
     LmProblemInternals,
     BlockSupernodalMode, EnvelopeMode, LmProblem, LmSolver, RootProblem, SchurPolicy,
-    SparseFaer, SparseFaerF32,
+    SparseFaer,
 };
 use arael::utils::Float;
 use arael::vect::{vect2d, vect3d};
@@ -516,11 +516,11 @@ fn f32_steps_agree() {
     RootProblem::serialize(&mut w, &mut params);
     let lambdas = [1e-2f32, 1e-4, 1e-6];
 
-    let mut block = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut block = SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
         .with_block_supernodal(BlockSupernodalMode::Always));
-    let mut scalar = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut scalar = SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_envelope_schur(EnvelopeMode::Never)
         .with_block_supernodal(BlockSupernodalMode::Never));
@@ -531,8 +531,8 @@ fn f32_steps_agree() {
     assert!(!scalar.plan().unwrap().block_supernodal);
     assert_steps_agree("f32 reduced", &lambdas, &b, &s, 1e-3);
 
-    let mut block = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Always));
-    let mut scalar = SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Never));
+    let mut block = SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Always));
+    let mut scalar = SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default().with_policy(SchurPolicy::Never).with_block_supernodal(BlockSupernodalMode::Never));
     let b = steps(&mut block, &mut w, &params, &lambdas);
     let s = steps(&mut scalar, &mut w, &params, &lambdas);
     let plan = block.plan().unwrap();

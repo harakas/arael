@@ -1,6 +1,6 @@
 // SparseFaer is one backend with two routes: marginalize the model's
 // landmark-like blocks and factorize what is left, or factorize the whole
-// system. It picks for itself; SchurPolicy and FaerOrdering override the
+// system. It picks for itself; SchurPolicy and SolveOrdering override the
 // pick. Every route must reach the same optimum -- they are the same
 // equations, solved in a different order.
 
@@ -8,8 +8,8 @@ use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
     LmProblemInternals,SolveFailureKind,
-    lm_solve, CooMatrix, CscMatrix, FaerOrdering, LmConfig, LmProblem, RootProblem,
-    SchurPolicy, SolveError, SolverReport, SparseFaer,
+    lm_solve, CooMatrix, CscMatrix, SolveOrdering, LmConfig, LmProblem, RootProblem,
+    SchurPolicy, SetupError, SolverReport, SparseFaer,
 };
 
 // --- a model with marginalizable blocks: poses seeing shared landmarks ---
@@ -194,10 +194,10 @@ fn force_skips_the_analysis() {
 fn every_ordering_of_the_whole_system_agrees() {
     let (reference, _) = solved_params(&mut SparseFaer::new());
     for ordering in [
-        FaerOrdering::Auto,
-        FaerOrdering::Amd,
-        FaerOrdering::MarginalizeFirst,
-        FaerOrdering::Natural,
+        SolveOrdering::Auto,
+        SolveOrdering::Amd,
+        SolveOrdering::MarginalizeFirst,
+        SolveOrdering::Natural,
     ] {
         let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_policy(SchurPolicy::Never)
@@ -229,7 +229,7 @@ fn naming_coupled_blocks_is_rejected() {
     let e = lm_solve(&params, &mut solver, &mut w, &cfg)
         .expect_err("coupled marginalization must fail at setup");
     assert!(
-        matches!(e.kind, SolveFailureKind::Setup(SolveError::CoupledMarginalization { .. })),
+        matches!(e.kind, SolveFailureKind::Setup(SetupError::CoupledMarginalization { .. })),
         "expected a coupled-marginalization setup failure, got {:?}",
         e.kind
     );

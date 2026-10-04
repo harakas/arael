@@ -58,6 +58,15 @@ is cut.
   anything else. The `SparseFaer::with_*` builders and the
   `whole_system` / `forced_schur` presets are gone; the options gain
   `with_schur_solve`.
+- Renamed: `SolveError` is `SetupError`, `FaerOrdering` is
+  `SolveOrdering`, `SchurSolve` is `SchurMethod` (the old names stay as
+  deprecated aliases); `ReducedOrdering::Nd` is `NestedDissection`; the
+  sparse option `supernodal` is `scalar_supernodal`; `Style.colour` is
+  `color`; the Jacobian's `*_column_normalised` methods are
+  `*_column_normalized`; `QuaternionParam::work()` is
+  `work_euler_angles()`. The `SparseFaerF32` and `SparseEigenF32`
+  aliases are gone: write `SparseFaer::<f32>`. The C++, Python and
+  JavaScript names are unchanged.
 - arael-faer: the factorization and Schur APIs take a thread count.
 
 ### Fixed

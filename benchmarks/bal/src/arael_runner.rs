@@ -169,11 +169,11 @@ impl Route {
 /// default: a 3D point makes a clique of the cameras that see it, and AMD
 /// drowns in cliques -- at Ladybug-1723 it factorizes S in 1508 ms against
 /// AMD's 4730. `amd` is the only value read; anything else is the default.
-pub fn schur_ordering() -> arael::simple_lm::FaerOrdering {
+pub fn schur_ordering() -> arael::simple_lm::SolveOrdering {
     if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
-        arael::simple_lm::FaerOrdering::Auto
+        arael::simple_lm::SolveOrdering::Auto
     } else {
-        arael::simple_lm::FaerOrdering::NestedDissection
+        arael::simple_lm::SolveOrdering::NestedDissection
     }
 }
 
@@ -325,7 +325,7 @@ fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_
 }
 
 fn solve32_schur_cg_implicit(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
-    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(schur_ordering())
         .with_implicit_schur(cg_options()));
@@ -334,7 +334,7 @@ fn solve32_schur_cg_implicit(params: &[f32], s: &mut SceneF, cfg: &arael::simple
 
 fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
-    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_iterative_schur(cg_options()));
@@ -344,7 +344,7 @@ fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmCo
 fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
-    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
@@ -354,7 +354,7 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>, ctx: &mut arael::threads::Context) -> Solved<f32> {
     let ordering = schur_ordering();
-    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())

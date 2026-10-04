@@ -903,8 +903,10 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
     pub fn from_rotation_matrix(m: matrix3<T>) -> Self {
         Self::new(crate::quatern::quatern::<T>::from_rotation_matrix(m))
     }
-    /// Return the current working-copy euler angles (derived from ref_rotation * delta).
-    pub fn work(&self) -> vect3<T> { self.work }
+    /// The working orientation as euler angles (from `ref_rotation * R(delta)`).
+    /// Named apart from the other params' `work()` because it is not the type
+    /// of `value`.
+    pub fn work_euler_angles(&self) -> vect3<T> { self.work }
     /// Return this parameter's index into the flat parameter vector, or `u32::MAX` if fixed.
     pub fn index(&self) -> u32 { self.index }
     /// Write per-component indices into `out`, or `u32::MAX` if fixed.
@@ -1347,6 +1349,9 @@ pub type BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize,
 ///   N-ary constraints where each participating entity has its own
 ///   SelfBlock holding its grad+diagonal: stores ONLY across-entity pairs,
 ///   using the `entity_offsets` span list to skip within-entity pairs.
+///
+/// Not [`CooMatrix`](crate::simple_lm::CooMatrix), which is a whole matrix
+/// in triplet form.
 #[derive(Clone)]
 pub struct Coo<T: crate::utils::Float = f64> {
     /// Hessian entries: upper-triangle (lo, hi, 2·dr_i·dr_j). Only cross-
@@ -1790,11 +1795,11 @@ impl<T: crate::utils::Float> Jacobian<T> {
         sum_sq.into_iter().map(|s| s.sqrt()).collect()
     }
 
-    /// Singular values of the column-normalised Jacobian (each column
+    /// Singular values of the column-normalized Jacobian (each column
     /// scaled by `1 / max(col_norm, 1e-15)`). Preserves the null-space
     /// (rank) of the Jacobian but flattens its spectrum: no scale-
     /// dependent conditioning leaks into rank detection.
-    pub fn singular_values_column_normalised(&self) -> std::vec::Vec<f64> {
+    pub fn singular_values_column_normalized(&self) -> std::vec::Vec<f64> {
         let m = self.num_residuals();
         let n = self.num_params;
         if m == 0 || n == 0 { return std::vec::Vec::new(); }
@@ -1820,13 +1825,13 @@ impl<T: crate::utils::Float> Jacobian<T> {
         }
     }
 
-    /// Full SVD of the column-normalised Jacobian (see
-    /// [`Self::singular_values_column_normalised`]). Also returns the
-    /// column L2 norms used for normalisation so callers can back-
-    /// transform right singular vectors from normalised parameter
-    /// space to raw: `v_raw[i] = v[i] / col_norms[i]` (then renormalise
+    /// Full SVD of the column-normalized Jacobian (see
+    /// [`Self::singular_values_column_normalized`]). Also returns the
+    /// column L2 norms used for normalization so callers can back-
+    /// transform right singular vectors from normalized parameter
+    /// space to raw: `v_raw[i] = v[i] / col_norms[i]` (then renormalize
     /// to unit length if needed).
-    pub fn svd_column_normalised(&self) -> (SvdResult, std::vec::Vec<f64>) {
+    pub fn svd_column_normalized(&self) -> (SvdResult, std::vec::Vec<f64>) {
         let m = self.num_residuals();
         let n = self.num_params;
         if m == 0 || n == 0 {

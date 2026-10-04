@@ -447,7 +447,7 @@
 //! | [`AngleParam<T>`](angle::AngleParam) | 1 | a 2D rotation (heading): the angle is optimized directly and its rotation matrix is cached, so constraints that rotate through it read a cached constant instead of recomputing sin/cos per observation |
 //! | [`SimpleEulerAngleParam<T>`](model::SimpleEulerAngleParam) | 3 | three direct Euler angles (roll, pitch, yaw) |
 //! | [`EulerAngleParam<T>`](model::EulerAngleParam) | 3 | "universal" delta composed with a fixed reference rotation; avoids parameterisation singularities for large-angle motion |
-//! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised each re-center so it never drifts off SO(3) |
+//! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalized each re-center so it never drifts off SO(3) |
 //! | [`TransformParam<T>`](transform::TransformParam) | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it |
 //! | [`ScaledTransformParam<T>`](transform::ScaledTransformParam) | 7 | a similarity transform (Sim(3)): `TransformParam` plus a uniform scale acting as `s * (R * x) + t` -- monocular loop closing's state. The scale is optimized as its logarithm; clear `optimize_scale` to fix it |
 //! | [`UnitVecParam<T>`](unitvec::UnitVecParam) | 2 | a direction on the unit sphere, such as the normal of a mapped plane landmark: read and write `unit`, which stays unit length because the two parameters rotate a reference direction rather than move its components |
@@ -1193,7 +1193,7 @@
 //!
 //! | Backend (`solve_with(&mut ..., &cfg)`) | What it is |
 //! |---|---|
-//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`FaerOrdering`](simple_lm::FaerOrdering) override it |
+//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`SolveOrdering`](simple_lm::SolveOrdering) override it |
 //! | [`Dense`](simple_lm::Dense) | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 //! | [`Band`](simple_lm::Band)`::new(kd)` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 //! | `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |

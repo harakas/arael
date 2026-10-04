@@ -183,7 +183,7 @@ impl Default for CSolveFailure {
 }
 
 fn failure_of(k: &arael::simple_lm::SolveFailureKind) -> CSolveFailure {
-    use arael::simple_lm::{DiagonalFault as D, SolveError as E,
+    use arael::simple_lm::{DiagonalFault as D, SetupError as E,
                           SolveFailureKind as K};
     let mut c = CSolveFailure::default();
     match k {
@@ -408,7 +408,7 @@ impl CSparseOptions {
     /// message. Unreachable through the typed wrappers.
     fn to_options(&self) -> SparseFaerOptions {
         use arael::simple_lm::{
-            BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+            BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy,
         };
         let policy = match self.schur {
             0 => SchurPolicy::Auto {
@@ -420,11 +420,11 @@ impl CSparseOptions {
             t => panic!("unknown schur policy tag {t}"),
         };
         let ordering = match self.ordering {
-            0 => FaerOrdering::Auto,
-            1 => FaerOrdering::Amd,
-            2 => FaerOrdering::MarginalizeFirst,
-            3 => FaerOrdering::Natural,
-            4 => FaerOrdering::NestedDissection,
+            0 => SolveOrdering::Auto,
+            1 => SolveOrdering::Amd,
+            2 => SolveOrdering::MarginalizeFirst,
+            3 => SolveOrdering::Natural,
+            4 => SolveOrdering::NestedDissection,
             t => panic!("unknown ordering tag {t}"),
         };
         let envelope = match self.envelope {
@@ -446,7 +446,7 @@ impl CSparseOptions {
             .with_ordering(ordering)
             .with_envelope_schur(envelope)
             .with_envelope_panel_width((width > 0).then_some(width as usize))
-            .with_supernodal(self.supernodal)
+            .with_scalar_supernodal(self.supernodal)
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
@@ -469,7 +469,7 @@ impl CSparseOptions {
 #[no_mangle]
 pub unsafe extern "C" fn decay_sparse_options(out: *mut CSparseOptions) {
     use arael::simple_lm::{
-        BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+        BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy,
     };
     let d = SparseFaerOptions::default();
     let (flop_margin, obvious_flop_ratio) = match d.policy {
@@ -485,11 +485,11 @@ pub unsafe extern "C" fn decay_sparse_options(out: *mut CSparseOptions) {
             SchurPolicy::Never => 2,
         },
         ordering: match d.ordering {
-            FaerOrdering::Auto => 0,
-            FaerOrdering::Amd => 1,
-            FaerOrdering::MarginalizeFirst => 2,
-            FaerOrdering::Natural => 3,
-            FaerOrdering::NestedDissection => 4,
+            SolveOrdering::Auto => 0,
+            SolveOrdering::Amd => 1,
+            SolveOrdering::MarginalizeFirst => 2,
+            SolveOrdering::Natural => 3,
+            SolveOrdering::NestedDissection => 4,
         },
         envelope: match d.envelope {
             EnvelopeMode::Auto => 0,
@@ -497,7 +497,7 @@ pub unsafe extern "C" fn decay_sparse_options(out: *mut CSparseOptions) {
             EnvelopeMode::Never => 2,
         },
         envelope_panel_width: d.envelope_panel_width.unwrap_or(0) as u32,
-        supernodal: d.supernodal,
+        supernodal: d.scalar_supernodal,
         narrow_band: d.narrow_band,
         flop_margin,
         obvious_flop_ratio,
@@ -768,7 +768,7 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
                     ReducedOrdering::NaturalBanded => 0,
                     ReducedOrdering::NaturalDense => 1,
                     ReducedOrdering::Amd => 2,
-                    ReducedOrdering::Nd => 3,
+                    ReducedOrdering::NestedDissection => 3,
                 },
             },
             None => COptI32 { has: false, v: 0 },
@@ -1926,7 +1926,7 @@ impl Default for CSolveFailure {
 }
 
 fn failure_of(k: &arael::simple_lm::SolveFailureKind) -> CSolveFailure {
-    use arael::simple_lm::{DiagonalFault as D, SolveError as E,
+    use arael::simple_lm::{DiagonalFault as D, SetupError as E,
                           SolveFailureKind as K};
     let mut c = CSolveFailure::default();
     match k {
@@ -2151,7 +2151,7 @@ impl CSparseOptions {
     /// message. Unreachable through the typed wrappers.
     fn to_options(&self) -> SparseFaerOptions {
         use arael::simple_lm::{
-            BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+            BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy,
         };
         let policy = match self.schur {
             0 => SchurPolicy::Auto {
@@ -2163,11 +2163,11 @@ impl CSparseOptions {
             t => panic!("unknown schur policy tag {t}"),
         };
         let ordering = match self.ordering {
-            0 => FaerOrdering::Auto,
-            1 => FaerOrdering::Amd,
-            2 => FaerOrdering::MarginalizeFirst,
-            3 => FaerOrdering::Natural,
-            4 => FaerOrdering::NestedDissection,
+            0 => SolveOrdering::Auto,
+            1 => SolveOrdering::Amd,
+            2 => SolveOrdering::MarginalizeFirst,
+            3 => SolveOrdering::Natural,
+            4 => SolveOrdering::NestedDissection,
             t => panic!("unknown ordering tag {t}"),
         };
         let envelope = match self.envelope {
@@ -2189,7 +2189,7 @@ impl CSparseOptions {
             .with_ordering(ordering)
             .with_envelope_schur(envelope)
             .with_envelope_panel_width((width > 0).then_some(width as usize))
-            .with_supernodal(self.supernodal)
+            .with_scalar_supernodal(self.supernodal)
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
@@ -2212,7 +2212,7 @@ impl CSparseOptions {
 #[no_mangle]
 pub unsafe extern "C" fn line_sparse_options(out: *mut CSparseOptions) {
     use arael::simple_lm::{
-        BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+        BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy,
     };
     let d = SparseFaerOptions::default();
     let (flop_margin, obvious_flop_ratio) = match d.policy {
@@ -2228,11 +2228,11 @@ pub unsafe extern "C" fn line_sparse_options(out: *mut CSparseOptions) {
             SchurPolicy::Never => 2,
         },
         ordering: match d.ordering {
-            FaerOrdering::Auto => 0,
-            FaerOrdering::Amd => 1,
-            FaerOrdering::MarginalizeFirst => 2,
-            FaerOrdering::Natural => 3,
-            FaerOrdering::NestedDissection => 4,
+            SolveOrdering::Auto => 0,
+            SolveOrdering::Amd => 1,
+            SolveOrdering::MarginalizeFirst => 2,
+            SolveOrdering::Natural => 3,
+            SolveOrdering::NestedDissection => 4,
         },
         envelope: match d.envelope {
             EnvelopeMode::Auto => 0,
@@ -2240,7 +2240,7 @@ pub unsafe extern "C" fn line_sparse_options(out: *mut CSparseOptions) {
             EnvelopeMode::Never => 2,
         },
         envelope_panel_width: d.envelope_panel_width.unwrap_or(0) as u32,
-        supernodal: d.supernodal,
+        supernodal: d.scalar_supernodal,
         narrow_band: d.narrow_band,
         flop_margin,
         obvious_flop_ratio,
@@ -2511,7 +2511,7 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
                     ReducedOrdering::NaturalBanded => 0,
                     ReducedOrdering::NaturalDense => 1,
                     ReducedOrdering::Amd => 2,
-                    ReducedOrdering::Nd => 3,
+                    ReducedOrdering::NestedDissection => 3,
                 },
             },
             None => COptI32 { has: false, v: 0 },

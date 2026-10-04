@@ -4,7 +4,7 @@
 // Structural case: a CSC column with no stored diagonal. Left unchecked,
 // diag_pos[j] = 0 makes extract_diagonal/solve_damped read and overwrite
 // vals[0] (an unrelated entry), surfacing as a "Cholesky failed" far away.
-// to_csc / to_csc_with_map reject it with SolveError::UnconstrainedParameter,
+// to_csc / to_csc_with_map reject it with SetupError::UnconstrainedParameter,
 // which a solve surfaces as Err(SolveFailure::Setup).
 //
 // Value case: a structurally present but zero diagonal cannot be rescued by
@@ -15,7 +15,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::simple_lm::{
-    LmProblemInternals,self, BandOverflow, CooMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
+    LmProblemInternals,self, BandOverflow, CooMatrix, DiagonalFault, FnProblem, LmConfig, SetupError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
 // The bad-diagonal diagnostic goes through arael's process-global log sink.
@@ -29,7 +29,7 @@ fn missing_diagonal_rejected_in_to_csc() {
     let mut coo = CooMatrix::new(2);
     coo.push(0, 0, 2.0);
     coo.push(0, 1, 1.0); // column 1: off-diagonal only, no (1,1)
-    assert_eq!(coo.to_csc().err(), Some(SolveError::UnconstrainedParameter { param: 1 }));
+    assert_eq!(coo.to_csc().err(), Some(SetupError::UnconstrainedParameter { param: 1 }));
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn missing_diagonal_rejected_in_to_csc_with_map() {
     coo.push(0, 1, 1.0);
     assert_eq!(
         coo.to_csc_with_map().err(),
-        Some(SolveError::UnconstrainedParameter { param: 1 })
+        Some(SetupError::UnconstrainedParameter { param: 1 })
     );
 }
 
@@ -292,7 +292,7 @@ fn band_overflow_is_a_setup_failure() {
     let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::Band::new(0), &mut p, &LmConfig::default())
         .expect_err("band overflow must fail at setup");
     assert_eq!(e.kind,
-        SolveFailureKind::Setup(SolveError::BandOverflow { row: 0, col: 1, kd: 0 }));
+        SolveFailureKind::Setup(SetupError::BandOverflow { row: 0, col: 1, kd: 0 }));
     assert!(e.partial.is_none(), "nothing ran");
 }
 
@@ -317,6 +317,6 @@ fn unconstrained_parameter_is_a_setup_failure_through_solve() {
     let e = simple_lm::lm_solve(&[0.0, 0.0], &mut simple_lm::SparseCoo::new(), &mut p, &LmConfig::default())
         .expect_err("an unconstrained parameter must fail at setup");
     assert_eq!(e.kind,
-        SolveFailureKind::Setup(SolveError::UnconstrainedParameter { param: 1 }));
+        SolveFailureKind::Setup(SetupError::UnconstrainedParameter { param: 1 }));
     assert!(e.partial.is_none(), "nothing ran");
 }

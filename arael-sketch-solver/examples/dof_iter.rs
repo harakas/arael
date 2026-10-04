@@ -76,13 +76,13 @@ fn main() {
 
     // Reference: the dense path.
     let t = std::time::Instant::now();
-    let mut svs_ref: Vec<f64> = jacobian.singular_values_column_normalised();
+    let mut svs_ref: Vec<f64> = jacobian.singular_values_column_normalized();
     let t_dense = t.elapsed();
     svs_ref.sort_by(|a: &f64, b| a.partial_cmp(b).unwrap());
     let (cut_ref, _) = rank_cut(&svs_ref);
     let dof_ref = n.saturating_sub(svs_ref.len() - cut_ref);
 
-    // Column scales, as in singular_values_column_normalised.
+    // Column scales, as in singular_values_column_normalized.
     let col_norms = jacobian.column_l2_norms();
     let scale: Vec<f64> = col_norms.iter().map(|c: &f64| c.max(1e-15)).collect();
 

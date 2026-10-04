@@ -488,7 +488,7 @@ match the root's precision: on an `#[arael(root, f32)]` model they take
 
 | Backend (`solve_with(&mut ..., &cfg)`) | What it is |
 |---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `FaerOrdering` / `BlockSupernodalMode` override it |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `SolveOrdering` / `BlockSupernodalMode` override it |
 | `Dense` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 | `Band::new(kd)` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 | `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |

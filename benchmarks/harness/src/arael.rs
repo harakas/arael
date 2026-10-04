@@ -38,7 +38,7 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     fn deserialize(&mut self, x: &[Self::Scalar]);
     fn solution(&self) -> Self::Solution;
 
-    /// The scalar picks the solver (`SparseFaer` / `SparseFaerF32`, or a band
+    /// The scalar picks the solver (`SparseFaer` / `SparseFaer<f32>`, or a band
     /// solver), which is the one thing a generic function cannot choose for
     /// itself. It sees the input too, so a benchmark can run one model through
     /// several linear solvers and get a row for each.

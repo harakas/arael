@@ -377,7 +377,7 @@ fn print_header(rounds: usize, only: &Option<String>) {
     // Auto is not a third ordering -- on a pose graph there is nothing to
     // marginalize, so there is no reduced system and it factorizes under AMD.
     let resolves_to = match ordering {
-        arael::simple_lm::FaerOrdering::Auto => " -- AMD here (no marginalizable blocks)",
+        arael::simple_lm::SolveOrdering::Auto => " -- AMD here (no marginalizable blocks)",
         _ => "",
     };
     println!("arael ordering    : {:?}{} [PGO_ORDERING: auto|nd]", ordering, resolves_to);

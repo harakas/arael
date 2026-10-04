@@ -383,8 +383,8 @@ pub fn schur_policy() -> arael::simple_lm::SchurPolicy {
 
 // SLAM_ORDERING=auto|amd|nd|natural|marginalize-first orders whichever system
 // is factorized. `auto` (the default) is arael's own rule. A typo is an error.
-pub fn ordering() -> arael::simple_lm::FaerOrdering {
-    use arael::simple_lm::FaerOrdering as O;
+pub fn ordering() -> arael::simple_lm::SolveOrdering {
+    use arael::simple_lm::SolveOrdering as O;
     match std::env::var("SLAM_ORDERING").as_deref() {
         Err(_) | Ok("auto") => O::Auto,
         Ok("amd") => O::Amd,
@@ -536,7 +536,7 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
         return arael::simple_lm::lm_solve_with_context(
             params,
-            &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            &mut arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
                 .with_policy(arael::simple_lm::SchurPolicy::Never)
                 .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
@@ -547,7 +547,7 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
         );
     }
     arael::simple_lm::lm_solve_with_context(
-        params, &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(narrow_band_enabled())
+        params, &mut arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default().with_narrow_band(narrow_band_enabled())
                     .with_policy(schur_policy())
                     .with_ordering(ordering())
                     .with_envelope_schur(envelope_mode())
@@ -660,7 +660,7 @@ impl Route {
             Route::Factorize => solve32(params, path, cfg, ctx),
             Route::Cg => arael::simple_lm::lm_solve_with_context(
                 params,
-                &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+                &mut arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
                     .with_policy(arael::simple_lm::SchurPolicy::Force)
                     .with_iterative_schur(cg_options())),
                 path,

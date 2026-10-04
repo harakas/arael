@@ -1,14 +1,14 @@
 //! Numeric rank and null-space basis of a sparse [`Jacobian`].
 //!
-//! The rank of the column-normalised Jacobian decides how many degrees
+//! The rank of the column-normalized Jacobian decides how many degrees
 //! of freedom a model has left (`nullity = num_params - rank`) and
 //! whether a candidate constraint row would remove one. Two paths
 //! produce the same decision:
 //!
-//! - **Dense** (small problems): full SVD of the normalised Jacobian.
+//! - **Dense** (small problems): full SVD of the normalized Jacobian.
 //! - **Iterative** (large problems): shift-inverted block subspace
-//!   iteration. A sparse Cholesky of the normalised `J^T J + lambda*I`
-//!   amplifies null directions by `1/lambda`; a few solve+orthonormalise
+//!   iteration. A sparse Cholesky of the normalized `J^T J + lambda*I`
+//!   amplifies null directions by `1/lambda`; a few solve+orthonormalize
 //!   sweeps converge a block containing the null space, and the rank
 //!   decision is taken from the singular values of `J` restricted to
 //!   that block -- the same metric as the dense path, no
@@ -26,7 +26,7 @@ use std::mem::MaybeUninit;
 /// Options for [`Jacobian::numeric_rank`].
 #[derive(Clone, Debug)]
 pub struct RankOptions {
-    /// Shift added to the diagonal of the normalised normal matrix.
+    /// Shift added to the diagonal of the normalized normal matrix.
     pub lambda: f64,
     /// Inverse-iteration sweeps per attempt.
     pub sweeps: usize,
@@ -59,7 +59,7 @@ impl Default for RankOptions {
 /// Which path produced a [`RankResult`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RankMethod {
-    /// Dense SVD of the normalised Jacobian.
+    /// Dense SVD of the normalized Jacobian.
     Dense,
     /// Subspace iteration; `block` is the final block width, `grew`
     /// counts how many times the block had to grow.
@@ -91,10 +91,10 @@ impl std::fmt::Display for RankError {
     }
 }
 
-/// Numeric rank of a column-normalised Jacobian, with the null basis.
+/// Numeric rank of a column-normalized Jacobian, with the null basis.
 #[derive(Clone, Debug)]
 pub struct RankResult {
-    /// Numeric rank of the column-normalised Jacobian.
+    /// Numeric rank of the column-normalized Jacobian.
     pub rank: usize,
     /// `num_params - rank`: the model's free directions (DOF).
     pub nullity: usize,
@@ -104,7 +104,7 @@ pub struct RankResult {
     /// Which path ran.
     pub method: RankMethod,
     row_tol: f64,
-    /// Column scales of the normalisation (already floored).
+    /// Column scales of the normalization (already floored).
     scales: Vec<f64>,
     /// Orthonormal null basis, column-major `n x nullity`.
     basis: Vec<f64>,
@@ -113,10 +113,10 @@ pub struct RankResult {
 
 impl RankResult {
     /// Component of a candidate row inside the null space, relative to
-    /// the row's own normalised norm (0 = row already in the span of
+    /// the row's own normalized norm (0 = row already in the span of
     /// the existing rows, 1 = row entirely in the free directions).
     /// Entries are `(param_index, d_residual/d_param)`, raw scale --
-    /// the stored column normalisation is applied here.
+    /// the stored column normalization is applied here.
     pub fn null_component(&self, entries: &[(u32, f64)]) -> f64 {
         let k = self.nullity;
         if k == 0 {
@@ -152,7 +152,7 @@ impl RankResult {
     }
 
     /// The orthonormal null basis: column-major slice and its column
-    /// count (`num_params x nullity`), in normalised parameter space.
+    /// count (`num_params x nullity`), in normalized parameter space.
     pub fn null_basis(&self) -> (&[f64], usize) {
         (&self.basis, self.nullity)
     }
@@ -188,7 +188,7 @@ pub fn rank_cut(sorted_ascending: &[f64]) -> (usize, f64) {
 }
 
 impl Jacobian<f64> {
-    /// Numeric rank of the column-normalised Jacobian. Errors on
+    /// Numeric rank of the column-normalized Jacobian. Errors on
     /// non-finite entries instead of producing NaN spectra.
     pub fn numeric_rank(&self, opts: &RankOptions) -> Result<RankResult, RankError> {
         self.rank_impl(opts, None)
@@ -398,7 +398,7 @@ impl Jacobian<f64> {
 
     fn rank_dense(&self, opts: &RankOptions, scales: Vec<f64>) -> RankResult {
         let n = self.num_params;
-        let (svd, _) = self.svd_column_normalised();
+        let (svd, _) = self.svd_column_normalized();
         let k = svd.singular_values.len();
         let mut sorted: Vec<f64> = svd.singular_values.clone();
         sorted.sort_by(|a, b| a.total_cmp(b));
@@ -656,7 +656,7 @@ fn complete_orthonormal(
     }
 }
 
-/// Sparse Cholesky of the column-normalised `J^T J + lambda I`: the
+/// Sparse Cholesky of the column-normalized `J^T J + lambda I`: the
 /// shift-inverted operator of the iterative rank path, also used for
 /// rowspan certificates.
 struct NormalFactor {
@@ -668,7 +668,7 @@ struct NormalFactor {
 impl NormalFactor {
     fn build(jac: &Jacobian<f64>, scales: &[f64], lambda: f64) -> Result<Self, RankError> {
         let n = jac.num_params;
-        // Assemble the normalised H + lambda*I as full symmetric CSC.
+        // Assemble the normalized H + lambda*I as full symmetric CSC.
         let mut upper: std::collections::HashMap<(u32, u32), f64> = std::collections::HashMap::new();
         for row in &jac.rows {
             for (ai, &(ia, va)) in row.entries.iter().enumerate() {
@@ -750,7 +750,7 @@ impl Jacobian<f64> {
     /// Coefficients expressing `row` as a combination of this
     /// Jacobian's rows, one per row: the regularised minimum-norm
     /// solution `lambda = J_n z` with `(J_n^T J_n + eps I) z = row_n`
-    /// in column-normalised space. For a row inside the rowspan the
+    /// in column-normalized space. For a row inside the rowspan the
     /// large `|lambda[i]|` name the rows carrying the dependency; a
     /// row outside the rowspan yields small coefficients everywhere.
     pub fn rowspan_certificate(&self, row: &[(u32, f64)], eps: f64) -> Result<Vec<f64>, RankError> {
@@ -765,7 +765,7 @@ impl Jacobian<f64> {
 
 /// Rowspan queries against one Jacobian through a single shared
 /// regularised normal-equations factor `(J_n^T J_n + eps I)^{-1}` in
-/// column-normalised space. Everything a blocker analysis needs --
+/// column-normalized space. Everything a blocker analysis needs --
 /// span-membership residuals, certificates, and low-rank row-removal
 /// (Woodbury) updates -- reduces to [`Self::solve_row`],
 /// [`Self::row_dot`] and [`Self::matvec`] against this factor.
@@ -817,7 +817,7 @@ impl<'a> RowspanAnalyzer<'a> {
         self.jac.rows.iter().map(|r| self.row_dot(&r.entries, z)).collect()
     }
 
-    /// Column-normalised L2 norm of a row.
+    /// Column-normalized L2 norm of a row.
     pub fn row_norm(&self, row: &[(u32, f64)]) -> f64 {
         let n = self.jac.num_params;
         let mut s = 0.0f64;

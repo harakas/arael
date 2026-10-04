@@ -1,5 +1,5 @@
 // Iterative Schur: conjugate gradients on the reduced system instead of
-// factorizing it (`SchurSolve::Iterative`). The step it produces is inexact
+// factorizing it (`SchurMethod::Iterative`). The step it produces is inexact
 // by construction, so what these tests pin is that the SOLVE still lands on
 // the same optimum as the factorizing route, that the route is selected
 // explicitly and never by accident, and that asking for it where there is no
@@ -8,7 +8,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
-    lm_solve, CgOptions, LmConfig, RootProblem, SchurPolicy, SolveError,
+    lm_solve, CgOptions, LmConfig, RootProblem, SchurPolicy, SetupError,
     SolveFailureKind, SolverReport, SparseFaer,
 };
 
@@ -324,7 +324,7 @@ fn iterative_without_a_reduction_is_an_error() {
     assert!(
         matches!(
             err.kind,
-            SolveFailureKind::Setup(SolveError::IterativeSchurWithoutReduction)
+            SolveFailureKind::Setup(SetupError::IterativeSchurWithoutReduction)
         ),
         "wrong failure: {:?}",
         err.kind
