@@ -9,7 +9,7 @@
 // BENCH_THREADS is the one knob: it sizes the pinned core count, every thread
 // pool's cap, AND arael's LmConfig::num_threads. Default 1, which is the
 // single-core comparison every committed number was measured under. 0 means every
-// core.
+// core. BENCH_PIN=0 keeps the caps and drops the pin.
 
 /// Threads -- and cores -- every system gets. 1 by default; 0 means every core.
 ///
@@ -22,9 +22,18 @@ pub fn threads() -> usize {
         .unwrap_or(1)
 }
 
+/// Whether the run pins to cores: BENCH_PIN, on unless it says 0.
+pub fn pinned() -> bool {
+    pin_from(std::env::var("BENCH_PIN").ok().as_deref())
+}
+
+fn pin_from(value: Option<&str>) -> bool {
+    value.map(str::trim) != Some("0")
+}
+
 /// Pin this process (and everything it spawns) to `BENCH_THREADS` cores, and hold
 /// every thread pool to the same number. Exports BENCH_CORE for the subprocess
-/// assert.
+/// assert. Under BENCH_PIN=0 the caps still apply and the mask is the inherited one.
 pub fn enforce_cores() {
     let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let n = match threads() {
@@ -54,17 +63,19 @@ pub fn enforce_cores() {
     // Linux only: the other platforms have no affinity call, so the thread
     // caps above are all the budget there is.
     #[cfg(target_os = "linux")]
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut set);
-        for c in (total - n)..total {
-            libc::CPU_SET(c, &mut set);
+    if pinned() {
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_ZERO(&mut set);
+            for c in (total - n)..total {
+                libc::CPU_SET(c, &mut set);
+            }
+            assert_eq!(
+                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set),
+                0,
+                "cannot pin to the last {n} of {total} cores"
+            );
         }
-        assert_eq!(
-            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set),
-            0,
-            "cannot pin to the last {n} of {total} cores"
-        );
     }
 
     // Export what the KERNEL calls this mask, not what we think it should be
@@ -84,4 +95,19 @@ pub fn cpus_allowed() -> String {
                 .map(|l| l.split_whitespace().last().unwrap_or("?").to_string())
         })
         .unwrap_or_else(|| "?".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pin_from;
+
+    #[test]
+    fn the_pin_is_on_unless_bench_pin_says_zero() {
+        assert!(pin_from(None));
+        assert!(pin_from(Some("1")));
+        assert!(pin_from(Some("")));
+        assert!(pin_from(Some("yes")));
+        assert!(!pin_from(Some("0")));
+        assert!(!pin_from(Some(" 0 ")));
+    }
 }
