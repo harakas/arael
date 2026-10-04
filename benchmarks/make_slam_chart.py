@@ -18,23 +18,24 @@
 # cancelled); first-iter is that same iteration plus the setup paid
 # once. Rows: arael first, then the rest by full-iter ascending.
 PANELS = [
+    # Desktop panels: 2026-10-04, min of 32 rounds.
     ("60 poses, 1,080 params -- Apple M4 Pro", 1, (18.0, 6.0), [
-        ("arael (f32)", 1.32, 1.84, "arael"),
-        ("arael (f64)", 1.74, 2.17, "arael"),
-        ("g2o (LM)", 3.54, 6.83, "other"),
-        ("Ceres (LM)", 5.22, 10.55, "other"),
-        ("SymForce (f64)", 5.36, 14.83, "other"),
-        ("factrs (LM)", 8.28, 14.53, "other"),
-        ("GTSAM (LM)", 9.95, 11.35, "other"),
+        ("arael (f32)", 1.36, 1.74, "arael"),
+        ("arael (f64)", 1.68, 2.11, "arael"),
+        ("g2o (LM)", 3.41, 6.86, "other"),
+        ("Ceres (LM)", 4.95, 10.39, "other"),
+        ("SymForce (f64)", 5.55, 14.68, "other"),
+        ("factrs (LM)", 7.82, 13.46, "other"),
+        ("GTSAM (LM)", 9.73, 11.34, "other"),
     ]),
     ("300 poses, 5,400 params -- Apple M4 Pro", 1, (250.0, 50.0), [
-        ("arael (f32)", 25.59, 32.34, "arael"),
-        ("arael (f64)", 39.31, 46.98, "arael"),
-        ("g2o (LM)", 62.11, 114.28, "other"),
-        ("Ceres (LM)", 84.03, 164.57, "other"),
-        ("factrs (LM)", 123.53, 175.16, "other"),
-        ("SymForce (f64)", 134.84, 232.71, "other"),
-        ("GTSAM (LM)", 159.83, 172.41, "other"),
+        ("arael (f32)", 24.79, 29.88, "arael"),
+        ("arael (f64)", 38.31, 42.93, "arael"),
+        ("g2o (LM)", 62.84, 109.89, "other"),
+        ("Ceres (LM)", 81.98, 160.18, "other"),
+        ("factrs (LM)", 108.62, 186.96, "other"),
+        ("SymForce (f64)", 130.80, 226.64, "other"),
+        ("GTSAM (LM)", 159.15, 168.74, "other"),
     ]),
     ("60 poses, 1,080 params -- Raspberry Pi 5", 1, (64.0, 16.0), [
         ("arael (f32)", 5.95, 7.98, "arael"),
@@ -160,7 +161,8 @@ def arael_version():
             if 'name = "arael"' in text:
                 m = re.search(r'^version = "([^"]+)"', text, re.M)
                 if m:
-                    return m.group(1)
+                    # A dev tree's chart is for the release it is heading to.
+                    return m.group(1).removesuffix("-dev")
         root = os.path.dirname(root)
     raise SystemExit("cannot find the arael version in any parent Cargo.toml")
 

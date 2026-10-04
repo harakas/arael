@@ -21,19 +21,19 @@
 # the setup, which the second chart draws.
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
-    # 2026-08-04, min of 8 rounds (benchmarks/slam README, 1200-pose figure-8
+    # 2026-10-04, min of 8 rounds (benchmarks/slam README, 1200-pose figure-8
     # table). Best validated configuration per system: Ceres is sparse_cholesky
     # (its sparse_schur is slower on this scene, and iterative_schur is inexact
     # and misses the gate), SymForce is f64. The arael CG rows are inexact too,
     # and have no full-iter to plot.
     ("Landmark SLAM -- 1200 poses, 21.6k params (Apple M4 Pro)", 1, [
-        ("arael (f32)", 203.54, 574.21, "arael"),
-        ("arael (f64)", 312.93, 725.00, "arael"),
-        ("g2o (LM)", 1075.42, 1516.79, "other"),
-        ("Ceres (LM)", 1162.71, 1430.46, "other"),
-        ("GTSAM (LM)", 1322.54, 2544.32, "other"),
-        ("factrs (LM)", 1401.12, 1764.26, "other"),
-        ("SymForce (f64)", 1695.11, 2384.76, "other"),
+        ("arael (f32)", 191.63, 553.38, "arael"),
+        ("arael (f64)", 312.35, 677.33, "arael"),
+        ("g2o (LM)", 1100.71, 1587.40, "other"),
+        ("Ceres (LM)", 1178.54, 1434.63, "other"),
+        ("factrs (LM)", 1374.72, 1711.31, "other"),
+        ("GTSAM (LM)", 1388.09, 2649.61, "other"),
+        ("SymForce (f64)", 1708.88, 2397.71, "other"),
     ]),
     # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
@@ -55,13 +55,13 @@ PANELS = [
 # Per panel: (title, value decimals, [(label, peak_mb, kind)])
 MEM_PANELS = [
     ("Landmark SLAM -- peak process memory", 1, [
-        ("arael (f32)", 216.4, "arael"),
-        ("arael (f64)", 298.2, "arael"),
+        ("arael (f32)", 179.0, "arael"),
+        ("arael (f64)", 289.6, "arael"),
         ("Ceres (LM)", 461.0, "other"),
-        ("g2o (LM)", 729.8, "other"),
+        ("g2o (LM)", 729.9, "other"),
         ("SymForce (f64)", 838.7, "other"),
-        ("factrs (LM)", 865.0, "other"),
-        ("GTSAM (LM)", 4691.3, "other"),
+        ("factrs (LM)", 865.1, "other"),
+        ("GTSAM (LM)", 4691.2, "other"),
     ]),
     ("Localization -- peak process memory", 1, [
         ("arael (f32)", 4.3, "arael"),
@@ -286,7 +286,8 @@ def arael_version():
             if '[package]\nname = "arael"' in text or 'name = "arael"' in text:
                 m = re.search(r'^version = "([^"]+)"', text, re.M)
                 if m:
-                    return m.group(1)
+                    # A dev tree's chart is for the release it is heading to.
+                    return m.group(1).removesuffix("-dev")
         root = os.path.dirname(root)
     raise SystemExit("cannot find the arael version in any parent Cargo.toml")
 
