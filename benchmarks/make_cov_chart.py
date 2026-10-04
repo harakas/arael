@@ -166,7 +166,8 @@ def arael_version():
             if 'name = "arael"' in text:
                 m = re.search(r'^version = "([^"]+)"', text, re.M)
                 if m:
-                    return m.group(1)
+                    # A dev tree's chart is for the release it is heading to.
+                    return m.group(1).removesuffix("-dev")
         root = os.path.dirname(root)
     raise SystemExit("cannot find the arael version in any parent Cargo.toml")
 
