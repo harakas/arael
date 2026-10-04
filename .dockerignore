@@ -1,0 +1,10 @@
+# Build context for benchmarks/Dockerfile: the sources and the datasets,
+# not the build trees, run logs or scratch.
+.git
+**/target
+**/cpp/build
+benchmarks/runs
+benchmarks/bal/debug.txt
+benchmarks/**/expand*.rs
+benchmarks/Dockerfile
+.dockerignore
