@@ -86,7 +86,7 @@ factorization -- so on a solve of three iterations it is a third of the bill, an
 on a long-running estimator it rounds to nothing. Neither the front-page chart
 nor this one is the whole story on its own.
 
-## Results (2026-07-26, Apple M4 Pro, single core enforced by the harness, min of 32 interleaved rounds)
+## Results (2026-10-04, Apple M4 Pro, single core enforced by the harness, min of 32 interleaved rounds)
 
 What each column means:
 
@@ -111,6 +111,12 @@ inner solve gets harder as the outer one converges, so one iteration does not
 stand for the rest and differencing two of them measures neither. That row is
 read on total ms and ms/iter.
 
+t(1) and t(2) are each minimized over rounds before being subtracted, so a
+row whose t(2) happened to sample unusually well reads a full-iter below what
+its own iterations cost, and one whose t(1) did reads above. At the
+sub-millisecond scale of the 60-pose scene that shows: a full-iter well under
+a row's later iterations, as the totals give them, is that sampling.
+
 `LOC_POSES=N` sets the pose count (landmarks scale as `4N`). The arael rows use
 `fast_atan` (above).
 
@@ -118,31 +124,31 @@ read on total ms and ms/iter.
 
 | system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 (band)   |     0.71 |   3(3) |    0.24 |      0.25 |     1.000 |        0.23 |     4.9 |  3274.6025 |
-| arael LM f32 (band)   |     0.70 |   3(3) |    0.23 |      0.24 |     0.960 |        0.24 |     4.3 |  3274.6025 |
-| symforce LM f64       |     4.74 |   3(3) |    1.58 |      0.35 |     1.400 |        3.89 |    20.6 |  3274.6025 |
-| symforce LM f32       |     4.50 |   3(3) |    1.50 |      0.30 |     1.200 |        3.75 |    18.2 |  3274.6025 |
-| g2o LM                |     4.61 |   3(3) |    1.54 |      1.10 |     4.400 |        2.14 |    11.2 |  3274.6025 |
-| ceres sparse_cholesky |     6.24 |   3(3) |    2.08 |      1.83 |     7.320 |        3.90 |    12.9 |  3274.6025 |
-| ceres sparse_schur    |     6.33 |   3(3) |    2.11 |      2.11 |     8.440 |        3.86 |    12.9 |  3274.6025 |
-| ceres iterative_schur\* |   6.73 |   3(3) |    2.24 |         - |         - |        3.90 |    12.0 |  3274.6025 |
-| gtsam LM              |    10.54 |   3(3) |    3.51 |      3.50 |    14.000 |        3.79 |    14.6 |  3274.6025 |
-| factrs LM             |    12.42 |   3(3) |    4.14 |      3.12 |    12.480 |        5.48 |    11.9 |  3274.6025 |
+| arael LM f64 (band)   |     0.58 |   3(3) |    0.19 |      0.20 |     1.000 |        0.20 |     5.2 |  3274.6025 |
+| arael LM f32 (band)   |     0.59 |   3(3) |    0.20 |      0.19 |     0.977 |        0.21 |     4.5 |  3274.6025 |
+| symforce LM f64       |     4.72 |   3(3) |    1.57 |      0.26 |     1.309 |        3.97 |    20.6 |  3274.6025 |
+| symforce LM f32       |     4.34 |   3(3) |    1.45 |      0.26 |     1.329 |        3.74 |    18.3 |  3274.6025 |
+| g2o LM                |     4.70 |   3(3) |    1.57 |      1.27 |     6.492 |        2.11 |    11.2 |  3274.6025 |
+| ceres sparse_cholesky |     6.31 |   3(3) |    2.10 |      1.90 |     9.718 |        3.79 |    13.0 |  3274.6025 |
+| ceres sparse_schur    |     6.42 |   3(3) |    2.14 |      2.10 |    10.709 |        3.81 |    12.9 |  3274.6025 |
+| ceres iterative_schur\* |   6.65 |   3(3) |    2.22 |         - |         - |        3.71 |    12.1 |  3274.6025 |
+| factrs LM             |    11.86 |   3(3) |    3.95 |      3.33 |    17.028 |        5.46 |    11.9 |  3274.6025 |
+| gtsam LM              |    10.62 |   3(3) |    3.54 |      3.37 |    17.242 |        3.87 |    14.6 |  3274.6025 |
 
 ### 300 poses (1,200 landmarks, 41,323 frines, 1,800 parameters; `ARAEL_LAMBDA0=1e-5`)
 
 | system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 (band)   |     7.33 |   3(3) |    2.44 |      2.40 |     1.000 |        2.46 |    13.6 | 25269.0409 |
-| arael LM f32 (band)   |     6.74 |   3(3) |    2.25 |      2.26 |     0.942 |        2.26 |    10.0 | 25269.0410 |
-| symforce LM f32       |    40.95 |   2(3) |   13.65 |      3.02 |     1.258 |       34.23 |   100.2 | 25269.0410 |
-| symforce LM f64       |    45.01 |   3(3) |   15.00 |      2.97 |     1.238 |       35.94 |   112.5 | 25269.0409 |
-| g2o LM                |    38.80 |   3(3) |   12.93 |      9.85 |     4.104 |       18.60 |    37.7 | 25269.0409 |
-| ceres sparse_cholesky |    51.06 |   3(3) |   17.02 |     14.70 |     6.125 |       31.86 |    42.2 | 25269.0409 |
-| ceres sparse_schur    |    51.46 |   3(3) |   17.15 |     15.12 |     6.300 |       31.02 |    37.1 | 25269.0409 |
-| ceres iterative_schur\* |  52.44 |   3(3) |   17.48 |         - |         - |       30.48 |    37.2 | 25269.0409 |
-| gtsam LM              |    86.38 |   3(3) |   28.79 |     27.92 |    11.633 |       32.41 |    58.9 | 25269.0409 |
-| factrs LM             |    91.50 |   3(3) |   30.50 |     24.22 |    10.092 |       42.51 |    64.9 | 25269.0409 |
+| arael LM f64 (band)   |     6.06 |   3(3) |    2.02 |      1.97 |     1.000 |        1.98 |    13.9 | 25269.0409 |
+| arael LM f32 (band)   |     5.92 |   2(3) |    1.97 |      1.97 |     1.001 |        1.96 |    10.2 | 25269.0410 |
+| symforce LM f32       |    40.73 |   2(3) |   13.58 |      3.11 |     1.580 |       33.88 |   100.2 | 25269.0410 |
+| symforce LM f64       |    44.98 |   3(3) |   14.99 |      3.73 |     1.895 |       35.04 |   112.5 | 25269.0409 |
+| g2o LM                |    37.68 |   3(3) |   12.56 |      9.52 |     4.829 |       18.37 |    37.7 | 25269.0409 |
+| ceres sparse_cholesky |    50.48 |   3(3) |   16.83 |     14.28 |     7.247 |       31.66 |    42.3 | 25269.0409 |
+| ceres sparse_schur    |    50.17 |   3(3) |   16.72 |     15.20 |     7.713 |       30.44 |    37.2 | 25269.0409 |
+| ceres iterative_schur\* |  52.06 |   3(3) |   17.35 |         - |         - |       29.94 |    37.3 | 25269.0409 |
+| factrs LM             |    90.23 |   3(3) |   30.08 |     23.73 |    12.045 |       41.91 |    64.8 | 25269.0409 |
+| gtsam LM              |    85.51 |   3(3) |   28.50 |     26.72 |    13.558 |       31.99 |    58.9 | 25269.0409 |
 
 ### Raspberry Pi 5 (Cortex-A76, single core, 60 poses; ROUNDS=32, ARAEL_LAMBDA0=1e-2, default damping)
 
@@ -178,8 +184,8 @@ The four tables above, drawn as one iteration plus the setup it pays once, one
 cell per machine:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/loc-dark.svg">
-  <img alt="2x2 bar charts of localization solve time on an Apple M4 Pro (60 and 300 poses), a Raspberry Pi 5 and a Raspberry Pi Zero: each system's bar split into one complete iteration and the setup it pays once" src="../charts/v0.8.0/loc-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/loc-dark.svg">
+  <img alt="2x2 bar charts of localization solve time on an Apple M4 Pro (60 and 300 poses), a Raspberry Pi 5 and a Raspberry Pi Zero: each system's bar split into one complete iteration and the setup it pays once" src="../charts/v0.9.0/loc-light.svg">
 </picture>
 
 ## The charts

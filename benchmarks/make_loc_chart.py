@@ -20,23 +20,24 @@
 # fixed map leaves nothing to marginalize), SymForce is f64.
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
+    # Desktop panels: 2026-10-04, min of 32 rounds.
     ("60 poses, 360 params -- Apple M4 Pro", 2, (6.0, 2.0), [
-        ("arael (f32)", 0.24, 0.24, "arael"),
-        ("arael (f64)", 0.25, 0.23, "arael"),
-        ("SymForce (f64)", 0.35, 3.89, "other"),
-        ("g2o (LM)", 1.10, 2.14, "other"),
-        ("Ceres (LM)", 1.83, 3.90, "other"),
-        ("factrs (LM)", 3.12, 5.48, "other"),
-        ("GTSAM (LM)", 3.50, 3.79, "other"),
+        ("arael (f32)", 0.19, 0.21, "arael"),
+        ("arael (f64)", 0.20, 0.20, "arael"),
+        ("SymForce (f64)", 0.26, 3.97, "other"),
+        ("g2o (LM)", 1.27, 2.11, "other"),
+        ("Ceres (LM)", 1.90, 3.79, "other"),
+        ("factrs (LM)", 3.33, 5.46, "other"),
+        ("GTSAM (LM)", 3.37, 3.87, "other"),
     ]),
     ("300 poses, 1,800 params -- Apple M4 Pro", 1, (48.0, 12.0), [
-        ("arael (f32)", 2.26, 2.26, "arael"),
-        ("arael (f64)", 2.40, 2.46, "arael"),
-        ("SymForce (f64)", 2.97, 35.94, "other"),
-        ("g2o (LM)", 9.85, 18.60, "other"),
-        ("Ceres (LM)", 14.70, 31.86, "other"),
-        ("factrs (LM)", 24.22, 42.51, "other"),
-        ("GTSAM (LM)", 27.92, 32.41, "other"),
+        ("arael (f32)", 1.97, 1.96, "arael"),
+        ("arael (f64)", 1.97, 1.98, "arael"),
+        ("SymForce (f64)", 3.73, 35.04, "other"),
+        ("g2o (LM)", 9.52, 18.37, "other"),
+        ("Ceres (LM)", 14.28, 31.66, "other"),
+        ("factrs (LM)", 23.73, 41.91, "other"),
+        ("GTSAM (LM)", 26.72, 31.99, "other"),
     ]),
     ("60 poses, 360 params -- Raspberry Pi 5", 2, (24.0, 6.0), [
         ("arael (f32)", 1.02, 1.02, "arael"),
