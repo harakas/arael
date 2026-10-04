@@ -64,7 +64,7 @@ pub fn ord_code(o: Option<arael::simple_lm::ReducedOrdering>) -> f64 {
         Some(ReducedOrdering::NaturalBanded) => 0.0,
         Some(ReducedOrdering::NaturalDense) => 1.0,
         Some(ReducedOrdering::Amd) => 2.0,
-        Some(ReducedOrdering::Nd) => 3.0,
+        Some(ReducedOrdering::NestedDissection) => 3.0,
         None => -1.0,
     }
 }
@@ -207,7 +207,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("jac_sv_n"), sv.len() as f64);
         assert_eq!(g("jac_sv0"), sv[0]);
         assert_eq!(g("jac_sv_last"), *sv.last().unwrap());
-        let svn = jac.singular_values_column_normalised();
+        let svn = jac.singular_values_column_normalized();
         assert_eq!(g("jac_svn0"), svn[0]);
         assert_eq!(g("jac_svn_last"), *svn.last().unwrap());
         let cn = jac.column_l2_norms();
@@ -243,7 +243,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
             Some(ReducedOrdering::NaturalBanded) => 0.0,
             Some(ReducedOrdering::NaturalDense) => 1.0,
             Some(ReducedOrdering::Amd) => 2.0,
-            Some(ReducedOrdering::Nd) => 3.0,
+            Some(ReducedOrdering::NestedDissection) => 3.0,
             None => -1.0,
         };
         assert_eq!(g("plan_ordering"), ord);
@@ -258,7 +258,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     // knob drives the backend (pinned by the plan it produces).
     {
         use arael::simple_lm::{
-            BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy,
+            BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy,
             SolverReport, SparseFaer, SparseFaerOptions,
         };
         let d = SparseFaerOptions::default();
@@ -269,12 +269,12 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
             _ => panic!("the default policy must be Auto"),
         };
         assert_eq!(g("so_schur"), 0.0);
-        assert!(matches!(d.ordering, FaerOrdering::Auto));
+        assert!(matches!(d.ordering, SolveOrdering::Auto));
         assert_eq!(g("so_ordering"), 0.0);
         assert!(matches!(d.envelope, EnvelopeMode::Auto));
         assert_eq!(g("so_envelope"), 0.0);
         assert_eq!(g("so_panel"), d.envelope_panel_width.unwrap_or(0) as f64);
-        assert_eq!(g("so_supernodal"), d.supernodal as u8 as f64);
+        assert_eq!(g("so_supernodal"), d.scalar_supernodal as u8 as f64);
         assert_eq!(g("so_narrow_band"), d.narrow_band as u8 as f64);
         assert_eq!(g("so_flop_margin"), fm);
         assert_eq!(g("so_obvious"), ofr);
@@ -287,7 +287,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         fill(&mut f11);
         let mut s11 = SparseFaer::from_options(&SparseFaerOptions::auto()
             .with_policy(SchurPolicy::Force)
-            .with_ordering(FaerOrdering::Natural)
+            .with_ordering(SolveOrdering::Natural)
             .with_envelope_schur(EnvelopeMode::Always));
         let r11 = f11.solve_with(&mut s11, &cfg).unwrap();
         assert_eq!(g("opt_end"), r11.end_cost);
@@ -305,9 +305,9 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         fill(&mut f12);
         let mut s12 = SparseFaer::from_options(&SparseFaerOptions::auto()
             .with_policy(SchurPolicy::Force)
-            .with_ordering(FaerOrdering::Amd)
+            .with_ordering(SolveOrdering::Amd)
             .with_envelope_schur(EnvelopeMode::Never)
-            .with_supernodal(false));
+            .with_scalar_supernodal(false));
         let r12 = f12.solve_with(&mut s12, &cfg).unwrap();
         assert_eq!(g("opt2_end"), r12.end_cost);
         let p12 = match r12.solver {
@@ -356,7 +356,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     // to cold ones; a parameter-count change re-analyzes by itself.
     {
         use arael::simple_lm::{
-            EnvelopeMode, FaerOrdering, LmSession, SchurPolicy, SolverReport,
+            EnvelopeMode, SolveOrdering, LmSession, SchurPolicy, SolverReport,
             SparseFaer, SparseFaerOptions,
         };
         let mut f13 = Fit::default();
@@ -399,7 +399,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         let mut sessf = LmSession::new(SparseFaer::from_options(
             &SparseFaerOptions::auto()
                 .with_policy(SchurPolicy::Force)
-                .with_ordering(FaerOrdering::Natural)
+                .with_ordering(SolveOrdering::Natural)
                 .with_envelope_schur(EnvelopeMode::Always),
         ));
         let rs5 = sessf.solve(&mut f14, &cfg).unwrap();

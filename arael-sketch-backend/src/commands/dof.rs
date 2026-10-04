@@ -112,7 +112,7 @@ pub(crate) fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CmdResult
     let (svd, col_norms) = if raw {
         (jacobian.svd(), Vec::new())
     } else {
-        jacobian.svd_column_normalised()
+        jacobian.svd_column_normalized()
     };
     let t_svd = t1.elapsed();
     let svs_vec = &svd.singular_values;

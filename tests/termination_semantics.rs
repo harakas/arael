@@ -155,7 +155,7 @@ fn status_reports_max_iterations() {
 // ---------------------------------------------------------------------------
 
 use arael::simple_lm::{
-    Dense, LambdaDriver, LambdaState, LambdaStep, LmSolver, SolveError, SolverReport,
+    Dense, LambdaDriver, LambdaState, LambdaStep, LmSolver, SetupError, SolverReport,
 };
 use std::time::Duration;
 
@@ -263,7 +263,7 @@ impl LmSolver<f64> for NeverFactorizes {
     fn compute(
         &mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64],
         grad: &mut [f64], m: &mut Vec<f64>, ctx: &mut arael::threads::Context,
-    ) -> Result<f64, SolveError> {
+    ) -> Result<f64, SetupError> {
         <Dense as LmSolver<f64>>::compute(&mut self.0, problem, params, grad, m, ctx)
     }
     fn extract_diagonal(&self, m: &Vec<f64>, d: &mut [f64]) {
@@ -834,16 +834,16 @@ fn report_is_ascii_and_has_no_escapes() {
 }
 
 #[test]
-fn pretty_report_carries_colour_and_glyphs() {
+fn pretty_report_carries_color_and_glyphs() {
     let r = synthetic_result();
     let s = r.pretty_report();
 
     assert!(!s.is_ascii(), "pretty_report() is where the glyphs live");
-    assert!(s.contains('\x1b'), "pretty_report() should be coloured");
+    assert!(s.contains('\x1b'), "pretty_report() should be colored");
     assert!(s.contains('\u{2713}'), "check mark for an accepted step");
     assert!(s.contains('\u{2717}'), "ballot X for a rejected one");
     assert!(s.contains('\u{2298}'), "circled slash for a failed factorization");
-    // Failed, rejected, accepted -- in that order, once the colour is stripped.
+    // Failed, rejected, accepted -- in that order, once the color is stripped.
     assert!(strip_ansi(&s).contains("\u{2298}\u{2717}\u{2713}"), "the timeline, in order");
 
     // Same facts, different clothes.
@@ -858,15 +858,15 @@ fn render_takes_an_explicit_style() {
     assert_eq!(r.render(Style::PRETTY), r.pretty_report());
 
     // Colour without glyphs, for a terminal that cannot draw them.
-    let s = r.render(Style { colour: true, unicode: false });
-    assert!(s.contains('\x1b'), "coloured");
+    let s = r.render(Style { color: true, unicode: false });
+    assert!(s.contains('\x1b'), "colored");
     assert!(s.is_ascii(), "but no glyphs -- ANSI escapes are themselves ASCII");
     // Each marker is wrapped in its own escape, so they are only adjacent once
-    // the colour is stripped back out.
+    // the color is stripped back out.
     assert!(strip_ansi(&s).contains("x-+"), "still the ASCII markers:\n{s}");
 }
 
-/// Drop ANSI colour sequences, leaving the text.
+/// Drop ANSI color sequences, leaving the text.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::new();
     let mut chars = s.chars();

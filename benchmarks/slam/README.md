@@ -331,7 +331,7 @@ gate at any size (0.7 m out at 60 poses, 0.14 m at 300).
 
 **arael CG** is the same idea in arael: the landmarks are marginalized as
 usual, then the reduced pose system is solved by preconditioned conjugate
-gradients rather than factorized (`SchurSolve::Iterative`, on a reduced
+gradients rather than factorized (`SchurMethod::Iterative`, on a reduced
 system that is still formed). It reaches the common optimum at every size,
 and it has no full-iter for the same reason. Its inner tolerance is 1e-4
 (`SLAM_CG_TOL`), measured as the fastest setting that still lands on the

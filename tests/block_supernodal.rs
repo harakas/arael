@@ -430,7 +430,7 @@ fn f32_supernodal_schur_route_solves() {
     let mut w = build_f32(0.1, 2);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
-    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_envelope_schur(EnvelopeMode::Never)
         .with_block_supernodal(BlockSupernodalMode::Always));
     let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();

@@ -766,7 +766,7 @@ impl DecaySparseOptions {
     /// The Rust defaults.
     #[wasm_bindgen(constructor)]
     pub fn new() -> DecaySparseOptions {
-        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy};
+        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy};
         let d = SparseFaerOptions::default();
         let (flop_margin, obvious_flop_ratio) = match d.policy {
             SchurPolicy::Auto { flop_margin, obvious_flop_ratio } => (flop_margin, obvious_flop_ratio),
@@ -779,11 +779,11 @@ impl DecaySparseOptions {
                 SchurPolicy::Never => 2,
             },
             ordering: match d.ordering {
-                FaerOrdering::Auto => 0,
-                FaerOrdering::Amd => 1,
-                FaerOrdering::MarginalizeFirst => 2,
-                FaerOrdering::Natural => 3,
-                FaerOrdering::NestedDissection => 4,
+                SolveOrdering::Auto => 0,
+                SolveOrdering::Amd => 1,
+                SolveOrdering::MarginalizeFirst => 2,
+                SolveOrdering::Natural => 3,
+                SolveOrdering::NestedDissection => 4,
             },
             envelope: match d.envelope {
                 EnvelopeMode::Auto => 0,
@@ -791,7 +791,7 @@ impl DecaySparseOptions {
                 EnvelopeMode::Never => 2,
             },
             envelope_panel_width: d.envelope_panel_width.unwrap_or(0) as u32,
-            supernodal: d.supernodal,
+            supernodal: d.scalar_supernodal,
             narrow_band: d.narrow_band,
             flop_margin,
             obvious_flop_ratio,
@@ -809,7 +809,7 @@ impl DecaySparseOptions {
         }
     }
     fn to_options(&self) -> Result<SparseFaerOptions, JsValue> {
-        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy};
+        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy};
         let policy = match self.schur {
             0 => SchurPolicy::Auto { flop_margin: self.flop_margin, obvious_flop_ratio: self.obvious_flop_ratio },
             1 => SchurPolicy::Force,
@@ -817,11 +817,11 @@ impl DecaySparseOptions {
             t => return Err(js_err(&format!("unknown schur policy tag {t}"))),
         };
         let ordering = match self.ordering {
-            0 => FaerOrdering::Auto,
-            1 => FaerOrdering::Amd,
-            2 => FaerOrdering::MarginalizeFirst,
-            3 => FaerOrdering::Natural,
-            4 => FaerOrdering::NestedDissection,
+            0 => SolveOrdering::Auto,
+            1 => SolveOrdering::Amd,
+            2 => SolveOrdering::MarginalizeFirst,
+            3 => SolveOrdering::Natural,
+            4 => SolveOrdering::NestedDissection,
             t => return Err(js_err(&format!("unknown ordering tag {t}"))),
         };
         let envelope = match self.envelope {
@@ -843,7 +843,7 @@ impl DecaySparseOptions {
             .with_ordering(ordering)
             .with_envelope_schur(envelope)
             .with_envelope_panel_width((width > 0).then_some(width as usize))
-            .with_supernodal(self.supernodal)
+            .with_scalar_supernodal(self.supernodal)
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
@@ -946,7 +946,7 @@ impl DecayLmResult {
             ReducedOrdering::NaturalBanded => 0.0,
             ReducedOrdering::NaturalDense => 1.0,
             ReducedOrdering::Amd => 2.0,
-            ReducedOrdering::Nd => 3.0,
+            ReducedOrdering::NestedDissection => 3.0,
         })));
         js_set(&o, "keptBandwidth", &JsValue::from_f64(p.kept_bandwidth as f64));
         js_set(&o, "envelope", &JsValue::from_bool(p.envelope));
@@ -1515,7 +1515,7 @@ impl LineSparseOptions {
     /// The Rust defaults.
     #[wasm_bindgen(constructor)]
     pub fn new() -> LineSparseOptions {
-        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy};
+        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy};
         let d = SparseFaerOptions::default();
         let (flop_margin, obvious_flop_ratio) = match d.policy {
             SchurPolicy::Auto { flop_margin, obvious_flop_ratio } => (flop_margin, obvious_flop_ratio),
@@ -1528,11 +1528,11 @@ impl LineSparseOptions {
                 SchurPolicy::Never => 2,
             },
             ordering: match d.ordering {
-                FaerOrdering::Auto => 0,
-                FaerOrdering::Amd => 1,
-                FaerOrdering::MarginalizeFirst => 2,
-                FaerOrdering::Natural => 3,
-                FaerOrdering::NestedDissection => 4,
+                SolveOrdering::Auto => 0,
+                SolveOrdering::Amd => 1,
+                SolveOrdering::MarginalizeFirst => 2,
+                SolveOrdering::Natural => 3,
+                SolveOrdering::NestedDissection => 4,
             },
             envelope: match d.envelope {
                 EnvelopeMode::Auto => 0,
@@ -1540,7 +1540,7 @@ impl LineSparseOptions {
                 EnvelopeMode::Never => 2,
             },
             envelope_panel_width: d.envelope_panel_width.unwrap_or(0) as u32,
-            supernodal: d.supernodal,
+            supernodal: d.scalar_supernodal,
             narrow_band: d.narrow_band,
             flop_margin,
             obvious_flop_ratio,
@@ -1558,7 +1558,7 @@ impl LineSparseOptions {
         }
     }
     fn to_options(&self) -> Result<SparseFaerOptions, JsValue> {
-        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, FaerOrdering, SchurPolicy};
+        use arael::simple_lm::{BlockSupernodalMode, EnvelopeMode, SolveOrdering, SchurPolicy};
         let policy = match self.schur {
             0 => SchurPolicy::Auto { flop_margin: self.flop_margin, obvious_flop_ratio: self.obvious_flop_ratio },
             1 => SchurPolicy::Force,
@@ -1566,11 +1566,11 @@ impl LineSparseOptions {
             t => return Err(js_err(&format!("unknown schur policy tag {t}"))),
         };
         let ordering = match self.ordering {
-            0 => FaerOrdering::Auto,
-            1 => FaerOrdering::Amd,
-            2 => FaerOrdering::MarginalizeFirst,
-            3 => FaerOrdering::Natural,
-            4 => FaerOrdering::NestedDissection,
+            0 => SolveOrdering::Auto,
+            1 => SolveOrdering::Amd,
+            2 => SolveOrdering::MarginalizeFirst,
+            3 => SolveOrdering::Natural,
+            4 => SolveOrdering::NestedDissection,
             t => return Err(js_err(&format!("unknown ordering tag {t}"))),
         };
         let envelope = match self.envelope {
@@ -1592,7 +1592,7 @@ impl LineSparseOptions {
             .with_ordering(ordering)
             .with_envelope_schur(envelope)
             .with_envelope_panel_width((width > 0).then_some(width as usize))
-            .with_supernodal(self.supernodal)
+            .with_scalar_supernodal(self.supernodal)
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
@@ -1695,7 +1695,7 @@ impl LineLmResult {
             ReducedOrdering::NaturalBanded => 0.0,
             ReducedOrdering::NaturalDense => 1.0,
             ReducedOrdering::Amd => 2.0,
-            ReducedOrdering::Nd => 3.0,
+            ReducedOrdering::NestedDissection => 3.0,
         })));
         js_set(&o, "keptBandwidth", &JsValue::from_f64(p.kept_bandwidth as f64));
         js_set(&o, "envelope", &JsValue::from_bool(p.envelope));

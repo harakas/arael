@@ -150,11 +150,11 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
             } else {
                 "fixed ladder"
             }))
-        // FaerOrdering::Auto resolves to AMD on this problem, so its Debug name
+        // SolveOrdering::Auto resolves to AMD on this problem, so its Debug name
         // would say less than the ordering it picks.
         .line("arael schur ordering", format!("{} [BAL_ORDERING=amd]",
             match arael_runner::schur_ordering() {
-                arael::simple_lm::FaerOrdering::NestedDissection => "nested dissection",
+                arael::simple_lm::SolveOrdering::NestedDissection => "nested dissection",
                 _ => "AMD",
             }))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",

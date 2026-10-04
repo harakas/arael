@@ -197,3 +197,32 @@ fn fixed_quaternion_param_has_no_params() {
     assert_eq!(params.len(), 0, "a fixed QuaternionParam must serialize no params");
     assert_eq!(rig.att.index(), u32::MAX);
 }
+
+// A `symbolic =` field may read a QuaternionParam's orientation as euler
+// angles; the macro reaches them through `work_euler_angles()`.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, {
+    let d = yawrig.att.rotation_matrix() - yawrig.target;
+    [d[0][0], d[1][1], d[2][2]]
+}))]
+struct YawRig {
+    att: QuaternionParam<f64>,
+    target: matrix3d,
+    #[arael(symbolic = att.z)]
+    yaw: f64,
+    hb: SelfBlock<YawRig>,
+}
+
+#[test]
+fn symbolic_field_reads_quaternion_param_euler_angles() {
+    let q = quaternd::from_euler_angles(vect3d::new(0.1, -0.2, 0.3));
+    let mut rig = YawRig {
+        att: QuaternionParam::new(q),
+        target: q.rotation_matrix(),
+        yaw: 0.0,
+        hb: SelfBlock::new(),
+    };
+    rig.update_self();
+    assert!((rig.yaw - 0.3).abs() < 1e-12, "yaw {}", rig.yaw);
+}

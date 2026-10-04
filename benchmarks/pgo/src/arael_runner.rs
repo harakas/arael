@@ -126,11 +126,11 @@ fn solution_parts<T: Float>(poses: &refs::Vec<Pose2<T>>) -> Vec<PoseIn> {
 /// ordering instead of AMD. On parking-garage -- a 3D pose graph dense enough
 /// that AMD's ordering leaves faer no supernodes worth having -- it is worth a
 /// lot; on the sparser graphs it is not. Default stays AMD.
-pub(crate) fn ordering() -> arael::simple_lm::FaerOrdering {
+pub(crate) fn ordering() -> arael::simple_lm::SolveOrdering {
     if std::env::var("PGO_ORDERING").as_deref() == Ok("nd") {
-        arael::simple_lm::FaerOrdering::NestedDissection
+        arael::simple_lm::SolveOrdering::NestedDissection
     } else {
-        arael::simple_lm::FaerOrdering::Auto
+        arael::simple_lm::SolveOrdering::Auto
     }
 }
 
@@ -221,7 +221,7 @@ pub fn solve_f32<P: arael::simple_lm::LmProblemInternals<f32>>(
     cfg: &arael::simple_lm::LmConfig<f32>,
     ctx: &mut arael::threads::Context,
 ) -> Solved<f32> {
-    let mut solver = arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+    let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_ordering(ordering())
         .with_policy(schur_policy())
         .with_block_supernodal(block_supernodal())

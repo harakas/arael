@@ -6,7 +6,7 @@
 
 use arael::simple_lm::{
     LmProblemInternals,
-    lm_solve, BandOverflow, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
+    lm_solve, CooMatrix, Dense, LmConfig, LmProblem, LmResult,
 };
 
 /// Rosenbrock as least squares: r = [10*(y - x^2), 1 - x], cost = 0.5*|r|^2,

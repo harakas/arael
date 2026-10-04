@@ -19,7 +19,7 @@
 use arael::simple_lm::RootProblem;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{
-    self, CooMatrix, CscMatrix, LmConfig, LmProblem, SolveError,
+    self, CooMatrix, CscMatrix, LmConfig, LmProblem, SetupError,
     SolveFailureKind, SolverKind, SparseFaerOptions, LmProblemInternals};
 use arael::vect::{vect2d, vect2f};
 use arael::refs::{self, Ref};
@@ -551,7 +551,7 @@ fn f32_cholmod_is_unavailable() {
     let e = m.solve(SolverKind::Cholmod, &cfg)
         .expect_err("cholmod at f32 must be unavailable");
     assert!(
-        matches!(e.kind, SolveFailureKind::Setup(SolveError::SolverUnavailable { .. })),
+        matches!(e.kind, SolveFailureKind::Setup(SetupError::SolverUnavailable { .. })),
         "kind = {:?}", e.kind
     );
     assert!(e.partial.is_none(), "nothing ran");
@@ -570,7 +570,7 @@ fn uncompiled_backend_is_unavailable() {
     let e = chain.solve(SolverKind::Cholmod, &cfg)
         .expect_err("uncompiled backend must be unavailable");
     match e.kind {
-        SolveFailureKind::Setup(SolveError::SolverUnavailable { solver, .. }) => {
+        SolveFailureKind::Setup(SetupError::SolverUnavailable { solver, .. }) => {
             assert_eq!(solver, "Cholmod");
         }
         other => panic!("expected SolverUnavailable, got {other:?}"),

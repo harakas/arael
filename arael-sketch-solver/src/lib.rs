@@ -2424,7 +2424,7 @@ impl Sketch {
         let (dof, method) = if analyze {
             // Diagnostic path: full dense spectrum, since the caller
             // wants every eigenvalue/eigenvector anyway.
-            let mut sorted: Vec<f64> = jacobian.singular_values_column_normalised();
+            let mut sorted: Vec<f64> = jacobian.singular_values_column_normalized();
             if sorted.iter().any(|v| !v.is_finite()) {
                 return Err("non-finite singular values (degenerate geometry?)".into());
             }

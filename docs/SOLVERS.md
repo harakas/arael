@@ -131,7 +131,7 @@ SchurPolicy::Never        // factorize the whole system
 Under `Never` a named set is not wasted: it becomes the factorization's
 ordering instead ("marginalized parameters first"), which is the same
 elimination performed inside the factorization rather than before it.
-`with_ordering` controls that directly -- see `FaerOrdering`.
+`with_ordering` controls that directly -- see `SolveOrdering`.
 
 **The block supernodal Cholesky.** `SparseFaer` factorizes in block form
 by default: the model's blocks are kept whole, the elimination tree is
@@ -214,7 +214,7 @@ let result = model.solve(SolverKind::Sparse(SparseFaerOptions::default()), &cfg)
 ```
 
 A kind that is not compiled in, or not available at the model's scalar,
-returns `SolveError::SolverUnavailable` with the parameters untouched,
+returns `SetupError::SolverUnavailable` with the parameters untouched,
 instead of failing to build.
 
 ## `LmConfig` -- every field, with defaults
@@ -598,14 +598,14 @@ pub struct SolveFailure<T> {
 }
 
 pub enum SolveFailureKind {
-    Setup(SolveError),  // the linear system could not be built or factored
+    Setup(SetupError),  // the linear system could not be built or factored
     DegenerateDiagonal { param: usize, fault: DiagonalFault },
 }
 
 pub enum DiagonalFault { Nan, Negative, Zero }
 ```
 
-`Setup(SolveError)` is a structural failure: a band element outside the
+`Setup(SetupError)` is a structural failure: a band element outside the
 declared bandwidth, a parameter no constraint touches, a failed symbolic
 factorization, an illegal marginalization, or a backend compiled out
 (`SolverUnavailable`). When it strikes on the first assembly nothing ran:
@@ -839,16 +839,16 @@ site before the message is formatted, so a silenced arael allocates nothing.
 let r = model.solve_sparse(&cfg)?;
 
 r.print();          // plain ASCII, to stdout
-r.pretty_print();   // colour and glyphs, to stdout
+r.pretty_print();   // color and glyphs, to stdout
 
 let s: String = r.report();          // the same text print() writes
 let s: String = r.pretty_report();   // the same text pretty_print() writes
-let s: String = r.render(Style { colour: true, unicode: false });  // pick both
+let s: String = r.render(Style { color: true, unicode: false });  // pick both
 println!("{r}");    // Display is report()
 ```
 
 `report()` is pure ASCII with no escape sequences, so it is safe in a log or a
-file. `pretty_report()` carries ANSI colour and box glyphs and is for a terminal.
+file. `pretty_report()` carries ANSI color and box glyphs and is for a terminal.
 Both draw the same facts:
 
 ```text

@@ -330,14 +330,14 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     match solver_kind().as_str() {
         "faer" => arael::simple_lm::lm_solve_with_context(
             params,
-            &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            &mut arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())
                 .with_block_supernodal_memory_lean(block_supernodal_lean())),
             path, cfg, ctx),
         "narrow_band" => arael::simple_lm::lm_solve_with_context(
             params,
-            &mut arael::simple_lm::SparseFaerF32::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            &mut arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
                 .with_narrow_band(true)
                 .with_block_supernodal(block_supernodal())
                 .with_block_supernodal_batching(block_supernodal_batch())

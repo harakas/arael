@@ -106,6 +106,12 @@ fn widen_mat3(m: &matrix3sym) -> arael_sym::matrixsym {
     arael_sym::matrixsym::from_rows(m.rows.iter().map(widen_vec3).collect())
 }
 
+/// Accessor of a param field's working value: `work()`, or
+/// `work_euler_angles()` on a `QuaternionParam`.
+fn work_call(field: &str, rotvec_fields: &[String]) -> &'static str {
+    if rotvec_fields.iter().any(|f| f == field) { "work_euler_angles()" } else { "work()" }
+}
+
 // ---------------------------------------------------------------------------
 // Constraint context
 // ---------------------------------------------------------------------------
@@ -120,6 +126,7 @@ pub(crate) fn generate_symbolic_precompute(
     type_name: &str,
     fields: &[(String, SymFieldType)],
     param_fields: &[String],
+    rotvec_fields: &[String],
     symbolic_fields: &[(String, String)],
     deriv_fields: &[(String, String, String)],
     scalar_generic: Option<&str>,
@@ -136,7 +143,7 @@ pub(crate) fn generate_symbolic_precompute(
             | SymFieldType::OptionalStruct(_)) { continue; }
         let is_param = param_fields.iter().any(|p| p == fname);
         let base = if is_param {
-            format!("self.{}.work()", fname)
+            format!("self.{}.{}", fname, work_call(fname, rotvec_fields))
         } else {
             format!("self.{}", fname)
         };
@@ -182,11 +189,12 @@ pub(crate) fn generate_symbolic_precompute(
             .find(|(n, _)| n == by)
             .filter(|_| param_fields.iter().any(|p| p == by))
             .map(|(_, t)| t);
+        let work = work_call(by, rotvec_fields);
         let with = |names: &[&str]| -> Vec<String> {
-            names.iter().map(|c| format!("self.{}.work().{}", by, c)).collect()
+            names.iter().map(|c| format!("self.{}.{}.{}", by, work, c)).collect()
         };
         let dvars: Vec<String> = match by_sft {
-            Some(SymFieldType::Scalar) => vec![format!("self.{}.work()", by)],
+            Some(SymFieldType::Scalar) => vec![format!("self.{}.{}", by, work)],
             Some(SymFieldType::Vec2) => with(&["x", "y"]),
             Some(SymFieldType::Vec3) => with(&["x", "y", "z"]),
             _ => return Err(syn::Error::new(sp, format!(
@@ -2631,7 +2639,8 @@ fn register_bindings_body(
             if matches!(sft, SymFieldType::Skip) { continue; }
             let is_param = layout.param_fields.contains(field_name);
             let sym_base = if is_param {
-                format!("{}.{}.work()", sym_prefix, field_name)
+                format!("{}.{}.{}", sym_prefix, field_name,
+                    work_call(field_name, &layout.universal_rotvec_fields))
             } else {
                 format!("{}.{}", sym_prefix, field_name)
             };
@@ -2719,7 +2728,8 @@ fn register_bindings_body(
                     | SymFieldType::OptionalStruct(_)) { continue; }
                 let is_param = layout.param_fields.contains(field_name);
                 let sym_base = if is_param {
-                    format!("{}.{}.work()", sym_prefix, field_name)
+                    format!("{}.{}.{}", sym_prefix, field_name,
+                        work_call(field_name, &layout.universal_rotvec_fields))
                 } else {
                     format!("{}.{}", sym_prefix, field_name)
                 };
@@ -2753,13 +2763,14 @@ fn register_bindings_body(
                 let dvars_for = |by: &str| -> syn::Result<std::vec::Vec<String>> {
                     let by_sft = layout.fields.iter()
                         .find(|(n, _)| n == by).map(|(_, t)| t);
+                    let work = work_call(by, &layout.universal_rotvec_fields);
                     let comps_of = |names: &[&str]| -> std::vec::Vec<String> {
                         names.iter().map(|c|
-                            format!("{}.{}.work().{}", sym_prefix, by, c)).collect()
+                            format!("{}.{}.{}.{}", sym_prefix, by, work, c)).collect()
                     };
                     match by_sft {
                         Some(SymFieldType::Scalar) =>
-                            Ok(vec![format!("{}.{}.work()", sym_prefix, by)]),
+                            Ok(vec![format!("{}.{}.{}", sym_prefix, by, work)]),
                         Some(SymFieldType::Vec2) => Ok(comps_of(&["x", "y"])),
                         Some(SymFieldType::Vec3) => Ok(comps_of(&["x", "y", "z"])),
                         _ => Err(syn::Error::new(proc_macro2::Span::call_site(),

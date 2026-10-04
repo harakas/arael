@@ -2251,7 +2251,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         Some(l) if !l.symbolic_fields.is_empty() =>
             crate::constraint::generate_symbolic_precompute(
                 &name.to_string(), &l.fields, &l.param_fields,
-                &l.symbolic_fields, &l.deriv_fields,
+                &l.universal_rotvec_fields, &l.symbolic_fields, &l.deriv_fields,
                 input.generics.type_params().next()
                     .map(|tp| tp.ident.to_string()).as_deref())?,
         _ => TokenStream2::new(),
