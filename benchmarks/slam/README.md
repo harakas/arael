@@ -427,15 +427,17 @@ rustup target add arm-unknown-linux-musleabihf
 cargo build --release --target arm-unknown-linux-musleabihf
 ```
 
-Min of 16 rounds, the same 60-pose scene:
+Min of 16 rounds, the same 60-pose scene (2026-10-04):
 
-| system       | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
-|--------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 |  1052.08 |   3(3) |  350.69 |    330.07 |     1.000 |      378.89 |     7.7 |  3062.0488 |
-| arael LM f32 |   674.85 |   3(3) |  224.95 |    209.10 |     0.634 |      252.33 |     5.8 |  3062.0487 |
-| factrs LM    |  4087.99 |   3(3) | 1362.66 |   1258.58 |     3.813 |     1567.77 |    15.1 |  3062.0483 |
+| system                  | total ms | iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-------------------------|---------:|------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64            |  1031.02 |  3(3) |  343.67 |    325.45 |     1.000 |      372.72 |     8.1 |  3062.0488 |
+| arael LM f32            |   647.76 |  3(3) |  215.92 |    198.25 |     0.609 |      249.58 |     6.2 |  3062.0485 |
+| arael CG f64\*          |  1725.66 |  5(5) |  345.13 |         - |         - |      269.30 |     6.9 |  3062.0486 |
+| arael CG f32\*          |  1558.44 |  5(5) |  311.69 |         - |         - |      190.38 |     5.4 |  3062.0487 |
+| factrs LM               |  4125.37 |  3(3) | 1375.12 |   1264.96 |     3.887 |     1574.62 |    15.0 |  3062.0483 |
 
-3/3 at the common optimum, anchored by one external system (factrs): the
+5/5 at the common optimum, anchored by one external system (factrs): the
 C++ stack is not cross-compiled for ARMv6, so it is the only non-arael row
 here.
 

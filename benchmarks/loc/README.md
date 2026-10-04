@@ -167,7 +167,7 @@ a row's later iterations, as the totals give them, is that sampling.
 
 ### Raspberry Pi Zero (ARM1176, ARMv6, single core, 60 poses; ROUNDS=10, ARAEL_LAMBDA0=1e-2)
 
-The cross-compiled static-musl binary on a real Pi Zero (2026-07-26, on the
+The cross-compiled static-musl binary on a real Pi Zero (2026-10-04, on the
 harness). The C++ solvers are not cross-built, so factrs is the only external
 system here and the sole anchor for the validation; tiny-solver is off by
 default. factrs matches the reference initial cost to 1.1e-16, so the ARMv6
@@ -176,9 +176,9 @@ the shared tolerance).
 
 | system                  | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-------------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| **arael LM f32 (band)** |    64.66 |   3(3) |   21.55 |     21.39 |     0.696 |       22.02 |     2.3 |  3274.6021 |
-| **arael LM f64 (band)** |    92.46 |   3(3) |   30.82 |     30.74 |     1.000 |       31.43 |     2.9 |  3274.6021 |
-| factrs LM               |  1202.02 |   3(3) |  400.67 |    353.35 |    11.495 |      491.62 |     7.2 |  3274.6021 |
+| **arael LM f32 (band)** |    57.36 |   3(3) |   19.12 |     18.79 |     0.674 |       19.59 |     2.7 |  3274.6021 |
+| **arael LM f64 (band)** |    84.21 |   3(3) |   28.07 |     27.90 |     1.000 |       28.49 |     3.3 |  3274.6021 |
+| factrs LM               |  1168.05 |   3(3) |  389.35 |    340.56 |    12.205 |      481.15 |     7.3 |  3274.6021 |
 
 The four tables above, drawn as one iteration plus the setup it pays once, one
 cell per machine:
