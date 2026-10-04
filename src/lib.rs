@@ -166,8 +166,8 @@
 //! [benchmarks/plane](https://github.com/harakas/arael/tree/master/benchmarks/plane).
 //!
 //! <picture>
-//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-dark.svg">
-//!   <img alt="2x2 bar charts of per-iteration solve time (top) and peak process memory (bottom): landmark SLAM at 1200 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.2/slam-loc-light.svg">
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/slam-loc-dark.svg">
+//!   <img alt="2x2 bar charts of per-iteration solve time (top) and peak process memory (bottom): landmark SLAM at 1200 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/slam-loc-light.svg">
 //! </picture>
 //!
 //! The same per-iteration metric, and the peak memory of those runs, on

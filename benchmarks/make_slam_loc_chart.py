@@ -35,18 +35,18 @@ PANELS = [
         ("GTSAM (LM)", 1388.09, 2649.61, "other"),
         ("SymForce (f64)", 1708.88, 2397.71, "other"),
     ]),
-    # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
+    # 2026-10-04, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
     # landmark map leaves nothing to marginalize, and iterative_schur is inexact),
     # SymForce is f64.
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 2, [
-        ("arael (f32)", 1.02, 1.0, "arael"),
-        ("arael (f64)", 1.06, 1.1, "arael"),
-        ("SymForce (f64)", 1.34, 16.4, "other"),
-        ("g2o (LM)", 4.04, 7.8, "other"),
-        ("Ceres (LM)", 5.34, 11.4, "other"),
-        ("factrs (LM)", 13.06, 20.5, "other"),
-        ("GTSAM (LM)", 13.74, 16.3, "other"),
+        ("arael (f32)", 0.96, 0.96, "arael"),
+        ("arael (f64)", 0.96, 0.96, "arael"),
+        ("SymForce (f64)", 1.27, 16.66, "other"),
+        ("g2o (LM)", 4.02, 7.80, "other"),
+        ("Ceres (LM)", 5.41, 11.69, "other"),
+        ("factrs (LM)", 12.41, 20.32, "other"),
+        ("GTSAM (LM)", 13.71, 16.37, "other"),
     ]),
 ]
 
@@ -64,13 +64,13 @@ MEM_PANELS = [
         ("GTSAM (LM)", 4691.2, "other"),
     ]),
     ("Localization -- peak process memory", 1, [
-        ("arael (f32)", 4.3, "arael"),
-        ("arael (f64)", 4.9, "arael"),
-        ("g2o (LM)", 10.1, "other"),
-        ("Ceres (LM)", 11.5, "other"),
-        ("factrs (LM)", 12.1, "other"),
-        ("GTSAM (LM)", 15.4, "other"),
-        ("SymForce (f64)", 20.5, "other"),
+        ("arael (f32)", 4.4, "arael"),
+        ("arael (f64)", 5.1, "arael"),
+        ("g2o (LM)", 10.0, "other"),
+        ("Ceres (LM)", 11.0, "other"),
+        ("factrs (LM)", 12.0, "other"),
+        ("GTSAM (LM)", 15.1, "other"),
+        ("SymForce (f64)", 20.4, "other"),
     ]),
 ]
 
