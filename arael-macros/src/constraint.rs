@@ -10787,13 +10787,13 @@ mod nested_path_tests {
         registry_store("NrtMap", layout(
             &[("paths", SymFieldType::Struct("NrtPath".into())),
               ("landmarks", SymFieldType::Struct("NrtLandmark".into()))],
-            &["paths", "landmarks"])).unwrap();
+            &["paths", "landmarks"]), None).unwrap();
         registry_store("NrtPath", layout(
             &[("poses", SymFieldType::Struct("NrtPose".into())),
               ("pose_pairs", SymFieldType::Struct("NrtPosePair".into()))],
-            &["poses", "pose_pairs"])).unwrap();
-        registry_store("NrtPose", layout(&[], &[])).unwrap();
-        registry_store("NrtLandmark", layout(&[], &[])).unwrap();
+            &["poses", "pose_pairs"]), None).unwrap();
+        registry_store("NrtPose", layout(&[], &[]), None).unwrap();
+        registry_store("NrtLandmark", layout(&[], &[]), None).unwrap();
 
         // Two-hop nested entity.
         assert_eq!(resolve_nested_path("NrtMap", "NrtPose"),
@@ -10810,11 +10810,11 @@ mod nested_path_tests {
         // A constraint struct with a Ref<Target> must NOT make Target reachable
         // by containment (that would be a spurious path through a reference).
         registry_store("NrtRefRoot", layout(
-            &[("cons", SymFieldType::Struct("NrtCons".into()))], &["cons"])).unwrap();
+            &[("cons", SymFieldType::Struct("NrtCons".into()))], &["cons"]), None).unwrap();
         let mut cons = layout(&[("target", SymFieldType::Struct("NrtTarget".into()))], &[]);
         cons.ref_paths.push(("target".to_string(), "root.somewhere".to_string()));
-        registry_store("NrtCons", cons).unwrap();
-        registry_store("NrtTarget", layout(&[], &[])).unwrap();
+        registry_store("NrtCons", cons, None).unwrap();
+        registry_store("NrtTarget", layout(&[], &[]), None).unwrap();
 
         assert_eq!(resolve_nested_path("NrtRefRoot", "NrtTarget"), None);
     }

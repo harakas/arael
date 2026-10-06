@@ -1,0 +1,13 @@
+error: a second #[arael::function] named `square`; the first is at $DIR/tests/constraint_attr_errors/same_name_functions.rs:8 (functions are keyed by bare name; rename one of them)
+  --> tests/constraint_attr_errors/same_name_functions.rs:16:8
+   |
+16 |     fn square(x: E) -> E {
+   |        ^^^^^^
+
+warning: unused import: `arael_sym::E`
+  --> tests/constraint_attr_errors/same_name_functions.rs:13:9
+   |
+13 |     use arael_sym::E;
+   |         ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

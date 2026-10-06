@@ -1094,6 +1094,10 @@ code. The dialect:
   expansion naming that root. The same applies across modules within a
   crate (expansion order follows item order); use `export_models!` /
   `arael_import!` to share models across crates.
+- **One name per crate**: the macro sees bare struct names, not module
+  paths, so two `#[arael::model]` structs (or two `#[arael::function]`
+  fns) with the same name anywhere in one crate are an error naming the
+  first definition. Rename one of them.
 - **Errors**: body and attribute diagnostics are prefixed with the
   constraint's `file:line` (spans do not survive the macro's stash
   round trip, so the error arrow points at the root struct -- read the

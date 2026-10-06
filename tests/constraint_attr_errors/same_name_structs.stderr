@@ -1,4 +1,4 @@
-error: a different #[arael::model] struct named `Twin` is already registered (the registry is keyed by bare struct name; rename one of them)
+error: a second #[arael::model] struct named `Twin`; the first is at $DIR/tests/constraint_attr_errors/same_name_structs.rs:9 (the registry is keyed by bare struct name; rename one of them)
   --> tests/constraint_attr_errors/same_name_structs.rs:22:16
    |
 22 |     pub struct Twin {

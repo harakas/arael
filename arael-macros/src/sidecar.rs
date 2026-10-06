@@ -315,7 +315,7 @@ mod tests {
     use crate::registry_store;
 
     fn store(name: &str, l: SymLayout) {
-        registry_store(name, l).unwrap();
+        registry_store(name, l, None).unwrap();
     }
 
     #[test]

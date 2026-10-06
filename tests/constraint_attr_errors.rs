@@ -90,4 +90,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/data_ref_uncovered_param_ref.rs");
     t.compile_fail("tests/constraint_attr_errors/data_ref_not_collection.rs");
     t.compile_fail("tests/constraint_attr_errors/data_ref_shadows_parent_slot.rs");
+    t.compile_fail("tests/constraint_attr_errors/same_name_models.rs");
+    t.compile_fail("tests/constraint_attr_errors/same_name_functions.rs");
 }
