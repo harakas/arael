@@ -289,7 +289,7 @@ fn parse_deriv_array(input: syn::parse::ParseStream) -> syn::Result<Vec<String>>
 }
 
 fn source_location(span: proc_macro2::Span) -> (String, u32) {
-    (format!("{:?}", span), span.start().line as u32)
+    (span.file(), span.start().line as u32)
 }
 
 // ---- Form A: fn name(x: E, ...) -> E { body } -----------------------------
@@ -321,7 +321,7 @@ fn form_a(attr: TokenStream2, input: syn::ItemFn) -> syn::Result<TokenStream2> {
         deriv_strings: attrs.deriv_strings.clone(),
         attr_file,
         attr_line,
-    });
+    }).map_err(|msg| syn::Error::new(input.sig.ident.span(), msg))?;
 
     // Emit a fn whose body delegates to arael-sym's parser. Keeps
     // ordinary-Rust callability (ExtendedModel / FunctionBag users)
@@ -417,7 +417,7 @@ fn form_c(
         body: body_string,
         attr_file,
         attr_line,
-    });
+    }).map_err(|msg| syn::Error::new(input.sig.ident.span(), msg))?;
 
     // The Rust twin: the same block over the arael-sym types. Reads of
     // parameters and `let` locals are cloned, since the sym types are
@@ -556,7 +556,7 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         deriv_strings: attrs.deriv_strings.clone(),
         attr_file,
         attr_line,
-    });
+    }).map_err(|msg| syn::Error::new(attrs.sym_name.span(), msg))?;
 
     let sym_ident = syn::Ident::new(&sym_name, proc_macro2::Span::call_site());
     let adapter_ident = syn::Ident::new(

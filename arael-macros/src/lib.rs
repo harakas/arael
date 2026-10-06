@@ -261,6 +261,14 @@ impl UserFunction {
             UserFunction::Typed    { sym_name, .. } => sym_name,
         }
     }
+    /// Where the function is defined (file, line).
+    pub(crate) fn site(&self) -> (&str, u32) {
+        match self {
+            UserFunction::Symbolic { attr_file, attr_line, .. } |
+            UserFunction::Extern   { attr_file, attr_line, .. } |
+            UserFunction::Typed    { attr_file, attr_line, .. } => (attr_file, *attr_line),
+        }
+    }
     #[allow(dead_code)]
     pub(crate) fn param_names(&self) -> &[String] {
         match self {
@@ -293,6 +301,9 @@ struct Registry {
     // several structs embed the same type. BTreeMap makes it the
     // alphabetically first -- deterministic (B11).
     layouts: std::collections::BTreeMap<String, SymLayout>,
+    /// Where each registered struct is defined (file, line): a second
+    /// struct of the same name elsewhere is an error.
+    sites: std::collections::BTreeMap<String, (String, u32)>,
     constraints: Vec<StashedConstraint>,
     functions: HashMap<String, UserFunction>,
     /// Every `CrossBlock<A, B>` entity pair seen anywhere in the model, in
@@ -320,6 +331,7 @@ static SYM_REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 fn registry_init() -> Registry {
     Registry {
         layouts: std::collections::BTreeMap::new(),
+        sites: std::collections::BTreeMap::new(),
         constraints: Vec::new(),
         functions: HashMap::new(),
         cross_pairs: std::collections::BTreeSet::new(),
@@ -380,21 +392,34 @@ fn registry_cross_pairs() -> Vec<(String, String)> {
     guard.as_ref().map(|r| r.cross_pairs.iter().cloned().collect()).unwrap_or_default()
 }
 
-/// Returns an error if a DIFFERENT layout is already registered under
-/// this name: the registry is keyed by bare struct name, so two
-/// #[arael::model] structs with the same name (different modules) would
-/// silently last-write-win and corrupt each other's generated code.
-/// Re-registering an identical layout (e.g. cfg-duplicated expansion)
-/// stays allowed.
-fn registry_store(name: &str, layout: SymLayout) -> Result<(), String> {
+/// Returns an error if a struct of this name defined elsewhere, or a
+/// DIFFERENT layout, is already registered: the registry is keyed by bare
+/// struct name, so two #[arael::model] structs with the same name
+/// (different modules) would share one entry and each other's
+/// constraints. Re-registering the same definition (e.g. cfg-duplicated
+/// expansion) stays allowed. `site` is the struct's (file, line) for a
+/// struct defined in this crate; an import carries none and is checked
+/// on its layout alone.
+fn registry_store(name: &str, layout: SymLayout, site: Option<(String, u32)>) -> Result<(), String> {
     let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.get_or_insert_with(registry_init);
+    if let Some(site) = &site
+        && let Some(prev) = reg.sites.get(name)
+        && prev != site {
+            return Err(format!(
+                "a second #[arael::model] struct named `{}`; the first is at {}:{} \
+                 (the registry is keyed by bare struct name; rename one of them)",
+                name, prev.0, prev.1));
+        }
     if let Some(prev) = reg.layouts.get(name)
         && format!("{:?}", prev) != format!("{:?}", layout) {
             return Err(format!(
                 "a different #[arael::model] struct named `{}` is already registered \
                  (the registry is keyed by bare struct name; rename one of them)", name));
         }
+    if let Some(site) = site {
+        reg.sites.insert(name.to_string(), site);
+    }
     // A suspect wrapper recorded earlier (an unrecognized container whose
     // held type was not yet registered) naming THIS type is now proven to
     // hold a model type -- that containment is silently dropped, so fail
@@ -634,11 +659,24 @@ fn registry_constraints() -> Vec<StashedConstraint> {
     guard.as_ref().map(|reg| reg.constraints.clone()).unwrap_or_default()
 }
 
-#[allow(dead_code)]
-pub(crate) fn registry_store_function(name: &str, f: UserFunction) {
+/// Returns an error if a function of this name defined elsewhere is
+/// already registered: functions are keyed by bare name, so a second
+/// `#[arael::function]` of the same name (different modules) would
+/// replace the first in every constraint body. Re-registering the same
+/// definition stays allowed.
+pub(crate) fn registry_store_function(name: &str, f: UserFunction) -> Result<(), String> {
     let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.get_or_insert_with(registry_init);
+    if let Some(prev) = reg.functions.get(name)
+        && prev.site() != f.site() {
+            let (file, line) = prev.site();
+            return Err(format!(
+                "a second #[arael::function] named `{}`; the first is at {}:{} \
+                 (functions are keyed by bare name; rename one of them)",
+                name, file, line));
+        }
     reg.functions.insert(name.to_string(), f);
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1095,11 +1133,11 @@ fn register_model_import(ts: TokenStream2) -> syn::Result<TokenStream2> {
     let newly = registry_mark_imported(&name.to_string());
 
     if matches!(input.data, syn::Data::Enum(_)) {
-        register_enum_layout(&name)?;
+        register_enum_layout(&name, None)?;
         return Ok(TokenStream2::new());
     }
 
-    let param_count = register_model_layout(&input)?;
+    let param_count = register_model_layout(&input, None)?;
     if let Some((exp_name, exp_count)) = &expect {
         if *exp_name != name.to_string() || *exp_count != param_count as usize {
             return Err(syn::Error::new_spanned(&input.ident,
@@ -1197,7 +1235,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         return emit_trivial_model_for_enum(input);
     }
 
-    let param_count = register_model_layout(input)?;
+    let param_count = register_model_layout(input, Some(ident_site(&input.ident)))?;
 
     // Every `pub` model struct joins the crate's export bundle
     // (`arael::export_models!()` -> the crate's `arael_import!` macro).
@@ -1319,7 +1357,8 @@ fn stash_constraints(
 /// compute its layout, and store it in the session registry. Shared by
 /// the in-crate expansion and `__register_model!` (cross-crate import),
 /// which registers without emitting. Returns the struct's param count.
-fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
+/// `site` is the struct's (file, line) when defined in this crate.
+fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) -> syn::Result<u32> {
     let name = &input.ident;
 
     // Compute PARAM_COUNT from Param<T> fields
@@ -1656,7 +1695,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         is_root: has_struct_attr_ident(&input.attrs, "root"),
         scalar_generic: scalar_generic.clone(),
         spelled_types: spelled_types_reg,
-    }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
+    }, site).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     Ok(param_count)
 }
@@ -1667,9 +1706,14 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
 /// Register a zero-field sym layout so constraint macros that look up
 /// this type find an entry (important if the enum is ever used as a
 /// nested struct field type in constraint bodies).
-fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
-    registry_store(&name.to_string(), SymLayout::default())
+fn register_enum_layout(name: &syn::Ident, site: Option<(String, u32)>) -> syn::Result<()> {
+    registry_store(&name.to_string(), SymLayout::default(), site)
         .map_err(|msg| syn::Error::new_spanned(name, msg))
+}
+
+/// The (file, line) a struct is defined at, from its name's span.
+fn ident_site(name: &syn::Ident) -> (String, u32) {
+    (name.span().file(), name.span().start().line as u32)
 }
 
 fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
@@ -1679,7 +1723,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
     let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    register_enum_layout(name)?;
+    register_enum_layout(name, Some(ident_site(name)))?;
 
     // Pub enums join the export bundle like structs: an imported entity
     // may carry a field of this enum type.
