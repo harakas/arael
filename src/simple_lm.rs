@@ -3484,6 +3484,16 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 };
                 lambda = next_lambda;
 
+                // A cost of exactly zero ends the solve whatever min_iters says:
+                // nothing is left to improve, and every further step would be
+                // a rejection up to the damping ceiling.
+                if new_cost == T::zero() {
+                    end_cost = new_cost;
+                    status = LmStatus::Converged;
+                    done = true;
+                    break;
+                }
+
                 // Cost reached target threshold -- terminate (respects min_iters)
                 if iter >= config.min_iters && new_cost <= config.cost_threshold {
                     end_cost = new_cost;

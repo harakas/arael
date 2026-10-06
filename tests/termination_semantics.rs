@@ -1017,3 +1017,27 @@ fn a_solve_that_starts_below_the_threshold_stops_before_iterating() {
     assert!(matches!(r.status, LmStatus::CostThreshold), "status {:?}", r.status);
     assert_eq!(r.start_cost, r.end_cost);
 }
+
+// A cost of exactly zero ends the solve on the step that reaches it,
+// whatever min_iters says: nothing is left to improve, and every further
+// step would be a rejection up to the damping ceiling.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, { [exact.x - 3.0] }))]
+struct Exact {
+    x: Param<f64>,
+    hb: SelfBlock<Exact>,
+}
+
+#[test]
+fn exact_zero_cost_ends_the_solve() {
+    for cfg in [LmConfig::default(), LmConfig::default().with_nielsen(), LmConfig::ill_conditioned()] {
+        let mut m = Exact { x: Param::new(0.0), hb: SelfBlock::new() };
+        let r = m.solve_sparse(&cfg).unwrap();
+        assert_eq!(r.end_cost, 0.0, "cost {}", r.end_cost);
+        assert_eq!(r.status, LmStatus::Converged, "status {:?}", r.status);
+        assert_eq!(r.iterations, r.accepted_iterations,
+            "retries after the zero cost: {} iterations, {} accepted",
+            r.iterations, r.accepted_iterations);
+    }
+}
