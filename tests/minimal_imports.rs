@@ -103,3 +103,50 @@ mod compound_via_prelude {
         assert!((x.dir.unit.norm() - 1.0).abs() < 1e-12);
     }
 }
+
+// The solve-side names a program matches on or configures with come
+// through the prelude too: the result and status types, the lambda
+// drivers, the session, the covariance options, the dynamic aliases.
+mod solve_side_via_prelude {
+    use arael::prelude::*;
+
+    // Two targets for one parameter: the minimum sits between them at a
+    // cost that is not zero.
+    #[arael::model]
+    #[arael(root)]
+    #[arael(constraint(hb, { [twin.x - 3.0, twin.x - 4.0] }))]
+    struct Twin {
+        x: Param<f64>,
+        hb: SelfBlock<Twin>,
+    }
+
+    fn describe(r: &SolveResult<f64>) -> String {
+        match r {
+            Ok(res) if res.status.is_success() && (res.end_cost - 0.5).abs() < 1e-9 =>
+                "converged".to_string(),
+            Ok(res) => format!("stopped: {:?}, cost {}, x {:?}, iterations {} ({} accepted)",
+                res.status, res.end_cost, res.x, res.iterations, res.accepted_iterations),
+            Err(SolveFailure { kind: SolveFailureKind::Setup(e), .. }) => format!("setup: {e:?}"),
+            Err(e) => format!("failed: {:?}", e.kind),
+        }
+    }
+
+    #[test]
+    fn solve_side_names_reach_the_prelude() {
+        let mut m = Twin { x: Param::new(0.0), hb: SelfBlock::new() };
+        let cfg = LmConfig::default().with_driver(NielsenLambdaDriver::default());
+        let boxed: Box<dyn LambdaDriver<f64>> = Box::new(DefaultLambdaDriver::default());
+        let _ = boxed;
+        assert_eq!(describe(&m.solve_sparse(&cfg)), "converged");
+
+        let mut session = LmSession::new(arael::simple_lm::SparseFaer::new());
+        assert_eq!(describe(&session.solve(&mut m, &cfg)), "converged");
+
+        let cov_opts = CovOptions { ordering: CovOrdering::Auto, ..Default::default() };
+        let _ = cov_opts;
+        let v: vectd<4> = vectd::<4>::default();
+        let a: matrixd<2, 3> = matrixd::<2, 3>::default();
+        let _ = (&v, &a);
+        assert_eq!(v.len(), 4);
+    }
+}

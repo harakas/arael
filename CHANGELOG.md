@@ -67,6 +67,9 @@ is cut.
   `work_euler_angles()`. The `SparseFaerF32` and `SparseEigenF32`
   aliases are gone: write `SparseFaer::<f32>`. The C++, Python and
   JavaScript names are unchanged.
+- The prelude now carries the solve result and status types, the
+  lambda drivers, `LmSession`, the covariance options and the dynamic
+  vector and matrix aliases; `Similar` and `LmSolver` are out of it.
 - arael-faer: the factorization and Schur APIs take a thread count.
 
 ### Fixed
