@@ -2426,8 +2426,8 @@ pub use arael_macros::__register_model;
 /// program names -- parameter and block types, the rotation
 /// parameterizations, the math aliases, the solve-side traits and
 /// config -- and deliberately leaves out generically named or
-/// specialist items (solver backends like `Dense`/`Band`, the free
-/// `solve_*` functions, `sym`), which read better explicitly
+/// specialist items (solver backends like `Dense`/`Band`, `lm_solve`,
+/// `sym`), which read better explicitly
 /// imported. `refs` is re-exported as a module
 /// so collections stay qualified (`refs::Vec<Pose>` -- a bare `Vec`
 /// would fight std's). Additions are curated: a generically named item
@@ -2439,11 +2439,14 @@ pub mod prelude {
         ExtendedModel, JacobianModel, Model, Param, QuaternionParam,
         SelfBlock, SimpleEulerAngleParam,
     };
-    pub use crate::covariance::{CovAssembly, CovError, CovMode, Covariance};
+    pub use crate::covariance::{
+        CovAssembly, CovError, CovMode, CovOptions, CovOrdering, Covariance,
+    };
     pub use crate::refs::{self, Ref};
     pub use crate::simple_lm::{
-        FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
-        RootProblem,
+        DefaultLambdaDriver, FitProblem, LambdaDriver, LmConfig, LmProblem, LmResult,
+        LmSession, LmStatus, NielsenLambdaDriver, RootProblem, SolveFailure,
+        SolveFailureKind, SolveResult,
     };
     // Inner API, in the prelude because a hand-written problem has to
     // name it to write its one empty impl.
@@ -2455,10 +2458,10 @@ pub mod prelude {
         transform3, transform3d, transform3f,
     };
     pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
-    pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
+    pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f, matrixd, matrixf};
     pub use crate::quatern::{quaternd, quaternf};
     pub use crate::twist::{twist3, twist3d, twist3f};
     #[allow(deprecated)]
     pub use crate::twist::{se3, se3d, se3f};
-    pub use crate::vect::{vect2d, vect2f, vect3d, vect3f, Similar};
+    pub use crate::vect::{vect2d, vect2f, vect3d, vect3f, vectd, vectf};
 }
