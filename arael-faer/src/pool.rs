@@ -17,6 +17,10 @@
 //! calling thread once every worker has reported, so the tasks are
 //! never left running behind a returned call.
 //!
+//! Every task starts with the upper halves of the YMM registers clear
+//! (`vzeroupper`): a worker would otherwise carry the dirty state faer's
+//! x86 kernels leave from one stage into the next.
+//!
 //! The task borrows the caller's data, and the workers outlive the
 //! call, so the pointer handed to them has its lifetime erased.
 //! That is the contract of `std::thread::scope`, over threads that
@@ -130,6 +134,7 @@ fn worker_loop(w: Arc<Worker>, done: Arc<Done>) {
             Order::Run(job) => job,
             Order::Stop => return,
         };
+        crate::ymm::clear_upper_ymm();
         // SAFETY: the caller blocks in `run` until this worker has
         // reported below, so the task it points at is alive.
         let outcome = catch_unwind(AssertUnwindSafe(|| unsafe { (*job.task)(job.index) }));
@@ -153,6 +158,7 @@ fn worker_loop(w: Arc<Worker>, done: Arc<Done>) {
 pub fn run(n: usize, task: &(dyn Fn(usize) + Sync)) {
     if n <= 1 {
         if n == 1 {
+            crate::ymm::clear_upper_ymm();
             task(0);
         }
         return;
@@ -171,6 +177,7 @@ pub fn run(n: usize, task: &(dyn Fn(usize) + Sync)) {
         *slot = Some(Order::Run(Job { task: ptr, index: k + 1 }));
         w.wake.notify_one();
     }
+    crate::ymm::clear_upper_ymm();
     let mine = catch_unwind(AssertUnwindSafe(|| task(0))).err();
     let theirs = {
         let mut state = lock(&pool.done.state);
@@ -223,7 +230,7 @@ pub fn workers() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// The pool is one per process, so the tests that count its workers
@@ -362,5 +369,34 @@ mod tests {
             }
         })).collect();
         for h in handles { h.join().unwrap(); }
+    }
+
+    #[test]
+    fn every_task_starts_with_the_upper_ymm_state_clear() {
+        let _t = turn();
+        let clear_here = || crate::ymm::upper_ymm_in_use() == Some(false);
+        // The worker is dirtied in one dispatch, the caller right before the
+        // next.
+        let worker_dirty = AtomicBool::new(false);
+        run(2, &|i| {
+            if i == 1 {
+                let dirty = crate::ymm::dirty_upper_ymm() && crate::ymm::upper_ymm_in_use() == Some(true);
+                worker_dirty.store(dirty, Ordering::SeqCst);
+            }
+        });
+        if !worker_dirty.load(Ordering::SeqCst) {
+            return; // no AVX2, or the CPU cannot report the state
+        }
+        assert!(crate::ymm::dirty_upper_ymm());
+        let clear: Vec<AtomicBool> = (0..2).map(|_| AtomicBool::new(false)).collect();
+        run(2, &|i| clear[i].store(clear_here(), Ordering::SeqCst));
+        for (i, c) in clear.iter().enumerate() {
+            assert!(c.load(Ordering::SeqCst), "task {} started dirty", i);
+        }
+        // A single task runs on the caller alone, and starts clear too.
+        assert!(crate::ymm::dirty_upper_ymm());
+        let alone = AtomicBool::new(false);
+        run(1, &|_| alone.store(clear_here(), Ordering::SeqCst));
+        assert!(alone.load(Ordering::SeqCst), "the single task started dirty");
     }
 }
