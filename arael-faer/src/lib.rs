@@ -295,6 +295,7 @@ pub mod nd;
 pub mod schur;
 pub mod supernodal;
 pub mod pool;
+mod ymm;
 
 #[cfg(test)]
 mod sort_keys_tests {

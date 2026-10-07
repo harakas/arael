@@ -369,6 +369,8 @@ pub fn envelope_factorize<T: SchurReal>(
     s: &SparseBlockColMat<crate::SparseIndex, T>,
     factor: &mut [T],
 ) -> Result<(), EnvelopeError> {
+    // faer's x86 kernels leave the upper YMM state dirty; return with it clear.
+    let _clear = crate::ymm::ClearUpperYmmOnDrop;
     assert_eq!(factor.len(), sym.factor_val_count());
     let part = &sym.part;
     let top = &sym.top;
@@ -878,6 +880,33 @@ mod tests {
         let mut x = rhs.clone();
         envelope_solve(&sym, &factor, &mut x);
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
+    }
+
+    /// The factorization returns with the upper YMM state clear, its error
+    /// return included.
+    #[test]
+    fn factorize_leaves_the_upper_ymm_state_clear() {
+        if !(crate::ymm::dirty_upper_ymm() && crate::ymm::upper_ymm_in_use() == Some(true)) {
+            return; // no AVX2, or the CPU cannot report the state
+        }
+        let clear = || crate::ymm::upper_ymm_in_use() == Some(false);
+        let part: Vec<usize> = (0..=40).map(|i| i * 6).collect();
+        let cells: Vec<(usize, usize)> =
+            (0usize..40).flat_map(|j| (j.saturating_sub(8)..j).map(move |i| (i, j))).collect();
+        let (mut s, _, _) = build_banded(&part, &cells, 17);
+        let sym = EnvelopeSymbolic::new(s.symbolic());
+        let mut factor = vec![0.0f64; sym.factor_val_count()];
+
+        assert!(crate::ymm::dirty_upper_ymm());
+        envelope_factorize(&sym, &s, &mut factor).unwrap();
+        assert!(clear(), "after the factorization");
+
+        let ssym = s.symbolic().clone();
+        let b = ssym.col_range(2).find(|&b| ssym.blk_row(b) == 2).unwrap();
+        s.vals_mut()[ssym.val_range(b).start] = -50.0;
+        assert!(crate::ymm::dirty_upper_ymm());
+        assert!(envelope_factorize(&sym, &s, &mut factor).is_err());
+        assert!(clear(), "after the failed factorization");
     }
 
     #[test]
