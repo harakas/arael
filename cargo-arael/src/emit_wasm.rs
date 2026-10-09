@@ -278,6 +278,7 @@ fn field_accessors(
             "UnitVecParam" | "UnitVecParamF" => {
                 let v3 = if of == "UnitVecParamF" { "vect3f" } else { "vect3d" };
                 rw(out, &format!("{js}Unit"), &conv(v3).unwrap(), &format!("e.{name}.unit"));
+                rw(out, &format!("{js}Optimize"), &conv("bool").unwrap(), &format!("e.{name}.optimize"));
                 for i in 0..2 {
                     ro(out, &format!("{js}UnitD{i}"), &conv(v3).unwrap(), &format!("e.{name}.unit_d[{i}]"));
                 }
@@ -830,12 +831,53 @@ impl {cfg} {{
     pub fn set_max_accepted_iters(&mut self, v: Option<u32>) {{ self.max_accepted_iters = v; }}
 }}
 
+/// Whether and when the sparse backend marginalizes (the `schur` tag).
+#[wasm_bindgen(js_name = \"SchurPolicy\")]
+pub enum JsSchurPolicy {{ Auto = 0, Force = 1, Never = 2 }}
+
+/// Elimination ordering of the sparse backend (the `ordering` tag).
+#[wasm_bindgen(js_name = \"SolveOrdering\")]
+pub enum JsSolveOrdering {{ Auto = 0, Amd = 1, MarginalizeFirst = 2, Natural = 3, NestedDissection = 4 }}
+
+/// The envelope route for the reduced system (the `envelope` tag).
+#[wasm_bindgen(js_name = \"EnvelopeMode\")]
+pub enum JsEnvelopeMode {{ Auto = 0, Always = 1, Never = 2 }}
+
+/// How the reduced system is solved (the `schurSolve` tag).
+#[wasm_bindgen(js_name = \"SchurMethod\")]
+pub enum JsSchurMethod {{ Factorize = 0, Iterative = 1, IterativeImplicit = 2 }}
+
+/// The block supernodal Cholesky (the `blockSupernodal` tag).
+#[wasm_bindgen(js_name = \"BlockSupernodalMode\")]
+pub enum JsBlockSupernodalMode {{ Auto = 0, Always = 1, Never = 2 }}
+
+/// How a solve ended (the result's `status`).
+#[wasm_bindgen(js_name = \"LmStatus\")]
+pub enum JsLmStatus {{
+    Converged = 0, CostThreshold = 1, MaxIterations = 2, GradientTolerance = 3,
+    ParameterTolerance = 4, PredictedReduction = 5, LambdaCeiling = 6,
+    DriverTerminated = 7, ObserverTerminated = 8, TimeLimit = 9,
+    RetryBudgetExhausted = 10, Aborted = 11,
+}}
+
+/// How the reduced system was ordered (the plan's `ordering`).
+#[wasm_bindgen(js_name = \"ReducedOrdering\")]
+pub enum JsReducedOrdering {{ NaturalBanded = 0, NaturalDense = 1, Amd = 2, NestedDissection = 3 }}
+
+/// How much covariance to prepare (`assembleCovariance`'s mode).
+#[wasm_bindgen(js_name = \"CovMode\")]
+pub enum JsCovMode {{ PerQuery = 0, AllMarginals = 1, TriDiagonal = 2 }}
+
+/// Elimination ordering of a covariance assembly
+/// (`assembleCovarianceWith`'s ordering and the covariance plan's).
+#[wasm_bindgen(js_name = \"CovOrdering\")]
+pub enum JsCovOrdering {{ Auto = 0, Amd = 1, NestedDissection = 2, Natural = 3 }}
+
 /// The sparse backend's options as plain data, starting from the Rust
-/// defaults. The enum fields carry the tags of the C ABI: schur 0 Auto,
-/// 1 Force, 2 Never; ordering 0 Auto, 1 Amd, 2 MarginalizeFirst,
-/// 3 Natural, 4 NestedDissection; envelope 0 Auto, 1 Always, 2 Never;
-/// schurSolve 0 Factorize, 1 Iterative, 2 IterativeImplicit;
-/// blockSupernodal 0 Auto, 1 Always, 2 Never.
+/// defaults. The enum fields carry the tags of the C ABI, named by the
+/// exported enums: `schur` by SchurPolicy, `ordering` by SolveOrdering,
+/// `envelope` by EnvelopeMode, `schurSolve` by SchurMethod,
+/// `blockSupernodal` by BlockSupernodalMode.
 #[wasm_bindgen]
 pub struct {opts} {{
     pub schur: u32,
@@ -991,6 +1033,10 @@ impl {res} {{
     pub fn status(&self) -> i32 {{ status_code(&self.r.status) }}
     #[wasm_bindgen(getter, js_name = \"statusName\")]
     pub fn status_name(&self) -> String {{ format!(\"{{:?}}\", self.r.status) }}
+    /// The status as a short phrase, the text Rust's `as_str()` gives
+    /// (\"converged\", \"hit max_iters\", ...).
+    #[wasm_bindgen(getter, js_name = \"statusText\")]
+    pub fn status_text(&self) -> String {{ self.r.status.as_str().to_string() }}
     /// Did the solve reach a minimum, as opposed to running out of
     /// something?
     #[wasm_bindgen(getter, js_name = \"isSuccess\")]
@@ -1025,6 +1071,72 @@ impl {res} {{
             ]),
             None => JsValue::UNDEFINED,
         }}
+    }}
+    /// What the solve's threads did: the counts asked, whether the
+    /// sweeps fell back to one thread, and `sweeps` (undefined when the
+    /// model has no threaded sweep path) with its timing, the whole
+    /// model's footprint and the stores' footprints in `held`. One
+    /// thread in WebAssembly.
+    pub fn threads(&self) -> JsValue {{
+        use arael::threads::{{FormTiming, PhaseChoice, PhaseTiming, StoreFootprint}};
+        let form = |f: &FormTiming| js_obj(&[
+            (\"calls\", f.calls as f64),
+            (\"region\", f.region.as_secs_f64()),
+            (\"taskSum\", f.task_sum.as_secs_f64()),
+            (\"taskMax\", f.task_max.as_secs_f64()),
+            (\"taskMin\", f.task_min.as_secs_f64()),
+        ]);
+        let phase = |p: &PhaseTiming| {{
+            let o = js_sys::Object::new();
+            js_set(&o, \"par\", &form(&p.par));
+            js_set(&o, \"seq\", &form(&p.seq));
+            JsValue::from(o)
+        }};
+        let footprint = |s: &StoreFootprint| js_obj(&[
+            (\"selfBlocks\", s.self_blocks as f64),
+            (\"crossBlocks\", s.cross_blocks as f64),
+            (\"cooEntries\", s.coo_entries as f64),
+            (\"bytes\", s.bytes as f64),
+        ]);
+        let choice = |c: &PhaseChoice| {{
+            let o = js_sys::Object::new();
+            js_set(&o, \"threaded\", &JsValue::from_bool(c.threaded));
+            js_set(&o, \"calls\", &JsValue::from_f64(c.calls as f64));
+            JsValue::from(o)
+        }};
+        let t = &self.r.threads;
+        let o = js_sys::Object::new();
+        js_set(&o, \"sweepsAsked\", &JsValue::from_f64(t.sweeps_asked as f64));
+        js_set(&o, \"linear\", &JsValue::from_f64(t.linear as f64));
+        js_set(&o, \"fellBack\", &JsValue::from_bool(t.fell_back()));
+        js_set(&o, \"sweeps\", &match &t.sweeps {{
+            Some(s) => {{
+                let g = &s.timing;
+                let timing = js_sys::Object::new();
+                js_set(&timing, \"on\", &JsValue::from_bool(g.on));
+                js_set(&timing, \"bind\", &JsValue::from_f64(g.bind.as_secs_f64()));
+                js_set(&timing, \"assemblyUpdate\", &JsValue::from_f64(g.assembly_update.as_secs_f64()));
+                js_set(&timing, \"assemblyZero\", &JsValue::from_f64(g.assembly_zero.as_secs_f64()));
+                js_set(&timing, \"assembly\", &phase(&g.assembly));
+                js_set(&timing, \"gatherGrad\", &JsValue::from_f64(g.gather_grad.as_secs_f64()));
+                js_set(&timing, \"assemblyZeroVals\", &JsValue::from_f64(g.assembly_zero_vals.as_secs_f64()));
+                js_set(&timing, \"scatter\", &JsValue::from_f64(g.scatter.as_secs_f64()));
+                js_set(&timing, \"costUpdate\", &JsValue::from_f64(g.cost_update.as_secs_f64()));
+                js_set(&timing, \"cost\", &phase(&g.cost));
+                let held = js_sys::Array::new();
+                for h in &s.held {{ held.push(&footprint(h)); }}
+                let w = js_sys::Object::new();
+                js_set(&w, \"threads\", &JsValue::from_f64(s.threads as f64));
+                js_set(&w, \"assembly\", &choice(&s.assembly));
+                js_set(&w, \"cost\", &choice(&s.cost));
+                js_set(&w, \"timing\", &timing);
+                js_set(&w, \"whole\", &footprint(&s.whole));
+                js_set(&w, \"held\", &held);
+                JsValue::from(w)
+            }}
+            None => JsValue::UNDEFINED,
+        }});
+        o.into()
     }}
     /// The sparse backend's plan, or undefined when the solve carried
     /// none. Absent statistics are undefined; `ordering` is 0

@@ -255,6 +255,21 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("plan_dense_none"), 1.0);
     }
 
+    // What the solve's threads did crosses field for field.
+    {
+        let t = &r2.threads;
+        assert_eq!(g("th_sweeps_asked"), t.sweeps_asked as f64);
+        assert_eq!(g("th_linear"), t.linear as f64);
+        assert_eq!(g("th_fell_back"), t.fell_back() as u8 as f64);
+        assert_eq!(g("th_has_sweeps"), t.sweeps.is_some() as u8 as f64);
+        let s = t.sweeps.as_ref();
+        assert_eq!(g("th_threads"), s.map_or(0.0, |s| s.threads as f64));
+        assert_eq!(g("th_assembly_calls"), s.map_or(0.0, |s| s.assembly.calls as f64));
+        assert_eq!(g("th_cost_threaded"), s.is_some_and(|s| s.cost.threaded) as u8 as f64);
+        assert_eq!(g("th_whole_self"), s.map_or(0.0, |s| s.whole.self_blocks as f64));
+        assert_eq!(g("th_held"), s.map_or(0.0, |s| s.held.len() as f64));
+    }
+
     // Sparse options: the defaults are the Rust defaults, and each
     // knob drives the backend (pinned by the plan it produces).
     {
@@ -862,6 +877,8 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("fr_col_scale_all"), 1.5);
         assert_eq!(g("fr_col_tag_all"), -3.0);
         assert_eq!(g("fr_col_dir_0z"), 1.0);
+        assert_eq!(g("fr_col_dir_frozen"), 1.0);
+        assert_eq!(g("fr_dir_one_live"), 1.0);
         assert_eq!(g("fr_col_q_reset"), 1.0);
         assert_eq!(g("misc_ok"), 1.0);
     }
@@ -902,5 +919,6 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         near("tf_rx", v.x); near("tf_ry", v.y); near("tf_rz", v.z);
         assert_eq!(g("tf_write"), 1.0);
         assert_eq!(g("tf_read_back"), -0.2);
+        assert_eq!(g("tf_dir_frozen"), 1.0);
     }
 }

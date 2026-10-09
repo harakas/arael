@@ -35,11 +35,15 @@ struct M {
 }
 
 fn build(start: vect3<f64>) -> M {
+    build_with(UnitVecParam::new(start))
+}
+
+fn build_with(dir: UnitVecParam<f64>) -> M {
     let mut lms = arael::refs::Vec::new();
     let m1 = vect3::new(0.6, 0.64, 0.48).unit();
     let m2 = vect3::new(0.8, 0.36, 0.48).unit();
     lms.push(Lm {
-        dir: UnitVecParam::new(start),
+        dir,
         w: Param::new(0.0),
         m1,
         m2,
@@ -92,6 +96,28 @@ fn solves_to_the_mean_direction() {
     assert!(lm.dir.d.value.x.abs() < 1e-12 && lm.dir.d.value.y.abs() < 1e-12);
     assert!((lm.w.value - e.z).abs() < 1e-6, "w = {}", lm.w.value);
     assert!(r.end_cost > 0.01, "the measurements disagree by design: {}", r.end_cost);
+}
+
+/// A cleared `optimize` flag, or the `fixed` constructor, takes the direction
+/// out of the parameter vector and the solve leaves it where it was.
+#[test]
+fn optimize_flag_freezes_the_direction() {
+    let start = vect3::new(0.2, -0.5, 0.9);
+    let mut cleared = UnitVecParam::new(start);
+    cleared.optimize = false;
+    for dir in [cleared, UnitVecParam::fixed(start)] {
+        let mut m = build_with(dir);
+        let mut params = Vec::new();
+        m.serialize(&mut params);
+        assert_eq!(params.len(), 1, "only w is live");
+        let r = m.solve_dense(&LmConfig::conservative()).unwrap();
+        assert!(r.status.is_success(), "{:?}", r.status);
+        let lm = &m.lms[0];
+        let held = start.unit();
+        assert!((lm.dir.unit - held).norm() < 1e-14, "the direction moved");
+        assert!(!lm.dir.optimize);
+        assert!((lm.w.value - held.z).abs() < 1e-8, "w = {}", lm.w.value);
+    }
 }
 
 /// The chart re-centres every accepted step, so even a start far around the

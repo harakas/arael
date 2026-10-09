@@ -186,6 +186,18 @@ int main() {
         ? plan2->flop_ratio.value() : -1.0);
     pi("plan_dense_none", r.plan().has_value() ? 0 : 1);
 
+    // What the solve's threads did crosses as data.
+    auto th2 = r2.threads();
+    pi("th_sweeps_asked", th2.sweeps_asked);
+    pi("th_linear", th2.linear);
+    pi("th_fell_back", th2.fell_back ? 1 : 0);
+    pi("th_has_sweeps", th2.sweeps.has_value() ? 1 : 0);
+    pi("th_threads", th2.sweeps.has_value() ? th2.sweeps->threads : 0);
+    pi("th_assembly_calls", th2.sweeps.has_value() ? th2.sweeps->assembly.calls : 0);
+    pi("th_cost_threaded", th2.sweeps.has_value() && th2.sweeps->cost.threaded ? 1 : 0);
+    pi("th_whole_self", th2.sweeps.has_value() ? long(th2.sweeps->whole.self_blocks) : 0);
+    pi("th_held", long(r2.threads_held().size()));
+
     // Sparse options: the defaults are the Rust defaults, and each
     // knob drives the backend (pinned by the plan it produces).
     SparseOptions so;
@@ -687,6 +699,8 @@ int main() {
                     && !fa.pose_optimize_rotation()) ? 1 : 0);
     fa.set_pose_translation({0.3, -0.2, 0.5});
     p("tf_read_back", fa.pose().translation().y);
+    fa.set_dir_optimize(false);
+    pi("tf_dir_frozen", (!fa.dir_optimize() && fb.dir_optimize()) ? 1 : 0);
 
     return 0;
 }

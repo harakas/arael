@@ -4287,9 +4287,9 @@ impl SparseFaerOptions {
     }
 
     /// Factor a banded system with a narrow-band Cholesky instead of faer's
-    /// general sparse Cholesky. Off by default. Applies to whichever system
-    /// the backend factorizes -- the reduced Schur system when it reduces,
-    /// the whole Hessian when it does not.
+    /// general sparse Cholesky. Off by default. Applies to the whole
+    /// Hessian, when the backend does not reduce; the reduced system has its
+    /// own route, [`with_envelope_schur`](Self::with_envelope_schur).
     ///
     /// A trajectory with local features is banded in natural order (the whole
     /// pose system for a localization or pose graph, the reduced pose system

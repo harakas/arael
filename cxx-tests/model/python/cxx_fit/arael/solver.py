@@ -351,6 +351,89 @@ class SchurPlan(ctypes.Structure):
     ordering = _plan_opt("_ordering", ReducedOrdering)
 
 
+class FormTiming(ctypes.Structure):
+    """One form's share of a sweep phase, summed over its calls (mirror
+    of the Rust FormTiming). Seconds."""
+    _fields_ = [
+        ("calls", ctypes.c_uint32),
+        ("region", ctypes.c_double),
+        ("task_sum", ctypes.c_double),
+        ("task_max", ctypes.c_double),
+        ("task_min", ctypes.c_double),
+    ]
+
+
+class PhaseTiming(ctypes.Structure):
+    """A sweep phase's clocks: the dispatched calls (`par`) and the ones
+    run on the calling thread (`seq`)."""
+    _fields_ = [("par", FormTiming), ("seq", FormTiming)]
+
+
+class ParTiming(ctypes.Structure):
+    """Where the sweeps' time went (mirror of the Rust ParTiming); all
+    zero unless the solve gathered timing, and `on` says which."""
+    _fields_ = [
+        ("on", ctypes.c_bool),
+        ("bind", ctypes.c_double),
+        ("assembly_update", ctypes.c_double),
+        ("assembly_zero", ctypes.c_double),
+        ("assembly", PhaseTiming),
+        ("gather_grad", ctypes.c_double),
+        ("assembly_zero_vals", ctypes.c_double),
+        ("scatter", ctypes.c_double),
+        ("cost_update", ctypes.c_double),
+        ("cost", PhaseTiming),
+    ]
+
+
+class StoreFootprint(ctypes.Structure):
+    """What one store holds (mirror of the Rust StoreFootprint)."""
+    _fields_ = [
+        ("self_blocks", ctypes.c_uint64),
+        ("cross_blocks", ctypes.c_uint64),
+        ("coo_entries", ctypes.c_uint64),
+        ("bytes", ctypes.c_uint64),
+    ]
+
+
+class PhaseChoice(ctypes.Structure):
+    """What one phase's sweeps did over a solve: whether it was
+    dispatched over the stores, and how many calls there were."""
+    _fields_ = [("threaded", ctypes.c_bool), ("calls", ctypes.c_uint32)]
+
+
+class SweepReport(ctypes.Structure):
+    """What the sweeps did (mirror of the Rust SweepReport). `held` is
+    the store count; LmResult.threads_held lists the footprints."""
+    _fields_ = [
+        ("threads", ctypes.c_uint32),
+        ("assembly", PhaseChoice),
+        ("cost", PhaseChoice),
+        ("timing", ParTiming),
+        ("whole", StoreFootprint),
+        ("held", ctypes.c_uint32),
+    ]
+
+
+class _OptSweepReport(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", SweepReport)]
+
+
+class ThreadReport(ctypes.Structure):
+    """What a solve's threads did (mirror of the Rust ThreadReport): the
+    counts the two halves were given, whether the sweeps fell back to
+    one thread, and `sweeps`, None when the model has no threaded sweep
+    path."""
+    _fields_ = [
+        ("sweeps_asked", ctypes.c_uint32),
+        ("linear", ctypes.c_uint32),
+        ("fell_back", ctypes.c_bool),
+        ("_sweeps", _OptSweepReport),
+    ]
+
+    sweeps = _plan_opt("_sweeps", lambda v: v)
+
+
 class CovPlan(ctypes.Structure):
     """What a covariance assembly decided (mirror of the Rust CovPlan):
     the `ordering` it kept, what the candidates priced at, how many

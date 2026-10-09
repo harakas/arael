@@ -18,7 +18,7 @@ from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
-                           SolveFailureKind)
+                           SolveFailureKind, StoreFootprint, ThreadReport)
 
 LmIter = _f.LmIter
 
@@ -191,6 +191,27 @@ class LmResult(_f.LmResultRaw):
             return []
         buf = (LmStep * n)()
         _f.graph_result_steps(self._detail, buf, n)
+        return list(buf)
+
+    @property
+    def threads(self):
+        """What the solve's threads did (arael.solver.ThreadReport)."""
+        t = ThreadReport()
+        if self._detail:
+            _f.graph_result_threads(self._detail, ctypes.byref(t))
+        return t
+
+    @property
+    def threads_held(self):
+        """What each split store held (a list of
+        arael.solver.StoreFootprint); empty without a threaded sweep."""
+        if not self._detail:
+            return []
+        n = _f.graph_result_threads_held(self._detail, None, 0)
+        if not n:
+            return []
+        buf = (StoreFootprint * n)()
+        _f.graph_result_threads_held(self._detail, buf, n)
         return list(buf)
 
     def __del__(self):

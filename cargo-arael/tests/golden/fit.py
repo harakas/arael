@@ -18,7 +18,7 @@ from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
-                           SolveFailureKind)
+                           SolveFailureKind, StoreFootprint, ThreadReport)
 
 LmIter = _f.LmIter
 
@@ -191,6 +191,27 @@ class LmResult(_f.LmResultRaw):
             return []
         buf = (LmStep * n)()
         _f.fit_result_steps(self._detail, buf, n)
+        return list(buf)
+
+    @property
+    def threads(self):
+        """What the solve's threads did (arael.solver.ThreadReport)."""
+        t = ThreadReport()
+        if self._detail:
+            _f.fit_result_threads(self._detail, ctypes.byref(t))
+        return t
+
+    @property
+    def threads_held(self):
+        """What each split store held (a list of
+        arael.solver.StoreFootprint); empty without a threaded sweep."""
+        if not self._detail:
+            return []
+        n = _f.fit_result_threads_held(self._detail, None, 0)
+        if not n:
+            return []
+        buf = (StoreFootprint * n)()
+        _f.fit_result_threads_held(self._detail, buf, n)
         return list(buf)
 
     def __del__(self):
@@ -472,8 +493,8 @@ _Z4 = (0.0,) * 4
 _Z8 = (0.0,) * 8
 
 
-_frame_rec = struct.Struct("=QdddddddQQddddddddQQQddddddqd")
-_frame_slots = (ctypes.c_uint64 * 29)()
+_frame_rec = struct.Struct("=QdddddddQQddddddddQQQdddQdddqd")
+_frame_slots = (ctypes.c_uint64 * 30)()
 
 
 class Frame:
@@ -614,6 +635,14 @@ class Frame:
     @dir_unit.setter
     def dir_unit(self, v):
         _f.fit_frame_dir_set_unit(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def dir_optimize(self):
+        return _f.fit_frame_dir_optimize(self._p)
+
+    @dir_optimize.setter
+    def dir_optimize(self, v):
+        _f.fit_frame_dir_set_optimize(self._p, v)
 
     @property
     def dir_unit_d0(self):
@@ -3517,8 +3546,8 @@ class FitFramesVec:
                  pose_optimize_translation=None, pose_optimize_rotation=None,
                  st_translation=None, st_rotation=None, st_scale=None,
                  st_optimize_translation=None, st_optimize_rotation=None,
-                 st_optimize_scale=None, dir_unit=None, anchor=None,
-                 tag=None, scale=None):
+                 st_optimize_scale=None, dir_unit=None, dir_optimize=None,
+                 anchor=None, tag=None, scale=None):
         """Appends one element and returns it; each keyword sets that
         field in the same call, an omitted one keeps the Rust default."""
         m = 0
@@ -3554,19 +3583,21 @@ class FitFramesVec:
         else:
             m |= 1 << 10; dir_unit = tuple(dir_unit)
             if len(dir_unit) != 3: dir_unit = _cols.flat(dir_unit, 3)
+        if dir_optimize is None: dir_optimize = 0
+        else: m |= 1 << 11; dir_optimize = 1 if dir_optimize else 0
         if anchor is None: anchor = _Z3
         else:
-            m |= 1 << 11; anchor = tuple(anchor)
+            m |= 1 << 12; anchor = tuple(anchor)
             if len(anchor) != 3: anchor = _cols.flat(anchor, 3)
         if tag is None: tag = 0
-        else: m |= 1 << 12
-        if scale is None: scale = 0.0
         else: m |= 1 << 13
+        if scale is None: scale = 0.0
+        else: m |= 1 << 14
         _frame_rec.pack_into(_frame_slots, 0,
             m, *pose_translation, *pose_rotation, pose_optimize_translation,
             pose_optimize_rotation, *st_translation, *st_rotation, st_scale,
             st_optimize_translation, st_optimize_rotation, st_optimize_scale,
-            *dir_unit, *anchor, tag, scale)
+            *dir_unit, dir_optimize, *anchor, tag, scale)
         r = FrameRef(_f.fit_frames_push_n(self._p, _frame_slots, 1))
         return Frame(lambda k=r.raw: _f.fit_frames_get(self._p, k), r)
 
@@ -3579,8 +3610,8 @@ class FitFramesVec:
                   pose_optimize_rotation=None, st_translation=None,
                   st_rotation=None, st_scale=None,
                   st_optimize_translation=None, st_optimize_rotation=None,
-                  st_optimize_scale=None, dir_unit=None, anchor=None,
-                  tag=None, scale=None):
+                  st_optimize_scale=None, dir_unit=None, dir_optimize=None,
+                  anchor=None, tag=None, scale=None):
         """Appends `n` elements in one call. Each keyword is one value
         for all of them or a sequence with one per element (a numpy
         array of the matching dtype is read in place); `n` may be
@@ -3595,7 +3626,8 @@ class FitFramesVec:
                         ("st_optimize_translation", st_optimize_translation),
                         ("st_optimize_rotation", st_optimize_rotation),
                         ("st_optimize_scale", st_optimize_scale),
-                        ("dir_unit", dir_unit), ("anchor", anchor),
+                        ("dir_unit", dir_unit),
+                        ("dir_optimize", dir_optimize), ("anchor", anchor),
                         ("tag", tag), ("scale", scale)))
         i0 = len(self)
         _f.fit_frames_push_n(self._p, None, n)
@@ -3621,6 +3653,8 @@ class FitFramesVec:
             self._set_st_optimize_scale(i0, n, st_optimize_scale)
         if dir_unit is not None:
             self._set_dir_unit(i0, n, dir_unit)
+        if dir_optimize is not None:
+            self._set_dir_optimize(i0, n, dir_optimize)
         if anchor is not None:
             self._set_anchor(i0, n, anchor)
         if tag is not None:
@@ -3837,6 +3871,25 @@ class FitFramesVec:
         buf, ptr, stride = _cols.column_out("d", 3, n)
         _f.fit_frames_get_dir_unit_n(self._p, 0, ptr, n, stride)
         return _cols.column_finish(buf, "d", 3, n)
+
+    def _set_dir_optimize(self, start, n, v):
+        ptr, stride, _keep = _cols.column_in(v, "B", 1, n, "dir_optimize")
+        if not _f.fit_frames_set_dir_optimize_n(self._p, start, ptr, n, stride):
+            raise IndexError("dir_optimize: %d + %d exceeds the collection" % (start, n))
+
+    def set_dir_optimize(self, v):
+        """Sets `dir_optimize` on every element in one call: one value for
+        all of them, or a sequence with one per element (a numpy array
+        of the matching dtype is read in place)."""
+        self._set_dir_optimize(0, len(self), v)
+
+    def get_dir_optimize(self):
+        """`dir_optimize` of every element in one call, as an (n,) array
+        (numpy when importable, else a flat ctypes array)."""
+        n = len(self)
+        buf, ptr, stride = _cols.column_out("B", 1, n)
+        _f.fit_frames_get_dir_optimize_n(self._p, 0, ptr, n, stride)
+        return _cols.column_finish(buf, "B", 1, n)
 
     def _set_anchor(self, start, n, v):
         ptr, stride, _keep = _cols.column_in(v, "d", 3, n, "anchor")

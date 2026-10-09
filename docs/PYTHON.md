@@ -354,8 +354,9 @@ A threaded solve leaves arael's sweep workers parked for the life of the
 process; `pool_shutdown()` in the model's module joins them, and the next
 threaded solve spawns them again.
 
-`solve_dense(cfg)`, `solve_sparse(cfg, opts=None)` and
-`solve_band(kd, cfg)` (kd the half-bandwidth in scalar parameters)
+`solve_dense(cfg=None)`, `solve_sparse(cfg=None, opts=None)` and
+`solve_band(kd, cfg=None)` (kd the half-bandwidth in scalar parameters;
+`None` means the Rust defaults)
 return an `LmResult` for every healthy termination. `r.status` is an
 `LmStatus`; `r.status.is_success()` and `r.status.as_str()` mirror
 the Rust helpers, and success is not `status >= 0` (max_iters and
@@ -409,7 +410,9 @@ The result owns the whole Rust-side solve and stays valid however
 many solves follow. `r.report()` and `r.pretty_report()` render
 status, costs, the timing breakdown and the backend's plan. With
 `cfg.gather_timing = True`, `r.timing` holds the breakdown and
-`r.steps` the per-attempt timeline (a list of `LmStep`). A warm
+`r.steps` the per-attempt timeline (a list of `LmStep`). `r.threads`
+holds what the solve's threads did (a `ThreadReport`) and
+`r.threads_held` what each split store held. A warm
 restart re-enters at the previous damping; the optimized parameters
 already live in the model:
 
@@ -437,8 +440,9 @@ what the assembly costs, never what it is: `AUTO` builds a symbolic
 factorization per candidate ordering to choose between them, naming
 the ordering skips that. The view owns its assembly, is freed on
 garbage collection (`free()` forces it), and a later assembly never
-disturbs an older view. Entity arguments must come from the live
-model:
+disturbs an older view. The calls drop Rust's `_cov` suffix
+(`marginal` is `marginal_cov`). Entity arguments must come from the
+live model:
 
 ```python
 cov = f.assemble_covariance()

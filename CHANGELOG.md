@@ -17,6 +17,9 @@ is cut.
 - arael-faer's error types implement `Display` and `Error`.
 - arael-sym: `FunctionBag::add_n` (the old `addN` is deprecated), and an
   `E` can be made from an `Expr`.
+- `UnitVecParam` has an `optimize` flag, in Rust and every skin.
+- The C, C++, Python and JS skins carry the solve's thread report.
+- JS: named enums for the option tags and statuses, and `statusText`.
 - The solve result reports what the threads did and where the time
   went.
 - `Context`: where a solve keeps its working data -- the Hessian

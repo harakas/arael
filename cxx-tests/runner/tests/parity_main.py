@@ -178,6 +178,19 @@ p("plan_flop_ratio", plan2.flop_ratio
   if plan2 is not None and plan2.flop_ratio is not None else -1.0)
 pi("plan_dense_none", 0 if r.plan is not None else 1)
 
+# What the solve's threads did crosses as data.
+th2 = r2.threads
+pi("th_sweeps_asked", th2.sweeps_asked)
+pi("th_linear", th2.linear)
+pi("th_fell_back", 1 if th2.fell_back else 0)
+sw = th2.sweeps
+pi("th_has_sweeps", 1 if sw is not None else 0)
+pi("th_threads", sw.threads if sw is not None else 0)
+pi("th_assembly_calls", sw.assembly.calls if sw is not None else 0)
+pi("th_cost_threaded", 1 if sw is not None and sw.cost.threaded else 0)
+pi("th_whole_self", sw.whole.self_blocks if sw is not None else 0)
+pi("th_held", len(r2.threads_held))
+
 # Sparse options: the defaults are the Rust defaults, and each knob
 # drives the backend (pinned by the plan it produces).
 so = fit.SparseOptions()
@@ -818,6 +831,10 @@ p("fr_col_scale_all", col(ff.frames.get_scale(), 1))
 ff.frames.set_tag(-3)
 pi("fr_col_tag_all", int(col(ff.frames.get_tag(), 3)))
 p("fr_col_dir_0z", col(ff.frames.get_dir_unit(), 0, 3, 2))
+ff.frames.set_dir_optimize(False)
+pi("fr_col_dir_frozen", 0 if any(bool(x) for x in ff.frames.get_dir_optimize()) else 1)
+ff.frames[1].dir_optimize = True
+pi("fr_dir_one_live", 1 if (not ff.frames[0].dir_optimize and ff.frames[1].dir_optimize) else 0)
 ff.frames.set_pose_rotation((1.0, 0.0, 0.0, 0.0))
 pi("fr_col_q_reset", 1 if tuple(ff.frames[0].pose_rotation) == (1.0, 0.0, 0.0, 0.0) else 0)
 
@@ -901,3 +918,5 @@ pi("tf_write", 1 if (fa.pose_translation.x == 9.0 and fa.st_scale == 2.0
                      and not fa.pose_optimize_rotation) else 0)
 fa.pose_translation = (0.3, -0.2, 0.5)
 p("tf_read_back", fa.pose.translation.y)
+fa.dir_optimize = False
+pi("tf_dir_frozen", 1 if (not fa.dir_optimize and fb.dir_optimize) else 0)

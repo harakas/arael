@@ -48,6 +48,13 @@ using arael::SolveFailure;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::ThreadReport;
+using arael::SweepReport;
+using arael::PhaseChoice;
+using arael::ParTiming;
+using arael::PhaseTiming;
+using arael::FormTiming;
+using arael::StoreFootprint;
 using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
@@ -269,6 +276,8 @@ int32_t path_solve_sparse(Path*, const LmConfig*, const SparseOptions*, LmResult
 const char* path_result_report(void*, bool);
 bool path_result_plan(const void*, SchurPlan*);
 uint64_t path_result_steps(const void*, LmStep*, uint64_t);
+void path_result_threads(const void*, ThreadReport*);
+uint64_t path_result_threads_held(const void*, StoreFootprint*, uint64_t);
 void path_result_free(void*);
 struct PathSession;
 PathSession* path_session_new(const SparseOptions*);
@@ -293,8 +302,8 @@ inline void set_log_level(LogLevel level) {
 }
 
 /// Stop and join arael's sweep worker threads; the next threaded solve
-/// spawns them again. Process-wide, and a no-op when arael was built
-/// without the `rayon` feature.
+/// spawns them again. Process-wide. Without the `threads` feature no
+/// worker is ever spawned and it returns at once.
 inline void pool_shutdown() {
     ffi::path_pool_shutdown();
 }
@@ -303,8 +312,8 @@ inline void pool_shutdown() {
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data, steps() the per-attempt timeline. Copies share
-/// ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline, threads() what
+/// the threads did. Copies share ownership of the Rust result.
 class LmResult : public LmResultT<float> {
 public:
     LmResult() : LmResultT<float>() {}
@@ -339,16 +348,35 @@ public:
             ffi::path_result_steps(detail, out.data(), out.size());
         return out;
     }
+    /// What the solve's threads did (Rust's ThreadReport).
+    ThreadReport threads() const {
+        ThreadReport t{};
+        if (detail)
+            ffi::path_result_threads(detail, &t);
+        return t;
+    }
+    /// What each split store held (Rust's SweepReport::held); empty
+    /// without a threaded sweep.
+    std::vector<StoreFootprint> threads_held() const {
+        std::vector<StoreFootprint> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::path_result_threads_held(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::path_result_threads_held(detail, out.data(), out.size());
+        return out;
+    }
 
 private:
     std::shared_ptr<void> guard_;
 };
 
-/// The Err side of a solve: SolverFailed, the text from
-/// last_error() (valid until the next call on the model), the
-/// best accepted state before the break when the solve got that
+/// The Err side of a solve (Rust's SolveFailure): SolverFailed, the
+/// text from last_error() (valid until the next call on the model),
+/// the best accepted state before the break when the solve got that
 /// far, and the structured failure (which kind, which parameter /
-/// row / block index) in `failure`.
+/// row / block index) in `failure`, Rust's SolveFailureKind with the
+/// setup error's data flattened in.
 struct SolveError {
     LmStatus status;
     const char* message;

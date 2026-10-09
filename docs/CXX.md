@@ -157,9 +157,9 @@ views are named by their container's nature: `PathPosesDeque`,
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
   and per-half optimize flags, `ScaledTransformParam` those plus
-  `scale` and `optimize_scale`; `UnitVecParam` exposes `unit` and the
-  read-only chart basis `unit_d0`/`unit_d1` (for covariance
-  Jacobians); `AngleParam` exposes `<f>_angle` (read/write + optimize)
+  `scale` and `optimize_scale`; `UnitVecParam` exposes `unit`, its
+  `optimize` flag and the read-only chart basis `unit_d0`/`unit_d1`
+  (for covariance Jacobians); `AngleParam` exposes `<f>_angle` (read/write + optimize)
   and the read-only `<f>_rotation_matrix`. User `#[arael(component)]` structs surface like nested
   sub-models: their fields (set-before / read-after values included)
   behind an accessor. Entity wrappers carry
@@ -215,8 +215,8 @@ views are named by their container's nature: `PathPosesDeque`,
   `ill_conditioned()` (the Nielsen lambda driver). Every Rust field is
   there except the lambda driver (the preset supplies it); Rust
   `Option` fields are `arael::option<F>`
-  (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` in
-  seconds, `max_accepted_iters` and `assembly_threads` as
+  (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` as
+  `time_limit_seconds`, `max_accepted_iters` and `assembly_threads` as
   `option<uint32_t>`. The shared solver surface lives in
   `arael/solver.hpp`.
   Warm restart: `cfg.initial_lambda = r.final_lambda` re-enters at
@@ -237,8 +237,8 @@ views are named by their container's nature: `PathPosesDeque`,
   accepted, lambda, costs, step and gradient norms, per-phase
   seconds; a damping retry is its own record).
 - **Sparse backend options**: `solve_sparse(cfg, opts)` takes a
-  `SparseOptions` -- Schur policy (Auto / Force / Never, with the
-  Auto pricing's tuning), elimination ordering (Auto / Amd /
+  `SparseOptions` -- the Schur policy as `schur` (Rust's `policy`:
+  Auto / Force / Never, with the Auto pricing's tuning), elimination ordering (Auto / Amd /
   MarginalizeFirst / Natural / NestedDissection), the envelope route
   for the reduced system (Auto / Always / Never, plus panel width),
   supernodal on/off, narrow band, and the block supernodal Cholesky
@@ -271,7 +271,9 @@ views are named by their container's nature: `PathPosesDeque`,
   returns the sparse backend's `SchurPlan` as data (reduction taken
   or not, eliminated/kept parameters, ordering, bandwidth, whether the
   envelope or the block supernodal route factorized, the Auto policy's
-  evidence); empty for dense and band solves. Copies of a result share ownership.
+  evidence); empty for dense and band solves. `r.threads()` returns
+  what the solve's threads did (`ThreadReport`) and `r.threads_held()`
+  what each split store held. Copies of a result share ownership.
 - **result / option** mirror Rust's shapes; reading the wrong side
   prints the failed check and aborts (`arael_assert_true` -- always
   on).
@@ -279,7 +281,9 @@ views are named by their container's nature: `PathPosesDeque`,
   mirror the Rust helpers -- note success is NOT `code >= 0` (hitting
   max_iters or the time limit is Ok-side but not a success).
 - **Failures**: a solve failure comes back as
-  `Err(SolveError{status, message, partial, failure})` -- `partial`
+  `Err(SolveError{status, message, partial, failure})` (Rust's
+  `SolveFailure`; its `failure` is Rust's `SolveFailureKind` with the
+  setup error's data flattened in) -- `partial`
   holds the best accepted state when the solve got past its first
   assembly, usable for diagnosis (its report renders like any
   result); `failure` is the structured cause (`SolveFailureKind` plus
@@ -292,7 +296,8 @@ views are named by their container's nature: `PathPosesDeque`,
   parameters are unchanged and a session in use was invalidated.
   `validate()` returns the diagnostic text ("" when clean).
 - **Covariance**: `assemble_covariance(CovMode)` at the solution
-  returns a `Covariance` view; `cov->marginal(entity)` answers the
+  returns a `Covariance` view. Its calls drop Rust's `_cov` suffix:
+  `cov->marginal(entity)` answers the
   entity's marginal block, typed by size (1 param -> `double`, 2 ->
   `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer);
   `cov->cross(a, b, out, cap)` the row-major pa x pb cross-covariance
