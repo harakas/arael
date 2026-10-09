@@ -207,6 +207,9 @@ struct LmConfigT {
     /// on `num_threads`; a value gives the sweeps that count and leaves
     /// the linear solve on `num_threads`.
     option<uint32_t> assembly_threads;
+    /// Accepted steps after which the solve stops (status
+    /// MaxIterations). Empty turns it off.
+    option<uint32_t> max_accepted_iters;
 };
 
 /// Whether and when the sparse backend marginalizes (mirrors arael's

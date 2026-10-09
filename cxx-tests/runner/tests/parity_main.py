@@ -80,6 +80,7 @@ p("cfg_cost_threshold", defs.cost_threshold)
 p("cfg_lambda_floor", defs.lambda_floor)
 pi("cfg_grad_has", 1 if defs.gradient_tolerance is not None else 0)
 pi("cfg_time_has", 1 if defs.time_limit_seconds is not None else 0)
+pi("cfg_maxacc_has", 1 if defs.max_accepted_iters is not None else 0)
 p("cfg_wc_lambda", fit.LmConfig.well_conditioned().initial_lambda)
 
 # The ill_conditioned preset selects the Nielsen lambda driver; its

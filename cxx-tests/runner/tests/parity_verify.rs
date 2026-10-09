@@ -111,6 +111,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cfg_lambda_floor"), d.lambda_floor);
         assert_eq!(g("cfg_grad_has"), d.gradient_tolerance.is_some() as u8 as f64);
         assert_eq!(g("cfg_time_has"), d.time_limit.is_some() as u8 as f64);
+        assert_eq!(g("cfg_maxacc_has"), d.max_accepted_iters.is_some() as u8 as f64);
         assert_eq!(g("cfg_wc_lambda"), LmConfig::<f64>::well_conditioned().initial_lambda);
     }
 

@@ -77,6 +77,7 @@ int main() {
     p("cfg_lambda_floor", defs.lambda_floor);
     pi("cfg_grad_has", defs.gradient_tolerance.has_value() ? 1 : 0);
     pi("cfg_time_has", defs.time_limit_seconds.has_value() ? 1 : 0);
+    pi("cfg_maxacc_has", defs.max_accepted_iters.has_value() ? 1 : 0);
     p("cfg_wc_lambda", LmConfig::well_conditioned().initial_lambda);
 
     // The ill_conditioned preset selects the Nielsen lambda driver;

@@ -1041,3 +1041,19 @@ fn exact_zero_cost_ends_the_solve() {
             r.iterations, r.accepted_iterations);
     }
 }
+
+// `max_accepted_iters` ends the solve on the accepted step that reaches
+// it, whatever min_iters says; unset, the solve runs on.
+#[test]
+fn max_accepted_iters_stops_after_that_many_accepted_steps() {
+    let cfg = LmConfig { max_iters: 200, ..Default::default() };
+    let mut c = build_chain();
+    let full = c.solve_sparse(&cfg).unwrap();
+    assert!(full.accepted_iterations > 2, "the chain converges in {} accepted steps", full.accepted_iterations);
+
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig { max_accepted_iters: Some(2), ..cfg }).unwrap();
+    assert_eq!(r.accepted_iterations, 2);
+    assert_eq!(r.status, LmStatus::MaxIterations, "status {:?}", r.status);
+    assert!(r.iterations >= 2 && r.iterations < full.iterations);
+}

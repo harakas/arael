@@ -230,6 +230,7 @@ LmConfig {
     abs_precision:   1e-6,   // small-step cost drop threshold
     rel_precision:   1e-4,   // small-step relative-drop threshold
     max_iters:       100,    // hard cap on iterations
+    max_accepted_iters: None,   // stop after this many accepted steps
     min_iters:       5,      // don't terminate before this many accepted steps
     patience:        3,      // this many consecutive small steps → stop
     initial_lambda:  1e-4,   // starting LM damping
@@ -246,9 +247,10 @@ LmConfig {
 
 | Field | Default | Meaning |
 |---|---|---|
-| `abs_precision` | `1e-6` | a step is "small" when cost drop falls below this **and** below `rel_precision` |
+| `abs_precision` | `1e-6` | a step is "small" when the cost drop falls below this **or** below `rel_precision` of the cost |
 | `rel_precision` | `1e-4` | fractional cost improvement below this counts as "small". `(old - new) / old` |
 | `max_iters` | `100` | hard cap on total iterations (counts inner damping retries) |
+| `max_accepted_iters` | `None` | `Option<usize>`. Stop after this many accepted steps (`LmStatus::MaxIterations`) |
 | `min_iters` | `5` | solver will not terminate before this many accepted steps, regardless of precision |
 | `patience` | `3` | consecutive small steps before termination. Prevents premature termination from one lucky step |
 | `initial_lambda` | `1e-4` | starting damping. Small ≈ Gauss-Newton (fast, may overshoot), large ≈ gradient descent (slow, stable) |
@@ -393,6 +395,7 @@ The solver stops when all of:
 or on any of:
 
 - `iter >= max_iters`
+- `accepted >= max_accepted_iters`, when set
 - `cost <= cost_threshold`
 - the new cost is within `16 * epsilon * cost` of the old one
   (machine-precision noise floor -- further digits are not

@@ -12,6 +12,8 @@ is cut.
   the factorization. Off until `LmConfig::num_threads` is set.
 - `ARAEL_NUM_THREADS` in the environment sets the default thread count;
   a count set in code still wins.
+- `LmConfig::max_accepted_iters` stops a solve after that many accepted
+  steps.
 - The solve result reports what the threads did and where the time
   went.
 - `Context`: where a solve keeps its working data -- the Hessian

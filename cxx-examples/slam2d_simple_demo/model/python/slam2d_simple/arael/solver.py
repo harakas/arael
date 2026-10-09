@@ -522,6 +522,7 @@ def lm_types(fp):
             ("_observer", observer_fn),
             ("_observer_user", ctypes.c_void_p),
             ("_assembly_threads", COptU32),
+            ("_max_accepted_iters", COptU32),
         ]
 
         gradient_tolerance = _opt_property("_gradient_tolerance")
@@ -531,6 +532,7 @@ def lm_types(fp):
         min_diagonal = _opt_property("_min_diagonal")
         time_limit_seconds = _opt_property("_time_limit_seconds")
         assembly_threads = _opt_int_property("_assembly_threads")
+        max_accepted_iters = _opt_int_property("_max_accepted_iters")
 
         @property
         def observer(self):

@@ -1528,6 +1528,7 @@ pub struct LmConfig {
     min_diagonal: Option<f64>,
     time_limit_seconds: Option<f64>,
     assembly_threads: Option<u32>,
+    max_accepted_iters: Option<u32>,
 }
 
 #[wasm_bindgen]
@@ -1553,6 +1554,7 @@ impl LmConfig {
             min_diagonal: c.min_diagonal.map(|v| v as f64),
             time_limit_seconds: c.time_limit.map(|d| d.as_secs_f64()),
             assembly_threads: c.assembly_threads.map(|n| n as u32),
+            max_accepted_iters: c.max_accepted_iters.map(|n| n as u32),
         }
     }
     fn to_config(&self) -> arael::simple_lm::LmConfig<f64> {
@@ -1562,6 +1564,7 @@ impl LmConfig {
         c.patience = self.patience as usize;
         c.num_threads = self.num_threads as usize;
         c.assembly_threads = self.assembly_threads.map(|n| n as usize);
+        c.max_accepted_iters = self.max_accepted_iters.map(|n| n as usize);
         c.verbose = self.verbose;
         c.gather_timing = self.gather_timing;
         c.abs_precision = self.abs_precision as f64;
@@ -1609,6 +1612,10 @@ impl LmConfig {
     pub fn assembly_threads(&self) -> Option<u32> { self.assembly_threads }
     #[wasm_bindgen(setter, js_name = "assemblyThreads")]
     pub fn set_assembly_threads(&mut self, v: Option<u32>) { self.assembly_threads = v; }
+    #[wasm_bindgen(getter, js_name = "maxAcceptedIters")]
+    pub fn max_accepted_iters(&self) -> Option<u32> { self.max_accepted_iters }
+    #[wasm_bindgen(setter, js_name = "maxAcceptedIters")]
+    pub fn set_max_accepted_iters(&mut self, v: Option<u32>) { self.max_accepted_iters = v; }
 }
 
 /// The sparse backend's options as plain data, starting from the Rust
