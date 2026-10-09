@@ -61,15 +61,38 @@ impl Expr {
                     None => default.as_ref().unwrap().eval(vars),
                 }
             }
-            Expr::Func { params, kind, args, .. } => {
-                if let Some(f) = kind.eval_fn() {
-                    let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
-                    Ok(f(&vals?))
-                } else {
-                    // INVARIANT: eval_fn() is None only for the Symbolic variants,
-                    // which always carry a body (Extern is the only eval_fn kind).
-                    let body = kind.body().expect("FuncKind must have body or eval_fn");
-                    super::expand_func(params, body, args).eval(vars)
+            Expr::Func { name, params, kind, args } => {
+                match kind {
+                    crate::FuncKind::ExternOutput { index } => {
+                        let (cname, context_arg, eval_fn, cargs) = match args[0].as_ref() {
+                            Expr::Func { name, kind: crate::FuncKind::ExternNumericDerivs { context_arg, eval_fn, .. }, args, .. } =>
+                                (name, *context_arg, eval_fn, args),
+                            _ => return Err(format!("{name}: an output of something that is not a numeric-derivs call")),
+                        };
+                        let Some(f) = eval_fn else {
+                            return Err(format!("{cname} has no eval fn: it evaluates only where generated code calls it"));
+                        };
+                        let numbers = if context_arg { &cargs[1..] } else { &cargs[..] };
+                        let vals: Result<Vec<f64>, _> = numbers.iter().map(|a| a.eval(vars)).collect();
+                        let (value, partials) = f(&vals?);
+                        if *index == 0 {
+                            return Ok(value);
+                        }
+                        partials.get(index - 1).copied().ok_or_else(|| format!(
+                            "{cname} returned {} partials, partial {} asked for",
+                            partials.len(), index - 1))
+                    }
+                    crate::FuncKind::ExternNumericDerivs { .. } => Err(format!(
+                        "{name} is the eval fn's whole result, value and partials; evaluate one of them")),
+                    crate::FuncKind::NoDerivative { of, why } => Err(format!("no derivative of {of}: {why}")),
+                    _ => if let Some(f) = kind.eval_fn() {
+                        let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
+                        Ok(f(&vals?))
+                    } else {
+                        // The symbolic kinds carry a body.
+                        let body = kind.body().expect("FuncKind must have body or eval_fn");
+                        super::expand_func(params, body, args).eval(vars)
+                    }
                 }
             }
         }
@@ -133,7 +156,7 @@ impl Expr {
                             body: body.subs_by_name(var, replacement),
                             derivs: derivs.iter().map(|d| d.subs_by_name(var, replacement)).collect(),
                         },
-                        crate::FuncKind::Extern { .. } => kind.clone(),
+                        _ => kind.clone(),
                     }
                 };
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: new_kind, args: new_args })

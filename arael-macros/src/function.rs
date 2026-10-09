@@ -42,7 +42,7 @@ pub fn function_attribute(attr: TokenStream2, item: TokenStream2) -> syn::Result
             format!("#[arael::function] must be attached to a fn: {}", e)))?;
     match classify_signature(&input.sig, &input.block)? {
         SignatureKind::FormA => form_a(attr, input),
-        SignatureKind::FormB { scalar_ty } => form_b(attr, input, scalar_ty),
+        SignatureKind::FormB(shape) => form_b(attr, input, shape),
         SignatureKind::FormC { param_kinds, ret_kinds, ret_tuple } =>
             form_c(attr, input, param_kinds, ret_kinds, ret_tuple),
     }
@@ -51,8 +51,9 @@ pub fn function_attribute(attr: TokenStream2, item: TokenStream2) -> syn::Result
 enum SignatureKind {
     /// `fn name(x: E, ...) -> E`
     FormA,
-    /// `fn name(x: f32, ...) -> f32` or `f64`
-    FormB { scalar_ty: String },
+    /// `fn name([root: &R,] x: f32, ...[, derivs: bool]) -> f32 | (f32, [f32; N])`
+    /// or the same over `f64`
+    FormB(FormBShape),
     /// `fn name(p: vect3sym, x: E, ...) -> <kind> | (<kind>, ...) | [E; N]`
     FormC { param_kinds: Vec<String>, ret_kinds: Vec<String>, ret_tuple: bool },
 }
@@ -74,22 +75,20 @@ fn classify_signature(sig: &syn::Signature, block: &syn::Block) -> syn::Result<S
         } else { None }
     }).collect();
 
-    if param_tys.is_empty() {
+    if sig.inputs.is_empty() {
         return Err(syn::Error::new_spanned(sig,
             "#[arael::function] requires at least one parameter"));
     }
 
     let single_expression = block.stmts.len() == 1
         && matches!(block.stmts[0], syn::Stmt::Expr(_, None));
-    if ret_name.as_deref() == Some("E") && param_tys.iter().all(|t| t == "E")
-        && single_expression
+    if ret_name.as_deref() == Some("E") && param_tys.len() == sig.inputs.len()
+        && param_tys.iter().all(|t| t == "E") && single_expression
     {
         return Ok(SignatureKind::FormA);
     }
-    if let Some(r) = ret_name.as_deref() {
-        if (r == "f32" || r == "f64") && param_tys.iter().all(|t| t == r) {
-            return Ok(SignatureKind::FormB { scalar_ty: r.to_string() });
-        }
+    if let Some(shape) = form_b_shape(sig, ret_ty)? {
+        return Ok(SignatureKind::FormB(shape));
     }
     if let Some((ret_kinds, ret_tuple)) = typed_return(ret_ty)
         && param_tys.len() == sig.inputs.len()
@@ -100,7 +99,8 @@ fn classify_signature(sig: &syn::Signature, block: &syn::Block) -> syn::Result<S
     Err(syn::Error::new_spanned(sig,
         "#[arael::function] requires one of:\n  \
          - Form A: `fn name(x: E, ...) -> E` with a single-expression body\n  \
-         - Form B: `fn name(x: f32, ...) -> f32` (or `f64`, all params and return type uniform)\n  \
+         - Form B: `fn name([root: &Root,] x: f32, ...[, derivs: bool]) -> f32 | (f32, [f32; N])` \
+         (or `f64`; the scalars uniform, the root a shared reference)\n  \
          - Form C: params and result among `E`, `vect2sym`, `vect3sym`, `matrix2sym`, \
          `matrix3sym`, `quaternsym`, a tuple of them or `[E; N]`; the body may hold `let` bindings"))
 }
@@ -224,7 +224,8 @@ struct FormAAttrs {
 
 struct FormBAttrs {
     sym_name: syn::Ident,
-    deriv_strings: Vec<String>,
+    /// `None`: a function declared without a derivative.
+    deriv_strings: Option<Vec<String>>,
 }
 
 impl syn::parse::Parse for FormAAttrs {
@@ -269,8 +270,6 @@ impl syn::parse::Parse for FormBAttrs {
             if input.is_empty() { break; }
             let _: syn::Token![,] = input.parse()?;
         }
-        let deriv_strings = deriv_strings.ok_or_else(|| syn::Error::new(sym_name.span(),
-            "#[arael::function] on a numerical eval fn requires `derivs = [...]`"))?;
         Ok(FormBAttrs { sym_name, deriv_strings })
     }
 }
@@ -524,9 +523,85 @@ fn match_to_rust_select(m: &syn::ExprMatch) -> syn::Result<syn::Expr> {
         #default)))
 }
 
-// ---- Form B: fn name_eval(x: f32/f64, ...) -> same ------------------------
+// ---- Form B: fn name_eval([root: &R,] x: f32/f64, ...[, derivs: bool]) -> same | (same, [same; N])
 
-fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Result<TokenStream2> {
+/// What a Form B signature says: the scalar type; the root parameter
+/// (its type's last segment, and whether that is a generic parameter of
+/// the fn); whether a trailing `derivs: bool` is there; and the partial
+/// count of a `(S, [S; N])` return.
+struct FormBShape {
+    scalar_ty: String,
+    root: Option<(String, bool)>,
+    flag: bool,
+    numeric: Option<usize>,
+}
+
+/// `Some` when the signature is Form B, `None` when it is not; an error
+/// when it is Form B with the flag and the tuple return not matching.
+fn form_b_shape(sig: &syn::Signature, ret_ty: &syn::Type) -> syn::Result<Option<FormBShape>> {
+    let inputs: Vec<&syn::PatType> = sig.inputs.iter().filter_map(|a| match a {
+        syn::FnArg::Typed(pt) => Some(pt),
+        syn::FnArg::Receiver(_) => None,
+    }).collect();
+    if inputs.len() != sig.inputs.len() {
+        return Ok(None);
+    }
+    let scalar_name = |t: &syn::Type| -> Option<String> {
+        type_last_ident(t).map(|i| i.to_string()).filter(|n| n == "f32" || n == "f64")
+    };
+    // The return: `S`, or `(S, [S; N])`.
+    let (scalar_ty, numeric) = match ret_ty {
+        syn::Type::Tuple(tt) if tt.elems.len() == 2 => {
+            let Some(s) = scalar_name(&tt.elems[0]) else { return Ok(None) };
+            let syn::Type::Array(arr) = &tt.elems[1] else { return Ok(None) };
+            if scalar_name(&arr.elem).as_deref() != Some(s.as_str()) {
+                return Ok(None);
+            }
+            let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. }) = &arr.len else {
+                return Ok(None);
+            };
+            let n: usize = n.base10_parse().map_err(|e| syn::Error::new(n.span(), e))?;
+            (s, Some(n))
+        }
+        other => match scalar_name(other) {
+            Some(s) => (s, None),
+            None => return Ok(None),
+        },
+    };
+    // The root: a shared reference first.
+    let mut first = 0;
+    let root = match inputs.first().map(|pt| pt.ty.as_ref()) {
+        Some(syn::Type::Reference(r)) if r.mutability.is_none() => {
+            let Some(name) = type_last_ident(&r.elem) else { return Ok(None) };
+            let generic = sig.generics.type_params().any(|tp| tp.ident == *name);
+            first = 1;
+            Some((name.to_string(), generic))
+        }
+        _ => None,
+    };
+    // The flag: a `bool` last.
+    let flag = inputs.len() > first
+        && type_last_ident(&inputs[inputs.len() - 1].ty).is_some_and(|i| i == "bool");
+    let last = inputs.len() - usize::from(flag);
+    let scalars = &inputs[first..last];
+    if !scalars.iter().all(|pt| scalar_name(&pt.ty).as_deref() == Some(scalar_ty.as_str())) {
+        return Ok(None);
+    }
+    if scalars.is_empty() && root.is_none() {
+        return Ok(None);
+    }
+    if flag != numeric.is_some() {
+        return Err(syn::Error::new_spanned(sig, if flag {
+            "a trailing `derivs: bool` goes with the tuple return `(S, [S; N])`: the value and its partials"
+        } else {
+            "a tuple return `(S, [S; N])` needs a trailing `derivs: bool` parameter, true when the partials are read"
+        }));
+    }
+    Ok(Some(FormBShape { scalar_ty, root, flag, numeric }))
+}
+
+fn form_b(attr: TokenStream2, input: syn::ItemFn, shape: FormBShape) -> syn::Result<TokenStream2> {
+    let FormBShape { scalar_ty, root, flag, numeric } = shape;
     let attrs: FormBAttrs = syn::parse2(attr)?;
     let eval_ident = input.sig.ident.clone();
     let eval_name = eval_ident.to_string();
@@ -536,15 +611,30 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
             "symbolic sibling name must differ from the eval fn name (convention: <name>_eval for the eval fn, <name> for the sibling)"));
     }
 
-    let param_i = param_idents(&input.sig)?;
-    let param_strs: Vec<String> = param_i.iter().map(|i| i.to_string()).collect();
-    let arity = param_i.len();
-
-    if attrs.deriv_strings.len() != arity {
+    let all_params = param_idents(&input.sig)?;
+    let takes_root = root.is_some();
+    let scalar_params: Vec<syn::Ident> =
+        all_params[usize::from(takes_root)..all_params.len() - usize::from(flag)].to_vec();
+    let n_scalar = scalar_params.len();
+    if let Some(n) = numeric && n != n_scalar {
+        return Err(syn::Error::new_spanned(&input.sig.output, format!(
+            "`[{scalar_ty}; {n}]` holds one partial per scalar parameter, and `{eval_name}` has {n_scalar}")));
+    }
+    if numeric.is_some() && attrs.deriv_strings.is_some() {
+        return Err(syn::Error::new(attrs.sym_name.span(),
+            "a fn that returns its partials takes no `derivs = [...]`"));
+    }
+    if let Some(d) = &attrs.deriv_strings && d.len() != n_scalar {
         return Err(syn::Error::new_spanned(&input.sig,
             format!("#[arael::function(derivs = [...])] on `{}`: expected {} deriv expression{}, got {}",
-                sym_name, arity, if arity == 1 { "" } else { "s" }, attrs.deriv_strings.len())));
+                sym_name, n_scalar, if n_scalar == 1 { "" } else { "s" }, d.len())));
     }
+
+    // The symbolic parameters: the root first when there is one, then
+    // the scalars. The flag belongs to the generated code.
+    let param_i: Vec<syn::Ident> = all_params[..all_params.len() - usize::from(flag)].to_vec();
+    let param_strs: Vec<String> = param_i.iter().map(|i| i.to_string()).collect();
+    let arity = param_i.len();
 
     let (attr_file, attr_line) = source_location(attrs.sym_name.span());
     registry_store_function(&sym_name, UserFunction::Extern {
@@ -554,6 +644,8 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         arity,
         scalar_ty: scalar_ty.clone(),
         deriv_strings: attrs.deriv_strings.clone(),
+        root: root.clone(),
+        numeric: numeric.is_some(),
         attr_file,
         attr_line,
     }).map_err(|msg| syn::Error::new(attrs.sym_name.span(), msg))?;
@@ -564,9 +656,6 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         proc_macro2::Span::call_site(),
     );
     let vis = &input.vis;
-    let deriv_lits: Vec<syn::LitStr> = attrs.deriv_strings.iter()
-        .map(|s| syn::LitStr::new(s, proc_macro2::Span::call_site()))
-        .collect();
     let param_lits: Vec<syn::LitStr> = param_strs.iter()
         .map(|s| syn::LitStr::new(s, proc_macro2::Span::call_site()))
         .collect();
@@ -577,9 +666,11 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         .map(|i| syn::LitInt::new(&i.to_string(), proc_macro2::Span::call_site()))
         .collect();
     let scalar_ident = syn::Ident::new(&scalar_ty, proc_macro2::Span::call_site());
+    let root_lit = syn::LitBool::new(takes_root, proc_macro2::Span::call_site());
 
-    // Build args from `&[f64]` to the user's f32/f64 eval fn.
-    let eval_call_args: Vec<TokenStream2> = (0..arity).map(|i| {
+    // The scalar args from `&[f64]` to the user's f32/f64 eval fn. The
+    // adapter never sees a root: there is none at runtime.
+    let eval_call_args: Vec<TokenStream2> = (0..n_scalar).map(|i| {
         let idx = syn::LitInt::new(&i.to_string(), proc_macro2::Span::call_site());
         if scalar_ty == "f32" {
             quote! { (args[#idx] as f32) }
@@ -588,8 +679,102 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         }
     }).collect();
     let ret_cast: TokenStream2 = if scalar_ty == "f32" { quote! { as f64 } } else { quote! {} };
+    let root_panic = syn::LitStr::new(
+        &format!("arael::function `{sym_name}` reads the model root: it evaluates only inside a constraint body"),
+        proc_macro2::Span::call_site());
 
     let eval_fn = &input;
+
+    // The numeric shape: the eval fn returns the value and the partials.
+    if numeric.is_some() {
+        let adapter = if takes_root { quote! {} } else { quote! {
+            #[doc(hidden)]
+            fn #adapter_ident(args: &[f64]) -> (f64, ::std::vec::Vec<f64>) {
+                let _scalar_check: #scalar_ident = 0.0;
+                let _ = args;
+                let (__v, __d) = #eval_ident( #(#eval_call_args,)* true );
+                (__v as f64, __d.iter().map(|__x| *__x as f64).collect())
+            }
+        } };
+        let eval_fn_tokens = if takes_root { quote! { None } } else { quote! { Some(#adapter_ident) } };
+        return Ok(quote! {
+            #eval_fn
+
+            #adapter
+
+            ::arael::inventory::submit! {
+                ::arael::user_fn::UserFnEntry {
+                    sym_name: #sym_name_lit,
+                    param_names: &[#(#param_lits),*],
+                    kind: ::arael::user_fn::UserFnKind::ExternNumericDerivs {
+                        eval_fn: #eval_fn_tokens,
+                        call_path: #eval_path_lit,
+                        root: #root_lit,
+                    },
+                }
+            }
+
+            #[allow(non_snake_case)]
+            #vis fn #sym_ident( #( #param_i : ::arael::sym::E ),* ) -> ::arael::sym::E {
+                let __f = ::arael::sym::extern_func_numeric_derivs(
+                    #sym_name_lit, #arity_lit, #eval_path_lit, #root_lit, #eval_fn_tokens);
+                __f(::std::vec![ #( #param_i ),* ])
+            }
+        });
+    }
+
+    // The scalar shapes: the eval fn's value, with the attribute's
+    // derivatives or none.
+    let adapter_body = if takes_root {
+        quote! { panic!(#root_panic) }
+    } else {
+        quote! { #eval_ident( #(#eval_call_args),* ) #ret_cast }
+    };
+    let (deriv_srcs_tokens, derivs_body) = match &attrs.deriv_strings {
+        None => {
+            let why = "declared without a derivative; add derivs = [...] or return partials";
+            let entries: Vec<TokenStream2> = (0..arity).map(|i| {
+                if takes_root && i == 0 {
+                    quote! { ::arael::sym::constant(0.0) }
+                } else {
+                    quote! { ::arael::sym::no_derivative(#sym_name_lit, #why) }
+                }
+            }).collect();
+            (quote! { None }, quote! {
+                let _ = &__syms;
+                ::std::vec![ #(#entries),* ]
+            })
+        }
+        Some(ds) => {
+            let deriv_lits: Vec<syn::LitStr> = ds.iter()
+                .map(|s| syn::LitStr::new(s, proc_macro2::Span::call_site()))
+                .collect();
+            let root_entry = if takes_root { quote! { ::arael::sym::constant(0.0), } } else { quote! {} };
+            let root_alias = if takes_root {
+                quote! { (::arael::sym::symbol("root"), __syms[0].clone()), }
+            } else {
+                quote! {}
+            };
+            (quote! { Some(&[#(#deriv_lits),*]) }, quote! {
+                let __bag = ::arael::user_fn::registry_bag();
+                // Parse each deriv under the registry bag. Bare idents
+                // naming the user's params (e.g. `x`) become free
+                // `symbol("x")` nodes; rewrite them to the placeholder
+                // `__p_N` syms extern_func hands us. The root answers to
+                // its own name and to `root`.
+                let __user_to_ph: ::std::vec::Vec<(::arael::sym::E, ::arael::sym::E)> = ::std::vec![
+                    #root_alias
+                    #( (::arael::sym::symbol(#param_lits), __syms[#arity_idx].clone()), )*
+                ];
+                ::std::vec![
+                    #root_entry
+                    #( ::arael::sym::parse_with_functions(#deriv_lits, &__bag)
+                        .expect("#[arael::function] deriv parse failed")
+                        .substitute(&__user_to_ph), )*
+                ]
+            })
+        }
+    };
 
     Ok(quote! {
         #eval_fn
@@ -597,8 +782,8 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
         #[doc(hidden)]
         fn #adapter_ident(args: &[f64]) -> f64 {
             let _scalar_check: #scalar_ident = 0.0;  // static proof scalar_ty matches
-            let _ = args;  // silence unused when arity=0 (impossible, but safe)
-            #eval_ident( #(#eval_call_args),* ) #ret_cast
+            let _ = args;
+            #adapter_body
         }
 
         ::arael::inventory::submit! {
@@ -606,9 +791,10 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
                 sym_name: #sym_name_lit,
                 param_names: &[#(#param_lits),*],
                 kind: ::arael::user_fn::UserFnKind::Extern {
-                    deriv_srcs: &[#(#deriv_lits),*],
+                    deriv_srcs: #deriv_srcs_tokens,
                     eval_fn: #adapter_ident,
                     call_path: #eval_path_lit,
+                    root: #root_lit,
                 },
             }
         }
@@ -618,19 +804,7 @@ fn form_b(attr: TokenStream2, input: syn::ItemFn, scalar_ty: String) -> syn::Res
             let __f = ::arael::sym::extern_func(
                 #sym_name_lit, #arity_lit, #eval_path_lit,
                 move |__syms: ::std::vec::Vec<::arael::sym::E>| -> ::std::vec::Vec<::arael::sym::E> {
-                    let __bag = ::arael::user_fn::registry_bag();
-                    // Parse each deriv under the registry bag. Bare
-                    // idents naming the user's params (e.g. `x`) become
-                    // free `symbol("x")` nodes; rewrite them to the
-                    // placeholder `__p_N` syms extern_func hands us.
-                    let __user_to_ph: ::std::vec::Vec<(::arael::sym::E, ::arael::sym::E)> = ::std::vec![
-                        #( (::arael::sym::symbol(#param_lits), __syms[#arity_idx].clone()), )*
-                    ];
-                    ::std::vec![
-                        #( ::arael::sym::parse_with_functions(#deriv_lits, &__bag)
-                            .expect("#[arael::function] deriv parse failed")
-                            .substitute(&__user_to_ph), )*
-                    ]
+                    #derivs_body
                 },
                 #adapter_ident,
             );

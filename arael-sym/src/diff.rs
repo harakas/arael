@@ -215,6 +215,34 @@ impl E {
                     crate::cached(args[0].diff_var(var, memo))
                 } else if let Some(body) = kind.auto_diff_body() {
                     super::expand_func(params, body, args).diff_var(var, memo)
+                } else if let crate::FuncKind::ExternOutput { index } = kind {
+                    // The value's derivative is the chain rule over the
+                    // partials the same call returns; a partial has none.
+                    let (cname, context_arg, cargs) = match args[0].as_ref() {
+                        Expr::Func { name, kind: crate::FuncKind::ExternNumericDerivs { context_arg, .. }, args, .. } =>
+                            (name, *context_arg, args),
+                        _ => return crate::no_derivative(name,
+                            "an output of something that is not a numeric-derivs call"),
+                    };
+                    if *index > 0 {
+                        return crate::no_derivative(cname,
+                            "a partial the eval fn returned has no derivative of its own");
+                    }
+                    let skip = usize::from(context_arg);
+                    let mut acc = zero();
+                    for (i, a) in cargs.iter().enumerate().skip(skip) {
+                        let da = a.diff_var(var, memo);
+                        if !matches!(da.as_ref(), Expr::Const(v) if *v == 0.0) {
+                            let partial = crate::extern_output(&args[0], 1 + i - skip);
+                            acc = add_fast(acc, mul_fast(partial, da));
+                        }
+                    }
+                    acc
+                } else if let crate::FuncKind::ExternNumericDerivs { .. } = kind {
+                    crate::no_derivative(name,
+                        "the eval fn's whole result, value and partials; differentiate one of them")
+                } else if let crate::FuncKind::NoDerivative { of, why } = kind {
+                    crate::no_derivative(of, why)
                 } else {
                     // Explicit derivs: df/dvar = sum_i(df/dp_i * dp_i/dvar)
                     let derivs = kind.derivs().unwrap();

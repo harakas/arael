@@ -1,0 +1,5 @@
+error: a trailing `derivs: bool` goes with the tuple return `(S, [S; N])`: the value and its partials
+ --> tests/user_function_errors/flag_without_tuple.rs:4:1
+  |
+4 | fn f_eval(x: f64, derivs: bool) -> f64 { let _ = derivs; x * x }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -267,7 +267,17 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::Func { name, args, .. } => {
+            Expr::Func { name, kind, args, .. } => {
+                match kind {
+                    crate::FuncKind::ExternOutput { index } => {
+                        fmt::Display::fmt(args[0].as_ref(), f)?;
+                        return if *index == 0 { write!(f, ".0") } else { write!(f, ".1[{}]", index - 1) };
+                    }
+                    crate::FuncKind::NoDerivative { of, why } => {
+                        return write!(f, "<no derivative of {of}: {why}>");
+                    }
+                    _ => {}
+                }
                 write!(f, "{name}(")?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
@@ -454,7 +464,21 @@ impl Expr {
                 }
                 buf.push_str("\\end{cases}");
             }
-            Expr::Func { name, args, .. } => {
+            Expr::Func { name, kind, args, .. } => {
+                match kind {
+                    crate::FuncKind::ExternOutput { index } => {
+                        buf.push_str("\\left(");
+                        args[0].write_latex(buf);
+                        buf.push_str(&format!("\\right)_{{{index}}}"));
+                        return;
+                    }
+                    crate::FuncKind::NoDerivative { of, why } => {
+                        let text = format!("no derivative of {of}: {why}").replace('_', "\\_");
+                        buf.push_str(&format!("\\text{{{text}}}"));
+                        return;
+                    }
+                    _ => {}
+                }
                 let escaped = name.replace('_', "\\_");
                 buf.push_str(&format!("\\operatorname{{{escaped}}}\\left("));
                 for (i, arg) in args.iter().enumerate() {
@@ -689,6 +713,26 @@ impl Expr {
                         arg.write_rust(buf, ft, 0);
                     }
                     buf.push(')');
+                } else if let crate::FuncKind::ExternNumericDerivs { call_path, partials_read, .. } = kind {
+                    // The call, whether the partials are read last.
+                    buf.push_str(call_path);
+                    buf.push('(');
+                    for arg in args {
+                        arg.write_rust(buf, ft, 0);
+                        buf.push_str(", ");
+                    }
+                    buf.push_str(if *partials_read { "true" } else { "false" });
+                    buf.push(')');
+                } else if let crate::FuncKind::ExternOutput { index } = kind {
+                    // The call, or its hoisted name: an atom either way.
+                    args[0].write_rust(buf, ft, 0);
+                    if *index == 0 {
+                        buf.push_str(".0");
+                    } else {
+                        buf.push_str(&format!(".1[{}]", index - 1));
+                    }
+                } else if let crate::FuncKind::NoDerivative { of, why } = kind {
+                    buf.push_str(&format!("compile_error!(\"no derivative of {of}: {why}\")"));
                 }
                 return; // already wrote, skip trailing paren logic
             }

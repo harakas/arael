@@ -525,13 +525,49 @@ sym! {
 }
 ```
 
+### Extern functions with numeric derivatives: `extern_func_numeric_derivs`
+
+`extern_func_numeric_derivs(name, arity, call_path, context_arg, eval_fn)`
+creates an extern function whose Rust eval returns the value and its
+first partial derivatives by each argument together, `(f64, [f64; N])`. Only
+first derivatives exist, by design: a partial has no derivative of its
+own. Like `extern_func` it returns a builder. The value it builds differentiates into partials read from
+the same call, which CSE then shares, so one call serves a residual
+and its Jacobian. Codegen writes `call_path(args..., read)`, the
+trailing `read` telling the eval fn whether the partials will be used;
+`with_partials_read(&e, read)` sets it, which code generators do per
+emitted batch. With `context_arg` the first argument is a Rust value
+the eval fn takes before the numbers, written into the call as it is
+and given no partial. `eval_fn` takes the arguments as `&[f64]` and
+returns the value and the partials; `None` when the function runs
+only in generated code. `partial_of(&value, i)` is the i-th partial of
+such a value.
+
+```rust
+use arael_sym::*;
+fn sq(args: &[f64]) -> (f64, Vec<f64>) { (args[0] * args[0], vec![2.0 * args[0]]) }
+let f = extern_func_numeric_derivs("sq", 1, "sq_eval", false, Some(sq));
+let e = f(vec![symbol("x")]);
+println!("{}", e.to_rust("f64"));            // sq_eval(x, true).0
+println!("{}", e.diff("x").to_rust("f64"));  // sq_eval(x, true).1[0]
+```
+
+`no_derivative(of, why)` is the derivative that does not exist: give it
+as a deriv of an extern function that has none; differentiating a
+partial of a numeric-derivs function yields it too. Eval returns
+`Err`, `to_rust` writes `compile_error!`, and it prints as
+`<no derivative of f: why>`.
+
 ### `FuncKind`: the underlying enum
 
-Every `Expr::Func` carries one of three `FuncKind` variants:
+Every `Expr::Func` carries one `FuncKind` variant:
 
 - `FuncKind::Symbolic { body }` -- the simplest case; the body is auto-differentiated and inlined for evaluation and codegen.
 - `FuncKind::SymbolicDerivs { body, derivs }` -- body for evaluation/codegen, explicit per-argument derivatives.
 - `FuncKind::Extern { derivs, eval_fn, call_path }` -- explicit derivatives, native eval function, codegen emits `call_path(args...)`.
+- `FuncKind::ExternNumericDerivs { call_path, partials_read, context_arg, eval_fn }` -- the eval fn's whole result, value and partials; codegen emits `call_path(args..., partials_read)`.
+- `FuncKind::ExternOutput { index }` -- one output of that result, its single argument: 0 the value, `1 + i` the partial by argument `i`.
+- `FuncKind::NoDerivative { of, why }` -- the derivative that does not exist.
 
 You can construct `Expr::Func` values directly via `FuncKind` if you need to bypass the constructors above; usually the constructors are easier.
 

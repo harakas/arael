@@ -209,7 +209,8 @@ pub(crate) fn generate_symbolic_precompute(
             }
         }
     }
-    let exprs: Vec<E> = assigns.iter().map(|(_, e, _)| e.clone()).collect();
+    let mut exprs: Vec<E> = assigns.iter().map(|(_, e, _)| e.clone()).collect();
+    finish_batch(&mut exprs, sp, true)?;
     let (inters, outs) = arael_sym::cse_scoped(&exprs);
     // In a generic `T: Float` struct an unsuffixed literal cannot infer
     // its type; emit every literal through a local conversion closure.
@@ -396,6 +397,11 @@ struct ConstraintCtx {
     // their bodies see only their own parameters and `let`s, and a
     // function may not call itself.
     typed_fn: Vec<String>,
+    // The model root, where a body has one: its type name and the
+    // variable the generated code binds it to (the type name lowercased).
+    // A root-taking function gets that variable's symbol as its first
+    // argument. `None` in a symbolic-field precompute.
+    root: Option<(String, String)>,
 }
 
 impl ConstraintCtx {
@@ -407,6 +413,7 @@ impl ConstraintCtx {
             poisoned: Vec::new(),
             subs: Vec::new(),
             typed_fn: Vec::new(),
+            root: None,
         }
     }
 
@@ -837,9 +844,25 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
         // Function calls: atan2, atan, sin, cos, etc.
         Expr::Call(ec) => {
             if let Expr::Path(func_path) = ec.func.as_ref() {
-                let args: Vec<SymVal> = ec.args.iter()
-                    .map(|a| eval_expr(a, ctx))
-                    .collect::<Result<_, _>>()?;
+                // A bare `root` (or the root's own name) as an argument is
+                // the model root, handed to a root-taking function as the
+                // root binding's symbol; `root_args` says where it is.
+                let mut root_args: Vec<bool> = Vec::with_capacity(ec.args.len());
+                let mut args: Vec<SymVal> = Vec::with_capacity(ec.args.len());
+                for a in &ec.args {
+                    if let Some(var) = root_arg_name(a, ctx) {
+                        let Some((_, root_var)) = &ctx.root else {
+                            return Err(syn::Error::new_spanned(a, format!(
+                                "`{var}`: no model root here; a function that reads the root \
+                                 can be used only in a constraint body")));
+                        };
+                        root_args.push(true);
+                        args.push(SymVal::Scalar(arael_sym::symbol(root_var)));
+                    } else {
+                        root_args.push(false);
+                        args.push(eval_expr(a, ctx)?);
+                    }
+                }
                 // Single-segment path: a builtin, a typed user function
                 // (evaluated here, in a scope of its own) or a scalar
                 // user function through arael-sym's parser.
@@ -849,9 +872,13 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                         && let Some(uf @ crate::UserFunction::Typed { .. }) =
                             crate::registry_lookup_function(&name)
                     {
+                        if root_args.iter().any(|r| *r) {
+                            return Err(syn::Error::new_spanned(expr, format!(
+                                "`{name}` is a typed function and takes no root")));
+                        }
                         return eval_typed_call(&uf, args, ctx, expr);
                     }
-                    return eval_function(&name, args, expr);
+                    return eval_function(&name, args, &root_args, expr, ctx);
                 }
                 // Multi-segment path: static constructors on symbolic types,
                 // e.g. matrix2sym::rotation(angle). Match by the last two
@@ -1037,130 +1064,95 @@ fn build_dotted_path(expr: &Expr) -> Option<String> {
 /// placeholder derivs / bodies so all names resolve at parse time;
 /// the second pass re-parses under the full bag and replaces the
 /// stubs.
-fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
+/// A bag of every registered scalar user function as a stub: enough for
+/// the parser to resolve a call by name and arity. Typed functions are
+/// not scalar expressions; the interpreter inlines them. A tuple
+/// function's stub is already its final entry.
+fn stub_bag(all: &[crate::UserFunction]) -> arael_sym::FunctionBag {
     fn dummy_eval(_args: &[f64]) -> f64 { 0.0 }
-    let all = crate::registry_all_functions();
     let mut bag = arael_sym::FunctionBag::new();
-
-    // Pass 1: stubs so cross-references resolve when parsing. Typed
-    // functions are not scalar expressions; the interpreter inlines them.
-    for uf in &all {
+    for uf in all {
         match uf {
-            crate::UserFunction::Typed { .. } => continue,
+            crate::UserFunction::Typed { .. } => {}
             crate::UserFunction::Symbolic { sym_name, param_names, .. } => {
-                // Stub body: symbol(sym_name) -- irrelevant for dispatch as
-                // the second pass replaces it. Parser dispatches function
-                // calls by name regardless of body shape.
-                bag.add_symbolic(
-                    sym_name.clone(),
-                    param_names.clone(),
-                    arael_sym::symbol(sym_name),
-                );
+                bag.add_symbolic(sym_name.clone(), param_names.clone(), arael_sym::symbol(sym_name));
+            }
+            crate::UserFunction::Extern { sym_name, eval_path, param_names, numeric: true, root, .. } => {
+                bag.add_with_kind(sym_name.clone(), param_names.clone(),
+                    arael_sym::FuncKind::ExternNumericDerivs {
+                        call_path: eval_path.clone(), partials_read: true,
+                        context_arg: root.is_some(), eval_fn: None,
+                    });
             }
             crate::UserFunction::Extern { sym_name, eval_path, param_names, arity, .. } => {
-                let zero_derivs: Vec<arael_sym::E> =
-                    (0..*arity).map(|_| arael_sym::constant(0.0)).collect();
-                bag.add_with_kind(
-                    sym_name.clone(),
-                    param_names.clone(),
+                let zero: Vec<arael_sym::E> = (0..*arity).map(|_| arael_sym::constant(0.0)).collect();
+                bag.add_with_kind(sym_name.clone(), param_names.clone(),
                     arael_sym::FuncKind::Extern {
-                        derivs: zero_derivs,
-                        eval_fn: dummy_eval,
-                        call_path: eval_path.clone(),
-                    },
-                );
+                        derivs: zero, eval_fn: dummy_eval, call_path: eval_path.clone(),
+                    });
             }
         }
     }
+    bag
+}
 
-    // Pass 2: re-parse each fn's body / derivs under the full bag and
-    // replace the stubs. Errors surface at the first constraint-body
-    // use-site (where the user's own span is available for the error
-    // message); here we silently skip failing entries.
+/// Every registered user function, parsed. With a body context, `root`
+/// and `root.<field>` in a deriv expression become the body's bindings.
+fn build_user_function_bag(ctx: Option<&ConstraintCtx>) -> syn::Result<arael_sym::FunctionBag> {
+    fn dummy_eval(_args: &[f64]) -> f64 { 0.0 }
+    let all = crate::registry_all_functions();
+    // Pass 1: stubs so cross-references resolve when parsing.
+    let mut bag = stub_bag(&all);
+
+    // Pass 2: re-parse each fn's body / derivs under a stub bag with the
+    // fn's own parameters as 0-ary symbols, and replace the stub. A body
+    // or deriv that does not parse is an error naming the function, not
+    // a silent drop that surfaces as an unknown function at a caller.
     for uf in &all {
         match uf {
             crate::UserFunction::Typed { .. } => continue,
             crate::UserFunction::Symbolic { sym_name, param_names, body, .. } => {
-                let mut sub = arael_sym::FunctionBag::new();
-                // Inherit all entries from the full bag by re-registering
-                // them as stubs (same as pass 1). Then parse body against
-                // sub, then re-insert into main bag.
-                //
-                // Simpler: parse against the main bag directly. Parameter
-                // names are registered as placeholder 0-ary symbolic fns
-                // in the sub-bag.
-                for (p, ph) in param_names.iter().zip(param_names.iter().map(|p| arael_sym::symbol(p))) {
-                    sub.add_symbolic(p.clone(), Vec::<String>::new(), ph);
+                let mut sub = stub_bag(&all);
+                for p in param_names {
+                    sub.add_symbolic(p.clone(), Vec::<String>::new(), arael_sym::symbol(p));
                 }
-                // Copy every user-fn entry to sub:
-                for other in &all {
-                    match other {
-                        crate::UserFunction::Symbolic {
-                            sym_name: on, param_names: opn, ..
-                        } => {
-                            sub.add_symbolic(on.clone(), opn.clone(), arael_sym::symbol(on));
-                        }
-                        crate::UserFunction::Extern {
-                            sym_name: on, eval_path: oep, param_names: opn, arity: oa, ..
-                        } => {
-                            let zero: Vec<arael_sym::E> =
-                                (0..*oa).map(|_| arael_sym::constant(0.0)).collect();
-                            sub.add_with_kind(on.clone(), opn.clone(),
-                                arael_sym::FuncKind::Extern {
-                                    derivs: zero, eval_fn: dummy_eval,
-                                    call_path: oep.clone(),
-                                });
-                        }
-                        crate::UserFunction::Typed { .. } => {}
-                    }
-                }
-                // A body that does not parse must be reported HERE, with
-                // the function named -- skipping it used to surface as a
-                // misleading unknown-function error at some caller.
                 let body_e = arael_sym::parse_with_functions(body, &sub)
                     .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(),
                         format!("arael::function `{}`: body does not parse: {}",
                             sym_name, err)))?;
                 bag.add_symbolic(sym_name.clone(), param_names.clone(), body_e);
             }
+            crate::UserFunction::Extern { numeric: true, .. } => continue,
             crate::UserFunction::Extern {
-                sym_name, eval_path, param_names, arity, deriv_strings, ..
+                sym_name, eval_path, param_names, arity, deriv_strings, root, ..
             } => {
-                let mut sub = arael_sym::FunctionBag::new();
-                for (p, ph) in param_names.iter().zip(param_names.iter().map(|p| arael_sym::symbol(p))) {
-                    sub.add_symbolic(p.clone(), Vec::<String>::new(), ph);
+                let mut sub = stub_bag(&all);
+                for p in param_names {
+                    sub.add_symbolic(p.clone(), Vec::<String>::new(), arael_sym::symbol(p));
                 }
-                for other in &all {
-                    match other {
-                        crate::UserFunction::Symbolic {
-                            sym_name: on, param_names: opn, ..
-                        } => {
-                            sub.add_symbolic(on.clone(), opn.clone(), arael_sym::symbol(on));
-                        }
-                        crate::UserFunction::Extern {
-                            sym_name: on, eval_path: oep, param_names: opn, arity: oa, ..
-                        } => {
-                            let zero: Vec<arael_sym::E> =
-                                (0..*oa).map(|_| arael_sym::constant(0.0)).collect();
-                            sub.add_with_kind(on.clone(), opn.clone(),
-                                arael_sym::FuncKind::Extern {
-                                    derivs: zero, eval_fn: dummy_eval,
-                                    call_path: oep.clone(),
-                                });
-                        }
-                        crate::UserFunction::Typed { .. } => {}
-                    }
-                }
-                // Same rule for deriv expressions: a malformed one is an
-                // error naming the function and the string, not a silent
-                // drop from the bag.
                 let mut derivs: Vec<arael_sym::E> = Vec::with_capacity(*arity);
-                for (i, s) in deriv_strings.iter().enumerate() {
-                    let e = arael_sym::parse_with_functions(s, &sub)
-                        .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(),
-                            format!("arael::function `{}`: derivs[{}] `{}` does not parse: {}",
-                                sym_name, i, s, err)))?;
-                    derivs.push(e);
+                if root.is_some() {
+                    derivs.push(arael_sym::constant(0.0));
+                }
+                match deriv_strings {
+                    None => {
+                        for _ in 0..*arity - usize::from(root.is_some()) {
+                            derivs.push(arael_sym::no_derivative(sym_name, NO_DERIVATIVE_WHY));
+                        }
+                    }
+                    Some(ds) => for (i, s) in ds.iter().enumerate() {
+                        let e = arael_sym::parse_with_functions(s, &sub)
+                            .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("arael::function `{}`: derivs[{}] `{}` does not parse: {}",
+                                    sym_name, i, s, err)))?;
+                        let e = match ctx {
+                            Some(c) => root_bindings(&e, c)
+                                .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(),
+                                    format!("arael::function `{}`: derivs[{}]: {}", sym_name, i, err)))?,
+                            None => e,
+                        };
+                        derivs.push(e);
+                    },
                 }
                 bag.add_with_kind(
                     sym_name.clone(),
@@ -1175,6 +1167,63 @@ fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
         }
     }
     Ok(bag)
+}
+
+/// What a batch of expressions needs before it is rendered: no
+/// derivative that does not exist in it, no root read where no root is
+/// bound (`no_root`), and every numeric-derivs call told whether its
+/// partials are read in this batch.
+fn finish_batch(exprs: &mut [arael_sym::E], sp: proc_macro2::Span, no_root: bool) -> syn::Result<()> {
+    use arael_sym::{Expr as SExpr, FuncKind};
+    let mut poison: Option<String> = None;
+    let mut calls: Vec<arael_sym::E> = Vec::new();
+    let mut partial_read: Vec<arael_sym::E> = Vec::new();
+    for e in exprs.iter() {
+        e.for_each_node(&mut |n| match n.as_ref() {
+            SExpr::Func { kind: FuncKind::NoDerivative { of, why }, .. } => {
+                if poison.is_none() {
+                    poison = Some(format!("no derivative of `{of}`: {why}"));
+                }
+            }
+            SExpr::Func { kind: FuncKind::ExternNumericDerivs { .. }, .. } => {
+                if !calls.contains(n) {
+                    calls.push(n.clone());
+                }
+            }
+            SExpr::Func { kind: FuncKind::ExternOutput { index }, args, .. } if *index > 0 => {
+                if !partial_read.contains(&args[0]) {
+                    partial_read.push(args[0].clone());
+                }
+            }
+            _ => {}
+        });
+        if no_root {
+            for v in e.free_vars() {
+                if v == "root" || v.starts_with("root.") {
+                    return Err(syn::Error::new(sp, format!(
+                        "`{v}`: a function reading the model root was used where no root is bound")));
+                }
+            }
+        }
+    }
+    if let Some(msg) = poison {
+        return Err(syn::Error::new(sp, msg));
+    }
+    let mut pairs: Vec<(arael_sym::E, arael_sym::E)> = Vec::new();
+    for c in calls {
+        let wanted = partial_read.contains(&c);
+        if let SExpr::Func { kind: FuncKind::ExternNumericDerivs { partials_read, .. }, .. } = c.as_ref()
+            && *partials_read != wanted
+        {
+            pairs.push((c.clone(), arael_sym::with_partials_read(&c, wanted)));
+        }
+    }
+    if !pairs.is_empty() {
+        for e in exprs.iter_mut() {
+            *e = arael_sym::cse::replace_many(e, &pairs);
+        }
+    }
+    Ok(())
 }
 
 /// Bind a `let` pattern to a value: a name, `_`, or a tuple of those
@@ -1335,10 +1384,79 @@ fn eval_typed_call(
     Ok(result)
 }
 
-fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, syn::Error> {
+/// The model root as a call argument: `root`, or the root variable's own
+/// name, unless a `let` or a field of that name shadows it.
+fn root_arg_name(a: &Expr, ctx: &ConstraintCtx) -> Option<String> {
+    let Expr::Path(ep) = a else { return None };
+    let ident = ep.path.get_ident()?.to_string();
+    if ctx.lets.contains(&ident) || ctx.bindings.contains_key(&ident) {
+        return None;
+    }
+    if ident == "root" {
+        // A Ref field named `root` keeps its own meaning.
+        let is_field = ctx.entity_vars.get("root")
+            .is_some_and(|t| ctx.root.as_ref().is_none_or(|(rt, _)| t != rt));
+        return (!is_field).then_some(ident);
+    }
+    ctx.root.as_ref().is_some_and(|(_, v)| *v == ident).then_some(ident)
+}
+
+/// A scalar read off a body binding by its dotted path: the binding
+/// itself, or a component of a vector or quaternion binding.
+fn scalar_at_path(ctx: &ConstraintCtx, path: &str) -> Option<arael_sym::E> {
+    if let Some(SymVal::Scalar(e)) = ctx.bindings.get(path) {
+        return Some(e.clone());
+    }
+    let (head, comp) = path.rsplit_once('.')?;
+    match (ctx.bindings.get(head)?, comp) {
+        (SymVal::Vec2(v), "x") => Some(v.x.clone()),
+        (SymVal::Vec2(v), "y") => Some(v.y.clone()),
+        (SymVal::Vec3(v), "x") => Some(v.x.clone()),
+        (SymVal::Vec3(v), "y") => Some(v.y.clone()),
+        (SymVal::Vec3(v), "z") => Some(v.z.clone()),
+        (SymVal::Quat(q), "t") => Some(q.t.clone()),
+        (SymVal::Quat(q), "x") => Some(q.v.x.clone()),
+        (SymVal::Quat(q), "y") => Some(q.v.y.clone()),
+        (SymVal::Quat(q), "z") => Some(q.v.z.clone()),
+        _ => None,
+    }
+}
+
+/// `root` and `root.<field>` in a deriv expression, as the body reads
+/// them: the root variable's symbol, and the body's binding for the
+/// field. Nothing to do without a root.
+fn root_bindings(e: &arael_sym::E, ctx: &ConstraintCtx) -> Result<arael_sym::E, String> {
+    let Some((_, root_var)) = &ctx.root else { return Ok(e.clone()) };
+    let mut subs: Vec<(arael_sym::E, arael_sym::E)> = Vec::new();
+    for v in e.free_vars() {
+        if v == "root" {
+            subs.push((arael_sym::symbol("root"), arael_sym::symbol(root_var)));
+        } else if v.starts_with("root.") {
+            let Some(val) = scalar_at_path(ctx, &v) else {
+                return Err(format!("`{v}`: no such scalar on the root"));
+            };
+            subs.push((arael_sym::symbol(&v), val));
+        }
+    }
+    Ok(if subs.is_empty() { e.clone() } else { e.substitute(&subs) })
+}
+
+const NO_DERIVATIVE_WHY: &str = "declared without a derivative; add derivs = [...] or return partials";
+
+fn eval_function(
+    name: &str,
+    args: Vec<SymVal>,
+    root_args: &[bool],
+    span: &Expr,
+    ctx: &ConstraintCtx,
+) -> Result<SymVal, syn::Error> {
+    let with_root = root_args.iter().any(|r| *r);
     // Delegate scalar functions to arael-sym's name-based lookup. Arity and
     // scalar-ness are validated here since SymVal is a macro-local type.
     if let Some(fnref) = arael_sym::function_by_name(name) {
+        if with_root {
+            return Err(syn::Error::new_spanned(span, format!("`{name}` takes no root")));
+        }
         return match fnref {
             arael_sym::FunctionRef::Unary(f) => {
                 if args.len() != 1 {
@@ -1391,6 +1509,27 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
             return Err(syn::Error::new_spanned(span, format!(
                 "{} expects {} arg(s), got {}", name, expected_arity, args.len())));
         }
+        // The root: first for a function that takes it, nowhere otherwise.
+        let takes_root = matches!(&uf, crate::UserFunction::Extern { root: Some(_), .. });
+        if takes_root {
+            if !root_args[0] {
+                return Err(syn::Error::new_spanned(span, format!(
+                    "`{name}` reads the model root: pass `root` as its first argument")));
+            }
+            if root_args[1..].iter().any(|r| *r) {
+                return Err(syn::Error::new_spanned(span, format!(
+                    "`{name}` takes the root once, as its first argument")));
+            }
+            if let crate::UserFunction::Extern { root: Some((rty, false)), .. } = &uf
+                && let Some((model_root, _)) = &ctx.root
+                && rty != model_root
+            {
+                return Err(syn::Error::new_spanned(span, format!(
+                    "`{name}` takes `&{rty}`, and this model's root is `{model_root}`")));
+            }
+        } else if with_root {
+            return Err(syn::Error::new_spanned(span, format!("`{name}` takes no root")));
+        }
         let arg_es: Vec<arael_sym::E> = args.iter().map(|a| match a {
             SymVal::Scalar(e) => Ok(e.clone()),
             _ => Err(syn::Error::new_spanned(span,
@@ -1402,7 +1541,7 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
         // substituted with the actual arg expressions -- that keeps the
         // generated code pointing at the caller's binding (e.g. `m.x.work()`
         // rather than a naked `x`).
-        let bag = build_user_function_bag()?;
+        let bag = build_user_function_bag(Some(ctx))?;
         let subs: Vec<(arael_sym::E, arael_sym::E)> = uf.param_names().iter().zip(arg_es.iter())
             .map(|(pname, e)| (arael_sym::symbol(pname), e.clone()))
             .collect();
@@ -1419,35 +1558,57 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                         format!("arael::function `{}` body parse: {}", name, err)))?;
                 return Ok(SymVal::Scalar(parsed.substitute(&subs)));
             }
+            crate::UserFunction::Extern { numeric: true, eval_path, .. } => {
+                // The value; whether the partials are read is settled per
+                // rendered batch.
+                let f = arael_sym::extern_func_numeric_derivs(
+                    name, expected_arity, eval_path, takes_root, None);
+                return Ok(SymVal::Scalar(f(arg_es.clone())));
+            }
             crate::UserFunction::Extern { eval_path, deriv_strings, .. } => {
                 // Parse each deriv against the full user-function bag plus
                 // the user's own param names (so `g(x)` resolves if `g` is
                 // another user fn and `x` is our param). The resulting E
                 // uses the user's chosen param names as symbols; rewrite
                 // those to __p0 / __p1 / ... so arael-sym's chain-rule
-                // substitution at diff time works as expected.
+                // substitution at diff time works as expected. The root
+                // answers to its own name and to `root`, and has a zero
+                // derivative; `root.<field>` reads the body's binding.
                 fn __dummy_eval(_args: &[f64]) -> f64 { 0.0 }
                 let user_param_syms: Vec<arael_sym::E> = uf.param_names().iter()
                     .map(|p| arael_sym::symbol(p)).collect();
                 let placeholder_param_syms: Vec<arael_sym::E> = (0..expected_arity)
                     .map(|i| arael_sym::symbol(&format!("__p{}", i))).collect();
-                let rewrite_subs: Vec<(arael_sym::E, arael_sym::E)> = user_param_syms.iter()
+                let mut rewrite_subs: Vec<(arael_sym::E, arael_sym::E)> = user_param_syms.iter()
                     .zip(placeholder_param_syms.iter())
                     .map(|(u, p)| (u.clone(), p.clone())).collect();
+                if takes_root {
+                    rewrite_subs.push((arael_sym::symbol("root"), placeholder_param_syms[0].clone()));
+                }
 
-                let mut combined = build_user_function_bag()?;
+                let mut combined = build_user_function_bag(Some(ctx))?;
                 for (pname, e) in uf.param_names().iter().zip(user_param_syms.iter()) {
                     combined.add_symbolic(pname.clone(), std::vec::Vec::<String>::new(), e.clone());
                 }
-                let mut derivs_e: Vec<arael_sym::E> = Vec::with_capacity(deriv_strings.len());
-                for s in deriv_strings {
-                    let d = arael_sym::parse_with_functions(s, &combined)
-                        .map_err(|err| syn::Error::new_spanned(span,
-                            format!("arael::function `{}` deriv parse: {}", name, err)))?;
-                    // Rewrite user param names → placeholder names so
-                    // arael-sym's chain rule substitutes them with the
-                    // actual arg expressions at diff time.
-                    derivs_e.push(d.substitute(&rewrite_subs));
+                let mut derivs_e: Vec<arael_sym::E> = Vec::with_capacity(expected_arity);
+                if takes_root {
+                    derivs_e.push(arael_sym::constant(0.0));
+                }
+                match deriv_strings {
+                    None => {
+                        for _ in 0..expected_arity - usize::from(takes_root) {
+                            derivs_e.push(arael_sym::no_derivative(name, NO_DERIVATIVE_WHY));
+                        }
+                    }
+                    Some(ds) => for s in ds {
+                        let d = arael_sym::parse_with_functions(s, &combined)
+                            .map_err(|err| syn::Error::new_spanned(span,
+                                format!("arael::function `{}` deriv parse: {}", name, err)))?;
+                        let d = root_bindings(&d.substitute(&rewrite_subs), ctx)
+                            .map_err(|err| syn::Error::new_spanned(span,
+                                format!("arael::function `{}` deriv: {}", name, err)))?;
+                        derivs_e.push(d);
+                    },
                 }
                 let node = arael_sym::extern_func(
                     name,
@@ -6274,6 +6435,7 @@ pub fn generate_root_methods(
         let mut cost_exprs = residual_exprs.clone();
         apply_substitutions(&mut cost_exprs, &all_subs);
         if fast_atan { replace_atan_fast(&mut cost_exprs); }
+        finish_batch(&mut cost_exprs, proc_macro2::Span::call_site(), false)?;
         let (cost_intermediates, cost_simplified) = arael_sym::cse_scoped(&cost_exprs);
         let mut cost_stmts = Vec::new();
         cost_stmts.push(block_cost_decl.clone());
@@ -6308,6 +6470,7 @@ pub fn generate_root_methods(
         // shares its work with the rows.
         let off_guard = off_branch_guard(&all_gh_exprs);
         if let Some(q) = &off_guard { all_gh_exprs.push(q.clone()); }
+        finish_batch(&mut all_gh_exprs, proc_macro2::Span::call_site(), false)?;
         let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
 
         // The sequential sweep's statements and, for a threaded root, the
@@ -9830,6 +9993,7 @@ fn interpret_constraint_body(
 
     // Setup context — recursively register all fields including nested structs
     let mut ctx = ConstraintCtx::new();
+    ctx.root = Some((root_type_name.to_string(), root_type_name.to_lowercase()));
     for (var_name, type_name) in &var_infos {
         if parent_ref_names.contains(var_name) { continue; }
         // Two variables with the same name and different types is a real
