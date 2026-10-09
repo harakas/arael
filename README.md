@@ -104,6 +104,15 @@ Raspberry Pi 5 ([benchmarks/loc](benchmarks/loc/README.md)): with the
 landmarks fixed the localization Hessian is block-tridiagonal, and arael
 solves it with its band Cholesky.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/threads-dark.svg">
+  <img alt="Two grouped bar charts, landmark SLAM at 1200 poses and bundle adjustment on Ladybug-372 on an AMD Ryzen 9 7950X3D: one complete iteration at 1, 2, 4 and 8 threads for arael f64, arael f32 and Ceres" src="benchmarks/charts/v0.9.0/threads-light.svg">
+</picture>
+
+The same iteration at one to eight threads, on the landmark-SLAM
+benchmark and on bundle adjustment, against Ceres on the same machine
+(see [Threads](#threads)).
+
 ## Scope
 
 Arael is a nonlinear optimization framework, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:
@@ -569,7 +578,8 @@ stay sequential, says `#[arael(root, seq)]` and keeps its linear solve threaded.
 
 Threading has overhead: whether it helps, and by how much, depends on the model
 and its number of parameters. Every solve's report says what the threads did.
-See [docs/SOLVERS.md](docs/SOLVERS.md#threads).
+See [docs/SOLVERS.md](docs/SOLVERS.md#threads); the threads chart under
+[Benchmarks](#benchmarks) shows what the threads buy.
 
 ## Parameter Covariance
 

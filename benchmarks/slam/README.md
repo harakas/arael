@@ -571,7 +571,10 @@ The SLAM panel of the bar chart embedded in the top-level README
 `../make_slam_loc_chart.py` (stdlib only) from the 300-pose full-iter
 column above, with a second row of panels drawn from the `peak MB`
 column; after re-running the benchmark, update its `PANELS` and
-`MEM_PANELS` tables from the results and re-run it.
+`MEM_PANELS` tables from the results and re-run it. The threads chart
+(`../charts/v<version>/threads-*.svg`, from `../make_threads_chart.py`)
+takes its SLAM panel from the 1200-pose `full-iter` column at 1, 2, 4
+and 8 threads the same way.
 
 ## Covariance recovery (2026-08-05, Apple M4 Pro, single core)
 

@@ -278,7 +278,9 @@ per results table, every row with a full-iter a bar -- BAL compares linear
 solvers, so arael's two direct routes, Ceres's two and g2o's one each get one.
 The inexact rows have no full-iter and are left out. After re-running the
 benchmark, update the `PANELS` data (full-iter and 1st-iter per row) and re-run
-it.
+it. The threads chart (`../charts/v<version>/threads-*.svg`, from
+`../make_threads_chart.py`) takes its bundle panel from the Ladybug-372
+`full-iter` column at 1, 2, 4 and 8 threads the same way.
 
 ## The Schur reduction, and the ordering it needs
 
