@@ -3,7 +3,7 @@ name = "arael-faer"
 version.workspace = true
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
-description = "faer extensions: variable-block sparse matrix storage (block CSC), Schur-complement reduction, and a nested-dissection ordering"
+description = "faer extensions: block CSC storage, Schur-complement reduction, supernodal and envelope block Cholesky, conjugate gradients, and a nested-dissection ordering"
 license = "MIT"
 repository = "https://github.com/harakas/arael"
 readme = "README.md"
@@ -12,14 +12,8 @@ categories = ["mathematics", "science", "algorithms"]
 
 [features]
 # nano-gemm's AVX-512 microkernels (x86 only). Without it nano-gemm picks AVX2 by
-# itself. `--example gemmbench` reports which path it actually took.
-#
-# On the one x86 machine measured so far this HURTS: nano-gemm takes its AVX-512
-# kernel only above a width threshold (m > 4 for f64, m > 8 for f32), and every
-# tile shape above that threshold got 1.2-2.7x slower, while every shape below it
-# was unchanged. At tile widths of 3 to 12 a 512-bit kernel is the wrong shape of
-# hammer. The feature stays because that is one machine and one nano-gemm version:
-# measure on yours with `gemmbench` before believing either result.
+# itself. Not a win on every machine: measure with `--example gemmbench`, which
+# reports which path it took, before enabling it.
 x86-v4 = ["nano-gemm/x86-v4"]
 
 # faer's threaded kernels, and with them the supernodal factorization's own

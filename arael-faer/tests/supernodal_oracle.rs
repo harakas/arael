@@ -273,13 +273,13 @@ fn check(
     rhs: &[f64],
     order: Option<&[usize]>,
     params: &SupernodalParams,
-    par: Par,
+    threads: usize,
 ) -> SupernodalSymbolic {
     let n = a.symbolic().ncols();
     let sn = SupernodalSymbolic::new(a.symbolic(), order, params).unwrap();
     let mut factor = vec![f64::NAN; sn.factor_val_count()];
     let mut ctx = SupernodalContext::new();
-    supernodal_factorize(&sn, a, &mut factor, &mut ctx, par).unwrap();
+    supernodal_factorize(&sn, a, &mut factor, &mut ctx, threads).unwrap();
     let (max_rel, pads) = compare_with_faer(a, &sn, &factor);
     assert!(max_rel < 1e-12, "{label}: factor differs from faer's by {max_rel:.3e}");
     assert_eq!(pads, 0, "{label}: {pads} padded entries are not exactly zero");
@@ -327,7 +327,7 @@ fn factor_matches_faer_under_our_permutation() {
                 for (pname, params) in param_sets() {
                     check(
                         &format!("seed {seed} nblk {nblk} boost {boost} {oname} {pname}"),
-                        &a, &dense, &rhs, Some(&order), &params, Par::Seq,
+                        &a, &dense, &rhs, Some(&order), &params, 1,
                     );
                 }
             }
@@ -335,7 +335,7 @@ fn factor_matches_faer_under_our_permutation() {
             let sn = SupernodalSymbolic::new(&sym, Some(&amd_block_order(&sym)), &SupernodalParams::default()).unwrap();
             let mut factor = vec![0.0; sn.factor_val_count()];
             let mut ctx = SupernodalContext::new();
-            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::Seq).unwrap();
+            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
             let mut rng = Lcg(seed);
             for k in [1usize, 7, 131] {
                 let many: Vec<f64> = (0..n * k).map(|_| rng.unit()).collect();
@@ -363,11 +363,11 @@ fn scalar_limit_matches_faer() {
             for (pname, params) in param_sets() {
                 check(
                     &format!("scalar seed {seed} {oname} {pname}"),
-                    &a, &dense, &rhs, Some(&order), &params, Par::Seq,
+                    &a, &dense, &rhs, Some(&order), &params, 1,
                 );
             }
             let bare = SupernodalParams { relax: None, postorder: false, ..Default::default() };
-            let sn = check(&format!("scalar seed {seed} {oname} bare"), &a, &dense, &rhs, Some(&order), &bare, Par::Seq);
+            let sn = check(&format!("scalar seed {seed} {oname} bare"), &a, &dense, &rhs, Some(&order), &bare, 1);
             assert_eq!(sn.factor_scalar_nnz(), faer_len_val(&a, &sn), "scalar seed {seed} {oname}: fill");
         }
     }
@@ -402,7 +402,7 @@ fn forest_and_isolated_blocks() {
     let (a, dense, rhs) = spd_on(sym.clone(), 3, 2.0);
     for (oname, order) in orders(&sym, 3) {
         for (pname, params) in param_sets() {
-            check(&format!("forest {oname} {pname}"), &a, &dense, &rhs, Some(&order), &params, Par::Seq);
+            check(&format!("forest {oname} {pname}"), &a, &dense, &rhs, Some(&order), &params, 1);
         }
     }
 }
@@ -434,11 +434,11 @@ fn forest_and_isolated_blocks_threaded() {
     let (a, dense, rhs) = spd_on(sym.clone(), 21, 2.0);
     let nd = nd_block_order(&sym);
     for threads in [2usize, 4] {
-        check(&format!("threaded forest {threads}"), &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), Par::rayon(threads));
+        check(&format!("threaded forest {threads}"), &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), threads);
     }
     let small = forest();
     let (a, dense, rhs) = spd_on(small.clone(), 3, 2.0);
-    check("threaded small forest", &a, &dense, &rhs, None, &SupernodalParams::default(), Par::rayon(4));
+    check("threaded small forest", &a, &dense, &rhs, None, &SupernodalParams::default(), 4);
 }
 
 /// A clique of wide blocks (one big dense panel) plus a tail of 9-wide
@@ -480,7 +480,7 @@ fn wide_panels_match_faer() {
     let natural: Vec<usize> = (0..sym.nblk_cols()).collect();
     for (oname, order) in [("natural", &natural), ("tail-first", &tail_first)] {
         for (pname, params) in param_sets() {
-            check(&format!("wide {oname} {pname}"), &a, &dense, &rhs, Some(order), &params, Par::Seq);
+            check(&format!("wide {oname} {pname}"), &a, &dense, &rhs, Some(order), &params, 1);
         }
     }
 
@@ -490,7 +490,7 @@ fn wide_panels_match_faer() {
         let sn = SupernodalSymbolic::new(&sym, Some(order), &SupernodalParams::default()).unwrap();
         let mut factor = vec![f32::NAN; sn.factor_val_count()];
         let mut ctx = SupernodalContext::new();
-        supernodal_factorize(&sn, &a32, &mut factor, &mut ctx, Par::Seq).unwrap();
+        supernodal_factorize(&sn, &a32, &mut factor, &mut ctx, 1).unwrap();
         let (max_rel, pads) = compare_with_faer(&a32, &sn, &factor);
         assert!(max_rel < 1e-4, "wide f32 {oname}: factor differs from faer's f32 by {max_rel:.3e}");
         assert_eq!(pads, 0, "wide f32 {oname}: padded entries not exactly zero");
@@ -526,7 +526,7 @@ fn batching_past_the_depth_cap_matches_faer() {
     let sym = structure(part, cells);
     let (a, dense, rhs) = spd_on(sym.clone(), 11, 1.0);
     for (pname, params) in param_sets() {
-        let sn = check(&format!("depth cap {pname}"), &a, &dense, &rhs, None, &params, Par::Seq);
+        let sn = check(&format!("depth cap {pname}"), &a, &dense, &rhs, None, &params, 1);
         if params.batch_ratio.is_some() {
             assert!(sn.batched_pairs() >= 250, "depth cap {pname}: only {} pairs batched", sn.batched_pairs());
         } else {
@@ -561,10 +561,10 @@ fn mixed_batch_buckets_match_faer() {
     let sym = structure(part, cells);
     let (a, dense, rhs) = spd_on(sym.clone(), 13, 1.0);
     let no_relax = SupernodalParams { relax: None, ..Default::default() };
-    let sn = check("mixed buckets", &a, &dense, &rhs, None, &no_relax, Par::Seq);
+    let sn = check("mixed buckets", &a, &dense, &rhs, None, &no_relax, 1);
     assert!(sn.batched_pairs() >= 30, "mixed buckets: only {} pairs batched", sn.batched_pairs());
     for (pname, params) in param_sets() {
-        check(&format!("mixed buckets {pname}"), &a, &dense, &rhs, None, &params, Par::Seq);
+        check(&format!("mixed buckets {pname}"), &a, &dense, &rhs, None, &params, 1);
     }
 }
 
@@ -580,12 +580,12 @@ fn an_empty_matrix_factors_to_nothing() {
         assert_eq!(sn.dim(), 0);
         let mut factor: Vec<f64> = Vec::new();
         let mut ctx = SupernodalContext::new();
-        supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::Seq).unwrap();
+        supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
         let mut x: Vec<f64> = Vec::new();
         supernodal_solve(&sn, &factor, &mut x, &mut ctx);
         supernodal_solve_multi(&sn, &factor, &mut x, 3, &mut ctx);
         #[cfg(feature = "threads")]
-        supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::rayon(4)).unwrap();
+        supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 4).unwrap();
     }
     let sn = SupernodalSymbolic::new(&sym, Some(&[]), &SupernodalParams::default()).unwrap();
     assert_eq!(sn.n_supernodes(), 0);
@@ -597,7 +597,7 @@ fn a_single_block_matches_faer() {
     let sym = structure(vec![0, 4], vec![(0, 0)]);
     let (a, dense, rhs) = spd_on(sym.clone(), 6, 2.0);
     for (pname, params) in param_sets() {
-        let sn = check(&format!("single block {pname}"), &a, &dense, &rhs, None, &params, Par::Seq);
+        let sn = check(&format!("single block {pname}"), &a, &dense, &rhs, None, &params, 1);
         assert_eq!(sn.n_supernodes(), 1);
         assert_eq!(sn.supernode_dims(0), (4, 4));
     }
@@ -611,7 +611,7 @@ fn zero_right_hand_sides_are_a_no_op() {
     let sn = SupernodalSymbolic::new(&sym, None, &SupernodalParams::default()).unwrap();
     let mut factor = vec![0.0; sn.factor_val_count()];
     let mut ctx = SupernodalContext::new();
-    supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::Seq).unwrap();
+    supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
     let mut x: Vec<f64> = Vec::new();
     supernodal_solve_multi(&sn, &factor, &mut x, 0, &mut ctx);
     assert!(x.is_empty());
@@ -672,7 +672,7 @@ fn late_indefiniteness_is_rejected() {
         let mut factor = vec![0.0; sn.factor_val_count()];
         let mut ctx = SupernodalContext::new();
         assert_eq!(
-            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, Par::Seq),
+            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1),
             Err(SupernodalError::NotPositiveDefinite),
             "{pname}"
         );
@@ -735,10 +735,10 @@ fn every_thread_count_matches_the_sequential_factor() {
         let sym = two_components(comp, seed);
         let (a, dense, rhs) = spd_on(sym.clone(), seed, 2.0);
         let nd = nd_block_order(&sym);
-        let sn = check(&format!("threads seq {comp}"), &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), Par::Seq);
+        let sn = check(&format!("threads seq {comp}"), &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), 1);
         let mut seq = vec![f64::NAN; sn.factor_val_count()];
         let mut ctx = SupernodalContext::new();
-        supernodal_factorize(&sn, &a, &mut seq, &mut ctx, Par::Seq).unwrap();
+        supernodal_factorize(&sn, &a, &mut seq, &mut ctx, 1).unwrap();
         let mut x_seq = rhs.clone();
         supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx);
         for threads in [2usize, 3, 8, 16] {
@@ -746,7 +746,7 @@ fn every_thread_count_matches_the_sequential_factor() {
             for repeat in 0..2 {
                 let mut par = vec![f64::NAN; sn.factor_val_count()];
                 let mut ctx = SupernodalContext::new();
-                supernodal_factorize(&sn, &a, &mut par, &mut ctx, Par::rayon(threads)).unwrap();
+                supernodal_factorize(&sn, &a, &mut par, &mut ctx, threads).unwrap();
                 assert!(same_factor(&sn, &seq, &par, 1e-12), "comp {comp} threads {threads} repeat {repeat}: factor differs");
                 let mut x = rhs.clone();
                 supernodal_solve(&sn, &par, &mut x, &mut ctx);
@@ -756,13 +756,13 @@ fn every_thread_count_matches_the_sequential_factor() {
 
         let a32 = to_f32(&a);
         let mut seq32 = vec![f32::NAN; sn.factor_val_count()];
-        supernodal_factorize(&sn, &a32, &mut seq32, &mut SupernodalContext::new(), Par::Seq).unwrap();
+        supernodal_factorize(&sn, &a32, &mut seq32, &mut SupernodalContext::new(), 1).unwrap();
         let (max_rel, pads) = compare_with_faer(&a32, &sn, &seq32);
         assert!(max_rel < 1e-4, "f32 comp {comp}: factor differs from faer's f32 by {max_rel:.3e}");
         assert_eq!(pads, 0);
         for threads in [3usize, 8] {
             let mut par32 = vec![f32::NAN; sn.factor_val_count()];
-            supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), Par::rayon(threads)).unwrap();
+            supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), threads).unwrap();
             assert!(same_factor(&sn, &seq32, &par32, 1e-4), "f32 comp {comp} threads {threads}: factor differs");
         }
     }
@@ -784,7 +784,7 @@ fn a_declined_cut_factors_sequentially_under_threads() {
     let sn = SupernodalSymbolic::new(&sym, None, &SupernodalParams::default()).unwrap();
     for threads in [2usize, 4, 16] {
         assert_eq!(sn.subtree_chunks(threads), 0, "a chain must not split at {threads} threads");
-        check(&format!("declined cut {threads}"), &a, &dense, &rhs, None, &SupernodalParams::default(), Par::rayon(threads));
+        check(&format!("declined cut {threads}"), &a, &dense, &rhs, None, &SupernodalParams::default(), threads);
     }
 }
 
@@ -805,7 +805,7 @@ fn a_failure_inside_a_worker_is_reported() {
         a.vals_mut()[sym.val_range(b).start] = -5.0;
         let mut factor = vec![0.0; sn.factor_val_count()];
         assert_eq!(
-            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), Par::rayon(4)),
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 4),
             Err(SupernodalError::NotPositiveDefinite),
             "poisoned diagonal of block {poisoned}"
         );
@@ -818,13 +818,13 @@ fn a_failure_inside_a_worker_is_reported() {
         }
         let mut factor = vec![0.0; sn.factor_val_count()];
         assert_eq!(
-            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), Par::rayon(4)),
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 4),
             Err(SupernodalError::NotPositiveDefinite),
             "poisoned coupling {lo}-{hi}"
         );
     }
     let (a, dense, rhs) = spd_on(sym.clone(), 21, 2.0);
-    check("after the failures", &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), Par::rayon(4));
+    check("after the failures", &a, &dense, &rhs, Some(&nd), &SupernodalParams::default(), 4);
 }
 
 /// A trajectory's reduced system in miniature: `nblk` 6-wide blocks, each
@@ -852,13 +852,13 @@ fn windowed() -> SupernodalParams {
 fn windowed_panels_match_faer() {
     let sym = band(70, 30);
     let (a, dense, rhs) = spd_on(sym.clone(), 31, 2.0);
-    let sn = check("windowed band", &a, &dense, &rhs, None, &windowed(), Par::Seq);
+    let sn = check("windowed band", &a, &dense, &rhs, None, &windowed(), 1);
     let (cols, rows) = sn.windowed_panels();
     assert!(cols > 0 && rows > 0, "the band must have windowed panels, got {cols} and {rows}");
 
     let (sym, tail_first) = wide();
     let (a, dense, rhs) = spd_on(sym.clone(), 4, 0.5);
-    let sn = check("windowed wide", &a, &dense, &rhs, Some(&tail_first), &windowed(), Par::Seq);
+    let sn = check("windowed wide", &a, &dense, &rhs, Some(&tail_first), &windowed(), 1);
     assert!(sn.windowed_panels().0 > 0, "the wide fixture must have a windowed panel");
 
     let mut seen = 0usize;
@@ -870,7 +870,7 @@ fn windowed_panels_match_faer() {
         }
         let sn = check(
             &format!("windowed random {oname}"),
-            &a, &dense, &rhs, Some(&order), &windowed(), Par::Seq,
+            &a, &dense, &rhs, Some(&order), &windowed(), 1,
         );
         seen += sn.windowed_panels().0;
     }
@@ -927,13 +927,13 @@ fn windowed_panels_agree_at_every_thread_count() {
         }
         let mut seq = vec![f64::NAN; sn.factor_val_count()];
         let mut ctx = SupernodalContext::new();
-        supernodal_factorize(&sn, &a, &mut seq, &mut ctx, Par::Seq).unwrap();
+        supernodal_factorize(&sn, &a, &mut seq, &mut ctx, 1).unwrap();
         let mut x_seq = rhs.clone();
         supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx);
         for threads in [2usize, 3, 4, 8, 16] {
             let mut par = vec![f64::NAN; sn.factor_val_count()];
             let mut ctx = SupernodalContext::new();
-            supernodal_factorize(&sn, &a, &mut par, &mut ctx, Par::rayon(threads)).unwrap();
+            supernodal_factorize(&sn, &a, &mut par, &mut ctx, threads).unwrap();
             let (max_rel, pads) = compare_with_faer(&a, &sn, &par);
             assert!(max_rel < 1e-12, "{name} threads {threads}: factor differs from faer's by {max_rel:.3e}");
             assert_eq!(pads, 0, "{name} threads {threads}: padded entries not exactly zero");
@@ -946,7 +946,7 @@ fn windowed_panels_agree_at_every_thread_count() {
         let a32 = to_f32(&a);
         for threads in [3usize, 8] {
             let mut par32 = vec![f32::NAN; sn.factor_val_count()];
-            supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), Par::rayon(threads))
+            supernodal_factorize(&sn, &a32, &mut par32, &mut SupernodalContext::new(), threads)
                 .unwrap();
             let (max_rel, pads) = compare_with_faer(&a32, &sn, &par32);
             assert!(max_rel < 1e-4, "f32 {name} threads {threads}: factor differs from faer's f32 by {max_rel:.3e}");
@@ -973,8 +973,8 @@ fn candidates_priced_on_threads_pick_the_same_winner() {
         assert_eq!(par.symbolic.factor_val_count(), one.symbolic.factor_val_count(), "{threads} threads");
         let mut f1 = vec![f64::NAN; one.symbolic.factor_val_count()];
         let mut f2 = vec![f64::NAN; par.symbolic.factor_val_count()];
-        supernodal_factorize(&one.symbolic, &a, &mut f1, &mut SupernodalContext::new(), Par::Seq).unwrap();
-        supernodal_factorize(&par.symbolic, &a, &mut f2, &mut SupernodalContext::new(), Par::Seq).unwrap();
+        supernodal_factorize(&one.symbolic, &a, &mut f1, &mut SupernodalContext::new(), 1).unwrap();
+        supernodal_factorize(&par.symbolic, &a, &mut f2, &mut SupernodalContext::new(), 1).unwrap();
         assert!(same_factor_seq(&one.symbolic, &f1, &f2), "{threads} threads: the kept symbolic differs");
     }
 }

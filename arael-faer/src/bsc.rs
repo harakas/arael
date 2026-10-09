@@ -53,6 +53,10 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
     /// covering `blk_row_idx`; block rows in range, strictly ascending
     /// within each block-column; `val_ptr` gaps equal to each stored
     /// tile's `row_width * col_width`, with nonzero dimensions.
+    ///
+    /// # Panics
+    ///
+    /// When the structure breaks any of those rules.
     #[track_caller]
     pub fn new_checked(
         row_part: Vec<I>,
@@ -399,6 +403,10 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
 impl<I: Index, T> SparseBlockColMat<I, T> {
     /// wraps a value buffer (length [`val_count`](SymbolicSparseBlockColMat::val_count))
     /// around a symbolic structure
+    ///
+    /// # Panics
+    ///
+    /// When `vals` is not `val_count` long.
     #[track_caller]
     pub fn new(symbolic: SymbolicSparseBlockColMat<I>, vals: Vec<T>) -> Self {
         assert!(vals.len() == symbolic.val_count());
@@ -495,6 +503,10 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
     /// [`val_count`](SymbolicSparseBlockColMat::val_count)). the
     /// per-iteration companion to a one-time `to_csc`: the pattern is
     /// fixed, so later iterations only need the values re-gathered.
+    ///
+    /// # Panics
+    ///
+    /// When `out` is not `val_count` long.
     pub fn csc_vals_into(&self, out: &mut [T]) {
         let sym = &self.symbolic;
         assert_eq!(out.len(), sym.val_count());
@@ -538,6 +550,10 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
     /// gathers a scalar CSC matrix into block form under the given
     /// partitions. a tile is stored iff any scalar entry falls inside
     /// it; unset scalars within a stored tile are zero.
+    ///
+    /// # Panics
+    ///
+    /// When a partition does not end at the matrix's dimension.
     #[track_caller]
     pub fn from_csc(
         csc: SparseColMatRef<'_, I, T>,
@@ -710,6 +726,10 @@ where
     ///
     /// Requires the symmetric convention: square, with equal row and column
     /// partitions. `y` is overwritten, not accumulated into.
+    ///
+    /// # Panics
+    ///
+    /// When `x` is not `ncols` long or `y` not `nrows` long.
     pub fn mul_symmetric_upper(&self, x: &[T], y: &mut [T]) {
         let sym = &self.symbolic;
         assert_eq!(x.len(), sym.ncols(), "x length must match the column count");

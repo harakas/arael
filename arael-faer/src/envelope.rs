@@ -77,6 +77,16 @@ pub enum EnvelopeError {
     NotPositiveDefinite,
 }
 
+impl core::fmt::Display for EnvelopeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            EnvelopeError::NotPositiveDefinite => f.write_str("a diagonal tile is not positive definite"),
+        }
+    }
+}
+
+impl std::error::Error for EnvelopeError {}
+
 /// One-time structural analysis of a block-CSC matrix `S`: the
 /// factor's envelope pattern and the map from each factor tile back to
 /// `S`'s value buffer. Reused across damped solves; only the values change.
@@ -133,6 +143,10 @@ pub struct EnvelopeSymbolic {
 /// so it is cheap enough to price the route before choosing it.
 ///
 /// f64 because the count overflows 32 bits on a system of any size.
+///
+/// # Panics
+///
+/// When `s` is not square.
 pub fn envelope_flops(s: &SymbolicSparseBlockColMat<crate::SparseIndex>) -> f64 {
     let nb = s.nblk_cols();
     assert_eq!(nb, s.nblk_rows(), "envelope flops need a square matrix");
@@ -160,6 +174,10 @@ impl EnvelopeSymbolic {
     /// Analyzes `s` (the symbolic structure of a symmetric block-CSC matrix
     /// stored as its upper block triangle, in natural order) and builds the
     /// envelope factor pattern.
+    ///
+    /// # Panics
+    ///
+    /// As [`with_panel_width`](Self::with_panel_width) does.
     pub fn new(s: &SymbolicSparseBlockColMat<crate::SparseIndex>) -> Self {
         Self::with_panel_width(s, None)
     }
@@ -173,6 +191,10 @@ impl EnvelopeSymbolic {
     /// sits on -- and it is what a caller should normally leave alone. An
     /// explicit width is for measuring the curve, and is clamped to a width
     /// that can actually be grouped.
+    ///
+    /// # Panics
+    ///
+    /// When `s` is not square, or not stored as its upper block triangle.
     pub fn with_panel_width(
         s: &SymbolicSparseBlockColMat<crate::SparseIndex>,
         panel_width: Option<usize>,
@@ -364,6 +386,10 @@ impl EnvelopeSymbolic {
 /// Numeric factorization `R^T R = S` into `factor` (laid out per
 /// [`EnvelopeSymbolic::factor_val_count`]). `s` must have the exact structure
 /// `sym` was built from. Reuses `sym` across damped solves.
+///
+/// # Panics
+///
+/// When `factor` is not `factor_val_count` long.
 pub fn envelope_factorize<T: SchurReal>(
     sym: &EnvelopeSymbolic,
     s: &SparseBlockColMat<crate::SparseIndex, T>,
@@ -486,6 +512,10 @@ pub fn envelope_factorize<T: SchurReal>(
 
 /// Solves `S x = rhs` in place given a factor produced by
 /// [`envelope_factorize`]. `rhs` has length [`EnvelopeSymbolic::dim`].
+///
+/// # Panics
+///
+/// When `rhs` is not `dim` long.
 pub fn envelope_solve<T: SchurReal>(sym: &EnvelopeSymbolic, factor: &[T], rhs: &mut [T]) {
     assert_eq!(rhs.len(), sym.dim());
     let nb = sym.nblocks();

@@ -65,6 +65,16 @@ pub enum CgError {
     IndefiniteBlock(usize),
 }
 
+impl core::fmt::Display for CgError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CgError::IndefiniteBlock(b) => write!(f, "diagonal block {b} is not positive definite"),
+        }
+    }
+}
+
+impl std::error::Error for CgError {}
+
 /// Block-Jacobi preconditioner: the Cholesky factor of every diagonal block.
 #[derive(Debug)]
 pub struct BlockJacobi<T> {

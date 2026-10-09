@@ -32,10 +32,11 @@
 //!   with no band and no small degrees, where minimum degree has nothing to
 //!   chew on. faer offers AMD, natural, or a custom permutation; this computes
 //!   the custom one.
-//! - **Worker threads** ([`pool`]) -- the threads the stages above that do
-//!   not run on faer's kernels dispatch to, and that arael's sweeps share.
-//!   Spawned on first use, parked between dispatches, one dispatch at a
-//!   time. faer's own kernels run on rayon's pool.
+//! - **Worker threads** ([`pool`], inner API shared with arael) -- the
+//!   threads the stages above that do not run on faer's kernels dispatch
+//!   to, and that arael's sweeps share. Spawned on first use, parked
+//!   between dispatches, one dispatch at a time. faer's own kernels run on
+//!   rayon's pool.
 //!
 //! # bsc -- block CSC
 //!
@@ -95,9 +96,9 @@
 //! * [`SchurContext`](schur::SchurContext) -- reusable workspace across
 //!   iterations; `set_threads` runs the reduction and the
 //!   back-substitution on the pool, one range of S's block columns per
-//!   thread, same sums at any count; `set_chunk_columns` sets how many
-//!   columns a thread forms at a time; `enable_timing` breaks a
-//!   reduction down by stage
+//!   thread, the same answer to rounding at any count; `set_chunk_columns`
+//!   sets how many columns a thread forms at a time; `enable_timing`
+//!   breaks a reduction down by stage
 //! * [`FIXED_SHAPES`](schur::FIXED_SHAPES) /
 //!   [`has_fixed_kernel`](schur::has_fixed_kernel) -- the tile shapes with a
 //!   fully unrolled GEMM kernel (the ones SLAM systems use: 3/6/7/9-wide
@@ -175,9 +176,9 @@
 //!   natural one
 //! * [`supernodal_factorize`](supernodal::supernodal_factorize) -- numeric:
 //!   `L L^T = A` into a factor buffer, left-looking over the descendant
-//!   graph. Its `Par` runs independent subtrees on separate threads and
-//!   hands the pool to the dense kernels of the panels too big to chunk;
-//!   the result is bit-identical at any thread count
+//!   graph. Its thread count runs independent subtrees on separate threads
+//!   and hands the pool to the dense kernels of the panels too big to
+//!   chunk; the result matches the sequential one to rounding
 //! * [`supernodal_solve`](supernodal::supernodal_solve) -- solve `A x = rhs`
 //!   from the factor
 //! * [`SupernodalParams`](supernodal::SupernodalParams) -- amalgamation table,
@@ -220,12 +221,17 @@ pub type SparseIndex = u32;
 /// reaches. Widening the library is this alias and a rebuild.
 pub type ValueIndex = u32;
 
-/// Convert a `usize` offset into a [`ValueIndex`].
+/// Convert a `usize` offset into a [`ValueIndex`]. Inner API, shared with
+/// arael.
 ///
 /// Checked rather than assumed: overflowing would put a value in the wrong
 /// slot instead of failing, which is a silently wrong matrix. Goes through
 /// `TryFrom` so widening the alias needs no edit here -- and costs nothing
 /// once the range is statically known.
+///
+/// # Panics
+///
+/// When `p` does not fit a [`ValueIndex`].
 #[inline]
 pub fn value_index(p: usize) -> ValueIndex {
     ValueIndex::try_from(p).unwrap_or_else(|_| {
@@ -242,7 +248,11 @@ pub fn value_index(p: usize) -> ValueIndex {
 /// wide as the key count asks for, 8 to 16 bits, so the histogram holds
 /// about one counter per key; the passes stop at the highest bit any key
 /// sets in the range, and a digit every key shares costs its count and
-/// no placement.
+/// no placement. Inner API, shared with arael.
+///
+/// # Panics
+///
+/// When `bits.end` exceeds 64, or there are more than `u32::MAX` keys.
 pub fn sort_keys(keys: &mut Vec<u64>, bits: core::ops::Range<u32>) {
     assert!(bits.end <= 64 && keys.len() <= u32::MAX as usize);
     let n = keys.len() as u32;

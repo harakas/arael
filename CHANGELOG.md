@@ -14,6 +14,7 @@ is cut.
   a count set in code still wins.
 - `LmConfig::max_accepted_iters` stops a solve after that many accepted
   steps.
+- arael-faer's error types implement `Display` and `Error`.
 - The solve result reports what the threads did and where the time
   went.
 - `Context`: where a solve keeps its working data -- the Hessian
