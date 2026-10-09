@@ -93,214 +93,98 @@ impl fmt::Display for G<f32> {
 // LM solver types
 // ---------------------------------------------------------------------------
 
-/// Configuration for the Levenberg-Marquardt solver.
-///
-/// Choosing good parameters depends heavily on the problem structure:
-///
-/// - **Well-conditioned, near minimum** (e.g. re-solving after a small
-///   perturbation): use small `initial_lambda` (1e-6), tight precision, few
-///   iterations. The Gauss-Newton step is nearly optimal.
-///
-/// - **Far from minimum** (e.g. first solve from a rough initial guess):
-///   use larger `initial_lambda` (1e-3 or higher) so early steps are more
-///   gradient-descent-like and don't overshoot. Increase `max_iters`.
-///
-/// - **Ill-conditioned / many local minima** (e.g. SLAM with outliers):
-///   use graduated optimization (multiple passes with increasing constraint
-///   weights) rather than tuning LM parameters. The robust cost function
-///   handles outliers; LM just needs enough iterations per pass.
-///
-/// - **Interactive / real-time** (e.g. sketch editor drag): use small
-///   `initial_lambda` (1e-6), moderate `max_iters` (50-100), loose precision.
-///   Speed matters more than the last decimal of convergence.
-///
-/// The defaults are a reasonable middle ground. For critical applications,
-/// experiment with the parameters on representative problem instances.
+/// Settings of a solve: when it stops, how it damps, how many threads it
+/// uses, what it reports. [`conservative`](Self::conservative) is the
+/// default; the other presets change a few of its fields.
 #[derive(Clone)]
 pub struct LmConfig<T: Float> {
-    /// Absolute cost improvement threshold. A step counts as "small" when
-    /// the cost decrease is below this OR the relative improvement is
-    /// below `rel_precision` (either criterion suffices -- abs alone can
-    /// stop a solve whose cost is tiny, rel alone one that plateaus at a
-    /// large cost). After `patience` consecutive small steps, the solver
-    /// terminates.
+    // Stopping rules.
+
+    /// A step is small when the cost drops by less than this, or by less
+    /// than `rel_precision` of the cost. `patience` small steps in a row
+    /// stop the solve.
     pub abs_precision: T,
-    /// Relative cost improvement threshold. A step counts as "small" when
-    /// `(old_cost - new_cost) / old_cost < rel_precision` (OR the absolute
-    /// criterion above). Note the badly-scaled-problem hazard: a solve at
-    /// cost 1e9 improving 1e4 per step is relatively small and will stop;
-    /// rescale the problem or lower `rel_precision`.
+    /// The relative half of the small-step test: a cost drop below this
+    /// fraction of the cost is small. A solve at a large cost that improves
+    /// slowly stops under it; lower it or rescale the problem.
     pub rel_precision: T,
-    /// Maximum number of LM iterations (including inner damping retries).
-    pub max_iters: usize,
-    /// Minimum iterations before termination is allowed. Ensures the solver
-    /// makes at least this many accepted steps before checking convergence.
-    pub min_iters: usize,
-    /// Number of consecutive "small improvement" steps before stopping.
-    /// Higher values make the solver more conservative about terminating.
+    /// Small steps in a row that stop the solve.
     pub patience: usize,
-    /// Initial damping parameter lambda. Small values (1e-6) behave like
-    /// Gauss-Newton (fast near minimum, may overshoot far away). Large
-    /// values (1e-1) behave like gradient descent (slow but stable). The
-    /// solver adapts lambda automatically during the solve.
-    pub initial_lambda: T,
-    /// Stop immediately when cost drops to or below this value. Set to 0.0
-    /// to disable (only terminate via precision/patience). Useful when you
-    /// know the target cost (e.g. constraint satisfaction where 0 is perfect).
+    /// Iterations the stopping rules wait before they apply. `time_limit`
+    /// does not wait.
+    pub min_iters: usize,
+    /// Iterations, damping retries included, after which the solve stops.
+    pub max_iters: usize,
+    /// Stop as soon as the cost is at or below this. `0.0` turns it off.
     pub cost_threshold: T,
-    /// Stop at a stationary point: `max_i |g_i| / sqrt(H_ii) <= gradient_tolerance`,
-    /// the Jacobi-scaled gradient max-norm. `None` (the default) disables the test.
-    ///
-    /// This is the only criterion that tests for an actual STATIONARY POINT.
-    /// The cost tests (`abs_precision` / `rel_precision`) only say the cost has
-    /// stopped improving, which can happen while the solve is still drifting
-    /// along a near-null direction -- a gauge freedom is exactly that.
-    ///
-    /// Each component is divided by the square root of its Hessian diagonal (the
-    /// column norm of J), so the tolerance is invariant to how the parameters
-    /// are scaled -- reparametrize a pose from metres to millimetres and the
-    /// same value still means the same thing, and a value transfers across
-    /// problems rather than riding with their units. Checked after each
-    /// assembly; respects `min_iters`.
+    /// Stop at a stationary point: `max_i |g_i| / sqrt(H_ii)` at or below
+    /// this. The division by the Hessian diagonal makes the value
+    /// independent of the parameters' units. The only rule that tests for
+    /// a stationary point; the cost rules only see the cost stop moving.
+    /// `None` turns it off.
     pub gradient_tolerance: Option<T>,
-    /// Stop when the parameters stop moving:
-    /// `|step|_2 <= parameter_tolerance * (|x|_2 + parameter_tolerance)`.
-    /// `None` (the default) disables the test.
-    ///
-    /// Relative to the size of the parameters, so it is scale-free; the
-    /// trailing `+ parameter_tolerance` keeps it sane as `|x|` approaches zero.
-    /// It is a different question from "has the cost stopped improving": the
-    /// cost can plateau while the step is still doing real work, and the step
-    /// can vanish while the cost is still creeping.
-    ///
-    /// Checked on an ACCEPTED step (a rejected one does not move the
-    /// parameters), before `advance()` re-centers them -- re-centering zeroes
-    /// the rotation deltas, which would understate `|x|`. Respects `min_iters`.
+    /// Stop when an accepted step is small against the parameters:
+    /// `|step| <= tol * (|x| + tol)`. `None` turns it off.
     pub parameter_tolerance: Option<T>,
-    /// Stop when the LM model predicts no meaningful improvement is left:
-    /// `predicted_reduction <= predicted_reduction_tolerance * cost`.
-    /// `None` (the default) disables the test.
-    ///
-    /// The predicted reduction is the linear model's own estimate of the cost
-    /// drop the step will produce, `(delta.g + lambda delta.D.delta) / 2` -- the
-    /// same quantity the gain ratio divides by. Unlike the cost tests, which
-    /// look back at what a step actually did, this looks forward: near the
-    /// optimum the model expects almost nothing, so the solve stops one
-    /// iteration before the confirming step would.
-    ///
-    /// Checked on an ACCEPTED step (where lambda was appropriate, so the model
-    /// is trustworthy), and it respects `min_iters`.
+    /// Stop when, after an accepted step, the model predicts less than this
+    /// fraction of the cost as the next gain. `None` turns it off.
     pub predicted_reduction_tolerance: Option<T>,
-    /// Wall-clock budget for the whole solve. `None` (the default) means no
-    /// limit, and the solver never reads the clock for it.
-    ///
-    /// This is a hard ceiling and it OVERRIDES `min_iters`: when the budget
-    /// is spent the solve stops wherever it is, with
-    /// [`LmStatus::TimeLimit`]. The parameters returned are the last
-    /// ACCEPTED step -- a rejected trial never reaches `LmResult::x` -- so
-    /// the result is always a usable answer, just not a converged one.
-    ///
-    /// The budget is checked before each assembly and before each damped
-    /// attempt, so the overrun is bounded by one linear solve, not by one
-    /// full iteration. It cannot preempt a single factorization: on a
-    /// problem whose first factorization already exceeds the budget, the
-    /// solve returns after it, having done one assembly and no steps.
-    ///
-    /// For a fixed-rate system (`Some(Duration::from_millis(200))` on a 4 Hz
-    /// loop) this is the difference between a late answer and a missed
-    /// frame.
+    /// Wall-clock budget for the solve. When it is spent the solve returns
+    /// the last accepted step with [`LmStatus::TimeLimit`], whatever
+    /// `min_iters` says. Checked before each assembly and each damped
+    /// attempt, so one factorization can overrun it. `None` turns it off,
+    /// and then the solve never reads the clock.
     pub time_limit: Option<Duration>,
-    /// Floor under the damping scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`.
-    /// `None` (the default) leaves the scale at `H[i,i]`, which is the classic
-    /// multiplicative damping `(1 + lambda) * H[i,i]`.
-    ///
-    /// With a floor, a parameter of zero curvature still gets `lambda *
-    /// min_diagonal` of damping, so the system stays positive definite and the
-    /// parameter simply does not move (its gradient is zero too). Without one the
-    /// damped diagonal is `(1 + lambda) * 0 = 0` and the solve ends with
-    /// [`SolveFailureKind::DegenerateDiagonal`].
-    ///
-    /// **A zero diagonal means the system is badly formulated: a parameter that
-    /// nothing constrains. This is a bandaid, and it should be avoided.** It lets
-    /// such a solve finish instead of stopping, but the parameter it damps through
-    /// is unconstrained and its value is meaningless -- the floor does not
-    /// determine it, it only stops it from taking the solve down. Fix the model:
-    /// constrain the parameter, hold it fixed (`Param::fixed`), or leave the entity
-    /// out. Reach for this only when the alternative is worse, e.g. a residual that
-    /// switches itself off (a `branch` guarding an undefined observation, a
-    /// saturated robustifier) can leave an entity with nothing reaching it for one
-    /// iteration and pick it up again on the next.
-    ///
-    /// 1e-6 is a reasonable value.
-    ///
-    /// Rescues a ZERO diagonal only. NEGATIVE and NaN stay fatal: `J^T J`'s
-    /// diagonal is a sum of squares, so either one means the assembly is poisoned.
-    pub min_diagonal: Option<T>,
-    /// Minimum damping lambda: LM never decreases lambda below this after
-    /// an accepted step (clamped from below to machine epsilon). The
-    /// default 1e-12 effectively means "no floor" for well-posed problems.
-    /// Raise it (e.g. 1e-6) for problems with gauge freedom or otherwise
-    /// near-singular Hessians -- bundle adjustment with its 7-DOF gauge is
-    /// the canonical case -- where near-zero damping produces
-    /// non-positive-definite damped systems and catastrophic Gauss-Newton
-    /// overshoots along the near-null directions.
+
+    // Damping.
+
+    /// The damping lambda the solve starts with. Small (1e-6) is close to
+    /// Gauss-Newton, large (1e-1) close to gradient descent; the driver
+    /// adapts it from there.
+    pub initial_lambda: T,
+    /// Lambda never drops below this after an accepted step. Raise it
+    /// (1e-6) for a near-singular problem, such as a bundle adjustment with
+    /// its gauge freedom.
     pub lambda_floor: T,
-    /// Threads for the linear solve and for the cost and assembly sweeps.
-    /// `1` (the default) is sequential;
-    /// `n > 1` uses `n`; `0` uses every core.
-    ///
-    /// Requires the `threads` cargo feature. Without it, anything other than 1 is
-    /// ignored with a warning and the solve stays sequential.
-    ///
-    /// Threading has overhead: whether it helps, and by how much, depends on the
-    /// model and its number of parameters.
-    ///
-    /// The threaded sweeps assemble into per-thread block stores gathered
-    /// serially, so they match the sequential ones to rounding, not to the
-    /// bit. Of the linear backends only `SparseFaer` reads the count. Its
-    /// Schur reduction and back-substitution run on arael's own workers,
-    /// one range of the reduced system's block columns each, and give the
-    /// same answer at any count; of the analysis, the route pricing's
-    /// symbolic factorizations run side by side, the rest is sequential.
-    ///
-    /// The default is `ARAEL_NUM_THREADS` when the environment sets it,
-    /// else 1 ([`threads::default_num_threads`](crate::threads::default_num_threads));
-    /// a count set here wins over it.
-    pub num_threads: usize,
-    /// Threads for the cost and assembly sweeps alone, when
-    /// they want a count of their own. `None` (the default) leaves them on
-    /// [`num_threads`](Self::num_threads); `Some(n)` gives the sweeps `n`
-    /// and leaves the linear solve on `num_threads`. Same scale: `1` is
-    /// sequential, `0` is every core.
-    ///
-    /// The two phases scale differently -- the sweeps split by constraint
-    /// count and the factorization by its elimination tree -- so the count
-    /// that suits one need not suit the other.
-    pub assembly_threads: Option<usize>,
-    /// Print per-iteration cost, lambda, and timing to stderr. Very useful
-    /// for understanding how the solver behaves with a given parameter set --
-    /// check the output to validate convergence and tune the config.
-    pub verbose: bool,
-    /// The damping-schedule strategy: how lambda evolves across the solve
-    /// (see [`LambdaDriver`]). Defaults to [`DefaultLambdaDriver`], the
-    /// classic fixed-multiplier schedule; set another (e.g.
-    /// [`NielsenLambdaDriver`]) with [`LmConfig::with_driver`]. The driver
-    /// reads `initial_lambda` and `lambda_floor` from this config at solve
-    /// start, so those two fields configure whichever driver is in place.
+    /// Floor under the damping scale: `H_ii + lambda * max(H_ii, floor)`.
+    /// Lets a parameter with a zero diagonal through the factorization,
+    /// where the solve would otherwise end with
+    /// [`SolveFailureKind::DegenerateDiagonal`]. Such a parameter is
+    /// unconstrained and its value means nothing: constrain it or fix it
+    /// instead, and use this only for a residual that switches itself off
+    /// for an iteration. 1e-6 is a reasonable value. `None` turns it off.
+    pub min_diagonal: Option<T>,
+    /// How lambda moves from one attempt to the next (see
+    /// [`LambdaDriver`]). [`DefaultLambdaDriver`] by default,
+    /// [`NielsenLambdaDriver`] through [`with_nielsen`](Self::with_nielsen).
+    /// The driver reads `initial_lambda` and `lambda_floor` when the solve
+    /// starts.
     pub driver: Box<dyn LambdaDriver<T>>,
-    /// Watch the solve: called once per damped attempt with an
-    /// [`LmIter`], and can stop the solve (see [`LmObserver`]). `None`
-    /// (the default) costs nothing. Set with
-    /// [`LmConfig::with_observer`].
-    pub observer: Option<Box<dyn LmObserver<T>>>,
-    /// Gather per-phase wall-clock timing. When `true`, [`LmResult::timing`]
-    /// is `Some(LmTiming)`; when `false` (the default) it is `None` and the
-    /// solver never reads the clock -- zero overhead. Enable it to profile
-    /// where a solve spends its time (assembly, factorization, cost
-    /// evaluation, re-centering); the first assembly and first factorization
-    /// are recorded separately because they also establish the sparsity
-    /// pattern and symbolic factorization.
+
+    // Threads.
+
+    /// Threads for the sweeps and the linear solve: `1` is sequential, `n`
+    /// uses `n`, `0` every core. Needs the `threads` feature; without it any
+    /// other count is ignored with a warning. Threaded results match the
+    /// sequential ones to rounding. The default is `ARAEL_NUM_THREADS` when
+    /// the environment sets it, else 1
+    /// ([`default_num_threads`](crate::threads::default_num_threads)).
+    pub num_threads: usize,
+    /// A thread count for the cost and assembly sweeps alone, on the same
+    /// scale; the linear solve keeps `num_threads`. `None` uses
+    /// `num_threads` for both.
+    pub assembly_threads: Option<usize>,
+
+    // Diagnostics.
+
+    /// Print each iteration's cost, lambda and timing to stderr.
+    pub verbose: bool,
+    /// Record where the time went; [`LmResult::timing`] is then `Some`.
+    /// Off, the solve never reads the clock.
     pub gather_timing: bool,
+    /// Called once per damped attempt with an [`LmIter`]; can stop the
+    /// solve (see [`LmObserver`]). `None` costs nothing.
+    pub observer: Option<Box<dyn LmObserver<T>>>,
 }
 
 impl<T: Float> Default for LmConfig<T> {
@@ -337,18 +221,12 @@ impl<T: Float + std::fmt::Debug> std::fmt::Debug for LmConfig<T> {
 }
 
 impl<T: Float> LmConfig<T> {
-    /// General-purpose defaults: moderate initial damping, no early-termination
-    /// tests, no floors. The starting point when nothing is known about the
-    /// problem's conditioning. [`Default`] returns this.
-    ///
-    /// Sets: `abs_precision` 1e-6, `rel_precision` 1e-4, `max_iters` 100,
-    /// `min_iters` 5, `patience` 3, `initial_lambda` 1e-4, `lambda_floor` 1e-12
-    /// (f64) or `f32::EPSILON` ~1.2e-7 (f32), the fixed-ladder
-    /// [`DefaultLambdaDriver`]. All
-    /// tolerances (`gradient_tolerance`, `parameter_tolerance`,
-    /// `predicted_reduction_tolerance`) and `min_diagonal` are off; `num_threads`
-    /// is `ARAEL_NUM_THREADS` when the environment sets it, else 1
-    /// ([`threads::default_num_threads`](crate::threads::default_num_threads)).
+    /// The defaults; [`Default`] returns this. `abs_precision` 1e-6,
+    /// `rel_precision` 1e-4, `patience` 3, `min_iters` 5, `max_iters` 100,
+    /// `initial_lambda` 1e-4, `lambda_floor` 1e-12 (f64) or `f32::EPSILON`
+    /// (f32), the [`DefaultLambdaDriver`]; the optional stopping rules and
+    /// `min_diagonal` off; `num_threads` from
+    /// [`default_num_threads`](crate::threads::default_num_threads).
     pub fn conservative() -> Self {
         LmConfig {
             abs_precision: T::from(1e-6).unwrap(),
@@ -373,18 +251,10 @@ impl<T: Float> LmConfig<T> {
         }
     }
 
-    /// WIP: the gradient-termination threshold is provisional, not yet
-    /// validated against a benchmark.
-    ///
-    /// For a good starting estimate near a quadratic minimum, modeled on the
-    /// well-conditioned slam benchmark: near-Gauss-Newton damping, a gradient
-    /// stop, and low iteration floors so it stops as soon as it has converged.
-    /// Fast, but less forgiving of a poor initialization.
-    ///
-    /// Changes from [`conservative`](Self::conservative): `initial_lambda` 1e-8
-    /// (the damping the slam benchmark runs at -- `lambda` scales the diagonal,
-    /// so this is a fraction of it, not an absolute), `gradient_tolerance` 1e-4
-    /// (provisional), `min_iters` 1, `patience` 1.
+    /// For a start near the minimum: near-Gauss-Newton damping, the gradient
+    /// stop, no iteration floor. Changes from
+    /// [`conservative`](Self::conservative): `initial_lambda` 1e-8,
+    /// `gradient_tolerance` 1e-4, `min_iters` 1, `patience` 1.
     pub fn well_conditioned() -> Self {
         LmConfig {
             initial_lambda: T::from(1e-8).unwrap(),
@@ -395,20 +265,10 @@ impl<T: Float> LmConfig<T> {
         }
     }
 
-    /// WIP: modeled on BAL, not yet validated as a general preset.
-    ///
-    /// For stiff, far-from-solution, or gauge-degenerate problems, modeled on
-    /// the BAL bundle-adjustment benchmark: the gain-ratio
-    /// [`NielsenLambdaDriver`] adapts damping to how well each step's quadratic
-    /// model held. Robust, but slower than
-    /// [`well_conditioned`](Self::well_conditioned).
-    ///
-    /// Changes from [`conservative`](Self::conservative): the Nielsen driver.
-    /// BAL needs no raised `lambda_floor` (measured identical to the default,
-    /// since the gain ratio never marches lambda that low) and no
-    /// `min_diagonal`. `initial_lambda` stays at 1e-4, BAL's default; the
-    /// driver adapts it, so tune it to the problem only if the first steps
-    /// stall.
+    /// For a stiff, far-from-solution or gauge-degenerate problem: the
+    /// gain-ratio [`NielsenLambdaDriver`] sets the damping from how well
+    /// each step's model held. Changes from
+    /// [`conservative`](Self::conservative): the driver.
     pub fn ill_conditioned() -> Self {
         LmConfig {
             driver: Box::new(NielsenLambdaDriver::default()),
