@@ -180,6 +180,15 @@
 //! with the landmarks fixed the localization Hessian is
 //! block-tridiagonal, and arael solves it with its band Cholesky.
 //!
+//! <picture>
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/threads-dark.svg">
+//!   <img alt="Two grouped bar charts, landmark SLAM at 1200 poses and bundle adjustment on Ladybug-372 on an AMD Ryzen 9 7950X3D: one complete iteration at 1, 2, 4 and 8 threads for arael f64, arael f32 and Ceres" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.9.0/threads-light.svg">
+//! </picture>
+//!
+//! The same iteration at one to eight threads, on the landmark-SLAM
+//! benchmark and on bundle adjustment, against Ceres on the same machine
+//! (see [Threads](#threads)).
+//!
 //! # Scope
 //!
 //! Arael is a nonlinear optimization framework, not a complete SLAM or
@@ -1415,7 +1424,8 @@
 //! the reduced system's block columns each; and the factorization's
 //! large panels, in windows. A threaded solve matches a sequential one
 //! to rounding, not to the bit. `assembly_threads` gives the sweeps a
-//! count of their own.
+//! count of their own. The threads chart under [Benchmarks](#benchmarks)
+//! shows what the threads buy.
 //!
 //! The model is read from every thread at once, so a root must be
 //! [`Sync`]. A root that is not, or that should stay sequential, opts
