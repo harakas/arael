@@ -27,7 +27,6 @@ parameter vector, and `SolverKind` names one at run time.
 | `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
 | `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
 | `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL |
-| `SparseCoo::new()` / `SparseDirectCsc::new()` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. (the root's `.solve_sparse()` method is faer) |
 
 ## Basic usage
 

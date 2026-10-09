@@ -495,7 +495,6 @@ match the root's precision: on an `#[arael(root, f32)]` model they take
 | `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` (feature `eigen`) |
 | `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
 | `SparseCholmodSupernodal::new()` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
-| `SparseCoo::new()` / `SparseDirectCsc::new()` | COO / direct-CSC assembly over a dense solve -- validation baselines, deprecated in favour of `SparseFaer` (the root's `.solve_sparse()`) |
 
 ### Damping-schedule drivers
 
