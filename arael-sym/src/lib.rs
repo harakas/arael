@@ -46,7 +46,8 @@
 //! Every expression has type [`E`], defined as
 //! `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) --
 //! the `.clone()` calls `sym!` inserts don't duplicate the
-//! expression tree.
+//! expression tree. Shared nodes stay shared, so an expression is a
+//! DAG; [`E::for_each_node`] visits each node once.
 //!
 //! ```
 //! use arael_sym::*;
@@ -121,6 +122,9 @@
 //! //   2 * __x0
 //! ```
 //!
+//! [`cse_scoped`] does the same with [`select`] arms as scopes: work used
+//! only inside an arm stays inside it.
+//!
 //! ## Vectors and Matrices
 //!
 //! ```
@@ -134,12 +138,17 @@
 //! assert_eq!(dot, "x + 2 * y + 3 * z");
 //! ```
 //!
+//! [`SymVec`] and [`SymMat`] are plain containers of expressions for
+//! general algebra. The [`geo`] types below mirror the runtime geometry
+//! API instead; [`vectsym`] and [`matrixsym`] are their any-size members.
+//!
 //! ## Geometric primitives
 //!
-//! Fixed-shape companions to the runtime `vect{2,3}f` / `matrix{2,3}f` types
-//! used inside `#[arael::model]` constraint bodies. They live in
+//! Companions to the runtime `vect` / `matrix` / `quatern` / `transform3`
+//! types used inside `#[arael::model]` constraint bodies. They live in
 //! [`geo`] and are re-exported at the crate root:
-//! [`vect2sym`], [`vect3sym`], [`matrix2sym`], [`matrix3sym`], [`quaternsym`].
+//! [`vect2sym`], [`vect3sym`], [`matrix2sym`], [`matrix3sym`],
+//! [`quaternsym`], [`transform3sym`], [`vectsym`], [`matrixsym`].
 //!
 //! ```
 //! use arael_sym::*;
@@ -291,6 +300,8 @@
 //! `clamp` has pass-through derivative (as if clamping were not there).
 //! `branch(q, a, b)` picks `a` when `q >= 0` else `b`, and evaluates
 //! only the taken side; its derivative is the taken side's.
+//! [`select`] picks one of several arms by an integer index and evaluates
+//! only that arm.
 //!
 //! `min`, `max`, and `sign` build on these. `min` and `max` return the
 //! smaller/larger of two arguments and differentiate the taken side; at a
@@ -314,6 +325,13 @@
 //!     assert!((val - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
 //! };
 //! ```
+//!
+//! ## Robust losses
+//!
+//! [`loss_huber`], [`loss_cauchy`], [`loss_tukey`], [`loss_geman_mcclure`]
+//! and [`loss_soft_l1`] take the squared residual norm and the squared
+//! scale and return the robustified cost. [`loss_select`] picks one of
+//! them by a runtime index.
 
 #![allow(clippy::should_implement_trait)]
 
@@ -343,6 +361,17 @@ impl E {
     fn new(expr: Expr) -> E {
         E(Rc::new(expr))
     }
+}
+
+/// Wraps the expression as it is; nothing is simplified. The constructors
+/// and operators simplify, this does not.
+impl From<Expr> for E {
+    fn from(expr: Expr) -> E {
+        E::new(expr)
+    }
+}
+
+impl E {
 
     /// Return true if this expression is the literal constant zero.
     /// After `simplify`, a structurally-zero expression (e.g. the
@@ -353,57 +382,16 @@ impl E {
         matches!(&*self.0, Expr::Const(v) if *v == 0.0)
     }
 
-    /// Collect all symbol names referenced in this expression.
+    /// The symbol names in this expression: [`free_vars`](Expr::free_vars)
+    /// as a `HashSet`.
     pub fn symbols(&self) -> std::collections::HashSet<String> {
-        let mut out = std::collections::HashSet::new();
-        self.collect_symbols(&mut out);
-        out
+        self.free_vars().into_iter().collect()
     }
 
-    fn collect_symbols(&self, out: &mut std::collections::HashSet<String>) {
-        match &*self.0 {
-            Expr::Sym(s) => { out.insert(s.clone()); }
-            Expr::Const(_) | Expr::NamedConst { .. } => {}
-            Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
-            | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
-            | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
-            | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
-            | Expr::Sqrt(a) | Expr::Abs(a)
-            | Expr::Heaviside(a) => { a.collect_symbols(out); }
-            Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
-            | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
-                a.collect_symbols(out);
-                b.collect_symbols(out);
-            }
-            Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => {
-                a.collect_symbols(out);
-                b.collect_symbols(out);
-                c.collect_symbols(out);
-            }
-            Expr::Select { index, arms, default } => {
-                index.collect_symbols(out);
-                for a in arms { a.collect_symbols(out); }
-                if let Some(d) = default { d.collect_symbols(out); }
-            }
-            Expr::Func { params, kind, args, .. } => {
-                // Captured symbols: a function body may reference symbols
-                // beyond its params (eval resolves them from the outer
-                // vars map), so they are free symbols of this expression.
-                // Params themselves are bound.
-                if let Some(body) = kind.body() {
-                    let mut inner = std::collections::HashSet::new();
-                    body.collect_symbols(&mut inner);
-                    for n in inner {
-                        if !params.contains(&n) { out.insert(n); }
-                    }
-                }
-                for arg in args { arg.collect_symbols(out); }
-            }
-        }
-    }
-
-    /// Substitute symbols in this expression. Each pair `(from, to)` replaces
-    /// occurrences of `from` with `to`. Returns a new expression.
+    /// Replace each `from` by `to` and rebuild the expression through the
+    /// simplifying operators, so the result is simplified. [`subs`](Expr::subs)
+    /// replaces one variable by name; [`cse::replace`] and
+    /// [`cse::replace_many`] replace exactly, without simplifying.
     pub fn substitute(&self, subs: &[(E, E)]) -> E {
         for (from, to) in subs {
             if self == from { return to.clone(); }
@@ -886,6 +874,11 @@ impl AsVarName for &E {
     fn var_expr(&self) -> E { (*self).clone() }
 }
 
+/// An `E` names a variable when it is a symbol.
+///
+/// # Panics
+///
+/// `var_name` panics on anything but a symbol.
 impl AsVarName for E {
     fn var_name(&self) -> &str {
         match self.as_ref() {
@@ -1262,6 +1255,9 @@ pub enum FunctionRef {
 /// Adding a new `pub fn foo` above should add an entry here as well; every
 /// string-based dispatcher (the parser, the macro's constraint/fit
 /// dispatchers, user-facing autocompleters) reads from this one table.
+///
+/// The same names are written out in the [`parse`] doc and in
+/// docs/SYM.md ("Built-in functions recognised"): keep the three in sync.
 pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     // Unary trig
     ("sin", FunctionRef::Unary(sin)),
@@ -1356,7 +1352,7 @@ pub fn function_names() -> impl Iterator<Item = &'static str> {
 ///   [`simple_func2`] / [`extern_func1`] / [`extern_func2`]. The bag
 ///   invokes it once with placeholder symbols to extract name, params,
 ///   and kind.
-/// - [`addN`](Self::addN) -- register an n-ary closure over `Vec<E>`.
+/// - [`add_n`](Self::add_n) -- register an n-ary closure over `Vec<E>`.
 ///   Pairs with [`simple_func`] / [`simple_func_derivs`] /
 ///   [`extern_func`]. No upper arity bound.
 /// - [`add`](Self::add) -- register an already-formed `Expr::Func`
@@ -1430,7 +1426,7 @@ impl FunctionBag {
     /// constructors on placeholder args).
     ///
     /// For registering closures directly, use [`add1`](Self::add1) /
-    /// [`add2`](Self::add2) / [`addN`](Self::addN).
+    /// [`add2`](Self::add2) / [`add_n`](Self::add_n).
     ///
     /// Returns `Err` if `e` is not an `Expr::Func`.
     pub fn add(&mut self, e: E) -> Result<(), String> {
@@ -1476,20 +1472,28 @@ impl FunctionBag {
     /// return (`impl Fn(Vec<E>) -> E`).
     ///
     /// ```ignore
-    /// bag.addN(4, simple_func("blend", 4, |args: Vec<E>|
+    /// bag.add_n(4, simple_func("blend", 4, |args: Vec<E>|
     ///     args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
     /// )).unwrap();
     /// ```
-    #[allow(non_snake_case)]
-    pub fn addN<F>(&mut self, arity: usize, f: F) -> Result<(), String>
+    pub fn add_n<F>(&mut self, arity: usize, f: F) -> Result<(), String>
     where F: FnOnce(std::vec::Vec<E>) -> E
     {
         let placeholders: std::vec::Vec<E> =
             (0..arity).map(|i| symbol(&format!("__a{i}"))).collect();
         let e = f(placeholders);
-        let (name, params, kind) = extract_func_template(e, "FunctionBag::addN")?;
+        let (name, params, kind) = extract_func_template(e, "FunctionBag::add_n")?;
         self.table.insert(name, BagFunction { params, kind });
         Ok(())
+    }
+
+    /// Former name of [`add_n`](Self::add_n).
+    #[deprecated(since = "0.9.0", note = "renamed to add_n")]
+    #[allow(non_snake_case)]
+    pub fn addN<F>(&mut self, arity: usize, f: F) -> Result<(), String>
+    where F: FnOnce(std::vec::Vec<E>) -> E
+    {
+        self.add_n(arity, f)
     }
 
     /// Convenience: register a symbolic function from an explicit

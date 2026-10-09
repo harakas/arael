@@ -343,22 +343,21 @@ fn count_divisors(roots: &[&E], scoped: bool, facts: &mut Facts) -> HashMap<Key,
     counts
 }
 
+/// Replace every subexpression equal to `target` by `replacement`, without
+/// simplifying. A product target also matches inside a larger product by
+/// its factors: replacing `x * y` in `x * z * y` gives `z * replacement`.
+/// [`replace_many`] does several targets in one walk but matches whole
+/// nodes only; [`E::substitute`] is the simplifying form.
+pub fn replace(e: &E, target: &E, replacement: &E) -> E {
+    replace_memo(e, target, replacement, &mut Memo::new())
+}
+
 /// A memo of one rewrite over a batch, keyed by node identity and
 /// holding the node with its rewrite: a shared subtree is rewritten
 /// once, and an address cannot be reused while the memo lives.
 type Memo = HashMap<*const Expr, (E, E)>;
 
-/// Replace all occurrences of a sub-expression with another in the given
-/// expression.
-///
-/// Performs a structural walk of the expression tree, replacing every node
-/// that is equal to `target` with `replacement`. For product targets, also
-/// detects when the target's factors are a subset of a larger product.
-pub fn replace_pub(e: &E, target: &E, replacement: &E) -> E {
-    replace(e, target, replacement, &mut Memo::new())
-}
-
-fn replace(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
+fn replace_memo(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
     let ptr = e.as_ref() as *const Expr;
     if let Some((_, r)) = memo.get(&ptr) {
         return r.clone();
@@ -372,7 +371,7 @@ fn replace_uncached(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
     if e == target {
         return replacement.clone();
     }
-    let rec = |c: &E, memo: &mut Memo| replace(c, target, replacement, memo);
+    let rec = |c: &E, memo: &mut Memo| replace_memo(c, target, replacement, memo);
     match e.as_ref() {
         Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
         Expr::Neg(a) => E::new(Expr::Neg(rec(a, memo))),
@@ -401,7 +400,7 @@ fn replace_uncached(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
                         remaining.push(replacement.clone());
                         // Recurse on remaining factors in case of nested matches
                         let result = build_mul_from_factors(e_coeff, remaining);
-                        return replace(&result, target, replacement, memo);
+                        return replace_memo(&result, target, replacement, memo);
                     }
                 }
             }
@@ -480,14 +479,14 @@ fn collect_switches(e: &E, out: &mut Vec<E>) {
 
 /// Apply many `target -> replacement` substitutions to `e` in one memoized
 /// traversal. A node structurally equal to a target is replaced wholesale;
-/// other nodes are rebuilt around their substituted children. A per-node
-/// pointer memo makes each shared subtree cost once, so this does the work of N
-/// separate [`replace_pub`] passes in a single walk.
+/// other nodes are rebuilt around their substituted children, without
+/// simplifying. A per-node pointer memo makes each shared subtree cost
+/// once, so this does the work of N single-target passes in one walk.
 ///
 /// `subs` is an ordered list: on a duplicate target the first pair wins, as if
 /// the substitutions were applied in sequence. Targets match by exact
-/// structural equality -- a `Mul` target needing factor-subset matching must go
-/// through [`replace_pub`].
+/// structural equality; a product is not matched by a subset of its factors,
+/// which [`replace`] does. [`E::substitute`] is the simplifying form.
 pub fn replace_many(e: &E, subs: &[(E, E)]) -> E {
     if subs.is_empty() {
         return e.clone();
@@ -721,10 +720,10 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
         // definitions, one memo for the whole batch.
         let mut memo = Memo::new();
         for r in results.iter_mut() {
-            *r = replace(r, &subexpr, &var_sym, &mut memo);
+            *r = replace_memo(r, &subexpr, &var_sym, &mut memo);
         }
         for (_, expr) in lets.iter_mut() {
-            *expr = replace(expr, &subexpr, &var_sym, &mut memo);
+            *expr = replace_memo(expr, &subexpr, &var_sym, &mut memo);
         }
 
         lets.push((var_name, subexpr));
@@ -968,10 +967,24 @@ mod tests {
         let subs = [(cxy.clone(), a.clone()), (z.clone(), b.clone())];
         let got = replace_many(&expr, &subs);
 
-        // Sequential reference: the two replace_pub passes the old code did.
-        let seq = replace_pub(&replace_pub(&expr, &cxy, &a), &z, &b);
+        // Sequential reference: two single-target passes.
+        let seq = replace(&replace(&expr, &cxy, &a), &z, &b);
         assert_eq!(got, seq);
         assert!(!format!("{}", got).contains("cached"));
+    }
+
+    #[test]
+    fn replace_matches_a_product_target_by_its_factors() {
+        let (x, y, z, a) = (symbol("x"), symbol("y"), symbol("z"), symbol("a"));
+        // Built by hand so x * y is not a node of the tree.
+        let expr = E::new(Expr::Mul(E::new(Expr::Mul(x.clone(), z.clone())), y.clone()));
+        let target = E::new(Expr::Mul(x.clone(), y.clone()));
+        let got = replace(&expr, &target, &a);
+        let want: std::collections::HashSet<String> =
+            ["a", "z"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(got.symbols(), want);
+        let vars = HashMap::from([("z", 5.0), ("a", 7.0)]);
+        assert_eq!(got.eval(&vars).unwrap(), 35.0);
     }
 
     #[test]

@@ -2327,8 +2327,8 @@ fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<
 
 /// Wrap each entry of a symbolic rotation matrix in `cached()`. The composed
 /// R_ref * retraction(delta) entries otherwise get mixed into the surrounding
-/// residual math and reshaped by simplification, so `replace_pub` can no longer
-/// match them against the precompute substitution. `cached()` is an identity
+/// residual math and reshaped by simplification, so the substitution can no
+/// longer match them against the precompute entries. `cached()` is an identity
 /// barrier: the entry stays a stable, matchable subtree, and the substitution
 /// (which also wraps its `from` in `cached()`) hits it reliably. See
 /// [`build_universal_rotvec_substitutions`].
