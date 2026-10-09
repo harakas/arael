@@ -9119,7 +9119,7 @@ pub fn generate_root_methods(
                 self.__coo.accumulate_hessian(hessian);
             }
             fn accumulate_hessian_band<F: arael::utils::Float>(&self, band: &mut [F], kd: usize)
-                -> Result<(), arael::simple_lm::BandOverflow>
+                -> Result<(), arael::simple_lm::SetupError>
             {
                 #(self.#store_names.accumulate_hessian_band(band, kd)?;)*
                 self.__coo.accumulate_hessian_band(band, kd)?;
@@ -9155,12 +9155,6 @@ pub fn generate_root_methods(
                 arael::model::Model::deserialize_params(self, data);
                 <#root_name as arael::model::ExtendedModel<#prec_type>>::extended_deserialize(self);
             }
-            fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
-                let mut __out = std::vec::Vec::new();
-                arael::model::Model::collect_param_blocks(self, &mut __out);
-                __out
-            }
-            #marginalize_hint_fn
             #ref_issue_walker
         }
 
@@ -9337,7 +9331,7 @@ pub fn generate_root_methods(
                 __cost
             }
 
-            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+            fn __gh_band_in(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, __stores: &mut [#store_ty], __cut: &arael::store::Cut, __tm: &mut arael::threads::ParTiming) -> Result<#prec_type, arael::simple_lm::SetupError> {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad, __stores, __cut, __tm);
                 #extended_cost_call
@@ -9562,7 +9556,7 @@ pub fn generate_root_methods(
                 let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
                 self.__gh_sparse_in(params, grad, coo, __stores, __cut, __tm)
             }
-            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
+            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize, ctx: &mut arael::threads::Context) -> Result<#prec_type, arael::simple_lm::SetupError> {
                 self.__blocks_in(ctx);
                 let (__stores, __cut, __tm) = ctx.sweep_parts_mut::<#store_ty>();
                 self.__gh_band_in(params, grad, band, kd, __stores, __cut, __tm)
@@ -9604,6 +9598,11 @@ pub fn generate_root_methods(
                 assert!(cursor == positions.positions().len(),
                     "scatter_hessian_indexed: {} entries against a stream of {}",
                     cursor, positions.positions().len());
+            }
+            fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
+                let mut __out = std::vec::Vec::new();
+                arael::model::Model::collect_param_blocks(self, &mut __out);
+                __out
             }
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut arael::threads::Context) {
                 arael::model::Model::collect_param_blocks(self, out)

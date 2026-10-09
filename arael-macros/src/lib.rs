@@ -893,7 +893,7 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// - `marginalize(field, ...)` -- marks landmark-style fields (small
 ///   parameter blocks coupled to other parameters but never to each
 ///   other) for the sparse solver to eliminate first. Generates
-///   `RootProblem::marginalize_hint()` with the fields' parameter
+///   `LmProblemInternals::marginalize_hint()` with the fields' parameter
 ///   ranges, which the sparse solver takes as its marginalize set (as
 ///   `SparseFaerOptions::with_marginalize` would name it), ordering
 ///   those parameters first in the factorization (replacing AMD).
@@ -2645,7 +2645,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         None
     };
 
-    // marginalize(fields): generate the RootProblem::marginalize_hint
+    // marginalize(fields): generate the LmProblemInternals::marginalize_hint
     // override. Ranges come from the same field walk serialize uses, so
     // fixed params and nested models are counted identically.
     let marginalize_hint_fn = if root_eliminate.is_empty() {

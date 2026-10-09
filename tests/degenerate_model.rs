@@ -15,7 +15,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::simple_lm::{
-    LmProblemInternals,self, BandOverflow, CooMatrix, DiagonalFault, FnProblem, LmConfig, SetupError, SolveFailureKind};
+    LmProblemInternals,self, CooMatrix, DiagonalFault, FnProblem, LmConfig, SetupError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
 // The bad-diagonal diagnostic goes through arael's process-global log sink.
@@ -281,8 +281,8 @@ impl LmProblem<f64> for BandOverflowProblem {
 }
 
 impl LmProblemInternals<f64> for BandOverflowProblem {
-    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize, _ctx: &mut arael::threads::Context) -> Result<f64, BandOverflow> {
-        Err(BandOverflow { row: 0, col: 1, kd })
+    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize, _ctx: &mut arael::threads::Context) -> Result<f64, SetupError> {
+        Err(SetupError::BandOverflow { row: 0, col: 1, kd })
     }
 }
 

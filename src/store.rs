@@ -224,10 +224,24 @@ impl<S: BlockStore> AnyStore for std::vec::Vec<S> {
 // The context's stores
 // ---------------------------------------------------------------------------
 
-/// The store accessors the generated code uses: a root sizes and fills
-/// its stores in `begin_with_context` and reads them back per sweep. A
-/// user of [`Context`] needs none of these.
+/// What the generated code and the solve use: a root sizes and fills
+/// its stores in `begin_with_context` and reads them back per sweep, the
+/// solve records what its hooks do. A user of [`Context`] needs none of
+/// these.
 impl Context {
+    /// Record that this solve's extended hook pushes COO entries, so its
+    /// Hessian pattern is only knowable after a compute. Set once per
+    /// solve, before the first assembly.
+    pub fn set_runtime_coo(&mut self, on: bool) { self.runtime_coo = on; }
+
+    /// Whether the hook pushes COO entries (see
+    /// [`set_runtime_coo`](Self::set_runtime_coo)).
+    pub fn runtime_coo(&self) -> bool { self.runtime_coo }
+
+    /// Where this solve's sweeps spent their time, as the sweeps record
+    /// it; [`sweeps`](Self::sweeps) is the read for a user.
+    pub fn sweep_timing(&self) -> &ParTiming { &self.sweeps }
+
     /// This root's Hessian block stores, if the context holds them: one
     /// per thread. A solve that threads nothing has exactly one, and
     /// every walk over the list reads the same whatever its length.
@@ -911,7 +925,7 @@ fn self_dense<const N: usize, const M: usize, T: crate::utils::Float, F: crate::
 #[inline]
 fn self_band<const N: usize, const M: usize, T: crate::utils::Float, F: crate::utils::Float>(
     indices: &[u32; N], hessian: &[T; M], band: &mut [F], kd: usize,
-) -> Result<(), crate::simple_lm::BandOverflow> {
+) -> Result<(), crate::simple_lm::SetupError> {
     let ldab = kd + 1;
     for i in 0..N {
         let gi = indices[i];
@@ -923,7 +937,7 @@ fn self_band<const N: usize, const M: usize, T: crate::utils::Float, F: crate::u
             let gj = gj as usize;
             let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
             if hi - lo > kd {
-                return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
+                return Err(crate::simple_lm::SetupError::BandOverflow { row: lo, col: hi, kd });
             }
             band[(kd + lo - hi) + hi * ldab] += F::from(hessian[tri_idx(N, i, j)]).unwrap();
         }
@@ -1273,7 +1287,7 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
     /// half-bandwidth `kd` (LAPACK layout). Errors when an entry falls
     /// outside the band.
     pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
+        -> Result<(), crate::simple_lm::SetupError>
     {
         for k in 0..self.entity.len() {
             self_band(&self.indices[k], self.block(k), band, kd)?;
@@ -1358,7 +1372,7 @@ fn cross_dense<const NA: usize, const NB: usize, const P: usize, T: crate::utils
 #[inline]
 fn cross_band<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float, F: crate::utils::Float>(
     a: &[u32; NA], b: &[u32; NB], values: &[T; P], band: &mut [F], kd: usize,
-) -> Result<(), crate::simple_lm::BandOverflow> {
+) -> Result<(), crate::simple_lm::SetupError> {
     let ldab = kd + 1;
     for i in 0..NA {
         let gi = a[i];
@@ -1371,7 +1385,7 @@ fn cross_band<const NA: usize, const NB: usize, const P: usize, T: crate::utils:
             let gj = gj as usize;
             let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
             if hi - lo > kd {
-                return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
+                return Err(crate::simple_lm::SetupError::BandOverflow { row: lo, col: hi, kd });
             }
             let val = F::from(values[row + j]).unwrap();
             // Aliased slots (same entity in both refs): the triangle
@@ -1738,7 +1752,7 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     /// Add every tile into an upper-band Hessian of half-bandwidth `kd`
     /// (LAPACK layout). Errors when an entry falls outside the band.
     pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
+        -> Result<(), crate::simple_lm::SetupError>
     {
         for k in 0..self.a.len() {
             cross_band(&self.a[k], &self.b[k], self.block(k), band, kd)?;
@@ -1790,6 +1804,215 @@ pub(crate) fn densify_band(band: &[f64], n: usize, kd: usize) -> Vec<f64> {
     full
 }
 
+
+// ---------------------------------------------------------------------------
+// A scalar CSC pattern from block cells
+// ---------------------------------------------------------------------------
+
+
+/// Scalar-coordinate -> CSC-position resolver over a tile-expanded
+/// pattern built by [`csc_from_cells`], memoized per run of same-cell
+/// coordinates (one cell lookup per contributing block object). Owns
+/// its lookup tables, so it has no lifetime ties to the matrix.
+#[derive(Clone)]
+pub struct ScalarCscResolver {
+    col_ptr: std::vec::Vec<usize>,
+    row_part: std::vec::Vec<usize>,
+    blk_of: std::vec::Vec<u32>,
+    /// sorted (block_col << 32 | block_row) keys of the stored cells
+    keys: std::vec::Vec<u64>,
+    /// per block column, where its cells start in `keys`; one more entry
+    /// closes the last
+    col_cells: std::vec::Vec<u32>,
+    /// per stored cell: scalar-row prefix of the tiles above it within
+    /// its block column (column-independent)
+    prefix: std::vec::Vec<usize>,
+    memo_key: u64,
+    memo_prefix: usize,
+    memo_row_start: usize,
+}
+
+impl ScalarCscResolver {
+    /// Position of scalar (row, col) in the tile-expanded CSC. Panics
+    /// if the coordinate's cell is not part of the structure.
+    #[inline]
+    pub fn resolve(&mut self, i: u32, j: u32) -> usize {
+        let (i, j) = (i as usize, j as usize);
+        let bc = self.blk_of[j] as usize;
+        let key = ((bc as u64) << 32) | self.blk_of[i] as u64;
+        if key != self.memo_key {
+            self.memo_key = key;
+            // The search is over the block column's own cells.
+            // INVARIANT: the pattern holds every cell the macro emits; a miss is
+            // a codegen bug, so fail loud rather than scatter into a wrong slot.
+            let lo = self.col_cells[bc] as usize;
+            let c = lo + self.keys[lo..self.col_cells[bc + 1] as usize].binary_search(&key)
+                .expect("coordinate outside the built pattern");
+            self.memo_prefix = self.prefix[c];
+            self.memo_row_start = self.row_part[self.blk_of[i] as usize];
+        }
+        self.col_ptr[j] + self.memo_prefix + (i - self.memo_row_start)
+    }
+
+    /// Position of scalar (row, col), the column stride of its tile and
+    /// the first position of its panel, the block column's storage. Every
+    /// scalar column of a block column stores the same rows, so the stride
+    /// is the block column's height, the tile is affine in both coordinates
+    /// and the block column's columns are one range of the buffer.
+    #[inline]
+    pub fn resolve_tile(&mut self, i: u32, j: u32) -> (usize, usize, usize) {
+        let pos = self.resolve(i, j);
+        let j = j as usize;
+        let panel = self.col_ptr[self.row_part[self.blk_of[j] as usize]];
+        (pos, self.col_ptr[j + 1] - self.col_ptr[j], panel)
+    }
+}
+
+/// Build a scalar CSC pattern by tile-expanding the block cells of an
+/// entity partition (the two-scan construction, scalar flavor): every
+/// stored cell contributes its full dense tile, so the pattern carries
+/// the tiles' structural zeros (~1% on entity-block models) and needs
+/// no COO pass. Returns the zero-valued matrix and the position
+/// resolver for [`crate::simple_lm::LmProblemInternals::bind_hessian_positions`].
+pub fn csc_from_cells<T: crate::utils::Float>(
+    partition: &[usize],
+    cells: &[(u32, u32)],
+) -> (crate::simple_lm::CscMatrix<T>, ScalarCscResolver) {
+    let nblk = partition.len() - 1;
+    let n = partition[nblk];
+    let mut blk_of = vec![0u32; n];
+    for b in 0..nblk {
+        for i in partition[b]..partition[b + 1] {
+            blk_of[i] = b as u32;
+        }
+    }
+
+    // cell set, sorted by (block_col, block_row), run-compressed first
+    let mut keys: std::vec::Vec<u64> = std::vec::Vec::with_capacity(1024);
+    let mut last = u64::MAX;
+    for &(i, j) in cells {
+        let key = ((blk_of[j as usize] as u64) << 32) | blk_of[i as usize] as u64;
+        if key != last {
+            keys.push(key);
+            last = key;
+        }
+    }
+    arael_faer::sort_keys(&mut keys, 0..64);
+    keys.dedup();
+
+    // per-cell row prefix within its block column; per-column nnz and
+    // cell count
+    let mut prefix = vec![0usize; keys.len()];
+    let mut col_ptr = vec![0usize; n + 1];
+    let mut col_cells = vec![0u32; nblk + 1];
+    {
+        let mut c = 0;
+        while c < keys.len() {
+            let bc = (keys[c] >> 32) as usize;
+            let mut acc = 0usize;
+            let mut e = c;
+            while e < keys.len() && (keys[e] >> 32) as usize == bc {
+                let br = keys[e] as u32 as usize;
+                prefix[e] = acc;
+                acc += partition[br + 1] - partition[br];
+                e += 1;
+            }
+            col_cells[bc + 1] = (e - c) as u32;
+            // every scalar column of this block column holds `acc` rows
+            for j in partition[bc]..partition[bc + 1] {
+                col_ptr[j + 1] = acc;
+            }
+            c = e;
+        }
+    }
+    for j in 0..n {
+        col_ptr[j + 1] += col_ptr[j];
+    }
+    for b in 0..nblk {
+        col_cells[b + 1] += col_cells[b];
+    }
+
+    // row indices: per block column, the tiles' row spans, repeated for
+    // each scalar column; diagonal positions where the diagonal tile is
+    // stored (0 otherwise -- degenerate model, matching to_csc)
+    let nnz = col_ptr[n];
+    let mut row_idx = std::vec::Vec::with_capacity(nnz);
+    let mut diag_pos = vec![0 as ValueIndex; n];
+    {
+        let mut c = 0;
+        while c < keys.len() {
+            let bc = (keys[c] >> 32) as usize;
+            let mut e = c;
+            while e < keys.len() && (keys[e] >> 32) as usize == bc {
+                e += 1;
+            }
+            for j in partition[bc]..partition[bc + 1] {
+                for k in c..e {
+                    let br = keys[k] as u32 as usize;
+                    if br == bc {
+                        diag_pos[j] = value_index(col_ptr[j] + prefix[k] + (j - partition[br]));
+                    }
+                    for i in partition[br]..partition[br + 1] {
+                        row_idx.push(i as u32);
+                    }
+                }
+            }
+            c = e;
+        }
+    }
+
+    let csc = crate::simple_lm::CscMatrix {
+        n,
+        col_ptr: col_ptr.clone(),
+        row_idx,
+        vals: vec![T::zero(); nnz],
+        diag_pos,
+    };
+    let resolver = ScalarCscResolver {
+        col_ptr,
+        row_part: partition.to_vec(),
+        blk_of,
+        keys,
+        col_cells,
+        prefix,
+        memo_key: u64::MAX,
+        memo_prefix: 0,
+        memo_row_start: 0,
+    };
+    (csc, resolver)
+}
+
+/// Turn entity spans (from [`crate::simple_lm::LmProblemInternals::param_block_spans`]) into a
+/// full block partition of `0..n`: ascending scalar offsets with one
+/// entry per block boundary, first 0, last `n`. Parameters not covered
+/// by any entity span (e.g. `skip_self_block` models) become one block
+/// per gap. Span ORDER is free: the generated walk emits each span at
+/// its block FIELD's declaration position while offsets follow the
+/// params' serialize positions (a root's `hb` declared after its
+/// collections arrives last with offset 0), so the spans are sorted
+/// here. Panics if spans overlap.
+pub fn block_partition_from_spans(spans: &[(u32, u32)], n: usize) -> std::vec::Vec<usize> {
+    let mut spans = spans.to_vec();
+    spans.sort_unstable();
+    let mut part = std::vec::Vec::with_capacity(spans.len() + 2);
+    part.push(0usize);
+    let mut end = 0usize;
+    for &(off, width) in &spans {
+        let off = off as usize;
+        assert!(off >= end, "param block spans overlap");
+        if off > end {
+            // gap: params owned by no SelfBlock form their own block
+            part.push(off);
+        }
+        end = off + width as usize;
+        part.push(end);
+    }
+    assert!(end <= n);
+    if end < n {
+        part.push(n);
+    }
+    part
+}
 
 #[cfg(test)]
 mod tests {

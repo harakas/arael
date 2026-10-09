@@ -13,7 +13,8 @@ mod g2o3;
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, RootProblem, LmProblemInternals};
+use arael::simple_lm::{RootProblem, LmProblemInternals};
+use arael::store::{block_partition_from_spans, csc_from_cells};
 
 // The 2D pose graph, same shape as the benchmark's.
 #[arael::model]

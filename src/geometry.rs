@@ -27,8 +27,6 @@ pub type cameraf = camera<f32>;
 /// f64 camera.
 #[allow(non_camel_case_types)]
 pub type camerad = camera<f64>;
-/// Legacy alias of [`cameraf`]; new code names the precision.
-pub type Camera = cameraf;
 
 impl<T: Float> camera<T> {
     /// Project a 3D point in camera frame to 2D pixel coordinates.

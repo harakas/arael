@@ -9,8 +9,8 @@ use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
     LmProblemInternals,
-    lm_solve, Band, BandOverflow, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
-    LmSession, LmSolver, RootProblem, SchurPolicy, SparseFaer,
+    lm_solve, Band, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
+    LmSession, LmSolver, RootProblem, SchurPolicy, SetupError, SparseFaer,
 };
 
 // --- a model with marginalizable blocks: poses seeing nearby landmarks ---
@@ -194,7 +194,7 @@ impl LmProblemInternals<f64> for BindCounter<'_> {
     fn calc_grad_hessian_band(
         &mut self, x: &[f64], g: &mut [f64], b: &mut [f64], kd: usize,
         _ctx: &mut arael::threads::Context,
-    ) -> Result<f64, BandOverflow> {
+    ) -> Result<f64, SetupError> {
         self.inner.calc_grad_hessian_band(x, g, b, kd, _ctx)
     }
     fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], g: &mut [f64], csc: &mut CscMatrix<f64>, _ctx: &mut arael::threads::Context) -> f64 {

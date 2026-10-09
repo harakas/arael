@@ -14,7 +14,8 @@ mod scene;
 mod arael_runner;
 
 use arael::store::HessianBinder;
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, LmProblemInternals, RootProblem};
+use arael::simple_lm::{LmProblemInternals, RootProblem};
+use arael::store::{block_partition_from_spans, csc_from_cells};
 use arael::threads::{Context, ParTiming};
 use scene::{SceneConfig, Trajectory};
 
