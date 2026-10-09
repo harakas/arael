@@ -15,6 +15,8 @@ is cut.
 - `LmConfig::max_accepted_iters` stops a solve after that many accepted
   steps.
 - arael-faer's error types implement `Display` and `Error`.
+- arael-sym: `FunctionBag::add_n` (the old `addN` is deprecated), and an
+  `E` can be made from an `Expr`.
 - The solve result reports what the threads did and where the time
   went.
 - `Context`: where a solve keeps its working data -- the Hessian
@@ -86,6 +88,8 @@ is cut.
   `geometry::Camera`, and the `solve_spd*` functions are no longer
   public.
 - arael-faer: the factorization and Schur APIs take a thread count.
+- arael-sym: `cse::replace_pub` is renamed `cse::replace`; it and
+  `replace_many` replace exactly, `E::substitute` with simplification.
 
 ### Fixed
 

@@ -333,15 +333,21 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
     }
 }
 
+// Keep the function list in this doc in sync with FUNCTIONS (lib.rs) and
+// docs/SYM.md ("Built-in functions recognised").
 /// Parse a string into a symbolic expression, using only built-in
 /// functions.
 ///
 /// Supports standard infix notation with `+`, `-`, `*`, `/`, `^` (power),
-/// parentheses, and function calls (`sin`, `cos`, `tan`, `asin`, `acos`,
-/// `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`,
-/// `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`,
-/// `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`,
-/// `epsilon_for`, `cached`, `identity`). See the full list in [`crate::FUNCTIONS`].
+/// parentheses, and function calls: `sin`, `cos`, `tan`, `asin`, `acos`,
+/// `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`,
+/// `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`,
+/// `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`,
+/// `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`,
+/// `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`,
+/// `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`,
+/// `select`, `select_or`, `multibranch`, `piecewise`. The same list is
+/// [`crate::FUNCTIONS`].
 ///
 /// The identifiers `pi` and `e` are recognized as named constants.
 /// All other identifiers become symbolic variables.
@@ -587,11 +593,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn bag_addN_quaternary_closure() {
+    fn bag_add_n_quaternary_closure() {
         // Arity 4: something the old API could not express.
         let mut bag = FunctionBag::new();
-        bag.addN(4, crate::simple_func("blend", 4, |args: Vec<E>|
+        bag.add_n(4, crate::simple_func("blend", 4, |args: Vec<E>|
             args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
         )).unwrap();
         let e = parse_with_functions("blend(1, 2, 3, 4)", &bag).unwrap();

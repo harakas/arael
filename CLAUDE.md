@@ -19,6 +19,7 @@
  * arael-sketch: We have color scheme in colors.rs -- so don't hardcode colors but add/reuse entries.
  * There is no need to add #[arael(skip)] on every non-parameter bool, f32/f64, String, etc. They just clutter the code and reduce readability.
  * When modifying arael-sym with new features and docs -- also update docs/SYM.md
+ * arael-sym's built-in function names are listed in three places: `FUNCTIONS` in arael-sym/src/lib.rs, the `parse` doc in arael-sym/src/parse.rs, and docs/SYM.md ("Built-in functions recognised"). When adding or renaming a built-in, update all three.
  * When adding/changing features that might have performance impacts, run before and after benchmarks to compare, reject regressions in performance, and flag improvements.
  * When benchmark numbers change, regenerate the charts (`benchmarks/make_slam_loc_chart.py`, `benchmarks/pgo/make_chart.py`) and update links in README/docs.
  * Charts live in `benchmarks/charts/v<version>/` -- the path carries the version. Do not delete legacy versions as they are referenced by published crates.

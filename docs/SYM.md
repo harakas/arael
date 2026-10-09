@@ -138,6 +138,16 @@ sym! {
 }
 ```
 
+Three substitution forms:
+
+- `f.subs(x, &g)` replaces the variable `x` by `g`.
+- `cse::replace(&f, &target, &g)` replaces every subexpression equal to
+  `target`, without simplifying. A product target also matches inside a
+  larger product by its factors. `cse::replace_many(&f, &[(t1, g1), (t2, g2)])`
+  does several targets in one walk, matching whole nodes only.
+- `f.substitute(&[(t1, g1)])` is the simplifying form: the result is
+  rebuilt through the operators.
+
 ### Kinematics example
 
 ```rust
@@ -671,7 +681,8 @@ let g = parse("exp(sin(x)) * cos(x)").unwrap();
 println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * sin(x)
 ```
 
-Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `min`, `max`, `sign`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `fast_atan`, `fast_atan2`, `epsilon_for`, `cached`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
+<!-- Keep this list in sync with FUNCTIONS in arael-sym/src/lib.rs and the parse() doc in arael-sym/src/parse.rs. -->
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`, `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`, `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`, `select`, `select_or`, `multibranch`, `piecewise`. The same list is `FUNCTIONS`, enumerable at runtime via `function_names()`.
 
 ### User-defined functions: `parse_with_functions` + `FunctionBag`
 
@@ -701,10 +712,10 @@ bag.add1(simple_func1("sq", |t| t.clone() * t)).unwrap();
 bag.add2(simple_func2("hypot",
     |a, b| sqrt(a.clone() * a + b.clone() * b))).unwrap();
 
-// addN: n-ary closure. Takes `Vec<E>`, matching the shape of
-//       `simple_func` / `simple_func_derivs` / `extern_func`. No
-//       upper arity bound.
-bag.addN(4, simple_func("blend", 4, |args: Vec<E>|
+// add_n: n-ary closure. Takes `Vec<E>`, matching the shape of
+//        `simple_func` / `simple_func_derivs` / `extern_func`. No
+//        upper arity bound.
+bag.add_n(4, simple_func("blend", 4, |args: Vec<E>|
     args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
 )).unwrap();
 
