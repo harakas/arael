@@ -33,10 +33,16 @@ pub struct PhaseTiming {
 /// One form's share of a phase, summed over its calls.
 #[derive(Clone, Debug, Default)]
 pub struct FormTiming {
+    /// Calls of the phase that ran in this form.
     pub calls: usize,
+    /// Dispatch to join, or the sequential run of the stores, summed
+    /// over the calls.
     pub region: Duration,
+    /// The time the stores took, summed over every store of every call.
     pub task_sum: Duration,
+    /// The longest store of each call, summed over the calls.
     pub task_max: Duration,
+    /// The shortest store of each call, summed over the calls.
     pub task_min: Duration,
 }
 
@@ -58,6 +64,7 @@ impl PhaseTiming {
         if min != Duration::MAX { f.task_min += min; }
     }
 
+    /// Calls of the phase in both forms.
     pub fn calls(&self) -> usize { self.par.calls + self.seq.calls }
 
     fn report(&self, threads: usize) -> String {
@@ -89,18 +96,24 @@ pub struct ParTiming {
     /// Binding the stores' blocks to an assembled pattern: the position
     /// stream's build, with its sort and its cut into chunks.
     pub bind: Duration,
+    /// The parameter update before an assembly sweep.
     pub assembly_update: Duration,
     /// Zeroing a store's tiles and gradient stashes, which each sweep
     /// task does to its own store first: the longest store's, a part of
     /// the sweep region and of that task's time.
     pub assembly_zero: Duration,
+    /// The assembly sweeps: dispatch to join, and the stores' times.
     pub assembly: PhaseTiming,
+    /// Summing the stores' gradient stashes into the gradient.
     pub gather_grad: Duration,
     /// Zeroing the assembled Hessian's value buffer before the scatter,
     /// on the routes that scatter into one.
     pub assembly_zero_vals: Duration,
+    /// Scattering the stores' tiles into the assembled Hessian.
     pub scatter: Duration,
+    /// The parameter update before a cost sweep.
     pub cost_update: Duration,
+    /// The cost sweeps: dispatch to join, and the stores' times.
     pub cost: PhaseTiming,
 }
 
@@ -181,7 +194,9 @@ pub struct SweepReport {
     /// Stores the sweeps were given: 1 means the whole model in one, run
     /// on the calling thread.
     pub threads: usize,
+    /// What the assembly sweeps did: their form and call count.
     pub assembly: PhaseChoice,
+    /// What the cost sweeps did: their form and call count.
     pub cost: PhaseChoice,
     /// Where the sweeps' time went, when the solve gathered timing
     /// ([`LmConfig::gather_timing`](crate::simple_lm::LmConfig::gather_timing)

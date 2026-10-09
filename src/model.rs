@@ -1,3 +1,16 @@
+//! Parameters, models and the traits generated models implement.
+//!
+//! [`Param`] holds one optimizable value. The rotation parameters
+//! ([`SimpleEulerAngleParam`], [`EulerAngleParam`], [`QuaternionParam`])
+//! optimize a small delta around a re-centered reference. [`Model`] is
+//! the protocol `#[arael::model]` generates (serialize, deserialize,
+//! update, advance), [`Component`] the lifecycle hooks of a compound
+//! parameter, [`ExtendedModel`] the hand-written residuals a root adds.
+//! [`SelfBlock`] and [`CrossBlock`] declare which parameters a
+//! constraint couples; [`Coo`] collects entries for pairs it does not
+//! name. [`Jacobian`] and [`JacobianModel`] are the `jacobian` root's
+//! diagnostics.
+
 // ---------------------------------------------------------------------------
 // ParamType -- types that can be optimization parameters
 // ---------------------------------------------------------------------------

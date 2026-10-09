@@ -1,6 +1,7 @@
-//! `cargo arael` -- generate C ABI + C++ (and later Python)
-//! interfaces for arael root models. See docs/dev/CXX.md for the
-//! design and docs/SIDECAR.md for the model description it consumes.
+//! `cargo arael` -- generate C ABI, C++, Python and JavaScript
+//! (WebAssembly) interfaces for arael root models. See docs/dev/CXX.md
+//! for the design and docs/SIDECAR.md for the model description it
+//! consumes.
 
 use cargo_arael::export;
 

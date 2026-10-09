@@ -3,9 +3,10 @@ name = "cargo-arael"
 version.workspace = true
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
-description = "Cargo subcommand generating C++/Python interfaces for arael root models"
+description = "Cargo subcommand generating C, C++, Python and JavaScript (WebAssembly) interfaces for arael root models"
 license = "MIT"
 repository = "https://github.com/harakas/arael"
+readme = "README.md"
 keywords = ["cargo", "ffi", "code-generation", "optimization"]
 categories = ["development-tools::cargo-plugins", "development-tools::ffi"]
 

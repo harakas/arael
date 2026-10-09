@@ -27,6 +27,7 @@ entity to fill), containers spelled `refs::Vec<..>` /
 | `cxx/include/arael/*.hpp` | vendored math + support headers |
 | `cxx/CMakeLists.txt` | build glue |
 | `python/<ns>/` | the Python interface (docs/PYTHON.md) |
+| `wasm/` | the JavaScript interface, a wasm-bindgen crate (docs/WASM.md) |
 
 `export` also adds a macro build profile to the workspace `Cargo.toml`
 when it is missing: the arael macro crates at `opt-level = 3` in the
@@ -249,10 +250,10 @@ views are named by their container's nature: `PathPosesDeque`,
   `LmSession sess;` (optionally over a `SparseOptions`), then
   `sess.solve(model, cfg)` keeps the sparsity analysis (pattern,
   ordering, symbolic factorization, Schur plan) across solves, so
-  only the first pays for it. Warm solves are bit-identical to cold
-  ones. Call `invalidate()` after any structural change: a changed
-  parameter or block count without it fails the solve, and a change
-  that keeps every count solves warm through stale analysis.
+  only the first pays for it. Call `invalidate()` after any structural
+  change: without it a changed parameter or block count panics, which
+  reaches C++ as `arael::PanicError`, and a change that keeps every
+  count solves warm through stale analysis.
 - **cost_table()** -- only when the root is `#[arael(root, jacobian)]`:
   per-constraint cost breakdown, label -> that group's robustified
   cost, sorted by label and summing to `cost()`. Labels come from

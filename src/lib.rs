@@ -13,8 +13,8 @@
 //! Instead of constructing a graph, you build a hierarchical data structure
 //! from plain Rust structs and containers. This yields high performance and
 //! low memory usage. The optimizer can also be automatically exported to
-//! C++ and Python, where the generated classes mirror your Rust model
-//! structure.
+//! C++, Python and JavaScript (WebAssembly), where the generated classes
+//! mirror your Rust model structure.
 //!
 //! # Contents
 //!
@@ -27,7 +27,7 @@
 //! - [Runtime Differentiation](#runtime-differentiation)
 //! - [Model Structure](#model-structure)
 //! - [Cross-Crate Models](#cross-crate-models)
-//! - [C++ and Python Interfaces](#c-and-python-interfaces)
+//! - [C++, Python and JavaScript Interfaces](#c-python-and-javascript-interfaces)
 //! - [Solvers](#solvers)
 //! - [Parameter Covariance](#parameter-covariance)
 //! - [Instrumentation & Debugging](#instrumentation--debugging)
@@ -74,6 +74,9 @@
 //! - **Warm re-solve** -- `LmSession` keeps what a solve learns about the
 //!   problem's structure (pattern, ordering, symbolic factorization) so
 //!   repeated solves of the same problem skip the analysis
+//! - **Threads** -- with the `threads` feature the cost and assembly
+//!   sweeps and the linear solve run on as many threads as `num_threads`
+//!   says (see [Threads](#threads))
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
@@ -1165,19 +1168,20 @@
 //!   recomputes it from the same tokens and fails the build on mismatch
 //!   (incompatible arael-macros versions between the two crates).
 //!
-//! # C++ and Python Interfaces
+//! # C++, Python and JavaScript Interfaces
 //!
 //! A crate holding a root model exports to other languages with one
 //! command: `cargo install cargo-arael`, then `cargo arael export` in
 //! the model crate. This generates a C ABI shim crate (`capi/`, cdylib +
 //! staticlib), C++ wrapper classes with vendored math headers
-//! (`cxx/`, with CMake glue), and a pure-`ctypes` Python package
-//! (`python/`, stdlib only -- one cdylib serves every CPython 3.x).
+//! (`cxx/`, with CMake glue), a pure-`ctypes` Python package
+//! (`python/`, stdlib only -- one cdylib serves every CPython 3.x), and
+//! a wasm-bindgen crate for the browser (`wasm/`).
 //!
-//! Both skins carry the full surface: composing the problem, all
+//! The three skins carry the full surface: composing the problem, all
 //! solvers (dense/sparse/band), robust losses, configs with the real
-//! Rust preset values, iteration observers, timing, solve reports, and
-//! the covariance queries.
+//! Rust preset values, timing, solve reports, and the covariance
+//! queries.
 //!
 //! ```cpp
 //! Fit fit;                                  // C++
@@ -1193,7 +1197,7 @@
 //! r = f.solve_sparse(cfg)                   # raises AraelError on failure
 //! ```
 //!
-//! See `docs/CXX.md` and `docs/PYTHON.md`;
+//! See `docs/CXX.md`, `docs/PYTHON.md` and `docs/WASM.md`;
 //! [`cxx-examples/`](https://github.com/harakas/arael/tree/master/cxx-examples)
 //! carries four demos with C++ and Python drivers over shared models.
 //!
@@ -1326,13 +1330,17 @@
 //! | `abs_precision` | `1e-6` | cost-drop threshold for "small step" detection |
 //! | `rel_precision` | `1e-4` | fractional cost improvement below this is "small" |
 //! | `max_iters` | `100` | hard cap on iterations (counts inner damping retries) |
+//! | `max_accepted_iters` | `None` | stop after this many accepted steps |
 //! | `min_iters` | `5` | solver cannot terminate before this many accepted steps |
 //! | `patience` | `3` | consecutive small steps required to terminate |
 //! | `initial_lambda` | `1e-4` | starting LM damping; small ≈ Gauss-Newton, large ≈ gradient descent |
+//! | `lambda_floor` | `1e-12` (f32: its epsilon) | lambda never drops below this after an accepted step |
 //! | `cost_threshold` | `0.0` | terminate immediately when cost ≤ this (`0.0` disables) |
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
+//! | `predicted_reduction_tolerance` | `None` | stop when the model predicts less than this fraction of the cost as the next gain |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
+//! | `driver` | `DefaultLambdaDriver` | how lambda moves between attempts (a [`LambdaDriver`](simple_lm::LambdaDriver)); `NielsenLambdaDriver` through `with_nielsen()` |
 //! | `num_threads` | `1`, or `ARAEL_NUM_THREADS` | threads for the linear solve and the sweeps (needs the `threads` feature). Measure first -- see below |
 //! | `assembly_threads` | `None` | a thread count for the cost and assembly sweeps alone; `None` leaves them on `num_threads` |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
@@ -1681,9 +1689,10 @@
 //! - **Turn on verbose mode.** Set `verbose: true` on `LmConfig` and
 //!   every LM step prints cost, lambda, and the step outcome. On a
 //!   Cholesky rejection the line also reports non-finite counts for
-//!   grad / diagonal / cur_x / matrix and a count of non-positive
-//!   diagonal entries -- four quick signals that narrow the problem
-//!   before any deeper digging:
+//!   grad / diagonal / cur_x / matrix -- four quick signals that narrow
+//!   the problem before any deeper digging (a non-positive diagonal is
+//!   caught before the inner loop and fails the solve with
+//!   `SolveFailureKind::DegenerateDiagonal`, naming the parameter):
 //!
 //!   ```ignore
 //!   let cfg = arael::simple_lm::LmConfig::conservative().with_verbose(true);
@@ -2262,8 +2271,8 @@
 //!   (`constraint(parent.hb, ...)`); the landmarks are then fused in
 //!   closed form. Same scene again; writes `slam2d_direct_align.eps`.
 //! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
-//!   -- synthetic monocular SLAM: S-curve trajectory, 20 poses,
-//!   40 landmarks, odometry + tilt + GPS + feature observations.
+//!   -- synthetic monocular SLAM: S-curve trajectory, 60 poses,
+//!   240 landmarks, odometry + tilt + GPS + feature observations.
 //!   Full verbose-LM trace across graduated isigma passes -- the
 //!   reference for what a healthy solver run looks like.
 //! - **[`slam_demo_gm`](https://github.com/harakas/arael/blob/master/examples/slam_demo_gm.rs)**
@@ -2384,10 +2393,12 @@
 //!   supplies its `sym!` macro)
 //! - `arael-macros` -- the procedural macros: `#[arael::model]`, constraint
 //!   code generation, `#[arael::function]`
-//! - `arael-faer` -- sparse extensions over faer: block CSC storage and the
-//!   Schur-complement reduction
+//! - `arael-faer` -- sparse extensions over faer: block CSC storage, the
+//!   Schur-complement reduction, supernodal and envelope block Cholesky,
+//!   conjugate gradients, a nested-dissection ordering, and the worker
+//!   pool
 //! - `cargo-arael` -- the `cargo arael export` subcommand: generates the
-//!   C ABI, C++, and Python interfaces
+//!   C ABI, C++, Python and JavaScript (WebAssembly) interfaces
 //! - `arael-sketch`, `arael-sketch-solver`, `arael-sketch-backend` -- the
 //!   2D sketch editor: GUI, constraint-solver library, and headless
 //!   command/MCP backend

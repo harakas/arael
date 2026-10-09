@@ -146,31 +146,17 @@ their precedence. A model with no block structure (hand-built problems, or
 one whose Hessian entries all come through `coo`) has nothing to factor in
 block form and takes the scalar route.
 
-It measured at parity or ahead of the scalar route on every benchmark,
-per iteration and in peak memory, and its symbolic analysis is the
-cheaper of the two -- which is what shows up in the first iteration.
-The tables are in the benchmark READMEs -- [pgo](../benchmarks/pgo/README.md),
-[bal](../benchmarks/bal/README.md), [slam](../benchmarks/slam/README.md).
-
 ```rust,ignore
-BlockSupernodalMode::Auto    // default: the block route on a sequential solve
-BlockSupernodalMode::Always  // also when threaded
-BlockSupernodalMode::Never   // always faer's scalar Cholesky
+BlockSupernodalMode::Auto    // default: the block route wherever the model has block structure
+BlockSupernodalMode::Always  // the same today; kept for a future Auto that may decline
+BlockSupernodalMode::Never   // faer's scalar Cholesky
 ```
 
-`Auto` takes the block route at any thread count. Its dense kernels
-receive `num_threads`, gated on size: a panel update is threaded only
-where the work covers the pool, because faer's threaded kernels lose
-badly below that -- measured 0.32x on four threads for a 150x120x100
-matmul. Independent subtrees of the elimination tree go to separate
-threads as whole chunks, which is where most of the gain is: only a
-fraction of the update GEMMs are large enough for the pool, and the rest
-are parallel by living on different threads rather than inside one.
-Measured at four threads: the 1200-pose figure-8 2.2x, at 4800 poses
-2.5x, Ladybug-372's reduced system 1.5x (its tree is a near-chain, so
-there is little to chunk), a pose graph unchanged. A panel too big to
-chunk is shared between the threads in windows of its columns, so the
-threaded factor matches the sequential one to rounding.
+The block route runs at any thread count. Independent subtrees of the
+elimination tree go to separate threads as whole chunks; a panel too
+big to chunk is shared between the threads in windows of its columns;
+the dense kernels get `num_threads` on the panels large enough to pay
+for it. The threaded factor matches the sequential one to rounding.
 
 Two further knobs, both for memory:
 
@@ -237,10 +223,15 @@ LmConfig {
     cost_threshold:  0.0,    // stop when cost ≤ this (0.0 disables)
     gradient_tolerance: None,   // stop when max|g_i| <= tol
     parameter_tolerance: None,  // stop when |step| <= tol * (|x| + tol)
+    predicted_reduction_tolerance: None, // stop when the predicted next gain is below this fraction of the cost
+    lambda_floor:    1e-12,  // lambda never drops below this (f32: its epsilon)
     min_diagonal:    None,   // floor under the damping scale
+    driver:          DefaultLambdaDriver, // how lambda moves between attempts
     time_limit:      None,   // wall-clock budget; None = no limit
     num_threads:     1,      // threads for the linear solve and the sweeps (needs `threads`)
+    assembly_threads: None,  // a separate count for the sweeps
     verbose:         false,  // print per-iteration trace to stderr
+    observer:        None,   // called once per damped attempt
     gather_timing:   false,  // collect per-phase timing into LmResult::timing
 }
 ```
@@ -254,9 +245,12 @@ LmConfig {
 | `min_iters` | `5` | solver will not terminate before this many accepted steps, regardless of precision |
 | `patience` | `3` | consecutive small steps before termination. Prevents premature termination from one lucky step |
 | `initial_lambda` | `1e-4` | starting damping. Small ≈ Gauss-Newton (fast, may overshoot), large ≈ gradient descent (slow, stable) |
+| `lambda_floor` | `1e-12` (f32: its epsilon) | lambda never drops below this after an accepted step. Raise it (1e-6) for a near-singular problem, such as a bundle adjustment with its gauge freedom |
+| `driver` | `DefaultLambdaDriver` | how lambda moves from one attempt to the next (a [`LambdaDriver`](#damping-schedule-drivers)); `NielsenLambdaDriver` through `with_nielsen()`. Reads `initial_lambda` and `lambda_floor` when the solve starts |
 | `cost_threshold` | `0.0` | terminate immediately when cost drops to or below this. Useful for feasibility-style problems with a known target |
 | `gradient_tolerance` | `None` | `Option<T>`. Stop when `max|g_i| <= tol`. **The only criterion that tests for a stationary point** -- the cost tests only say the cost stopped improving, which also happens while drifting along a gauge freedom. arael minimizes `sum r^2`, so its gradient is `2 J^T r`; a solver minimizing `1/2 sum r^2` reads the same number twice as tight, so do not carry a tolerance across without halving it. Respects `min_iters` |
 | `parameter_tolerance` | `None` | `Option<T>`. Stop when `\|step\|_2 <= tol * (\|x\|_2 + tol)` -- the parameters have stopped moving. A different question from the cost test: the cost can plateau while the step still does real work, and the step can vanish while the cost still creeps. Checked on an accepted step, before `advance()` re-centers. Respects `min_iters` |
+| `predicted_reduction_tolerance` | `None` | `Option<T>`. Stop when, after an accepted step, the model predicts less than this fraction of the cost as the next gain |
 | `min_diagonal` | `None` | `Option<T>`. Floor under the DAMPING scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`. `None` leaves the scale at `H[i,i]` -- the classic multiplicative damping `(1 + lambda) * H[i,i]`. **Without it a parameter of zero curvature FAILS the solve** (`Err` with `SolveFailureKind::DegenerateDiagonal`) -- `(1 + lambda) * 0` is still 0, so the system is singular and no step can ever be accepted. With it, that parameter gets `lambda * min_diagonal` of damping, the factorization succeeds, and it simply does not move (its gradient is zero too). **A zero diagonal means the system is badly formulated -- a parameter nothing constrains -- so this is a bandaid and should be avoided**; the parameter it damps through stays unconstrained and its value is meaningless. Fix the model first: constrain it, hold it fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when a residual can legitimately switch itself off (a `branch` guarding an undefined observation, a saturated robustifier) and an entity can end one iteration with nothing reaching it. 1e-6 is reasonable. Rescues a ZERO diagonal only: NEGATIVE and NaN stay fatal, since `J^T J`'s diagonal is a sum of squares and either value means the assembly is poisoned |
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
 | `num_threads` | `1`, or `ARAEL_NUM_THREADS` | threads for the linear solve and for the cost and assembly sweeps. `1` sequential, `n` uses n, `0` uses every core. The environment variable sets the default; a count set in code wins. **Requires the `threads` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
@@ -556,7 +550,9 @@ pub struct LmResult<T> {
     pub accepted_iterations: usize,  // cost-decreasing steps only
     pub status: LmStatus,            // why the solve stopped
     pub final_lambda: T,             // damping at exit (seeds a warm restart)
+    pub solver: Option<SolverReport>, // the sparse backend's plan; None for dense and band
     pub timing: Option<LmTiming>,    // per-phase wall clock; Some iff gather_timing
+    pub threads: ThreadReport,       // what the solve's threads did
 }
 ```
 
@@ -691,10 +687,12 @@ let result = model.solve_sparse(&cfg)?;
 ```
 
 Without the feature, a `num_threads` other than 1 warns and runs
-sequentially -- it does not silently pretend. `num_threads: 0` resolves to
-`rayon::current_num_threads()`, so it honours `RAYON_NUM_THREADS` or whatever
-`ThreadPoolBuilder` the application installed; the pool is shared with the rest of
-the process.
+sequentially -- it does not silently pretend. `num_threads: 0` is every
+core: the rayon pool's size, which honours `RAYON_NUM_THREADS` or whatever
+`ThreadPoolBuilder` the application installed. The cost and assembly
+sweeps, the Schur reduction and the block factorization's subtrees and
+windows run on arael's own workers (`arael::pool`); faer's dense kernels
+run on rayon's pool, shared with the rest of the process.
 
 `ARAEL_NUM_THREADS` in the environment is the default of `num_threads` for
 every config built in the process, `LmConfig::default()` and the presets
@@ -900,7 +898,7 @@ pub struct LmTiming {
 
 Before the backend can factorize anything it discovers the sparsity pattern and
 binds each block's scatter target in it, detects the marginalizable blocks, weighs the Schur
-reduction (two trial symbolic factorizations), chooses the fill-reducing ordering,
+reduction (trial symbolic factorizations of the candidate routes), chooses the fill-reducing ordering,
 and factorizes symbolically. All of it runs inside the first `compute`, and
 `analysis` is what it cost.
 
@@ -965,7 +963,7 @@ each block's scatter target in it, and the first solve runs the symbolic factori
 (fill-reducing ordering + elimination tree). On a fresh sparse problem those
 two often dominate the whole solve; a warm re-solve pays neither. Each
 `first_*` is part of its phase total (`first_assembly` ⊂ `assembly`, etc.).
-Phase times are single-threaded wall clock and cover only the work inside
+Phase times are wall clock, whatever the thread count, and cover only the work inside
 each phase, so they sum to slightly less than `total`.
 
 For the **steady-state cost per iteration**, use the `mean_*` methods --
@@ -1049,8 +1047,8 @@ be chosen from the problem's actual scale.
   canonical case; see benchmarks/bal).
 
 Custom drivers implement the four-method trait (`start`, `accepted`,
-`rejected`, `factorization_failed` -- the latter two also receive the
-current `LambdaState`). All three step hooks return `Option<T>`, and
+`rejected`, which receives the `LambdaStep`, and `factorization_failed`,
+which receives the current `LambdaState`). All three step hooks return `Option<T>`, and
 **`None` always means "stop the solve"**. Which status comes back says
 whether a step survived:
 

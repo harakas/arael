@@ -6,7 +6,7 @@ A Rust framework for nonlinear least-squares optimization. You write constraints
 
 Solve regression and curve fitting, sensor fusion, SLAM, bundle adjustment, pose-graph and geometric constraint optimization.
 
-Instead of constructing a graph, you build a hierarchical data structure from plain Rust structs and containers. This yields high performance and low memory usage. The optimizer can also be automatically exported to C++ and Python, where the generated classes mirror your Rust model structure.
+Instead of constructing a graph, you build a hierarchical data structure from plain Rust structs and containers. This yields high performance and low memory usage. The optimizer can also be automatically exported to C++, Python and JavaScript (WebAssembly), where the generated classes mirror your Rust model structure.
 
 ## Contents
 
@@ -22,7 +22,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - [Parameter Covariance](#parameter-covariance)
 - [Runtime Differentiation](#runtime-differentiation)
 - [Cross-Crate Models](#cross-crate-models)
-- [C++ and Python Interfaces](#c-and-python-interfaces)
+- [C++, Python and JavaScript Interfaces](#c-python-and-javascript-interfaces)
 - [Instrumentation and troubleshooting](#instrumentation-and-troubleshooting)
   - [My solve doesn't converge. What do I check?](#my-solve-doesnt-converge-what-do-i-check)
   - [Looking under the hood with `cargo expand`](#looking-under-the-hood-with-cargo-expand)
@@ -48,6 +48,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
 - **Precomputed rotations** -- every rotation param caches its rotation matrix and the matrix's Jacobian once per linearization; constraints that differentiate through a rotation read them as constants instead of rebuilding them per observation
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
+- **Threads** -- with the `threads` feature the cost and assembly sweeps and the linear solve run on as many threads as `num_threads` says ([docs/SOLVERS.md](docs/SOLVERS.md#threads))
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
@@ -694,7 +695,7 @@ Rules:
   it from the same tokens and fails the build on mismatch (incompatible
   arael-macros versions between the two crates).
 
-## C++ and Python Interfaces
+## C++, Python and JavaScript Interfaces
 
 A crate holding a root model exports to other languages with one
 command:
@@ -706,12 +707,12 @@ cd mymodel/ && cargo arael export
 
 This generates, next to the model, a C ABI shim crate (`capi/`,
 cdylib + staticlib), C++ wrapper classes with vendored math headers
-(`cxx/`, with CMake glue), and a pure-`ctypes` Python package
-(`python/`, stdlib only -- one cdylib serves every CPython 3.x). Both
-skins carry the full surface: composing the problem, all solvers
+(`cxx/`, with CMake glue), a pure-`ctypes` Python package
+(`python/`, stdlib only -- one cdylib serves every CPython 3.x), and a
+wasm-bindgen crate for the browser (`wasm/`). The three skins carry
+the full surface: composing the problem, all solvers
 (dense/sparse/band), robust losses, configs with the real Rust preset
-values, iteration observers, timing, solve reports, and the
-covariance queries.
+values, timing, solve reports, and the covariance queries.
 
 ```cpp
 Fit fit;                                  // C++
@@ -728,8 +729,8 @@ r = f.solve_sparse(cfg)                   # raises AraelError on failure
 ```
 
 [`cxx-examples/`](cxx-examples/) carries four demos with C++ and
-Python drivers over shared models. See [docs/CXX.md](docs/CXX.md) and
-[docs/PYTHON.md](docs/PYTHON.md).
+Python drivers over shared models. See [docs/CXX.md](docs/CXX.md),
+[docs/PYTHON.md](docs/PYTHON.md) and [docs/WASM.md](docs/WASM.md).
 
 ## Instrumentation and troubleshooting
 
@@ -968,7 +969,7 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     log.rs          info!/warn!/error! logging macros
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
-cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python interface generator (docs/CXX.md, docs/PYTHON.md)
+cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python + JavaScript (WebAssembly) interface generator (docs/CXX.md, docs/PYTHON.md, docs/WASM.md)
 cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
 cxx-examples/       demos over generated interfaces: shared Rust models, C++ and Python drivers
 export-tests/       Standalone mini-workspace proving cross-crate model export/import
@@ -1047,6 +1048,7 @@ docs/               Extended documentation
   COVARIANCE.md     Parameter covariance reference
   CXX.md            Generated C++ interface reference
   PYTHON.md         Generated Python interface reference
+  WASM.md           Generated JavaScript (WebAssembly) interface reference
   SIDECAR.md        JSON model sidecar format
   LINEAR.md         Robust linear regression walkthrough
   SLAM.md           SLAM example walkthrough

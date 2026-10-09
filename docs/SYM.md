@@ -22,8 +22,7 @@ See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough
 ## Basics
 
 ```rust
-use arael::sym::*;
-use arael::sym;
+use arael_sym::*;
 
 sym! {
     let (x, y) = symbols!(x, y);
@@ -39,7 +38,7 @@ The `symbols!` macro expands each bare identifier to
 
 The `sym!` macro auto-inserts `.clone()` on variable reuse, eliminating ownership boilerplate.
 
-Every expression has type `arael::sym::E`, defined as `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) -- the `.clone()` calls `sym!` inserts don't duplicate the expression tree.
+Every expression has type `arael_sym::E` (`arael::sym::E` through arael), defined as `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) -- the `.clone()` calls `sym!` inserts don't duplicate the expression tree.
 
 ### Auto-simplification
 
@@ -124,13 +123,13 @@ sym! {
 ## Evaluation and Substitution
 
 ```rust
-use maplit::hashmap;
+use std::collections::HashMap;
 
 sym! {
     let (x, y) = symbols!(x, y);
     let f = pow(x, 2.0) + 3.0 * x + 1.0;
 
-    let vars = hashmap!{ "x" => 2.0 };
+    let vars = HashMap::from([("x", 2.0)]);
     println!("f(2) = {}", f.eval(&vars).unwrap()); // 11
 
     println!("f(y+1) = {}", f.subs(x, &(y + 1.0)));
@@ -296,7 +295,7 @@ Mirrors the runtime `quatern` surface for everything branch-free; Add /
 Sub / Neg / scalar Mul as for the vectors, plus `identity()`. The branchy
 runtime operations (`pow`, `log`, `exp`, `slerp`, `from_two_vectors`,
 `get_axis_angle`) are deliberately absent: constraint expressions must
-stay continuous (see TODO.md). `get_euler_angles` uses `safe_asin` for
+stay continuous. `get_euler_angles` uses `safe_asin` for
 the pitch instead of the runtime's boundary branches.
 
 ### transform3sym
@@ -774,12 +773,12 @@ Plus `remove(name) -> bool`, `contains(name)`, `names() -> Vec<String>`, `entrie
 Formal parameters always shadow outer variables of the same name during the function body's evaluation. This is what you want for an interactive REPL: defining `sq(x) = x*x` after `x = 5` should still yield 9 when you call `sq(3)`, not 25.
 
 ```rust
-use maplit::hashmap;
+use std::collections::HashMap;
 
 let mut bag = FunctionBag::new();
 bag.add_symbolic("sq", vec!["x".into()], parse("x*x").unwrap());
 let e = parse_with_functions("sq(3)", &bag).unwrap();
-let vars = hashmap!{ "x" => 5.0 };
+let vars = HashMap::from([("x", 5.0)]);
 assert_eq!(e.eval(&vars).unwrap(), 9.0); // 3*3, not 5*5
 ```
 

@@ -180,7 +180,10 @@ const r2 = s.solve(g, cfg);         // warm
 s.invalidate();                     // after any structural change
 ```
 
-The rules are the Rust session's ([docs/SOLVERS.md](SOLVERS.md#what-a-solve-keeps----context-and-lmsession)).
+Call `invalidate()` after any structural change: without it a changed
+parameter or block count panics, which is fatal to the instance, and a
+change that keeps every count solves warm through stale analysis. The
+rules are the Rust session's ([docs/SOLVERS.md](SOLVERS.md#what-a-solve-keeps----context-and-lmsession)).
 
 `g.cost()` is the cost at the current parameters; `g.validate()` the
 model's diagnostics as text, empty when clean.

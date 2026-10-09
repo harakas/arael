@@ -57,8 +57,10 @@ pub struct twist3<T: Float> {
     pub w: vect3<T>,
 }
 
+/// [`twist3`] over `f32`.
 #[allow(non_camel_case_types)]
 pub type twist3f = twist3<f32>;
+/// [`twist3`] over `f64`.
 #[allow(non_camel_case_types)]
 pub type twist3d = twist3<f64>;
 

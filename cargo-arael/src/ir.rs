@@ -83,7 +83,7 @@ impl Model {
 }
 
 /// The N-dimensional math spellings, parsed to (scalar, dims):
-/// `vect<f64, 4>` / `vectd<4>` -> ("f64", [4]);
+/// `vect<f64, 4>` / `vectd<4>` -> ("f64", \[4\]);
 /// `matrix<f32, 2, 4>` / `matrixf<2, 4>` -> ("f32", [2, 4]).
 /// None for anything else.
 pub fn ndim_math(of: &str) -> Option<(String, Vec<usize>)> {
