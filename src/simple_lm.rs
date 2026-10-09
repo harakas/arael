@@ -89,10 +89,6 @@ impl fmt::Display for G<f32> {
 }
 
 
-/// Fixed-size dispatch threshold. Systems up to this size use compile-time
-/// fixed-size matrices for efficiency; larger systems use dynamic allocation.
-pub const FIXED_SIZE_THRESHOLD: usize = 9;
-
 // ---------------------------------------------------------------------------
 // LM solver types
 // ---------------------------------------------------------------------------
@@ -548,25 +544,6 @@ impl<T: Float> LmConfig<T> {
 // LmProblem trait — object implementing cost + gradient/hessian
 // ---------------------------------------------------------------------------
 
-/// Error when a block's indices exceed the declared bandwidth.
-#[derive(Debug)]
-pub struct BandOverflow {
-    /// Row index of the offending element.
-    pub row: usize,
-    /// Column index of the offending element.
-    pub col: usize,
-    /// Declared half-bandwidth that was exceeded.
-    pub kd: usize,
-}
-
-impl std::fmt::Display for BandOverflow {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "band overflow: element ({}, {}) exceeds bandwidth kd={}", self.row, self.col, self.kd)
-    }
-}
-
-impl std::error::Error for BandOverflow {}
-
 /// A structural failure that makes the linear system impossible to build or
 /// factor, so the solve cannot even be attempted. Reported through
 /// [`SolveFailureKind::Setup`]. Distinct from a numeric non-positive-definite
@@ -749,12 +726,6 @@ impl<T: std::fmt::Debug> std::error::Error for SolveFailure<T> {}
 /// or [`SolveFailure`] with the partial state when one exists.
 pub type SolveResult<T> = Result<LmResult<T>, SolveFailure<T>>;
 
-impl From<BandOverflow> for SetupError {
-    fn from(e: BandOverflow) -> Self {
-        SetupError::BandOverflow { row: e.row, col: e.col, kd: e.kd }
-    }
-}
-
 /// Interface for optimization problems.
 ///
 /// Parameter round trip of an `#[arael(root)]` model: flatten the model's
@@ -772,29 +743,6 @@ pub trait RootProblem<T: Float> {
     /// (including extended-model state). Mandatory after a solve over a
     /// raw vector; the `solve_*` entry points call it for you.
     fn deserialize(&mut self, data: &[T]);
-    /// Parameter index ranges of fields marked `#[arael(root,
-    /// marginalize(field))]`: small mutually uncoupled blocks
-    /// (landmark-style entities) that a sparse backend may eliminate
-    /// first (see [`SparseFaerOptions::with_marginalize`]). Empty by
-    /// default; the macro overrides it for marked fields.
-    fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
-        std::vec::Vec::new()
-    }
-    /// Entity parameter blocks as `(offset, width)` spans of the flat
-    /// parameter vector, one per live entity, in serialize order --
-    /// read from each entity's `SelfBlock` indices, so it is valid only
-    /// after [`serialize`](Self::serialize). The macro overrides this;
-    /// the default is empty. See [`block_partition_from_spans`] for
-    /// turning spans into a full partition.
-    fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
-        std::vec::Vec::new()
-    }
-    /// [`param_block_spans`](Self::param_block_spans) under a solve
-    /// context: a root with split stores reads them there. The default
-    /// ignores the context.
-    fn param_block_spans_with_context(&self, _ctx: &crate::threads::Context) -> std::vec::Vec<(u32, u32)> {
-        self.param_block_spans()
-    }
     /// Report every `Ref` field that no longer resolves in its
     /// collection (see [`Issue::StaleRef`](crate::validate::Issue)).
     /// The macro overrides this for roots whose collections hold
@@ -833,209 +781,8 @@ fn compare_gradients<T: Float>(
     }
 }
 
-/// Scalar-coordinate -> CSC-position resolver over a tile-expanded
-/// pattern built by [`csc_from_cells`], memoized per run of same-cell
-/// coordinates (one cell lookup per contributing block object). Owns
-/// its lookup tables, so it has no lifetime ties to the matrix.
-#[derive(Clone)]
-pub struct ScalarCscResolver {
-    col_ptr: std::vec::Vec<usize>,
-    row_part: std::vec::Vec<usize>,
-    blk_of: std::vec::Vec<u32>,
-    /// sorted (block_col << 32 | block_row) keys of the stored cells
-    keys: std::vec::Vec<u64>,
-    /// per block column, where its cells start in `keys`; one more entry
-    /// closes the last
-    col_cells: std::vec::Vec<u32>,
-    /// per stored cell: scalar-row prefix of the tiles above it within
-    /// its block column (column-independent)
-    prefix: std::vec::Vec<usize>,
-    memo_key: u64,
-    memo_prefix: usize,
-    memo_row_start: usize,
-}
-
-impl ScalarCscResolver {
-    /// Position of scalar (row, col) in the tile-expanded CSC. Panics
-    /// if the coordinate's cell is not part of the structure.
-    #[inline]
-    pub fn resolve(&mut self, i: u32, j: u32) -> usize {
-        let (i, j) = (i as usize, j as usize);
-        let bc = self.blk_of[j] as usize;
-        let key = ((bc as u64) << 32) | self.blk_of[i] as u64;
-        if key != self.memo_key {
-            self.memo_key = key;
-            // The search is over the block column's own cells.
-            // INVARIANT: the pattern holds every cell the macro emits; a miss is
-            // a codegen bug, so fail loud rather than scatter into a wrong slot.
-            let lo = self.col_cells[bc] as usize;
-            let c = lo + self.keys[lo..self.col_cells[bc + 1] as usize].binary_search(&key)
-                .expect("coordinate outside the built pattern");
-            self.memo_prefix = self.prefix[c];
-            self.memo_row_start = self.row_part[self.blk_of[i] as usize];
-        }
-        self.col_ptr[j] + self.memo_prefix + (i - self.memo_row_start)
-    }
-
-    /// Position of scalar (row, col), the column stride of its tile and
-    /// the first position of its panel, the block column's storage. Every
-    /// scalar column of a block column stores the same rows, so the stride
-    /// is the block column's height, the tile is affine in both coordinates
-    /// and the block column's columns are one range of the buffer.
-    #[inline]
-    pub fn resolve_tile(&mut self, i: u32, j: u32) -> (usize, usize, usize) {
-        let pos = self.resolve(i, j);
-        let j = j as usize;
-        let panel = self.col_ptr[self.row_part[self.blk_of[j] as usize]];
-        (pos, self.col_ptr[j + 1] - self.col_ptr[j], panel)
-    }
-}
-
-/// Build a scalar CSC pattern by tile-expanding the block cells of an
-/// entity partition (the two-scan construction, scalar flavor): every
-/// stored cell contributes its full dense tile, so the pattern carries
-/// the tiles' structural zeros (~1% on entity-block models) and needs
-/// no COO pass. Returns the zero-valued matrix and the position
-/// resolver for [`LmProblemInternals::bind_hessian_positions`].
-pub fn csc_from_cells<T: Float>(
-    partition: &[usize],
-    cells: &[(u32, u32)],
-) -> (CscMatrix<T>, ScalarCscResolver) {
-    let nblk = partition.len() - 1;
-    let n = partition[nblk];
-    let mut blk_of = vec![0u32; n];
-    for b in 0..nblk {
-        for i in partition[b]..partition[b + 1] {
-            blk_of[i] = b as u32;
-        }
-    }
-
-    // cell set, sorted by (block_col, block_row), run-compressed first
-    let mut keys: std::vec::Vec<u64> = std::vec::Vec::with_capacity(1024);
-    let mut last = u64::MAX;
-    for &(i, j) in cells {
-        let key = ((blk_of[j as usize] as u64) << 32) | blk_of[i as usize] as u64;
-        if key != last {
-            keys.push(key);
-            last = key;
-        }
-    }
-    arael_faer::sort_keys(&mut keys, 0..64);
-    keys.dedup();
-
-    // per-cell row prefix within its block column; per-column nnz and
-    // cell count
-    let mut prefix = vec![0usize; keys.len()];
-    let mut col_ptr = vec![0usize; n + 1];
-    let mut col_cells = vec![0u32; nblk + 1];
-    {
-        let mut c = 0;
-        while c < keys.len() {
-            let bc = (keys[c] >> 32) as usize;
-            let mut acc = 0usize;
-            let mut e = c;
-            while e < keys.len() && (keys[e] >> 32) as usize == bc {
-                let br = keys[e] as u32 as usize;
-                prefix[e] = acc;
-                acc += partition[br + 1] - partition[br];
-                e += 1;
-            }
-            col_cells[bc + 1] = (e - c) as u32;
-            // every scalar column of this block column holds `acc` rows
-            for j in partition[bc]..partition[bc + 1] {
-                col_ptr[j + 1] = acc;
-            }
-            c = e;
-        }
-    }
-    for j in 0..n {
-        col_ptr[j + 1] += col_ptr[j];
-    }
-    for b in 0..nblk {
-        col_cells[b + 1] += col_cells[b];
-    }
-
-    // row indices: per block column, the tiles' row spans, repeated for
-    // each scalar column; diagonal positions where the diagonal tile is
-    // stored (0 otherwise -- degenerate model, matching to_csc)
-    let nnz = col_ptr[n];
-    let mut row_idx = std::vec::Vec::with_capacity(nnz);
-    let mut diag_pos = vec![0 as ValueIndex; n];
-    {
-        let mut c = 0;
-        while c < keys.len() {
-            let bc = (keys[c] >> 32) as usize;
-            let mut e = c;
-            while e < keys.len() && (keys[e] >> 32) as usize == bc {
-                e += 1;
-            }
-            for j in partition[bc]..partition[bc + 1] {
-                for k in c..e {
-                    let br = keys[k] as u32 as usize;
-                    if br == bc {
-                        diag_pos[j] = value_index(col_ptr[j] + prefix[k] + (j - partition[br]));
-                    }
-                    for i in partition[br]..partition[br + 1] {
-                        row_idx.push(i as u32);
-                    }
-                }
-            }
-            c = e;
-        }
-    }
-
-    let csc = CscMatrix {
-        n,
-        col_ptr: col_ptr.clone(),
-        row_idx,
-        vals: vec![T::zero(); nnz],
-        diag_pos,
-    };
-    let resolver = ScalarCscResolver {
-        col_ptr,
-        row_part: partition.to_vec(),
-        blk_of,
-        keys,
-        col_cells,
-        prefix,
-        memo_key: u64::MAX,
-        memo_prefix: 0,
-        memo_row_start: 0,
-    };
-    (csc, resolver)
-}
-
-/// Turn entity spans (from [`RootProblem::param_block_spans`]) into a
-/// full block partition of `0..n`: ascending scalar offsets with one
-/// entry per block boundary, first 0, last `n`. Parameters not covered
-/// by any entity span (e.g. `skip_self_block` models) become one block
-/// per gap. Span ORDER is free: the generated walk emits each span at
-/// its block FIELD's declaration position while offsets follow the
-/// params' serialize positions (a root's `hb` declared after its
-/// collections arrives last with offset 0), so the spans are sorted
-/// here. Panics if spans overlap.
-pub fn block_partition_from_spans(spans: &[(u32, u32)], n: usize) -> std::vec::Vec<usize> {
-    let mut spans = spans.to_vec();
-    spans.sort_unstable();
-    let mut part = std::vec::Vec::with_capacity(spans.len() + 2);
-    part.push(0usize);
-    let mut end = 0usize;
-    for &(off, width) in &spans {
-        let off = off as usize;
-        assert!(off >= end, "param block spans overlap");
-        if off > end {
-            // gap: params owned by no SelfBlock form their own block
-            part.push(off);
-        }
-        end = off + width as usize;
-        part.push(end);
-    }
-    assert!(end <= n);
-    if end < n {
-        part.push(n);
-    }
-    part
-}
+// Moved to [`crate::store`]; the paths here stay.
+pub use crate::store::{block_partition_from_spans, csc_from_cells, ScalarCscResolver};
 
 /// Entry points of an `#[arael(fit(...))]` / `#[arael(fit64(...))]` model.
 /// The macro implements the parameter round trip (`serialize` /
@@ -1355,7 +1102,7 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
     /// A backend route, not a user call. The default panics: a problem
     /// solved through a route it does not assemble is a wiring mistake,
     /// and saying so at the call beats a wrong answer.
-    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize, _ctx: &mut crate::threads::Context) -> Result<T, BandOverflow> {
+    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize, _ctx: &mut crate::threads::Context) -> Result<T, SetupError> {
         unimplemented!("this problem assembles no band Hessian; solve through a dense or sparse route")
     }
     /// Assemble gradient and accumulate Hessian directly into CSC vals
@@ -1455,8 +1202,20 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
         _ctx: &mut crate::threads::Context,
     ) {}
 
+    /// Entity parameter blocks as `(offset, width)` spans of the flat
+    /// parameter vector, one per live entity, in serialize order --
+    /// read from each entity's `SelfBlock` indices, so it is valid only
+    /// after [`RootProblem::serialize`]. The macro overrides this; the
+    /// default is empty. See [`block_partition_from_spans`] for turning
+    /// spans into a full partition.
+    fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
+        std::vec::Vec::new()
+    }
+
     /// Append the entity parameter spans (see
-    /// [`RootProblem::param_block_spans`]). Default: nothing.
+    /// [`param_block_spans`](Self::param_block_spans)) under a solve
+    /// context: a root with split stores reads them there. Default:
+    /// nothing.
     fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut crate::threads::Context) {}
 
     /// The model's OWN elimination hint -- the ranges named by
@@ -2225,7 +1984,7 @@ fn cholesky_solve_dynamic_f32(n: usize, a: &[f32], b: &[f32], x: &mut [f32]) -> 
 /// Solve A*x = b for symmetric positive definite A (f64) via Cholesky decomposition.
 /// Uses fixed-size nalgebra for n <= 9, dynamic allocation otherwise.
 /// Returns false if A is not positive definite.
-pub fn solve_spd(n: usize, a: &[f64], b: &[f64], x: &mut [f64]) -> bool {
+pub(crate) fn solve_spd(n: usize, a: &[f64], b: &[f64], x: &mut [f64]) -> bool {
     if n <= 9 {
         dispatch_cholesky!(cholesky_solve, n, a, b, x)
     } else {
@@ -2236,7 +1995,7 @@ pub fn solve_spd(n: usize, a: &[f64], b: &[f64], x: &mut [f64]) -> bool {
 /// Solve A*x = b for symmetric positive definite A (f32) via Cholesky decomposition.
 /// Uses fixed-size nalgebra for n <= 9, dynamic allocation otherwise.
 /// Returns false if A is not positive definite.
-pub fn solve_spd_f32(n: usize, a: &[f32], b: &[f32], x: &mut [f32]) -> bool {
+pub(crate) fn solve_spd_f32(n: usize, a: &[f32], b: &[f32], x: &mut [f32]) -> bool {
     if n <= 9 {
         dispatch_cholesky!(cholesky_solve_f32, n, a, b, x)
     } else {
@@ -2253,7 +2012,7 @@ pub fn solve_spd_f32(n: usize, a: &[f32], b: &[f32], x: &mut [f32]) -> bool {
 /// Assembles and solves the damped normal equations using a specific matrix
 /// storage format (dense, band, sparse, etc.).
 pub trait LmSolver<T: Float> {
-    /// Associated matrix storage type (e.g. Vec for dense, SparseMatrix for sparse).
+    /// Associated matrix storage type (`Vec` for dense, `CscMatrix` for sparse).
     type Matrix;
 
     /// Create a zero-initialized matrix for n parameters.
@@ -3815,51 +3574,45 @@ impl SparseCoo {
     }
 }
 
-/// The matrix of the [`SparseCoo`] backend: a [`CscMatrix`].
-pub struct SparseMatrix<T> {
-    /// Underlying CSC storage.
-    pub csc: CscMatrix<T>,
-}
-
 #[allow(deprecated)]
 impl LmSolver<f64> for SparseCoo {
-    type Matrix = SparseMatrix<f64>;
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    type Matrix = CscMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &CscMatrix<f64>) -> usize {
+        matrix.vals.iter().filter(|v| !v.is_finite()).count()
     }
     fn reset(&mut self) {
         self.coo = CooMatrix::new(0);
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
+    fn new_matrix(&self, n: usize) -> CscMatrix<f64> {
+        CscMatrix::empty(n)
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
-        let n = matrix.csc.n;
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+        let n = matrix.n;
         if self.coo.n != n {
             self.coo = CooMatrix::new(n);
         } else {
             self.coo.clear();
         }
         let cost = problem.calc_grad_hessian_sparse_with_context(params, grad, &mut self.coo, ctx);
-        matrix.csc = self.coo.to_csc()?;
+        *matrix = self.coo.to_csc()?;
         Ok(cost)
     }
 
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
+    fn extract_diagonal(&self, matrix: &CscMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() {
-            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize];
+            diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize];
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
-            for k in matrix.csc.col_ptr[j]..matrix.csc.col_ptr[j + 1] {
-                let i = matrix.csc.row_idx[k] as usize;
-                let v = matrix.csc.vals[k];
+            for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+                let i = matrix.row_idx[k] as usize;
+                let v = matrix.vals[k];
                 dense[i * n + j] = v;
                 if i != j { dense[j * n + i] = v; }
             }
@@ -3894,49 +3647,49 @@ impl SparseDirectCsc {
 
 #[allow(deprecated)]
 impl LmSolver<f64> for SparseDirectCsc {
-    type Matrix = SparseMatrix<f64>;
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    type Matrix = CscMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &CscMatrix<f64>) -> usize {
+        matrix.vals.iter().filter(|v| !v.is_finite()).count()
     }
     fn reset(&mut self) {
         self.pattern_built = false;
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
+    fn new_matrix(&self, n: usize) -> CscMatrix<f64> {
+        CscMatrix::empty(n)
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
         if !self.pattern_built {
             // First call: use COO to discover pattern
-            let n = matrix.csc.n;
+            let n = matrix.n;
             let mut coo = CooMatrix::new(n);
             let cost = problem.calc_grad_hessian_sparse_with_context(params, grad, &mut coo, ctx);
-            matrix.csc = coo.to_csc()?;
+            *matrix = coo.to_csc()?;
             self.pattern_built = true;
             Ok(cost)
         } else {
             // Subsequent calls: direct accumulate into existing CSC structure
             // (the generated code zeroes csc.vals before accumulating, which
             // also clears the damped diagonal left behind by solve_damped)
-            Ok(problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc, ctx))
+            Ok(problem.calc_grad_hessian_sparse_direct(params, grad, matrix, ctx))
         }
     }
 
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
+    fn extract_diagonal(&self, matrix: &CscMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() {
-            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize];
+            diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize];
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         // Use dense fallback for now
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
-            for k in matrix.csc.col_ptr[j]..matrix.csc.col_ptr[j + 1] {
-                let i = matrix.csc.row_idx[k] as usize;
-                let v = matrix.csc.vals[k];
+            for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+                let i = matrix.row_idx[k] as usize;
+                let v = matrix.vals[k];
                 dense[i * n + j] = v;
                 if i != j { dense[j * n + i] = v; }
             }
@@ -7173,31 +6926,31 @@ impl<T: EigenScalar> Drop for SparseEigen<T> {
 
 #[cfg(feature = "eigen")]
 impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
-    type Matrix = SparseMatrix<T>;
+    type Matrix = CscMatrix<T>;
     fn reset(&mut self) {
         self.positions = None;
     }
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<T>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    fn matrix_nonfinite_count(&self, matrix: &CscMatrix<T>) -> usize {
+        matrix.vals.iter().filter(|v| !v.is_finite()).count()
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
+    fn new_matrix(&self, n: usize) -> CscMatrix<T> {
+        CscMatrix::empty(n)
     }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T], matrix: &mut CscMatrix<T>, ctx: &mut crate::threads::Context) -> Result<T, SetupError> {
         if let Some(kept) = &mut self.positions {
-            return Ok(kept.assemble(problem, ctx, params, grad, &mut matrix.csc));
+            return Ok(kept.assemble(problem, ctx, params, grad, matrix));
         }
-        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, &mut matrix.csc)?;
+        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, matrix)?;
         self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
-    fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize]; }
+    fn extract_diagonal(&self, matrix: &CscMatrix<T>, diagonal: &mut [T]) {
+        for i in 0..diagonal.len() { diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
-        eigen_ffi_solve(T::LLT_SOLVE, self.handle, &matrix.csc, grad, delta)
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+        for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
+        eigen_ffi_solve(T::LLT_SOLVE, self.handle, matrix, grad, delta)
     }
 }
 
@@ -7222,31 +6975,31 @@ impl Drop for SparseCholmod {
 
 #[cfg(feature = "cholmod")]
 impl LmSolver<f64> for SparseCholmod {
-    type Matrix = SparseMatrix<f64>;
+    type Matrix = CscMatrix<f64>;
     fn reset(&mut self) {
         self.positions = None;
     }
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    fn matrix_nonfinite_count(&self, matrix: &CscMatrix<f64>) -> usize {
+        matrix.vals.iter().filter(|v| !v.is_finite()).count()
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
+    fn new_matrix(&self, n: usize) -> CscMatrix<f64> {
+        CscMatrix::empty(n)
     }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
         if let Some(kept) = &mut self.positions {
-            return Ok(kept.assemble(problem, ctx, params, grad, &mut matrix.csc));
+            return Ok(kept.assemble(problem, ctx, params, grad, matrix));
         }
-        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, &mut matrix.csc)?;
+        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, matrix)?;
         self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize]; }
+    fn extract_diagonal(&self, matrix: &CscMatrix<f64>, diagonal: &mut [f64]) {
+        for i in 0..diagonal.len() { diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
-        eigen_ffi_solve(eigen_cholmod_f64_solve, self.handle, &matrix.csc, grad, delta)
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
+        eigen_ffi_solve(eigen_cholmod_f64_solve, self.handle, matrix, grad, delta)
     }
 }
 
@@ -7275,31 +7028,31 @@ impl Drop for SparseCholmodSupernodal {
 
 #[cfg(feature = "cholmod-gpl")]
 impl LmSolver<f64> for SparseCholmodSupernodal {
-    type Matrix = SparseMatrix<f64>;
+    type Matrix = CscMatrix<f64>;
     fn reset(&mut self) {
         self.positions = None;
     }
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    fn matrix_nonfinite_count(&self, matrix: &CscMatrix<f64>) -> usize {
+        matrix.vals.iter().filter(|v| !v.is_finite()).count()
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
+    fn new_matrix(&self, n: usize) -> CscMatrix<f64> {
+        CscMatrix::empty(n)
     }
-    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
+    fn compute(&mut self, problem: &mut dyn LmProblemInternals<f64>, params: &[f64], grad: &mut [f64], matrix: &mut CscMatrix<f64>, ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
         if let Some(kept) = &mut self.positions {
-            return Ok(kept.assemble(problem, ctx, params, grad, &mut matrix.csc));
+            return Ok(kept.assemble(problem, ctx, params, grad, matrix));
         }
-        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, &mut matrix.csc)?;
+        let (cost, positions, tiled) = assemble_first_csc(problem, ctx, params, grad, matrix)?;
         self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize]; }
+    fn extract_diagonal(&self, matrix: &CscMatrix<f64>, diagonal: &mut [f64]) {
+        for i in 0..diagonal.len() { diagonal[i] = matrix.vals[matrix.diag_pos[i] as usize]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
-        eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, &matrix.csc, grad, delta)
+    fn solve_damped(&mut self, n: usize, matrix: &mut CscMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.vals[matrix.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
+        eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, matrix, grad, delta)
     }
 }
 
@@ -7625,7 +7378,7 @@ impl<T: Float> CscMatrix<T> {
 
 /// Band Cholesky solve via LAPACK dpbsv (f64). Band is modified in-place.
 #[cfg(feature = "lapack")]
-pub fn solve_spd_band_lapack(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> bool {
+pub(crate) fn solve_spd_band_lapack(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> bool {
     let mut info: i32 = 0;
     let ldab = (kd + 1) as i32;
     unsafe {
@@ -7647,7 +7400,7 @@ pub fn solve_spd_band_lapack(n: usize, kd: usize, band: &mut [f64], b: &mut [f64
 
 /// Band Cholesky solve via LAPACK spbsv (f32). Band is modified in-place.
 #[cfg(feature = "lapack")]
-pub fn solve_spd_band_lapack_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) -> bool {
+pub(crate) fn solve_spd_band_lapack_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) -> bool {
     let mut info: i32 = 0;
     let ldab = (kd + 1) as i32;
     unsafe {
@@ -7675,7 +7428,7 @@ pub fn solve_spd_band_lapack_f32(n: usize, kd: usize, band: &mut [f32], b: &mut 
 /// `band[(kd+i-j) + j*(kd+1)]`. The band array is modified in-place
 /// (factorized). `b` is modified in-place with the solution.
 /// Returns false if A is not positive definite.
-pub fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> bool {
+pub(crate) fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> bool {
     let ldab = kd + 1;
 
     // Cholesky factorize in-place: A = R^T * R (upper triangular R in band)
@@ -7731,7 +7484,7 @@ pub fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> b
 
 /// Band Cholesky solve for SPD matrix in upper-band format (f32).
 /// Same semantics as [`solve_spd_band`] but for single precision.
-pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) -> bool {
+pub(crate) fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) -> bool {
     let ldab = kd + 1;
 
     for j in 0..n {
@@ -7900,7 +7653,7 @@ mod tests {
         }
 
         impl LmProblemInternals<f64> for Quad {
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize, _ctx: &mut crate::threads::Context) -> Result<f64, BandOverflow> {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize, _ctx: &mut crate::threads::Context) -> Result<f64, SetupError> {
                 unreachable!("dense-only test problem")
             }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>, _ctx: &mut crate::threads::Context) -> f64 {

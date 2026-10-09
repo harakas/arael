@@ -148,8 +148,6 @@ impl<T: ParamType> Param<T> {
 
     /// Return the current working-copy value (set during `update_params`).
     pub fn work(&self) -> T { self.work }
-    /// Return a reference to the current working-copy value.
-    pub fn work_ref(&self) -> &T { &self.work }
     /// Return a mutable reference to the current working-copy value.
     pub fn work_mut(&mut self) -> &mut T { &mut self.work }
 
@@ -1532,13 +1530,13 @@ impl<T: crate::utils::Float> Coo<T> {
     /// band[(kd + r - c) + c * ldab], matching SelfBlock/CrossBlock and
     /// the band solvers).
     pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
-        -> Result<(), crate::simple_lm::BandOverflow>
+        -> Result<(), crate::simple_lm::SetupError>
     {
         let ldab = kd + 1;
         for &(row, col, v) in &self.hessian {
             let (r, c) = (row as usize, col as usize);
             if c < r || c - r > kd {
-                return Err(crate::simple_lm::BandOverflow { row: r, col: c, kd });
+                return Err(crate::simple_lm::SetupError::BandOverflow { row: r, col: c, kd });
             }
             band[(kd + r - c) + c * ldab] += F::from(v).unwrap();
         }
@@ -2303,7 +2301,7 @@ mod tests {
         let kd = 1;
         let mut band = vec![0.0; (kd + 1) * n];
         let err = blk.accumulate_hessian_band(&mut band, kd).unwrap_err();
-        assert_eq!((err.row, err.col, err.kd), (0, 3, 1));
+        assert_eq!(err, crate::simple_lm::SetupError::BandOverflow { row: 0, col: 3, kd: 1 });
     }
 
     #[test]

@@ -10,7 +10,7 @@
 // at the back. A block reports no span of its own.
 
 use arael::model::{Component, Model, Param, SelfBlock, SimpleEulerAngleParam};
-use arael::simple_lm::RootProblem;
+use arael::simple_lm::{LmProblemInternals, RootProblem};
 use arael::vect::vect3d;
 
 // Three slots of width 1, 3 and 1: any of them may be fixed.
@@ -315,7 +315,7 @@ fn an_untouched_root_entity_reports_its_span() {
     assert_eq!(span_of(&m.loose[0].hb), vec![], "a block carries no span");
 
     // The root collects every entity's span, in serialize order.
-    let spans = RootProblem::<f64>::param_block_spans(&m);
+    let spans = LmProblemInternals::<f64>::param_block_spans(&m);
     assert_eq!(spans, vec![(0, 5), (5, 1), (6, 1)]);
 }
 
@@ -349,7 +349,7 @@ fn an_untouched_nested_entity_reports_its_span() {
     assert_eq!(span_of(&d.bags[0].loose[0]), vec![(5, 1)]);
     assert_eq!(span_of(&d.bags[0].loose[1]), vec![(6, 1)]);
     assert_eq!(span_of(&d.bags[0].loose[0].hb), vec![], "a block carries no span");
-    assert_eq!(RootProblem::<f64>::param_block_spans(&d),
+    assert_eq!(LmProblemInternals::<f64>::param_block_spans(&d),
         vec![(0, 5), (5, 1), (6, 1)]);
 }
 

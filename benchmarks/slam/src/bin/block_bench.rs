@@ -10,7 +10,8 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, RootProblem, LmProblemInternals};
+use arael::simple_lm::{CooMatrix, RootProblem, LmProblemInternals};
+use arael::store::{block_partition_from_spans, csc_from_cells};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use scene::SceneConfig;
 use std::time::Instant;
@@ -76,7 +77,7 @@ fn main() {
 
     // block: entity partition, then structure + position map
     let (t_spans, partition) = min_ms(rounds, || {
-        let spans = RootProblem::param_block_spans(&path);
+        let spans = LmProblemInternals::param_block_spans(&path);
         block_partition_from_spans(&spans, n)
     });
     let (t_block_map, (sym, positions_block)) = min_ms(rounds, || {

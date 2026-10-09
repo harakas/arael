@@ -70,6 +70,15 @@ is cut.
 - The prelude now carries the solve result and status types, the
   lambda drivers, `LmSession`, the covariance options and the dynamic
   vector and matrix aliases; `Similar` and `LmSolver` are out of it.
+- For hand-written problems: `marginalize_hint` and the entity-span
+  methods are on `LmProblemInternals` only, and the band assembly
+  reports a `SetupError` (the `BandOverflow` struct is gone). Sparse
+  backends use `CscMatrix` as their matrix; `SparseMatrix` is gone. The
+  CSC helpers (`csc_from_cells`, `block_partition_from_spans`,
+  `ScalarCscResolver`) live in `arael::store`; their old paths still
+  work. Gone: `Param::work_ref`, `FIXED_SIZE_THRESHOLD`,
+  `geometry::Camera`, and the `solve_spd*` functions are no longer
+  public.
 - arael-faer: the factorization and Schur APIs take a thread count.
 
 ### Fixed

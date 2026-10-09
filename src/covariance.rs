@@ -696,7 +696,7 @@ fn block_graph(
     if spans.is_empty() || cells.is_empty() {
         return None;
     }
-    let part = crate::simple_lm::block_partition_from_spans(spans, n);
+    let part = crate::store::block_partition_from_spans(spans, n);
     if part.len() - 1 >= n {
         return None;
     }

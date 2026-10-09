@@ -41,6 +41,8 @@ pub struct FormTiming {
 }
 
 impl PhaseTiming {
+    /// Add one sweep: its region and its tasks' times. Called by the
+    /// generated sweeps.
     pub fn record(&mut self, region: Duration, dispatched: bool, tasks: impl Iterator<Item = Duration>) {
         let f = if dispatched { &mut self.par } else { &mut self.seq };
         f.calls += 1;
@@ -229,17 +231,10 @@ impl Context {
         }
     }
 
-    /// Record that this solve's extended hook pushes COO entries, so its
-    /// Hessian pattern is only knowable after a compute. Set once per
-    /// solve, before the first assembly.
-    pub fn set_runtime_coo(&mut self, on: bool) { self.runtime_coo = on; }
-
-    /// Whether the hook pushes COO entries (see
-    /// [`set_runtime_coo`](Self::set_runtime_coo)).
-    pub fn runtime_coo(&self) -> bool { self.runtime_coo }
-
     /// Time the phases of the solves through this context. Off by
-    /// default: then the sweeps never read a clock.
+    /// default: then the sweeps never read a clock. A solve with
+    /// [`LmConfig::gather_timing`](crate::simple_lm::LmConfig::gather_timing)
+    /// turns it on, and it stays on for the solves that follow.
     pub fn set_timing(&mut self, on: bool) {
         self.timing = on;
         // The sweeps' clocks read this: without it they count calls and
@@ -252,9 +247,10 @@ impl Context {
 
     /// The thread count of the next solve, resolved like
     /// [`LmConfig::num_threads`](crate::simple_lm::LmConfig::num_threads)
-    /// (0 is the pool's size). The solve entries set it from the config,
-    /// which starts a solve: the timing counts what this solve does, not
-    /// what the last one through the context did.
+    /// (0 is the pool's size). Every solve entry sets it from the config,
+    /// so a call here matters only when the sweeps are driven without a
+    /// solve. Setting it also resets the sweep timing: a solve's report
+    /// counts what that solve did, not what the last one did.
     pub fn set_threads(&mut self, n: usize) {
         self.threads = pool_size(n).max(1);
         self.sweeps = ParTiming { on: self.timing, ..ParTiming::default() };
@@ -282,10 +278,6 @@ impl Context {
             whole: self.whole,
         })
     }
-
-    /// Where this solve's sweeps spent their time.
-    pub fn sweep_timing(&self) -> &ParTiming { &self.sweeps }
-
 }
 
 /// The thread count a new [`LmConfig`](crate::simple_lm::LmConfig) starts
@@ -320,7 +312,7 @@ fn num_threads_from(text: &str) -> Result<usize, String> {
 
 /// The thread count a solve's `num_threads` setting means: 0 is the
 /// rayon pool's size. Without the `threads` feature every count is 1.
-pub fn pool_size(num_threads: usize) -> usize {
+pub(crate) fn pool_size(num_threads: usize) -> usize {
     #[cfg(feature = "threads")]
     {
         match num_threads {

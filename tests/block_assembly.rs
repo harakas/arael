@@ -4,12 +4,13 @@
 // (calc_grad_hessian_sparse_indexed) -- only the position maps differ:
 // the scalar one comes from CooMatrix::to_csc_with_positions, the block one
 // from SymbolicSparseBlockColMat::from_scalar_coords over the entity
-// partition (RootProblem::param_block_spans + block_partition_from_spans).
+// partition (LmProblemInternals::param_block_spans + block_partition_from_spans).
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::store::{HessianBinder, PositionStream};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem, LmProblemInternals};
+use arael::simple_lm::{CooMatrix, LmProblem, RootProblem, LmProblemInternals};
+use arael::store::{block_partition_from_spans, csc_from_cells};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 
 #[arael::model]
@@ -194,7 +195,7 @@ fn block_assembly_matches_scalar() {
     assert_eq!(n, 2 * (N_POSES + N_LANDMARKS));
 
     // Entity spans: one per pose and landmark, width 2, serialize order.
-    let spans = RootProblem::param_block_spans(&w);
+    let spans = LmProblemInternals::param_block_spans(&w);
     assert_eq!(spans.len(), N_POSES + N_LANDMARKS);
     assert!(spans.iter().enumerate().all(|(k, &(off, width))| {
         off as usize == 2 * k && width == 2
@@ -258,7 +259,7 @@ fn two_scan_matches_coo_route() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
     let n = params.len();
-    let partition = block_partition_from_spans(&RootProblem::param_block_spans(&w), n);
+    let partition = block_partition_from_spans(&LmProblemInternals::param_block_spans(&w), n);
 
     // reference: COO route
     let mut grad = vec![0.0; n];
@@ -303,7 +304,7 @@ fn two_scan_matches_coo_route() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
     let n = params.len();
-    let partition = block_partition_from_spans(&RootProblem::param_block_spans(&w), n);
+    let partition = block_partition_from_spans(&LmProblemInternals::param_block_spans(&w), n);
     let mut grad = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
@@ -739,7 +740,7 @@ fn schur_solve_matches_sparse() {
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
-    let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
+    let lm_start = LmProblemInternals::param_block_spans(&wq)[N_POSES].0 as usize;
     let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_marginalize(lm_start..params.len()));
     let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
@@ -784,7 +785,7 @@ fn schur_solve_with_fixed_params() {
     fix(&mut wq);
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
-    let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
+    let lm_start = LmProblemInternals::param_block_spans(&wq)[N_POSES].0 as usize;
     let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default().with_marginalize(lm_start..params.len()));
     let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 

@@ -1166,7 +1166,7 @@ fn a_pushing_hook_on_a_par_root_threads() {
 /// from several stores adds in another order).
 #[test]
 fn tiled_scatter_matches_sequential_over_the_stores() {
-    use arael::simple_lm::{block_partition_from_spans, csc_from_cells};
+    use arael::store::{block_partition_from_spans, csc_from_cells};
     use arael::store::{HessianBinder, PositionStream};
     let fill = |threads: usize, dirty: bool| -> Vec<f64> {
         let mut w = build(30);

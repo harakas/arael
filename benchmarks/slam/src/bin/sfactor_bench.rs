@@ -13,7 +13,8 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, RootProblem, LmProblemInternals};
+use arael::simple_lm::{RootProblem, LmProblemInternals};
+use arael::store::block_partition_from_spans;
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use arael_faer::faer;
 use arael_faer::faer::dyn_stack::MemStack;
@@ -147,7 +148,7 @@ fn main() {
             })
             .collect()
     };
-    let hint = RootProblem::marginalize_hint(&path);
+    let hint = LmProblemInternals::marginalize_hint(&path);
     let candidates: Vec<Vec<usize>> = if hint.is_empty() {
         LmProblemInternals::marginalize_candidates(&path).iter().map(|r| blocks_in(r)).collect()
     } else {
