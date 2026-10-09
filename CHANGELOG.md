@@ -46,6 +46,9 @@ is cut.
   memory between solves. The `Boxed*` names are now aliases.
 - **`TripletBlock` is gone.** Use `coo`.
 - `se3` is renamed `twist3`. The old name still works, deprecated.
+- `Arena::contains`, deprecated since 0.7.3, is gone; `contains_ref` is
+  the test. The `SparseCoo` and `SparseDirectCsc` baselines stay,
+  deprecated, as test oracles; they are out of the backend tables.
 - For hand-written problems: `LmProblem` keeps the methods you
   implement; the solver's own moved to `LmProblemInternals`, and a few
   signatures changed (docs/SOLVERS.md).

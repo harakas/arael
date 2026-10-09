@@ -3553,7 +3553,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
 
 /// Naive sparse solver: COO assembly, dense Cholesky solve. A reference
 /// implementation for validating the assembly paths.
-#[deprecated(since = "0.7.3", note = "validation baseline; use `SparseFaer`     (`solve_sparse` / `model.solve_sparse`)")]
+#[deprecated(since = "0.7.3", note = "validation baseline; use `SparseFaer` (`model.solve_sparse()`)")]
 pub struct SparseCoo {
     // Reused across iterations; clear() keeps the allocated capacity.
     coo: CooMatrix<f64>,
@@ -3625,7 +3625,7 @@ impl LmSolver<f64> for SparseCoo {
 /// Sparse solver using direct CSC assembly (no COO intermediate after first iteration).
 /// First iteration: COO assembly to discover pattern, build CSC structure.
 /// Subsequent iterations: direct accumulate into CSC vals (with binary search lookup).
-#[deprecated(since = "0.7.3", note = "validation baseline; use `SparseFaer`     (`solve_sparse` / `model.solve_sparse`)")]
+#[deprecated(since = "0.7.3", note = "validation baseline; use `SparseFaer` (`model.solve_sparse()`)")]
 pub struct SparseDirectCsc {
     pattern_built: bool,
 }
