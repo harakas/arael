@@ -452,9 +452,9 @@ fn fixing_a_slot_of_any_param_type_shortens_the_span() {
     let mut e = every();
     e.a.angle.optimize = false;
     k.items.push(e);
-    // The direction's tangent delta: two fewer.
+    // The direction: two fewer.
     let mut e = every();
-    e.u.d.optimize = false;
+    e.u.optimize = false;
     k.items.push(e);
     // The transform's rotation half: three fewer.
     let mut e = every();

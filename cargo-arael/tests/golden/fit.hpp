@@ -49,6 +49,13 @@ using arael::SolveFailure;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::ThreadReport;
+using arael::SweepReport;
+using arael::PhaseChoice;
+using arael::ParTiming;
+using arael::PhaseTiming;
+using arael::FormTiming;
+using arael::StoreFootprint;
 using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
@@ -199,6 +206,8 @@ bool fit_frame_st_optimize_scale(const Frame*);
 void fit_frame_st_set_optimize_scale(Frame*, bool);
 vect3d fit_frame_dir_unit(const Frame*);
 void fit_frame_dir_set_unit(Frame*, vect3d);
+bool fit_frame_dir_optimize(const Frame*);
+void fit_frame_dir_set_optimize(Frame*, bool);
 vect3d fit_frame_dir_unit_d0(const Frame*);
 vect3d fit_frame_dir_unit_d1(const Frame*);
 vect3d fit_frame_anchor(const Frame*);
@@ -490,6 +499,8 @@ int32_t fit_solve_sparse(Fit*, const LmConfig*, const SparseOptions*, LmResultT<
 const char* fit_result_report(void*, bool);
 bool fit_result_plan(const void*, SchurPlan*);
 uint64_t fit_result_steps(const void*, LmStep*, uint64_t);
+void fit_result_threads(const void*, ThreadReport*);
+uint64_t fit_result_threads_held(const void*, StoreFootprint*, uint64_t);
 void fit_result_free(void*);
 struct FitSession;
 FitSession* fit_session_new(const SparseOptions*);
@@ -514,8 +525,8 @@ inline void set_log_level(LogLevel level) {
 }
 
 /// Stop and join arael's sweep worker threads; the next threaded solve
-/// spawns them again. Process-wide, and a no-op when arael was built
-/// without the `rayon` feature.
+/// spawns them again. Process-wide. Without the `threads` feature no
+/// worker is ever spawned and it returns at once.
 inline void pool_shutdown() {
     ffi::fit_pool_shutdown();
 }
@@ -524,8 +535,8 @@ inline void pool_shutdown() {
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data, steps() the per-attempt timeline. Copies share
-/// ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline, threads() what
+/// the threads did. Copies share ownership of the Rust result.
 class LmResult : public LmResultT<double> {
 public:
     LmResult() : LmResultT<double>() {}
@@ -560,16 +571,35 @@ public:
             ffi::fit_result_steps(detail, out.data(), out.size());
         return out;
     }
+    /// What the solve's threads did (Rust's ThreadReport).
+    ThreadReport threads() const {
+        ThreadReport t{};
+        if (detail)
+            ffi::fit_result_threads(detail, &t);
+        return t;
+    }
+    /// What each split store held (Rust's SweepReport::held); empty
+    /// without a threaded sweep.
+    std::vector<StoreFootprint> threads_held() const {
+        std::vector<StoreFootprint> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::fit_result_threads_held(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::fit_result_threads_held(detail, out.data(), out.size());
+        return out;
+    }
 
 private:
     std::shared_ptr<void> guard_;
 };
 
-/// The Err side of a solve: SolverFailed, the text from
-/// last_error() (valid until the next call on the model), the
-/// best accepted state before the break when the solve got that
+/// The Err side of a solve (Rust's SolveFailure): SolverFailed, the
+/// text from last_error() (valid until the next call on the model),
+/// the best accepted state before the break when the solve got that
 /// far, and the structured failure (which kind, which parameter /
-/// row / block index) in `failure`.
+/// row / block index) in `failure`, Rust's SolveFailureKind with the
+/// setup error's data flattened in.
 struct SolveError {
     LmStatus status;
     const char* message;
@@ -621,6 +651,8 @@ public:
     }
     vect3d dir_unit() const { return ffi::fit_frame_dir_unit(h_); }
     void set_dir_unit(vect3d v) { ffi::fit_frame_dir_set_unit(h_, v); }
+    bool dir_optimize() const { return ffi::fit_frame_dir_optimize(h_); }
+    void set_dir_optimize(bool v) { ffi::fit_frame_dir_set_optimize(h_, v); }
     /// Chart tangent basis: d unit / d chart, per chart param.
     vect3d dir_unit_d0() const { return ffi::fit_frame_dir_unit_d0(h_); }
     vect3d dir_unit_d1() const { return ffi::fit_frame_dir_unit_d1(h_); }

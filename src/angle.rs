@@ -32,7 +32,9 @@ use crate::utils::Float;
 #[derive(Clone)]
 pub struct AngleParam<T: Float = f64> {
     /// The optimizable angle in radians. Set it before a solve, read it
-    /// after; constraint bodies read it directly as a scalar.
+    /// after; constraint bodies read it directly as a scalar. Freeze it
+    /// through `angle.optimize`, as for any `Param`, or build with
+    /// [`fixed`](Self::fixed).
     pub angle: Param<T>,
     /// Cached `sin(angle)`; the rotation matrix and its Jacobian read it (pub
     /// so generated constraint code can). Refreshed each iteration; treat as

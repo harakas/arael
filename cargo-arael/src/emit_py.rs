@@ -610,6 +610,8 @@ fn field_py(
                 let p2 = format!("{prefix}_{name}");
                 prop(py, owner_cls, &p2, "unit", &format!("{name}_unit"), v3,
                      true);
+                prop(py, owner_cls, &p2, "optimize", &format!("{name}_optimize"),
+                     "ctypes.c_bool", false);
                 for i in 0..2 {
                     sig(py, &format!("{p2}_unit_d{i}"), &["ctypes.c_void_p"], v3);
                     owner_cls.push_str(&format!(
@@ -1067,6 +1069,13 @@ class Covariance:
         &["ctypes.c_void_p", "ctypes.POINTER(_solver.LmStep)",
           "ctypes.c_uint64"],
         "ctypes.c_uint64");
+    sig(&mut py, &format!("{root_sn}_result_threads"),
+        &["ctypes.c_void_p", "ctypes.POINTER(_solver.ThreadReport)"],
+        "None");
+    sig(&mut py, &format!("{root_sn}_result_threads_held"),
+        &["ctypes.c_void_p", "ctypes.POINTER(_solver.StoreFootprint)",
+          "ctypes.c_uint64"],
+        "ctypes.c_uint64");
     sig(&mut py, &format!("{root_sn}_result_free"), &["ctypes.c_void_p"],
         "None");
     sig(&mut py, &format!("{root_sn}_cost"), &["ctypes.c_void_p"],
@@ -1361,7 +1370,7 @@ from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
-                           SolveFailureKind)
+                           SolveFailureKind, StoreFootprint, ThreadReport)
 
 LmIter = _f.LmIter
 
@@ -1534,6 +1543,27 @@ class LmResult(_f.LmResultRaw):
             return []
         buf = (LmStep * n)()
         _f.{root_sn}_result_steps(self._detail, buf, n)
+        return list(buf)
+
+    @property
+    def threads(self):
+        \"\"\"What the solve's threads did (arael.solver.ThreadReport).\"\"\"
+        t = ThreadReport()
+        if self._detail:
+            _f.{root_sn}_result_threads(self._detail, ctypes.byref(t))
+        return t
+
+    @property
+    def threads_held(self):
+        \"\"\"What each split store held (a list of
+        arael.solver.StoreFootprint); empty without a threaded sweep.\"\"\"
+        if not self._detail:
+            return []
+        n = _f.{root_sn}_result_threads_held(self._detail, None, 0)
+        if not n:
+            return []
+        buf = (StoreFootprint * n)()
+        _f.{root_sn}_result_threads_held(self._detail, buf, n)
         return list(buf)
 
     def __del__(self):

@@ -7,7 +7,7 @@
 #[path = "parity_verify.rs"]
 mod parity_verify;
 
-use arael::simple_lm::{LmConfig, LmProblem, RootProblem};
+use arael::simple_lm::{LmConfig, LmProblem, LmStatus, RootProblem};
 use cxx_fit::Fit;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -128,6 +128,13 @@ fn wasm_interface_matches_rust_exactly() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
     let r = fit.solve_dense(&cfg).unwrap();
     assert_eq!(g("status"), parity_verify::code(&r.status));
+    assert_eq!(g("status_named"), (r.status == LmStatus::Converged) as u8 as f64);
+    assert_eq!(g("status_text_len"), r.status.as_str().len() as f64);
+    assert_eq!(g("th_sweeps_asked"), r.threads.sweeps_asked as f64);
+    assert_eq!(g("th_linear"), r.threads.linear as f64);
+    assert_eq!(g("th_fell_back"), r.threads.fell_back() as u8 as f64);
+    assert_eq!(g("th_has_sweeps"), r.threads.sweeps.is_some() as u8 as f64);
+    assert_eq!(g("enum_schur_force"), 1.0);
     assert_eq!(g("iterations"), r.iterations as f64);
     assert_eq!(g("start_cost"), r.start_cost);
     assert_eq!(g("end_cost"), r.end_cost);

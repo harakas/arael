@@ -311,9 +311,9 @@ fn a_model_of_these_params_solves_the_same_after_a_round_trip() {
 fn unitvec_param_keeps_its_optimize_flag() {
     for opt in [true, false] {
         let mut a = UnitVecParam::new(vect3d::new(0.0, 1.0, 0.0));
-        a.d.optimize = opt;
+        a.optimize = opt;
         let b: UnitVecParam = rt(&a);
-        assert_eq!(b.d.optimize, opt);
+        assert_eq!(b.optimize, opt);
     }
 }
 

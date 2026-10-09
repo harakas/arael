@@ -713,6 +713,94 @@ pub struct COptRouteFlops {
     pub v: CRouteFlops,
 }
 
+/// One form's share of a sweep phase, summed over its calls (mirrors
+/// arael's FormTiming). Seconds.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CFormTiming {
+    pub calls: u32,
+    pub region: f64,
+    pub task_sum: f64,
+    pub task_max: f64,
+    pub task_min: f64,
+}
+
+/// A sweep phase's clocks: the dispatched calls and the ones run on the
+/// calling thread (mirrors arael's PhaseTiming).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CPhaseTiming {
+    pub par: CFormTiming,
+    pub seq: CFormTiming,
+}
+
+/// Where the sweeps' time went (mirrors arael's ParTiming); all zero
+/// unless the solve gathered timing, and `on` says which.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CParTiming {
+    pub on: bool,
+    pub bind: f64,
+    pub assembly_update: f64,
+    pub assembly_zero: f64,
+    pub assembly: CPhaseTiming,
+    pub gather_grad: f64,
+    pub assembly_zero_vals: f64,
+    pub scatter: f64,
+    pub cost_update: f64,
+    pub cost: CPhaseTiming,
+}
+
+/// What one store holds (mirrors arael's StoreFootprint).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CStoreFootprint {
+    pub self_blocks: u64,
+    pub cross_blocks: u64,
+    pub coo_entries: u64,
+    pub bytes: u64,
+}
+
+/// What one phase's sweeps did over a solve (mirrors arael's
+/// PhaseChoice).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CPhaseChoice {
+    pub threaded: bool,
+    pub calls: u32,
+}
+
+/// What the sweeps did (mirrors arael's SweepReport). `held` is the
+/// store count; fit_result_threads_held reads the footprints.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CSweepReport {
+    pub threads: u32,
+    pub assembly: CPhaseChoice,
+    pub cost: CPhaseChoice,
+    pub timing: CParTiming,
+    pub whole: CStoreFootprint,
+    pub held: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct COptSweepReport {
+    pub has: bool,
+    pub v: CSweepReport,
+}
+
+/// What a solve's threads did (mirrors arael's ThreadReport). `sweeps`
+/// is absent when the model has no threaded sweep path.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CThreadReport {
+    pub sweeps_asked: u32,
+    pub linear: u32,
+    pub fell_back: bool,
+    pub sweeps: COptSweepReport,
+}
+
 #[repr(C)]
 pub struct CCandidateFlops {
     pub amd: f64,
@@ -903,6 +991,88 @@ pub unsafe extern "C" fn fit_result_plan(d: *const ResultDetail, out: *mut CSchu
     }
 }
 
+fn c_form(f: &arael::threads::FormTiming) -> CFormTiming {
+    CFormTiming {
+        calls: f.calls as u32,
+        region: f.region.as_secs_f64(),
+        task_sum: f.task_sum.as_secs_f64(),
+        task_max: f.task_max.as_secs_f64(),
+        task_min: f.task_min.as_secs_f64(),
+    }
+}
+
+fn c_phase(p: &arael::threads::PhaseTiming) -> CPhaseTiming {
+    CPhaseTiming { par: c_form(&p.par), seq: c_form(&p.seq) }
+}
+
+fn c_footprint(s: &arael::threads::StoreFootprint) -> CStoreFootprint {
+    CStoreFootprint {
+        self_blocks: s.self_blocks as u64,
+        cross_blocks: s.cross_blocks as u64,
+        coo_entries: s.coo_entries as u64,
+        bytes: s.bytes as u64,
+    }
+}
+
+fn c_choice(c: &arael::threads::PhaseChoice) -> CPhaseChoice {
+    CPhaseChoice { threaded: c.threaded, calls: c.calls as u32 }
+}
+
+/// What the solve's threads did, for the result behind `d`.
+#[no_mangle]
+pub unsafe extern "C" fn fit_result_threads(d: *const ResultDetail, out: *mut CThreadReport) {
+    let t = &(*d).result.threads;
+    let sweeps = match &t.sweeps {
+        Some(s) => {
+            let g = &s.timing;
+            COptSweepReport {
+                has: true,
+                v: CSweepReport {
+                    threads: s.threads as u32,
+                    assembly: c_choice(&s.assembly),
+                    cost: c_choice(&s.cost),
+                    timing: CParTiming {
+                        on: g.on,
+                        bind: g.bind.as_secs_f64(),
+                        assembly_update: g.assembly_update.as_secs_f64(),
+                        assembly_zero: g.assembly_zero.as_secs_f64(),
+                        assembly: c_phase(&g.assembly),
+                        gather_grad: g.gather_grad.as_secs_f64(),
+                        assembly_zero_vals: g.assembly_zero_vals.as_secs_f64(),
+                        scatter: g.scatter.as_secs_f64(),
+                        cost_update: g.cost_update.as_secs_f64(),
+                        cost: c_phase(&g.cost),
+                    },
+                    whole: c_footprint(&s.whole),
+                    held: s.held.len() as u32,
+                },
+            }
+        }
+        None => COptSweepReport::default(),
+    };
+    *out = CThreadReport {
+        sweeps_asked: t.sweeps_asked as u32,
+        linear: t.linear as u32,
+        fell_back: t.fell_back(),
+        sweeps,
+    };
+}
+
+/// What each split store of the result behind `d` holds
+/// (SweepReport::held). Copies up to `cap` records into `out` and
+/// returns the total count -- call with cap 0 to size the buffer.
+#[no_mangle]
+pub unsafe extern "C" fn fit_result_threads_held(d: *const ResultDetail, out: *mut CStoreFootprint, cap: u64) -> u64 {
+    let held: &[arael::threads::StoreFootprint] = match &(*d).result.threads.sweeps {
+        Some(s) => &s.held,
+        None => &[],
+    };
+    for (i, s) in held.iter().take(cap as usize).enumerate() {
+        *out.add(i) = c_footprint(s);
+    }
+    held.len() as u64
+}
+
 /// Per-attempt timeline of the result behind `d` (LmTiming::steps;
 /// populated when the solve ran with gather_timing, empty
 /// otherwise). Copies up to `cap` records into `out` and returns the
@@ -957,8 +1127,8 @@ pub extern "C" fn fit_set_log_level(level: u32) {
 }
 
 /// Stop and join arael's sweep worker threads; the next threaded solve
-/// spawns them again. Process-wide, and a no-op when arael was built
-/// without the `rayon` feature.
+/// spawns them again. Process-wide. Without the `threads` feature no
+/// worker is ever spawned and it returns at once.
 #[no_mangle]
 pub extern "C" fn fit_pool_shutdown() {
     arael::pool::shutdown();
@@ -5338,7 +5508,7 @@ pub unsafe extern "C" fn fit_frames_try_get(p: *mut FitHandle, r: u32) -> *mut F
         None => std::ptr::null_mut(),
     }
 }
-/// Appends `n` elements built from `n` slot records of 29 u64 each (mask
+/// Appends `n` elements built from `n` slot records of 30 u64 each (mask
 /// word(s), then one slot per leaf), or `n` defaults when `slots` is null.
 /// Returns the first new element's key: its packed ref on a refs::Vec,
 /// its index on a std::vec::Vec.
@@ -5350,7 +5520,7 @@ pub unsafe extern "C" fn fit_frames_push_n(p: *mut FitHandle, slots: *const u64,
     for i in 0..n as usize {
         let mut e: Frame = Default::default();
         if !slots.is_null() {
-            assign_slots_frame(&mut e, slots.add(i * 29));
+            assign_slots_frame(&mut e, slots.add(i * 30));
         }
         m.push(e);
     }
@@ -5713,6 +5883,38 @@ pub unsafe extern "C" fn fit_frames_get_dir_unit_n(
     }
     true
 }
+/// Sets `dir_optimize` on elements `start..start + n` from values `stride` bytes
+/// apart (0 broadcasts one value); false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_set_dir_optimize_n(
+    p: *mut FitHandle, start: u32, v: *const u8, n: u32, stride: i64) -> bool {
+    let m = &mut (*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let src = (v as *const u8).offset((i as i64 * stride) as isize) as *const u8;
+        m[start + i].dir.optimize = std::ptr::read_unaligned(src) != 0;
+    }
+    true
+}
+/// Reads `dir_optimize` of elements `start..start + n` into slots `stride` bytes
+/// apart; false when the range exceeds the collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_frames_get_dir_optimize_n(
+    p: *const FitHandle, start: u32, out: *mut u8, n: u32, stride: i64) -> bool {
+    let m = &(*p).model.frames;
+    let (start, n) = (start as usize, n as usize);
+    if start + n > m.len() {
+        return false;
+    }
+    for i in 0..n {
+        let dst = (out as *mut u8).offset((i as i64 * stride) as isize) as *mut u8;
+        std::ptr::write_unaligned(dst, m[start + i].dir.optimize as u8);
+    }
+    true
+}
 /// Sets `anchor` on elements `start..start + n` from values `stride` bytes
 /// apart (0 broadcasts one value); false when the range exceeds the collection.
 #[no_mangle]
@@ -5912,6 +6114,14 @@ pub unsafe extern "C" fn fit_frame_dir_unit(p: *const Frame) -> CVec3F64 {
 #[no_mangle]
 pub unsafe extern "C" fn fit_frame_dir_set_unit(p: *mut Frame, v: CVec3F64) {
     (*p).dir.unit = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_dir_optimize(p: *const Frame) -> bool {
+    (*p).dir.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_frame_dir_set_optimize(p: *mut Frame, v: bool) {
+    (*p).dir.optimize = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_frame_dir_unit_d0(p: *const Frame) -> CVec3F64 {
@@ -6311,7 +6521,7 @@ pub unsafe extern "C" fn fit_wrap_gain_ptr(p: *mut Wrap) -> *mut Gain {
 }
 
 /// Assigns a slot record's masked leaves onto a `Frame`: 1 mask
-/// word(s), then 28 slot(s), one per leaf in field order.
+/// word(s), then 29 slot(s), one per leaf in field order.
 #[allow(dead_code)]
 unsafe fn assign_slots_frame(e: &mut Frame, s: *const u64) {
     if *s.add(0) & (1u64 << 0) != 0 {
@@ -6348,13 +6558,16 @@ unsafe fn assign_slots_frame(e: &mut Frame, s: *const u64) {
         e.dir.unit = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(21)), f64::from_bits(*s.add(22)), f64::from_bits(*s.add(23))]).into();
     }
     if *s.add(0) & (1u64 << 11) != 0 {
-        e.anchor = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(24)), f64::from_bits(*s.add(25)), f64::from_bits(*s.add(26))]).into();
+        e.dir.optimize = *s.add(24) != 0;
     }
     if *s.add(0) & (1u64 << 12) != 0 {
-        e.tag = *s.add(27) as i32;
+        e.anchor = std::mem::transmute::<[f64; 3], CVec3F64>([f64::from_bits(*s.add(25)), f64::from_bits(*s.add(26)), f64::from_bits(*s.add(27))]).into();
     }
     if *s.add(0) & (1u64 << 13) != 0 {
-        e.scale = f64::from_bits(*s.add(28)) as f32;
+        e.tag = *s.add(28) as i32;
+    }
+    if *s.add(0) & (1u64 << 14) != 0 {
+        e.scale = f64::from_bits(*s.add(29)) as f32;
     }
 }
 

@@ -114,7 +114,7 @@ field is a property:
 | `Param<T>` | the value as above, plus `<name>Optimize` |
 | rotation parameters | `<name>` (the vector or quaternion `.value`) and `<name>Optimize` |
 | `TransformParam` | `<name>Translation`, `<name>Rotation`, `<name>OptimizeTranslation`, `<name>OptimizeRotation`; `ScaledTransformParam` adds `<name>Scale`, `<name>OptimizeScale` |
-| `UnitVecParam` | `<name>Unit`, and the read-only `<name>UnitD0`, `<name>UnitD1` |
+| `UnitVecParam` | `<name>Unit`, `<name>Optimize`, and the read-only `<name>UnitD0`, `<name>UnitD1` |
 | `AngleParam` | `<name>Angle`, `<name>AngleOptimize`, and the method `<name>RotationMatrix()` |
 | `Ref<T>` | a number |
 | a sub-model or user component | a method `<name>()` returning its handle |
@@ -148,16 +148,20 @@ is a property (`cfg.maxIters = 50`); the optional ones take a number or
 exported, nor are threads: `numThreads` stays 1 in WebAssembly.
 
 `SparseOptions` mirrors the sparse backend's options, starting from the
-Rust defaults; its enum fields carry the tags of the C ABI, listed on
-the class.
+Rust defaults; its enum fields carry the tags of the C ABI, named by the
+exported enums (`SchurPolicy`, `SolveOrdering`, `EnvelopeMode`,
+`SchurMethod`, `BlockSupernodalMode`; `opts.schur = SchurPolicy.Force`).
+`LmStatus`, `ReducedOrdering`, `CovMode` and `CovOrdering` name the
+other tags.
 
 ```js
 const r = g.solveSparse(LmConfig.wellConditioned());
 r.startCost; r.endCost; r.iterations; r.acceptedIterations;
-r.status; r.statusName; r.isSuccess; r.finalLambda;
+r.status; r.statusName; r.statusText; r.isSuccess; r.finalLambda;
 r.report();       // the text the Rust report() writes
 r.timing();       // per-phase seconds, or undefined without gatherTiming
 r.plan();         // the sparse backend's plan, or undefined
+r.threads();      // what the solve's threads did; one thread in WebAssembly
 r.steps();        // the per-attempt timeline, empty without gatherTiming
 ```
 
@@ -187,7 +191,7 @@ model's diagnostics as text, empty when clean.
 const cov = g.assembleCovariance();          // mode 1 AllMarginals
 const cov = g.assembleCovariance(0);         // 0 PerQuery, 2 TriDiagonal
 const cov = g.assembleCovarianceWith(mode, ordering, blockSupernodal);
-cov.marginalPose2(p);       // Float64Array, row-major dim x dim
+cov.marginalPose2(p);       // Float64Array, row-major dim x dim (Rust's marginal_cov)
 cov.conditionalPose2(p);
 cov.stdDevPose2(p);         // Float64Array, one per parameter
 cov.crossPose2Pose2(a, b);  // row-major
@@ -205,5 +209,9 @@ frees it now. A handle or accessor is small; the root holds the model.
 
 ## What is absent
 
-Threads, the observer callback, the per-constraint cost table of a
-`jacobian` root, and the partial result of a failed solve.
+Threads (`numThreads` and `assemblyThreads` are inert, and `threads()`
+reports one), the observer callback, the per-constraint cost table and
+`calcJacobian` of a `jacobian` root, the structured failure and the
+partial result of a failed solve, the transform views of the C++ and
+Python skins (the flat `<name>Translation` / `<name>Rotation` properties
+are there), `setLogLevel`, `poolShutdown`, and the g2o loader.

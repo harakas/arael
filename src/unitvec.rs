@@ -42,15 +42,19 @@ where
     /// constants (pub so generated constraint code can). Refreshed whenever
     /// the reference moves; treat as read-only.
     pub rot: matrix3<T>,
-    /// The tangent delta (body-frame rotation about y and z). Zero-centred;
-    /// fix it to freeze the direction.
+    /// Whether the direction is optimized. Clear it to hold the direction.
+    pub optimize: bool,
+    /// The tangent delta (body-frame rotation about y and z), zero-centred.
+    /// Solver internal -- freeze through `optimize`, not this.
+    #[doc(hidden)]
     pub d: Param<vect2<T>>,
     /// User-facing direction: set it (any nonzero length) before a solve,
     /// read it after `deserialize`. During a solve it holds the embed at the
     /// current delta, refreshed by the update paths.
     pub unit: vect3<T>,
     /// Jacobian cache `[d(unit)/d(d.x), d(unit)/d(d.y)]`, read by constraint
-    /// Jacobians; refreshed with `unit` (skipped while `d` is fixed).
+    /// Jacobians; refreshed with `unit` (skipped while the direction is
+    /// frozen).
     pub unit_d: [vect3<T>; 2],
 }
 
@@ -70,6 +74,7 @@ where
     /// A direction parameter starting at `dir` (normalized here).
     pub fn new(dir: vect3<T>) -> UnitVecParam<T> {
         let mut p = UnitVecParam {
+            optimize: true,
             ref_q: quatern::identity(),
             rot: matrix3::identity(),
             d: Param::new(vect2::new(T::zero(), T::zero())),
@@ -84,7 +89,7 @@ where
     /// A direction parameter frozen at `dir` (excluded from optimization).
     pub fn fixed(dir: vect3<T>) -> UnitVecParam<T> {
         let mut p = UnitVecParam::new(dir);
-        p.d = Param::fixed(vect2::new(T::zero(), T::zero()));
+        p.optimize = false;
         p
     }
 
@@ -98,7 +103,8 @@ where
 
     /// The hand-written twin of the generated symbolic precompute: the
     /// chart embed at the current delta into `unit`, and its Jacobian into
-    /// `unit_d` (skipped while `d` is fixed -- nothing reads it then).
+    /// `unit_d` (skipped while the delta has no slot -- nothing reads it
+    /// then).
     #[doc(hidden)]
     pub fn __precompute_symbolic(&mut self) {
         let d = self.d.work();
@@ -148,6 +154,8 @@ where
         self.ref_q = quatern::from_two_vectors(Self::ex(), self.unit);
         self.refresh();
         self.d.value = vect2::new(T::zero(), T::zero());
+        // The flag is the single source of truth for whether it moves.
+        self.d.optimize = self.optimize;
     }
 
     fn update(&mut self) {
@@ -205,11 +213,11 @@ where
     }
 
     fn serialize_size(&self) -> u32 {
-        Model::serialize_size(&self.d)
+        if self.optimize { Model::serialize_size(&self.d) } else { 0 }
     }
     // The tangent delta is the slot; it folds into the entity's span.
     fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
-        Model::fold_param_span(&self.d, min, count);
+        if self.optimize { Model::fold_param_span(&self.d, min, count); }
     }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<vect2<T>> as Model>::param_symbols(&format!("{}.d", base), out);
@@ -313,7 +321,7 @@ where
         use serde::ser::SerializeStruct;
         let mut st = s.serialize_struct("UnitVecParam", 2)?;
         st.serialize_field("unit", &self.unit)?;
-        st.serialize_field("optimize", &self.d.optimize)?;
+        st.serialize_field("optimize", &self.optimize)?;
         st.end()
     }
 }
@@ -345,10 +353,7 @@ where
                 let dir = u.unwrap_or_else(||
                     vect3::new(U::one(), U::zero(), U::zero()));
                 let mut p = UnitVecParam::new(dir);
-                p.d.optimize = opt.unwrap_or(true);
-                // The Jacobian cache is skipped while the delta is frozen,
-                // so refresh after setting the flag.
-                p.__precompute_symbolic();
+                p.optimize = opt.unwrap_or(true);
                 Ok(p)
             }
         }

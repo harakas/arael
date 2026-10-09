@@ -195,6 +195,8 @@ pub fn leaves(model: &Model, t: &Type) -> Vec<Leaf> {
                     let v3 = if of == "UnitVecParamF" { "vect3f" } else { "vect3d" };
                     out.push(leaf(&format!("{name}_unit"), &format!("{name}.unit"),
                                   math_ty(v3).expect("builtin")));
+                    out.push(leaf(&format!("{name}_optimize"), &format!("{name}.optimize"),
+                                  LeafTy::Bool));
                 }
                 "AngleParam" | "AngleParamF" => {
                     let sc = if of == "AngleParamF" { LeafTy::F32 } else { LeafTy::F64 };
@@ -286,6 +288,7 @@ mod tests {
             ("st_optimize_rotation".into(), "st.optimize_rotation".into(), 1),
             ("st_optimize_scale".into(), "st.optimize_scale".into(), 1),
             ("dir_unit".into(), "dir.unit".into(), 3),
+            ("dir_optimize".into(), "dir.optimize".into(), 1),
             ("heading_angle".into(), "heading.angle.value".into(), 1),
             ("heading_angle_optimize".into(), "heading.angle.optimize".into(), 1),
             ("a".into(), "a".into(), 1),
@@ -300,11 +303,12 @@ mod tests {
         assert!(matches!(&lv[13].ty, LeafTy::Math { scalar, n: 4, mirror }
             if scalar == "f64" && mirror == "CQuatF64"));
         assert_eq!(lv[14].ty, LeafTy::F64);
-        assert!(matches!(&lv[22].ty, LeafTy::Math { scalar, n: 8, mirror }
+        assert_eq!(lv[19].ty, LeafTy::Bool);
+        assert!(matches!(&lv[23].ty, LeafTy::Math { scalar, n: 8, mirror }
             if scalar == "f32" && mirror == "CMatF32x2x4"));
-        assert_eq!(lv[21].ty, LeafTy::Ref);
-        // 1 mask word + 49 slots.
-        assert_eq!(record_slots(&lv), 50);
+        assert_eq!(lv[22].ty, LeafTy::Ref);
+        // 1 mask word + 50 slots.
+        assert_eq!(record_slots(&lv), 51);
     }
 
     #[test]

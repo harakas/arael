@@ -18,7 +18,7 @@ from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
-                           SolveFailureKind)
+                           SolveFailureKind, StoreFootprint, ThreadReport)
 
 LmIter = _f.LmIter
 
@@ -191,6 +191,27 @@ class LmResult(_f.LmResultRaw):
             return []
         buf = (LmStep * n)()
         _f.path_result_steps(self._detail, buf, n)
+        return list(buf)
+
+    @property
+    def threads(self):
+        """What the solve's threads did (arael.solver.ThreadReport)."""
+        t = ThreadReport()
+        if self._detail:
+            _f.path_result_threads(self._detail, ctypes.byref(t))
+        return t
+
+    @property
+    def threads_held(self):
+        """What each split store held (a list of
+        arael.solver.StoreFootprint); empty without a threaded sweep."""
+        if not self._detail:
+            return []
+        n = _f.path_result_threads_held(self._detail, None, 0)
+        if not n:
+            return []
+        buf = (StoreFootprint * n)()
+        _f.path_result_threads_held(self._detail, buf, n)
         return list(buf)
 
     def __del__(self):
@@ -574,8 +595,8 @@ class PointFrine:
         _f.path_point_frine_set_feature(self._p, _raw(r))
 
 
-_point_landmark_rec = struct.Struct("=QdddQddddQ")
-_point_landmark_slots = (ctypes.c_uint64 * 10)()
+_point_landmark_rec = struct.Struct("=QdddQdddQdQ")
+_point_landmark_slots = (ctypes.c_uint64 * 11)()
 
 
 class PointLandmarkFrinesVec:
@@ -748,6 +769,14 @@ class PointLandmark:
     @dir_unit.setter
     def dir_unit(self, v):
         _f.path_point_landmark_dir_set_unit(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def dir_optimize(self):
+        return _f.path_point_landmark_dir_optimize(self._p)
+
+    @dir_optimize.setter
+    def dir_optimize(self, v):
+        _f.path_point_landmark_dir_set_optimize(self._p, v)
 
     @property
     def dir_unit_d0(self):
@@ -1695,8 +1724,8 @@ class PathLandmarksArena:
     def reserve(self, additional):
         _f.path_landmarks_reserve(self._p, additional)
 
-    def push(self, *, anchor=None, anchor_pose=None, dir_unit=None, rho=None,
-                 rho_optimize=None):
+    def push(self, *, anchor=None, anchor_pose=None, dir_unit=None,
+                 dir_optimize=None, rho=None, rho_optimize=None):
         """New element's ref (get()/[] take it back); each keyword sets
         that field in the same call, an omitted one keeps the Rust
         default."""
@@ -1711,12 +1740,15 @@ class PathLandmarksArena:
         else:
             m |= 1 << 2; dir_unit = tuple(dir_unit)
             if len(dir_unit) != 3: dir_unit = _cols.flat(dir_unit, 3)
+        if dir_optimize is None: dir_optimize = 0
+        else: m |= 1 << 3; dir_optimize = 1 if dir_optimize else 0
         if rho is None: rho = 0.0
-        else: m |= 1 << 3
+        else: m |= 1 << 4
         if rho_optimize is None: rho_optimize = 0
-        else: m |= 1 << 4; rho_optimize = 1 if rho_optimize else 0
+        else: m |= 1 << 5; rho_optimize = 1 if rho_optimize else 0
         _point_landmark_rec.pack_into(_point_landmark_slots, 0,
-            m, *anchor, anchor_pose, *dir_unit, rho, rho_optimize)
+            m, *anchor, anchor_pose, *dir_unit, dir_optimize, rho,
+            rho_optimize)
         return PointLandmarkRef(_f.path_landmarks_push_n(self._p, _point_landmark_slots, 1))
 
     def remove(self, r):
