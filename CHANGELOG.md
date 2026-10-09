@@ -94,6 +94,8 @@ is cut.
 
 - Multithreaded solves are much faster: 0.8.3 threaded the
   factorization only, now every stage runs on threads.
+- `private-gemm-x86` is updated to 0.1.22 for faster threaded solves,
+  and an x86-specific performance fix speeds them up further.
 - Taking the Hessian blocks out of the model speeds up the cost and
   assembly sweeps: they read only the parameters, not the block storage
   that used to sit between them. The sparse Hessian is also written
