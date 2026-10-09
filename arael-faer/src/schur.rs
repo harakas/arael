@@ -241,6 +241,8 @@ macro_rules! impl_schur_real {
 impl_schur_real!(f32, new_colmajor_lhs_and_dst_f32, new_f32);
 impl_schur_real!(f64, new_colmajor_lhs_and_dst_f64, new_f64);
 
+/// Why a Schur reduction cannot proceed: the eliminated set is not
+/// eliminable, or a diagonal tile failed to factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchurError {
     /// a stored tile couples two eliminated blocks: `Hee` is not

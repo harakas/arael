@@ -36,6 +36,8 @@ The block-structured pieces a large sparse solve needs:
   stages above that do not run on faer's kernels dispatch to, and that arael's
   sweeps share. Spawned on first use, parked between dispatches, one dispatch
   at a time. faer's own kernels run on rayon's pool.
+- **Index types** (`SparseIndex`, `ValueIndex` / `value_index`) and `sort_keys`
+  -- inner API shared with arael.
 
 ## bsc -- block CSC
 
@@ -47,6 +49,7 @@ upper triangle.
 | | |
 |---|---|
 | `SymbolicSparseBlockColMat::from_scalar_coords` | build the structure from scalar (row, col) coordinates and a partition |
+| `SymbolicSparseBlockColMat::covering` | the same structure from a stream of scalar coordinates, without their positions, for a caller that binds its values through a `PositionResolver` |
 | `SparseBlockColMat::zeroed` / `new` | allocate values for a structure |
 | `block(b)` / `block_mut(b)` | a tile as a faer `MatRef` / `MatMut` -- dense, so faer's kernels apply |
 | `PositionResolver` | scalar (i, j) -> offset in the value array; build a scatter map once, assemble by index forever after |
@@ -100,7 +103,7 @@ one independent contribution per eliminated block.
 | `schur_reduce(sym, h, rhs, ctx, s, rhs_out)` | numeric: fill S and the reduced right-hand side from a (damped) H |
 | `schur_backsub(sym, h, rhs, x_kept, ctx, x_full)` | recover the eliminated blocks once the reduced system is solved |
 | `SchurSymbolic::{kept_size, kept_bandwidth, reduce_flops, pair_count}` | what the reduction will cost and how big S is -- free, from the symbolic pass, for deciding whether to reduce at all |
-| `SchurContext` | reusable workspace across iterations; `set_threads` runs the reduction and the back-substitution on the pool, one range of S's block columns per thread, the same answer to rounding at any count; `set_chunk_columns` sets how many columns a thread forms at a time; `enable_timing` breaks a reduction down by stage |
+| `SchurContext` | reusable workspace across iterations; `set_threads` runs the reduction and the back-substitution on the pool, one range of S's block columns per thread, the same answer to rounding at any count; `set_chunk_columns` sets how many columns a thread forms at a time; `enable_timing` breaks a reduction down by stage, into `SchurTiming` (`factor`: the eliminated diagonal tiles, `columns`: the kept columns) |
 | `FIXED_SHAPES` / `has_fixed_kernel` | the tile shapes with a fully unrolled GEMM kernel. Anything else works, through the nano-gemm fallback, at about 1.2-1.4x |
 | `SchurSymbolic::gemm_shapes` | which shapes a given problem needs, and how many calls each carries -- so a caller can see whether it is on the slow path |
 
@@ -194,8 +197,9 @@ never permuted and no scalar copy of it is ever built.
 | `supernodal_factorize(sym, a, factor, ctx, threads)` | numeric: `L L^T = A` into a factor buffer, left-looking over the descendant graph. `threads` runs independent subtrees on separate threads and hands the pool to the dense kernels of the panels too big to chunk; the result matches the sequential one to rounding |
 | `supernodal_solve(sym, factor, rhs, ctx)` | solve `A x = rhs` in place from the factor |
 | `SupernodalContext` | the workspace the factorization and solve reuse across calls; grows once |
-| `SupernodalParams` | amalgamation table, update-batching ratio, postordering. `memory_lean()` trades a little speed for a smaller factor |
+| `SupernodalParams` | amalgamation table, update-batching ratio, postordering, and the work thresholds (`window_update`, `window_solve`) past which a threaded factorization shares a panel between its threads in windows of its columns or rows. `memory_lean()` trades a little speed for a smaller factor |
 | `amd_block_order(a)` | AMD over the block adjacency -- the ordering to hand `new`, blocks kept whole |
+| `cheapest_block_order(a, params, candidates, threads)` | prices candidate orderings by their symbolic factorizations, side by side on the pool when `threads > 1`, and returns the cheapest as a `BlockOrderChoice`: the order, its symbolic (factorize through it), which candidate won, and every candidate's cost |
 | `SupernodalSymbolic::flops` / `factor_val_count` | what the factorization will cost and hold, for pricing this route against another |
 | `SupernodalSymbolic::subtree_chunks(workers)` | how many independent subtrees the parallel path hands to that many threads; 0 when it runs sequentially with threaded kernels instead |
 | `SupernodalError` | the matrix was not positive definite, or the factor overflowed the index type |
@@ -204,7 +208,16 @@ Consecutive small updates into one target panel are batched: they are packed
 zero-padded into a joint operand pair and spent as a single larger GEMM, which
 is accepted when the padding it adds stays under `batch_ratio` (1.5 by default,
 `None` disables). `arael::simple_lm::BlockSupernodalMode` selects this route in
-arael, where it is the default on a sequential solve.
+arael, where it is the default.
+
+## Features
+
+- `threads` -- faer's threaded kernels, and with them the factorization's
+  subtree and window parallelism. Off by default: everything runs
+  sequentially whatever thread count a caller passes. `rayon` is the
+  feature's name through 0.8, the same thing.
+- `x86-v4` -- nano-gemm's AVX-512 kernels on x86. Not a win on every
+  machine; measure with `--example gemmbench` before enabling it.
 
 ## License
 

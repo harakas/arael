@@ -66,10 +66,21 @@ const NONE: u32 = u32::MAX;
 /// rounding, not to the bit. `None` leaves every panel whole.
 #[derive(Clone, Debug)]
 pub struct SupernodalParams {
+    /// The amalgamation table, `(max_cols, max_zero_fraction)` rows;
+    /// `None` keeps fundamental supernodes.
     pub relax: Option<Vec<(usize, f64)>>,
+    /// The padded-flops factor under which small updates into one panel
+    /// are batched into one GEMM; `None` disables batching.
     pub batch_ratio: Option<f64>,
+    /// Relabel the block elimination tree in postorder before detecting
+    /// supernodes.
     pub postorder: bool,
+    /// The update work past which a threaded factorization shares a
+    /// panel between its threads in windows of its columns; `None` keeps
+    /// every panel whole.
     pub window_update: Option<usize>,
+    /// The triangular-solve work past which a panel is shared in windows
+    /// of its rows; `None` keeps every panel whole.
     pub window_solve: Option<usize>,
 }
 
@@ -88,11 +99,9 @@ impl Default for SupernodalParams {
 impl SupernodalParams {
     /// The memory-lean amalgamation: a single 2%-zero rung instead of
     /// the default table. On wide-block systems (bundle adjustment's
-    /// 9-wide cameras) it matches the default's speed while holding
-    /// less factor -- 41.3 against 49.1 MB on the Ladybug-372 reduced
-    /// system. On narrow-block systems the default's size-capped rungs
-    /// are worth 10-20% of the factorization time, so this is an
-    /// opt-in, not an auto-pick.
+    /// 9-wide cameras) it matches the default's speed with a smaller
+    /// factor. On narrow-block systems the default's size-capped rungs
+    /// factor faster, so this is an opt-in, not an auto-pick.
     pub fn memory_lean() -> Self {
         Self {
             relax: Some(vec![(usize::MAX, 0.02)]),
@@ -2824,7 +2833,7 @@ mod tests {
         }
     }
 
-    /// The parallel path factors the same matrix to the same bits as the
+    /// The parallel path factors the same matrix to rounding of the
     /// sequential one, and factors ALL of it.
     ///
     /// The bug this exists for: ownership of a chunk flows from its root

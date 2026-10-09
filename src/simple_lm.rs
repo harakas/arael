@@ -1224,7 +1224,8 @@ pub struct LmTiming {
     pub first_assembly: Duration,
     /// The backend's one-time structural analysis, run inside the first
     /// `compute`: sparsity pattern and value-position map, Schur detection, the
-    /// fill/flop decision (two trial symbolic factorizations), the fill-reducing
+    /// fill/flop decision (trial symbolic factorizations of the candidate
+    /// routes), the fill-reducing
     /// ordering, and the symbolic factorization.
     ///
     /// Disjoint from `assembly`, which is the model's residual and Jacobian work.

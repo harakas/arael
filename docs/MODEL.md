@@ -25,7 +25,7 @@ treated as a constant.
 | `SimpleEulerAngleParam<T>` | 3 | three independent Euler angles (roll, pitch, yaw) stored directly |
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
 | `QuaternionParam<T>` | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised on every re-center so it never drifts off SO(3) |
-| `TransformParam<T>` | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it. Clear `optimize_translation` or `optimize_rotation` to hold either half |
+| `TransformParam<T>` | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is a twist (`twist3`), so a rotation correction carries the translation with it. Clear `optimize_translation` or `optimize_rotation` to hold either half |
 | `ScaledTransformParam<T>` | 7 | a similarity transform (Sim(3)): `TransformParam` plus a uniform scale, acting on a point as `s * (R * x) + t` -- the state of monocular loop closing. Bodies read `scale_factor`; the scale is optimized as its logarithm, so it stays positive and a scale-difference residual is linear. Clear `optimize_scale` to fix the scale (stereo/RGB-D) |
 | `UnitVecParam<T>` | 2 | a direction on the unit sphere, such as the normal of a mapped plane landmark: read and write `unit`, which stays unit length because the two parameters rotate a reference direction rather than move its components; clear `optimize` to hold it |
 
@@ -522,7 +522,7 @@ struct Path {
 
 | Attribute | Purpose |
 |---|---|
-| `#[arael::model]` | declare a Model; generates the Model trait impl (serialize / deserialize / update / accumulate_hessian) |
+| `#[arael::model]` | declare a Model; generates the `Model` trait impl (`serialize_params` / `deserialize_params` / `update_params` / `advance_params` and the rest) |
 | `#[arael(root)]` | mark the top-level Model. Generates the `LmProblem` and `RootProblem` impls (unlocking LmProblem's `solve_with` / `solve_dense` / `solve_sparse`), manages indices, owns the update cycle |
 | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64). Produces `*_f32` methods. Every block in the model (`SelfBlock` / `CrossBlock`, whose scalar defaults to f64) must match this precision -- a mismatch is a compile error naming the struct and block field. Storage and `Param` precision are free to differ (an f32-storage model solving f64 casts at the boundary) |
 | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian(&params) -> Jacobian<T>` and `calc_cost_table(&params)` for diagnostics |
@@ -914,6 +914,8 @@ per residual group, mixed freely.
 | `#[arael(ref = <path>)]` | `Ref<T>` field | where to resolve the Ref: `root.<collection>` (a collection on the root), `parent.<collection>` (a collection on the immediate containing sub-model -- for a constraint nested below the root), `<other_ref>.<sub_collection>` (chain into a nested collection), or `parent.<ref>.<collection>` (through a parent ref of the parent-refs shared-cross form; data refs only) |
 | `#[arael(cross = (<refA>, <refB>))]` | `CrossBlock<T, T>` field | disambiguate *which* ref pair this CrossBlock serves when two local Refs share the same T |
 | `#[arael(compute = <expr>)]` | any data field | derived field: excluded from serialization, reassigned as `self.<field> = <expr>` on every `update()` (param names in the expression read their current working values). Example: `#[arael(compute = ea.rotation_matrix())]` caching a rotation matrix (see examples/model_demo.rs) |
+| `#[arael(symbolic = <expr>)]` | any data field | a computed field with derivatives: a constraint-body read of it expands to the expression, so the solver differentiates through it. Filled by the generated symbolic precompute |
+| `#[arael(deriv = <field>, by = <param>)]` | an array field | the declared Jacobian cache `d(field)/d(param)`: one entry per component of `param`, each shaped like `field`. Filled by the generated symbolic precompute; constraint Jacobians read it instead of re-deriving the expression per observation |
 | `#[arael(constraint_index)]` | `u32` field | receives a unique row id per constraint instance, useful for building per-constraint diagnostics / logs |
 | `#[arael(skip)]` | any field | exclude from the model entirely: not serialized, not updated, and a skipped entity collection gets no constraint sweeps. Use sparingly -- the macro already handles non-Param fields correctly |
 

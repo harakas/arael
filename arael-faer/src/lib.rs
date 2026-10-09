@@ -37,6 +37,8 @@
 //!   to, and that arael's sweeps share. Spawned on first use, parked
 //!   between dispatches, one dispatch at a time. faer's own kernels run on
 //!   rayon's pool.
+//! - **Index types** ([`SparseIndex`], [`ValueIndex`] / [`value_index`])
+//!   and [`sort_keys`] -- inner API shared with arael.
 //!
 //! # bsc -- block CSC
 //!
@@ -48,6 +50,9 @@
 //!
 //! * `SymbolicSparseBlockColMat::from_scalar_coords` -- build the structure
 //!   from scalar (row, col) coordinates and a partition
+//! * `SymbolicSparseBlockColMat::covering` -- the same structure from a
+//!   stream of scalar coordinates, without their positions, for a caller
+//!   that binds its values through a `PositionResolver`
 //! * `SparseBlockColMat::zeroed` / `new` -- allocate values for a structure
 //! * `block(b)` / `block_mut(b)` -- a tile as a faer `MatRef` / `MatMut` --
 //!   dense, so faer's kernels apply
@@ -98,7 +103,9 @@
 //!   back-substitution on the pool, one range of S's block columns per
 //!   thread, the same answer to rounding at any count; `set_chunk_columns`
 //!   sets how many columns a thread forms at a time; `enable_timing`
-//!   breaks a reduction down by stage
+//!   breaks a reduction down by stage, into
+//!   [`SchurTiming`](schur::SchurTiming) (`factor`: the eliminated
+//!   diagonal tiles, `columns`: the kept columns)
 //! * [`FIXED_SHAPES`](schur::FIXED_SHAPES) /
 //!   [`has_fixed_kernel`](schur::has_fixed_kernel) -- the tile shapes with a
 //!   fully unrolled GEMM kernel (the ones SLAM systems use: 3/6/7/9-wide
@@ -182,11 +189,19 @@
 //! * [`supernodal_solve`](supernodal::supernodal_solve) -- solve `A x = rhs`
 //!   from the factor
 //! * [`SupernodalParams`](supernodal::SupernodalParams) -- amalgamation table,
-//!   update-batching ratio, postordering;
+//!   update-batching ratio, postordering, and the work thresholds
+//!   (`window_update`, `window_solve`) past which a threaded factorization
+//!   shares a panel between its threads in windows of its columns or rows;
 //!   [`memory_lean`](supernodal::SupernodalParams::memory_lean) trades a
 //!   little speed for a smaller factor
 //! * [`amd_block_order`](supernodal::amd_block_order) -- AMD over the block
 //!   adjacency, blocks kept whole
+//! * [`cheapest_block_order`](supernodal::cheapest_block_order) -- prices
+//!   candidate orderings by their symbolic factorizations, side by side on
+//!   the pool when its thread count is above one, and returns the cheapest
+//!   as a [`BlockOrderChoice`](supernodal::BlockOrderChoice): the order,
+//!   its symbolic (factorize through it), which candidate won, and every
+//!   candidate's cost
 //! * [`SupernodalError`](supernodal::SupernodalError) -- not positive
 //!   definite, or the factor overflowed the index type
 //!
@@ -194,7 +209,16 @@
 //! zero-padded into a joint operand pair and spent as a single larger GEMM,
 //! accepted while the padding stays under the params' ratio.
 //! `arael::simple_lm::BlockSupernodalMode` selects this route in arael, where
-//! it is the default on a sequential solve.
+//! it is the default.
+//!
+//! # Features
+//!
+//! - `threads` -- faer's threaded kernels, and with them the factorization's
+//!   subtree and window parallelism. Off by default: everything runs
+//!   sequentially whatever thread count a caller passes. `rayon` is the
+//!   feature's name through 0.8, the same thing.
+//! - `x86-v4` -- nano-gemm's AVX-512 kernels on x86. Not a win on every
+//!   machine; measure with `--example gemmbench` before enabling it.
 
 pub use faer;
 
