@@ -110,7 +110,11 @@ impl Graph {
         Graph { xadj, adj, vwgt: vec![1; n] }
     }
 
-    /// Give the nodes weights (their scalar widths). Length must be `nodes()`.
+    /// Give the nodes weights (their scalar widths).
+    ///
+    /// # Panics
+    ///
+    /// When `vwgt` is not `nodes()` long.
     pub fn with_weights(mut self, vwgt: Vec<usize>) -> Self {
         assert_eq!(vwgt.len(), self.nodes());
         self.vwgt = vwgt;

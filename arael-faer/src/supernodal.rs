@@ -131,7 +131,33 @@ pub enum SupernodalError {
     NotPositiveDefinite,
 }
 
+impl core::fmt::Display for SupernodalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SupernodalError::IndexOverflow { required } => write!(
+                f, "the factor needs {required} values; a ValueIndex addresses at most {}",
+                ValueIndex::MAX
+            ),
+            SupernodalError::NotPositiveDefinite => f.write_str("a diagonal pivot is not positive"),
+        }
+    }
+}
+
+impl std::error::Error for SupernodalError {}
+
+/// faer's parallelism for the dense kernels of `threads` workers: rayon's
+/// pool under the `threads` feature, sequential otherwise.
+fn kernel_par(threads: usize) -> faer::Par {
+    #[cfg(feature = "threads")]
+    if threads > 1 {
+        return faer::Par::rayon(threads);
+    }
+    let _ = threads;
+    faer::Par::Seq
+}
+
 /// Where one stored tile of the matrix lands inside the factor panels.
+/// Inner API, read by arael's selected inverse.
 #[derive(Clone, Copy, Debug)]
 pub struct TileTarget {
     /// Offset of the tile's (0, 0) scalar in the factor value buffer.
@@ -146,6 +172,10 @@ pub struct TileTarget {
 /// The symbolic factorization: supernode structure, patterns, panel
 /// layout, descendant lists and the seed scatter map. Built once per
 /// sparsity structure; every damped attempt reuses it.
+///
+/// The factor-layout accessors (`tile_targets`, `supernode_pattern`,
+/// `supernode_pattern_rows`, `descendants`, `supernode_parent`, `order`,
+/// `position_of`) are inner API, read by arael's selected inverse.
 pub struct SupernodalSymbolic {
     /// scalar dimension
     n: usize,
@@ -223,6 +253,11 @@ impl SupernodalSymbolic {
     /// Analyse a symmetric block matrix under an optional block
     /// elimination order (`order[k]` = block eliminated k-th, e.g. from
     /// [`crate::nd::order_graph`]); `None` is the natural order.
+    ///
+    /// # Panics
+    ///
+    /// When `a` is not square in blocks, or `order` is not a permutation
+    /// of its blocks.
     pub fn new(
         a: &SymbolicSparseBlockColMat<SparseIndex>,
         order: Option<&[usize]>,
@@ -990,12 +1025,8 @@ impl SupernodalSymbolic {
     }
 }
 
-/// Approximate-minimum-degree order of the BLOCK graph: faer's amd run
-/// on the block adjacency, so blocks stay whole by construction. On the
-/// pose-graph benchmarks it matches scalar AMD's fill while ordering a
-/// graph 3-6x smaller. Returns the block elimination order
+/// Nested dissection of the block graph, as the block elimination order
 /// [`SupernodalSymbolic::new`] takes.
-/// Nested dissection of the block graph, as an elimination order.
 pub fn nd_block_order(a: &SymbolicSparseBlockColMat<SparseIndex>) -> Vec<usize> {
     crate::nd::order_graph(&crate::nd::Graph::of_blocks(a), crate::nd::NdParams::default())
 }
@@ -1052,6 +1083,9 @@ pub fn cheapest_block_order(
     Some(BlockOrderChoice { order: std::mem::take(&mut candidates[winner]), symbolic, winner, flops })
 }
 
+/// Approximate-minimum-degree order of the block graph: faer's AMD run on
+/// the block adjacency, so blocks stay whole. Returns the block
+/// elimination order [`SupernodalSymbolic::new`] takes.
 pub fn amd_block_order(a: &SymbolicSparseBlockColMat<SparseIndex>) -> Vec<usize> {
     let nblk = a.nblk_cols();
     let (_, _, bcp, bri, _) = a.parts();
@@ -1732,12 +1766,22 @@ fn factor_panel<T: SchurReal>(
 /// do. The factor buffer and the context are caller-owned and reused
 /// across attempts; each panel is zeroed and seeded at its own turn,
 /// so no pass over the whole buffer precedes the work.
+///
+/// `threads` runs independent subtrees on separate threads of
+/// [`crate::pool`] and hands rayon's pool to the dense kernels of the
+/// panels too big to chunk; 0 and 1 run on the calling thread. The result
+/// matches the sequential one to rounding.
+///
+/// # Panics
+///
+/// When `factor` is not [`factor_val_count`](SupernodalSymbolic::factor_val_count)
+/// long, or `a` has a different block structure from the one analysed.
 pub fn supernodal_factorize<T: SchurReal>(
     sym: &SupernodalSymbolic,
     a: &SparseBlockColMat<SparseIndex, T>,
     factor: &mut [T],
     ctx: &mut SupernodalContext<T>,
-    par: faer::Par,
+    threads: usize,
 ) -> Result<(), SupernodalError> {
     assert_eq!(factor.len(), sym.factor_val_count());
     let asym = a.symbolic();
@@ -1745,13 +1789,8 @@ pub fn supernodal_factorize<T: SchurReal>(
     let vals = a.vals();
     let ptr = FactorPtr(factor.as_mut_ptr());
 
-    let workers = match par {
-        faer::Par::Seq => 1,
-        #[cfg(feature = "threads")]
-        faer::Par::Rayon(n) => n.get(),
-        #[allow(unreachable_patterns)]
-        _ => 1,
-    };
+    let workers = threads.max(1);
+    let par = kernel_par(workers);
     ctx.main.size_for(sym, par);
     if workers > 1 {
         // One scratch per thread: a subtree worker's, or a helper's on a
@@ -1952,6 +1991,10 @@ fn contiguous_below(sym: &SupernodalSymbolic, s: usize, m: usize) -> Option<usiz
 /// Solve `A x = rhs` in place from a factor produced by
 /// [`supernodal_factorize`]. The permutation is applied on entry and
 /// undone on exit; `rhs` stays in the matrix's own ordering.
+///
+/// # Panics
+///
+/// As [`supernodal_solve_multi`] does.
 pub fn supernodal_solve<T: SchurReal>(
     sym: &SupernodalSymbolic,
     factor: &[T],
@@ -1969,6 +2012,11 @@ pub fn supernodal_solve<T: SchurReal>(
 /// matrix-matrix rather than matrix-vector, so this costs far less than `k`
 /// separate solves. Recovering an entity's covariance block wants exactly
 /// that: one column per degree of freedom, same factor.
+///
+/// # Panics
+///
+/// When `factor` is not [`factor_val_count`](SupernodalSymbolic::factor_val_count)
+/// long, or `rhs` is not `k` times the dimension.
 pub fn supernodal_solve_multi<T: SchurReal>(
     sym: &SupernodalSymbolic,
     factor: &[T],
@@ -2454,7 +2502,7 @@ mod tests {
                         let sn =
                             SupernodalSymbolic::new(a.symbolic(), Some(order), &params).unwrap();
                         let mut factor = vec![0.0f64; sn.factor_val_count()];
-                        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq).unwrap();
+                        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
                         let mut x = rhs.clone();
                         supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
                         let resid = rel_resid(&dense, n, &x, &rhs);
@@ -2487,7 +2535,7 @@ mod tests {
         let sn = SupernodalSymbolic::new(a.symbolic(), Some(&nd), &SupernodalParams::default())
             .unwrap();
         let mut factor = vec![0.0f32; sn.factor_val_count()];
-        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq).unwrap();
+        supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
         let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
         supernodal_solve(&sn, &factor, &mut x32, &mut SupernodalContext::new());
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
@@ -2613,7 +2661,7 @@ mod tests {
             )
             .unwrap();
             let mut factor = vec![0.0f64; sn.factor_val_count()];
-            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq).unwrap();
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
             let mut x = rhs.clone();
             supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
             (x, sn.batched_pairs())
@@ -2702,7 +2750,7 @@ mod tests {
                 SupernodalSymbolic::new(a.symbolic(), None, &SupernodalParams::default()).unwrap();
             let mut factor = vec![0.0f64; sn.factor_val_count()];
             for _ in 0..3 {
-                supernodal_factorize(&sn, &a, &mut factor, &mut ctx, faer::Par::Seq).unwrap();
+                supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
                 let mut x = rhs.clone();
                 supernodal_solve(&sn, &factor, &mut x, &mut ctx);
                 let resid = rel_resid(&dense, n, &x, &rhs);
@@ -2727,7 +2775,7 @@ mod tests {
             let sn =
                 SupernodalSymbolic::new(a.symbolic(), None, &SupernodalParams::default()).unwrap();
             let mut factor = vec![0.0f64; sn.factor_val_count()];
-            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, faer::Par::Seq).unwrap();
+            supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
 
             for k in [1usize, 2, 3, 6] {
                 // Column-major n x k, each column a distinct right-hand side.
@@ -2808,11 +2856,11 @@ mod tests {
 
             let mut seq = vec![0.0f64; sn.factor_val_count()];
             supernodal_factorize(&sn, &a, &mut seq, &mut SupernodalContext::new(),
-                                 faer::Par::Seq).unwrap();
+                                 1).unwrap();
             // Start from dirt: a panel nobody factored must not pass as zero.
             let mut par_f = vec![f64::NAN; sn.factor_val_count()];
             supernodal_factorize(&sn, &a, &mut par_f, &mut SupernodalContext::new(),
-                                 faer::Par::rayon(4)).unwrap();
+                                 4).unwrap();
 
             for s in 0..sn.n_supernodes() {
                 let (q, h) = sn.supernode_dims(s);
@@ -2850,7 +2898,7 @@ mod tests {
         let sn = SupernodalSymbolic::new(&asym, None, &SupernodalParams::default()).unwrap();
         let mut factor = vec![0.0f64; sn.factor_val_count()];
         assert_eq!(
-            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), faer::Par::Seq),
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1),
             Err(SupernodalError::NotPositiveDefinite),
         );
     }

@@ -875,7 +875,7 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
     let hb = arael_faer::bsc::SparseBlockColMat::new(hsym, vals);
     let mut factor = vec![0.0_f64; symbolic.factor_val_count()];
     let mut ctx = sn::SupernodalContext::new();
-    sn::supernodal_factorize(&symbolic, &hb, &mut factor, &mut ctx, faer::Par::Seq)
+    sn::supernodal_factorize(&symbolic, &hb, &mut factor, &mut ctx, 1)
         .map_err(|_| CovError::NotPositiveDefinite)?;
 
     Ok(Some(CovAssembly {

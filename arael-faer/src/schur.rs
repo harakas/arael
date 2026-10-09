@@ -28,11 +28,19 @@ use crate::{value_index, ValueIndex};
 use faer::Index;
 use faer::traits::ComplexField;
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+}
+
 /// scalar operations the hand-rolled tile kernels need. the kernels
 /// run on raw column-major slices (tile sizes are single digits, where
-/// plain loops beat dispatching into a general GEMM).
+/// plain loops beat dispatching into a general GEMM). Implemented for
+/// `f32` and `f64`; sealed.
 pub trait SchurReal:
-    ComplexField
+    sealed::Sealed
+    + ComplexField
     + Copy
     + Send
     + Sync
@@ -233,7 +241,7 @@ macro_rules! impl_schur_real {
 impl_schur_real!(f32, new_colmajor_lhs_and_dst_f32, new_f32);
 impl_schur_real!(f64, new_colmajor_lhs_and_dst_f64, new_f64);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchurError {
     /// a stored tile couples two eliminated blocks: `Hee` is not
     /// block-diagonal and the per-block elimination is invalid
@@ -246,6 +254,27 @@ pub enum SchurError {
     /// (with LM damping applied upstream this indicates a modeling bug)
     NotPositiveDefinite { block: usize },
 }
+
+impl core::fmt::Display for SchurError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SchurError::CoupledEliminated { row, col } => {
+                write!(f, "eliminated blocks {row} and {col} are coupled by a stored tile")
+            }
+            SchurError::MissingDiagonal { block } => {
+                write!(f, "eliminated block {block} has no diagonal tile")
+            }
+            SchurError::BadEliminatedSet => {
+                f.write_str("the eliminated set is not strictly ascending or names a block out of range")
+            }
+            SchurError::NotPositiveDefinite { block } => {
+                write!(f, "the diagonal tile of eliminated block {block} is not positive definite")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SchurError {}
 
 /// one-time structural analysis of a Schur reduction (see
 /// [`schur_symbolic`]); consumed by [`schur_reduce`] every iteration.
@@ -466,6 +495,10 @@ impl<T> SchurContext<T> {
     pub fn set_chunk_columns(&mut self, n: usize) {
         self.chunk = n;
     }
+    /// The chunk width [`set_chunk_columns`](Self::set_chunk_columns) set.
+    pub fn chunk_columns(&self) -> usize {
+        self.chunk
+    }
     /// gather a per-stage [`SchurTiming`] on every subsequent
     /// [`schur_reduce`] call (a few clock reads per call)
     pub fn enable_timing(&mut self) {
@@ -520,6 +553,10 @@ impl Stopwatch {
 /// stored, square partition) eliminating the given block ids (strictly
 /// ascending). Errors if the eliminated set is internally coupled or an
 /// eliminated block lacks its diagonal tile.
+///
+/// # Panics
+///
+/// When `h`'s block partition is not square.
 pub fn schur_symbolic<I: Index>(
     h: &SymbolicSparseBlockColMat<I>,
     eliminated: &[usize],
@@ -1006,7 +1043,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 /// are). Marginalized: 1 (inverse depth), 2 (a 2D point, or a bearing), 3 (a
 /// 3D point), 4 (a 3D line, or a 2D segment). Cross-checked against g2o's
 /// vertex dimensions and GTSAM's variable dimensions.
-pub const FIXED_SHAPES: [(usize, usize, usize); 65] = [
+pub const FIXED_SHAPES: &[(usize, usize, usize)] = &[
     // -- 2D --
     (3, 2, 3), // 2D pose (x, y, theta) through a 2D point. The slam2d demos,
     // g2o VertexSE2 + VertexPointXY, Victoria-Park-style range-bearing SLAM
@@ -1415,6 +1452,10 @@ pub fn schur_factor_eliminated<I: Index, T: SchurReal>(
 ///
 /// Requires a preceding [`schur_factor_eliminated`] (or [`schur_reduce`]) on
 /// this `h` and context, for the `C^-1`.
+///
+/// # Panics
+///
+/// When `x` or `y` is not the reduced system's dimension long.
 pub fn schur_apply<I: Index, T: SchurReal>(
     sym: &SchurSymbolic<I>,
     h: &SparseBlockColMat<I, T>,
@@ -1516,6 +1557,10 @@ pub fn schur_apply<I: Index, T: SchurReal>(
 /// column-major, concatenated in kept order, and `spans` with its
 /// `(scalar offset, width)` -- together the layout
 /// `cg::BlockJacobi::from_diagonal_blocks` reads.
+///
+/// # Panics
+///
+/// When `rhs_kept` is not the reduced system's dimension long.
 pub fn schur_prepare_implicit<I: Index, T: SchurReal>(
     sym: &SchurSymbolic<I>,
     h: &SparseBlockColMat<I, T>,
@@ -1779,6 +1824,11 @@ fn build_s_to_h<I: Index, T>(sym: &SchurSymbolic<I>, ctx: &mut SchurContext<T>) 
 /// Every tile receives its contributions in eliminated-block order
 /// whatever the cut, so the result is the same at any thread count.
 /// Per-stage wall time lands in [`SchurContext::timing`] when enabled.
+///
+/// # Panics
+///
+/// When `rhs` is not `h`'s dimension long, or `rhs_out` not the reduced
+/// system's.
 pub fn schur_reduce<I: Index, T: SchurReal>(
     sym: &SchurSymbolic<I>,
     h: &SparseBlockColMat<I, T>,
@@ -2020,6 +2070,11 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
 /// The eliminated blocks are recovered in ranges, one per thread
 /// ([`SchurContext::set_threads`]), each into its own span of a context
 /// buffer, and copied into `x_full` afterwards.
+///
+/// # Panics
+///
+/// When `rhs` or `x_full` is not `h`'s dimension long, or `x_kept` not
+/// the reduced system's.
 pub fn schur_backsub<I: Index, T: SchurReal>(
     sym: &SchurSymbolic<I>,
     h: &SparseBlockColMat<I, T>,

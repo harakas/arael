@@ -6521,7 +6521,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
                 if arael_faer::supernodal::supernodal_factorize(
-                    sn, h, &mut self.sn_factor, &mut self.sn_ctx, self.par,
+                    sn, h, &mut self.sn_factor, &mut self.sn_ctx, self.ctx.threads(),
                 )
                 .is_err()
                 {
@@ -6634,7 +6634,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let sn = self.sn_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
             if arael_faer::supernodal::supernodal_factorize(
-                sn, s, &mut self.sn_factor, &mut self.sn_ctx, self.par,
+                sn, s, &mut self.sn_factor, &mut self.sn_ctx, self.ctx.threads(),
             )
             .is_err()
             {
