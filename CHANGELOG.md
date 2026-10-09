@@ -17,6 +17,9 @@ is cut.
 - arael-faer's error types implement `Display` and `Error`.
 - arael-sym: `FunctionBag::add_n` (the old `addN` is deprecated), and an
   `E` can be made from an `Expr`.
+- `#[arael::function]` eval fns may take the model root as their first
+  argument, may return their value and partials from one call, or may
+  have no derivative at all; arael-sym has the nodes behind that.
 - `UnitVecParam` has an `optimize` flag, in Rust and every skin.
 - The C, C++, Python and JS skins carry the solve's thread report.
 - JS: named enums for the option tags and statuses, and `statusText`.

@@ -1,0 +1,15 @@
+error: symbolic = expression on `Off.c`: `root`: no model root here; a function that reads the root can be used only in a constraint body
+  --> tests/user_function_errors/root_in_symbolic_field.rs:11:1
+   |
+11 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `arael::model::Param`
+ --> tests/user_function_errors/root_in_symbolic_field.rs:4:5
+  |
+4 | use arael::model::Param;
+  |     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

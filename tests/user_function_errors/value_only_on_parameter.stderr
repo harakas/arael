@@ -1,0 +1,15 @@
+error: no derivative of `foo`: declared without a derivative; add derivs = [...] or return partials
+ --> tests/user_function_errors/value_only_on_parameter.rs:9:1
+  |
+9 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/user_function_errors/value_only_on_parameter.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

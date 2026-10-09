@@ -17,7 +17,15 @@ fn user_function_compile_errors() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/user_function_errors/bad_signature.rs");
     t.compile_fail("tests/user_function_errors/mismatched_derivs_count.rs");
-    t.compile_fail("tests/user_function_errors/missing_derivs_form_b.rs");
+    t.compile_fail("tests/user_function_errors/value_only_on_parameter.rs");
+    t.compile_fail("tests/user_function_errors/root_type_mismatch.rs");
+    t.compile_fail("tests/user_function_errors/root_missing_in_call.rs");
+    t.compile_fail("tests/user_function_errors/root_to_rootless.rs");
+    t.compile_fail("tests/user_function_errors/root_in_symbolic_field.rs");
+    t.compile_fail("tests/user_function_errors/tuple_without_flag.rs");
+    t.compile_fail("tests/user_function_errors/flag_without_tuple.rs");
+    t.compile_fail("tests/user_function_errors/derivs_on_numeric.rs");
+    t.compile_fail("tests/user_function_errors/partials_count_off.rs");
     t.compile_fail("tests/user_function_errors/same_name_form_b.rs");
     t.compile_fail("tests/user_function_errors/unknown_function_in_body.rs");
     t.compile_fail("tests/user_function_errors/arity_mismatch_at_call.rs");

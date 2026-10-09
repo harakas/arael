@@ -1,0 +1,5 @@
+error: `[f64; 1]` holds one partial per scalar parameter, and `f_eval` has 2
+ --> tests/user_function_errors/partials_count_off.rs:4:41
+  |
+4 | fn f_eval(x: f64, y: f64, derivs: bool) -> (f64, [f64; 1]) { let _ = derivs; (x * y, [y]) }
+  |                                         ^^^^^^^^^^^^^^^^^^

@@ -720,6 +720,29 @@ pub enum FuncKind {
     /// Explicit per-argument derivatives. Codegen emits `call_path(args...)`.
     /// `eval_fn` used for eval (required).
     Extern { derivs: Vec<E>, eval_fn: fn(&[f64]) -> f64, call_path: String },
+    /// An extern function whose Rust eval returns the value and its
+    /// first partial derivatives together, `(f64, [f64; N])`; see
+    /// [`extern_func_numeric_derivs`]. The node is that whole result,
+    /// read through [`ExternOutput`](FuncKind::ExternOutput). Codegen
+    /// emits `call_path(args..., partials_read)`.
+    ExternNumericDerivs {
+        call_path: String,
+        /// The trailing argument of the generated call: whether the
+        /// partials will be used.
+        partials_read: bool,
+        /// The first argument is a Rust value the eval fn takes before
+        /// the numbers: written into the call as it is, no partial.
+        context_arg: bool,
+        /// The arguments as `&[f64]` to the value and the partials;
+        /// `None` when the function runs only in generated code.
+        eval_fn: Option<fn(&[f64]) -> (f64, std::vec::Vec<f64>)>,
+    },
+    /// One output of an [`ExternNumericDerivs`](FuncKind::ExternNumericDerivs)
+    /// call, the node's single argument: 0 the value, `1 + i` the partial
+    /// by argument `i`.
+    ExternOutput { index: usize },
+    /// A derivative that does not exist; see [`no_derivative`].
+    NoDerivative { of: String, why: String },
 }
 
 impl FuncKind {
@@ -735,7 +758,7 @@ impl FuncKind {
     pub fn derivs(&self) -> Option<&[E]> {
         match self {
             FuncKind::SymbolicDerivs { derivs, .. } | FuncKind::Extern { derivs, .. } => Some(derivs),
-            FuncKind::Symbolic { .. } => None,
+            _ => None,
         }
     }
 
@@ -743,7 +766,7 @@ impl FuncKind {
     pub fn body(&self) -> Option<&E> {
         match self {
             FuncKind::Symbolic { body } | FuncKind::SymbolicDerivs { body, .. } => Some(body),
-            FuncKind::Extern { .. } => None,
+            _ => None,
         }
     }
 
@@ -769,6 +792,17 @@ impl Hash for FuncKind {
                 derivs.hash(state);
                 (*eval_fn as usize).hash(state);
                 call_path.hash(state);
+            }
+            FuncKind::ExternNumericDerivs { call_path, partials_read, context_arg, eval_fn } => {
+                call_path.hash(state);
+                partials_read.hash(state);
+                context_arg.hash(state);
+                eval_fn.map(|f| f as usize).hash(state);
+            }
+            FuncKind::ExternOutput { index } => index.hash(state),
+            FuncKind::NoDerivative { of, why } => {
+                of.hash(state);
+                why.hash(state);
             }
         }
     }
@@ -1572,8 +1606,131 @@ impl FunctionBag {
             kind: f.kind.clone(),
             args: args.to_vec(),
         });
+        // Such a call is used through its value.
+        let func = match &f.kind {
+            FuncKind::ExternNumericDerivs { .. } => extern_output(&func, 0),
+            _ => func,
+        };
         Some(Ok(func))
     }
+}
+
+/// Create an extern function whose Rust eval returns the value and its
+/// first partial derivatives by each argument together, `(f64, [f64; N])`: codegen emits
+/// `call_path(args..., read)`, with `read` telling the eval fn whether
+/// the partials will be used; differentiation reads the partials from
+/// that same call, so one call serves a residual and its Jacobian.
+/// `eval_fn` takes the arguments as `&[f64]` and returns the value and
+/// the partials; `None` when the function can run only in generated
+/// code. With `context_arg` the first argument is a Rust value the eval
+/// fn takes before the numbers, written into the call as it is and
+/// given no partial (arael passes the model root this way).
+///
+/// Only first derivatives exist, by design: a partial has no derivative
+/// of its own, and differentiating one gives [`no_derivative`]'s
+/// marker.
+///
+/// # Example
+/// ```
+/// use arael_sym::*;
+/// fn sq(args: &[f64]) -> (f64, Vec<f64>) { (args[0] * args[0], vec![2.0 * args[0]]) }
+/// let f = extern_func_numeric_derivs("sq", 1, "sq_eval", false, Some(sq));
+/// let x = symbol("x");
+/// let e = f(vec![x.clone()]);
+/// assert_eq!(e.to_rust("f64"), "sq_eval(x, true).0");
+/// assert_eq!(e.diff("x").to_rust("f64"), "sq_eval(x, true).1[0]");
+/// let at = std::collections::HashMap::from([("x", 3.0)]);
+/// assert_eq!(e.eval(&at).unwrap(), 9.0);
+/// assert_eq!(e.diff("x").eval(&at).unwrap(), 6.0);
+/// ```
+pub fn extern_func_numeric_derivs(
+    name: &str, arity: usize, call_path: &str, context_arg: bool,
+    eval_fn: Option<fn(&[f64]) -> (f64, std::vec::Vec<f64>)>,
+) -> impl Fn(std::vec::Vec<E>) -> E + Clone {
+    let name = name.to_string();
+    let call_path = call_path.to_string();
+    let params: std::vec::Vec<String> = (0..arity).map(|i| format!("__p{i}")).collect();
+    move |args: std::vec::Vec<E>| {
+        assert_eq!(args.len(), arity,
+            "extern function '{}' expects {} args, got {}", name, arity, args.len());
+        let call = E::new(Expr::Func {
+            name: name.clone(),
+            params: params.clone(),
+            kind: FuncKind::ExternNumericDerivs {
+                call_path: call_path.clone(), partials_read: true, context_arg, eval_fn,
+            },
+            args,
+        });
+        extern_output(&call, 0)
+    }
+}
+
+/// Output `index` of an `ExternNumericDerivs` call: 0 the value, `1 + i`
+/// the partial by argument `i`.
+pub(crate) fn extern_output(call: &E, index: usize) -> E {
+    let name = match call.as_ref() {
+        Expr::Func { name, .. } => name.clone(),
+        _ => "output".to_string(),
+    };
+    E::new(Expr::Func {
+        name,
+        params: vec!["__p0".to_string()],
+        kind: FuncKind::ExternOutput { index },
+        args: vec![call.clone()],
+    })
+}
+
+/// The i-th partial of a value an [`extern_func_numeric_derivs`]
+/// function returned, read from the same call. `None` when `value` is
+/// not such a value, or the function has no i-th argument.
+pub fn partial_of(value: &E, i: usize) -> Option<E> {
+    let Expr::Func { kind: FuncKind::ExternOutput { index: 0 }, args, .. } = value.as_ref() else {
+        return None;
+    };
+    let call = &args[0];
+    let Expr::Func { kind: FuncKind::ExternNumericDerivs { context_arg, .. }, args: call_args, .. } = call.as_ref() else {
+        return None;
+    };
+    (i < call_args.len() - usize::from(*context_arg)).then(|| extern_output(call, 1 + i))
+}
+
+/// The same [`extern_func_numeric_derivs`] call with `read` telling the
+/// eval fn whether its partials will be used, the generated call's
+/// trailing argument. `e` is the call's value, one of its partials, or
+/// the call itself; anything else comes back unchanged. Code generators
+/// set this per emitted batch: false where only the value is used.
+pub fn with_partials_read(e: &E, read: bool) -> E {
+    match e.as_ref() {
+        Expr::Func { name, params, kind: FuncKind::ExternNumericDerivs { call_path, context_arg, eval_fn, .. }, args } => {
+            E::new(Expr::Func {
+                name: name.clone(),
+                params: params.clone(),
+                kind: FuncKind::ExternNumericDerivs {
+                    call_path: call_path.clone(), partials_read: read,
+                    context_arg: *context_arg, eval_fn: *eval_fn,
+                },
+                args: args.clone(),
+            })
+        }
+        Expr::Func { kind: FuncKind::ExternOutput { index }, args, .. } => {
+            extern_output(&with_partials_read(&args[0], read), *index)
+        }
+        _ => e.clone(),
+    }
+}
+
+/// The derivative that does not exist, of `of`, for the reason `why`:
+/// give it as a deriv of an extern function that has none, and
+/// differentiating a partial of an [`extern_func_numeric_derivs`]
+/// function yields it. Eval returns `Err`, codegen writes
+/// `compile_error!`, and it prints as `<no derivative of f: why>`.
+pub fn no_derivative(of: &str, why: &str) -> E {
+    E::new(Expr::Func {
+        name: of.to_string(),
+        params: std::vec::Vec::new(),
+        kind: FuncKind::NoDerivative { of: of.to_string(), why: why.to_string() },
+        args: std::vec::Vec::new(),
+    })
 }
 
 // --- Operator overloads for E (auto-simplify like SymPy) ---

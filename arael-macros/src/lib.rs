@@ -221,16 +221,23 @@ pub(crate) enum UserFunction {
         attr_file: String,
         attr_line: u32,
     },
-    /// Form B: attribute sits on `fn <eval_name>(x: f32 | f64, ...) -> <same>`.
-    /// First positional attr arg names the symbolic sibling. Eval body is
-    /// opaque. Derivatives required.
+    /// Form B: attribute sits on `fn <eval_name>([root: &R,] x: f32 | f64,
+    /// ...[, derivs: bool]) -> <scalar> | (<scalar>, [<scalar>; N])`. First
+    /// positional attr arg names the symbolic sibling. Eval body is opaque.
     Extern {
         sym_name: String,          // e.g. "elliptic_k"
         eval_path: String,         // e.g. "elliptic_k_eval" (resolved at use site)
-        param_names: Vec<String>,  // eval fn's scalar param names
-        arity: usize,
+        param_names: Vec<String>,  // the root's name first when it takes one, then the scalars
+        arity: usize,              // param_names.len()
         scalar_ty: String,         // "f32" or "f64"
-        deriv_strings: Vec<String>, // one per param
+        /// One per scalar param; `None` for a fn declared without a
+        /// derivative. Never present for the numeric shape.
+        deriv_strings: Option<Vec<String>>,
+        /// The root parameter's type: its last path segment, and whether
+        /// that is a generic parameter of the fn (then unchecked).
+        root: Option<(String, bool)>,
+        /// Returns `(value, [partials; N])` with a trailing `derivs: bool`.
+        numeric: bool,
         attr_file: String,
         attr_line: u32,
     },

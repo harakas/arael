@@ -1,0 +1,5 @@
+error: a fn that returns its partials takes no `derivs = [...]`
+ --> tests/user_function_errors/derivs_on_numeric.rs:3:19
+  |
+3 | #[arael::function(f, derivs = [2.0 * x])]
+  |                   ^

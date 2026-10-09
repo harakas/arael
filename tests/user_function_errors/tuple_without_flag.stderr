@@ -1,0 +1,5 @@
+error: a tuple return `(S, [S; N])` needs a trailing `derivs: bool` parameter, true when the partials are read
+ --> tests/user_function_errors/tuple_without_flag.rs:4:1
+  |
+4 | fn f_eval(x: f64) -> (f64, [f64; 1]) { (x * x, [2.0 * x]) }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

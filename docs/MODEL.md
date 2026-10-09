@@ -1161,17 +1161,63 @@ Optional `derivs = [expr, ...]` overrides auto-diff with an
 explicit partial per parameter. Expressions are raw tokens, not
 strings or closures.
 
-### Form B: opaque numerical eval + symbolic derivatives
+### Form B: opaque numerical eval
 
-`#[arael::function(sym_name, derivs = [...])]` on a
-`fn name_eval(x: f32, ...) -> f32` (or `f64`). The eval fn is
-opaque numerical code the macro never inspects. The positional
-`sym_name` names the symbolic sibling the macro emits for use
-inside constraints; the sibling delegates residual evaluation to
-the eval fn and uses the stashed `derivs` expressions for
-gradient / Hessian assembly.
+`#[arael::function(sym_name[, derivs = [...]])]` on a
+`fn name_eval(...)` over `f32` or `f64`. The eval fn is opaque
+numerical code the macro never inspects. The positional `sym_name`
+names the symbolic sibling the macro emits for use inside
+constraints. The signature says where the derivative comes from:
+
+| shape | signature | derivative |
+|---|---|---|
+| without one | `fn f_eval([root: &R,] x: f64, ...) -> f64`, no `derivs` | none |
+| symbolic | the same, with `derivs = [...]` | the expressions |
+| numeric | `fn f_eval([root: &R,] x: f64, ..., derivs: bool) -> (f64, [f64; N])`, no `derivs` | from the call |
+
+**The root.** The eval fn may take the model root as its first
+parameter, a shared reference to the root type, or to a generic
+parameter with the fn's own bound. Every call passes it explicitly,
+as `root` or the root's own name: `gain(root, m.x)` in a body,
+`slope(root, x)` in derivs. A root-taking function works in
+constraint bodies, Form C bodies and derivs; not in a `symbolic =`
+field, where no root exists.
+
+**Symbolic.** `derivs` has one expression per scalar parameter, same
+token shape as Form A derivs, over the eval fn's own parameter names
+in declaration order, the root's fields as `root.<field>`, and other
+registered functions, root-taking ones included; mutual recursion is
+resolved by a two-pass bag build at constraint-expansion time.
+
+**Numeric.** The fn returns its value and its first partial derivative
+by each scalar parameter from the same call: `.0` the value, `.1[i]`
+the partial derivative by the i-th scalar parameter. The trailing `derivs: bool` says
+whether the partials will be read: the cost sweep passes false, the
+Jacobian assembly true, and the array is ignored when false. One call
+serves the residual and its Jacobian. Only first derivatives exist, by
+design: a numeric partial has no derivative of its own.
+
+**Without one.** A scalar-returning fn with no `derivs`. It serves
+where no derivative of it is needed: in another function's derivs, or
+applied to data. Applied to a parameter in a residual, the Jacobian
+needs the derivative it does not have, and that is a compile error
+naming the function.
 
 ```rust,ignore
+// A gain table on the root: its value, the slope it also gives, and
+// a lookup returning both from one search.
+#[arael::function(slope)]
+fn slope_eval(root: &Scene, x: f64) -> f64 { root.table.slope(x) }
+
+#[arael::function(gain, derivs = [slope(root, x)])]
+fn gain_eval(root: &Scene, x: f64) -> f64 { root.table.value(x) }
+
+#[arael::function(lookup)]
+fn lookup_eval(root: &Scene, x: f64, derivs: bool) -> (f64, [f64; 1]) {
+    let (v, dv) = root.table.at(x);
+    (v, [if derivs { dv } else { 0.0 }])
+}
+
 // `my_safe_asin` clamps its input before calling the libm asin
 // and supplies a closed-form derivative that stays finite at the
 // clamp edge. The `identity(...)` guard blocks the simplifier
@@ -1187,26 +1233,26 @@ fn my_safe_asin_eval(x: f64) -> f64 {
 
 #[arael::model]
 #[arael(root, jacobian)]
-#[arael(constraint(hb, name = "inverse_sin", {
-    [(my_safe_asin(m.x) - m.target) * m.isigma]
+#[arael(constraint(hb, name = "fit", {
+    [(gain(root, scene.x) - scene.target) * scene.isigma,
+     lookup(root, scene.x) - scene.target2,
+     my_safe_asin(scene.y) - 0.5]
 }))]
-struct M {
+struct Scene {
+    table: Table,
     x: Param<f64>,
+    y: Param<f64>,
     target: f64,
+    target2: f64,
     isigma: f64,
-    hb: SelfBlock<M>,
+    hb: SelfBlock<Scene>,
 }
 ```
 
-`derivs` is required in Form B -- one expression per scalar
-parameter, same token shape as Form A derivs. Parameter names
-inside the derivative expressions refer to the eval fn's own
-parameters in declaration order, so the `x` in
-`1.0 / sqrt(1.0 - x * x + 1e-12)` is the `x` from
-`fn my_safe_asin_eval(x: f64)`. Derivative expressions may call
-other registered `#[arael::function]`s, including each other and
-themselves -- mutual recursion is resolved by a two-pass bag
-build at constraint-expansion time.
+The sibling takes the root as an `E` too, `gain(root, x)`, and builds
+the expression for ordinary Rust. A root-taking function cannot be
+evaluated there, since there is no root at runtime: the scalar
+shapes panic, the numeric one returns an error.
 
 ### Form C: typed, with `let` bindings and tuples
 

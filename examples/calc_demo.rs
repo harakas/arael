@@ -150,6 +150,10 @@ fn handle_line(
                         FuncKind::Symbolic { body } => body.to_string(),
                         FuncKind::SymbolicDerivs { body, .. } => body.to_string(),
                         FuncKind::Extern { call_path, .. } => format!("<extern: {call_path}>"),
+                        FuncKind::ExternNumericDerivs { call_path, .. } =>
+                            format!("<extern: {call_path}, value and partials>"),
+                        FuncKind::ExternOutput { index } => format!("<output {index}>"),
+                        FuncKind::NoDerivative { of, why } => format!("<no derivative of {of}: {why}>"),
                     };
                     println!("  {}({}) = {}", name, params.join(", "), body);
                 }
