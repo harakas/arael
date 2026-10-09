@@ -216,7 +216,9 @@ views are named by their container's nature: `PathPosesDeque`,
   there except the lambda driver (the preset supplies it); Rust
   `Option` fields are `arael::option<F>`
   (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` in
-  seconds. The shared solver surface lives in `arael/solver.hpp`.
+  seconds, `max_accepted_iters` and `assembly_threads` as
+  `option<uint32_t>`. The shared solver surface lives in
+  `arael/solver.hpp`.
   Warm restart: `cfg.initial_lambda = r.final_lambda` re-enters at
   the previous damping (Rust's `continue_from`); the optimized
   parameters already live in the model.

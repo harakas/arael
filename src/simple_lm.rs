@@ -115,6 +115,9 @@ pub struct LmConfig<T: Float> {
     pub min_iters: usize,
     /// Iterations, damping retries included, after which the solve stops.
     pub max_iters: usize,
+    /// Accepted steps after which the solve stops, with
+    /// [`LmStatus::MaxIterations`]. `None` turns it off.
+    pub max_accepted_iters: Option<usize>,
     /// Stop as soon as the cost is at or below this. `0.0` turns it off.
     pub cost_threshold: T,
     /// Stop at a stationary point: `max_i |g_i| / sqrt(H_ii)` at or below
@@ -202,6 +205,7 @@ impl<T: Float + std::fmt::Debug> std::fmt::Debug for LmConfig<T> {
             .field("abs_precision", &self.abs_precision)
             .field("rel_precision", &self.rel_precision)
             .field("max_iters", &self.max_iters)
+            .field("max_accepted_iters", &self.max_accepted_iters)
             .field("min_iters", &self.min_iters)
             .field("patience", &self.patience)
             .field("initial_lambda", &self.initial_lambda)
@@ -232,6 +236,7 @@ impl<T: Float> LmConfig<T> {
             abs_precision: T::from(1e-6).unwrap(),
             rel_precision: T::from(1e-4).unwrap(),
             max_iters: 100,
+            max_accepted_iters: None,
             min_iters: 5,
             patience: 3,
             initial_lambda: T::from(1e-4).unwrap(),
@@ -313,6 +318,11 @@ impl<T: Float> LmConfig<T> {
     /// Set the iteration cap ([`max_iters`](Self::max_iters)).
     pub fn with_max_iters(mut self, n: usize) -> Self {
         self.max_iters = n;
+        self
+    }
+    /// Set the accepted-step cap ([`max_accepted_iters`](Self::max_accepted_iters)).
+    pub fn with_max_accepted_iters(mut self, n: usize) -> Self {
+        self.max_accepted_iters = Some(n);
         self
     }
     /// Set the minimum iterations before termination ([`min_iters`](Self::min_iters)).
@@ -1153,7 +1163,8 @@ pub enum LmStatus {
     Converged,
     /// Cost dropped to or below [`LmConfig::cost_threshold`].
     CostThreshold,
-    /// Hit [`LmConfig::max_iters`] without meeting a convergence criterion.
+    /// Hit [`LmConfig::max_iters`] or [`LmConfig::max_accepted_iters`]
+    /// without meeting a convergence criterion.
     MaxIterations,
     /// The gradient went flat: the Jacobi-scaled gradient max-norm fell to
     /// [`LmConfig::gradient_tolerance`]. The only status that means "this is a
@@ -3172,6 +3183,12 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     }
                 } else {
                     small_count = 0;
+                }
+                // Enough accepted steps: stop, unless this same step
+                // converged.
+                if !done && config.max_accepted_iters.is_some_and(|n| accepted >= n) {
+                    status = LmStatus::MaxIterations;
+                    done = true;
                 }
                 end_cost = new_cost;
                 break;

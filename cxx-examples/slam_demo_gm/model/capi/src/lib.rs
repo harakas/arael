@@ -352,6 +352,7 @@ pub struct CLmConfig {
     pub observer: Option<CObserverFn>,
     pub observer_user: *mut core::ffi::c_void,
     pub assembly_threads: COptU32,
+    pub max_accepted_iters: COptU32,
 }
 
 /// The sparse backend's options as plain data: constructed by
@@ -554,6 +555,10 @@ pub unsafe extern "C" fn path_lm_config(preset: u32, out: *mut CLmConfig) {
             Some(n) => COptU32 { has: true, v: n as u32 },
             None => COptU32 { has: false, v: 0 },
         },
+        max_accepted_iters: match c.max_accepted_iters {
+            Some(n) => COptU32 { has: true, v: n as u32 },
+            None => COptU32 { has: false, v: 0 },
+        },
     };
 }
 
@@ -565,6 +570,7 @@ impl CLmConfig {
         c.patience = self.patience as usize;
         c.num_threads = self.num_threads as usize;
         c.assembly_threads = self.assembly_threads.has.then(|| self.assembly_threads.v as usize);
+        c.max_accepted_iters = self.max_accepted_iters.has.then(|| self.max_accepted_iters.v as usize);
         c.verbose = self.verbose;
         c.gather_timing = self.gather_timing;
         c.abs_precision = self.abs_precision;
