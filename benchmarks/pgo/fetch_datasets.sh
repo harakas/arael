@@ -13,6 +13,11 @@
 #                     originally released with iSAM.
 #   parking-garage -- real-world multi-level parking garage
 #                     (1661 poses, 6275 edges).
+# Two more 2D datasets for the browser demo (cxx-examples/m3500_demo),
+# both from the SE-Sync data collection:
+#   intel      -- the Intel Research Lab building (1728 poses, 2512 edges).
+#   ais2klinik -- the Freiburg ais2klinik path between two buildings
+#                 (15115 poses, 16727 edges).
 set -e
 cd "$(dirname "$0")/datasets"
 [ -f input_M3500_g2o.g2o ] || curl -sL -o input_M3500_g2o.g2o \
@@ -23,4 +28,8 @@ cd "$(dirname "$0")/datasets"
   "https://raw.githubusercontent.com/david-m-rosen/SE-Sync/master/data/sphere2500.g2o"
 [ -f parking-garage.g2o ] || curl -sL -o parking-garage.g2o \
   "https://raw.githubusercontent.com/david-m-rosen/SE-Sync/master/data/parking-garage.g2o"
+for f in intel ais2klinik; do
+  [ -f $f.g2o ] || curl -sL -o $f.g2o \
+    "https://raw.githubusercontent.com/david-m-rosen/SE-Sync/master/data/$f.g2o"
+done
 ls -la

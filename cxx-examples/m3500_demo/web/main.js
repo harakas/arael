@@ -4,12 +4,11 @@
 // soft prior, follows the pointer and stays where it is released),
 // locked in place, fixed (its parameters taken out of the solve) and
 // cleared, one or many at a time, and every such step undone.
-import init, { Graph, LmConfig, LmSession, araelVersion } from "../model/wasm/pkg/m3500_demo_wasm.js";
-import { Dataset2 } from "../model/wasm/js/arael/g2o.js";
+// `pkg`, `arael` and `datasets` are links to the built module, the g2o
+// loader and the vendored datasets, so this directory is the whole site.
+import init, { Graph, LmConfig, LmSession, araelVersion } from "./pkg/m3500_demo_wasm.js";
+import { Dataset2 } from "./arael/g2o.js";
 
-// `datasets` links to the vendored g2o files under benchmarks/pgo, so
-// the example directory is all a server has to hold.
-const DATASET = "datasets/input_M3500_g2o.g2o";
 const LOCK_WEIGHT = 10.0;
 const CENTER_WEIGHT = 0.01;
 const DOUBLE_CLICK_MS = 400;
@@ -34,6 +33,7 @@ const versionEl = document.getElementById("version");
 const weightedEl = document.getElementById("weighted");
 const liveEl = document.getElementById("live");
 const logEl = document.getElementById("log");
+const datasetEl = document.getElementById("dataset");
 const tipEl = document.getElementById("tip");
 
 // The two toggle buttons in the tool column.
@@ -691,26 +691,43 @@ function hideTip() {
   tipEl.hidden = true;
 }
 
-for (const el of document.querySelectorAll("#tools button")) {
+for (const el of document.querySelectorAll("#tools button, #tools select")) {
   el.addEventListener("pointerenter", () => showTip(el));
   el.addEventListener("pointerleave", hideTip);
   el.addEventListener("focus", () => showTip(el));
   el.addEventListener("blur", hideTip);
 }
 
-document.getElementById("file").addEventListener("change", async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  try {
-    ds = Dataset2.parse(await f.text());
-  } catch (err) {
-    setStatus(`${f.name}: ${err.message}`);
-    return;
-  }
+// A new dataset, from the dropdown or a file: build, solve, fit.
+function start(parsed) {
+  ds = parsed;
   build();
   solve(full);
   fit();
   dirty = true;
+}
+
+async function loadDataset() {
+  const name = datasetEl.selectedOptions[0].text;
+  setStatus(`loading ${name}...`);
+  try {
+    start(await Dataset2.load(datasetEl.value));
+  } catch (e) {
+    setStatus(`${name}: ${e.message} (serve the web directory: python3 -m http.server -d web in cxx-examples/m3500_demo)`);
+    throw e;
+  }
+}
+
+datasetEl.addEventListener("change", loadDataset);
+
+document.getElementById("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    start(Dataset2.parse(await f.text()));
+  } catch (err) {
+    setStatus(`${f.name}: ${err.message}`);
+  }
 });
 
 window.addEventListener("resize", resize);
@@ -729,14 +746,4 @@ quick.timeLimitSeconds = QUICK_BUDGET_S;
 quickLambda0 = quick.initialLambda;
 resize();
 requestAnimationFrame(frame);
-setStatus("loading the dataset...");
-try {
-  ds = await Dataset2.load(DATASET);
-} catch (e) {
-  setStatus(`${DATASET}: ${e.message} (serve the example directory: python3 -m http.server in cxx-examples/m3500_demo)`);
-  throw e;
-}
-build();
-solve(full);
-fit();
-dirty = true;
+await loadDataset();
