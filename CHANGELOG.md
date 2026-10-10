@@ -26,7 +26,6 @@ is cut.
   have no derivative at all; arael-sym has the nodes behind that.
 - `UnitVecParam` has an `optimize` flag, in Rust and every skin.
 - The C, C++, Python and JS skins carry the solve's thread report.
-- JS: named enums for the option tags and statuses, and `statusText`.
 - The solve result reports what the threads did and where the time
   went.
 - `Context`: where a solve keeps its working data -- the Hessian
@@ -86,8 +85,8 @@ is cut.
   `color`; the Jacobian's `*_column_normalised` methods are
   `*_column_normalized`; `QuaternionParam::work()` is
   `work_euler_angles()`. The `SparseFaerF32` and `SparseEigenF32`
-  aliases are gone: write `SparseFaer::<f32>`. The C++, Python and
-  JavaScript names are unchanged.
+  aliases are gone: write `SparseFaer::<f32>`. The C++ and Python
+  names are unchanged.
 - The prelude now carries the solve result and status types, the
   lambda drivers, `LmSession`, the covariance options and the dynamic
   vector and matrix aliases; `Similar` and `LmSolver` are out of it.
