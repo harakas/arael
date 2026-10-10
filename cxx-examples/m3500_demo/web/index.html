@@ -8,29 +8,32 @@
   :root { color-scheme: light dark; }
   html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
-  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #8884; }
-  header label { display: inline-flex; gap: 4px; align-items: center; }
-  main { flex: 1; min-height: 0; position: relative; }
+  header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; padding: 8px 12px; border-bottom: 1px solid #8884; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 10px; vertical-align: middle; }
+  #body { flex: 1; min-height: 0; display: flex; }
+  #tools { display: flex; flex-direction: column; gap: 14px; width: 116px; box-sizing: border-box; padding: 10px 8px; border-right: 1px solid #8884; }
+  .group { display: flex; flex-direction: column; gap: 4px; }
+  #tools button { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: #8881; border: 1px solid #8886; border-radius: 4px; cursor: pointer; }
+  #tools button:hover { background: #8883; }
+  #tools button::after { content: attr(data-key); font-size: 11px; opacity: 0.55; margin-left: 6px; }
+  #tools button.toggle::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #8886; }
+  #tools button.toggle[aria-pressed="true"] { background: #3a7bd52a; border-color: #3a7bd5; }
+  #tools button.toggle[aria-pressed="true"]::after { background: #3a7bd5; }
+  main { flex: 1; min-width: 0; position: relative; }
   canvas { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
-  h1 { font-size: 17px; font-weight: 600; margin: 0; padding: 8px 12px 0; }
-  footer { display: flex; justify-content: space-between; gap: 12px; padding: 6px 12px; border-top: 1px solid #8884; font-variant-numeric: tabular-nums; white-space: pre-wrap; }
+  footer { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 12px; border-top: 1px solid #8884; font-variant-numeric: tabular-nums; }
+  #status { white-space: pre-wrap; }
+  #hints { font-size: 12px; opacity: 0.7; text-align: center; }
   #version { opacity: 0.7; white-space: nowrap; color: inherit; text-decoration: none; }
   #version:hover { text-decoration: underline; }
-  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 10px; vertical-align: middle; }
-  kbd { padding: 0 4px; border: 1px solid #8886; border-radius: 3px; font-family: inherit; }
+  #tip { position: fixed; z-index: 10; max-width: 260px; padding: 6px 9px; border-radius: 5px; background: #222; color: #eee; font-size: 13px; line-height: 1.35; box-shadow: 0 2px 8px #0006; pointer-events: none; }
+  @media (prefers-color-scheme: dark) { #tip { background: #eee; color: #222; } }
 </style>
 </head>
 <body>
-<h1>Arael demo: pose-graph optimization in the browser</h1>
 <header>
-  <button id="solve">Solve</button>
-  <button id="reset">Reset</button>
-  <button id="undo">Undo</button>
-  <button id="redo">Redo</button>
-  <button id="recenter">Recenter</button>
-  <label><input type="checkbox" id="weighted"> information weighting</label>
-  <label><input type="checkbox" id="live" checked> re-solve while dragging</label>
-  <label>load g2o <input type="file" id="file" accept=".g2o,.txt"></label>
+  <h1>Arael demo: pose-graph optimization in the browser</h1>
   <span class="legend">
     <span style="background:#3a7bd5"></span>pose
     <span style="background:#e0a000"></span>locked
@@ -38,10 +41,40 @@
     <span style="background:#2c2"></span>selected
     <span style="background:linear-gradient(90deg,#888,#f00);width:24px;height:6px;border-radius:2px"></span>link cost
   </span>
-  <span>drag a pose; <kbd>L</kbd> lock, <kbd>F</kbd> fix, <kbd>C</kbd> clear the selection; <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Z</kbd> undo, with <kbd>Shift</kbd> or <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Y</kbd> redo; shift-click or shift-drag selects; wheel zooms, middle double-click fits</span>
 </header>
-<main><canvas id="view"></canvas></main>
-<footer><span id="status">loading...</span><a id="version" href="https://github.com/harakas/arael" target="_blank" rel="noopener"></a></footer>
+<div id="body">
+  <nav id="tools">
+    <div class="group">
+      <button id="solve" data-key="" data-tip="Solve the whole graph again from the poses as they are.">Solve</button>
+      <button id="reset" data-key="R" data-tip="Put the dataset's poses back, release every lock and fix, and solve.">Reset</button>
+    </div>
+    <div class="group">
+      <button id="undo" data-key="Ctrl+Z" data-tip="Undo the last action: a drag, lock, fix, clear or reset. Cmd+Z on a Mac.">Undo</button>
+      <button id="redo" data-key="Ctrl+Y" data-tip="Redo the undone action. Also Shift with the undo key.">Redo</button>
+    </div>
+    <div class="group">
+      <button id="lock" data-key="L" data-tip="Hold the selected poses where they are with a soft prior. Dragging a pose places such a hold and moves it with the pointer.">Lock</button>
+      <button id="fix" data-key="F" data-tip="Fix the selected poses in place: their parameters leave the solve.">Fix</button>
+      <button id="clear" data-key="C" data-tip="Release the selected poses, locks and fixes alike, and solve.">Clear</button>
+    </div>
+    <div class="group">
+      <button id="recenter" data-key="" data-tip="Fit the view to the whole graph. A middle double-click does the same.">Recenter</button>
+      <button id="load" data-key="" data-tip="Load any 2D g2o file from your computer.">Load g2o</button>
+      <input type="file" id="file" accept=".g2o,.txt" hidden>
+    </div>
+    <div class="group">
+      <button id="weighted" class="toggle" aria-pressed="false" data-tip="Weight each measurement by the information matrix in the file instead of the identity.">Weighted</button>
+      <button id="live" class="toggle" aria-pressed="true" data-tip="Solve while a pose is dragged. Off, only the dragged pose moves until it is released.">Live</button>
+    </div>
+  </nav>
+  <main><canvas id="view"></canvas></main>
+</div>
+<footer>
+  <span id="status">loading...</span>
+  <span id="hints">shift-click or shift-drag selects, wheel zooms, middle double-click fits</span>
+  <a id="version" href="https://github.com/harakas/arael" target="_blank" rel="noopener"></a>
+</footer>
+<div id="tip" hidden></div>
 <script type="module" src="main.js"></script>
 </body>
 </html>
