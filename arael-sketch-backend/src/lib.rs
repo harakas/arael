@@ -1,10 +1,11 @@
 //! Headless backend for arael-sketch.
 //!
 //! Contains the command parser, action pipeline, undo/redo history,
-//! constraint-conflict detection, geometry helpers and MCP server --
-//! everything that used to live in `arael-sketch` but does not touch
-//! the GUI. Depends only on the solver (`arael-sketch-solver`) and
-//! numerical deps; pulls in zero egui/eframe code.
+//! constraint-conflict detection, the offset, pattern, mirror, scale
+//! and split engines, geometry helpers and the MCP server: everything
+//! of the editor that does not touch the GUI. Depends only on the
+//! solver (`arael-sketch-solver`) and numerical deps; pulls in zero
+//! egui/eframe code.
 
 pub mod geometry;
 pub mod earc_fit;

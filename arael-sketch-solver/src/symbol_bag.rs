@@ -26,7 +26,7 @@ impl SymbolBag {
         Self::build_filtered(sketch, None)
     }
 
-    /// [`build`] restricted to the entities named in `only`; dims and
+    /// [`build`](Self::build) restricted to the entities named in `only`; dims and
     /// user parameters are always included (they are few). Callers
     /// evaluating a handful of expressions pass the entity names the
     /// expressions can reach, so a large sketch does not pay for tens

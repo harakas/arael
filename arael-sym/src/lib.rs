@@ -47,7 +47,8 @@
 //! `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) --
 //! the `.clone()` calls `sym!` inserts don't duplicate the
 //! expression tree. Shared nodes stay shared, so an expression is a
-//! DAG; [`E::for_each_node`] visits each node once.
+//! DAG; [`E::for_each_node`] visits each node once, [`E::map_nodes`]
+//! rebuilds it bottom-up and [`E::dag_size`] counts its unique nodes.
 //!
 //! ```
 //! use arael_sym::*;
@@ -70,6 +71,22 @@
 //!     format!("{}", f.diff(x))
 //! };
 //! assert_eq!(result, "x * cos(x) + sin(x)");
+//! ```
+//!
+//! ## Expansion, collection and substitution
+//!
+//! [`Expr::expand`] distributes products and integer powers over sums,
+//! [`Expr::collect`] gathers the terms sharing a variable,
+//! [`Expr::subs`] replaces a variable by name and [`E::substitute`]
+//! replaces whole subexpressions. [`Expr::free_vars`] lists the symbols.
+//!
+//! ```
+//! use arael_sym::*;
+//! sym! {
+//!     let (a, b, x) = symbols!(a, b, x);
+//!     assert_eq!(format!("{}", (x * (a + b)).expand()), "a * x + b * x");
+//!     assert_eq!(format!("{}", (a * x + b * x).collect(x)), "x * (a + b)");
+//! };
 //! ```
 //!
 //! ## Evaluation
@@ -99,6 +116,10 @@
 //! assert_eq!(code2, "y.atan2(x)");
 //! ```
 //!
+//! [`Expr::to_latex`] typesets the expression. [`Expr::to_rust_generic`]
+//! emits code for a generic `T: Float` scope, every literal wrapped as
+//! `__c(<lit>)`.
+//!
 //! ## Common Subexpression Elimination (CSE)
 //!
 //! ```
@@ -122,8 +143,9 @@
 //! //   2 * __x0
 //! ```
 //!
-//! [`cse_scoped`] does the same with [`select`] arms as scopes: work used
-//! only inside an arm stays inside it.
+//! [`cse_scoped`] does the same with [`select`] and [`branch`] arms as
+//! scopes: work used only inside an arm stays inside it. It returns the
+//! statements as [`cse::Intermediate`] values, a `let` or a `match`.
 //!
 //! ## Vectors and Matrices
 //!
@@ -192,6 +214,10 @@
 //! let vars = std::collections::HashMap::from([("x", 1.0)]);
 //! assert!((f.eval(&vars).unwrap() - 1.0).abs() < 1e-10);
 //! ```
+//!
+//! [`parse_with_functions`] also recognises the functions registered in
+//! a [`FunctionBag`]. [`function_by_name`] looks a built-in up in
+//! [`FUNCTIONS`] and returns it as a [`FunctionRef`], tagged by arity.
 //!
 //! ## Named constants
 //!
@@ -293,6 +319,13 @@
 //! Built-in [`rad_diff`] and [`rad_sum`] are extern functions with
 //! rollover-safe angle normalization to \[-pi, pi\].
 //!
+//! [`extern_func_numeric_derivs`] wraps a Rust function that returns
+//! its value and its first partial derivatives from one call;
+//! [`no_derivative`] marks a derivative that does not exist. Only
+//! first derivatives are supported for these.
+//! [`E::replace_function`] rebuilds every call of a named function,
+//! built-ins (the names in [`FUNCTIONS`]) included.
+//!
 //! ## Piecewise functions
 //!
 //! Pragmatic functions for optimization near numerical boundaries.
@@ -301,7 +334,9 @@
 //! `branch(q, a, b)` picks `a` when `q >= 0` else `b`, and evaluates
 //! only the taken side; its derivative is the taken side's.
 //! [`select`] picks one of several arms by an integer index and evaluates
-//! only that arm.
+//! only that arm. [`multibranch`] chains conditions, the first `>= 0`
+//! taking its arm; [`piecewise`] is the piecewise function of one
+//! variable over ascending breaks. Both are nested `branch`es.
 //!
 //! `min`, `max`, and `sign` build on these. `min` and `max` return the
 //! smaller/larger of two arguments and differentiate the taken side; at a

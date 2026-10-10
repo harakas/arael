@@ -126,8 +126,10 @@ pub trait ParamSlot {
 /// parameter vector.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param<T: ParamType> {
+    /// Whether the solver moves this parameter; `false` holds it at `value`.
     #[serde(default = "default_true")]
     pub optimize: bool,
+    /// The value: initial in, optimized out.
     pub value: T,
     #[serde(skip)]
     work: T,
@@ -217,8 +219,13 @@ pub trait Model {
     fn update_params<F: crate::utils::Float>(&mut self, _data: &[F]) {}
     fn update_self(&mut self) {}
 
+    /// Scalar count of the type's parameters: the dimension of its blocks.
     const PARAM_COUNT: u32 = 0;
+    /// Scalars this instance serializes: its parameters with `optimize`
+    /// set, sub-models included.
     fn serialize_size(&self) -> u32 { 0 }
+    /// Append the parameter names under `base`, one per scalar, in
+    /// serialization order.
     fn param_symbols(_base: &str, _out: &mut std::vec::Vec<String>) {}
 
 
@@ -247,12 +254,12 @@ pub trait Model {
     /// the call frees nothing and is safe at any time. Default: no-op.
     fn release_blocks(&mut self) {}
 
-    // Fold accepted-step euler angle deltas into their reference rotations
-    // and zero the delta entries in the parameter vector. A no-op for
-    // everything except EulerAngleParam, which re-centers after every
-    // accepted LM step (the property that avoids gimbal lock). Recurses
-    // through the model tree exactly like update/serialize, so params at
-    // any nesting depth are advanced.
+    /// Fold accepted-step euler angle deltas into their reference rotations
+    /// and zero the delta entries in the parameter vector. A no-op for
+    /// everything except `EulerAngleParam`, which re-centers after every
+    /// accepted LM step (the property that avoids gimbal lock). Recurses
+    /// through the model tree like update/serialize, so params at any
+    /// nesting depth are advanced.
     fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
 }
@@ -511,7 +518,9 @@ use crate::matrix::matrix3;
 /// For near-gimbal-lock scenarios use [`EulerAngleParam`] instead.
 #[derive(Clone, Copy)]
 pub struct SimpleEulerAngleParam<T: crate::utils::Float> {
+    /// Whether the solver moves this rotation.
     pub optimize: bool,
+    /// The euler angles (roll, pitch, yaw): initial in, optimized out.
     pub value: vect3<T>,
     work: vect3<T>,
     index: u32,
@@ -665,7 +674,9 @@ impl<T: crate::utils::Float> Model for SimpleEulerAngleParam<T> where vect3<T>: 
 /// precomputed on each update for use in constraint expressions.
 #[derive(Clone, Copy)]
 pub struct EulerAngleParam<T: crate::utils::Float> {
+    /// Whether the solver moves this rotation.
     pub optimize: bool,
+    /// The euler angles (roll, pitch, yaw): initial in, optimized out.
     pub value: vect3<T>,
     work: vect3<T>,
     index: u32,
@@ -857,6 +868,7 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
 /// z = up. Rotation order: R = Rz(yaw) * Ry(pitch) * Rx(roll).
 #[derive(Clone, Copy)]
 pub struct QuaternionParam<T: crate::utils::Float> {
+    /// Whether the solver moves this rotation.
     pub optimize: bool,
     /// Initial orientation in, optimized orientation out (synced by
     /// `deserialize_params`); a unit quaternion.
@@ -2010,6 +2022,7 @@ pub fn jacobian_entries<T: crate::utils::Float>(indices: &[u32], derivatives: &[
 /// that can be differentiated at compile time.
 pub trait ModelSym {
     type Sym;
+    /// The companion with every field a symbol named under `base`.
     fn sym(base: &str) -> Self::Sym;
 }
 

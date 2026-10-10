@@ -95,6 +95,8 @@
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
 //!   auto-differentiate symbolically, and optimize via `ExtendedModel`
 //!   (see `examples/runtime_fit_demo.rs`)
+//! - **User-defined functions** -- plug custom symbolic or native-eval
+//!   operators into constraint bodies with `#[arael::function]`
 //! - **Hessian blocks** -- markers declaring which parameters a constraint
 //!   couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one
 //!   entity with another, and the `coo` keyword for pairs a constraint
@@ -1256,7 +1258,7 @@
 //!
 //! | Backend (`solve_with(&mut ..., &cfg)`) | What it is |
 //! |---|---|
-//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`SolveOrdering`](simple_lm::SolveOrdering) override it |
+//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= `solve_sparse`): sparse Cholesky, pure Rust. Factorizes the block Hessian in block form (the supernodal block route), falling back to faer's scalar one where that does not apply. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`SolveOrdering`](simple_lm::SolveOrdering) / [`BlockSupernodalMode`](simple_lm::BlockSupernodalMode) override it |
 //! | [`Dense`](simple_lm::Dense) | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 //! | [`Band`](simple_lm::Band)`::new(kd)` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 //! | `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
@@ -1999,9 +2001,9 @@
 //!   `/// arael: PointFrine[<name>] @ path/to/file.rs:NNN`
 //!   pinpoint the constraint attribute each block came from.
 //!
-//! Expansion grows quickly (the single_root demo is ~800 lines; a
-//! full SLAM model is several thousand). Use `sed -n` or a pager
-//! scoped to the method you care about:
+//! Expansion grows quickly (a full SLAM model runs to thousands of
+//! lines). Use `sed -n` or a pager scoped to the method you care
+//! about:
 //!
 //! ```bash
 //! cargo expand --example slam_demo | sed -n '/fn __compute_blocks/,/^    fn /p'
@@ -2321,9 +2323,8 @@
 //!   Ladybug problem (49 cameras, 7776 points, 31843 observations,
 //!   from the vendored file). The Snavely reprojection residual
 //!   written symbolically; verbose LM with the Nielsen driver drives
-//!   the cost 1.70M -> 26.7k and the reprojection RMS 7.3 px ->
-//!   0.92 px in 22 steps, reaching the same optimum as Ceres. Same
-//!   model as `benchmarks/bal`.
+//!   the solve to the same optimum as Ceres. Same model as
+//!   `benchmarks/bal`.
 //! - **[`model_demo`](https://github.com/harakas/arael/blob/master/examples/model_demo.rs)**
 //!   -- minimal `#[arael::model]` walk-through showing how
 //!   `Param`, `SimpleEulerAngleParam`, and the update cycle fit
@@ -2344,6 +2345,12 @@
 //!   -- curve fitting where the residual equation is a string parsed
 //!   at runtime. Demonstrates `ExtendedModel` + robust loss on top
 //!   of the symbolic front end.
+//! - **[`root_fit_demo`](https://github.com/harakas/arael/blob/master/examples/root_fit_demo.rs)**
+//!   -- curve fitting on the regular model system: the parameters
+//!   live on the root, each measurement is a plain data entity whose
+//!   constraint writes into the root's own `SelfBlock` through
+//!   `root.hb`. The full constraint feature set (guards, block
+//!   losses, named groups) in place of the `fit(...)` one-liner.
 //! - **[`user_function_demo`](https://github.com/harakas/arael/blob/master/examples/user_function_demo.rs)**
 //!   -- `#[arael::function]` for user-defined operators in
 //!   constraint bodies. Form A purely symbolic

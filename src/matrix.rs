@@ -710,6 +710,7 @@ impl<T: Float> matrix2<T>
         self.rows[0].is_finite() && self.rows[1].is_finite()
     }
 
+    /// Converts this matrix to a `matrix2<K>` of a different float type.
     pub fn cast<K: Float>(self) -> matrix2<K> {
         matrix2::<K>::from_rows(
             self[0].cast::<K>(),

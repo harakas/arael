@@ -22,7 +22,7 @@ parameter vector, and `SolverKind` names one at run time.
 |---|---|
 | **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after; the factorization itself runs in block form (the supernodal block route below) |
 | `Dense` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small |
-| `Band::new(kd)` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
+| `Band::new(kd)` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). Far cheaper than dense on such a system, but hard-errors on any off-band element |
 | `BandLapack::new(kd)` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
 | `SparseEigen::<T>::new()` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
 | `SparseCholmod::new()` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
@@ -95,8 +95,9 @@ landmarks by back-substitution afterwards.
 hands the backend the model's type coupling graph, `SparseFaer` reads the
 marginalizable families off it, and decides from the block structure
 whether marginalizing them is actually faster than factorizing the whole
-system -- it is not always, and on Ladybug-1723 (1723 cameras) it is 1.6x
-slower. Ask what it did with `LmResult::solver`.
+system -- it is not always: on a bundle problem with many cameras the
+reduced system can factor slower than the whole one. Ask what it did with
+`LmResult::solver`.
 
 Name the blocks yourself when you know better than the graph does:
 
@@ -166,8 +167,8 @@ SparseFaer::from_options(&SparseFaerOptions::default()
     .with_block_supernodal_memory_lean(true))      // smaller factor, a little slower
 ```
 
-Batching packs consecutive small updates into one GEMM, which is worth
-4-5% per iteration and costs nothing in memory. The memory-lean
+Batching packs consecutive small updates into one GEMM, which speeds the
+factorization a little at no memory cost. The memory-lean
 amalgamation relaxes fewer supernodes together, trading a few percent of
 speed for a smaller factor. `SchurPlan::block_supernodal` reports which
 route ran.
@@ -1037,8 +1038,8 @@ be chosen from the problem's actual scale.
   what every plain entry point uses: divide lambda by 5 on acceptance
   (clamped to `LmConfig::lambda_floor`), multiply by 10 on rejection or
   factorization failure, give up when a rejection would pass 1e10.
-- `NielsenLambdaDriver` -- the gain-ratio adaptive schedule (Nielsen,
-  IMM-REP-1999-05): on acceptance lambda scales by
+- `NielsenLambdaDriver` -- the gain-ratio adaptive schedule: on
+  acceptance lambda scales by
   `max(1/3, 1 - (2 rho - 1)^3)`, on rejection it multiplies by an
   escalating `nu` (2, 4, 8, ... reset to 2 by the next acceptance).
   Use it on strongly nonlinear problems where the fixed schedule

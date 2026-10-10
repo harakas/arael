@@ -40,19 +40,15 @@ const NO_SRC: ValueIndex = ValueIndex::MAX;
 
 /// Widest a super-panel may get, in scalar columns.
 ///
-/// The update GEMM gains efficiency with width and saturates around here; past
-/// that only the fill keeps growing, since a panel `w` wide takes its envelope
-/// top as the deepest of its columns and so factorizes `n * (b + w)` values
-/// against a true envelope of `n * b`. Below ~30 the GEMM is too narrow to
-/// pay; past ~90 the fill dominates and it is slower at every size measured.
-///
-/// Between those the curve is not smooth: it moves a few percent either way
-/// with no relation to width, and which width is best changes with the
-/// problem -- 72 beat 48 at one size and lost to it at two others. That is
-/// the panel's stride landing well or badly in cache, not arithmetic, so
-/// there is nothing to derive here. 48 is chosen for being at or ahead of the
-/// general sparse route at every size measured rather than best at any; a
-/// caller who cares can measure their own case through
+/// The update GEMM gains efficiency with width and saturates; past that only
+/// the fill keeps growing, since a panel `w` wide takes its envelope top as
+/// the deepest of its columns and so factorizes `n * (b + w)` values against
+/// a true envelope of `n * b`. Too narrow and the GEMM does not pay; too wide
+/// and the fill dominates. Between those the best width depends on how the
+/// panel's stride lands in cache, which changes with the problem, so there
+/// is nothing to derive: 48 is chosen for keeping ahead of the general sparse
+/// route across the systems this crate meets rather than for being best at
+/// any one. A caller who cares can set their own through
 /// [`EnvelopeSymbolic::with_panel_width`].
 ///
 /// The panel takes whole block columns, so the width it reaches is this

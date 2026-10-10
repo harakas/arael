@@ -112,8 +112,8 @@ minimum degree has no separator to find.
 Pricing is not free: it builds a symbolic analysis per candidate and discards
 the loser. Where minimum degree wins regardless, naming `Amd` skips that and
 halves the setup. A block graph of many small blocks is the case -- a bundle
-adjustment with tens of thousands of 3-DOF points, where minimum degree wins
-every Ladybug dataset. A trajectory that revisits is the opposite case, and
+adjustment with tens of thousands of 3-DOF points, where minimum degree
+wins. A trajectory that revisits is the opposite case, and
 there the comparison pays for itself.
 
 Ordering over the block graph rather than `H`'s scalar columns is the same

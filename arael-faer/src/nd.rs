@@ -12,33 +12,32 @@
 //!
 //! This is what bundle adjustment needs and minimum degree cannot give it: a
 //! 3D point seen by k cameras makes a k-clique among them, and AMD drowns in
-//! cliques. On the 1723-camera Ladybug problem AMD leaves 83.1M values in the
-//! factor and faer takes 4.7 s over it; this ordering leaves 46.9M and takes
-//! 2.3 s.
+//! cliques: on a large bundle problem this ordering leaves a factor about
+//! half the size of AMD's, and the factorization takes about half the time.
 //!
 //! It is NOT a general win, and the caller must know which matrix it has:
 //!
 //! * **banded** (a SLAM trajectory's reduced system) -- the natural order is
-//!   already at the fill limit, and dissecting it is 3.4x SLOWER.
+//!   already at the fill limit, and dissecting it only makes it slower.
 //! * **very sparse graphs** (a pose graph) -- AMD wins outright.
 //! * **cliquey, no band** (bundle adjustment) -- this is the one.
 //!
 //! # Ordering the block graph, not the matrix
 //!
 //! [`NestedDissection::of_blocks`] dissects the graph of BLOCKS -- one node per
-//! camera, not per parameter. Two reasons, both measured:
+//! camera, not per parameter. Two reasons:
 //!
 //! * a block's parameters stay contiguous in the permutation, so the factor
 //!   keeps its supernodes, and a separator is priced in the parameters it
 //!   actually costs;
-//! * the graph is 9x smaller, and the ordering runs in 50 ms instead of 916.
+//! * the graph is far smaller, so the ordering is fast.
 //!
 //! # What to minimise
 //!
 //! Not fill. Cholesky flops go as the SUM OF SQUARES of the column heights, so
-//! a smaller separator sitting in a worse place can cost MORE arithmetic --
-//! measured: moving the cut to shrink the separator cut fill by 3% and raised
-//! flops by 2%, and the factorization got slower. What pays is shrinking the
+//! a smaller separator sitting in a worse place can cost MORE arithmetic:
+//! moving the cut to shrink the separator can cut fill and raise flops, and
+//! the factorization gets slower. What pays is shrinking the
 //! separator WITHOUT moving the cut, which is what the minimum vertex cover
 //! does: it drops vertices the cut never needed.
 
@@ -52,12 +51,10 @@ use faer::sparse::SymbolicSparseColMat;
 #[derive(Clone, Copy, Debug)]
 pub struct NdParams {
     /// Stop dissecting below this many nodes and order the rest with AMD.
-    /// Barely matters: 16 / 64 / 256 measured 2398 / 2419 / 2333 ms on
-    /// Ladybug-1723.
+    /// Barely matters to the factorization time.
     pub leaf: usize,
     /// Passes of Fiduccia-Mattheyses refinement over each separator. 0 leaves
-    /// the raw cut, and costs a lot: on Ladybug-1723 the factor grows from
-    /// 39.2M values to 48.7M.
+    /// the raw cut, and costs a lot of factor size.
     pub fm_passes: usize,
     /// How lopsided a bisection may get, as a fraction of the subgraph's
     /// weight on the heavier side. Refinement will not push past it.

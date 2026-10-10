@@ -33,9 +33,8 @@ The three SO(3) parameterizations reach the same optimum; they differ only in
 residual/Jacobian assembly cost (the linear solve is identical). Each pose
 precomputes its rotation matrix and rotation Jacobian once per update, so when
 many observations share a pose the exact parameterizations cost almost the same
-as the naive one -- on the bearing-dense slam benchmark all three land within
-~3% per iteration on assembly and ~0.3% on total solve time. Choose by geometry,
-not speed. See the [rotation-parameterization comparison](../benchmarks/slam/README.md#rotation-parameterization-simple-vs-euler-vs-quaternion).
+as the naive one -- on the bearing-dense slam benchmark all three cost about
+the same per iteration. Choose by geometry, not speed. See the [rotation-parameterization comparison](../benchmarks/slam/README.md#rotation-parameterization-simple-vs-euler-vs-quaternion).
 
 ```rust,ignore
 #[arael::model]
@@ -350,7 +349,7 @@ That has two consequences worth knowing.
 
 - **A sweep reads only what it needs.** Evaluating cost walks the
   entities' data without dragging Hessian storage through cache with
-  it. A bundle-adjustment observation is 32 bytes rather than 296.
+  it.
 
 - **The storage is the solve's, not the model's.** It is sized when the
   solve begins and released with the solve, so a long-lived model that
@@ -358,21 +357,9 @@ That has two consequences worth knowing.
   `release_blocks()` on the root still exists and is still safe to
   call; there is simply nothing left for it to free.
 
-**Changed in 0.9.0.** Up to 0.8.3 a block field *was* the container:
-`SelfBlock` embedded its Hessian triangle in the entity struct as a
-fixed `[T; M]` array, and `CrossBlock` its rectangle, so a
-bundle-adjustment observation carried 296 bytes of Hessian and a model
-held its assembly memory for as long as it lived. `BoxedSelfBlock` and
-`BoxedCrossBlock` existed for that: they held the same block behind a
-`Box`, which could be freed between solves and skipped for a frozen
-sub-tree, at the price of a pointer indirection. Choosing between them
-mattered: an inline-block model dragged its Hessian storage through
-cache on every sweep, cost evaluation included, and paid for it.
-
-There is nothing to choose now. Both spellings are the same type, the
-struct carries no values either way, and the two `Boxed` names are
-deprecated aliases kept so existing models compile. New models should
-say `SelfBlock` and `CrossBlock`.
+`BoxedSelfBlock` and `BoxedCrossBlock` are deprecated aliases of the
+same types, kept so existing models compile. New models say `SelfBlock`
+and `CrossBlock`.
 
 ### Named pairs and the `coo` list
 
@@ -1002,8 +989,7 @@ code. The dialect:
 - **Statements**: `let` bindings followed by ONE final array
   expression `[r0, r1, ...]` -- each element a residual. Macro calls
   (`assert!`, `println!`), item declarations, and non-final expression
-  statements are compile errors (a stray `;`-terminated expression
-  used to silently become an extra residual; it no longer compiles).
+  statements are compile errors.
 - **Variables**: the constraint's own entity -- reachable by the
   struct's lowercase name (e.g. `pose2` inside `Pose2`'s constraint) or
   by `self`, the same way a guard names it -- plus its `Ref` field

@@ -63,7 +63,7 @@ pub trait SchurReal:
 
     /// `dst -= C_a * Z_b` for a tile shape with no unrolled kernel (see
     /// [`FIXED_SHAPES`]). nano-gemm takes the widths at run time, so it covers every
-    /// shape, and on the shapes it is asked for it is up to 4x faster than the plain
+    /// shape, and on the shapes it is asked for it is faster than the plain
     /// loop it replaces (`--example gemmbench`). It does NOT beat the unrolled
     /// kernels, which is why those still take the shapes they cover: nano-gemm
     /// reaches its microkernel through a function pointer, and at these sizes that
@@ -76,11 +76,10 @@ pub trait SchurReal:
     /// The plan is built per call and NOT cached. It depends only on the shape, so
     /// caching it looks obvious -- but a plan is four lookups into a const
     /// microkernel table plus a branch chain, into a struct that stays on the stack,
-    /// and a cache has to be searched before it can save that. Measured: a
-    /// thread-local hash map costs ~25 ns against a GEMM that takes 15, which made
-    /// this fallback SLOWER than the plain loop it replaces; a thread-local linear
-    /// scan over the few live shapes comes out level with just rebuilding. Level is
-    /// not worth the state, so there is none.
+    /// and a cache has to be searched before it can save that. A thread-local
+    /// hash map costs more to search than the plan costs to build, and a
+    /// thread-local linear scan over the few live shapes only comes out level
+    /// with rebuilding. Level is not worth the state, so there is none.
     fn gemm_sub_nano(
         dst: &mut [Self],
         ca: &[Self],
@@ -365,7 +364,7 @@ impl<I: Index> SchurSymbolic<I> {
     }
     /// The GEMM tile shapes this reduction needs, `((wa, we, wb), calls)`, in
     /// no particular order. A shape not in [`FIXED_SHAPES`] goes to the
-    /// nano-gemm fallback, which costs about 1.2-1.4x the unrolled kernel, so a
+    /// nano-gemm fallback, which costs more than the unrolled kernel, so a
     /// caller that cares about the last of it should look here -- and the call
     /// count says how much of the reduction is off the unrolled path.
     ///
@@ -526,6 +525,7 @@ pub struct SchurTiming {
 }
 
 impl SchurTiming {
+    /// `factor` plus `columns`.
     pub fn total(&self) -> std::time::Duration {
         self.factor + self.columns
     }
@@ -913,8 +913,7 @@ pub(crate) fn llt_solve_panel<T: SchurReal>(l: &[T], panel: &mut [T], w: usize, 
 }
 
 /// [`gemm_sub`] with compile-time dimensions: constant trip counts let
-/// the compiler fully unroll and vectorize (measured 2x on the slam
-/// pair GEMMs vs the runtime-dimension loop)
+/// the compiler fully unroll and vectorize.
 #[inline]
 fn gemm_sub_fixed<T: SchurReal, const WA: usize, const WE: usize, const WB: usize>(
     dst: &mut [T],
@@ -940,27 +939,9 @@ fn gemm_sub_fixed<T: SchurReal, const WA: usize, const WE: usize, const WB: usiz
 /// [`gemm_sub_fixed_trans`] is a horizontal dot product per output element, which does
 /// not. So for a transposed tile there is a choice: multiply in place with the worse
 /// loop shape, or pay a `WA x WE` transpose and then use the better one. The transpose
-/// wins once there is enough of a column to vectorize (`WA`) and few enough columns to
-/// copy (`WE`).
-///
-/// Measured with `--example gemmbench` on aarch64/NEON, which is the tighter
-/// constraint -- on x86/AVX2 transposing first wins on every shape tested, so anything
-/// that pays there pays here. Both scalars agree. Transposed, `fixed` -> `fixed+T`:
-///
-/// ```text
-///                     f64 (aarch64)   f32 (aarch64)
-///   (6,1,6)  in         1.87x           2.11x
-///   (6,2,6)  in         1.75x           1.99x
-///   (6,3,6)  in         1.31x           1.20x      <- the SLAM workhorse
-///   (6,4,6)  in         1.13x           1.21x
-///   (9,3,9)  in         1.22x           1.69x      <- BAL
-///   (7,3,7)  in         1.34x           1.10x
-///   (6,6,6)  out        1.01x           0.99x      <- WE = 6: the copy stops paying
-///   (9,6,9)  out        0.95x           0.98x
-///   (3,3,3)  out        0.85x           0.90x      <- WA = 3: no column to vectorize
-///   (3,4,3)  out        0.83x           0.79x
-///   (2,3,2)  out        0.64x           0.65x
-/// ```
+/// wins once there is enough of a column to vectorize (`WA` at least 5) and few
+/// enough columns to copy (`WE` at most 4): at `WE` of 6 the copy stops paying, at
+/// `WA` of 3 there is no column to vectorize.
 ///
 /// `WB` is the amortization: the copy is `WA * WE` elements and is paid once for all
 /// `WB` output columns. The rhs update is a single column, where the copy alone equals
@@ -1022,7 +1003,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 
 /// The tile shapes that have a fully unrolled GEMM kernel. Every other shape
 /// works, through the nano-gemm fallback, which takes the widths at run time and
-/// costs about 1.2-1.4x the unrolled kernel on these sizes (`--example
+/// costs more than the unrolled kernel on these sizes (`--example
 /// gemmbench`).
 ///
 /// Two families, both `(wa, we, wb)`:
@@ -1038,7 +1019,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 /// This is the same list the `fixed_shapes!` macro dispatches on; a test walks every
 /// shape up to 9x9x9 and checks the two agree, so they cannot drift apart.
 /// [`SchurSymbolic::gemm_shapes`] reports what a given problem actually needs,
-/// which is how a caller finds out it is paying the 2x.
+/// which is how a caller finds out it is on the fallback.
 /// The widths are the ones SLAM systems actually use. Observers: 3 (a 2D
 /// pose), 6 (a 3D pose), 7 (a similarity, for scale-aware loop closure), 9 (a
 /// camera with intrinsics, which is also what a BAL camera and a NavState
@@ -1139,10 +1120,10 @@ pub fn has_fixed_kernel(wa: usize, we: usize, wb: usize) -> bool {
     FIXED_SHAPES.contains(&(wa, we, wb))
 }
 
-/// Counts calls that reached an unrolled kernel. Whether the dispatch fires is
-/// invisible in the output -- the fallback computes the same thing -- so without
-/// this a broken match arm would silently take the slower path and no test would
-/// notice. Compiled out of every non-test build.
+// Counts calls that reached an unrolled kernel. Whether the dispatch fires is
+// invisible in the output -- the fallback computes the same thing -- so without
+// this a broken match arm would silently take the slower path and no test would
+// notice. Compiled out of every non-test build.
 #[cfg(test)]
 thread_local! {
     static FIXED_KERNEL_HITS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
@@ -1158,10 +1139,10 @@ fn note_fixed_kernel() {
 #[inline(always)]
 fn note_fixed_kernel() {}
 
-/// Counts observer runs that took the uniform path ([`gemm_row`]). Like
-/// [`note_fixed_kernel`], the output cannot tell the two routes apart, so a
-/// missing dispatch arm would silently cost speed and no test would notice.
-/// Compiled out of every non-test build.
+// Counts observer runs that took the uniform path (`gemm_row`). Like
+// `note_fixed_kernel`, the output cannot tell the two routes apart, so a
+// missing dispatch arm would silently cost speed and no test would notice.
+// Compiled out of every non-test build.
 #[cfg(test)]
 thread_local! {
     static UNIFORM_RUN_HITS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
@@ -1203,11 +1184,9 @@ fn note_uniform_run() {}
 /// The three widths are packed into one integer (a nibble each) and matched
 /// as a single value, so the compiler emits ONE switch. Matching the tuple
 /// `(wa, we, wb)` directly compiles to a chain of comparisons instead, and
-/// every shape then pays for the shapes listed ahead of it: measured on a
-/// 7-arm chain, the reduce got 5.5% slower at (6, 4, 6) and 2.0% slower at
-/// (6, 3, 6) purely from their position in the list. With the pack, growing
-/// the list to 11 shapes costs the existing ones nothing (measured again).
-/// It is not a micro-optimization -- it is what makes the list free to grow.
+/// every shape then pays for the shapes listed ahead of it. With the pack,
+/// growing the list costs the existing shapes nothing, which is what makes
+/// the list free to grow.
 macro_rules! fixed_shapes {
     ($kernel:ident, $dst:expr, $ca:expr, $zb:expr, $wa:expr, $we:expr, $wb:expr) => {
         // widths are tile dimensions, far below 16
@@ -2388,8 +2367,8 @@ mod tests {
     /// FIXED_SHAPES advertises which shapes are fast; fixed_shapes! decides
     /// which ones actually are. Nothing in the OUTPUT distinguishes them --
     /// the fallback computes the same values -- so a match arm that never
-    /// fires, or a list that promises a kernel nobody wrote, would cost 2x in
-    /// silence. Walk every shape up to 9x9x9 and demand the two agree, in
+    /// fires, or a list that promises a kernel nobody wrote, would cost speed
+    /// in silence. Walk every shape up to 9x9x9 and demand the two agree, in
     /// both orientations. This is the only test that can see the property.
     #[test]
     fn the_shape_list_and_the_dispatch_agree() {

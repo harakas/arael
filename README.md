@@ -37,8 +37,8 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)`, block-level robust loss (`loss = |s| loss_geman_mcclure(s, c2)`), and switchable constraints (`guard = expr`)
 - **Multiple solver backends** via `LmSolver` trait:
   - **Dense Cholesky** (nalgebra) -- fixed-size dispatch up to 9x9, dynamic for larger
-  - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems (9.4x faster than dense at 500 poses)
-  - **Sparse Cholesky** (faer, pure Rust) -- for general sparse hessians (66x faster than dense at 200 poses with 6% fill)
+  - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems
+  - **Sparse Cholesky** (faer, pure Rust) -- for general sparse hessians
   - **Eigen SimplicialLLT** and **CHOLMOD** -- optional C++ backends via FFI (`--features eigen`, `--features cholmod`)
   - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
@@ -446,12 +446,13 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[loc_global_demo](examples/loc_global_demo.rs)** -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` on the constraint, or `[hb_pose, coo]` with no block field) and a staged pass that optimises only the globals first.
 - **[plane_slam_demo](examples/plane_slam_demo.rs)** -- plane SLAM with a user-defined component: `UnitVec<T>`, a 2-DOF unit direction on the sphere, demonstrating `#[arael(component)]`.
 - **[m3500_demo](examples/m3500_demo.rs)** -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints from a g2o file, the between-factor written symbolically, solved with sparse faer LM. The same model backs [benchmarks/pgo](benchmarks/pgo/README.md).
-- **[bal_demo](examples/bal_demo.rs)** -- bundle adjustment on a real Bundle-Adjustment-in-the-Large Ladybug problem (49 cameras, 7776 points, 31843 observations, from the vendored file). The Snavely reprojection residual written symbolically; verbose LM with the Nielsen driver drives the cost 1.70M -> 26.7k and the reprojection RMS 7.3 px -> 0.92 px in 22 steps, reaching the same optimum as Ceres. Same model as [benchmarks/bal](benchmarks/bal/README.md).
+- **[bal_demo](examples/bal_demo.rs)** -- bundle adjustment on a real Bundle-Adjustment-in-the-Large Ladybug problem (49 cameras, 7776 points, 31843 observations, from the vendored file). The Snavely reprojection residual written symbolically; verbose LM with the Nielsen driver drives the solve to the same optimum as Ceres. Same model as [benchmarks/bal](benchmarks/bal/README.md).
 - **[model_demo](examples/model_demo.rs)** -- minimal `#[arael::model]` walk-through showing how `Param`, `SimpleEulerAngleParam`, and the update cycle fit together.
 - **[single_root_demo](examples/single_root_demo.rs)** -- single-struct model-and-root + a direct-composed sub-model, each carrying its own `SelfBlock<Self>`. The smallest example that exercises the "root has its own params" path.
 - **[refs_demo](examples/refs_demo.rs)** -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena` behaviour: insertion, iteration, stable handles.
 - **[jacobian_demo](examples/jacobian_demo.rs)** -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and `calc_jacobian` / `calc_cost_table` walk-through. End-to-end reference for the instrumentation features used in convergence debugging.
 - **[runtime_fit_demo](examples/runtime_fit_demo.rs)** -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.
+- **[root_fit_demo](examples/root_fit_demo.rs)** -- curve fitting on the regular model system: the parameters live on the root, each measurement is a plain data entity whose constraint writes into the root's own `SelfBlock` through `root.hb`. The full constraint feature set (guards, block losses, named groups) in place of the `fit(...)` one-liner.
 - **[user_function_demo](examples/user_function_demo.rs)** -- `#[arael::function]` for user-defined operators in constraint bodies, in its two forms: a purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` (arael differentiates it automatically) and an opaque numerical `my_safe_asin` that carries a hand-written closed-form derivative. Both are used in a single two-residual LM fit.
 - **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
 - **[calc_demo](examples/calc_demo.rs)** -- `bc`-style REPL calculator built on `arael-sym`. Shows `parse_with_functions` + `FunctionBag` for user-defined functions, persistent history via rustyline.
@@ -873,7 +874,7 @@ Reading these tells you what the compiler *actually* has to evaluate -- useful f
 - **`calc_jacobian`** -- same body structure but builds a `JacobianRow` per residual instead of accumulating into the blocks. Generated only when you declare `#[arael(root, jacobian)]`.
 - **source markers** -- doc comments like `/// arael: PointFrine[<name>] @ path/to/file.rs:NNN` pinpoint the constraint attribute each block came from.
 
-Expansion grows quickly (the single-root demo is ~800 lines; a full SLAM model is several thousand). Use `sed -n` or a pager scoped to the method you care about:
+Expansion grows quickly (a full SLAM model runs to thousands of lines). Use `sed -n` or a pager scoped to the method you care about:
 
 ```bash
 cargo expand --example slam_demo | sed -n '/fn __compute_blocks/,/^    fn /p'
@@ -939,7 +940,7 @@ Draw points, lines, circles, arcs, ellipses and rectangles with auto-snap to nea
 
 ### Command Panel & Scripting
 
-Press `/` to open the command panel. Full scripting support with 79 commands for geometry creation, constraints, dimensions, parameters, introspection, and view control. Commands support expressions, coordinate references (`L0.p2`, `@dx,dy`), geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector arithmetic (`L0.p2 + normal(L0) * 3`).
+Press `/` to open the command panel. Full scripting support, with commands for geometry creation, constraints, dimensions, parameters, introspection, and view control. Commands support expressions, coordinate references (`L0.p2`, `@dx,dy`), geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector arithmetic (`L0.p2 + normal(L0) * 3`).
 
 See [arael-sketch-backend/docs/COMMANDS.md](arael-sketch-backend/docs/COMMANDS.md) for the full command reference.
 
@@ -966,7 +967,10 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     twist.rs        twists: compact rigid-transform form and conversions
     simple_lm.rs    LM solver, LmProblem/RootProblem/FitProblem, Dense/Band/Sparse backends
                     (SparseFaer: sparse Cholesky + Schur marginalization)
+    store.rs        The block store the generated sweeps and the solver share (inner API)
+    threads.rs      Solve context: thread count, the block stores kept between solves, the thread report
     covariance.rs   Parameter covariance recovery (Sigma = 2 H^-1) at the solution
+    rank.rs         Numeric rank and null-space basis of a sparse Jacobian
     geometry.rs     Camera models and projections (pinhole intrinsics/extrinsics)
     g2o.rs          .g2o pose-graph file I/O (2D and 3D, read and write)
     validate.rs     Model validation report types (Diagnostic, Issue)
@@ -980,11 +984,21 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
 cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python + JavaScript (WebAssembly) interface generator (docs/CXX.md, docs/PYTHON.md, docs/WASM.md)
+  src/
+    main.rs         `cargo arael export` / `check`: the driver
+    lib.rs          Library surface: the sidecar IR and the per-target emitters
+    export.rs       Export pipeline: build with the sidecar, harvest the JSON, emit the trees
+    ir.rs           The model IR, a typed mirror of the JSON sidecar
+    leaves.rs       The settable-scalar leaf walk shared by the shim and Python emitters
+    emit_ffi.rs     Rust FFI shim emitter (the C ABI capi crate)
+    emit_hpp.rs     C++ header emitter
+    emit_py.rs      Python (ctypes) module emitter
+    emit_wasm.rs    wasm-bindgen crate emitter (JavaScript)
 cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
 cxx-examples/       demos over generated interfaces: shared Rust models, C++ and Python drivers
 export-tests/       Standalone mini-workspace proving cross-crate model export/import
 
-arael-faer/         faer extensions (block CSC + Schur complement), staged for upstreaming
+arael-faer/         faer extensions: block CSC, Schur complement, block Cholesky, ordering, threads
   src/
     lib.rs          Crate documentation
     bsc.rs          Sparse matrix over a variable block partition (block CSC)
@@ -993,6 +1007,8 @@ arael-faer/         faer extensions (block CSC + Schur complement), staged for u
     envelope.rs     Envelope (profile) Cholesky in natural order
     supernodal.rs   Supernodal block Cholesky under a block ordering
     nd.rs           Nested-dissection fill-reducing ordering
+    pool.rs         Worker threads for the cost/assembly sweeps and the solve's own stages
+    ymm.rs          Resets the upper YMM register halves faer's x86 kernels leave dirty
 
 arael-sym/          Symbolic math library
   src/
@@ -1010,7 +1026,7 @@ arael-sym-macros/   Proc macro for arael-sym: sym! (auto-clone insertion)
 
 arael-macros/       Procedural macros
   src/
-    lib.rs          #[arael::model], sym!, field rewriting
+    lib.rs          #[arael::model], #[derive(Model)], export_models!, field classification and rewriting
     constraint.rs   Constraint code generation, CSE integration
     function.rs     #[arael::function] user-defined function codegen
     sidecar.rs      JSON model sidecar for the interface generators (docs/SIDECAR.md)
@@ -1019,19 +1035,33 @@ arael-sketch-solver/ 2D constraint solver library
   src/
     lib.rs          Sketch root, solve(), entity management
     entities.rs     Point, Line, Arc types
-    constraints.rs  112 constraint types
+    arc_math.rs     Rotated-ellipse point and tangent formulas shared by arcs and constraints
+    constraints.rs  The constraint types, one struct per constraint
+    registry.rs     Constraint registry: one interface over every constraint collection
     expr_constraint.rs  Expression-based constraints for parametric dimensions
     dimensions.rs   Dimension annotations
+    metas.rs        Meta-constraints: a recorded offset or pattern that owns what it created
+    drag.rs         Drag apparatus: a gesture-scoped pull of a grab target toward the cursor
     blocker.rs      Blocker analysis for DOF-rejected constraints
+    probe.rs        Candidate Jacobian rows for constraint probes
     symbol_bag.rs   Named parameters -> indices/expressions for parametric equations
 
 arael-sketch-backend/ Headless sketch backend: command interface + MCP server
   src/
     lib.rs          Backend entry, module wiring
-    commands.rs     Text command parser/executor (GUI-decoupled)
+    commands/       Text command parser/executor (GUI-decoupled): mod.rs dispatches, one file per command group
     actions.rs      Action enum, undo-able operations
     history.rs      Undo/redo system
     conflicts.rs    Constraint-conflict detection
+    coincide.rs     Transitive-coincidence groups over the endpoint slots
+    chain.rs        Sequences of lines and arcs connected end to end
+    corner_ops.rs   Fillet/chamfer engine
+    offset.rs       Offset engine
+    pattern.rs      Pattern engine: circular / rectangular copies
+    mirror.rs       Mirror engine
+    scale.rs        Uniform scaling about a center point
+    split.rs        Split/trim engine
+    meta.rs         Meta-constraints: the part every kind shares
     earc_fit.rs     Elliptic arc fitting (endpoint + tangent + bulge)
     geometry.rs     Coordinate transforms, snapping
     ids.rs          Constraint/selection identification types
@@ -1043,9 +1073,19 @@ arael-sketch/       Interactive sketch editor GUI (egui/eframe)
   src/
     main.rs         Entry point, EditorApp
     app_update.rs   eframe::App update loop
+    tool_input.rs   Per-tool pointer and keyboard input handlers
     tools.rs        Tool modes, selection, constraint types
     drawing.rs      Canvas rendering, grid, dimensions
+    overlays.rs     Canvas overlays: tool previews, hints, marquee, status bar
+    panels.rs       Side, parameters and command panels
+    dim_input.rs    Dimension-value input overlay
+    offset_tool.rs  Offset tool: window, canvas input, preview, edit mode
+    pattern_tool.rs Pattern tool: window and canvas input
+    mirror_tool.rs  Mirror tool
     colors.rs       Color scheme (light/dark)
+    test_harness.rs Headless GUI test harness: synthetic input, no window
+    gui_tests.rs    GUI gesture tests on the harness
+    perf_probe.rs   Frame-loop timing probes (ignored tests)
 
 examples/           Runnable demos (see Examples section above)
 benches/            Criterion micro-benchmarks
@@ -1073,6 +1113,8 @@ benchmarks/         Solver benchmarks vs Ceres / g2o / GTSAM / SymForce / factrs
   plane/            Plane SLAM: plane landmarks (unit normal + distance) on a closed loop
   aerobatics/       Rotation-parameterization conditioning (arael-only)
   harness/          Shared benchmark scaffolding
+  cpp/              Headers shared by the C++ comparison drivers
+  Dockerfile        Image with every comparison system built, for the x86 runs
   charts/           Generated chart SVGs, versioned per release
   make_*_chart.py   Chart generators for the README/docs SVGs
 ```

@@ -18,40 +18,48 @@ use arael_sym::{E, FuncKind, FunctionBag, constant, no_derivative, parse_with_fu
 /// inventory at program start. The `&'static` fields come from literals
 /// the macro expands into.
 pub struct UserFnEntry {
+    /// The name constraint bodies call.
     pub sym_name: &'static str,
+    /// The parameter names, in order.
     pub param_names: &'static [&'static str],
+    /// The form and what the macro captured for it.
     pub kind: UserFnKind,
 }
 
+/// The form of a `#[arael::function]` and what the macro captured for it.
 pub enum UserFnKind {
-    /// Form A: `fn name(x: E, ...) -> E { body }`. `body_src` is the
-    /// arael-sym source string captured at attribute expansion.
+    /// Form A: `fn name(x: E, ...) -> E { body }`.
     Symbolic {
+        /// The body as arael-sym source, captured at attribute expansion.
         body_src: &'static str,
         /// Explicit derivative strings, one per parameter. `None` means
         /// auto-diff the body at use time.
         deriv_srcs: Option<&'static [&'static str]>,
     },
     /// Form B with a scalar return: `fn name_eval([root: &R,] x: f32 |
-    /// f64, ...) -> <same>`. `call_path` is the eval fn's name (resolved
-    /// in the user's crate); `eval_fn` is a pointer to a shim that
-    /// adapts the scalar signature to `fn(&[f64]) -> f64`, and panics
-    /// when the fn takes the root. `deriv_srcs` is `None` for a fn
-    /// declared without a derivative. With `root` the first parameter
-    /// is the model root.
+    /// f64, ...) -> <same>`.
     Extern {
+        /// Derivative strings, one per parameter; `None` for a fn
+        /// declared without a derivative.
         deriv_srcs: Option<&'static [&'static str]>,
+        /// A shim adapting the scalar signature to `fn(&[f64]) -> f64`;
+        /// panics when the fn takes the root.
         eval_fn: fn(&[f64]) -> f64,
+        /// The eval fn's name, resolved in the user's crate.
         call_path: &'static str,
+        /// Whether the first parameter is the model root.
         root: bool,
     },
-    /// Form B returning its value and partials: `fn name_eval([root:
-    /// &R,] x: f32 | f64, ..., derivs: bool) -> (<same>, [<same>; N])`.
-    /// `eval_fn` adapts the scalar arguments to the value and the
-    /// partials, `None` when the fn takes the root.
+    /// Form B returning its value and first partial derivatives:
+    /// `fn name_eval([root: &R,] x: f32 | f64, ..., derivs: bool) ->
+    /// (<same>, [<same>; N])`.
     ExternNumericDerivs {
+        /// A shim adapting the scalar arguments to the value and the
+        /// partials; `None` when the fn takes the root.
         eval_fn: Option<fn(&[f64]) -> (f64, Vec<f64>)>,
+        /// The eval fn's name, resolved in the user's crate.
         call_path: &'static str,
+        /// Whether the first parameter is the model root.
         root: bool,
     },
 }

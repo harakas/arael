@@ -1,8 +1,8 @@
 //! 2D parametric constraint-based sketch solver.
 //!
-//! Work in progress -- a parametric CAD sketching tool built on the arael
-//! optimization framework. Draw geometry, apply constraints, and the
-//! solver keeps everything consistent in real time.
+//! A parametric CAD sketching tool built on the arael optimization
+//! framework. Draw geometry, apply constraints, and the solver keeps
+//! everything consistent in real time.
 //!
 //! # Entities
 //!
@@ -19,7 +19,7 @@
 //!
 //! # Constraints
 //!
-//! Over 40 constraint types including: coincident (point-point, line-line,
+//! The constraint types include: coincident (point-point, line-line,
 //! point-on-line, point-on-arc), parallel, perpendicular, tangent,
 //! equal length/radius, distance, horizontal/vertical distance, and more.
 //! All constraints are symbolically differentiated at compile time.

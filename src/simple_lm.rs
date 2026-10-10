@@ -1979,9 +1979,8 @@ pub trait LmSolver<T: Float> {
 /// Dense Cholesky solver (nalgebra).
 ///
 /// The per-retry DMatrix copy is deliberate: it is O(n^2) under an
-/// O(n^3) blocked factorization, and replacing nalgebra with a naive
-/// in-place scalar Cholesky to avoid it measured 5x SLOWER at n = 3000
-/// (P6 investigation) -- the allocation was never the cost.
+/// O(n^3) blocked factorization, and a naive in-place scalar Cholesky
+/// that avoids it is slower -- the allocation is not the cost.
 #[derive(Default)]
 pub struct Dense;
 
@@ -3585,7 +3584,7 @@ impl LmSolver<f64> for SparseDirectCsc {
 /// pushes entries, hand-built problems) falls back to COO discovery.
 ///
 /// The fast path's pattern is tile-expanded, so it carries the blocks'
-/// structural zeros as explicit entries (~1.2% more nonzeros on
+/// structural zeros as explicit entries (a few more nonzeros on
 /// entity-block models). Every backend treats those as ordinary
 /// nonzeros; the factor grows by well under a percent and the values are
 /// unchanged.
@@ -3660,35 +3659,23 @@ fn partition_idx(partition: &[usize]) -> std::vec::Vec<SparseIndex> {
     partition.iter().map(|&p| p as SparseIndex).collect()
 }
 
-/// Fill-reducing ordering, but only where there is fill to reduce.
-/// Marginalizing shared landmarks makes the reduced system dense (69% of
-/// the upper triangle at slam-300), and on such a matrix AMD finds nothing
-/// the natural order does not already have -- measured identical factor
-/// size and numeric time, for 4x the symbolic cost. Below the threshold the
-/// matrix is a sparse graph again and AMD earns its keep.
-/// Why the reduced system got the ordering it got -- the verbose output
-/// explains the choice, and the choice is worth a lot (measured on the
-/// reduced systems our own benchmarks produce, faer numeric factorization):
-///
-/// | S | n | density | b/n | natural | AMD |
-/// |---|---|---|---|---|---|
-/// | slam-6000 | 36000 | 4.9% | 0.03 | **795 ms** | 837 ms |
-/// | slam-1200 | 7200 | 23% | 0.13 | **150 ms** | 151 ms |
-/// | slam-300 | 1800 | 69% | 0.50 | 22.8 ms | 22.8 ms |
-/// | BAL-1723 | 15507 | 8.0% | 0.89 | 4481 ms | **4794 ms**\* |
-///
-/// \* AMD is not the best ordering for BAL -- nested dissection factorizes
-/// that same matrix in 1538 ms -- but it is the best of the two faer offers.
+/// Why the reduced system got the ordering it got. A fill-reducing
+/// ordering pays only where there is fill to reduce: marginalizing shared
+/// landmarks makes the reduced system dense, and on such a matrix AMD
+/// finds nothing the natural order does not already have, for a symbolic
+/// pass of its own. Below that density the matrix is a sparse graph again
+/// and AMD earns its keep; a banded one is already at its fill limit in
+/// the natural order. The verbose output names the choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReducedOrdering {
     /// The matrix is banded: a landmark is seen from a bounded stretch of the
     /// trajectory, so S is banded too, and the natural order already sits at
     /// the band limit. AMD then costs a fill-reducing pass to rediscover an
-    /// ordering no better than the one we have (at 6000 slam poses: 452 ms of
-    /// symbolic against 65, for 0.2% more fill).
+    /// ordering no better than the one we have.
     NaturalBanded,
     /// The matrix is dense enough that there is no fill to reduce: AMD finds
-    /// nothing the natural order does not already have, for 4x the symbolic.
+    /// nothing the natural order does not already have, for a symbolic pass
+    /// of its own.
     NaturalDense,
     /// A general sparse graph. AMD earns its keep -- and on the pose-graph
     /// shape it beats nested dissection outright.
@@ -3700,9 +3687,8 @@ pub enum ReducedOrdering {
 
 /// Half-bandwidth (in scalars) past which the narrow-band Cholesky
 /// ([`SparseFaerOptions::with_narrow_band`]) tends to lose to faer's supernodal
-/// factorization -- narrow bands win, wide ones do not. Measured crossover on
-/// SLAM reduced systems is around here (hardware-dependent); it only gates a
-/// warning, never the route itself.
+/// factorization -- narrow bands win, wide ones do not. The crossover depends
+/// on the hardware; this only gates a warning, never the route itself.
 const NARROW_BAND_WIDE_KD: usize = 128;
 
 /// Scalar half-bandwidth of a block matrix in natural order: the largest
@@ -3749,13 +3735,11 @@ fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<
 ///
 /// At 0.97 the envelope has to be at least 3% cheaper. Equal arithmetic is not
 /// enough to choose it: the two routes read and write memory differently, and
-/// where their operation counts came out equal the envelope still measured up
-/// to 18% slower.
+/// at equal operation counts the envelope can be the slower one.
 ///
-/// The 3% is a safety margin, not a measured boundary. Choosing the envelope
-/// where it does not suit costs time on every iteration; refusing it where it
-/// would have suited costs only the gain it would have made, which was under
-/// 1% wherever this margin refused one.
+/// The 3% is a safety margin. Choosing the envelope where it does not suit
+/// costs time on every iteration; refusing it where it would have suited
+/// costs only the small gain it would have made.
 const ENVELOPE_FLOP_MARGIN: f64 = 0.97;
 
 /// The same, against the block supernodal Cholesky, which is what a declined
@@ -3768,14 +3752,13 @@ const ENVELOPE_FLOP_MARGIN: f64 = 0.97;
 /// loses, and it has to do substantially less arithmetic to win the wall clock
 /// back.
 ///
-/// The two regimes measured are far apart, which is why the exact value here
-/// does not matter much. A reduced pose system holds this ratio between 0.87
-/// and 0.98 whatever its bandwidth -- a narrow band cuts the envelope's
-/// arithmetic, but it also splits the supernodal into many small supernodes,
-/// which cuts its own by about as much -- and the supernodal matched or beat
-/// the envelope across that whole range. The ratio only collapses where the
-/// blocks are small and the band is a few blocks wide, and there it goes to
-/// 0.13-0.28, well clear of this threshold from the other side.
+/// The two regimes are far apart, which is why the exact value here does not
+/// matter much. A reduced pose system holds this ratio near 1 whatever its
+/// bandwidth -- a narrow band cuts the envelope's arithmetic, but it also
+/// splits the supernodal into many small supernodes, which cuts its own by
+/// about as much -- and there the supernodal is the right choice. The ratio
+/// only collapses where the blocks are small and the band is a few blocks
+/// wide, and there it lands well clear of this threshold from the other side.
 const ENVELOPE_FLOP_MARGIN_BLOCK: f64 = 0.5;
 
 /// Share of the parameters a reduction may keep and still be waved through by
@@ -3784,9 +3767,9 @@ const ENVELOPE_FLOP_MARGIN_BLOCK: f64 = 0.5;
 /// A reduction earns its keep by leaving a smaller system to factor. One that
 /// keeps most of the parameters pays for the reduction and then factors nearly
 /// what it started with, so it is never obviously right and is priced exactly
-/// instead. Measured: the landmark reductions this is meant to wave through
-/// keep about a third (slam), while the one that must be priced keeps 84%
-/// (plane, whose planes are few next to its poses).
+/// instead. The landmark reductions this is meant to wave through keep well
+/// under half (a SLAM map's poses next to its landmarks); a plane SLAM, whose
+/// planes are few next to its poses, keeps most and is priced.
 const KEPT_FRACTION_OBVIOUS: f64 = 0.5;
 
 fn block_half_bandwidth(hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> usize {
@@ -3854,7 +3837,7 @@ impl ReducedOrdering {
 /// choice between a supernodal factorization (dense panels, BLAS3) and a
 /// simplicial one (a column at a time): its flop-count heuristic is too
 /// conservative for the systems this crate produces, and picks columns where
-/// panels are 2.6x faster. See [`SparseFaerOptions::with_scalar_supernodal`].
+/// panels are faster. See [`SparseFaerOptions::with_scalar_supernodal`].
 fn chol_params<'a>(supernodal: bool) -> faer::sparse::linalg::cholesky::CholeskySymbolicParams<'a> {
     let mut p = faer::sparse::linalg::cholesky::CholeskySymbolicParams::default();
     if supernodal {
@@ -3895,9 +3878,9 @@ pub enum SolverReport {
 ///
 /// Marginalizing is not always a win: it forces "marginalized variables
 /// first" as the elimination order, and on a large kept system a general
-/// fill-reducing ordering of the WHOLE matrix can do better. Measured on
-/// BAL Ladybug-1723 (1723 cameras), eliminating the points -- the legal,
-/// obvious choice -- is 1.6x SLOWER than factorizing the whole system.
+/// fill-reducing ordering of the WHOLE matrix can do better: on a bundle
+/// problem with many cameras, eliminating the points -- the legal, obvious
+/// choice -- can be slower than factorizing the whole system.
 #[derive(Clone, Copy, Debug)]
 pub enum SchurPolicy {
     /// Never reduce: assemble the whole system as one scalar CSC and
@@ -3924,7 +3907,7 @@ pub enum SchurPolicy {
     /// factorization.
     ///
     /// That comparison needs a fill-reducing ordering of the WHOLE matrix,
-    /// which is the expensive part (17.6 ms at slam-300) -- so it is skipped
+    /// which is the expensive part -- so it is skipped
     /// when the reduction is obviously right, by `obvious_flop_ratio` below.
     Auto {
         /// Decline when the reduced route costs more than this multiple of
@@ -3932,9 +3915,7 @@ pub enum SchurPolicy {
         /// default of 1.5 leaves slack toward reducing, because the
         /// reduction's GEMM flops stream through unrolled kernels while
         /// the sparse factor's flops do not -- a reduced-route flop is
-        /// cheaper than a full-route flop. The one measured problem inside
-        /// the slack band, BAL-372 at 1.1, is a wash on the clock, which
-        /// is what break-even should look like.
+        /// cheaper than a full-route flop.
         flop_margin: f64,
         /// Skip the comparison entirely when the reduction is obviously
         /// worth it: when the whole reduced route -- the reduction plus the
@@ -3956,17 +3937,12 @@ pub enum SchurPolicy {
         /// are pessimistic in the full route's favor, so a small ratio
         /// means the reduction cannot lose, however the orderings come out.
         ///
-        /// Measured: BAL-49 at 2.5, slam-60 at 3.1, BAL-138 at 8.7,
-        /// slam-2000 at 14.4 and slam-300 at 18.2 are reductions the exact
-        /// comparison would confirm anyway, so the bar of 25 fires on all
-        /// of them; BAL-372 at 56 and BAL-1723 at 1614 defer (both reduce
-        /// after pricing), and the plane benchmark's shared-plane scene --
-        /// a small block family observed by everyone, the shape where
-        /// reducing LOSES 14x -- lands at 248 and is declined by the
-        /// pricing it falls through to. Deferring is safe (the exact
-        /// comparison decides); firing wrongly is the only real risk, and
-        /// the nearest defer sits at over twice the bar. Set to 0 to
-        /// always compare.
+        /// The landmark reductions this is meant to wave through sit far
+        /// below the bar, and the ones that need pricing -- a large kept
+        /// system, or a small block family observed by everyone, where
+        /// reducing loses -- far above it. Deferring is safe (the exact
+        /// comparison decides); firing wrongly is the only real risk. Set
+        /// to 0 to always compare.
         obvious_flop_ratio: f64,
     },
 }
@@ -3998,9 +3974,9 @@ pub enum SolveOrdering {
     ///
     /// Note what Auto does NOT do: use a set the solver DETECTED itself as
     /// an ordering. Detection says which blocks are marginalizable, not
-    /// that ordering them first is a good idea -- on Ladybug-49 it leaves
-    /// 9% less fill and runs 6% slower, because it chops the factor into
-    /// thousands of 3-column supernodes. A set the caller named is an
+    /// that ordering them first is a good idea -- it can leave less fill
+    /// and still run slower, because it chops the factor into thousands
+    /// of 3-column supernodes. A set the caller named is an
     /// instruction; a set we guessed is not.
     Auto,
     /// Approximate minimum degree, always.
@@ -4014,11 +3990,10 @@ pub enum SolveOrdering {
     /// Nested dissection ([`arael_faer::nd`]). For a reduced system with no
     /// band and no small degrees -- bundle adjustment, where every 3D point
     /// makes a clique of the cameras that see it and minimum degree drowns in
-    /// them. On Ladybug-1723's reduced system it factorizes in 1508 ms against
-    /// AMD's 4730, and beats METIS.
+    /// them.
     ///
     /// It is a bad ordering for anything else, and badly so: a banded system (a
-    /// SLAM trajectory's reduced system) is 3.3x SLOWER dissected than left in
+    /// SLAM trajectory's reduced system) is slower dissected than left in
     /// its natural order, and a pose graph prefers AMD. [`Auto`](Self::Auto)
     /// picks it for the whole system only through the reduction gate; the
     /// reduced system never gets it unless asked. Ask for it only when you
@@ -4050,10 +4025,9 @@ pub use arael_faer::cg::{CgOptions, CgStats};
 /// loop closure ties distant poses together and widens the band, which is what
 /// the envelope has to keep narrow to be worth anything.
 ///
-/// The envelope route uses 4-15% less peak memory than the block supernodal
-/// Cholesky it competes with, and 12-48% less than faer's scalar route. It
-/// pays for that in time: on landmark SLAM at 60 to 900 poses the supernodal
-/// ran 2-12% faster per iteration.
+/// The envelope route uses less peak memory than the block supernodal
+/// Cholesky it competes with, and less still than faer's scalar route, and
+/// pays for that in time: the supernodal runs faster per iteration.
 ///
 /// **When it applies.** Only when the reduced system is left in its natural
 /// order, which arael decides from the system's density and bandwidth. If it
@@ -4101,9 +4075,8 @@ pub enum EnvelopeMode {
 /// block structure (hand-built problems, `coo` constraints) always take the
 /// scalar route.
 ///
-/// Measured at or ahead of the scalar route on every benchmark, with a
-/// 2-10x cheaper symbolic phase and 17-35% less peak memory (see
-/// docs/dev/BLOCK.md). Its dense kernels take
+/// At or ahead of the scalar route, with a cheaper symbolic phase and
+/// less peak memory. Its dense kernels take
 /// [`LmConfig::num_threads`] on the panels large enough to pay for the
 /// pool, so there is no thread count at which the scalar route is the
 /// better default.
@@ -4134,8 +4107,8 @@ pub enum SchurMethod {
     /// no factor to store, at the price of an inexact step and no covariance.
     ///
     /// Worth it when factorizing the reduced system dominates the iteration,
-    /// which is a question of how much fill it takes -- on the bundle
-    /// benchmark that share runs from 12% at 49 cameras to 96% at 1723.
+    /// which is a question of how much fill it takes: on a bundle problem
+    /// that share grows with the camera count.
     Iterative(arael_faer::cg::CgOptions),
     /// The same conjugate gradients, on a reduced system that is never built:
     /// each product applies `B x - E C^-1 (E^T x)` by walking the Hessian.
@@ -4277,10 +4250,9 @@ impl SparseFaerOptions {
     ///
     /// faer decides this for itself from a flop-count heuristic, and on the
     /// sparse systems this crate produces the heuristic is too conservative: it
-    /// picks the column-at-a-time route where the panels would have been 2.6x
-    /// faster (a 3D pose graph, 6.1 ms against 2.3), and never picks it where
-    /// the columns are actually better. Measured across every benchmark we
-    /// have, forcing panels is a large win twice and a wash everywhere else, so
+    /// picks the column-at-a-time route where the panels would have been
+    /// faster, and never picks it where the columns are actually better.
+    /// Forcing panels wins on some systems and costs nothing on the rest, so
     /// it is the default. Turn it off to hand the choice back to faer.
     pub fn with_scalar_supernodal(mut self, on: bool) -> Self {
         self.scalar_supernodal = on;
@@ -4359,9 +4331,8 @@ impl SparseFaerOptions {
     /// does not -- under a block-level ordering (nested dissection when that
     /// is the ordering, block-AMD otherwise), so the scalar pattern, the
     /// scalar symbolic analysis and the per-attempt scalar copies are never
-    /// built. Measured at or ahead of the scalar route on every benchmark
-    /// matrix (1.0-1.3x per attempt), with a 2-10x cheaper symbolic phase;
-    /// see docs/dev/BLOCK.md and [`BlockSupernodalMode`].
+    /// built. At or ahead of the scalar route, with a cheaper symbolic
+    /// phase; see [`BlockSupernodalMode`].
     ///
     /// Default [`BlockSupernodalMode::Auto`]: the supernodal route wherever
     /// the scalar one would run, at any thread count -- its dense kernels
@@ -4392,9 +4363,9 @@ impl SparseFaerOptions {
     /// Trade a little supernode amalgamation for factor memory on the
     /// supernodal block route ([`SupernodalParams::memory_lean`]): on
     /// wide-block systems (bundle adjustment) it matches the default's
-    /// speed while holding ~16% less factor; on narrow-block systems the
-    /// default's amalgamation is worth 10-20% of the factorization time,
-    /// which is why this is an opt-in and not an auto-pick. Off by
+    /// speed with a smaller factor; on narrow-block systems the default's
+    /// amalgamation factors faster, which is why this is an opt-in and not
+    /// an auto-pick. Off by
     /// default; ignored unless the supernodal route runs at all.
     ///
     /// [`SupernodalParams::memory_lean`]: arael_faer::supernodal::SupernodalParams::memory_lean
@@ -4412,7 +4383,8 @@ impl SparseFaerOptions {
     /// -- that stays with the policy, and the default
     /// ([`SchurPolicy::Auto`]) still weighs it. Naming the blocks is not
     /// evidence that eliminating them pays: on a large enough kept system it
-    /// does not (Ladybug-1723 is 1.6x slower reduced), and the check is free
+    /// does not (a bundle problem with many cameras can be slower reduced),
+    /// and the check is free
     /// on the problems where the answer is obvious. Add
     /// `.with_policy(SchurPolicy::Force)` to skip it anyway.
     pub fn with_marginalize(mut self, range: std::ops::Range<usize>) -> Self {
@@ -4679,7 +4651,8 @@ pub struct SchurPlan {
 /// 2. **Whether marginalizing pays.** It does not always: it forces
 ///    "marginalized first" as the elimination order, and on a big enough
 ///    kept system a fill-reducing ordering of the whole matrix wins
-///    instead (Ladybug-1723 is 1.6x slower reduced). So a cheap filter
+///    instead (a bundle problem with many cameras can be slower reduced).
+///    So a cheap filter
 ///    settles the obvious cases from the block structure alone, and only
 ///    the unclear ones pay for the exact comparison -- see
 ///    [`SchurPolicy::Auto`].
@@ -7424,9 +7397,9 @@ mod tests {
     use super::{ordering_for, ReducedOrdering};
 
     /// A failed solve is usually seen through `unwrap`, which formats with
-    /// Debug. Derived, that walks the whole parameter vector: on Ladybug-1723
-    /// the panic message came to 5.6 MB on one line. Bound it, and keep the
-    /// count, which is the part worth reading.
+    /// Debug. Derived, that would print the whole parameter vector, megabytes
+    /// on one line for a large problem. Bound it, and keep the count, which
+    /// is the part worth reading.
     #[test]
     fn a_failed_solve_does_not_print_its_whole_parameter_vector() {
         let n = 485_013;
@@ -7458,16 +7431,12 @@ mod tests {
     }
 
     /// The reduced system's ordering is picked from its shape, and the shape
-    /// is what decides whether a fill-reducing pass is worth running at all.
-    /// Measured on the real matrices (faer numeric factorization):
-    ///
-    /// * banded, slam-6000 (36000, 4.9% dense, b/n = 0.03): natural 795 ms,
-    ///   AMD 837 ms -- and AMD spends 452 ms of symbolic to find nothing,
-    ///   against 65 ms for the natural order.
-    /// * dense, slam-300 (1800, 69% dense): natural = AMD, 22.8 ms.
-    /// * general sparse, a pose graph (0.1% dense, b/n = 0.8): AMD 2.1 ms,
-    ///   natural 101 ms -- 48x. Getting this one wrong is the expensive
-    ///   mistake, so the band test has to be strict.
+    /// is what decides whether a fill-reducing pass is worth running at all:
+    /// a banded system factors as fast in natural order and the fill-reducing
+    /// symbolic pass finds nothing; a dense one is the same either way; a
+    /// general sparse one (a pose graph) is many times slower in natural
+    /// order. Getting the last one wrong is the expensive mistake, so the
+    /// band test has to be strict.
     #[test]
     fn the_ordering_follows_the_shape_of_the_reduced_system() {
         // A banded matrix: every column reaches back a bounded distance.

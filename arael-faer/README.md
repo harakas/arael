@@ -68,20 +68,20 @@ order(V) = order(A) ++ order(B) ++ S      S separates A from B
 ```
 
 This is what bundle adjustment needs and minimum degree cannot give it: a 3D
-point seen by k cameras makes a k-clique among them, and AMD drowns in cliques.
-On the 1723-camera Ladybug problem AMD leaves 83.1M values in the factor and
-faer takes 4.7 s over it; this ordering leaves 46.9M and takes 2.3 s.
+point seen by k cameras makes a k-clique among them, and AMD drowns in cliques:
+on a large bundle problem this ordering leaves a factor about half the size of
+AMD's, and the factorization takes about half the time.
 
 `NestedDissection::of_blocks` dissects the graph of BLOCKS -- one node per
 camera, not per parameter -- so a block's parameters stay contiguous and the
-factor keeps its supernodes; the graph is also 9x smaller, and the ordering runs
-in 50 ms instead of 916. It returns a permutation faer takes as-is
+factor keeps its supernodes; the graph is also far smaller, so the ordering
+is fast. It returns a permutation faer takes as-is
 (`SymmetricOrdering::Custom`).
 
 It is NOT a general win, and the caller must know which matrix it has:
 
 - **banded** (a SLAM trajectory's reduced system) -- the natural order is
-  already at the fill limit, and dissecting it is 3.4x SLOWER.
+  already at the fill limit, and dissecting it only makes it slower.
 - **very sparse graphs** (a pose graph) -- AMD wins outright.
 - **cliquey, no band** (bundle adjustment) -- this is the one.
 
@@ -104,7 +104,7 @@ one independent contribution per eliminated block.
 | `schur_backsub(sym, h, rhs, x_kept, ctx, x_full)` | recover the eliminated blocks once the reduced system is solved |
 | `SchurSymbolic::{kept_size, kept_bandwidth, reduce_flops, pair_count}` | what the reduction will cost and how big S is -- free, from the symbolic pass, for deciding whether to reduce at all |
 | `SchurContext` | reusable workspace across iterations; `set_threads` runs the reduction and the back-substitution on the pool, one range of S's block columns per thread, the same answer to rounding at any count; `set_chunk_columns` sets how many columns a thread forms at a time; `enable_timing` breaks a reduction down by stage, into `SchurTiming` (`factor`: the eliminated diagonal tiles, `columns`: the kept columns) |
-| `FIXED_SHAPES` / `has_fixed_kernel` | the tile shapes with a fully unrolled GEMM kernel. Anything else works, through the nano-gemm fallback, at about 1.2-1.4x |
+| `FIXED_SHAPES` / `has_fixed_kernel` | the tile shapes with a fully unrolled GEMM kernel. Anything else works, through the nano-gemm fallback, somewhat slower |
 | `SchurSymbolic::gemm_shapes` | which shapes a given problem needs, and how many calls each carries -- so a caller can see whether it is on the slow path |
 
 S does not have to be formed. The same operator applied instead of built lets

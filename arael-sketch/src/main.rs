@@ -1,8 +1,6 @@
-// Interactive 2D sketch editor with real-time constraint solving.
-//
-// Tools: Select (drag to solve), Point, Line
-// Constraints: Horizontal, Vertical, Coincident (via toolbar)
-// Navigation: scroll wheel = zoom, middle mouse drag = pan
+// Interactive 2D sketch editor with real-time constraint solving: the
+// egui/eframe GUI over arael-sketch-backend. docs/ARAEL_SKETCH.md lists
+// the tools, constraints and navigation.
 
 mod colors;
 mod tools;
