@@ -477,26 +477,23 @@ fn main() {
     }
     println!();
 
-    // Graduated optimization: start with loose feature constraints, tighten
+    // Graduated optimization: start with loose feature constraints, tighten.
+    // Between passes only the isigma scale changes, so one LmSession
+    // carries the solves: what the first pass learns about the band is
+    // reused by the later passes.
     println!("--- Optimization ---");
     let isigma_scales = [0.01, 0.1, 1.0];
 
-    // The last pass also assembles the covariance at its solution
-    // (with_covariance), for the last-pose sigma below.
-    let mut final_result = None;
+    // kd = 2*6 - 1 = 11 (block-tridiagonal with 6-param poses)
+    let mut session = arael::simple_lm::LmSession::new(arael::simple_lm::Band::new(11));
     for (pass, &scale) in isigma_scales.iter().enumerate() {
         // Scale isigma for this pass (undo previous, apply new)
         path.frine_isigma_scale = scale;
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-        let mut config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
-        if pass + 1 == isigma_scales.len() {
-            config = config.with_covariance(CovMode::TriDiagonal);
-        }
-        // kd = 2*6 - 1 = 11 (block-tridiagonal with 6-param poses)
-        let result = path.solve_with(&mut arael::simple_lm::Band::new(11), &config).unwrap();
+        let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
+        let result = session.solve(&mut path, &config).unwrap();
         println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
-        final_result = Some(result);
     }
 
     // Absolute pose errors vs GT (meaningful -- no gauge freedom)
@@ -602,11 +599,11 @@ fn main() {
 
     // Current (last) pose estimate with 1-sigma uncertainty. H is
     // block-tridiagonal (fixed map, no loop closures), so CovMode::TriDiagonal
-    // recovered the last pose's covariance with a forward Schur pass over the
-    // band, inside the last solve.
+    // recovers the last pose's covariance with a forward Schur pass over the
+    // band, assembled over the session.
     {
         let last = path.poses.len() - 1;
-        let cov = final_result.unwrap().covariance.expect("last-pose covariance");
+        let cov = session.assemble_covariance(&mut path, CovMode::TriDiagonal).expect("last-pose covariance");
         let sd = cov.std_dev(&path.poses[last]).unwrap();
         let pose = &path.poses[last];
         let (p, e) = (pose.pos.value, pose.ea.value);

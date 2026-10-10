@@ -631,46 +631,47 @@ fn main() {
         write_hessian_bitmap(&mut path, &out);
     }
 
-    // Graduated optimization: start with loose feature constraints, tighten
+    // Graduated optimization: start with loose feature constraints, tighten.
+    // Between passes only the isigma scale changes, so one LmSession
+    // carries the solves: the analysis from pass 1 is reused warm by the
+    // later passes.
     println!("--- Optimization ---");
     let isigma_scales = [0.01, 0.1, 1.0];
 
-    // The last pass also assembles the parameter covariance at its
-    // solution (with_covariance), used for the landmark ellipsoids below.
-    let mut cov: Option<arael::covariance::CovAssembly> = None;
-    for (pass, &scale) in isigma_scales.iter().enumerate() {
-        path.frine_isigma_scale = scale;
-
-        println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-        let last = pass + 1 == isigma_scales.len();
-        let mut config = arael::simple_lm::LmConfig::well_conditioned()
-            .with_verbose(true)
-            .with_rel_precision(1e-6);
-        if last {
-            config = config.with_covariance(CovMode::AllMarginals);
+    // Returns the parameter covariance at the solution, assembled over
+    // the session, for the landmark ellipsoids below.
+    fn run_ramp<S: arael::simple_lm::LmSolver<f64>>(
+        solver: S, path: &mut Path, scales: &[f32],
+    ) -> Option<arael::covariance::CovAssembly> {
+        let mut session = arael::simple_lm::LmSession::new(solver);
+        for (pass, &scale) in scales.iter().enumerate() {
+            path.frine_isigma_scale = scale;
+            println!("\nPass {} (isigma scale={}):", pass + 1, scale);
+            let config = arael::simple_lm::LmConfig::well_conditioned()
+                .with_verbose(true)
+                .with_rel_precision(1e-6);
+            let result = session.solve(path, &config).unwrap();
+            println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
         }
-        let result = match solver_name.as_str() {
-            "dense" => path.solve_with(&mut arael::simple_lm::Dense, &config),
-            "faer" => path.solve_with(&mut arael::simple_lm::SparseFaer::new(), &config),
-            #[cfg(feature = "eigen")]
-            "eigen" => path.solve_with(&mut arael::simple_lm::SparseEigen::new(), &config),
-            #[cfg(not(feature = "eigen"))]
-            "eigen" => { eprintln!("Eigen solver requires --features eigen"); return; }
-            #[cfg(feature = "cholmod")]
-            "cholmod" => path.solve_with(&mut arael::simple_lm::SparseCholmod::new(), &config),
-            #[cfg(not(feature = "cholmod"))]
-            "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
-            _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
-        };
-        let result = result.unwrap();
-        println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
-        if last {
-            cov = match result.covariance {
-                Ok(c) => Some(c),
-                Err(e) => { println!("Covariance unavailable: {e}"); None }
-            };
+        match session.assemble_covariance(path, CovMode::AllMarginals) {
+            Ok(c) => Some(c),
+            Err(e) => { println!("Covariance unavailable: {e}"); None }
         }
     }
+
+    let cov = match solver_name.as_str() {
+        "dense" => run_ramp(arael::simple_lm::Dense, &mut path, &isigma_scales),
+        "faer" => run_ramp(arael::simple_lm::SparseFaer::new(), &mut path, &isigma_scales),
+        #[cfg(feature = "eigen")]
+        "eigen" => run_ramp(arael::simple_lm::SparseEigen::new(), &mut path, &isigma_scales),
+        #[cfg(not(feature = "eigen"))]
+        "eigen" => { eprintln!("Eigen solver requires --features eigen"); return; }
+        #[cfg(feature = "cholmod")]
+        "cholmod" => run_ramp(arael::simple_lm::SparseCholmod::new(), &mut path, &isigma_scales),
+        #[cfg(not(feature = "cholmod"))]
+        "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
+        _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
+    };
 
     // Mean absolute pose error vs GT (includes GPS systematic offset)
     {
