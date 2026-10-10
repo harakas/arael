@@ -3,7 +3,7 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
-## 0.9.0 - unreleased
+## 0.9.0 - 2026-10-10
 
 ### Added
 
