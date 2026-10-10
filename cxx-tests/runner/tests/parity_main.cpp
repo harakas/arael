@@ -282,6 +282,19 @@ int main() {
     LmResult rs2 = sess.solve(f13, cfg).value();
     p("sess_end2", rs2.end_cost);
     pi("sess_warm_equals_cold", rs2.end_cost == rs1.end_cost ? 1 : 0);
+    // The covariance over the session's context: the marginal the model's
+    // own assembly gives at this solution.
+    auto cs = sess.assemble_covariance(f13, CovMode::AllMarginals);
+    pi("sess_cov_ok", cs.is_ok() ? 1 : 0);
+    if (cs.is_ok()) p("sess_cov_item0", cs->marginal(f13.items()[0]).value());
+    // The covariance asked for in the config, carried by the result.
+    LmConfig cfgc = cfg;
+    cfgc.covariance = CovMode::AllMarginals;
+    LmResult rc = f13.solve_dense(cfgc).value();
+    auto rcov = rc.covariance();
+    pi("cfg_cov_ok", rcov.is_ok() ? 1 : 0);
+    if (rcov.is_ok()) p("cfg_cov_item0", rcov->marginal(f13.items()[0]).value());
+    pi("cfg_cov_absent", rs2.covariance().is_err() ? 1 : 0);
     sess.invalidate();
     f13.set_m(0.0);
     f13.set_c(0.0);

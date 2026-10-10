@@ -192,9 +192,13 @@ model's diagnostics as text, empty when clean.
 ## Covariance
 
 ```js
-const cov = g.assembleCovariance();          // mode 1 AllMarginals
+cfg.covariance = CovMode.AllMarginals;       // the solve assembles it at its solution
+const r = g.solveSparse(cfg);
+const cov = r.covariance();                  // moved out of the result; throws when the config did not ask, it was taken, or the assembly failed
+const cov = g.assembleCovariance();          // without a solve, at the current parameters; mode 1 AllMarginals
 const cov = g.assembleCovariance(0);         // 0 PerQuery, 2 TriDiagonal
 const cov = g.assembleCovarianceWith(mode, ordering, blockSupernodal);
+const cov = s.assembleCovariance(g);         // over a session's context
 cov.marginalPose2(p);       // Float64Array, row-major dim x dim (Rust's marginal_cov)
 cov.conditionalPose2(p);
 cov.stdDevPose2(p);         // Float64Array, one per parameter
@@ -203,7 +207,9 @@ cov.plan();                 // what the assembly decided
 ```
 
 One method per entity type, since JavaScript has no overloading; `p` is
-an entity handle. The tags are the C ABI's.
+an entity handle. The tags are the C ABI's: `cfg.covariance` is a
+`CovMode` tag or undefined, `cfg.covarianceOrdering` and
+`cfg.covarianceBlockSupernodal` the assembly's options.
 
 `araelVersion()` is the arael version the module was built with:
 `{ major, minor, patch, pre }`, `pre` the tag after the dash (`"dev"`

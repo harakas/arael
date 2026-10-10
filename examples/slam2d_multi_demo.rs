@@ -22,9 +22,9 @@
 //!     cargo run -r --example slam2d_multi_demo
 
 use arael::simple_lm::RootProblem;
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::CovMode;
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
-use arael::simple_lm::LmProblem;
+use arael::simple_lm::{LmProblem, LmResult};
 use arael::vect::vect2f;
 use arael::matrix::matrix2f;
 use arael::refs::{self, Ref};
@@ -232,7 +232,10 @@ fn main() {
     println!("Parameters: {} (Pose={}, Landmark={})\n",
         params.len(), Pose::PARAM_COUNT, Landmark::PARAM_COUNT);
 
-    let lm_cfg = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
+    // with_covariance: the solve also assembles the parameter covariance
+    // at its solution (result.covariance), for the ellipses below.
+    let lm_cfg = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true)
+        .with_covariance(CovMode::AllMarginals);
     let result = map.solve_sparse(&lm_cfg).unwrap();
     println!("\n{} iterations, cost {:.4} -> {:.4}",
         result.iterations, result.start_cost, result.end_cost);
@@ -291,7 +294,7 @@ fn main() {
 
     // 95% confidence ellipses from the per-landmark parameter covariance. GPS
     // pins the gauge, so the raw covariance block is meaningful.
-    let ellipses = compute_landmark_ellipses(&mut map);
+    let ellipses = compute_landmark_ellipses(&result, &map);
 
     let out = "slam2d_multi.eps";
     write_eps(&map, &gt, &ellipses, out).expect("eps write");
@@ -317,8 +320,8 @@ fn print_stats(label: &str, unit: &str, v: &[f32]) {
 // Per-landmark 95% confidence ellipse (center, semi_major, semi_minor,
 // angle_rad) from the 2x2 diagonal block of the parameter covariance. 95% in 2D
 // is chi^2(0.95, df=2) = 5.991, so the semi-axes are sqrt(5.991 * eigenvalue).
-fn compute_landmark_ellipses(map: &mut Map) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
-    let cov = match map.assemble_covariance(CovMode::AllMarginals) {
+fn compute_landmark_ellipses(result: &LmResult<f32>, map: &Map) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
+    let cov = match &result.covariance {
         Ok(cov) => cov,
         Err(e) => {
             println!("\n{e} -- skipping uncertainty ellipses.");

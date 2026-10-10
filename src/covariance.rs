@@ -6,19 +6,25 @@
 //! already minimal 3-DOF retractions, `Sigma` is in local tangent coordinates
 //! -- no manifold projection is needed.
 //!
-//! [`assemble_covariance`](crate::covariance::Covariance::assemble_covariance)
-//! re-assembles `H` at the solution and prepares it for querying. The dense
-//! inverse is never formed. Query per-entity
-//! blocks through the entity itself: any `Model` reports its parameter span via
-//! `collect_param_blocks`.
+//! A solve asked for it ([`LmConfig::with_covariance`](crate::simple_lm::LmConfig::with_covariance))
+//! carries it in [`LmResult::covariance`](crate::simple_lm::LmResult::covariance).
+//! The dense inverse is never formed.
+//! [`Covariance::assemble_covariance`](crate::covariance::Covariance::assemble_covariance)
+//! on the model gives the same covariance without a solve; slower, since it
+//! rebuilds what a solve already has.
+//! Query per-entity blocks through the entity itself: any `Model` reports
+//! its parameter span via `collect_param_blocks`.
 //!
 //! ```ignore
-//! use arael::covariance::{Covariance, CovMode};
-//! path.solve_sparse(&cfg);              // solution written back into the model
-//! let cov = path.assemble_covariance(CovMode::PerQuery)?;
+//! use arael::covariance::{CovMode, Covariance};
+//! let r = path.solve_sparse(&cfg.with_covariance(CovMode::PerQuery))?;  // solution written back
+//! let cov = r.covariance?;
 //! let lm0  = cov.marginal_cov(&path.landmarks[0]);        // one landmark, solves for its columns
 //! let lmc  = cov.conditional_cov(&path.landmarks[0]);     // its own info block, others fixed
 //! let x    = cov.cross_cov(&path.poses[0], &path.landmarks[3]);
+//!
+//! // Without a solve: the same assembly at the model's current parameters.
+//! let cov = path.assemble_covariance(CovMode::PerQuery)?;
 //! ```
 //!
 //! [`CovMode`](crate::covariance::CovMode) chosen at assembly picks the strategy:
@@ -62,6 +68,15 @@ pub enum CovError {
     /// serialization order: some off-band block couples non-adjacent entities (a
     /// loop closure or a free landmark). Use `PerQuery` / `AllMarginals` instead.
     NotTriDiagonal,
+    /// [`LmResult::covariance`](crate::simple_lm::LmResult::covariance) when
+    /// the config did not ask for one ([`LmConfig::covariance`](crate::simple_lm::LmConfig::covariance)).
+    NotRequested,
+    /// The config asked for a covariance from a raw entry point
+    /// ([`lm_solve`](crate::simple_lm::lm_solve),
+    /// [`LmSession::solve_x0`](crate::simple_lm::LmSession::solve_x0)), which
+    /// has no model to assemble it from. Solve through the model
+    /// (`solve_sparse` and friends, [`LmSession::solve`](crate::simple_lm::LmSession::solve)).
+    NoModel,
     /// A query this assembly's backend cannot answer. The
     /// [`CovMode::TriDiagonal`] backend stores only the band: it serves
     /// single-band-block entity queries, so an entity spanning several
@@ -81,6 +96,10 @@ impl std::fmt::Display for CovError {
             CovError::Empty => write!(f, "model has no optimizable parameters"),
             CovError::NotTriDiagonal => write!(f,
                 "Hessian is not block-tridiagonal (loop closure or free landmark?); use PerQuery or AllMarginals"),
+            CovError::NotRequested => write!(f,
+                "no covariance: the config did not ask for one (LmConfig::with_covariance)"),
+            CovError::NoModel => write!(f,
+                "no covariance: a raw solve (lm_solve, solve_x0) has no model to assemble it from; solve through the model"),
             CovError::UnsupportedQuery { op } => write!(f,
                 "{} is unsupported on the TriDiagonal backend for this query                  (entity spans several band blocks or none, or an off-diagonal                  block); assemble with PerQuery or AllMarginals", op),
         }
@@ -183,11 +202,12 @@ impl CovOptions {
     }
 }
 
-/// A covariance prepared at the solution. Build it with
-/// [`Covariance::assemble_covariance`], then query per-entity blocks. An owned
-/// value: querying does not borrow the problem, so
-/// `let cov = p.assemble_covariance(mode)?;` followed by
-/// `cov.marginal_cov(&p.landmarks[0])` borrow-checks.
+/// A covariance prepared at the solution: what a solve asked for it through
+/// [`LmConfig::covariance`](crate::simple_lm::LmConfig::covariance) carries
+/// in [`LmResult::covariance`](crate::simple_lm::LmResult::covariance), and
+/// what [`Covariance::assemble_covariance`] on the model builds. Query
+/// per-entity blocks from it. An owned value: querying does not borrow the
+/// model.
 pub struct CovAssembly {
     n: usize,
     backend: Backend,
@@ -1069,19 +1089,25 @@ fn build_band<T: Float>(band: &[T], kd: usize, n: usize, spans: &[(usize, usize)
 pub trait Covariance<T: Float>: LmProblemInternals<T> + RootProblem<T> + Model {
     /// Re-assemble `H` at the current parameters and prepare it for querying, per
     /// `mode`. The dense inverse is never formed. `Err` if `H` is singular, or
-    /// (for [`CovMode::TriDiagonal`]) not block-tridiagonal.
+    /// (for [`CovMode::TriDiagonal`]) not block-tridiagonal. Slower than the
+    /// covariance a solve returns
+    /// ([`LmConfig::with_covariance`](crate::simple_lm::LmConfig::with_covariance)):
+    /// it rebuilds what the solve already has.
     fn assemble_covariance(&mut self, mode: CovMode) -> Result<CovAssembly, CovError> {
-        self.assemble_covariance_with(mode, &CovOptions::auto())
+        let mut ctx = crate::threads::Context::new();
+        self.assemble_covariance_with(mode, &CovOptions::auto(), &mut ctx)
     }
 
     /// [`assemble_covariance`](Self::assemble_covariance) with the assembly
-    /// spelled out instead of left to the defaults -- see [`CovOptions`].
-    /// The covariance is the same either way; the options decide what it
-    /// costs to produce.
+    /// spelled out instead of left to the defaults -- see [`CovOptions`] --
+    /// and over a caller's [`Context`](crate::threads::Context), which a
+    /// loop of assemblies reuses instead of rebuilding per call. The
+    /// covariance is the same either way.
     fn assemble_covariance_with(
         &mut self,
         mode: CovMode,
         opts: &CovOptions,
+        ctx: &mut crate::threads::Context,
     ) -> Result<CovAssembly, CovError> {
         let mut params: Vec<T> = Vec::new();
         self.serialize(&mut params);
@@ -1091,14 +1117,12 @@ pub trait Covariance<T: Float>: LmProblemInternals<T> + RootProblem<T> + Model {
         }
         let mut grad = vec![T::zero(); n];
 
-        // One store for the whole query. Every walk below goes through
-        // the context, so the block structure is built once here instead
-        // of once per walk: the structure walks and the assembly each
-        // build their own otherwise, and on a large model that is the
-        // expensive part. Owned here and dropped with the call -- a
-        // caller never sees a context.
-        let mut ctx = crate::threads::Context::new();
-        self.begin_with_context(&mut ctx);
+        // Every walk below goes through the context, so the block structure
+        // is built once per context instead of once per walk: the structure
+        // walks and the assembly each build their own otherwise, and on a
+        // large model that is the expensive part. A context already begun
+        // over this model returns at once here.
+        self.begin_with_context(ctx);
         // An extended hook may push COO entries, which only running it
         // tells; the walks below need to know before they walk.
         let __writes_coo = self.extended_hook_writes_coo(&params);
@@ -1115,7 +1139,7 @@ pub trait Covariance<T: Float>: LmProblemInternals<T> + RootProblem<T> + Model {
             spans.sort_by_key(|&(o, _)| o);
             let kd = band_half_width(&spans);
             let mut band = vec![T::zero(); (kd + 1) * n];
-            self.calc_grad_hessian_band(&params, &mut grad, &mut band, kd, &mut ctx)
+            self.calc_grad_hessian_band(&params, &mut grad, &mut band, kd, ctx)
                 .map_err(|_| CovError::NotTriDiagonal)?;
             let bd = build_band(&band, kd, n, &spans)?;
             // The band route factorizes nothing, so no ordering is chosen.
@@ -1132,7 +1156,7 @@ pub trait Covariance<T: Float>: LmProblemInternals<T> + RootProblem<T> + Model {
         self.collect_param_blocks(&mut spans);
         let mut cells: Vec<(u32, u32)> = Vec::new();
         if !self.hessian_pattern_requires_compute() && !ctx.runtime_coo() {
-            LmProblemInternals::collect_hessian_cells(self, &mut cells, &mut ctx);
+            LmProblemInternals::collect_hessian_cells(self, &mut cells, ctx);
         }
         let blocked = !spans.is_empty() && !cells.is_empty();
 
@@ -1145,13 +1169,13 @@ pub trait Covariance<T: Float>: LmProblemInternals<T> + RootProblem<T> + Model {
             BlockSupernodalMode::Never => false,
         };
         if want_block && blocked && mode == CovMode::PerQuery {
-            if let Some(a) = block_assemble(self, &params, &mut grad, &spans, &cells, n, opts, &mut ctx)? {
+            if let Some(a) = block_assemble(self, &params, &mut grad, &spans, &cells, n, opts, ctx)? {
                 return Ok(a);
             }
         }
 
         let mut coo = CooMatrix::new(n);
-        self.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, &mut ctx);
+        self.calc_grad_hessian_sparse_with_context(&params, &mut grad, &mut coo, ctx);
         let csc_t = coo.to_csc().map_err(|_| CovError::NotPositiveDefinite)?;
 
         // Upper-triangle CSC of H in f64 (covariance is computed in f64

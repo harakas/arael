@@ -9,7 +9,7 @@
 
 use arael::simple_lm::RootProblem;
 use arael::model::{JacobianModel, Model, Param, SelfBlock};
-use arael::simple_lm::{self, LmConfig, LmProblem};
+use arael::simple_lm::{LmConfig, LmProblem};
 
 // Direct-composition sub-model: single parameter, single constraint pinning it
 // to 5.0. Not wrapped in refs::Vec, just embedded as a plain field in the root.
@@ -88,8 +88,7 @@ fn main() {
     }
 
     let config = LmConfig::well_conditioned().with_verbose(true);
-    let result = simple_lm::lm_solve(&params, &mut simple_lm::Dense, &mut m, &config).unwrap();
-    m.deserialize(&result.x);
+    let result = m.solve_dense(&config).unwrap();
 
     println!(
         "\nLM: {} iterations, cost {:.6} -> {:.6}",

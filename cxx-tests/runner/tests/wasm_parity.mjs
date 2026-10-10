@@ -63,3 +63,21 @@ p("c", fit.c);
 for (let i = 0; i < 3; i++) p(`item${i}_v`, items.at(i).v);
 const v = fit.vns().at(0).v;
 for (let i = 0; i < 4; i++) p(`vn_v${i}_after`, v[i]);
+
+// A session solve from the solution, then the covariance over the
+// session's context.
+const s = new w.LmSession();
+const rs = s.solve(fit, cfg);
+p("sess_end", rs.endCost);
+const cs = s.assembleCovariance(fit);
+p("sess_cov_item0", cs.marginalN(items.at(0))[0]);
+
+// The covariance asked for in the config, carried by the result.
+const cfgc = new w.LmConfig();
+cfgc.maxIters = 50;
+cfgc.covariance = w.CovMode.AllMarginals;
+const rc = fit.solveDense(cfgc);
+p("cfg_cov_item0", rc.covariance().marginalN(items.at(0))[0]);
+let absent = 0;
+try { r.covariance(); } catch (e) { absent = 1; }
+p("cfg_cov_absent", absent);

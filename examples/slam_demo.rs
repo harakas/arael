@@ -37,7 +37,7 @@
 //   constraints are scaled down.
 
 use arael::simple_lm::RootProblem;
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::CovMode;
 use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
@@ -635,33 +635,41 @@ fn main() {
     println!("--- Optimization ---");
     let isigma_scales = [0.01, 0.1, 1.0];
 
+    // The last pass also assembles the parameter covariance at its
+    // solution (with_covariance), used for the landmark ellipsoids below.
+    let mut cov: Option<arael::covariance::CovAssembly> = None;
     for (pass, &scale) in isigma_scales.iter().enumerate() {
         path.frine_isigma_scale = scale;
 
-        let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
-        path.serialize(&mut params64);
-        let _n = params64.len();
-
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-        let config = arael::simple_lm::LmConfig::well_conditioned()
+        let last = pass + 1 == isigma_scales.len();
+        let mut config = arael::simple_lm::LmConfig::well_conditioned()
             .with_verbose(true)
             .with_rel_precision(1e-6);
+        if last {
+            config = config.with_covariance(CovMode::AllMarginals);
+        }
         let result = match solver_name.as_str() {
-            "dense" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::Dense, &mut path, &config),
-            "faer" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::SparseFaer::new(), &mut path, &config),
+            "dense" => path.solve_with(&mut arael::simple_lm::Dense, &config),
+            "faer" => path.solve_with(&mut arael::simple_lm::SparseFaer::new(), &config),
             #[cfg(feature = "eigen")]
-            "eigen" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::SparseEigen::new(), &mut path, &config),
+            "eigen" => path.solve_with(&mut arael::simple_lm::SparseEigen::new(), &config),
             #[cfg(not(feature = "eigen"))]
             "eigen" => { eprintln!("Eigen solver requires --features eigen"); return; }
             #[cfg(feature = "cholmod")]
-            "cholmod" => arael::simple_lm::lm_solve(&params64, &mut arael::simple_lm::SparseCholmod::new(), &mut path, &config),
+            "cholmod" => path.solve_with(&mut arael::simple_lm::SparseCholmod::new(), &config),
             #[cfg(not(feature = "cholmod"))]
             "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
             _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
         };
         let result = result.unwrap();
-        path.deserialize(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
+        if last {
+            cov = match result.covariance {
+                Ok(c) => Some(c),
+                Err(e) => { println!("Covariance unavailable: {e}"); None }
+            };
+        }
     }
 
     // Mean absolute pose error vs GT (includes GPS systematic offset)
@@ -748,14 +756,11 @@ fn main() {
             mean, dea_rel_errs[n / 2], dea_rel_errs[0], dea_rel_errs[n - 1]);
     }
 
-    // Landmark uncertainty from the parameter covariance (Sigma = 2 H^-1). The
-    // relative covariance Cov_rel = C_ll + C_pp - C_lp - C_pl over the landmark and
-    // pose POSITION blocks cancels the shared gauge (GPS offset, yaw), giving
-    // uncertainty relative to the pose. Ellipsoid semi-axes = sqrt of its eigenvalues.
-    let cov = match path.assemble_covariance(CovMode::AllMarginals) {
-        Ok(c) => Some(c),
-        Err(e) => { println!("Covariance unavailable: {e}"); None }
-    };
+    // Landmark uncertainty from the parameter covariance (Sigma = 2 H^-1,
+    // `cov` from the last pass). The relative covariance Cov_rel = C_ll +
+    // C_pp - C_lp - C_pl over the landmark and pose POSITION blocks cancels
+    // the shared gauge (GPS offset, yaw), giving uncertainty relative to the
+    // pose. Ellipsoid semi-axes = sqrt of its eigenvalues.
 
     // Landmark errors: compare landmark-to-closest-pose vector (opt vs GT)
     println!("\n--- Landmark errors (relative to closest pose) ---");

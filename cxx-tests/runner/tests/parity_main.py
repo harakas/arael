@@ -277,6 +277,23 @@ for i in range(len(f13.items)):
 rs2 = sess.solve(f13, cfg)
 p("sess_end2", rs2.end_cost)
 pi("sess_warm_equals_cold", 1 if rs2.end_cost == rs1.end_cost else 0)
+# The covariance over the session's context: the marginal the model's own
+# assembly gives at this solution.
+cs = sess.assemble_covariance(f13)
+pi("sess_cov_ok", 1)
+p("sess_cov_item0", cs.marginal(f13.items[0]))
+# The covariance asked for in the config, carried by the result.
+cfgc = fit.LmConfig()
+cfgc.max_iters = 50
+cfgc.covariance = fit.CovMode.ALL_MARGINALS
+rc = f13.solve_dense(cfgc)
+pi("cfg_cov_ok", 1)
+p("cfg_cov_item0", rc.covariance().marginal(f13.items[0]))
+try:
+    rs2.covariance()
+    pi("cfg_cov_absent", 0)
+except AraelError:
+    pi("cfg_cov_absent", 1)
 sess.invalidate()
 f13.m = 0.0
 f13.c = 0.0

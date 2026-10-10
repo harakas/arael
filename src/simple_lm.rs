@@ -178,6 +178,17 @@ pub struct LmConfig<T: Float> {
     /// `num_threads` for both.
     pub assembly_threads: Option<usize>,
 
+    // Covariance.
+
+    /// Assemble the parameter covariance at the solution, in this mode, and
+    /// carry it in [`LmResult::covariance`]. `None` (the default) assembles
+    /// nothing. See [`CovMode`](crate::covariance::CovMode).
+    pub covariance: Option<crate::covariance::CovMode>,
+    /// How that covariance is assembled: the ordering and the factorization
+    /// ([`CovOptions`](crate::covariance::CovOptions)). Read only when
+    /// `covariance` asks for one.
+    pub covariance_options: crate::covariance::CovOptions,
+
     // Diagnostics.
 
     /// Print each iteration's cost, lambda and timing to stderr.
@@ -213,6 +224,8 @@ impl<T: Float + std::fmt::Debug> std::fmt::Debug for LmConfig<T> {
             .field("gradient_tolerance", &self.gradient_tolerance)
             .field("parameter_tolerance", &self.parameter_tolerance)
             .field("predicted_reduction_tolerance", &self.predicted_reduction_tolerance)
+            .field("covariance", &self.covariance)
+            .field("covariance_options", &self.covariance_options)
             .field("min_diagonal", &self.min_diagonal)
             .field("time_limit", &self.time_limit)
             .field("lambda_floor", &self.lambda_floor)
@@ -249,6 +262,8 @@ impl<T: Float> LmConfig<T> {
             lambda_floor: default_lambda_floor::<T>(),
             num_threads: crate::threads::default_num_threads(),
             assembly_threads: None,
+            covariance: None,
+            covariance_options: crate::covariance::CovOptions::auto(),
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
             observer: None,
@@ -379,6 +394,18 @@ impl<T: Float> LmConfig<T> {
     /// Toggle phase timing collection ([`gather_timing`](Self::gather_timing)).
     pub fn with_gather_timing(mut self, on: bool) -> Self {
         self.gather_timing = on;
+        self
+    }
+    /// Ask for the parameter covariance at the solution
+    /// ([`covariance`](Self::covariance)); it comes back in
+    /// [`LmResult::covariance`].
+    pub fn with_covariance(mut self, mode: crate::covariance::CovMode) -> Self {
+        self.covariance = Some(mode);
+        self
+    }
+    /// How the covariance is assembled ([`covariance_options`](Self::covariance_options)).
+    pub fn with_covariance_options(mut self, opts: crate::covariance::CovOptions) -> Self {
+        self.covariance_options = opts;
         self
     }
 
@@ -555,7 +582,7 @@ pub enum SolveFailureKind {
 /// otherwise it carries a full [`LmResult`] with
 /// [`LmStatus::Aborted`] -- usable for diagnosis or a warm
 /// [`LmConfig::continue_from`] restart.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SolveFailure<T> {
     /// What broke.
     pub kind: SolveFailureKind,
@@ -889,18 +916,22 @@ pub trait LmProblem<T> {
     /// serialize -> optimize -> deserialize round trip: parameters are
     /// read from the model and the optimized values written back. The
     /// damping schedule comes from `config.driver` (set it with
-    /// [`LmConfig::with_driver`]). For the common backends use
+    /// [`LmConfig::with_driver`]). A covariance the config asks for
+    /// ([`LmConfig::covariance`]) is assembled at the solution and
+    /// carried in [`LmResult::covariance`]. For the common backends use
     /// [`solve_dense`](Self::solve_dense) or
     /// [`solve_sparse`](Self::solve_sparse).
     fn solve_with<S: LmSolver<T>>(&mut self, solver: &mut S, config: &LmConfig<T>) -> SolveResult<T>
     where
-        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
+        Self: RootProblem<T> + LmProblemInternals<T> + crate::model::Model + Sized,
         T: Float,
     {
         let mut params = Vec::new();
         self.serialize(&mut params);
-        let result = lm_solve(&params, solver, self, config)?;
+        let mut ctx = crate::threads::Context::new();
+        let mut result = lm_solve_with_context(&params, solver, self, config, &mut ctx)?;
         self.deserialize(&result.x);
+        finish_covariance(self, config, &mut ctx, &mut result);
         Ok(result)
     }
 
@@ -909,7 +940,7 @@ pub trait LmProblem<T> {
     /// over [`solve_with`](Self::solve_with).
     fn solve_dense(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
-        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
+        Self: RootProblem<T> + LmProblemInternals<T> + crate::model::Model + Sized,
         T: Float,
         Dense: LmSolver<T>,
     {
@@ -930,7 +961,7 @@ pub trait LmProblem<T> {
     /// structure -- see [`SparseFaer`].
     fn solve_sparse(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
-        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
+        Self: RootProblem<T> + LmProblemInternals<T> + crate::model::Model + Sized,
         T: Float,
         SparseFaer<T>: LmSolver<T>,
     {
@@ -943,7 +974,7 @@ pub trait LmProblem<T> {
     /// unchanged, instead of failing to build.
     fn solve(&mut self, kind: SolverKind, config: &LmConfig<T>) -> SolveResult<T>
     where
-        Self: RootProblem<T> + LmProblemInternals<T> + Sized,
+        Self: RootProblem<T> + LmProblemInternals<T> + crate::model::Model + Sized,
         T: BackendScalar,
     {
         T::dispatch(&kind, self, config)
@@ -1251,6 +1282,9 @@ pub struct LmTiming {
     /// The first `advance` alone (recorded apart so the steady-state mean can
     /// drop the first iteration uniformly with the other phases).
     pub first_advance: Duration,
+    /// The covariance assembly [`LmConfig::covariance`] asked for, run after
+    /// the solve and not part of `total`; zero when none was asked.
+    pub covariance: Duration,
     /// Number of assembly calls (one per outer iteration).
     pub assembly_count: usize,
     /// Number of computes that did structural analysis. Normally 1 -- the
@@ -1366,7 +1400,6 @@ impl LmTiming {
 }
 
 /// Result returned by the Levenberg-Marquardt solver.
-#[derive(Clone)]
 pub struct LmResult<T> {
     /// Final parameter vector.
     pub x: Vec<T>,
@@ -1396,6 +1429,15 @@ pub struct LmResult<T> {
     pub timing: Option<LmTiming>,
     /// What the solve's threads did (see [`ThreadReport`]).
     pub threads: ThreadReport,
+    /// The parameter covariance at the solution, when
+    /// [`LmConfig::covariance`] asked for one: assembled over the solve's
+    /// own block structure once the solve has finished. `Err` names why
+    /// there is none: [`NotRequested`](crate::covariance::CovError::NotRequested)
+    /// when the config did not ask, [`NoModel`](crate::covariance::CovError::NoModel)
+    /// from the raw entry points ([`lm_solve`] and
+    /// [`LmSession::solve_x0`] have no model to assemble from), or the
+    /// assembly's own error.
+    pub covariance: Result<crate::covariance::CovAssembly, crate::covariance::CovError>,
 }
 
 /// What a solve's threads did: the counts the two halves were given, and
@@ -1640,6 +1682,14 @@ impl<T: Float> LmResult<T> {
         ));
         out.push_str(&row("cost eval", t.cost_eval, t.first_cost_eval, t.cost_eval_count));
         out.push_str(&row("advance", t.advance, t.first_advance, t.advance_count));
+        // After the solve and outside `total`, so no share of it.
+        if t.covariance > Duration::ZERO {
+            out.push_str(&format!(
+                "    {:<13} {:>8.2} ms  after the solve\n",
+                "covariance",
+                t.covariance.as_secs_f64() * 1e3,
+            ));
+        }
 
         // One marker per attempt, wrapped -- a long solve is hundreds of them.
         if !t.steps.is_empty() {
@@ -2499,6 +2549,37 @@ fn lm_empty_result<T: Float>(x0: &[T], config: &LmConfig<T>) -> LmResult<T> {
         timing: config.gather_timing.then(LmTiming::default),
         solver: None,
         threads: ThreadReport::default(),
+        covariance: cov_placeholder(config),
+    }
+}
+
+/// What a raw solve carries in [`LmResult::covariance`]: it has no model to
+/// assemble one from, so a config that asks gets `NoModel`. The model entry
+/// points replace it with the assembly.
+fn cov_placeholder<T: Float>(
+    config: &LmConfig<T>,
+) -> Result<crate::covariance::CovAssembly, crate::covariance::CovError> {
+    Err(if config.covariance.is_some() {
+        crate::covariance::CovError::NoModel
+    } else {
+        crate::covariance::CovError::NotRequested
+    })
+}
+
+/// The covariance the config asked for, assembled at the solution over the
+/// solve's own context and placed in the result; its time into the timing
+/// when gathered.
+fn finish_covariance<T: Float, P: crate::covariance::Covariance<T>>(
+    model: &mut P,
+    config: &LmConfig<T>,
+    ctx: &mut crate::threads::Context,
+    result: &mut LmResult<T>,
+) {
+    let Some(mode) = config.covariance else { return };
+    let start = config.gather_timing.then(Instant::now);
+    result.covariance = model.assemble_covariance_with(mode, &config.covariance_options, ctx);
+    if let (Some(start), Some(t)) = (start, result.timing.as_mut()) {
+        t.covariance = start.elapsed();
     }
 }
 
@@ -2766,7 +2847,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, ctx.sweeps()) });
+                    threads: report_threads(threads_asked, ctx.sweeps()),
+                    covariance: cov_placeholder(config) });
             }
             // Already at or below the target. The in-loop test only runs on an
             // ACCEPTED step, so a solve that starts met never reaches it: every
@@ -2779,7 +2861,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::CostThreshold, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, ctx.sweeps()) });
+                    threads: report_threads(threads_asked, ctx.sweeps()),
+                    covariance: cov_placeholder(config) });
             }
         }
 
@@ -2841,7 +2924,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     accepted_iterations: accepted,
                     status: LmStatus::Aborted, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, ctx.sweeps()) };
+                    threads: report_threads(threads_asked, ctx.sweeps()),
+                    covariance: cov_placeholder(config) };
                 return Err(SolveFailure {
                     kind: SolveFailureKind::DegenerateDiagonal { param: i, fault },
                     partial: Some(Box::new(partial)),
@@ -3280,6 +3364,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         timing: gather.then_some(timing),
         solver: solver.report(),
         threads: report_threads(threads_asked, ctx.sweeps()),
+        covariance: cov_placeholder(config),
     };
     match failure {
         None => Ok(result),
@@ -3361,18 +3446,63 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
         &self.ctx
     }
 
+    /// The same, mutably: what
+    /// [`assemble_covariance`](Self::assemble_covariance) hands the model's
+    /// [`assemble_covariance_with`](crate::covariance::Covariance::assemble_covariance_with).
+    pub fn context_mut(&mut self) -> &mut crate::threads::Context {
+        &mut self.ctx
+    }
+
+    /// The covariance at the model's current parameters, reusing what the
+    /// session's solves built; the model's own
+    /// [`assemble_covariance`](crate::covariance::Covariance::assemble_covariance)
+    /// rebuilds it per call. The same as asking for it in the config of
+    /// the solve ([`LmConfig::with_covariance`]).
+    ///
+    /// ```ignore
+    /// let mut session = LmSession::new(SparseFaer::new());
+    /// session.solve(&mut model, &cfg)?;
+    /// let cov = session.assemble_covariance(&mut model, CovMode::AllMarginals)?;
+    /// let sd = cov.std_dev(&model.poses[0])?;
+    /// ```
+    pub fn assemble_covariance<P>(
+        &mut self,
+        model: &mut P,
+        mode: crate::covariance::CovMode,
+    ) -> Result<crate::covariance::CovAssembly, crate::covariance::CovError>
+    where
+        P: crate::covariance::Covariance<T>,
+    {
+        self.assemble_covariance_with(model, mode, &crate::covariance::CovOptions::auto())
+    }
+
+    /// [`assemble_covariance`](Self::assemble_covariance) with the assembly
+    /// spelled out ([`CovOptions`](crate::covariance::CovOptions)).
+    pub fn assemble_covariance_with<P>(
+        &mut self,
+        model: &mut P,
+        mode: crate::covariance::CovMode,
+        opts: &crate::covariance::CovOptions,
+    ) -> Result<crate::covariance::CovAssembly, crate::covariance::CovError>
+    where
+        P: crate::covariance::Covariance<T>,
+    {
+        model.assemble_covariance_with(mode, opts, &mut self.ctx)
+    }
+
     /// Solve the model through the session: serialize -> optimize ->
-    /// deserialize, like [`LmProblem::solve_with`]. The first call runs the
-    /// full structural analysis; later calls reuse it (see the type docs for
-    /// when that is valid).
+    /// deserialize, like [`LmProblem::solve_with`], a covariance the config
+    /// asks for included. The first call runs the full structural analysis;
+    /// later calls reuse it (see the type docs for when that is valid).
     pub fn solve<P>(&mut self, model: &mut P, config: &LmConfig<T>) -> SolveResult<T>
     where
-        P: LmProblemInternals<T> + RootProblem<T>,
+        P: LmProblemInternals<T> + RootProblem<T> + crate::model::Model,
     {
         let mut params = Vec::new();
         model.serialize(&mut params);
-        let result = self.solve_x0(&params, model, config)?;
+        let mut result = self.solve_x0(&params, model, config)?;
         model.deserialize(&result.x);
+        finish_covariance(model, config, &mut self.ctx, &mut result);
         Ok(result)
     }
 
@@ -4437,7 +4567,7 @@ pub trait BackendScalar: Float {
     /// [`SetupError::SolverUnavailable`], parameters left untouched.
     fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<Self>) -> SolveResult<Self>
     where
-        P: LmProblemInternals<Self> + RootProblem<Self>;
+        P: LmProblemInternals<Self> + RootProblem<Self> + crate::model::Model;
 }
 
 /// The failure for a backend that cannot run: nothing was attempted, the
@@ -4455,7 +4585,7 @@ fn solver_unavailable<T: Float>(
 impl BackendScalar for f64 {
     fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f64>) -> SolveResult<f64>
     where
-        P: LmProblemInternals<f64> + RootProblem<f64>,
+        P: LmProblemInternals<f64> + RootProblem<f64> + crate::model::Model,
     {
         match kind {
             SolverKind::Dense => problem.solve_with(&mut Dense, config),
@@ -4511,7 +4641,7 @@ impl BackendScalar for f64 {
 impl BackendScalar for f32 {
     fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f32>) -> SolveResult<f32>
     where
-        P: LmProblemInternals<f32> + RootProblem<f32>,
+        P: LmProblemInternals<f32> + RootProblem<f32> + crate::model::Model,
     {
         match kind {
             SolverKind::Dense => problem.solve_with(&mut Dense, config),
@@ -7416,6 +7546,7 @@ mod tests {
             solver: None,
             timing: None,
             threads: Default::default(),
+            covariance: Err(crate::covariance::CovError::NotRequested),
         };
         let e = super::SolveFailure {
             kind: super::SolveFailureKind::DegenerateDiagonal {

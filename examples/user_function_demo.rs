@@ -22,7 +22,7 @@
 use arael::simple_lm::RootProblem;
 use arael::info;
 use arael::model::{Param, SelfBlock};
-use arael::simple_lm::{self, LmConfig, LmProblem};
+use arael::simple_lm::{LmConfig, LmProblem};
 use arael::sym::E;
 
 // --- Form A: purely symbolic sigmoid. No derivs, auto-differentiated
@@ -81,8 +81,7 @@ fn main() {
     info!("Start x = {:.6}, cost = {:.6}", params[0], m.calc_cost(&params));
 
     let config = LmConfig::conservative().with_verbose(true).with_max_iters(50);
-    let result = simple_lm::lm_solve(&params, &mut simple_lm::Dense, &mut m, &config).unwrap();
-    m.deserialize(&result.x);
+    let result = m.solve_dense(&config).unwrap();
 
     let r1 = sigmoid_f64(m.x.value) - 0.8;
     let r2 = my_safe_asin_eval(m.x.value) - 0.5;

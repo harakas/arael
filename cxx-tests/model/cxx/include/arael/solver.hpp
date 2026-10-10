@@ -176,6 +176,10 @@ struct LmIterT {
     uint32_t params_len;
 };
 
+enum class CovMode : uint32_t;
+enum class CovOrdering : uint32_t;
+enum class BlockSupernodalMode : uint32_t;
+
 /// The solver configuration, holding the preset's Rust values.
 /// Inspect them, edit them, pass the struct back whole; `option`
 /// fields mirror the Rust `Option` fields (assign a value or `{}`).
@@ -212,6 +216,13 @@ struct LmConfigT {
     /// Accepted steps after which the solve stops (status
     /// MaxIterations). Empty turns it off.
     option<uint32_t> max_accepted_iters;
+    /// Assemble the parameter covariance at the solution in this mode
+    /// and carry it in the result (LmResult::covariance()). Empty
+    /// assembles nothing.
+    option<CovMode> covariance;
+    /// How that covariance is assembled (Rust's CovOptions).
+    CovOrdering covariance_ordering;
+    BlockSupernodalMode covariance_block_supernodal;
 };
 
 /// Whether and when the sparse backend marginalizes (mirrors arael's
@@ -325,6 +336,9 @@ struct LmTiming {
     uint32_t linear_solve_count;
     uint32_t cost_eval_count;
     uint32_t advance_count;
+    /// The covariance assembly the config asked for, after the solve
+    /// and outside `total`; zero when none was asked.
+    double covariance;
 };
 
 /// One attempted LM step: the per-attempt timeline behind

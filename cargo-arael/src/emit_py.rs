@@ -899,6 +899,14 @@ _{0}_slots = (ctypes.c_uint64 * {1})()
         &["ctypes.c_void_p", "ctypes.c_uint32", "ctypes.c_uint32",
           "ctypes.c_uint32", "ctypes.POINTER(ctypes.c_void_p)"],
         "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_session_assemble_covariance"),
+        &["ctypes.c_void_p", "ctypes.c_void_p", "ctypes.c_uint32",
+          "ctypes.POINTER(ctypes.c_void_p)"], "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_session_assemble_covariance_with"),
+        &["ctypes.c_void_p", "ctypes.c_void_p", "ctypes.c_uint32",
+          "ctypes.c_uint32", "ctypes.c_uint32",
+          "ctypes.POINTER(ctypes.c_void_p)"],
+        "ctypes.c_int32");
     sig(&mut py, &format!("{root_sn}_cov_error"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_cov_free"), &["ctypes.c_void_p"],
@@ -1078,6 +1086,11 @@ class Covariance:
         &["ctypes.c_void_p", "ctypes.POINTER(_solver.StoreFootprint)",
           "ctypes.c_uint64"],
         "ctypes.c_uint64");
+    sig(&mut py, &format!("{root_sn}_result_covariance"),
+        &["ctypes.c_void_p", "ctypes.POINTER(ctypes.c_void_p)"],
+        "ctypes.c_int32");
+    sig(&mut py, &format!("{root_sn}_result_error"), &["ctypes.c_void_p"],
+        "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_result_free"), &["ctypes.c_void_p"],
         "None");
     sig(&mut py, &format!("{root_sn}_cost"), &["ctypes.c_void_p"],
@@ -1516,6 +1529,20 @@ class LmSession:
         \"\"\"Drop the learned structure; the next solve runs cold.\"\"\"
         _f.{root_sn}_session_invalidate(self._s)
 
+    def assemble_covariance(self, model, mode=CovMode.ALL_MARGINALS,
+                            ordering=CovOrdering.AUTO,
+                            block_supernodal=BlockSupernodalMode.AUTO):
+        \"\"\"The covariance at the model's current parameters, reusing
+        what this session's solves built. Contract as the model's
+        assemble_covariance.\"\"\"
+        c = ctypes.c_void_p()
+        code = _f.{root_sn}_session_assemble_covariance_with(
+            self._s, model._p, int(mode), int(ordering), int(block_supernodal),
+            ctypes.byref(c))
+        if code != 0:
+            raise AraelError(code, _err(model._p))
+        return Covariance(c)
+
 
 class LmResult(_f.LmResultRaw):
     \"\"\"A completed solve (see arael.solver for the fields); owns the
@@ -1564,6 +1591,22 @@ class LmResult(_f.LmResultRaw):
         if self._detail:
             _f.{root_sn}_result_threads(self._detail, ctypes.byref(t))
         return t
+
+    def covariance(self):
+        \"\"\"The covariance the config asked for (cfg.covariance),
+        assembled at the solution, moved out of the result into the
+        returned view; raises AraelError when the config did not ask,
+        an earlier call took it, or the assembly failed.\"\"\"
+        c = ctypes.c_void_p()
+        code = (_f.{root_sn}_result_covariance(self._detail, ctypes.byref(c))
+                if self._detail else 1)
+        if code == 0:
+            return Covariance(c)
+        if code == 1:
+            raise AraelError(code, \"no covariance: the config did not ask for one\")
+        if code == 2:
+            raise AraelError(code, \"no covariance: an earlier covariance() call took it\")
+        raise AraelError(code, _f.{root_sn}_result_error(self._detail).decode())
 
     @property
     def threads_held(self):

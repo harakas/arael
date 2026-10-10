@@ -351,7 +351,11 @@ fn main() {
     //
     // gather_timing fills result.timing: the per-phase totals, and one record
     // per attempt (damping retries included) in LmTiming::steps.
-    let lm_cfg = LmConfig::well_conditioned().with_verbose(true).with_gather_timing(true);
+    //
+    // with_covariance makes the solve assemble the parameter covariance at
+    // its solution too (result.covariance), for the ellipses below.
+    let lm_cfg = LmConfig::well_conditioned().with_verbose(true).with_gather_timing(true)
+        .with_covariance(CovMode::AllMarginals);
     // One call runs the whole Levenberg-Marquardt solve (indexed sparse
     // faer backend): it flattens the params, repeatedly linearizes the
     // constraints and takes damped steps, then writes the optimized values
@@ -399,7 +403,7 @@ fn main() {
     // Per-landmark positional uncertainty from the parameter covariance. The
     // first pose is held fixed, so the map cannot slide or rotate freely and the
     // Hessian is invertible; each landmark's 2x2 block is its own uncertainty.
-    let ellipses = compute_landmark_ellipses(&mut path);
+    let ellipses = compute_landmark_ellipses(&result, &path);
 
     let out = "slam2d_simple.eps";
     write_eps(&path, &gt_poses, &gt_lms, &lm_to_gt, &ellipses, out).expect("eps write");
@@ -409,8 +413,8 @@ fn main() {
 // Per-landmark 95% confidence ellipse: (center, semi_major, semi_minor, angle_rad).
 // 95% in 2D corresponds to chi^2(0.95, df=2) = 5.991, so the semi-axes are
 // sqrt(5.991 * eigenvalue) of the 2x2 position covariance block.
-fn compute_landmark_ellipses(path: &mut Path) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
-    let cov = match path.assemble_covariance(CovMode::AllMarginals) {
+fn compute_landmark_ellipses(result: &LmResult<f32>, path: &Path) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
+    let cov = match &result.covariance {
         Ok(cov) => cov,
         Err(e) => {
             println!("\n{e} -- skipping uncertainty.");

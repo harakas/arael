@@ -162,6 +162,20 @@ class LmSession:
         """Drop the learned structure; the next solve runs cold."""
         _f.line_session_invalidate(self._s)
 
+    def assemble_covariance(self, model, mode=CovMode.ALL_MARGINALS,
+                            ordering=CovOrdering.AUTO,
+                            block_supernodal=BlockSupernodalMode.AUTO):
+        """The covariance at the model's current parameters, reusing
+        what this session's solves built. Contract as the model's
+        assemble_covariance."""
+        c = ctypes.c_void_p()
+        code = _f.line_session_assemble_covariance_with(
+            self._s, model._p, int(mode), int(ordering), int(block_supernodal),
+            ctypes.byref(c))
+        if code != 0:
+            raise AraelError(code, _err(model._p))
+        return Covariance(c)
+
 
 class LmResult(_f.LmResultRaw):
     """A completed solve (see arael.solver for the fields); owns the
@@ -210,6 +224,22 @@ class LmResult(_f.LmResultRaw):
         if self._detail:
             _f.line_result_threads(self._detail, ctypes.byref(t))
         return t
+
+    def covariance(self):
+        """The covariance the config asked for (cfg.covariance),
+        assembled at the solution, moved out of the result into the
+        returned view; raises AraelError when the config did not ask,
+        an earlier call took it, or the assembly failed."""
+        c = ctypes.c_void_p()
+        code = (_f.line_result_covariance(self._detail, ctypes.byref(c))
+                if self._detail else 1)
+        if code == 0:
+            return Covariance(c)
+        if code == 1:
+            raise AraelError(code, "no covariance: the config did not ask for one")
+        if code == 2:
+            raise AraelError(code, "no covariance: an earlier covariance() call took it")
+        raise AraelError(code, _f.line_result_error(self._detail).decode())
 
     @property
     def threads_held(self):

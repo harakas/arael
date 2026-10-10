@@ -430,12 +430,18 @@ int main(int argc, char** argv) {
     SparseOptions opts;
     opts.envelope = EnvelopeMode::Always;
     LmSession session(opts);
+    // The last pass also assembles the parameter covariance at its
+    // solution (lm_cfg.covariance), for the landmark ellipsoids below.
+    auto cov_r = result<Covariance, CovError>::err({"no pass ran"});
     for (size_t pass = 0; pass < isigma_scales.size(); pass++) {
         path.set_frine_isigma_scale(isigma_scales[pass]);
         std::printf("\nPass %zu (isigma scale=%g):\n", pass + 1, isigma_scales[pass]);
+        const bool last = pass + 1 == isigma_scales.size();
         LmConfig lm_cfg = LmConfig::well_conditioned();
         lm_cfg.rel_precision = 1e-6;
         lm_cfg.verbose = true;
+        if (last)
+            lm_cfg.covariance = CovMode::AllMarginals;
         SolveResult r = solver_name == "dense" ? path.solve_dense(lm_cfg)
                                                : session.solve(path, lm_cfg);
         if (r.is_err()) {
@@ -444,6 +450,8 @@ int main(int argc, char** argv) {
         }
         std::printf("  %u iterations, cost %.4f -> %.4f\n",
             r->iterations, r->start_cost, r->end_cost);
+        if (last)
+            cov_r = r->covariance();
 
         // Move each landmark's anchor to its anchor pose's CURRENT
         // position and re-express direction + inverse range there, so
@@ -532,8 +540,8 @@ int main(int argc, char** argv) {
     // Landmark uncertainty from the parameter covariance. The relative
     // covariance C_ll + C_pp - C_lp - C_pl over the landmark and pose
     // POSITION blocks cancels the shared gauge uncertainty; ellipsoid
-    // semi-axes are the sqrt of its eigenvalues.
-    auto cov_r = path.assemble_covariance(CovMode::AllMarginals);
+    // semi-axes are the sqrt of its eigenvalues. `cov_r` is the last
+    // pass's.
     if (cov_r.is_err())
         std::printf("Covariance unavailable: %s\n", cov_r.error().message);
 

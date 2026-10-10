@@ -231,6 +231,8 @@ LmConfig {
     time_limit:      None,   // wall-clock budget; None = no limit
     num_threads:     1,      // threads for the linear solve and the sweeps (needs `threads`)
     assembly_threads: None,  // a separate count for the sweeps
+    covariance:      None,   // assemble the parameter covariance at the solution (CovMode)
+    covariance_options:     CovOptions::auto(), // how that covariance is assembled
     verbose:         false,  // print per-iteration trace to stderr
     observer:        None,   // called once per damped attempt
     gather_timing:   false,  // collect per-phase timing into LmResult::timing
@@ -256,6 +258,8 @@ LmConfig {
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
 | `num_threads` | `1`, or `ARAEL_NUM_THREADS` | threads for the linear solve and for the cost and assembly sweeps. `1` sequential, `n` uses n, `0` uses every core. The environment variable sets the default; a count set in code wins. **Requires the `threads` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
 | `assembly_threads` | `None` | `Option<usize>`. A thread count for the cost and assembly sweeps alone. `None` leaves them on `num_threads`; `Some(n)` gives the sweeps `n` and leaves the linear solve on `num_threads`. Same scale. The sweeps split by constraint count and the factorization by its elimination tree, so the count that suits one need not suit the other |
+| `covariance` | `None` | `Option<CovMode>`. `Some(mode)` makes the solve assemble the parameter covariance at its solution into `LmResult::covariance` ([docs/COVARIANCE.md](COVARIANCE.md)). Set with `with_covariance` |
+| `covariance_options` | `CovOptions::auto()` | how that covariance is assembled: the elimination ordering and whether the block supernodal Cholesky factorizes. Read only when `covariance` asks. Set with `with_covariance_options` |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 | `observer` | `None` | an [`LmObserver`](#iteration-observer) called once per damped attempt; can stop the solve. Set with `with_observer` |
 | `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
@@ -540,6 +544,9 @@ let r1 = session.solve(&mut model, &cfg); // cold: full analysis
 let r2 = session.solve(&mut model, &cfg); // warm: assembly + numerics
 ```
 
+A covariance the config asks for (`with_covariance`) comes back in the
+result here as on every other entry point ([docs/COVARIANCE.md](COVARIANCE.md)).
+
 ## `LmResult`
 
 ```rust,ignore
@@ -554,6 +561,7 @@ pub struct LmResult<T> {
     pub solver: Option<SolverReport>, // the sparse backend's plan; None for dense and band
     pub timing: Option<LmTiming>,    // per-phase wall clock; Some iff gather_timing
     pub threads: ThreadReport,       // what the solve's threads did
+    pub covariance: Result<CovAssembly, CovError>, // Ok when the config asked for one (LmConfig::covariance)
 }
 ```
 
@@ -889,6 +897,7 @@ pub struct LmTiming {
     pub first_cost_eval: Duration,
     pub advance: Duration,        // post-step re-centering
     pub first_advance: Duration,
+    pub covariance: Duration,     // the covariance the config asked for, after the solve; not in total
     // plus a *_count for each phase
 
     pub steps: Vec<LmStep>,       // the per-iteration timeline -- see below

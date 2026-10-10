@@ -349,7 +349,9 @@ cfg.gradient_tolerance = 1e-8      # or None
 `assembly_threads` included; both take effect when the exported crate is
 built with arael's `threads` feature ([docs/SOLVERS.md](SOLVERS.md#threads)).
 The defaults are the Rust ones, so `ARAEL_NUM_THREADS` in the environment
-sets `num_threads` here too.
+sets `num_threads` here too. `cfg.covariance` is a `CovMode` or `None`,
+with `cfg.covariance_ordering` and `cfg.covariance_block_supernodal` beside it (see
+Covariance below).
 A threaded solve leaves arael's sweep workers parked for the life of the
 process; `pool_shutdown()` in the model's module joins them, and the next
 threaded solve spawns them again. `arael_version()` in the same module
@@ -436,10 +438,15 @@ collection; `free()` forces it.
 
 ## Covariance and diagnostics
 
-`assemble_covariance(mode=CovMode.ALL_MARGINALS, ordering=
-CovOrdering.AUTO, block_supernodal=BlockSupernodalMode.AUTO)`
-prepares the covariance at the current (solved) parameters and
-returns a view, or raises. `ordering` and `block_supernodal` decide
+`cfg.covariance = CovMode.ALL_MARGINALS` makes the solve assemble the
+parameter covariance at its solution, and `r.covariance()` moves it out of
+the result into a view (raises `AraelError` when the config did not ask,
+an earlier call took it, or the assembly failed). `f.assemble_covariance(mode=CovMode.ALL_MARGINALS, ordering=
+CovOrdering.AUTO, block_supernodal=BlockSupernodalMode.AUTO)` assembles
+one at the current parameters without a solve;
+`sess.assemble_covariance(model, ...)` over a session's context.
+`cfg.covariance_ordering` and `cfg.covariance_block_supernodal`, like `ordering` and
+`block_supernodal`, decide
 what the assembly costs, never what it is: `AUTO` builds a symbolic
 factorization per candidate ordering to choose between them, naming
 the ordering skips that. The view owns its assembly, is freed on
@@ -449,7 +456,10 @@ disturbs an older view. The calls drop Rust's `_cov` suffix
 live model:
 
 ```python
-cov = f.assemble_covariance()
+cfg = fit.LmConfig.well_conditioned()
+cfg.covariance = CovMode.ALL_MARGINALS
+r = f.solve_sparse(cfg)
+cov = r.covariance()
 cov.marginal(f.items[0])            # 1 param -> float; 2 or 3 -> matrix2d / matrix3d; more -> row-major tuples
 cov.conditional(f.items[0])         # all other parameters held fixed
 cov.std_dev(f.poses[0])             # per-parameter standard deviations, every CovMode

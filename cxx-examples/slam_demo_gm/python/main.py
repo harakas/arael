@@ -340,6 +340,9 @@ def main():
     opts = pathmod.SparseOptions()
     opts.envelope = pathmod.EnvelopeMode.ALWAYS
     session = pathmod.LmSession(opts)
+    # The last pass also assembles the parameter covariance at its
+    # solution (lm_cfg.covariance), for the landmark ellipsoids below.
+    cov = None
     for passno, scale in enumerate(scales, 1):
         path.frine_isigma_scale = scale
         print("\nPass %d (isigma scale=%g):" % (passno, scale), flush=True)
@@ -347,11 +350,15 @@ def main():
         lm_cfg.rel_precision = 1e-6
         lm_cfg.gather_timing = True
         lm_cfg.verbose = True
+        if passno == len(scales):
+            lm_cfg.covariance = pathmod.CovMode.ALL_MARGINALS
         r = (path.solve_dense(lm_cfg) if solver_name == "dense"
              else session.solve(path, lm_cfg))
         print(r.pretty_report(), end='')
         print("  %d iterations, cost %.4f -> %.4f"
               % (r.iterations, r.start_cost, r.end_cost), flush=True)
+        if passno == len(scales):
+            cov = r.covariance()
 
         # Re-anchor: move each landmark's anchor to its anchor pose's
         # CURRENT position; values only. Near-infinity keeps its ray.
@@ -440,7 +447,7 @@ def main():
     # Landmark uncertainty: relative covariance C_ll + C_pp - C_lp -
     # C_pl over landmark and pose position blocks cancels the shared
     # gauge uncertainty; ellipsoid semi-axes = sqrt of eigenvalues.
-    cov = path.assemble_covariance()
+    # `cov` is the last pass's.
 
     print("\n--- Landmark errors (relative to closest pose) ---")
     lm_errs, lm_rel_errs, max_sigmas = [], [], []
