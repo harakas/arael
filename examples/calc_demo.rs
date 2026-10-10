@@ -179,7 +179,7 @@ fn handle_line(
     // Otherwise: evaluate an expression.
     let e = parse_with_functions(line, bag).map_err(|err| err.msg)?;
     let var_refs: HashMap<&str, f64> = vars.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let val = e.eval(&var_refs)?;
+    let val = e.eval(&var_refs).map_err(|e| e.to_string())?;
     println!("{val}");
     Ok(())
 }
@@ -234,7 +234,7 @@ fn handle_assignment(
     }
     let e = parse_with_functions(rhs, bag).map_err(|err| err.msg)?;
     let var_refs: HashMap<&str, f64> = vars.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let val = e.eval(&var_refs)?;
+    let val = e.eval(&var_refs).map_err(|e| e.to_string())?;
     vars.insert(lhs.to_string(), val);
     Ok(())
 }

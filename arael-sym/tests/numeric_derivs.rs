@@ -47,7 +47,7 @@ fn eval_reads_the_result() {
     assert_eq!(v.diff("x").eval(&vars).unwrap(), 4.0);
     assert_eq!(v.diff("y").eval(&vars).unwrap(), 12.0);
     let silent = extern_func_numeric_derivs("g", 1, "g_eval", false, None)(vec![symbol("x")]);
-    assert!(silent.eval(&vars).unwrap_err().contains("no eval fn"));
+    assert!(matches!(silent.eval(&vars).unwrap_err(), SymError::NoEval(_)));
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn a_partial_has_no_derivative() {
     let text = format!("{}", dd);
     assert!(text.contains("no derivative of f"), "{text}");
     let err = dd.eval(&HashMap::from([("x", 1.0), ("y", 1.0)])).unwrap_err();
-    assert!(err.contains("no derivative of f"), "{err}");
+    assert!(matches!(err, SymError::NoDerivative { ref of, .. } if of == "f"), "{err}");
     assert!(dd.to_rust("f64").contains("compile_error!"));
 }
 

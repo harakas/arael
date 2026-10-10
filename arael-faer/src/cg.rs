@@ -4,7 +4,7 @@
 //! block triangle (see [`crate::bsc`]), by repeated multiplication -- no
 //! factorization, so no fill and no factor to store. The step it returns is
 //! inexact by construction: it stops when the residual has fallen far enough,
-//! and how far is the caller's [`CgOptions::tol`].
+//! and how far is the caller's [`CgParams::tol`].
 //!
 //! The preconditioner is block Jacobi: the Cholesky factor of each diagonal
 //! block, applied per block. It costs one small dense factorization per block
@@ -21,7 +21,7 @@ use faer::Index;
 
 /// Settings for one CG solve.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CgOptions {
+pub struct CgParams {
     /// Stop once the preconditioned residual `r^T M^-1 r` falls to this
     /// fraction of its value at entry. That quantity is squared, so 1e-6
     /// here is a factor of 1e-3 on the residual norm.
@@ -39,11 +39,15 @@ pub struct CgOptions {
     pub restart_every: usize,
 }
 
-impl Default for CgOptions {
+impl Default for CgParams {
     fn default() -> Self {
-        CgOptions { tol: 1e-6, max_iters: 0, restart_every: 0 }
+        CgParams { tol: 1e-6, max_iters: 0, restart_every: 0 }
     }
 }
+
+/// Former name of [`CgParams`].
+#[deprecated(since = "0.9.0", note = "renamed to CgParams")]
+pub type CgOptions = CgParams;
 
 /// What one CG solve did.
 #[derive(Clone, Copy, Debug, Default)]
@@ -210,7 +214,7 @@ pub fn solve<T: SchurReal>(
     m: &BlockJacobi<T>,
     b: &[T],
     x: &mut [T],
-    opts: &CgOptions,
+    opts: &CgParams,
     w: &mut CgWorkspace<T>,
 ) -> CgStats {
     let n = b.len();
@@ -339,7 +343,7 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let mut x = vec![0.0; 4];
         let mut w = CgWorkspace::default();
-        let opts = CgOptions { tol: 1e-14, ..Default::default() };
+        let opts = CgParams { tol: 1e-14, ..Default::default() };
         let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert!(stats.converged, "did not converge: {:?}", stats);
         assert!(stats.iters <= 4, "took {} iterations on a 4x4", stats.iters);
@@ -359,7 +363,7 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let mut x = vec![0.0; 4];
         let mut w = CgWorkspace::default();
-        let opts = CgOptions { tol: 1e-14, max_iters: 1, ..Default::default() };
+        let opts = CgParams { tol: 1e-14, max_iters: 1, ..Default::default() };
         let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert_eq!(stats.iters, 1);
         assert!(!stats.converged);
@@ -371,7 +375,7 @@ mod tests {
         let m = BlockJacobi::build(&a).unwrap();
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let mut w = CgWorkspace::default();
-        let opts = CgOptions { tol: 1e-14, restart_every: 1, ..Default::default() };
+        let opts = CgParams { tol: 1e-14, restart_every: 1, ..Default::default() };
         let mut x = vec![0.0; 4];
         let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert!(stats.converged);
@@ -398,7 +402,7 @@ mod tests {
         let b = vec![1.0f32, 2.0, 3.0, 4.0];
         let mut x = vec![0.0f32; 4];
         let mut w = CgWorkspace::default();
-        let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &CgOptions::default(), &mut w);
+        let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &CgParams::default(), &mut w);
         assert!(stats.converged, "{:?}", stats);
         let mut ax = vec![0.0f32; 4];
         a.mul_symmetric_upper(&x, &mut ax);

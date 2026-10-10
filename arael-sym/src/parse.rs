@@ -4,7 +4,7 @@ use std::fmt;
 /// Error type for expression parsing.
 ///
 /// Contains the byte position of the error and a human-readable message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
     /// Byte offset in the input where the error occurred.
     pub pos: usize,
@@ -293,14 +293,14 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
     if let Some(bag) = bag
         && let Some(result) = bag.call(lookup_name, &args)
     {
-        return result.map_err(|msg| ParseError { pos: 0, msg });
+        return result.map_err(|e| ParseError { pos: 0, msg: e.to_string() });
     }
     let fnref = crate::function_by_name(lookup_name).ok_or_else(|| ParseError {
         pos: 0,
         msg: format!("unknown function: {name}"),
     })?;
     match fnref {
-        crate::FunctionRef::Variadic(f) => f(args).map_err(|msg| ParseError { pos: 0, msg }),
+        crate::FunctionRef::Variadic(f) => f(args).map_err(|e| ParseError { pos: 0, msg: e.to_string() }),
         crate::FunctionRef::Unary(f) => {
             if args.len() != 1 {
                 return Err(ParseError {
@@ -607,7 +607,7 @@ mod tests {
     fn bag_add_rejects_non_func() {
         let mut bag = FunctionBag::new();
         let err = bag.add(constant(1.0)).unwrap_err();
-        assert!(err.contains("expected Expr::Func"), "{err}");
+        assert!(matches!(err, crate::SymError::NotAFunction { .. }), "{err}");
     }
 
     #[test]

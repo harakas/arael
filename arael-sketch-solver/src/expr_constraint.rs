@@ -66,9 +66,9 @@ impl ExpressionConstraint {
     /// triangle stored in the COO list.
     pub fn compute(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64,
                    hb: &mut Coo<f64>, grad: &mut [f64]) -> Result<(), String> {
-        let r = self.expr.eval(vars)? * constraint_isigma;
+        let r = self.expr.eval(vars).map_err(|e| e.to_string())? * constraint_isigma;
         let dr: Vec<f64> = self.param_derivs.iter()
-            .map(|(_, deriv)| Ok::<_, String>(deriv.eval(vars)? * constraint_isigma))
+            .map(|(_, deriv)| Ok::<_, String>(deriv.eval(vars).map_err(|e| e.to_string())? * constraint_isigma))
             .collect::<Result<_, _>>()?;
         hb.add_residual(r, &self.indices, &dr, grad);
         Ok(())
@@ -76,7 +76,7 @@ impl ExpressionConstraint {
 
     /// Compute the squared residual (cost contribution).
     pub fn cost(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64) -> Result<f64, String> {
-        let r = self.expr.eval(vars)? * constraint_isigma;
+        let r = self.expr.eval(vars).map_err(|e| e.to_string())? * constraint_isigma;
         Ok(r * r)
     }
 
@@ -84,9 +84,9 @@ impl ExpressionConstraint {
     pub fn jacobian_row(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64)
         -> Result<(f64, Vec<(u32, f64)>), String>
     {
-        let r = self.expr.eval(vars)? * constraint_isigma;
+        let r = self.expr.eval(vars).map_err(|e| e.to_string())? * constraint_isigma;
         let dr: Result<Vec<f64>, String> = self.param_derivs.iter()
-            .map(|(_, deriv)| Ok(deriv.eval(vars)? * constraint_isigma))
+            .map(|(_, deriv)| Ok(deriv.eval(vars).map_err(|e| e.to_string())? * constraint_isigma))
             .collect();
         Ok((r, arael::model::jacobian_entries(&self.indices, &dr?)))
     }

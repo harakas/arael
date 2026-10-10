@@ -83,7 +83,7 @@ pub(crate) fn eval_expr_with(sketch: &Sketch, expr_str: &str, extra: &HashMap<St
     let mut ctx = eval_context(sketch);
     for (k, v) in extra { ctx.insert(k.clone(), *v); }
     let vars: HashMap<&str, f64> = ctx.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    parsed.eval(&vars)
+    parsed.eval(&vars).map_err(|e| e.to_string())
 }
 
 pub fn eval_expr(sketch: &Sketch, expr_str: &str) -> Result<f64, String> {

@@ -2,7 +2,7 @@
 
 `arael-sym` provides a lightweight computer algebra system built around a reference-counted expression tree (`E`). Expressions are constructed from symbols and constants, combined with standard arithmetic operators (which auto-simplify), and then differentiated, evaluated, pretty-printed, or compiled to Rust source code.
 
-This crate is the symbolic engine behind the [`arael`](https://docs.rs/arael) optimization framework, where it powers compile-time constraint differentiation and code generation. It can also be used independently for any symbolic math task.
+This crate is the symbolic engine behind the [`arael`](https://docs.rs/arael) optimization framework, where it powers compile-time constraint differentiation and code generation. It can also be used independently for any symbolic math task: building, differentiating, evaluating and printing expressions need nothing else. The Rust code it generates calls into arael for a few built-ins (`rad_diff`, `rad_sum`, `safe_sqrt`, `epsilon_for`, `fast_atan`, `fast_atan2`, `select`).
 
 See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough of the basics below (`cargo run --example sym_demo`).
 
@@ -162,6 +162,24 @@ sym! {
     println!("a(t) = {}", acc);
 }
 ```
+
+## Errors
+
+`eval` (on `E`, `SymVec` and `SymMat`), the `FunctionBag` `add*` methods and `FunctionBag::call` fail with `SymError`:
+
+| variant | when |
+|---|---|
+| `UnboundSymbol(name)` | `vars` does not bind a symbol of the expression |
+| `SelectIndexNotInteger(value)` | a select index is NaN, infinite or fractional |
+| `SelectIndexOutOfRange { value, arms }` | a select index is outside `0..arms` and there is no default arm |
+| `NoEval(function)` | an extern function that runs only in generated code was evaluated |
+| `NoDerivative { of, why }` | a derivative declared not to exist was evaluated |
+| `Arity { function, expected, got }` | a bag function was called with the wrong number of arguments |
+| `BadCall { function, message }` | a variadic built-in got the wrong argument shape, or an eval fn returned fewer partial derivatives than asked |
+| `NotAFunction { source }` | a `FunctionBag::add*` method was given something that is not a function call |
+| `Parse(ParseError)` | the text did not parse |
+
+`parse` and `parse_with_functions` return `ParseError`, which carries the position in the text. `SymError` implements `From<ParseError>`, so one `?` covers a parse followed by an eval. Both implement `Display` and `std::error::Error`.
 
 ## Free Variables
 

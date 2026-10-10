@@ -228,7 +228,7 @@ algebra -- in the assembly or the residual evaluation. All three f32 rows keep
 their geometry (camera-centre RMSE 1.3e-4, inside even the tight gate) and lose
 the cost, so the points or the intrinsics are what drift.
 
-Chase that before adding precision machinery to CG. `CgOptions::restart_every`
+Chase that before adding precision machinery to CG. `CgParams::restart_every`
 exists for the recurrence-drift case and is untested on a problem that needs
 it; the f64 CG vectors and f64 residual recompute from the original plan were
 deliberately not built, because they answer a question f32 is not currently

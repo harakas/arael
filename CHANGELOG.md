@@ -73,8 +73,9 @@ is cut.
   `whole_system` / `forced_schur` presets are gone; the options gain
   `with_schur_solve`.
 - Renamed: `SolveError` is `SetupError`, `FaerOrdering` is
-  `SolveOrdering`, `SchurSolve` is `SchurMethod` (the old names stay as
-  deprecated aliases); `ReducedOrdering::Nd` is `NestedDissection`; the
+  `SolveOrdering`, `SchurSolve` is `SchurMethod`, arael-faer's
+  `CgOptions` is `CgParams` (the old names stay as deprecated
+  aliases); `ReducedOrdering::Nd` is `NestedDissection`; the
   sparse option `supernodal` is `scalar_supernodal`; `Style.colour` is
   `color`; the Jacobian's `*_column_normalised` methods are
   `*_column_normalized`; `QuaternionParam::work()` is
@@ -96,6 +97,9 @@ is cut.
 - arael-faer: the factorization and Schur APIs take a thread count.
 - arael-sym: `cse::replace_pub` is renamed `cse::replace`; it and
   `replace_many` replace exactly, `E::substitute` with simplification.
+- arael-sym: evaluation and the function bag fail with a typed
+  `SymError` instead of a string. `ParseError` stays as the parser's
+  error and is wrapped as `SymError::Parse`.
 
 ### Fixed
 

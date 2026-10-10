@@ -10,7 +10,11 @@
 //! This crate is the symbolic engine behind the
 //! [`arael`](https://docs.rs/arael) optimization framework, where it powers
 //! compile-time constraint differentiation and code generation. It can also
-//! be used independently for any symbolic math task.
+//! be used independently for any symbolic math task: building,
+//! differentiating, evaluating and printing expressions need nothing
+//! else. The Rust code it generates calls into arael for a few built-ins
+//! (`rad_diff`, `rad_sum`, `safe_sqrt`, `epsilon_for`, `fast_atan`,
+//! `fast_atan2`, `select`).
 //!
 //! # Scope and limitations
 //!
@@ -101,6 +105,10 @@
 //! };
 //! assert_eq!(val, 10.0);
 //! ```
+//!
+//! `eval` fails with a [`SymError`]: an unbound symbol, a select index
+//! with no arm, a function that runs only in generated code. Parsing
+//! fails with a [`ParseError`], which `SymError` wraps.
 //!
 //! ## Code generation
 //!
@@ -376,8 +384,11 @@ mod fmt;
 mod simplify;
 mod linalg;
 mod parse;
+mod error;
 pub mod geo;
 pub mod cse;
+
+pub use error::SymError;
 
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -1146,34 +1157,34 @@ pub fn piecewise(x: impl Into<E>, arms: Vec<E>, breaks: Vec<E>) -> E {
 }
 
 // Variadic registry entries: the argument list is the Display form.
-fn select_call(args: Vec<E>) -> Result<E, String> {
+fn select_call(args: Vec<E>) -> Result<E, SymError> {
     if args.len() < 2 {
-        return Err("select expects an index and at least one arm".into());
+        return Err(SymError::bad_call("select", "expects an index and at least one arm"));
     }
     let mut it = args.into_iter();
     let index = it.next().unwrap();
     Ok(select(index, it.collect(), None))
 }
-fn select_or_call(mut args: Vec<E>) -> Result<E, String> {
+fn select_or_call(mut args: Vec<E>) -> Result<E, SymError> {
     if args.len() < 3 {
-        return Err("select_or expects an index, at least one arm, then the default".into());
+        return Err(SymError::bad_call("select_or", "expects an index, at least one arm, then the default"));
     }
     let default = args.pop();
     let mut it = args.into_iter();
     let index = it.next().unwrap();
     Ok(select(index, it.collect(), default))
 }
-fn multibranch_call(mut args: Vec<E>) -> Result<E, String> {
+fn multibranch_call(mut args: Vec<E>) -> Result<E, SymError> {
     if args.len() < 3 || args.len() % 2 == 0 {
-        return Err("multibranch expects condition/arm pairs then a default (an odd count of at least 3)".into());
+        return Err(SymError::bad_call("multibranch", "expects condition/arm pairs then a default (an odd count of at least 3)"));
     }
     let default = args.pop().unwrap();
     let pieces = args.chunks(2).map(|p| (p[0].clone(), p[1].clone())).collect();
     Ok(multibranch(pieces, default))
 }
-fn piecewise_call(args: Vec<E>) -> Result<E, String> {
+fn piecewise_call(args: Vec<E>) -> Result<E, SymError> {
     if args.len() < 2 || args.len() % 2 != 0 {
-        return Err("piecewise expects x, then arm/break pairs and a final arm (an even count of at least 2)".into());
+        return Err(SymError::bad_call("piecewise", "expects x, then arm/break pairs and a final arm (an even count of at least 2)"));
     }
     let mut it = args.into_iter();
     let x = it.next().unwrap();
@@ -1317,7 +1328,7 @@ pub enum FunctionRef {
     Ternary(fn(E, E, E) -> E),
     /// Any number of arguments; the function checks the count and shape
     /// itself and reports a bad call as the error text.
-    Variadic(fn(Vec<E>) -> Result<E, String>),
+    Variadic(fn(Vec<E>) -> Result<E, SymError>),
 }
 
 /// The authoritative table of scalar functions arael-sym exposes by name.
@@ -1474,10 +1485,10 @@ impl Default for FunctionBag {
     fn default() -> Self { Self::new() }
 }
 
-fn extract_func_template(e: E, source: &str) -> Result<(String, std::vec::Vec<String>, FuncKind), String> {
+fn extract_func_template(e: E, source: &str) -> Result<(String, std::vec::Vec<String>, FuncKind), SymError> {
     match (*e.0).clone() {
         Expr::Func { name, params, kind, .. } => Ok((name, params, kind)),
-        _ => Err(format!("{source}: expected Expr::Func, got a different expression")),
+        _ => Err(SymError::NotAFunction { source: source.to_string() }),
     }
 }
 
@@ -1498,7 +1509,7 @@ impl FunctionBag {
     /// [`add2`](Self::add2) / [`add_n`](Self::add_n).
     ///
     /// Returns `Err` if `e` is not an `Expr::Func`.
-    pub fn add(&mut self, e: E) -> Result<(), String> {
+    pub fn add(&mut self, e: E) -> Result<(), SymError> {
         let (name, params, kind) = extract_func_template(e, "FunctionBag::add")?;
         self.table.insert(name, BagFunction { params, kind });
         Ok(())
@@ -1510,7 +1521,7 @@ impl FunctionBag {
     /// ```ignore
     /// bag.add1(simple_func1("sq", |t| t.clone() * t)).unwrap();
     /// ```
-    pub fn add1<F>(&mut self, f: F) -> Result<(), String>
+    pub fn add1<F>(&mut self, f: F) -> Result<(), SymError>
     where F: FnOnce(E) -> E
     {
         let e = f(symbol("__a0"));
@@ -1525,7 +1536,7 @@ impl FunctionBag {
     /// bag.add2(simple_func2("hypot",
     ///     |a, b| sqrt(a.clone()*a + b.clone()*b))).unwrap();
     /// ```
-    pub fn add2<F>(&mut self, f: F) -> Result<(), String>
+    pub fn add2<F>(&mut self, f: F) -> Result<(), SymError>
     where F: FnOnce(E, E) -> E
     {
         let e = f(symbol("__a0"), symbol("__a1"));
@@ -1545,7 +1556,7 @@ impl FunctionBag {
     ///     args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
     /// )).unwrap();
     /// ```
-    pub fn add_n<F>(&mut self, arity: usize, f: F) -> Result<(), String>
+    pub fn add_n<F>(&mut self, arity: usize, f: F) -> Result<(), SymError>
     where F: FnOnce(std::vec::Vec<E>) -> E
     {
         let placeholders: std::vec::Vec<E> =
@@ -1559,7 +1570,7 @@ impl FunctionBag {
     /// Former name of [`add_n`](Self::add_n).
     #[deprecated(since = "0.9.0", note = "renamed to add_n")]
     #[allow(non_snake_case)]
-    pub fn addN<F>(&mut self, arity: usize, f: F) -> Result<(), String>
+    pub fn addN<F>(&mut self, arity: usize, f: F) -> Result<(), SymError>
     where F: FnOnce(std::vec::Vec<E>) -> E
     {
         self.add_n(arity, f)
@@ -1627,13 +1638,14 @@ impl FunctionBag {
     /// built-ins as a fallback should route through
     /// [`parse::parse_with_functions`] or
     /// [`crate::function_by_name`].
-    pub fn call(&self, name: &str, args: &[E]) -> Option<Result<E, String>> {
+    pub fn call(&self, name: &str, args: &[E]) -> Option<Result<E, SymError>> {
         let f = self.table.get(name)?;
         if args.len() != f.params.len() {
-            return Some(Err(format!(
-                "{} expects {} argument(s), got {}",
-                name, f.params.len(), args.len()
-            )));
+            return Some(Err(SymError::Arity {
+                function: name.to_string(),
+                expected: f.params.len(),
+                got: args.len(),
+            }));
         }
         let func = E::new(Expr::Func {
             name: name.to_string(),

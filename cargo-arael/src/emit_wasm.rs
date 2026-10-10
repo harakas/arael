@@ -942,7 +942,7 @@ impl {opts} {{
             narrow_band: d.narrow_band,
             flop_margin,
             obvious_flop_ratio,
-            cg_tol: arael::simple_lm::CgOptions::default().tol,
+            cg_tol: arael::simple_lm::CgParams::default().tol,
             schur_solve: 0,
             cg_max_iters: 0,
             cg_restart_every: 0,
@@ -995,7 +995,7 @@ impl {opts} {{
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
             .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean);
-        let cg = arael::simple_lm::CgOptions {{
+        let cg = arael::simple_lm::CgParams {{
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
             restart_every: self.cg_restart_every as usize,

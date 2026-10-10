@@ -8,7 +8,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
-    lm_solve, CgOptions, LmConfig, RootProblem, SchurPolicy, SetupError,
+    lm_solve, CgParams, LmConfig, RootProblem, SchurPolicy, SetupError,
     SolveFailureKind, SolverReport, SparseFaer,
 };
 
@@ -136,8 +136,8 @@ fn x0_of(w: &mut World) -> std::vec::Vec<f64> {
     x
 }
 
-fn cg(tol: f64) -> CgOptions {
-    CgOptions { tol, ..Default::default() }
+fn cg(tol: f64) -> CgParams {
+    CgParams { tol, ..Default::default() }
 }
 
 /// The reduced system solved iteratively reaches the same optimum as the one

@@ -620,12 +620,12 @@ pub enum Route {
 // solve that still lands on the common optimum. Tighter buys nothing -- it
 // costs more per iteration without saving an LM step -- and looser converges
 // to a worse cost.
-pub fn cg_options() -> arael::simple_lm::CgOptions {
-    let d = arael::simple_lm::CgOptions::default();
+pub fn cg_options() -> arael::simple_lm::CgParams {
+    let d = arael::simple_lm::CgParams::default();
     fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
         std::env::var(k).ok().and_then(|v| v.parse().ok())
     }
-    arael::simple_lm::CgOptions {
+    arael::simple_lm::CgParams {
         tol: env("SLAM_CG_TOL").unwrap_or(1e-4),
         max_iters: env("SLAM_CG_MAXITER").unwrap_or(d.max_iters),
         restart_every: env("SLAM_CG_RESTART").unwrap_or(d.restart_every),

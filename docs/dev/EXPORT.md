@@ -81,7 +81,7 @@ the signature change is safe). C++: `solve_sparse(cfg)` and
 `solve_sparse(cfg, opts)`; Python: `solve_sparse(cfg=None,
 opts=None)`. Excluded from v1: the marginalize range list (the model
 author's `marginalize` attribute already covers it),
-iterative/implicit Schur (`CgOptions` -- experimental), threads
+iterative/implicit Schur (`CgParams` -- experimental), threads
 (already `LmConfig.num_threads`). Tests: parity fixtures forcing each
 knob and comparing plan and results against the same options driven
 from Rust.
@@ -388,13 +388,13 @@ method + option) stay per-skin, documented.
 
 ### Aging exclusion [DONE 2026-07-31]
 
-`SchurSolve::Iterative`/`IterativeImplicit` + `CgOptions` is now the
+`SchurSolve::Iterative`/`IterativeImplicit` + `CgParams` is now the
 only `SparseFaerOptions` field with no crossing and has picked up
 benchmark use; the "experimental" label is aging.
 
 Shipped: `SparseOptions` gained `schur_solve` (Factorize / Iterative
 / IterativeImplicit) plus `cg_tol` / `cg_max_iters` /
-`cg_restart_every` (the `CgOptions` fields, defaults from Rust), in
+`cg_restart_every` (the `CgParams` fields, defaults from Rust), in
 both skins with a `SchurSolve` enum. Parity pins a Force+Iterative
 solve exactly, including the plan's CG iteration total. Every
 `SparseFaerOptions` capability except the marginalize range list now
