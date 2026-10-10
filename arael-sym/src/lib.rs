@@ -382,6 +382,7 @@ mod diff;
 mod eval;
 mod fmt;
 mod simplify;
+mod node_memo;
 mod linalg;
 mod parse;
 mod error;
