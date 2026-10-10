@@ -502,6 +502,17 @@ struct ThreadReport {
     option<SweepReport> sweeps;
 };
 
+/// The arael version a shim was built with (mirrors arael's Version):
+/// the three numbers and `pre`, the tag after the dash ("dev" in
+/// 0.9.0-dev, empty for a release); read it with arael_version().
+/// Layout is part of the C ABI.
+struct AraelVersion {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t patch;
+    const char* pre;
+};
+
 /// How much covariance to prepare (mirrors arael's CovMode).
 enum class CovMode : uint32_t {
     PerQuery = 0,

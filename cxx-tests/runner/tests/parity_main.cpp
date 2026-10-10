@@ -45,6 +45,11 @@ int main() {
     // Links and runs; a no-op in this build, which has no worker threads.
     pool_shutdown();
     pi("log_smoke", 1);
+    const AraelVersion ver = arael_version();
+    pi("arael_version_major", ver.major);
+    pi("arael_version_minor", ver.minor);
+    pi("arael_version_patch", ver.patch);
+    pi("arael_version_pre_len", long(std::strlen(ver.pre)));
 
     // LmStatus helpers mirror Rust's is_success / as_str.
     for (int i = 0; i <= 11; i++) {

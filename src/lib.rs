@@ -2443,6 +2443,48 @@ pub mod user_fn;
 pub use inventory;
 /// Re-export of the `arael-sym` symbolic math crate.
 pub use arael_sym as sym;
+/// A crate version: the three numbers and the tag after the dash.
+/// `Display` writes the `Cargo.toml` form, `0.9.0-dev`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Version {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    /// The pre-release tag after the dash (`"dev"` in `0.9.0-dev`);
+    /// empty for a release.
+    pub pre: &'static str,
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if !self.pre.is_empty() {
+            write!(f, "-{}", self.pre)?;
+        }
+        Ok(())
+    }
+}
+
+const fn version_number(s: &str) -> u32 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut v = 0u32;
+    while i < b.len() {
+        v = v * 10 + (b[i] - b'0') as u32;
+        i += 1;
+    }
+    v
+}
+
+/// The version of this crate, from its `Cargo.toml`. Every generated
+/// interface reports it: `arael_version()` in C, C++ and Python,
+/// `araelVersion()` in JavaScript.
+pub const VERSION: Version = Version {
+    major: version_number(env!("CARGO_PKG_VERSION_MAJOR")),
+    minor: version_number(env!("CARGO_PKG_VERSION_MINOR")),
+    patch: version_number(env!("CARGO_PKG_VERSION_PATCH")),
+    pre: env!("CARGO_PKG_VERSION_PRE"),
+};
 /// Offset into an assembled Hessian's value buffer: the width of every
 /// scatter position and tile origin the solver stores. 32 bits by default,
 /// which addresses 4e9 values (34 GB of `f64`); a problem past that needs the

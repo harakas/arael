@@ -49,6 +49,7 @@ using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
 using arael::ThreadReport;
+using arael::AraelVersion;
 using arael::SweepReport;
 using arael::PhaseChoice;
 using arael::ParTiming;
@@ -144,6 +145,7 @@ bool decay_last_failure(const Decay*, SolveFailure*);
 const char* decay_validate(Decay*);
 void decay_set_log_level(uint32_t);
 void decay_pool_shutdown(void);
+void decay_arael_version(AraelVersion*);
 void decay_sparse_options(SparseOptions*);
 int32_t decay_solve_dense(Decay*, const LmConfig*, LmResultT<float>*);
 int32_t decay_solve_sparse(Decay*, const LmConfig*, const SparseOptions*, LmResultT<float>*);
@@ -180,6 +182,13 @@ inline void set_log_level(LogLevel level) {
 /// worker is ever spawned and it returns at once.
 inline void pool_shutdown() {
     ffi::decay_pool_shutdown();
+}
+
+/// The arael version the shim was built with (arael::AraelVersion).
+inline AraelVersion arael_version() {
+    AraelVersion v{};
+    ffi::decay_arael_version(&v);
+    return v;
 }
 
 /// A completed solve: the plain result fields plus ownership of the

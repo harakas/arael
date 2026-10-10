@@ -117,6 +117,7 @@ fn wasm_interface_matches_rust_exactly() {
     let mut fit = Fit::default();
     parity_verify::fill(&mut fit);
     assert_eq!(g("clean"), 1.0);
+    parity_verify::version_matches(&g);
     assert_eq!(g("n_obs"), 6.0);
     assert_eq!(g("n_items"), 3.0);
     assert_eq!(g("obs3_y"), fit.obs[3].y);

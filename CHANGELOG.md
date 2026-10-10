@@ -15,6 +15,10 @@ is cut.
 - `LmConfig::max_accepted_iters` stops a solve after that many accepted
   steps.
 - arael-faer's error types implement `Display` and `Error`.
+- `arael::VERSION`, a `Version` with the three numbers and the
+  pre-release tag, and every generated interface reports the arael
+  version it was built with in the same shape: `arael_version()` in C,
+  C++ and Python, `araelVersion()` in JavaScript.
 - arael-sym: `FunctionBag::add_n` (the old `addN` is deprecated), and an
   `E` can be made from an `Expr`.
 - `#[arael::function]` eval fns may take the model root as their first

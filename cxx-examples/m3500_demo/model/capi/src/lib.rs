@@ -778,6 +778,17 @@ pub struct CThreadReport {
     pub sweeps: COptSweepReport,
 }
 
+/// The arael version the shim was built with (mirrors arael's Version):
+/// the three numbers and the tag after the dash, a static C string,
+/// empty for a release.
+#[repr(C)]
+pub struct CAraelVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub pre: *const c_char,
+}
+
 #[repr(C)]
 pub struct CCandidateFlops {
     pub amd: f64,
@@ -1108,6 +1119,19 @@ pub extern "C" fn graph_set_log_level(level: u32) {
 #[no_mangle]
 pub extern "C" fn graph_pool_shutdown() {
     arael::pool::shutdown();
+}
+
+/// The arael version the shim was built with; `pre` points at a static
+/// C string.
+#[no_mangle]
+pub unsafe extern "C" fn graph_arael_version(out: *mut CAraelVersion) {
+    static PRE: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+    *out = CAraelVersion {
+        major: arael::VERSION.major,
+        minor: arael::VERSION.minor,
+        patch: arael::VERSION.patch,
+        pre: PRE.get_or_init(|| CString::new(arael::VERSION.pre).unwrap()).as_ptr(),
+    };
 }
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.

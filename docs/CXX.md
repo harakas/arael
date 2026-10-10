@@ -100,7 +100,10 @@ The defaults are the Rust ones, so `ARAEL_NUM_THREADS` in the environment
 sets `num_threads` here too.
 A threaded solve leaves arael's sweep workers parked for the life of the
 process; `pool_shutdown()` in the model's namespace joins them, and the
-next threaded solve spawns them again.
+next threaded solve spawns them again. `arael_version()` in the same
+namespace is the arael version the shim was built with, an
+`AraelVersion`: `major`, `minor`, `patch` and `pre`, the tag after the
+dash (`"dev"` in `0.9.0-dev`, empty for a release).
 
 ## The API surface
 

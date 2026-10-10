@@ -434,6 +434,27 @@ class ThreadReport(ctypes.Structure):
     sweeps = _plan_opt("_sweeps", lambda v: v)
 
 
+class AraelVersion(ctypes.Structure):
+    """The arael version a shim was built with (mirror of the Rust
+    Version): the three numbers and `pre`, the tag after the dash
+    ("dev" in 0.9.0-dev, empty for a release). str() gives the
+    Cargo.toml form."""
+    _fields_ = [
+        ("major", ctypes.c_uint32),
+        ("minor", ctypes.c_uint32),
+        ("patch", ctypes.c_uint32),
+        ("_pre", ctypes.c_char_p),
+    ]
+
+    @property
+    def pre(self):
+        return (self._pre or b"").decode()
+
+    def __str__(self):
+        s = "%d.%d.%d" % (self.major, self.minor, self.patch)
+        return s + "-" + self.pre if self.pre else s
+
+
 class CovPlan(ctypes.Structure):
     """What a covariance assembly decided (mirror of the Rust CovPlan):
     the `ordering` it kept, what the candidates priced at, how many

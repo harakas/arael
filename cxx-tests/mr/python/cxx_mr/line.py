@@ -18,7 +18,8 @@ from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
-                           SolveFailureKind, StoreFootprint, ThreadReport)
+                           SolveFailureKind, StoreFootprint, ThreadReport,
+                           AraelVersion)
 
 LmIter = _f.LmIter
 
@@ -70,6 +71,15 @@ def pool_shutdown():
     built without the `rayon` feature."""
     load()
     _f.line_pool_shutdown()
+
+
+def arael_version():
+    """The arael version the shim was built with
+    (arael.solver.AraelVersion)."""
+    load()
+    v = AraelVersion()
+    _f.line_arael_version(ctypes.byref(v))
+    return v
 
 
 def _raw(r):

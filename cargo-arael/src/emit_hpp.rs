@@ -809,6 +809,7 @@ private:
          const char* {root_sn}_validate({root}*);\n\
          void {root_sn}_set_log_level(uint32_t);\n\
          void {root_sn}_pool_shutdown(void);\n\
+         void {root_sn}_arael_version(AraelVersion*);\n\
          void {root_sn}_sparse_options(SparseOptions*);\n\
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResultT<{fp}>*);\n\
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, const SparseOptions*, LmResultT<{fp}>*);\n\
@@ -878,6 +879,7 @@ using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
 using arael::ThreadReport;
+using arael::AraelVersion;
 using arael::SweepReport;
 using arael::PhaseChoice;
 using arael::ParTiming;
@@ -945,6 +947,13 @@ inline void set_log_level(LogLevel level) {{
 /// worker is ever spawned and it returns at once.
 inline void pool_shutdown() {{
     ffi::{root_sn}_pool_shutdown();
+}}
+
+/// The arael version the shim was built with (arael::AraelVersion).
+inline AraelVersion arael_version() {{
+    AraelVersion v{{}};
+    ffi::{root_sn}_arael_version(&v);
+    return v;
 }}
 
 /// A completed solve: the plain result fields plus ownership of the
