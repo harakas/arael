@@ -12,15 +12,21 @@
   header label { display: inline-flex; gap: 4px; align-items: center; }
   main { flex: 1; min-height: 0; position: relative; }
   canvas { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
-  footer { padding: 6px 12px; border-top: 1px solid #8884; font-variant-numeric: tabular-nums; white-space: pre-wrap; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; padding: 8px 12px 0; }
+  footer { display: flex; justify-content: space-between; gap: 12px; padding: 6px 12px; border-top: 1px solid #8884; font-variant-numeric: tabular-nums; white-space: pre-wrap; }
+  #version { opacity: 0.7; white-space: nowrap; color: inherit; text-decoration: none; }
+  #version:hover { text-decoration: underline; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 10px; vertical-align: middle; }
   kbd { padding: 0 4px; border: 1px solid #8886; border-radius: 3px; font-family: inherit; }
 </style>
 </head>
 <body>
+<h1>Arael demo: pose-graph optimization in the browser</h1>
 <header>
   <button id="solve">Solve</button>
   <button id="reset">Reset</button>
+  <button id="undo">Undo</button>
+  <button id="redo">Redo</button>
   <button id="recenter">Recenter</button>
   <label><input type="checkbox" id="weighted"> information weighting</label>
   <label><input type="checkbox" id="live" checked> re-solve while dragging</label>
@@ -30,11 +36,12 @@
     <span style="background:#e0a000"></span>locked
     <span style="background:#d33"></span>fixed
     <span style="background:#2c2"></span>selected
+    <span style="background:linear-gradient(90deg,#888,#f00);width:24px;height:6px;border-radius:2px"></span>link cost
   </span>
-  <span>drag a pose; <kbd>L</kbd> lock, <kbd>F</kbd> fix, <kbd>C</kbd> clear the selection; shift-click or shift-drag selects; wheel zooms, middle double-click fits</span>
+  <span>drag a pose; <kbd>L</kbd> lock, <kbd>F</kbd> fix, <kbd>C</kbd> clear the selection; <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Z</kbd> undo, with <kbd>Shift</kbd> or <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Y</kbd> redo; shift-click or shift-drag selects; wheel zooms, middle double-click fits</span>
 </header>
 <main><canvas id="view"></canvas></main>
-<footer id="status">loading…</footer>
+<footer><span id="status">loading...</span><a id="version" href="https://github.com/harakas/arael" target="_blank" rel="noopener"></a></footer>
 <script type="module" src="main.js"></script>
 </body>
 </html>

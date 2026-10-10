@@ -37,8 +37,12 @@ through the generated JavaScript interface
 ([docs/WASM.md](../../docs/WASM.md)). Drag a pose and a lock, a soft
 prior, follows the pointer and stays where it is released; `L` locks
 the selection in place, `F` fixes it (its parameters leave the solve),
-`C` clears; shift-click and shift-drag select; the wheel zooms, a
-middle double-click fits the view; any 2D g2o file can be loaded. The
+`C` clears; Ctrl+Z (Cmd+Z on a Mac) undoes any of these, Shift with
+it or Ctrl+Y redoes; a click selects without locking; shift-click and
+shift-drag select; a locked or fixed pose
+is picked before the plain poses around it; the links are colored by
+their cost, gray to red, red being the worst percent; the wheel zooms,
+a middle double-click fits the view; any 2D g2o file can be loaded. The
 gauge is a very weak lock on pose 0, so every pose moves under a drag.
 Every re-solve runs through one `LmSession`.
 Build the wasm crate once (the target and the pinned CLI are named in
