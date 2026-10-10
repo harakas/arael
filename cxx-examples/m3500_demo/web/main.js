@@ -18,10 +18,12 @@ const DRAG_START_PX = 3;
 const UNDO_DEPTH = 50;
 // Solver time per frame while dragging.
 const QUICK_BUDGET_S = 0.03;
-// Link color: gray at no cost, bright red at and above the cost of the
-// worst percent of edges, in this many steps.
+// Link color: bright red at and above the cost of the worst percent of
+// edges, gray at the median cost on the log scale (the default) and at
+// no cost on the linear one, in this many steps.
 const LINK_BUCKETS = 16;
 const LINK_RED_QUANTILE = 0.99;
+const LINK_LOG_GRAY_QUANTILE = 0.5;
 const LOCKED = 1;
 const FIXED = 2;
 
@@ -31,6 +33,7 @@ const statusEl = document.getElementById("status");
 const versionEl = document.getElementById("version");
 const weightedEl = document.getElementById("weighted");
 const liveEl = document.getElementById("live");
+const logEl = document.getElementById("log");
 const tipEl = document.getElementById("tip");
 
 // The two toggle buttons in the tool column.
@@ -391,12 +394,16 @@ function draw() {
   const costs = edgeCosts();
   const sorted = Float64Array.from(costs).sort();
   const red = Math.max(sorted[Math.floor(LINK_RED_QUANTILE * (sorted.length - 1))], 1e-12);
+  const gray = Math.max(sorted[Math.floor(LINK_LOG_GRAY_QUANTILE * (sorted.length - 1))], 1e-12);
+  const logScale = pressed(logEl) && red > gray;
   const paths = Array.from({ length: LINK_BUCKETS }, () => new Path2D());
   for (let k = 0; k < costs.length; k++) {
     const a = edgesAB[2 * k], b = edgesAB[2 * k + 1];
     const [ax, ay] = toScreen(xy[2 * a], xy[2 * a + 1]);
     const [bx, by] = toScreen(xy[2 * b], xy[2 * b + 1]);
-    const t = Math.min(1, costs[k] / red);
+    const t = logScale
+      ? Math.max(0, Math.min(1, Math.log(costs[k] / gray) / Math.log(red / gray)))
+      : Math.min(1, costs[k] / red);
     const path = paths[Math.min(LINK_BUCKETS - 1, Math.floor(t * LINK_BUCKETS))];
     path.moveTo(ax, ay);
     path.lineTo(bx, by);
@@ -657,6 +664,7 @@ const actions = {
   load: () => document.getElementById("file").click(),
   weighted: () => { toggle(weightedEl); build(); solve(full); },
   live: () => toggle(liveEl),
+  log: () => toggle(logEl),
 };
 for (const [id, act] of Object.entries(actions)) {
   document.getElementById(id).addEventListener("click", () => {
