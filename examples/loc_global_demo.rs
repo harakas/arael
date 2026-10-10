@@ -24,7 +24,7 @@
 // The rest (drift on raw params, odometry) is unchanged from loc_demo.
 
 use arael::simple_lm::RootProblem;
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::CovMode;
 use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
@@ -697,16 +697,21 @@ fn main() {
     println!("\n--- Centering pass ---");
     path.optimise_center();
 
-    // Graduated optimization: start with loose feature constraints, tighten
+    // Graduated optimization: start with loose feature constraints, tighten.
+    // Between passes only the isigma scale changes, so one LmSession
+    // carries the solves: the analysis from pass 1 is reused warm by the
+    // later passes. (optimise_center above solved a different structure,
+    // the poses frozen, so it has its own solve.)
     println!("\n--- Optimization ---");
     let isigma_scales = [0.01, 0.1, 1.0];
 
+    let mut session = arael::simple_lm::LmSession::new(arael::simple_lm::SparseFaer::<f32>::new());
     for (pass, &scale) in isigma_scales.iter().enumerate() {
         path.frine_isigma_scale = scale;
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
         let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
-        let result = path.solve_sparse(&config).unwrap();
+        let result = session.solve(&mut path, &config).unwrap();
         println!("  {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
             result.iterations, result.start_cost, result.end_cost,
             path.global_delta.value, path.global_rot.value);
@@ -752,10 +757,10 @@ fn main() {
 
         println!("\n--- Absolute pose errors (with position 1-sigma from the covariance) ---");
         // Per-pose position uncertainty (Sigma = 2 H^-1) at the recentered
-        // parameters, so assembled here rather than by the last solve; the
-        // globals are held fixed, so H is positive definite. std_dev's
-        // first three are the position.
-        let cov = match path.assemble_covariance(CovMode::AllMarginals) {
+        // parameters, assembled over the session (recentering changed
+        // values only); the globals are held fixed, so H is positive
+        // definite. std_dev's first three are the position.
+        let cov = match session.assemble_covariance(&mut path, CovMode::AllMarginals) {
             Ok(c) => Some(c),
             Err(e) => { println!("(covariance unavailable: {e})"); None }
         };

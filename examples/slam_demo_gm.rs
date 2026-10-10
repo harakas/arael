@@ -735,36 +735,29 @@ fn main() {
         vec![0.01, 0.1, 1.0]
     };
 
-    // Returns the parameter covariance the last pass assembled at its
-    // solution (with_covariance on its config).
+    // Returns the parameter covariance at the solution, assembled over
+    // the session.
     fn run_ramp<S: arael::simple_lm::LmSolver<f64>>(
         solver: S, path: &mut Path, scales: &[f64],
     ) -> Option<arael::covariance::CovAssembly> {
         let mut session = arael::simple_lm::LmSession::new(solver);
-        let mut cov = None;
         for (pass, &scale) in scales.iter().enumerate() {
             path.frine_isigma_scale = scale;
             println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-            let last = pass + 1 == scales.len();
-            let mut config = arael::simple_lm::LmConfig::well_conditioned()
+            let config = arael::simple_lm::LmConfig::well_conditioned()
                 .with_verbose(true)
                 .with_rel_precision(1e-6);
-            if last {
-                config = config.with_covariance(CovMode::AllMarginals);
-            }
             let result = session.solve(path, &config).unwrap();
             println!("  {} iterations, cost {:.4} -> {:.4}",
                 result.iterations, result.start_cost, result.end_cost);
-            if last {
-                cov = match result.covariance {
-                    Ok(c) => Some(c),
-                    Err(e) => { println!("Covariance unavailable: {e}"); None }
-                };
-            } else {
+            if pass + 1 < scales.len() {
                 reanchor_landmarks(path);
             }
         }
-        cov
+        match session.assemble_covariance(path, CovMode::AllMarginals) {
+            Ok(c) => Some(c),
+            Err(e) => { println!("Covariance unavailable: {e}"); None }
+        }
     }
 
     // Move each landmark's anchor to its anchor pose's CURRENT position
