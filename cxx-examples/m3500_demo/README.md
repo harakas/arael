@@ -43,7 +43,8 @@ parameters leave the solve),
 it or Ctrl+Y redoes; a click selects without locking; shift-click and
 shift-drag select; a locked or fixed pose
 is picked before the plain poses around it; the links are colored by
-their cost, gray to red, red being the worst percent; the wheel zooms,
+their cost on a log scale, gray at the median and red at the worst
+percent (the `Log color` toggle makes it linear); the wheel zooms,
 a middle double-click fits the view; any 2D g2o file can be loaded. The
 gauge is a very weak lock on pose 0, so every pose moves under a drag.
 Every re-solve runs through one `LmSession`.
