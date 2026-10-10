@@ -3,8 +3,8 @@
 // and the canvas shows the poses. A pose can be dragged (a lock, a
 // soft prior, follows the pointer and stays where it is released),
 // locked in place, fixed (its parameters taken out of the solve) and
-// cleared, one or many at a time.
-import init, { Graph, LmConfig, LmSession } from "../model/wasm/pkg/m3500_demo_wasm.js";
+// cleared, one or many at a time, and every such step undone.
+import init, { Graph, LmConfig, LmSession, araelVersion } from "../model/wasm/pkg/m3500_demo_wasm.js";
 import { Dataset2 } from "../model/wasm/js/arael/g2o.js";
 
 // `datasets` links to the vendored g2o files under benchmarks/pgo, so
@@ -14,12 +14,21 @@ const LOCK_WEIGHT = 10.0;
 const CENTER_WEIGHT = 0.01;
 const DOUBLE_CLICK_MS = 400;
 const PICK_RADIUS = 8;
+const DRAG_START_PX = 3;
+const UNDO_DEPTH = 50;
+// Solver time per frame while dragging.
+const QUICK_BUDGET_S = 0.03;
+// Link color: gray at no cost, bright red at and above the cost of the
+// worst percent of edges, in this many steps.
+const LINK_BUCKETS = 16;
+const LINK_RED_QUANTILE = 0.99;
 const LOCKED = 1;
 const FIXED = 2;
 
 const canvas = document.getElementById("view");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
+const versionEl = document.getElementById("version");
 const weightedEl = document.getElementById("weighted");
 const liveEl = document.getElementById("live");
 
@@ -28,6 +37,8 @@ let graph = null;
 let session = null;
 let n = 0;
 let edgesAB = new Int32Array(0);
+// Each edge's measurement and whitening rows, as given to the model.
+let edgeMeas = null;
 let xy = new Float64Array(0);
 let th = new Float64Array(0);
 let loaded = { xy: new Float64Array(0), th: new Float64Array(0) };
@@ -38,11 +49,17 @@ let view = { scale: 1, ox: 0, oy: 0 };
 let drag = null;
 let dirty = false;
 let text = "";
+let undo = [];
+let redo = [];
 
-// The full solve, and the short one a drag step runs; both made once
-// the module is initialized, at the bottom.
+// The full solve, and the short one a drag step runs: a time budget per
+// frame, and its damping carried from the previous frame, since a graph
+// bent between locks restarted at Gauss-Newton every frame overshoots
+// and spends its iterations on rejected steps. Both made once the
+// module is initialized, at the bottom.
 let full = null;
 let quick = null;
+let quickLambda0 = 0;
 
 // ------------------------------------------------------------ the model
 
@@ -96,6 +113,7 @@ function build() {
     s1.set(c1, 3 * k);
     s2.set(c2, 3 * k);
   });
+  edgeMeas = { delta, dth, s0, s1, s2 };
   edges.setAN(0, a);
   edges.setBN(0, b);
   edges.setDeltaN(0, delta);
@@ -124,6 +142,8 @@ function build() {
   flags = new Uint8Array(n);
   selected = new Set();
   hover = -1;
+  undo = [];
+  redo = [];
   session = new LmSession();
   refresh();
 }
@@ -171,12 +191,15 @@ function setFixed(i, fixed) {
 }
 
 function lockSelection() {
+  if (selected.size === 0) return;
+  remember();
   for (const i of selected) setLock(i, true, xy[2 * i], xy[2 * i + 1], th[i]);
   solve(full);
 }
 
 function fixSelection() {
   if (selected.size === 0) return;
+  remember();
   for (const i of selected) setFixed(i, true);
   // Parameters left the solve: the session's structure is stale.
   session.invalidate();
@@ -184,6 +207,8 @@ function fixSelection() {
 }
 
 function clearSelection() {
+  if (selected.size === 0) return;
+  remember();
   let unfixed = false;
   for (const i of selected) {
     if (flags[i] & LOCKED) setLock(i, false, 0, 0, 0);
@@ -197,6 +222,8 @@ function clearSelection() {
 }
 
 function reset() {
+  if (n === 0) return;
+  remember();
   const poses = graph.poses();
   poses.setPosN(0, loaded.xy);
   poses.setRotAngleN(0, loaded.th);
@@ -212,6 +239,67 @@ function reset() {
   if (unfixed) session.invalidate();
   solve(full);
   fit();
+}
+
+// ------------------------------------------------------------------ undo
+
+// What an action changes: the pose values, the locks and the flags. A
+// snapshot is taken before each action and put back whole, so an undo
+// needs no solve.
+function snapshot() {
+  const locks = graph.locks();
+  return {
+    xy: xy.slice(),
+    th: th.slice(),
+    flags: flags.slice(),
+    lockPos: locks.getPosN(0, n),
+    lockTh: locks.getThN(0, n),
+  };
+}
+
+function remember() {
+  undo.push(snapshot());
+  if (undo.length > UNDO_DEPTH) undo.shift();
+  redo.length = 0;
+}
+
+function restore(s) {
+  const poses = graph.poses();
+  const locks = graph.locks();
+  const opt = new Uint8Array(n);
+  const on = new Uint8Array(n);
+  let fixedChanged = false;
+  for (let i = 0; i < n; i++) {
+    opt[i] = (s.flags[i] & FIXED) ? 0 : 1;
+    on[i] = (s.flags[i] & LOCKED) ? 1 : 0;
+    if ((s.flags[i] ^ flags[i]) & FIXED) fixedChanged = true;
+  }
+  poses.setPosN(0, s.xy);
+  poses.setRotAngleN(0, s.th);
+  poses.setPosOptimizeN(0, opt);
+  poses.setRotAngleOptimizeN(0, opt);
+  locks.setPosN(0, s.lockPos);
+  locks.setThN(0, s.lockTh);
+  locks.setOnN(0, on);
+  flags = s.flags.slice();
+  // Parameters entered or left the solve: the session's structure is stale.
+  if (fixedChanged) session.invalidate();
+  refresh();
+  dirty = true;
+}
+
+function undoStep() {
+  if (undo.length === 0) return;
+  redo.push(snapshot());
+  restore(undo.pop());
+  setStatus(`undo: ${undo.length} more`);
+}
+
+function redoStep() {
+  if (redo.length === 0) return;
+  undo.push(snapshot());
+  restore(redo.pop());
+  setStatus(`redo: ${redo.length} more`);
 }
 
 // ------------------------------------------------------------- the view
@@ -252,21 +340,62 @@ function toWorld(sx, sy) {
   return [(sx - view.ox) / view.scale, (view.oy - sy) / view.scale];
 }
 
+function wrapAngle(d) {
+  return d - 2 * Math.PI * Math.floor((d + Math.PI) / (2 * Math.PI));
+}
+
+// Each edge's cost on the current poses: the model's edge residual, the
+// whitened error of pose b seen from pose a against the measurement,
+// squared and summed.
+function edgeCosts() {
+  const m = edgesAB.length / 2;
+  const c = new Float64Array(m);
+  const { delta, dth, s0, s1, s2 } = edgeMeas;
+  for (let k = 0; k < m; k++) {
+    const a = edgesAB[2 * k], b = edgesAB[2 * k + 1];
+    const dx = xy[2 * b] - xy[2 * a];
+    const dy = xy[2 * b + 1] - xy[2 * a + 1];
+    const ca = Math.cos(th[a]), sa = Math.sin(th[a]);
+    const lx = ca * dx + sa * dy - delta[2 * k];
+    const ly = -sa * dx + ca * dy - delta[2 * k + 1];
+    const rr = wrapAngle(th[b] - (th[a] + dth[k]));
+    const r0 = s0[3 * k] * lx + s0[3 * k + 1] * ly + s0[3 * k + 2] * rr;
+    const r1 = s1[3 * k] * lx + s1[3 * k + 1] * ly + s1[3 * k + 2] * rr;
+    const r2 = s2[3 * k] * lx + s2[3 * k + 1] * ly + s2[3 * k + 2] * rr;
+    c[k] = r0 * r0 + r1 * r1 + r2 * r2;
+  }
+  return c;
+}
+
+function linkColor(t) {
+  const r = Math.round(128 + 127 * t);
+  const gb = Math.round(128 * (1 - t));
+  return `rgba(${r},${gb},${gb},${(0.35 + 0.65 * t).toFixed(2)})`;
+}
+
 function draw() {
   const r = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
   if (n === 0) return;
-  ctx.strokeStyle = "rgba(128,128,128,0.35)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let k = 0; k < edgesAB.length; k += 2) {
-    const a = edgesAB[k], b = edgesAB[k + 1];
+  // The links, bucketed by cost and drawn gray to red, the reddest last.
+  const costs = edgeCosts();
+  const sorted = Float64Array.from(costs).sort();
+  const red = Math.max(sorted[Math.floor(LINK_RED_QUANTILE * (sorted.length - 1))], 1e-12);
+  const paths = Array.from({ length: LINK_BUCKETS }, () => new Path2D());
+  for (let k = 0; k < costs.length; k++) {
+    const a = edgesAB[2 * k], b = edgesAB[2 * k + 1];
     const [ax, ay] = toScreen(xy[2 * a], xy[2 * a + 1]);
     const [bx, by] = toScreen(xy[2 * b], xy[2 * b + 1]);
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
+    const t = Math.min(1, costs[k] / red);
+    const path = paths[Math.min(LINK_BUCKETS - 1, Math.floor(t * LINK_BUCKETS))];
+    path.moveTo(ax, ay);
+    path.lineTo(bx, by);
   }
-  ctx.stroke();
+  ctx.lineWidth = 1;
+  paths.forEach((path, i) => {
+    ctx.strokeStyle = linkColor(i / (LINK_BUCKETS - 1));
+    ctx.stroke(path);
+  });
   const colors = ["#3a7bd5", "#e0a000", "#d33", "#d33"];
   for (let c = 0; c < 4; c++) {
     ctx.fillStyle = colors[c];
@@ -305,17 +434,26 @@ function draw() {
   }
 }
 
+// The pose under the pointer: a locked or fixed pose within the pick
+// radius wins over the plain poses crowding it, so it can be picked out
+// to clear it; otherwise the nearest.
 function pick(sx, sy) {
   let best = -1, bestD = PICK_RADIUS * PICK_RADIUS;
+  let held = -1, heldD = bestD;
   for (let i = 0; i < n; i++) {
     const [px, py] = toScreen(xy[2 * i], xy[2 * i + 1]);
     const d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
-    if (d < bestD) {
+    if (flags[i]) {
+      if (d < heldD) {
+        heldD = d;
+        held = i;
+      }
+    } else if (d < bestD) {
       bestD = d;
       best = i;
     }
   }
-  return best;
+  return held >= 0 ? held : best;
 }
 
 function setStatus(s) {
@@ -326,7 +464,9 @@ function setStatus(s) {
 function frame() {
   if (drag && drag.pose >= 0 && drag.pending && liveEl.checked) {
     drag.pending = false;
-    solve(quick);
+    quick.initialLambda = drag.lambda ?? quickLambda0;
+    const r = solve(quick);
+    if (r) drag.lambda = r.finalLambda;
   }
   if (dirty) {
     dirty = false;
@@ -386,8 +526,9 @@ canvas.addEventListener("pointerdown", (e) => {
       dirty = true;
       return;
     }
-    setLock(i, true, xy[2 * i], xy[2 * i + 1], th[i]);
-    drag = { pose: i, pending: false, heading: th[i] };
+    // A press selects; the lock comes with the first movement, so a
+    // click leaves the pose as it is.
+    drag = { pose: i, pending: false, moved: false, from: [sx, sy] };
     dirty = true;
     return;
   }
@@ -408,8 +549,15 @@ canvas.addEventListener("pointermove", (e) => {
     return;
   }
   if (drag.pose >= 0) {
-    const [x, y] = toWorld(sx, sy);
     const i = drag.pose;
+    if (!drag.moved) {
+      const [fx, fy] = drag.from;
+      if ((sx - fx) * (sx - fx) + (sy - fy) * (sy - fy) < DRAG_START_PX * DRAG_START_PX) return;
+      drag.moved = true;
+      remember();
+      setLock(i, true, xy[2 * i], xy[2 * i + 1], th[i]);
+    }
+    const [x, y] = toWorld(sx, sy);
     const lock = graph.locks().at(i);
     lock.pos = { x, y };
     if (!liveEl.checked) {
@@ -437,8 +585,9 @@ canvas.addEventListener("pointerup", (e) => {
   const d = drag;
   drag = null;
   if (d.pose >= 0) {
-    // The lock stays, at the place the pointer let go.
-    solve(full);
+    // After a drag the lock stays, at the place the pointer let go; a
+    // click changed nothing.
+    if (d.moved) solve(full);
   } else if (d.rect) {
     const [x0, y0, x1, y1] = d.rect;
     const [lx, hx] = [Math.min(x0, x1), Math.max(x0, x1)];
@@ -469,6 +618,16 @@ window.addEventListener("keydown", (e) => {
     case "c": case "C": clearSelection(); break;
     case "r": case "R": reset(); break;
     case "Escape": selected.clear(); break;
+    case "z": case "Z":
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      if (e.shiftKey) redoStep(); else undoStep();
+      break;
+    case "y": case "Y":
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      redoStep();
+      break;
     default: return;
   }
   dirty = true;
@@ -477,6 +636,8 @@ window.addEventListener("keydown", (e) => {
 document.getElementById("solve").addEventListener("click", () => { solve(full); dirty = true; });
 document.getElementById("reset").addEventListener("click", () => { reset(); dirty = true; });
 document.getElementById("recenter").addEventListener("click", () => { fit(); dirty = true; });
+document.getElementById("undo").addEventListener("click", () => { undoStep(); });
+document.getElementById("redo").addEventListener("click", () => { redoStep(); });
 weightedEl.addEventListener("change", () => { build(); solve(full); dirty = true; });
 document.getElementById("file").addEventListener("change", async (e) => {
   const f = e.target.files[0];
@@ -488,8 +649,8 @@ document.getElementById("file").addEventListener("change", async (e) => {
     return;
   }
   build();
-  fit();
   solve(full);
+  fit();
   dirty = true;
 });
 
@@ -498,14 +659,18 @@ window.addEventListener("resize", resize);
 // -------------------------------------------------------------- start
 
 await init();
+const ver = araelVersion();
+versionEl.textContent = `arael ${ver.major}.${ver.minor}.${ver.patch}${ver.pre ? "-" + ver.pre : ""}`;
 full = LmConfig.wellConditioned();
 quick = LmConfig.wellConditioned();
-quick.maxIters = 3;
+quick.maxIters = 50;
 quick.minIters = 1;
-quick.patience = 1;
+quick.patience = 3;
+quick.timeLimitSeconds = QUICK_BUDGET_S;
+quickLambda0 = quick.initialLambda;
 resize();
 requestAnimationFrame(frame);
-setStatus("loading the dataset…");
+setStatus("loading the dataset...");
 try {
   ds = await Dataset2.load(DATASET);
 } catch (e) {
@@ -513,6 +678,6 @@ try {
   throw e;
 }
 build();
-fit();
 solve(full);
+fit();
 dirty = true;
