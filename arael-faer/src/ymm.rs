@@ -6,7 +6,7 @@
 //! calling thread keeps the upper halves of the YMM registers (the 256-bit AVX
 //! registers) dirty. SSE code that then runs next to VEX code -- arael's own
 //! kernels next to glibc's `memcpy` -- pays a state transition at every
-//! switch: 8.9x on Zen 2, 1.2-1.4x on Zen 4 and Skylake-X.
+//! switch, large on Zen 2 and small but present on Zen 4 and Skylake-X.
 //!
 //! It adds up where a thread goes from a faer product straight into a tight
 //! loop of its own. Two places do: a pool worker, from a task that ends in a

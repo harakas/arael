@@ -24,7 +24,18 @@
  * When benchmark numbers change, regenerate the charts (`benchmarks/make_slam_loc_chart.py`, `benchmarks/pgo/make_chart.py`) and update links in README/docs.
  * Charts live in `benchmarks/charts/v<version>/` -- the path carries the version. Do not delete legacy versions as they are referenced by published crates.
  * Use Edit/Write tools to change files so I can see the diff of what you are doing. Unless procedural, try to avoid using python for doing edits.
- * When writing documentation do not narrate our jorney to the solution, minor things that were there before, or speculative opinions, guesses. Concentrate on the API proper and be direct and brief. Write simple english, avoid jargon. Properly define acronyms. Do not repeat things that are obvious from context. Be brief.
+ * Documentation: concentrate on the API proper and be direct and brief, avoid essays
+ * Documentation: first sentence should define what the function/variable is about
+ * Documentation: avoid essays at the end of which the knowledge is -- definition should come first, after that a small optional explanation
+ * Documentation: add examples, and prefer examples to a long essay describing the functionality
+ * Documentation: write simple english, avoid jargon
+ * Documentation: properly define acronyms
+ * Documentation: avoid speculative opinions, guesses, only write what is there, the facts
+ * Documentation: do not narrate our journey to the solution, or history / changelog, describe what is there now (unless it's a major change)
+ * Documentation: do not add comments like "rows: uint; // rows" -- what can be obviously read from function / variable / argument names should not need to be stated again.
+ * Documentation: do not add out of context benchmark numbers or "10x faster on this random problem" that mean little to the reader. It's fine to say "significantly faster on bundle adjustment solvers / compared to this other method".
+ * Documentation: do not repeat things that are obvious from context
+ * Documentation: avoid unicode
  * Use codegen-units = 1 compile setting when benchmarking rust.
  * When adding/changing main API make sure the cxx/python export also gets the same API when relevant -- and update docs/CXX.md and docs/PYTHON.md with it.
  * When encountering missing API/functionality that would simplify implementation, add the API instead of doing hacky workarounds.

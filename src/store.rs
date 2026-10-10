@@ -131,11 +131,13 @@ impl Clock {
     #[inline]
     pub fn new(on: bool) -> Self { Clock { on } }
 
+    /// The start time, `None` when off.
     #[inline]
     pub fn start(self) -> Option<Instant> {
         if self.on { Some(Instant::now()) } else { None }
     }
 
+    /// The time since `started`; zero when off.
     #[inline]
     pub fn stop(self, started: Option<Instant>) -> Duration {
         started.map_or(Duration::ZERO, |t| t.elapsed())

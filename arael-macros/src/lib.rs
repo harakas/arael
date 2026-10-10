@@ -1,37 +1,52 @@
-//! Procedural macros for the arael optimization framework.
-//!
-//! This crate provides the `#[arael::model]` attribute macro and the
-//! `#[derive(Model)]` derive macro.
+//! Procedural macros for the arael optimization framework: the
+//! `#[arael::model]` attribute, the `#[arael::function]` attribute,
+//! the `#[derive(Model)]` derive and `export_models!`. They are used
+//! through the `arael` crate; the reference is
+//! [docs/MODEL.md](https://github.com/harakas/arael/blob/master/docs/MODEL.md).
 //!
 //! ## `#[arael::model]`
 //!
 //! Applied to a struct, this attribute macro:
 //!
-//! - Generates the `Model` trait implementation (serialize, deserialize, update,
-//!   Hessian-block accumulation) by inspecting `Param<T>`, `SimpleEulerAngleParam`,
-//!   and `EulerAngleParam` fields.
+//! - Generates the `Model` trait implementation (serialize, deserialize,
+//!   update, Hessian-block accumulation) from the `Param<T>` fields, the
+//!   rotation parameters (`SimpleEulerAngleParam`, `EulerAngleParam`,
+//!   `QuaternionParam`) and the `#[arael(component)]` structs.
 //! - Rewrites shorthand block types: `SelfBlock<A>` becomes
 //!   `SelfBlock<A, {A_PARAM_COUNT}>`, and `CrossBlock<A, B>` becomes
 //!   `CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>` (two const
-//!   generics — NA and NB are stored separately so the cross Hessian is
-//!   a rectangular NA*NB block).
-//!   There is no COO field: a constraint names the solve's COO list with
-//!   the `coo` keyword.
+//!   generics, so the cross Hessian is a rectangular NA*NB block).
 //! - Requires every params-having struct to declare exactly one
-//!   `SelfBlock<Self>` field (the canonical home for its gradient +
+//!   `SelfBlock<Self>` field (the home for its gradient and
 //!   within-entity Hessian diagonal). Exemptions: `#[arael(fit(...))]`
-//!   (auto-skipped — fit generates its own LmProblem) and
-//!   `#[arael(skip_self_block)]` (explicit opt-out for bag-of-params
-//!   structs whose params are written only by a parent's ExtendedModel).
-//! - Detects `SimpleEulerAngleParam` and `EulerAngleParam` fields by type
-//!   name and generates appropriate precompute calls for rotation matrices.
+//!   (fit generates its own LmProblem) and `#[arael(skip_self_block)]`
+//!   (bag-of-params structs whose params are written only by a parent's
+//!   ExtendedModel).
+//! - Generates the precompute calls that keep the rotation parameters'
+//!   matrices current.
 //! - Generates the symbolic companion struct (`FooSym`) and `ModelSym` impl.
 //!
 //! ## `#[arael(root)]`
 //!
 //! When placed on the root model struct, triggers code generation for all
 //! stashed `#[arael(constraint(...))]` attributes: symbolic differentiation,
-//! CSE, and emission of `LmProblem` trait methods.
+//! CSE, and emission of `LmProblem` trait methods. A constraint names the
+//! solve's COO list with the `coo` keyword.
+//!
+//! ## `#[arael::function]`
+//!
+//! Declares a function constraint bodies can call: a symbolic body,
+//! differentiated automatically or with explicit derivatives; a typed
+//! body over vectors, matrices and tuples; or a Rust eval function
+//! with symbolic derivatives, with its first partial derivatives
+//! returned from the same call, or with no derivative. An eval
+//! function may take the model root as its first argument. The forms
+//! are in MODEL.md ("User-defined functions").
+//!
+//! ## `export_models!`
+//!
+//! Makes the crate's models usable in another crate's root model
+//! (MODEL.md, "Exporting models to other crates").
 
 mod constraint;
 mod function;
@@ -48,7 +63,7 @@ use syn::{
 };
 
 // ---------------------------------------------------------------------------
-// Sym field registry — shared state between #[arael::model] invocations
+// Sym field registry -- shared state between #[arael::model] invocations
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -105,7 +120,7 @@ struct SymLayout {
     component: bool,
     /// Field name of `#[arael(constraint_index)]` u32 field, if present.
     constraint_index_field: Option<String>,
-    /// Field name of the struct's `SelfBlock<Self>` — detected automatically
+    /// Field name of the struct's `SelfBlock<Self>` -- detected automatically
     /// during `#[arael::model]` expansion. Required for every params-having
     /// Model: the self-block is the single home for that entity's gradient
     /// + A-A Hessian diagonal, so cross constraints need to know the field
@@ -185,7 +200,7 @@ fn registry_param_total(type_name: &str) -> u32 {
 /// Spans themselves are not stashed: `proc_macro2::Span` is backed by an Rc
 /// into the proc-macro bridge's handle table that is invalidated once the
 /// originating macro invocation returns (tried; rustc panics). But primitive
-/// location DATA (file path, line number) survives fine — we extract it at
+/// location DATA (file path, line number) survives fine -- we extract it at
 /// stash time via proc-macro2's `span-locations` feature and carry it as
 /// plain strings/u32s. Used both to prefix error messages with
 /// `file:line:` and to emit `arael: <label> @ file:line` markers into
@@ -735,7 +750,7 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 
 
 // ===========================================================================
-// #[derive(Model)] — generate Model trait impl for structs
+// #[derive(Model)] -- generate Model trait impl for structs
 // ===========================================================================
 
 /// Attribute macro for arael model structs.
@@ -1207,19 +1222,24 @@ fn register_model_import(ts: TokenStream2) -> syn::Result<TokenStream2> {
 }
 
 /// Register a user-defined function for use in `#[arael::model]`
-/// constraint bodies. Two forms:
+/// constraint bodies. Three forms:
 ///
 /// - **Form A** (purely symbolic): `fn name(x: E, ...) -> E { body_expr }`
-///   -- no positional argument; `body_expr` is the arael-sym expression
-///   the call materialises into. Optional `derivs = [expr, ...]` to
-///   override auto-diff.
-/// - **Form B** (opaque eval + derivs): `#[arael::function(name, derivs = [expr, ...])]`
-///   on `fn name_eval(x: f32, ...) -> f32` (or `f64`) -- positional
-///   `name` is the symbolic sibling the macro emits. `derivs` required.
+///   -- `body_expr` is the arael-sym expression the call materialises
+///   into. Optional `derivs = [expr, ...]` to override auto-diff.
+/// - **Form B** (Rust eval): `#[arael::function(name, derivs = [expr, ...])]`
+///   on `fn name_eval([root: &R,] x: f32, ...) -> f32` (or `f64`) --
+///   positional `name` is the symbolic sibling the macro emits. The
+///   derivatives come from `derivs`, or from the eval fn itself when it
+///   takes a trailing `derivs: bool` and returns `(value, [partials; N])`,
+///   or the function is declared without one. A leading `root`
+///   argument is the model root.
+/// - **Form C** (typed): `fn name(p: vect3sym, k: E, ...) -> (E, E) { let ...; expr }`
+///   -- vector, matrix and tuple parameters and results, `let`
+///   bindings, inlined at the call site.
 ///
-/// See the arael crate-level docs and
-/// [examples/runtime_fit_demo.rs](https://github.com/harakas/arael) for
-/// usage context.
+/// See docs/MODEL.md ("User-defined functions") and
+/// [examples/user_function_demo.rs](https://github.com/harakas/arael/blob/master/examples/user_function_demo.rs).
 #[proc_macro_attribute]
 pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
     match function::function_attribute(attr.into(), item.into()) {
@@ -1279,7 +1299,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         });
     }
 
-    // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
+    // No field injection needed -- SimpleEulerAngleParam/EulerAngleParam contain their own state.
 
     // Re-read fields (no injection, but keep the pattern for compatibility)
     let _fields = match &input.data {
@@ -1326,7 +1346,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
 
 /// Stash every `#[arael(constraint(...))]` on the struct for later
 /// generation at a root. Capture plain (file, line) data from span while
-/// we're still inside the originating invocation — Span itself doesn't
+/// we're still inside the originating invocation -- Span itself doesn't
 /// survive the bridge but primitives do. Shared by the in-crate
 /// expansion and `__register_model!`; both call it with the
 /// block-REWRITTEN fields, so stashed content is identical either way.
@@ -1436,7 +1456,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     let mut cross_block_fields_reg: Vec<(String, String, String, Option<(String, String)>)> = Vec::new();
     let mut spelled_types_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
-    // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
+    // Detect SelfBlock<Self> field -- this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
     for field in fields {
         let field_name = field.ident.as_ref().unwrap().to_string();
@@ -1623,7 +1643,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     }
     // Every params-having Model must declare exactly one `SelfBlock<Self>`
     // field. It is the canonical home for this entity's gradient +
-    // within-entity Hessian diagonal — both macro-emitted constraints and
+    // within-entity Hessian diagonal -- both macro-emitted constraints and
     // cross/triplet constraints writing to one of this type's params route
     // through it. A params-having struct with no SelfBlock would silently
     // drop those contributions.
@@ -1663,7 +1683,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     if param_count > 0 && self_block_field_reg.is_none() && !has_fit && !has_skip_self_block
         && !is_component {
         return Err(syn::Error::new_spanned(name,
-            format!("`{}` has {} parameter{} but no `SelfBlock<Self>` field — \
+            format!("`{}` has {} parameter{} but no `SelfBlock<Self>` field -- \
                      add e.g. `hb: arael::model::SelfBlock<Self>` so its grad \
                      and Hessian diagonal have a home, or annotate the struct \
                      with `#[arael(skip_self_block)]` if its params are \
@@ -1819,7 +1839,7 @@ fn classify_field_sym_type(ty: &syn::Type, scalar_generic: Option<&str>) -> SymF
                     SymFieldType::MatN(d[0], d[1])
                 }
                 _ => {
-                    // Check if it's a Ref<T> — extract inner type name
+                    // Check if it's a Ref<T> -- extract inner type name
                     if let Some((_, inner_ident)) = extract_wrapper_inner(ty, "Ref") {
                         return SymFieldType::Struct(inner_ident.to_string());
                     }
@@ -1894,7 +1914,7 @@ fn inner_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
 }
 
 /// Detect whether `ty` is `SelfBlock<SelfName, ...>` (possibly wrapped in
-/// Option<>) — used by `#[arael::model]` to find the struct's canonical
+/// Option<>) -- used by `#[arael::model]` to find the struct's canonical
 /// self-block field for grad + A-A Hessian accumulation.
 fn is_self_block_for(ty: &syn::Type, self_name: &str) -> bool {
     if let syn::Type::Path(tp) = ty
@@ -2409,10 +2429,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         None => quote! {},
     };
 
-    // Check for #[arael(constraint(...))] — stash ALL constraints for later generation.
+    // Check for #[arael(constraint(...))] -- stash ALL constraints for later generation.
     stash_constraints(name, &input.attrs, fields);
 
-    // Check for #[arael(root)] or #[arael(root, f32)] — trigger generation of all stashed constraints
+    // Check for #[arael(root)] or #[arael(root, f32)] -- trigger generation of all stashed constraints
     let root_info = input.attrs.iter().find_map(|attr| {
         if !attr.path().is_ident("arael") { return None; }
         let content: TokenStream2 = attr.parse_args().ok()?;
@@ -3318,7 +3338,7 @@ fn substitute_param_idents(
 }
 
 // ===========================================================================
-// #[arael(fit(...))] — auto-generate cost, gradient, hessian, and fit methods
+// #[arael(fit(...))] -- auto-generate cost, gradient, hessian, and fit methods
 // ===========================================================================
 
 struct FitAttr {
@@ -3500,7 +3520,7 @@ fn parse_fit_inner(
 }
 
 // ---------------------------------------------------------------------------
-// syn::Expr → arael_sym::E conversion
+// syn::Expr -> arael_sym::E conversion
 // ---------------------------------------------------------------------------
 
 struct SymContext {

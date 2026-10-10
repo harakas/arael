@@ -16,7 +16,9 @@ use crate::matrix::matrix3;
 /// multiplication (`*` operator). Unit quaternions represent 3D rotations.
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct quatern<T : Float> {
+    /// Scalar part.
     pub t : T,
+    /// Vector part.
     pub v : vect3<T>
 }
 

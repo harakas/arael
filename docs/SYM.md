@@ -4,7 +4,7 @@
 
 This crate is the symbolic engine behind the [`arael`](https://docs.rs/arael) optimization framework, where it powers compile-time constraint differentiation and code generation. It can also be used independently for any symbolic math task.
 
-See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough covering every section below (`cargo run --example sym_demo`).
+See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough of the basics below (`cargo run --example sym_demo`).
 
 ## Scope and limitations
 
@@ -172,6 +172,10 @@ sym! {
     println!("{:?}", e.free_vars()); // {"x", "y", "z"}
 }
 ```
+
+## Walking the Tree
+
+An expression is a DAG: a shared subexpression is one node. `e.for_each_node(&mut |n| ...)` calls the closure on every node once, children before parents. `e.map_nodes(&mut |n| ...)` rebuilds the expression bottom-up; the closure returns the replacement node, or `None` to keep it, and the result is not simplified. `e.dag_size()` counts the unique nodes.
 
 ## Linear Algebra
 
@@ -402,7 +406,7 @@ let df_dx = -400.0_f64 * (x * __x0) - 2.0_f64 * __x1;
 let df_dy = 200.0_f64 * __x0;
 ```
 
-`y - x*x` and `1 - x` each appear once, as `__x0` and `__x1`, rather than being recomputed at every use. CSE is applied automatically by `arael`'s constraint code-generation macro, where batches grow much larger -- one SLAM constraint went from 47000 ops to ~400 after CSE.
+`y - x*x` and `1 - x` each appear once, as `__x0` and `__x1`, rather than being recomputed at every use. CSE is applied automatically by `arael`'s constraint code-generation macro, where batches grow much larger.
 
 ### `cse_scoped`: CSE when the batch contains `select`
 
@@ -718,6 +722,8 @@ println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * si
 
 <!-- Keep this list in sync with FUNCTIONS in arael-sym/src/lib.rs and the parse() doc in arael-sym/src/parse.rs. -->
 Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`, `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`, `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`, `select`, `select_or`, `multibranch`, `piecewise`. The same list is `FUNCTIONS`, enumerable at runtime via `function_names()`.
+
+`function_by_name(name)` looks a built-in up by name and returns a `FunctionRef`: `Unary`, `Binary` or `Ternary` holding the function, or `Variadic` for the functions that take a variable number of arguments, which check the count themselves and report a bad call as an error string. `FUNCTIONS` is the table behind it.
 
 ### User-defined functions: `parse_with_functions` + `FunctionBag`
 

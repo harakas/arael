@@ -1,7 +1,7 @@
 //! `cargo arael` -- generate C ABI, C++, Python and JavaScript
-//! (WebAssembly) interfaces for arael root models. See docs/dev/CXX.md
-//! for the design and docs/SIDECAR.md for the model description it
-//! consumes.
+//! (WebAssembly) interfaces for arael root models. See docs/CXX.md,
+//! docs/PYTHON.md and docs/WASM.md for the generated interfaces and
+//! docs/SIDECAR.md for the model description it consumes.
 
 use cargo_arael::export;
 
@@ -10,7 +10,7 @@ usage: cargo arael <command> [options]
 
 commands:
   export    build the model crate, harvest its sidecar, and (re)generate
-            the interface tree (capi/, cxx/, python/); adds the macro
+            the interface tree (capi/, cxx/, python/, wasm/); adds the macro
             build profile to the workspace Cargo.toml when it is missing
   check     regenerate in memory and fail if the committed tree is stale;
             modifies nothing, notes a missing macro build profile

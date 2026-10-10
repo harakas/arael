@@ -42,7 +42,7 @@ pub enum Cutter {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SplitCut {
-    /// Parameter on the target: t in [0,1] for a line, the in-span
+    /// Parameter on the target: t in \[0,1\] for a line, the in-span
     /// parametric angle for an arc.
     pub param: f64,
     pub pos: vect2d,

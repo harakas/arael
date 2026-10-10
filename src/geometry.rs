@@ -8,14 +8,19 @@ use crate::vect::{vect2, vect3};
 /// the scalar like the math types; use [`cameraf`] / [`camerad`].
 #[allow(non_camel_case_types)]
 pub struct camera<T: Float> {
-    // Intrinsics
+    /// Focal length along x, in pixels.
     pub fx: T,
+    /// Focal length along y, in pixels.
     pub fy: T,
+    /// Principal point x, in pixels.
     pub cx: T,
+    /// Principal point y, in pixels.
     pub cy: T,
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
-    // Extrinsics: position and orientation in robot frame
+    /// Camera position in the robot frame.
     pub camera_pos: vect3<T>,
     /// Rotation from **c**amera frame to **r**obot frame (`mc2r` = M_camera_to_robot).
     pub mc2r: matrix3<T>,

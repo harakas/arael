@@ -72,7 +72,7 @@
 //! [`NestedDissection::of_blocks`](nd::NestedDissection::of_blocks) gives a
 //! permutation faer takes as-is (`SymmetricOrdering::Custom`).
 //!
-//! Not a general win: a banded system (a SLAM trajectory) is 3.4x SLOWER
+//! Not a general win: a banded system (a SLAM trajectory) is slower
 //! dissected, and a pose graph prefers AMD. The caller must know its matrix.
 //!
 //! Nested dissection normally comes from METIS, a C library -- it is what
@@ -111,7 +111,7 @@
 //!   fully unrolled GEMM kernel (the ones SLAM systems use: 3/6/7/9-wide
 //!   observers through 1/2/3/4-wide marginalized blocks, and those same widths
 //!   one column wide, for the right-hand side and back-substitution). Anything
-//!   else works, through the nano-gemm fallback, at about 1.2-1.4x
+//!   else works, through the nano-gemm fallback, somewhat slower
 //! * [`gemm_shapes`](schur::SchurSymbolic::gemm_shapes) -- which shapes a given
 //!   problem needs, so a caller can see whether it is on the slow path
 //!

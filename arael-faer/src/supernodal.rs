@@ -1,4 +1,4 @@
-//! Supernodal block Cholesky, symbolic analysis (docs/dev/BLOCK.md).
+//! Supernodal block Cholesky, symbolic analysis.
 //!
 //! Given a symmetric block-CSC matrix (upper-tile storage) and an
 //! optional block elimination order, compute everything the numeric
@@ -34,21 +34,18 @@ const NONE: u32 = u32::MAX;
 /// `max_cols` and whose accumulated explicit zeros stay under
 /// `max_zero_fraction` of the merged panel. `None` disables
 /// amalgamation (fundamental supernodes only). The default table is
-/// the one faer tunes for scalar supernodes; measured as the best of
-/// six candidates on the pose-graph and bundle benchmarks alike.
+/// the one faer tunes for scalar supernodes.
 ///
 /// `batch_ratio`: batch consecutive small-depth descendant updates of
 /// one target into a single zero-padded GEMM while the padded flops
 /// stay within this factor of the individual updates' flops. Trades
 /// arithmetic for one pass over the shared target region -- the win
 /// where rank-3 landmark updates are memory-bound. `None` disables
-/// batching. The 1.5 default is measured: 1.5-2.0 are ahead of 1.2 by
-/// ~3% per full iteration on the landmark-heavy whole-Hessian
-/// factorization, all are neutral elsewhere, and 3.0 loses outright --
-/// past ~2, the padding's arithmetic outruns the traffic it saves.
+/// batching. Past about 2 the padding's arithmetic outruns the traffic
+/// it saves; the default sits below that.
 /// Since the batch product accumulates straight into the panel, the
-/// ratio carries no memory cost: only the span-by-depth pack buffers
-/// remain, in the noise at any measured ratio.
+/// ratio carries no memory cost: only the small span-by-depth pack
+/// buffers remain.
 /// `postorder`: relabel the block elimination tree in postorder before
 /// detecting supernodes. In a postorder every only child sits
 /// immediately before its parent, so the fundamental-supernode
@@ -1134,14 +1131,12 @@ fn minus_one<T: SchurReal>() -> T {
 /// `Par`, and below which it runs sequentially whatever the caller
 /// asked for.
 ///
-/// Threading a small kernel is not merely useless, it is expensive:
-/// measured on 8 cores, a 150x120x100 `matmul` runs at 0.32x on four
-/// threads and 0.22x on eight, and a 200x48 triangular solve at 0.15x.
-/// faer leaves the smallest calls sequential by itself, so the loss
-/// sits in a band above that and below the size where the work covers
-/// the pool. These thresholds clear the band: each is the first
-/// measured size whose four-thread speedup exceeds 1.3x, and the gains
-/// above them run 1.5-3x.
+/// Threading a small kernel is not merely useless, it is expensive: a
+/// small matmul or triangular solve runs several times slower on four
+/// threads than on one. faer leaves the smallest calls sequential by
+/// itself, so the loss sits in a band above that and below the size
+/// where the work covers the pool. These thresholds clear the band:
+/// each is the first size at which four threads clearly gained.
 ///
 /// They are the shape of the machine as much as of the problem -- a
 /// different core count moves them. They are deliberately conservative:

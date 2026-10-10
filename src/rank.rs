@@ -61,21 +61,31 @@ impl Default for RankOptions {
 pub enum RankMethod {
     /// Dense SVD of the normalized Jacobian.
     Dense,
-    /// Subspace iteration; `block` is the final block width, `grew`
-    /// counts how many times the block had to grow.
-    Iterative { block: usize, grew: usize },
+    /// Subspace iteration.
+    Iterative {
+        /// The final block width.
+        block: usize,
+        /// How many times the block had to grow.
+        grew: usize,
+    },
     /// Independent connected components of the param-residual graph,
-    /// each solved dense or iterative at its own size; `largest_n` is
-    /// the biggest component's parameter count.
-    Components { count: usize, largest_n: usize },
+    /// each solved dense or iterative at its own size.
+    Components {
+        /// Number of components.
+        count: usize,
+        /// The biggest component's parameter count.
+        largest_n: usize,
+    },
 }
 
 /// Rank computation failure.
 #[derive(Clone, Debug)]
 pub enum RankError {
-    /// The Jacobian contains a non-finite entry; the label names the
-    /// first offending constraint row.
-    NonFinite { label: &'static str },
+    /// The Jacobian contains a non-finite entry.
+    NonFinite {
+        /// The constraint label of the first offending row.
+        label: &'static str,
+    },
     /// The shifted normal matrix could not be factorized.
     Factorization,
 }
@@ -777,12 +787,14 @@ pub struct RowspanAnalyzer<'a> {
 }
 
 impl<'a> RowspanAnalyzer<'a> {
+    /// Build the shared factor of `jac` with shift `eps`.
     pub fn new(jac: &'a Jacobian<f64>, eps: f64) -> Result<Self, RankError> {
         let scales: Vec<f64> = jac.column_l2_norms().iter().map(|c| c.max(1e-15)).collect();
         let factor = NormalFactor::build(jac, &scales, eps)?;
         Ok(RowspanAnalyzer { jac, scales, factor, eps })
     }
 
+    /// The shift the factor was built with.
     pub fn eps(&self) -> f64 {
         self.eps
     }

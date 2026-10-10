@@ -18,9 +18,8 @@ graduated optimisation.
 
 The linear solver is faer sparse Cholesky (pure Rust) to exploit the
 Hessian sparsity, with optional Eigen SimplicialLLT and CHOLMOD
-backends via C++ FFI. At 200 poses (default is 60; use --poses) the
-sparse path is 66x faster than dense. Problem size and solver are
-command-line flags:
+backends via C++ FFI. The default is 60 poses (`--poses`). Problem size
+and solver are command-line flags:
 
 ```bash
 cargo run -r --example slam_demo -- --solver faer --poses 100 --landmarks 400
@@ -359,11 +358,8 @@ couple a landmark to a pose and need a `CrossBlock` spanning both.
 
 ### `PointFrine` -- the landmark-to-pose observation
 
-A **frine** (project vocabulary) is a struct that ties one entity to
-one measurement. `PointFrine` is the frine for a point landmark: it
-binds a `PointLandmark` to a `PointFeature`. In factor-graph SLAM
-terms a frine plays the role of a `Factor` (GTSAM) or an `Edge`
-(g2o).
+`PointFrine` is the frine for a point landmark (see [Frines](#frines)):
+it binds a `PointLandmark` to a `PointFeature`.
 
 ```rust
 #[arael::model]
@@ -678,8 +674,9 @@ LM 224: |d|=0.054m  rel=0.21%  dist=25.9m  sigma=(1.876,0.319,0.020)m  frines=23
   ellipsoids.
 
 The dense Hessian inverse is `O(n^3)` and practical for the demo
-problem size (n=1080). For larger problems, sparse
-selected-inversion or Schur complement methods would be needed.
+problem size (n=1080). For larger problems, `assemble_covariance`
+answers the same queries without forming the dense inverse
+([docs/COVARIANCE.md](COVARIANCE.md)).
 
 ## Compile-time pipeline
 
@@ -736,12 +733,12 @@ output has more constraints and CSE intermediates):
 ```rust
 fn calc_cost(&mut self, params: &[f64]) -> f64 {
     arael::model::Model::update64(self, params);
-    let __self_ref = unsafe { &*(self as *const Self) };
+    let __self_ref = &*self;
     let mut __cost = 0.0 as f64;
 
     // Tilt constraint loop (simplified):
-    for __item in self.poses.iter_mut() {
-        let pose = &*__item;
+    for __item in self.poses.iter() {
+        let pose = __item;
         let path = &*__self_ref;
         let __r_0 = (pose.ea.work().x - pose.info.tilt_roll)
             * path.tilt_isigma;
@@ -773,15 +770,15 @@ fn calc_cost(&mut self, params: &[f64]) -> f64 {
 
 The `calc_grad_hessian_*` methods follow the same structure but also
 compute symbolic derivatives (with CSE applied across both residuals
-and their Jacobians) and accumulate them into `SelfBlock` /
-`CrossBlock` hessian blocks via `add_residual()`.
+and their Jacobians) and write them into the solve's block store, the
+blocks the `SelfBlock` / `CrossBlock` fields declare.
 
 ## Full source
 
 See [examples/slam_demo.rs](../examples/slam_demo.rs).
 
 [examples/slam_demo_gm.rs](../examples/slam_demo_gm.rs) is the same
-scene on newer machinery: a Geman-McClure or Cauchy block loss
+scene with a Geman-McClure or Cauchy block loss
 (`--loss gm|cauchy`) on the feature and GPS residuals instead of the
 per-element starship wrap, a `TransformParam` pose, anchored
 inverse-depth landmarks (`UnitVecParam` direction + inverse range,

@@ -30,7 +30,7 @@ pub enum ConstraintId {
     Horizontal(Ref<Line>),
     /// Line V flag constraint (name CL0V).
     Vertical(Ref<Line>),
-    /// Any collection-stored constraint, by its permanent nid (C<n>).
+    /// Any collection-stored constraint, by its permanent nid (`C<n>`).
     /// Nids are unique and survive every mutation; positional indices
     /// do not.
     Numbered(u32),

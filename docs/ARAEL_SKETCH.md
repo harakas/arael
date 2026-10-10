@@ -8,7 +8,7 @@ perpendicular, ...) and parametric dimensions (lengths, radii,
 angles, optionally expressions like `d0 * 2 + 3`), and the
 Levenberg-Marquardt solver keeps everything consistent in real time.
 
-[![Sketch Editor](sketch.png)](https://sketch.mare.ee/)
+[![Sketch Editor](../docs/sketch.png)](https://sketch.mare.ee/)
 
 [Try it in the browser](https://sketch.mare.ee/)
 
@@ -60,8 +60,8 @@ Beyond the two differentiation modes, the sketch uses:
 
 ## Three-crate layout
 
-After a recent split the editor is three independent crates, all
-under the arael workspace. Pull in only what you need:
+The editor is three independent crates, all under the arael
+workspace. Pull in only what you need:
 
 | Crate | Depends on | What lives there | Has egui? |
 |---|---|---|---|
@@ -84,7 +84,7 @@ egui canvas is `arael-sketch`.
 ## Backend API quick tour
 
 `arael-sketch-backend` is the layer most programmatic users will
-touch. The public surface (from `arael-sketch-backend/src/lib.rs`):
+touch. The re-exports (from `arael-sketch-backend/src/lib.rs`):
 
 ```rust
 pub use ids::{ConstraintId, Selection, find_constraint_by_name};
@@ -116,7 +116,7 @@ uniformly across GUI edits, scripted batches, and MCP tool calls:
    explicitly because no layer below is doing it for you.)
 
 2. **Command parser** (`cmd_add_line` and siblings in
-   `arael-sketch-backend/src/commands.rs`). Walks the parsed text
+   `arael-sketch-backend/src/commands/entities.rs`). Walks the parsed text
    arguments, snaps endpoints against existing entities within a
    tolerance, and emits extra coincidence actions
    (`ApplyCoincidentPP`, `ApplyCoincidentLL21`,
@@ -179,7 +179,7 @@ backend:
    execute(&mut ctx, "length L0 3");
    ```
 
-Full command reference (79 commands for geometry, constraints,
+Full command reference (geometry, constraints,
 dimensions, parameters, introspection, view control, explain / DOF
 diagnostics): see
 [`arael-sketch-backend/docs/COMMANDS.md`](../arael-sketch-backend/docs/COMMANDS.md).
@@ -234,7 +234,7 @@ Additional backend facilities worth knowing about:
   overridable with `force`.
 - **Blocker analysis (DOF rejection).** When a constraint is
   rejected because it does not reduce DOF, the solver's
-  `Sketch::analyze_blockers` reports which existing constraints are
+  `blocker::analyze` reports which existing constraints are
   the minimum set responsible. The GUI flashes those constraints in
   pink; headless consumers get the names in the error string.
 - **MCP server.** `mcp_server::start(addr, verbose, allow_all,
@@ -294,6 +294,10 @@ python3 -m http.server -d dist 8080
   of its source held by image constraints, recorded as a
   meta-constraint with a marker on each copy; the same marker
   interaction as the offset's.
+- **Mirror** -- mirrored copies of the selected entities across a
+  picked axis line, each copy held to its source by symmetry
+  constraints and the set's coincidences recreated among the copies.
+  No meta-constraint: undo removes the whole mirror.
 - **Select (Escape)** -- click to select, drag to move entities,
   Backspace/Delete to remove.
 - **Dark/Light mode** toggle, **Save/Load** (JSON),
@@ -389,7 +393,7 @@ the solve's COO list.
 ## Command panel & scripting
 
 Press `/` in the GUI to open the command panel. Full scripting
-support with 79 commands for geometry creation, constraints,
+support, with commands for geometry creation, constraints,
 dimensions, parameters, introspection, and view control. Commands
 support expressions, coordinate references (`L0.p2`, `@dx,dy`),
 geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector
@@ -462,9 +466,9 @@ crate with zero GUI dependencies.
 - [arael README](../README.md) -- the framework behind it all:
   macros, solvers, Jacobian, Starship method, SLAM and localization
   demos.
-- [docs/SLAM.md](SLAM.md) -- a large-scale end-to-end example of
+- [docs/SLAM.md](../docs/SLAM.md) -- a large-scale end-to-end example of
   compile-time differentiation.
-- [docs/SOLVERS.md](SOLVERS.md) -- Levenberg-Marquardt,
+- [docs/SOLVERS.md](../docs/SOLVERS.md) -- Levenberg-Marquardt,
   `LmConfig`, and backend selection.
 - [arael-sketch-backend/docs/COMMANDS.md](../arael-sketch-backend/docs/COMMANDS.md)
   -- full command reference.

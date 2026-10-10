@@ -307,7 +307,7 @@ pub fn line_line_intersection(p1: vect2d, p2: vect2d, p3: vect2d, p4: vect2d) ->
 // ---------------------------------------------------------------------------
 
 /// One crossing between two curves. `t_a` / `t_b` are the parameter of
-/// the hit on each curve: `t` in [0,1] for a line segment, the
+/// the hit on each curve: `t` in \[0,1\] for a line segment, the
 /// parametric angle for an arc/ellipse.
 #[derive(Clone, Copy, Debug)]
 pub struct CurveHit {

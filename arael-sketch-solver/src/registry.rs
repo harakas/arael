@@ -1,5 +1,5 @@
-//! The constraint registry: one interface over the 114 constraint
-//! collections, one enumeration point.
+//! The constraint registry: one interface over every constraint
+//! collection, one enumeration point.
 //!
 //! Every constraint struct implements [`SketchConstraint`]; every
 //! `Vec<C>` of them is usable as a `&mut dyn ConstraintCollection`;
@@ -23,7 +23,7 @@ pub struct CollectionMeta {
     pub coincidence: bool,
     /// Backed by a dimension (distance / axis-distance / angle
     /// families): deleted through the dimension, so the constraint is
-    /// not addressable by its C<n> name.
+    /// not addressable by its `C<n>` name.
     pub dimension_backed: bool,
 }
 
