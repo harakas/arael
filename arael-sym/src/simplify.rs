@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use super::{Expr, E, constant};
+use crate::node_memo::NodeMemo;
 
 fn is_const(e: &Expr, v: f64) -> bool {
     matches!(e, Expr::Const(c) if *c == v)
@@ -597,11 +597,14 @@ impl E {
     /// memo is keyed by node identity and holds the node with its
     /// rewrite, so an address cannot be reused while the pass runs.
     fn simplify_once(&self) -> E {
-        let mut memo = HashMap::new();
+        let mut memo = NodeMemo::default();
         self.simplify_once_memo(&mut memo)
     }
 
-    fn simplify_once_memo(&self, memo: &mut HashMap<*const Expr, (E, E)>) -> E {
+    fn simplify_once_memo(&self, memo: &mut NodeMemo) -> E {
+        if !crate::node_memo::shared(self) {
+            return self.0.simplify_once_inner(self, memo);
+        }
         let key = std::rc::Rc::as_ptr(&self.0);
         if let Some((_, r)) = memo.get(&key) {
             return r.clone();
@@ -618,7 +621,7 @@ impl Expr {
         E::new(self.clone()).simplify()
     }
 
-    fn simplify_once_inner(&self, orig: &E, memo: &mut HashMap<*const Expr, (E, E)>) -> E {
+    fn simplify_once_inner(&self, orig: &E, memo: &mut NodeMemo) -> E {
         /// Check if expression is the named constant "pi".
         fn is_pi(e: &E) -> bool {
             matches!(e.as_ref(), Expr::NamedConst { name, .. } if name == "pi")

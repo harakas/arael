@@ -1,5 +1,5 @@
 use super::{AsVarName, Expr, E, constant, sin, cos, cosh, sinh, tanh, exp, ln, sqrt, abs, branch};
-use std::collections::HashMap;
+use crate::node_memo::NodeMemo;
 
 // The derivative is built raw and canonicalized by a single simplify() at the
 // end of `diff`, so these constructors only need to drop the trivial 0/1
@@ -57,7 +57,7 @@ impl E {
     /// simplify of [`diff`](Self::diff): it shares the way the
     /// expression shares, for callers that simplify later or not at all.
     pub fn diff_unsimplified(&self, var: impl AsVarName) -> E {
-        let mut memo = HashMap::new();
+        let mut memo = NodeMemo::default();
         self.diff_var(var.var_name(), &mut memo)
     }
 
@@ -67,7 +67,10 @@ impl E {
     /// of a fresh copy per path. The memo is keyed by node identity and
     /// holds the node with its derivative, so an address cannot be
     /// reused by another node while the memo lives.
-    fn diff_var(&self, var: &str, memo: &mut HashMap<*const Expr, (E, E)>) -> E {
+    fn diff_var(&self, var: &str, memo: &mut NodeMemo) -> E {
+        if !crate::node_memo::shared(self) {
+            return self.diff_var_uncached(var, memo);
+        }
         let key = std::rc::Rc::as_ptr(&self.0);
         if let Some((_, d)) = memo.get(&key) {
             return d.clone();
@@ -77,7 +80,7 @@ impl E {
         d
     }
 
-    fn diff_var_uncached(&self, var: &str, memo: &mut HashMap<*const Expr, (E, E)>) -> E {
+    fn diff_var_uncached(&self, var: &str, memo: &mut NodeMemo) -> E {
         let zero = || constant(0.0);
         let one = || constant(1.0);
         let two = || constant(2.0);
