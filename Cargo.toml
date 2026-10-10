@@ -72,7 +72,9 @@ cc = { version = "1", optional = true }
 [dev-dependencies]
 criterion = "0.5"
 serde_json = "1"
-image = "0.25"
+# The examples write PNG only; the default formats pull in an AV1
+# encoder for nothing.
+image = { version = "0.25", default-features = false, features = ["png"] }
 rustyline = "15"
 dirs = "5"
 trybuild = "1"
