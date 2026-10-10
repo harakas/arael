@@ -365,9 +365,12 @@ int main() {
 
     // gather_timing fills the result's timing block, which the report
     // below breaks down per phase.
+    // covariance: the solve also assembles the parameter covariance at
+    // its solution (r->covariance()), for the ellipses below.
     LmConfig cfg_lm = LmConfig::well_conditioned();
     cfg_lm.verbose = true;
     cfg_lm.gather_timing = true;
+    cfg_lm.covariance = CovMode::AllMarginals;
     SolveResult r = path.solve_sparse(cfg_lm);
     if (r.is_err()) {
         std::fprintf(stderr, "solve failed: %s\n", r.error().message);
@@ -414,7 +417,7 @@ int main() {
     // pose is held fixed, so the Hessian is invertible; each landmark's
     // 2x2 block is its own positional uncertainty.
     std::vector<Ellipse> ellipses;
-    auto cov = path.assemble_covariance(CovMode::AllMarginals);
+    auto cov = r->covariance();
     if (cov.is_err()) {
         std::fprintf(stderr, "covariance: %s -- skipping uncertainty\n",
             cov.error().message);

@@ -154,12 +154,16 @@ bool decay_result_plan(const void*, SchurPlan*);
 uint64_t decay_result_steps(const void*, LmStep*, uint64_t);
 void decay_result_threads(const void*, ThreadReport*);
 uint64_t decay_result_threads_held(const void*, StoreFootprint*, uint64_t);
+int32_t decay_result_covariance(void*, DecayCov**);
+const char* decay_result_error(const void*);
 void decay_result_free(void*);
 struct DecaySession;
 DecaySession* decay_session_new(const SparseOptions*);
 void decay_session_free(DecaySession*);
 void decay_session_invalidate(DecaySession*);
 int32_t decay_session_solve(DecaySession*, Decay*, const LmConfig*, LmResultT<float>*);
+int32_t decay_session_assemble_covariance(DecaySession*, Decay*, uint32_t, DecayCov**);
+int32_t decay_session_assemble_covariance_with(DecaySession*, Decay*, uint32_t, uint32_t, uint32_t, DecayCov**);
 }
 } // namespace ffi
 
@@ -191,12 +195,15 @@ inline AraelVersion arael_version() {
     return v;
 }
 
+class Covariance;
+
 /// A completed solve: the plain result fields plus ownership of the
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
 /// SchurPlan as data, steps() the per-attempt timeline, threads() what
-/// the threads did. Copies share ownership of the Rust result.
+/// the threads did, covariance() the covariance the config asked for.
+/// Copies share ownership of the Rust result.
 class LmResult : public LmResultT<float> {
 public:
     LmResult() : LmResultT<float>() {}
@@ -249,6 +256,11 @@ public:
             ffi::decay_result_threads_held(detail, out.data(), out.size());
         return out;
     }
+    /// The covariance the config asked for (LmConfig::covariance),
+    /// assembled at the solution, moved out of the result into the
+    /// view; the error names why there is none (the config did not
+    /// ask, an earlier call took it, or the assembly failed).
+    result<Covariance, CovError> covariance() const;
 
 private:
     std::shared_ptr<void> guard_;
@@ -342,6 +354,18 @@ private:
     ffi::DecayCov* c_;
     std::shared_ptr<void> guard_;
 };
+
+inline result<Covariance, CovError> LmResult::covariance() const {
+    ffi::DecayCov* c = nullptr;
+    int32_t code = detail ? ffi::decay_result_covariance(detail, &c) : 1;
+    if (code == 0)
+        return result<Covariance, CovError>::ok(Covariance(c));
+    if (code == 1)
+        return result<Covariance, CovError>::err({"no covariance: the config did not ask for one"});
+    if (code == 2)
+        return result<Covariance, CovError>::err({"no covariance: an earlier covariance() call took it"});
+    return result<Covariance, CovError>::err({ffi::decay_result_error(detail)});
+}
 
 /// `Decay.cells`. Element pointers are STABLE across pushes (chunked storage).
 class DecayCellsVec {
@@ -556,6 +580,20 @@ public:
     }
     /// Drop the learned structure; the next solve runs cold.
     void invalidate() { ffi::decay_session_invalidate(s_); }
+    /// The covariance at the model's current parameters, reusing what
+    /// this session's solves built. Contract as
+    /// Decay::assemble_covariance.
+    result<Covariance, CovError> assemble_covariance(Decay& m, CovMode mode = CovMode::AllMarginals,
+                                                     const CovOptions& opts = CovOptions{}) {
+        ffi::DecayCov* c = nullptr;
+        int32_t code = ffi::decay_session_assemble_covariance_with(
+            s_, m.h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
+        if (code == -2) throw PanicError(m.last_error());
+        if (code != 0)
+            return result<Covariance, CovError>::err({m.last_error()});
+        return result<Covariance, CovError>::ok(Covariance(c));
+    }
 
 private:
     ffi::DecaySession* s_;

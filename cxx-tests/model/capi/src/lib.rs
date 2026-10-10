@@ -5,7 +5,7 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use arael::covariance::{CovAssembly, CovMode, CovOptions, CovOrdering, Covariance};
+use arael::covariance::{CovAssembly, CovError, CovMode, CovOptions, CovOrdering, Covariance};
 use arael::simple_lm::{
     LmConfig, LmProblem, LmSession, LmStatus, RootProblem, SparseFaer,
     SparseFaerOptions,
@@ -29,6 +29,8 @@ pub struct FitHandle {
 pub struct ResultDetail {
     result: arael::simple_lm::LmResult<f64>,
     buf: CString,
+    // Whether fit_result_covariance already moved the assembly out.
+    cov_taken: bool,
 }
 
 macro_rules! c_vec2 {
@@ -375,6 +377,62 @@ pub struct CLmConfig {
     pub observer_user: *mut core::ffi::c_void,
     pub assembly_threads: COptU32,
     pub max_accepted_iters: COptU32,
+    /// Assemble the parameter covariance at the solution and carry it
+    /// in the result (fit_result_covariance): `has` asks, `v` is
+    /// the CovMode tag (0 PerQuery, 1 AllMarginals, 2 TriDiagonal).
+    pub covariance: COptU32,
+    /// How that covariance is assembled: the CovOrdering tag (0 Auto,
+    /// 1 Amd, 2 NestedDissection, 3 Natural).
+    pub covariance_ordering: u32,
+    /// The BlockSupernodalMode tag (0 Auto, 1 Always, 2 Never).
+    pub covariance_block_supernodal: u32,
+}
+
+fn cov_mode_of(tag: u32) -> CovMode {
+    match tag {
+        0 => CovMode::PerQuery,
+        2 => CovMode::TriDiagonal,
+        _ => CovMode::AllMarginals,
+    }
+}
+
+fn cov_mode_tag(m: CovMode) -> u32 {
+    match m {
+        CovMode::PerQuery => 0,
+        CovMode::AllMarginals => 1,
+        CovMode::TriDiagonal => 2,
+    }
+}
+
+fn cov_options_of(ordering: u32, block_supernodal: u32) -> CovOptions {
+    CovOptions {
+        ordering: match ordering {
+            1 => CovOrdering::Amd,
+            2 => CovOrdering::NestedDissection,
+            3 => CovOrdering::Natural,
+            _ => CovOrdering::Auto,
+        },
+        block_supernodal: match block_supernodal {
+            1 => arael::simple_lm::BlockSupernodalMode::Always,
+            2 => arael::simple_lm::BlockSupernodalMode::Never,
+            _ => arael::simple_lm::BlockSupernodalMode::Auto,
+        },
+    }
+}
+
+fn cov_options_tags(o: &CovOptions) -> (u32, u32) {
+    let ordering = match o.ordering {
+        CovOrdering::Auto => 0,
+        CovOrdering::Amd => 1,
+        CovOrdering::NestedDissection => 2,
+        CovOrdering::Natural => 3,
+    };
+    let block_supernodal = match o.block_supernodal {
+        arael::simple_lm::BlockSupernodalMode::Auto => 0,
+        arael::simple_lm::BlockSupernodalMode::Always => 1,
+        arael::simple_lm::BlockSupernodalMode::Never => 2,
+    };
+    (ordering, block_supernodal)
 }
 
 /// The sparse backend's options as plain data: constructed by
@@ -581,6 +639,12 @@ pub unsafe extern "C" fn fit_lm_config(preset: u32, out: *mut CLmConfig) {
             Some(n) => COptU32 { has: true, v: n as u32 },
             None => COptU32 { has: false, v: 0 },
         },
+        covariance: match c.covariance {
+            Some(m) => COptU32 { has: true, v: cov_mode_tag(m) },
+            None => COptU32 { has: false, v: 0 },
+        },
+        covariance_ordering: cov_options_tags(&c.covariance_options).0,
+        covariance_block_supernodal: cov_options_tags(&c.covariance_options).1,
     };
 }
 
@@ -607,6 +671,8 @@ impl CLmConfig {
         c.time_limit = self.time_limit_seconds.has.then(|| {
             std::time::Duration::from_secs_f64(self.time_limit_seconds.v)
         });
+        c.covariance = self.covariance.has.then(|| cov_mode_of(self.covariance.v));
+        c.covariance_options = cov_options_of(self.covariance_ordering, self.covariance_block_supernodal);
         if let Some(f) = self.observer {
             c = c.with_observer(CObserver { f, user: self.observer_user });
         }
@@ -634,6 +700,9 @@ pub struct CLmTiming {
     pub linear_solve_count: u32,
     pub cost_eval_count: u32,
     pub advance_count: u32,
+    /// The covariance assembly the config asked for, after the solve
+    /// and outside `total`; zero when none was asked.
+    pub covariance: f64,
 }
 
 /// LmStep mirror: one attempted step of the per-attempt timeline
@@ -932,6 +1001,7 @@ unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<f64>) 
             linear_solve_count: t.linear_solve_count as u32,
             cost_eval_count: t.cost_eval_count as u32,
             advance_count: t.advance_count as u32,
+            covariance: t.covariance.as_secs_f64(),
         }, true),
         None => (CLmTiming::default(), false),
     };
@@ -950,7 +1020,7 @@ unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<f64>) 
 }
 
 fn boxed(r: arael::simple_lm::LmResult<f64>) -> *mut ResultDetail {
-    Box::into_raw(Box::new(ResultDetail { result: r, buf: CString::default() }))
+    Box::into_raw(Box::new(ResultDetail { result: r, buf: CString::default(), cov_taken: false }))
 }
 
 #[no_mangle]
@@ -1082,6 +1152,42 @@ pub unsafe extern "C" fn fit_result_threads_held(d: *const ResultDetail, out: *m
         *out.add(i) = c_footprint(s);
     }
     held.len() as u64
+}
+
+/// The covariance the config asked for (CLmConfig::covariance),
+/// assembled at the solution by the solve behind `d`. Moves it out of
+/// the result: returns 0 and the owned handle in `out` (release with
+/// fit_cov_free), 1 with `out` null when the config did not
+/// ask, 2 when an earlier call already took it, -1 when the assembly
+/// failed (text via fit_result_error).
+#[no_mangle]
+pub unsafe extern "C" fn fit_result_covariance(d: *mut ResultDetail, out: *mut *mut FitCov) -> i32 {
+    *out = std::ptr::null_mut();
+    let dd = &mut *d;
+    if dd.cov_taken {
+        return 2;
+    }
+    match std::mem::replace(&mut dd.result.covariance, Err(CovError::NotRequested)) {
+        Ok(c) => {
+            dd.cov_taken = true;
+            *out = Box::into_raw(Box::new(FitCov { cov: c, text: CString::default() }));
+            0
+        }
+        Err(CovError::NotRequested) => 1,
+        Err(e) => {
+            dd.result.covariance = Err(e);
+            dd.buf = CString::new(format!("{}", e).replace('\0', " ")).unwrap_or_default();
+            -1
+        }
+    }
+}
+
+/// The text of the last failure reported by a call on the result
+/// behind `d` (fit_result_covariance). Valid until the next
+/// call on the same result or fit_result_free.
+#[no_mangle]
+pub unsafe extern "C" fn fit_result_error(d: *const ResultDetail) -> *const c_char {
+    (*d).buf.as_ptr()
 }
 
 /// Per-attempt timeline of the result behind `d` (LmTiming::steps;
@@ -1658,27 +1764,45 @@ pub unsafe extern "C" fn fit_assemble_covariance_with(
     h: *mut FitHandle, mode: u32, ordering: u32, block_supernodal: u32,
     out: *mut *mut FitCov,
 ) -> i32 {
+    let mut ctx = arael::threads::Context::new();
+    fit_cov_build(&mut *h, mode, ordering, block_supernodal, &mut ctx, out)
+}
+
+/// fit_assemble_covariance reusing what the session's solves
+/// built. Error text lands on the model handle.
+#[no_mangle]
+pub unsafe extern "C" fn fit_session_assemble_covariance(
+    s: *mut FitSession, h: *mut FitHandle, mode: u32, out: *mut *mut FitCov,
+) -> i32 {
+    fit_session_assemble_covariance_with(s, h, mode, 0, 0, out)
+}
+
+/// fit_session_assemble_covariance with the assembly spelled out.
+#[no_mangle]
+pub unsafe extern "C" fn fit_session_assemble_covariance_with(
+    s: *mut FitSession, h: *mut FitHandle, mode: u32, ordering: u32, block_supernodal: u32,
+    out: *mut *mut FitCov,
+) -> i32 {
     let hh = &mut *h;
     *out = std::ptr::null_mut();
-    let m = match mode {
-        0 => CovMode::PerQuery,
-        2 => CovMode::TriDiagonal,
-        _ => CovMode::AllMarginals,
-    };
-    let opts = CovOptions {
-        ordering: match ordering {
-            1 => CovOrdering::Amd,
-            2 => CovOrdering::NestedDissection,
-            3 => CovOrdering::Natural,
-            _ => CovOrdering::Auto,
-        },
-        block_supernodal: match block_supernodal {
-            1 => arael::simple_lm::BlockSupernodalMode::Always,
-            2 => arael::simple_lm::BlockSupernodalMode::Never,
-            _ => arael::simple_lm::BlockSupernodalMode::Auto,
-        },
-    };
-    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance_with(m, &opts))) {
+    match &mut (*s).session {
+        Ok(sess) => fit_cov_build(hh, mode, ordering, block_supernodal, sess.context_mut(), out),
+        Err(msg) => {
+            let msg = msg.clone();
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
+
+unsafe fn fit_cov_build(
+    hh: &mut FitHandle, mode: u32, ordering: u32, block_supernodal: u32,
+    ctx: &mut arael::threads::Context, out: *mut *mut FitCov,
+) -> i32 {
+    *out = std::ptr::null_mut();
+    let m = cov_mode_of(mode);
+    let opts = cov_options_of(ordering, block_supernodal);
+    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance_with(m, &opts, ctx))) {
         Ok(Ok(c)) => {
             *out = Box::into_raw(Box::new(FitCov {
                 cov: c,

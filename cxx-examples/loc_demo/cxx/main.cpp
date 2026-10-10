@@ -312,14 +312,20 @@ int main() {
     // kd = 2*6 - 1 = 11 with 6-parameter poses.
     std::printf("--- Optimization ---\n");
     const float isigma_scales[3] = {0.01f, 0.1f, 1.0f};
+    // The last pass also assembles the covariance at its solution
+    // (lm_cfg.covariance), for the last-pose sigma below.
+    LmResult last_result;
     for (size_t pass = 0; pass < 3; pass++) {
         path.set_frine_isigma_scale(isigma_scales[pass]);
         std::printf("\nPass %zu (isigma scale=%g):\n", pass + 1, isigma_scales[pass]);
         LmConfig lm_cfg = LmConfig::well_conditioned();
         lm_cfg.verbose = true;
+        if (pass == 2)
+            lm_cfg.covariance = CovMode::TriDiagonal;
         LmResult r = path.solve_band(11, lm_cfg).value();
         std::printf("  %u iterations, cost %.4f -> %.4f\n",
             r.iterations, r.start_cost, r.end_cost);
+        last_result = r;
     }
 
     std::printf("\nFinal cost: %.4f\n", path.cost());
@@ -398,11 +404,11 @@ int main() {
 
     // Current (last) pose estimate with 1-sigma uncertainty. H is
     // block-tridiagonal (fixed map, no loop closures), so
-    // CovMode::TriDiagonal recovers the last pose's covariance with a
-    // forward pass over the band.
+    // CovMode::TriDiagonal recovered the last pose's covariance with a
+    // forward pass over the band, inside the last solve.
     {
         uint32_t last = path.poses().size() - 1;
-        auto cov = path.assemble_covariance(CovMode::TriDiagonal).value();
+        auto cov = last_result.covariance().value();
         auto pose = path.poses()[last];
         double sd[6];
         arael_assert_true(cov.std_dev(pose, sd, 6) == 6);

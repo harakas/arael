@@ -247,14 +247,20 @@ def main():
     # Graduated optimization on the band solver: kd = 2*6 - 1 = 11
     # with 6-parameter poses.
     print("--- Optimization ---", flush=True)
+    # The last pass also assembles the covariance at its solution
+    # (lm_cfg.covariance), for the last-pose sigma below.
+    last_result = None
     for passno, scale in enumerate((0.01, 0.1, 1.0), 1):
         path.frine_isigma_scale = scale
         print("\nPass %d (isigma scale=%g):" % (passno, scale), flush=True)
         lm_cfg = pathmod.LmConfig.well_conditioned()
         lm_cfg.verbose = True
+        if passno == 3:
+            lm_cfg.covariance = CovMode.TRI_DIAGONAL
         r = path.solve_band(11, lm_cfg)
         print("  %d iterations, cost %.4f -> %.4f"
               % (r.iterations, r.start_cost, r.end_cost), flush=True)
+        last_result = r
 
     print("\nFinal cost: %.4f" % path.cost())
 
@@ -328,10 +334,10 @@ def main():
           % (m, md, mn, mx))
 
     # Last pose estimate with 1-sigma uncertainty: H is
-    # block-tridiagonal, so TRI_DIAGONAL recovers it with a forward
-    # pass over the band.
+    # block-tridiagonal, so TRI_DIAGONAL recovered it with a forward
+    # pass over the band, inside the last solve.
     last = len(path.poses) - 1
-    cov = path.assemble_covariance(CovMode.TRI_DIAGONAL)
+    cov = last_result.covariance()
     pose = path.poses[last]
     sd = cov.std_dev(pose)
     p, e = pose.pos, pose.ea

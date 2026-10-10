@@ -21,7 +21,7 @@
 use arael::simple_lm::RootProblem;
 use std::collections::HashMap;
 use arael::model::{Coo, ExtendedModel, Param};
-use arael::simple_lm::LmConfig;
+use arael::simple_lm::{LmConfig, LmProblem};
 use arael_sym::E;
 
 // ---------------------------------------------------------------------------
@@ -293,22 +293,17 @@ fn main() {
     let init = init_str.map_or_else(HashMap::new, parse_init);
     let mut model = build_model(equation, data, &init, sigma);
 
-    let result = {
-        let mut params = Vec::new();
-        model.serialize(&mut params);
-        // conservative: a runtime-parsed user expression with no informed
-        // starting values has unknown conditioning.
-        let config = LmConfig::conservative().with_verbose(true);
-        let result = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::SparseFaer::new(), &mut model, &config).unwrap();
-        model.deserialize(&result.x);
-        result
-    };
+    // conservative: a runtime-parsed user expression with no informed
+    // starting values has unknown conditioning.
+    let config = LmConfig::conservative().with_verbose(true);
+    let result = model.solve_sparse(&config).unwrap();
 
     println!("\nIterations: {}, cost: {:.6} -> {:.6}", result.iterations, result.start_cost, result.end_cost);
 
-    // arael's covariance API -- `assemble_covariance` (see docs/COVARIANCE.md) --
-    // recovers this parameter covariance directly and is what you would normally
-    // use. We compute it by hand here to show the derivation from the Hessian, and
+    // arael's covariance API -- `LmConfig::with_covariance`, the covariance
+    // in the solve's result (see docs/COVARIANCE.md) -- recovers this
+    // parameter covariance directly and is what you would normally use. We
+    // compute it by hand here to show the derivation from the Hessian, and
     // to apply the reduced-chi-squared (Birge-ratio) scaling below, a correction
     // the API deliberately leaves to the caller.
     //
@@ -324,7 +319,6 @@ fn main() {
     // https://en.wikipedia.org/wiki/Reduced_chi-squared_statistic
     // With the robust gamma*atan loss the result is a local curvature
     // interval, not a strict Gaussian interval.
-    use arael::simple_lm::LmProblem;
     let mut params_final = Vec::new();
     model.serialize(&mut params_final);
     let n_p = params_final.len();

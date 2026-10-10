@@ -2790,6 +2790,7 @@ impl Sketch {
                 timing: None,
                 solver: None,
                 threads: Default::default(),
+                covariance: Err(arael::covariance::CovError::NotRequested),
             };
         }
 
@@ -2836,6 +2837,7 @@ impl Sketch {
             timing: None,
             solver: None,
             threads: Default::default(),
+            covariance: Err(arael::covariance::CovError::NotRequested),
         };
 
         let t_prep = timer.lap();

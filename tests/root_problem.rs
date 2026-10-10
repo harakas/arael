@@ -28,7 +28,7 @@ fn model() -> M {
 fn optimize<T, P>(m: &mut P, cfg: &LmConfig<T>) -> SolveResult<T>
 where
     T: arael::utils::Float,
-    P: LmProblemInternals<T> + RootProblem<T>,
+    P: LmProblemInternals<T> + RootProblem<T> + arael::model::Model,
     arael::simple_lm::Dense: arael::simple_lm::LmSolver<T>,
 {
     m.solve_dense(cfg)

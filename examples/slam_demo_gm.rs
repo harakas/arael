@@ -62,7 +62,7 @@
 //   scales.
 
 use arael::simple_lm::RootProblem;
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::CovMode;
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::quatern::quaternd;
 use arael::simple_lm::LmProblem;
@@ -735,23 +735,36 @@ fn main() {
         vec![0.01, 0.1, 1.0]
     };
 
+    // Returns the parameter covariance the last pass assembled at its
+    // solution (with_covariance on its config).
     fn run_ramp<S: arael::simple_lm::LmSolver<f64>>(
         solver: S, path: &mut Path, scales: &[f64],
-    ) {
+    ) -> Option<arael::covariance::CovAssembly> {
         let mut session = arael::simple_lm::LmSession::new(solver);
+        let mut cov = None;
         for (pass, &scale) in scales.iter().enumerate() {
             path.frine_isigma_scale = scale;
             println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-            let config = arael::simple_lm::LmConfig::well_conditioned()
+            let last = pass + 1 == scales.len();
+            let mut config = arael::simple_lm::LmConfig::well_conditioned()
                 .with_verbose(true)
                 .with_rel_precision(1e-6);
+            if last {
+                config = config.with_covariance(CovMode::AllMarginals);
+            }
             let result = session.solve(path, &config).unwrap();
             println!("  {} iterations, cost {:.4} -> {:.4}",
                 result.iterations, result.start_cost, result.end_cost);
-            if pass + 1 < scales.len() {
+            if last {
+                cov = match result.covariance {
+                    Ok(c) => Some(c),
+                    Err(e) => { println!("Covariance unavailable: {e}"); None }
+                };
+            } else {
                 reanchor_landmarks(path);
             }
         }
+        cov
     }
 
     // Move each landmark's anchor to its anchor pose's CURRENT position
@@ -773,7 +786,7 @@ fn main() {
         }
     }
 
-    match solver_name.as_str() {
+    let cov = match solver_name.as_str() {
         "dense" => run_ramp(arael::simple_lm::Dense, &mut path, &isigma_scales),
         "faer" => run_ramp(arael::simple_lm::SparseFaer::new(), &mut path, &isigma_scales),
         #[cfg(feature = "eigen")]
@@ -785,7 +798,7 @@ fn main() {
         #[cfg(not(feature = "cholmod"))]
         "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
         _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
-    }
+    };
 
     // Mean absolute pose error vs GT
     {
@@ -870,14 +883,11 @@ fn main() {
             mean, dea_rel_errs[n / 2], dea_rel_errs[0], dea_rel_errs[n - 1]);
     }
 
-    // Landmark uncertainty from the parameter covariance (Sigma = 2 H^-1). The
-    // relative covariance Cov_rel = C_ll + C_pp - C_lp - C_pl over the landmark and
-    // pose POSITION blocks cancels the shared gauge uncertainty, giving
-    // uncertainty relative to the pose. Ellipsoid semi-axes = sqrt of its eigenvalues.
-    let cov = match path.assemble_covariance(CovMode::AllMarginals) {
-        Ok(c) => Some(c),
-        Err(e) => { println!("Covariance unavailable: {e}"); None }
-    };
+    // Landmark uncertainty from the parameter covariance (Sigma = 2 H^-1,
+    // `cov` from the ramp). The relative covariance Cov_rel = C_ll + C_pp -
+    // C_lp - C_pl over the landmark and pose POSITION blocks cancels the
+    // shared gauge uncertainty, giving uncertainty relative to the pose.
+    // Ellipsoid semi-axes = sqrt of its eigenvalues.
 
     // Landmark errors: compare landmark-to-closest-pose vector (opt vs GT)
     println!("\n--- Landmark errors (relative to closest pose) ---");

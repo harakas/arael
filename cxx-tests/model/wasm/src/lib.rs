@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use arael::covariance::{CovAssembly, CovMode, CovOptions, CovOrdering, Covariance as _};
+use arael::covariance::{CovAssembly, CovError, CovMode, CovOptions, CovOrdering, Covariance as _};
 use arael::simple_lm::{LmProblem, LmStatus, RootProblem, SparseFaer, SparseFaerOptions};
 use cxx_fit as m;
 
@@ -30,6 +30,54 @@ pub fn arael_version() -> JsValue {
 
 fn js_err(msg: &str) -> JsValue {
     js_sys::Error::new(msg).into()
+}
+
+// The covariance tags of the C ABI: `mode` 0 PerQuery, 1 AllMarginals, 2
+// TriDiagonal; `ordering` 0 Auto, 1 Amd, 2 NestedDissection, 3 Natural;
+// `block_supernodal` 0 Auto, 1 Always, 2 Never.
+fn cov_args(mode: u32, ordering: u32, block_supernodal: u32) -> (CovMode, CovOptions) {
+    let m = match mode {
+        0 => CovMode::PerQuery,
+        2 => CovMode::TriDiagonal,
+        _ => CovMode::AllMarginals,
+    };
+    let opts = CovOptions {
+        ordering: match ordering {
+            1 => CovOrdering::Amd,
+            2 => CovOrdering::NestedDissection,
+            3 => CovOrdering::Natural,
+            _ => CovOrdering::Auto,
+        },
+        block_supernodal: match block_supernodal {
+            1 => arael::simple_lm::BlockSupernodalMode::Always,
+            2 => arael::simple_lm::BlockSupernodalMode::Never,
+            _ => arael::simple_lm::BlockSupernodalMode::Auto,
+        },
+    };
+    (m, opts)
+}
+
+fn cov_mode_tag(m: CovMode) -> u32 {
+    match m {
+        CovMode::PerQuery => 0,
+        CovMode::AllMarginals => 1,
+        CovMode::TriDiagonal => 2,
+    }
+}
+
+fn cov_options_tags(o: &CovOptions) -> (u32, u32) {
+    let ordering = match o.ordering {
+        CovOrdering::Auto => 0,
+        CovOrdering::Amd => 1,
+        CovOrdering::NestedDissection => 2,
+        CovOrdering::Natural => 3,
+    };
+    let block_supernodal = match o.block_supernodal {
+        arael::simple_lm::BlockSupernodalMode::Auto => 0,
+        arael::simple_lm::BlockSupernodalMode::Always => 1,
+        arael::simple_lm::BlockSupernodalMode::Never => 2,
+    };
+    (ordering, block_supernodal)
 }
 
 fn stale() -> JsValue {
@@ -316,7 +364,7 @@ impl Fit {
     pub fn solve_dense(&self, cfg: &LmConfig) -> Result<LmResult, JsValue> {
         let c = cfg.to_config();
         let mut g = self.root.borrow_mut();
-        g.solve_dense(&c).map(|r| LmResult { r }).map_err(failure)
+        g.solve_dense(&c).map(|r| LmResult { r, root: self.root.clone(), cov_taken: false }).map_err(failure)
     }
     /// The sparse solve, with the backend's defaults or `opts`.
     #[wasm_bindgen(js_name = "solveSparse")]
@@ -330,7 +378,7 @@ impl Fit {
                 g.solve_with(&mut s, &c)
             }
         };
-        r.map(|r| LmResult { r }).map_err(failure)
+        r.map(|r| LmResult { r, root: self.root.clone(), cov_taken: false }).map_err(failure)
     }
     /// The band solve, `kd` the half-bandwidth in scalar parameters.
     #[wasm_bindgen(js_name = "solveBand")]
@@ -338,7 +386,7 @@ impl Fit {
         let c = cfg.to_config();
         let mut g = self.root.borrow_mut();
         g.solve_with(&mut arael::simple_lm::Band::new(kd as usize), &c)
-            .map(|r| LmResult { r })
+            .map(|r| LmResult { r, root: self.root.clone(), cov_taken: false })
             .map_err(failure)
     }
     /// The covariance at the current parameters; `mode` 0 PerQuery,
@@ -352,26 +400,10 @@ impl Fit {
     /// Auto, 1 Always, 2 Never.
     #[wasm_bindgen(js_name = "assembleCovarianceWith")]
     pub fn assemble_covariance_with(&self, mode: u32, ordering: u32, block_supernodal: u32) -> Result<Covariance, JsValue> {
-        let m = match mode {
-            0 => CovMode::PerQuery,
-            2 => CovMode::TriDiagonal,
-            _ => CovMode::AllMarginals,
-        };
-        let opts = CovOptions {
-            ordering: match ordering {
-                1 => CovOrdering::Amd,
-                2 => CovOrdering::NestedDissection,
-                3 => CovOrdering::Natural,
-                _ => CovOrdering::Auto,
-            },
-            block_supernodal: match block_supernodal {
-                1 => arael::simple_lm::BlockSupernodalMode::Always,
-                2 => arael::simple_lm::BlockSupernodalMode::Never,
-                _ => arael::simple_lm::BlockSupernodalMode::Auto,
-            },
-        };
+        let (m, opts) = cov_args(mode, ordering, block_supernodal);
         let mut g = self.root.borrow_mut();
-        let cov = g.assemble_covariance_with(m, &opts).map_err(|e| js_err(&format!("{}", e)))?;
+        let mut ctx = arael::threads::Context::new();
+        let cov = g.assemble_covariance_with(m, &opts, &mut ctx).map_err(|e| js_err(&format!("{}", e)))?;
         Ok(Covariance { cov, root: self.root.clone() })
     }
     #[wasm_bindgen(getter, js_name = "m")]
@@ -3059,6 +3091,11 @@ pub struct LmConfig {
     time_limit_seconds: Option<f64>,
     assembly_threads: Option<u32>,
     max_accepted_iters: Option<u32>,
+    covariance: Option<u32>,
+    #[wasm_bindgen(js_name = "covarianceOrdering")]
+    pub covariance_ordering: u32,
+    #[wasm_bindgen(js_name = "covarianceBlockSupernodal")]
+    pub covariance_block_supernodal: u32,
 }
 
 #[wasm_bindgen]
@@ -3085,6 +3122,9 @@ impl LmConfig {
             time_limit_seconds: c.time_limit.map(|d| d.as_secs_f64()),
             assembly_threads: c.assembly_threads.map(|n| n as u32),
             max_accepted_iters: c.max_accepted_iters.map(|n| n as u32),
+            covariance: c.covariance.map(cov_mode_tag),
+            covariance_ordering: cov_options_tags(&c.covariance_options).0,
+            covariance_block_supernodal: cov_options_tags(&c.covariance_options).1,
         }
     }
     fn to_config(&self) -> arael::simple_lm::LmConfig<f64> {
@@ -3107,6 +3147,8 @@ impl LmConfig {
         c.predicted_reduction_tolerance = self.predicted_reduction_tolerance.map(|v| v as f64);
         c.min_diagonal = self.min_diagonal.map(|v| v as f64);
         c.time_limit = self.time_limit_seconds.map(std::time::Duration::from_secs_f64);
+        c.covariance = self.covariance.map(|m| cov_args(m, 0, 0).0);
+        c.covariance_options = cov_args(0, self.covariance_ordering, self.covariance_block_supernodal).1;
         c
     }
     /// The defaults.
@@ -3146,6 +3188,13 @@ impl LmConfig {
     pub fn max_accepted_iters(&self) -> Option<u32> { self.max_accepted_iters }
     #[wasm_bindgen(setter, js_name = "maxAcceptedIters")]
     pub fn set_max_accepted_iters(&mut self, v: Option<u32>) { self.max_accepted_iters = v; }
+    /// Assemble the parameter covariance at the solution in this mode
+    /// (a `CovMode` tag) and carry it in the result (`covariance()`);
+    /// undefined assembles nothing.
+    #[wasm_bindgen(getter)]
+    pub fn covariance(&self) -> Option<u32> { self.covariance }
+    #[wasm_bindgen(setter)]
+    pub fn set_covariance(&mut self, v: Option<u32>) { self.covariance = v; }
 }
 
 /// Whether and when the sparse backend marginalizes (the `schur` tag).
@@ -3334,6 +3383,9 @@ impl SparseOptions {
 #[wasm_bindgen]
 pub struct LmResult {
     r: arael::simple_lm::LmResult<f64>,
+    root: Rc<RefCell<m::Fit>>,
+    // Whether `covariance()` already moved the assembly out.
+    cov_taken: bool,
 }
 
 #[wasm_bindgen]
@@ -3385,8 +3437,28 @@ impl LmResult {
                 ("linearSolveCount", t.linear_solve_count as f64),
                 ("costEvalCount", t.cost_eval_count as f64),
                 ("advanceCount", t.advance_count as f64),
+                ("covariance", t.covariance.as_secs_f64()),
             ]),
             None => JsValue::UNDEFINED,
+        }
+    }
+    /// The covariance the config asked for (`covariance` on the
+    /// config), assembled at the solution, moved out of the result into
+    /// the returned object; throws naming why there is none (the config
+    /// did not ask, an earlier call took it, or the assembly failed).
+    pub fn covariance(&mut self) -> Result<Covariance, JsValue> {
+        if self.cov_taken {
+            return Err(js_err("no covariance: an earlier covariance() call took it"));
+        }
+        match std::mem::replace(&mut self.r.covariance, Err(CovError::NotRequested)) {
+            Ok(c) => {
+                self.cov_taken = true;
+                Ok(Covariance { cov: c, root: self.root.clone() })
+            }
+            Err(e) => {
+                self.r.covariance = Err(e);
+                Err(js_err(&format!("{}", e)))
+            }
         }
     }
     /// What the solve's threads did: the counts asked, whether the
@@ -3539,10 +3611,26 @@ impl LmSession {
     pub fn solve(&mut self, model: &Fit, cfg: &LmConfig) -> Result<LmResult, JsValue> {
         let c = cfg.to_config();
         let mut g = model.root.borrow_mut();
-        self.s.solve(&mut *g, &c).map(|r| LmResult { r }).map_err(failure)
+        self.s.solve(&mut *g, &c).map(|r| LmResult { r, root: model.root.clone(), cov_taken: false }).map_err(failure)
     }
     /// Drop the learned structure; the next solve runs cold.
     pub fn invalidate(&mut self) { self.s.invalidate(); }
+    /// The covariance at the model's current parameters, reusing what
+    /// the session's solves built. `mode` 0 PerQuery, 1 AllMarginals
+    /// (the default), 2 TriDiagonal.
+    #[wasm_bindgen(js_name = "assembleCovariance")]
+    pub fn assemble_covariance(&mut self, model: &Fit, mode: Option<u32>) -> Result<Covariance, JsValue> {
+        self.assemble_covariance_with(model, mode.unwrap_or(1), 0, 0)
+    }
+    /// `assembleCovariance` with the assembly spelled out; the tags are
+    /// the model method's.
+    #[wasm_bindgen(js_name = "assembleCovarianceWith")]
+    pub fn assemble_covariance_with(&mut self, model: &Fit, mode: u32, ordering: u32, block_supernodal: u32) -> Result<Covariance, JsValue> {
+        let (m, opts) = cov_args(mode, ordering, block_supernodal);
+        let mut g = model.root.borrow_mut();
+        let cov = g.assemble_covariance_with(m, &opts, self.s.context_mut()).map_err(|e| js_err(&format!("{}", e)))?;
+        Ok(Covariance { cov, root: model.root.clone() })
+    }
 }
 
 /// The parameter covariance at the solution, `Sigma = 2 H^-1`, queried

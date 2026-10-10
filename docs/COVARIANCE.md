@@ -17,20 +17,32 @@ re-centered reference rotation), so there is no manifold projection to undo -- a
 
 ## The API
 
-Bring the trait into scope and assemble at the solution:
+Ask for the covariance in the solve's config and read it off the result, or
+assemble it on the model at its current parameters:
 
 ```rust,ignore
-use arael::covariance::{Covariance, CovMode};
+use arael::covariance::{CovMode, Covariance};
 
-model.solve_sparse(&cfg)?;                       // solution written back into the model
-let cov = model.assemble_covariance(CovMode::AllMarginals)?;
+let cfg = LmConfig::well_conditioned().with_covariance(CovMode::AllMarginals);
+let r = model.solve_sparse(&cfg)?;               // solution written back into the model
+let cov = r.covariance?;
+
+let cov = model.assemble_covariance(CovMode::AllMarginals)?;   // without a solve
 ```
 
-`assemble_covariance(&mut self, mode) -> Result<CovAssembly, CovError>` is on the
-`Covariance` trait, which every `#[arael(root)]` model implements. It re-linearizes
-`H` at the current parameters and prepares it per `mode`. The returned
-`CovAssembly` is an owned value -- querying it does not borrow the model, so the
-two lines above borrow-check cleanly.
+`LmConfig::covariance: Option<CovMode>` (`with_covariance`) makes the solve
+assemble the covariance at its solution, per `mode`; every solve entry point
+honours it (`solve_sparse`, `solve_dense`, `solve_with`, `LmSession::solve`).
+`LmResult::covariance: Result<CovAssembly, CovError>` is the assembly, or
+why there is none:
+`NotRequested` when the config did not ask, `NoModel` from the raw
+`lm_solve`, or the assembly's error (an unfixed gauge, for instance). The
+`CovAssembly` is an owned value -- querying it does not borrow the model.
+
+`model.assemble_covariance(mode)`, on the `Covariance` trait every
+`#[arael(root)]` model implements, gives the same covariance at the
+model's current parameters without a solve. It is slower: it rebuilds what
+a solve already has.
 
 Query per-entity blocks by passing the entity itself. Any `Model` reports its
 live-parameter span (`collect_param_blocks`), so a single pose, a single
@@ -90,16 +102,26 @@ modes and the other libraries scale with it.
 
 ## How it factorizes
 
-`assemble_covariance_with(mode, &opts)` spells out what
-`assemble_covariance(mode)` leaves to the defaults. The covariance is the same
-either way; `CovOptions` changes only what it costs to produce.
+`CovOptions` spells out what the defaults leave open: `LmConfig::covariance_options`
+(`with_covariance_options`) for the covariance a solve assembles, and
+`assemble_covariance_with(mode, &opts, &mut ctx)` on the model, which also
+takes the `Context` to assemble over. The covariance is the same either way;
+the options change only what it costs to produce.
 
 ```rust
 use arael::covariance::{CovMode, CovOptions, CovOrdering, Covariance};
+use arael::threads::Context;
 
 let opts = CovOptions::auto().with_ordering(CovOrdering::NestedDissection);
-let cov = model.assemble_covariance_with(CovMode::PerQuery, &opts)?;
+let r = model.solve_sparse(&cfg.with_covariance(CovMode::PerQuery).with_covariance_options(opts.clone()))?;
+
+// Without a solve, over a context of one's own.
+let mut ctx = Context::new();
+let cov = model.assemble_covariance_with(CovMode::PerQuery, &opts, &mut ctx)?;
 ```
+
+**The context** is what a loop of assemblies reuses instead of rebuilding
+per call; `model.assemble_covariance(mode)` makes a fresh one each time.
 
 **`ordering`** picks the elimination order. `Auto` (the default) prices minimum
 degree against nested dissection over the model's block graph and keeps

@@ -597,18 +597,20 @@ Recover the covariance of the solved parameters, `Sigma = 2 H^-1`, without ever
 forming the dense inverse. Full reference:
 [docs/COVARIANCE.md](docs/COVARIANCE.md).
 
-The entry point is `assemble_covariance` on the `Covariance` trait -- it
-re-assembles `H` at the current solution and prepares it for querying. Read
-per-entity blocks through the entity itself: any `Model` reports its parameter
-span, so a pose, a landmark, or a whole collection is a valid query.
+Ask for it in the solve's config and read it off the result. Read per-entity
+blocks through the entity itself: any `Model` reports its parameter span, so
+a pose, a landmark, or a whole collection is a valid query.
 
 ```rust,ignore
-use arael::covariance::{Covariance, CovMode};
-model.solve_sparse(&cfg)?;                        // solution written back into the model
-let cov = model.assemble_covariance(CovMode::AllMarginals)?;
+use arael::covariance::{CovMode, Covariance};
+let cfg = LmConfig::well_conditioned().with_covariance(CovMode::AllMarginals);
+let r   = model.solve_sparse(&cfg)?;               // solution written back into the model
+let cov = r.covariance?;                           // the assembly the solve built
 let sd  = cov.std_dev(&model.poses[0])?;           // one entity's 1-sigma (tangent coords)
 let s   = cov.marginal_cov(&model.landmarks[3])?;  // its full covariance block
 let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]); // joint off-diagonal block
+
+let cov = model.assemble_covariance(CovMode::AllMarginals)?;   // without a solve
 ```
 
 Covariances are in local tangent coordinates -- rotation deltas are minimal 3-DOF
@@ -624,11 +626,11 @@ unfixed gauge (free-gauge SLAM, a similarity-free bundle problem) returns
 | **`AllMarginals`** | also runs a selected inverse up front (block Takahashi over a supernodal factor), so every marginal and cross block is a lookup | many / all marginals |
 | **`TriDiagonal`** | forward/backward Schur pass over a block-tridiagonal `H` (localization: a pose chain, fixed map, no loop closures) -- no factorization; the last pose is free | band-structured localization |
 
-`assemble_covariance_with` takes a `CovOptions` alongside the mode: the
-elimination `ordering`, and whether the block supernodal Cholesky factorizes.
-`CovOrdering::Auto` builds a symbolic factorization per candidate ordering to
-choose between them; naming the ordering skips that work. `CovAssembly::plan`
-reports what an assembly picked.
+`CovOptions` (`LmConfig::with_covariance_options`, or `assemble_covariance_with` on
+the model) chooses the elimination `ordering`, and whether the block
+supernodal Cholesky factorizes. `CovOrdering::Auto` builds a symbolic
+factorization per candidate ordering to choose between them; naming the
+ordering skips that work. `CovAssembly::plan` reports what an assembly picked.
 
 `marginal_cov` folds in the uncertainty of the variables an entity couples to;
 `conditional_cov` holds every other parameter fixed (`2 H_ee^-1`, never larger);

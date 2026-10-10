@@ -686,6 +686,18 @@ public:
     std::shared_ptr<void> guard_;
 }};
 
+inline result<Covariance, CovError> LmResult::covariance() const {{
+    ffi::{root}Cov* c = nullptr;
+    int32_t code = detail ? ffi::{root_sn}_result_covariance(detail, &c) : 1;
+    if (code == 0)
+        return result<Covariance, CovError>::ok(Covariance(c));
+    if (code == 1)
+        return result<Covariance, CovError>::err({{\"no covariance: the config did not ask for one\"}});
+    if (code == 2)
+        return result<Covariance, CovError>::err({{\"no covariance: an earlier covariance() call took it\"}});
+    return result<Covariance, CovError>::err({{ffi::{root_sn}_result_error(detail)}});
+}}
+
 "));
     }
 
@@ -818,12 +830,16 @@ private:
          uint64_t {root_sn}_result_steps(const void*, LmStep*, uint64_t);\n\
          void {root_sn}_result_threads(const void*, ThreadReport*);\n\
          uint64_t {root_sn}_result_threads_held(const void*, StoreFootprint*, uint64_t);\n\
+         int32_t {root_sn}_result_covariance(void*, {root}Cov**);\n\
+         const char* {root_sn}_result_error(const void*);\n\
          void {root_sn}_result_free(void*);\n\
          struct {root}Session;\n\
          {root}Session* {root_sn}_session_new(const SparseOptions*);\n\
          void {root_sn}_session_free({root}Session*);\n\
          void {root_sn}_session_invalidate({root}Session*);\n\
-         int32_t {root_sn}_session_solve({root}Session*, {root}*, const LmConfig*, LmResultT<{fp}>*);\n"));
+         int32_t {root_sn}_session_solve({root}Session*, {root}*, const LmConfig*, LmResultT<{fp}>*);\n\
+         int32_t {root_sn}_session_assemble_covariance({root}Session*, {root}*, uint32_t, {root}Cov**);\n\
+         int32_t {root_sn}_session_assemble_covariance_with({root}Session*, {root}*, uint32_t, uint32_t, uint32_t, {root}Cov**);\n"));
 
     let ffi_decls = &cpp.ffi;
     let body = &cpp.body;
@@ -956,12 +972,15 @@ inline AraelVersion arael_version() {{
     return v;
 }}
 
+class Covariance;
+
 /// A completed solve: the plain result fields plus ownership of the
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
 /// SchurPlan as data, steps() the per-attempt timeline, threads() what
-/// the threads did. Copies share ownership of the Rust result.
+/// the threads did, covariance() the covariance the config asked for.
+/// Copies share ownership of the Rust result.
 class LmResult : public LmResultT<{fp}> {{
 public:
     LmResult() : LmResultT<{fp}>() {{}}
@@ -1014,6 +1033,11 @@ public:
             ffi::{root_sn}_result_threads_held(detail, out.data(), out.size());
         return out;
     }}
+    /// The covariance the config asked for (LmConfig::covariance),
+    /// assembled at the solution, moved out of the result into the
+    /// view; the error names why there is none (the config did not
+    /// ask, an earlier call took it, or the assembly failed).
+    result<Covariance, CovError> covariance() const;
 
 private:
     std::shared_ptr<void> guard_;
@@ -1152,6 +1176,20 @@ public:
     }}
     /// Drop the learned structure; the next solve runs cold.
     void invalidate() {{ ffi::{root_sn}_session_invalidate(s_); }}
+    /// The covariance at the model's current parameters, reusing what
+    /// this session's solves built. Contract as
+    /// {root}::assemble_covariance.
+    result<Covariance, CovError> assemble_covariance({root}& m, CovMode mode = CovMode::AllMarginals,
+                                                     const CovOptions& opts = CovOptions{{}}) {{
+        ffi::{root}Cov* c = nullptr;
+        int32_t code = ffi::{root_sn}_session_assemble_covariance_with(
+            s_, m.h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
+        if (code == -2) throw PanicError(m.last_error());
+        if (code != 0)
+            return result<Covariance, CovError>::err({{m.last_error()}});
+        return result<Covariance, CovError>::ok(Covariance(c));
+    }}
 
 private:
     ffi::{root}Session* s_;

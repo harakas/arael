@@ -2,10 +2,11 @@
 // scaled by `isig` has Gauss-Newton Hessian H = 2 isig^2 I, so the covariance
 // Sigma = 2 H^-1 = (1/isig^2) I -- an analytic value to check against.
 
-use arael::covariance::{CovError, CovMode, CovOptions, CovOrdering, Covariance};
+use arael::covariance::{CovAssembly, CovError, CovMode, CovOptions, CovOrdering, Covariance};
 use arael::simple_lm::{BlockSupernodalMode, CooMatrix, LmProblem, RootProblem};
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
+use arael::threads::Context;
 
 #[arael::model]
 #[arael(constraint(hb, {
@@ -518,11 +519,12 @@ fn block_factorization_matches_the_scalar_one() {
     // Every query has to come back the same, whichever produced the factor.
     let n = 40;
     let mut c = chain3(n);
-    let block = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto()).unwrap();
+    let block = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto(), &mut Context::new()).unwrap();
     let scalar = c
         .assemble_covariance_with(
             CovMode::PerQuery,
             &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Never),
+            &mut Context::new(),
         )
         .unwrap();
     assert!(block.took_block_route(), "3-DOF blocks should take the block route");
@@ -573,6 +575,7 @@ fn all_marginals_declines_the_block_route() {
         .assemble_covariance_with(
             CovMode::AllMarginals,
             &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Always),
+            &mut Context::new(),
         )
         .unwrap();
     assert!(!a.took_block_route());
@@ -581,6 +584,7 @@ fn all_marginals_declines_the_block_route() {
         .assemble_covariance_with(
             CovMode::PerQuery,
             &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Never),
+            &mut Context::new(),
         )
         .unwrap();
     for i in 0..8 {
@@ -599,6 +603,7 @@ fn one_scalar_per_block_declines_the_block_route() {
         .assemble_covariance_with(
             CovMode::PerQuery,
             &CovOptions::auto().with_block_supernodal(BlockSupernodalMode::Always),
+            &mut Context::new(),
         )
         .unwrap();
     assert!(!a.took_block_route());
@@ -610,17 +615,18 @@ fn ordering_does_not_change_the_covariance() {
     let n = 40;
     let mut c = chain3(n);
     for mode in [CovMode::PerQuery, CovMode::AllMarginals] {
-        let auto = c.assemble_covariance_with(mode, &CovOptions::auto()).unwrap();
+        let auto = c.assemble_covariance_with(mode, &CovOptions::auto(), &mut Context::new()).unwrap();
         let amd = c
-            .assemble_covariance_with(mode, &CovOptions::auto().with_ordering(CovOrdering::Amd))
+            .assemble_covariance_with(mode, &CovOptions::auto().with_ordering(CovOrdering::Amd), &mut Context::new())
             .unwrap();
         let nat = c
-            .assemble_covariance_with(mode, &CovOptions::auto().with_ordering(CovOrdering::Natural))
+            .assemble_covariance_with(mode, &CovOptions::auto().with_ordering(CovOrdering::Natural), &mut Context::new())
             .unwrap();
         let nd = c
             .assemble_covariance_with(
                 mode,
                 &CovOptions::auto().with_ordering(CovOrdering::NestedDissection),
+                &mut Context::new(),
             )
             .unwrap();
 
@@ -647,11 +653,68 @@ fn ordering_does_not_change_the_covariance() {
 
     // The plain entry point is the Auto path.
     let plain = c.assemble_covariance(CovMode::PerQuery).unwrap();
-    let auto = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto()).unwrap();
+    let auto = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto(), &mut Context::new()).unwrap();
     assert_eq!(
         plain.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)],
         auto.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)],
     );
+}
+
+#[test]
+fn one_context_serves_many_assemblies() {
+    // A context begun once over the model serves every later assembly,
+    // in any mode, with the same answers a fresh context gives.
+    let n = 24;
+    let mut c = chain3(n);
+    let mut ctx = Context::new();
+    let first = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto(), &mut ctx).unwrap();
+    let again = c.assemble_covariance_with(CovMode::AllMarginals, &CovOptions::auto(), &mut ctx).unwrap();
+    let third = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto(), &mut ctx).unwrap();
+    let fresh = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+    for i in 0..n {
+        let want = fresh.marginal_cov(&c.nodes[i]).unwrap();
+        for (label, cov) in [("first", &first), ("again", &again), ("third", &third)] {
+            let got = cov.marginal_cov(&c.nodes[i]).unwrap();
+            for r in 0..3 {
+                for k in 0..3 {
+                    assert!((got[(r, k)] - want[(r, k)]).abs() < 1e-12, "{label} node {i} [{r},{k}]: {} vs {}", got[(r, k)], want[(r, k)]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_session_context_serves_the_covariance() {
+    // After a solve through a session, the covariance over the session's
+    // context -- the session's own method, its spelled-out form, and the
+    // model's method over the session's context -- equals the one a fresh
+    // context assembles at the solution.
+    use arael::simple_lm::{LmConfig, LmSession, SparseFaer};
+    let n = 24;
+    let mut c = chain3(n);
+    let mut session = LmSession::new(SparseFaer::new());
+    let cfg = LmConfig::<f64>::conservative();
+    session.solve(&mut c, &cfg).unwrap();
+    let warm = session.assemble_covariance(&mut c, CovMode::PerQuery).unwrap();
+    let spelled = session
+        .assemble_covariance_with(&mut c, CovMode::PerQuery, &CovOptions::auto().with_ordering(CovOrdering::Amd))
+        .unwrap();
+    let over = c.assemble_covariance_with(CovMode::PerQuery, &CovOptions::auto(), session.context_mut()).unwrap();
+    let fresh = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    for i in 0..n {
+        let b = fresh.marginal_cov(&c.nodes[i]).unwrap();
+        for (label, cov) in [("session", &warm), ("spelled", &spelled), ("over", &over)] {
+            let a = cov.marginal_cov(&c.nodes[i]).unwrap();
+            for r in 0..3 {
+                for k in 0..3 {
+                    assert!((a[(r, k)] - b[(r, k)]).abs() < 1e-12, "{label} node {i} [{r},{k}]: {} vs {}", a[(r, k)], b[(r, k)]);
+                }
+            }
+        }
+    }
+    // And the session still solves afterwards.
+    session.solve(&mut c, &cfg).unwrap();
 }
 
 // A model whose Hessian pattern exists only after a compute: the COO
@@ -765,6 +828,76 @@ impl arael::model::ExtendedModel<f64> for Cx {
         let r = params[self.a.index() as usize] - params[self.b.index() as usize];
         r * r
     }
+}
+
+// Every node's marginal of `got` equals `want`'s, to rounding.
+fn same_marginals(label: &str, c: &Chain3, got: &CovAssembly, want: &CovAssembly) {
+    for i in 0..c.nodes.len() {
+        let a = got.marginal_cov(&c.nodes[i]).unwrap();
+        let b = want.marginal_cov(&c.nodes[i]).unwrap();
+        for r in 0..3 {
+            for k in 0..3 {
+                assert!((a[(r, k)] - b[(r, k)]).abs() < 1e-12, "{label} node {i} [{r},{k}]: {} vs {}", a[(r, k)], b[(r, k)]);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_config_carries_the_covariance() {
+    // A solve the config asked for a covariance carries, at its solution,
+    // the one the model assembles there -- on every entry point and every
+    // mode -- and without the request the result says so.
+    use arael::simple_lm::{Band, Dense, LmConfig, LmProblem, LmSession, SparseFaer};
+    let n = 24;
+    let mut c = chain3(n);
+
+    // Sparse, AllMarginals.
+    let cfg = LmConfig::<f64>::conservative();
+    let r = c.solve_sparse(&cfg.clone().with_covariance(CovMode::AllMarginals)).unwrap();
+    let want = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+    same_marginals("sparse", &c, r.covariance.as_ref().unwrap(), &want);
+
+    // Not asked.
+    let r = c.solve_sparse(&cfg).unwrap();
+    assert_eq!(r.covariance.err(), Some(CovError::NotRequested));
+
+    // Dense, PerQuery, with the options spelled out.
+    let opts = CovOptions::auto().with_ordering(CovOrdering::Amd);
+    let r = c.solve_dense(&cfg.clone().with_covariance(CovMode::PerQuery).with_covariance_options(opts.clone())).unwrap();
+    let want = c.assemble_covariance_with(CovMode::PerQuery, &opts, &mut Context::new()).unwrap();
+    same_marginals("dense", &c, r.covariance.as_ref().unwrap(), &want);
+
+    // Band, TriDiagonal: 3-param nodes tied to their neighbours, kd 5.
+    let r = c.solve_with(&mut Band::new(5), &cfg.clone().with_covariance(CovMode::TriDiagonal)).unwrap();
+    let want = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
+    same_marginals("band", &c, r.covariance.as_ref().unwrap(), &want);
+
+    // Through a session, over its own context.
+    let mut session = LmSession::new(SparseFaer::new());
+    let r = session.solve(&mut c, &cfg.clone().with_covariance(CovMode::PerQuery)).unwrap();
+    let want = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    same_marginals("session", &c, r.covariance.as_ref().unwrap(), &want);
+
+    // The raw entry point has no model to assemble from.
+    let mut params = Vec::new();
+    c.serialize(&mut params);
+    let r = arael::simple_lm::lm_solve(&params, &mut Dense, &mut c, &cfg.clone().with_covariance(CovMode::PerQuery)).unwrap();
+    assert_eq!(r.covariance.err(), Some(CovError::NoModel));
+
+    // The assembly's time is in the timing when gathered, and zero otherwise.
+    let r = c.solve_sparse(&cfg.clone().with_gather_timing(true).with_covariance(CovMode::PerQuery)).unwrap();
+    assert!(r.timing.unwrap().covariance > std::time::Duration::ZERO);
+    let r = c.solve_sparse(&cfg.clone().with_gather_timing(true)).unwrap();
+    assert_eq!(r.timing.unwrap().covariance, std::time::Duration::ZERO);
+
+    // An assembly that fails leaves its error in the result; the solve
+    // itself is fine.
+    let mut p = path_chain(6);
+    p.ties.push(Tie { a: p.nodes.ref_at(0), b: p.nodes.ref_at(4), isig: 1.0, hb: CrossBlock::new() });
+    let r = p.solve_sparse(&cfg.clone().with_covariance(CovMode::TriDiagonal)).unwrap();
+    assert_eq!(r.status, arael::simple_lm::LmStatus::Converged);
+    assert_eq!(r.covariance.err(), Some(CovError::NotTriDiagonal));
 }
 
 #[test]

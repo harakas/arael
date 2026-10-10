@@ -52,6 +52,8 @@ is cut.
   Kahan and f64 summation are available.
 - Generic entities (`Pose<T>`) can be exported to C++ and Python.
 - The g2o reader accepts full information matrices.
+- `LmResult::covariance`, filled when `LmConfig::covariance` asks for
+  it; the same in the C, C++, Python and JS configs and results.
 
 ### Breaking
 
@@ -104,6 +106,7 @@ is cut.
 - arael-sym: evaluation and the function bag fail with a typed
   `SymError` instead of a string. `ParseError` stays as the parser's
   error and is wrapped as `SymError::Parse`.
+- `LmResult` and `SolveFailure` no longer derive `Clone`.
 
 ### Fixed
 

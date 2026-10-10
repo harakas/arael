@@ -7,7 +7,7 @@
 // Run: cargo run -r --example bench_band
 // With LAPACK: cargo run -r --features lapack --example bench_band
 
-use arael::simple_lm::RootProblem;
+use arael::simple_lm::LmProblem;
 use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -345,27 +345,21 @@ fn main() {
         let mut n = 0;
         for _ in 0..runs {
             let mut path = build_path(&cfg);
-            let mut params: Vec<f32> = Vec::new();
-            path.serialize(&mut params);
-            n = params.len();
             let t0 = std::time::Instant::now();
-            let _r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::Dense, &mut path, &solve_config).unwrap();
+            let r = path.solve_with(&mut arael::simple_lm::Dense, &solve_config).unwrap();
             dense_times.push(t0.elapsed().as_micros() as f64);
+            n = r.x.len();
 
             let mut path = build_path(&cfg);
-            let mut params: Vec<f32> = Vec::new();
-            path.serialize(&mut params);
             let t0 = std::time::Instant::now();
-            let _r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::Band::new(kd), &mut path, &solve_config).unwrap();
+            let _r = path.solve_with(&mut arael::simple_lm::Band::new(kd), &solve_config).unwrap();
             band_times.push(t0.elapsed().as_micros() as f64);
 
             #[cfg(feature = "lapack")]
             {
                 let mut path = build_path(&cfg);
-                let mut params: Vec<f32> = Vec::new();
-                path.serialize(&mut params);
                 let t0 = std::time::Instant::now();
-                let _r = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::BandLapack::new(kd), &mut path, &solve_config).unwrap();
+                let _r = path.solve_with(&mut arael::simple_lm::BandLapack::new(kd), &solve_config).unwrap();
                 lapack_times.push(t0.elapsed().as_micros() as f64);
             }
         }

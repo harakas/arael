@@ -297,13 +297,17 @@ def main():
 
     # gather_timing fills the result's timing block, which the report
     # below breaks down per phase.
+    # covariance: the solve also assembles the parameter covariance at
+    # its solution (r.covariance), for the ellipses below.
     cfg_lm = pathmod.LmConfig.well_conditioned()
     cfg_lm.verbose = True
     cfg_lm.gather_timing = True
+    cfg_lm.covariance = pathmod.CovMode.ALL_MARGINALS
     r = path.solve_sparse(cfg_lm)  # raises on failure
     # The result prints itself: status, cost, where the time went --
     # rendered by the Rust side from the full solve result.
     print("\n%s\n" % r.pretty_report(), flush=True)
+    cov = r.covariance()
 
     print("-- Pose errors vs GT --")
     est_poses = []
@@ -335,11 +339,11 @@ def main():
     if lm_refs:
         print("  mean: |d|=%.4fm" % (lm_sum / len(lm_refs)))
 
-    # Per-landmark uncertainty from the parameter covariance.
+    # Per-landmark uncertainty from the parameter covariance the solve
+    # assembled.
     ellipses = []
-    cov = path.assemble_covariance()
-    for r in lm_refs:
-        lm = path.landmarks[r]
+    for ref in lm_refs:
+        lm = path.landmarks[ref]
         ellipses.append(ellipse_from_cov(lm.pos, cov.marginal(lm)))
     print("\n%d landmark uncertainty ellipses (95%%)" % len(ellipses))
 

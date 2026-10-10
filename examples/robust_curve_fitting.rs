@@ -9,7 +9,7 @@
 // under the Curve it fits and targets the parent's Hessian block
 // (`parent.hb`), so only m and c are optimized -- no container struct, no
 // Ref indirection.
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::CovMode;
 use arael::model::{Param, SelfBlock};
 use arael::refs;
 use arael::simple_lm::{LmConfig, LmProblem};
@@ -100,10 +100,13 @@ fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64, Option<Vec<f64>>
     // conservative, with a high starting lambda: robust losses flatten the
     // cost surface around outliers, and small first steps keep the naive fit
     // from chasing them.
-    let cfg = LmConfig::conservative().with_verbose(true).with_initial_lambda(1.0);
+    // with_covariance: the solve also assembles the parameter covariance
+    // at its solution, for the 1-sigma of the fit.
+    let cfg = LmConfig::conservative().with_verbose(true).with_initial_lambda(1.0)
+        .with_covariance(CovMode::PerQuery);
     let result = fit.solve_dense(&cfg).unwrap();
     result.pretty_print();
-    let sd = fit.assemble_covariance(CovMode::PerQuery).ok().map(|cov| cov.std_dev(&fit.curves[0]).unwrap());
+    let sd = result.covariance.as_ref().ok().map(|cov| cov.std_dev(&fit.curves[0]).unwrap());
     (result.x[0], result.x[1], sd)
 }
 

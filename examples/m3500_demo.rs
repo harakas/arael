@@ -15,7 +15,7 @@
 // pass a path to run any other 2D g2o file:
 //   cargo run -r --example m3500_demo [-- path/to/file.g2o] [--weighted]
 
-use arael::simple_lm::RootProblem;
+use arael::simple_lm::LmProblem;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::{vect2d, vect3d};
@@ -210,16 +210,12 @@ fn main() {
     let before: Vec<(f64, f64)> = graph.poses.iter()
         .map(|p| (p.pos.value.x, p.pos.value.y)).collect();
 
-    let mut params: Vec<f64> = Vec::new();
-    graph.serialize(&mut params);
-    println!("parameters: {}", params.len());
-
     let cfg = arael::simple_lm::LmConfig::well_conditioned()
         .with_verbose(std::env::var("VERBOSE").is_ok());
     let start = std::time::Instant::now();
-    let result = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::SparseFaer::new(), &mut graph, &cfg).unwrap();
+    let result = graph.solve_sparse(&cfg).unwrap();
     let elapsed = start.elapsed();
-    graph.deserialize(&result.x);
+    println!("parameters: {}", result.x.len());
 
     let (ls1, huber1) = metrics(&graph);
     println!("{} iterations, cost {:.6} -> {:.6}", result.iterations, result.start_cost, result.end_cost);

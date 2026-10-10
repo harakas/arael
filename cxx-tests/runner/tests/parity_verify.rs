@@ -400,6 +400,30 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("sess_end2"), rs2.end_cost);
         assert_eq!(rs2.end_cost, rs1.end_cost, "warm must equal cold");
         assert_eq!(g("sess_warm_equals_cold"), 1.0);
+        // The covariance over the session's context: the skins take the
+        // same path, so the marginal matches exactly; and it is the
+        // marginal a fresh context assembles at this solution.
+        {
+            use arael::covariance::{CovMode, Covariance};
+            let warm = sess.assemble_covariance(&mut f13, CovMode::AllMarginals).unwrap();
+            let fresh = f13.assemble_covariance(CovMode::AllMarginals).unwrap();
+            let a = warm.marginal_cov(&f13.items[0]).unwrap()[(0, 0)];
+            let b = fresh.marginal_cov(&f13.items[0]).unwrap()[(0, 0)];
+            assert_eq!(g("sess_cov_ok"), 1.0);
+            assert_eq!(g("sess_cov_item0"), a);
+            assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "session covariance {a} vs fresh {b}");
+        }
+        // The covariance asked for in the config, carried by the result.
+        {
+            use arael::covariance::{CovError, CovMode};
+            let cfgc = LmConfig { covariance: Some(CovMode::AllMarginals), ..cfg.clone() };
+            let rc = f13.solve_dense(&cfgc).unwrap();
+            let a = rc.covariance.as_ref().unwrap().marginal_cov(&f13.items[0]).unwrap()[(0, 0)];
+            assert_eq!(g("cfg_cov_ok"), 1.0);
+            assert_eq!(g("cfg_cov_item0"), a);
+            assert_eq!(g("cfg_cov_absent"), 1.0);
+            assert_eq!(rs2.covariance.err(), Some(CovError::NotRequested));
+        }
         sess.invalidate();
         f13.m.value = 0.0;
         f13.c.value = 0.0;

@@ -221,8 +221,9 @@ views are named by their container's nature: `PathPosesDeque`,
   `Option` fields are `arael::option<F>`
   (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` as
   `time_limit_seconds`, `max_accepted_iters` and `assembly_threads` as
-  `option<uint32_t>`. The shared solver surface lives in
-  `arael/solver.hpp`.
+  `option<uint32_t>`, `covariance` as `option<CovMode>` with
+  `covariance_ordering` and `covariance_block_supernodal` beside it. The shared
+  solver surface lives in `arael/solver.hpp`.
   Warm restart: `cfg.initial_lambda = r.final_lambda` re-enters at
   the previous damping (Rust's `continue_from`); the optimized
   parameters already live in the model.
@@ -299,8 +300,14 @@ views are named by their container's nature: `PathPosesDeque`,
   tag) THROWS `arael::PanicError` with the panic text; the model's
   parameters are unchanged and a session in use was invalidated.
   `validate()` returns the diagnostic text ("" when clean).
-- **Covariance**: `assemble_covariance(CovMode)` at the solution
-  returns a `Covariance` view. Its calls drop Rust's `_cov` suffix:
+- **Covariance**: `cfg.covariance = CovMode::AllMarginals;` makes the
+  solve assemble the parameter covariance at its solution, and
+  `r->covariance()` moves it out of the result into a `Covariance` view
+  (an error naming why when the config did not ask, an earlier call
+  took it, or the assembly failed).
+  `model.assemble_covariance(CovMode)` assembles one at the current
+  parameters without a solve; `sess.assemble_covariance(model, CovMode)`
+  over a session's context. The view's calls drop Rust's `_cov` suffix:
   `cov->marginal(entity)` answers the
   entity's marginal block, typed by size (1 param -> `double`, 2 ->
   `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer);
@@ -314,8 +321,9 @@ views are named by their container's nature: `PathPosesDeque`,
   it, and every `assemble_covariance` call is independent -- older
   views keep answering from their own assembly. Entity arguments must
   come from the live model; `last_error()` carries the failure text.
-  `assemble_covariance(CovMode, const CovOptions&)` spells out the
-  assembly instead: `ordering` (`CovOrdering`) and `block_supernodal`.
+  `cfg.covariance_ordering` (`CovOrdering`) and `cfg.covariance_block_supernodal`, or
+  `assemble_covariance(CovMode, const CovOptions&)` on the model and the
+  session, spell out the assembly instead.
   `CovOrdering::Auto` builds a symbolic factorization per candidate
   ordering to choose between them; naming the ordering skips that work.
   `cov->plan()` returns a `CovPlan` saying which ordering the assembly

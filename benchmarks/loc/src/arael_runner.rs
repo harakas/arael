@@ -357,7 +357,7 @@ fn par_timing(ctx: &arael::threads::Context) -> Option<String> {
 
 // ----------------------------------------------------------- covariance
 
-use arael::covariance::{CovMode, Covariance};
+use arael::covariance::{CovMode, CovOptions, Covariance};
 
 /// One covariance-scaling run: `(N, median_ms, reps)` per query count, for the
 /// band-specialized TriDiagonal and the general PerQuery, plus the AllMarginals
@@ -397,9 +397,14 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let budget = Duration::from_secs_f64(budget_s);
     let cap_s = cell_cap_s();
 
+    // One context for every assembly: the block structure and the stores
+    // are built once. Each cell still sweeps and runs its mode's pass.
+    let opts = CovOptions::auto();
+    let mut ctx = arael::threads::Context::new();
+
     // Validation: last-pose std dev (the localization query).
     let sd_last = {
-        let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
+        let cov = path.assemble_covariance_with(CovMode::TriDiagonal, &opts, &mut ctx).unwrap();
         let m = cov.marginal_cov(&path.poses[last]).unwrap();
         (0..6).map(|k| m[(k, k)].sqrt()).collect()
     };
@@ -407,18 +412,18 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     // The localization query: just the last pose. TriDiagonal gets it from the
     // forward Schur pass alone (no backward recursion), so it is the cheapest cell.
     let tridiag_last = median_ms(budget, cap, || {
-        let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
+        let cov = path.assemble_covariance_with(CovMode::TriDiagonal, &opts, &mut ctx).unwrap();
         black_box(cov.marginal_cov(&path.poses[last]).unwrap());
     });
     let perquery_last = median_ms(budget, cap, || {
-        let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+        let cov = path.assemble_covariance_with(CovMode::PerQuery, &opts, &mut ctx).unwrap();
         black_box(cov.marginal_cov(&path.poses[last]).unwrap());
     });
 
     let tridiag_pose = scale_counts(query_counts(np, true), cap_s, |n| {
         let idx = spread(0, np, n);
         median_ms(budget, cap, || {
-            let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
+            let cov = path.assemble_covariance_with(CovMode::TriDiagonal, &opts, &mut ctx).unwrap();
             for &i in &idx {
                 black_box(cov.marginal_cov(&path.poses[i]).unwrap());
             }
@@ -427,7 +432,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let perquery_pose = scale_counts(query_counts(np, true), cap_s, |n| {
         let idx = spread(0, np, n);
         median_ms(budget, cap, || {
-            let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+            let cov = path.assemble_covariance_with(CovMode::PerQuery, &opts, &mut ctx).unwrap();
             for &i in &idx {
                 black_box(cov.marginal_cov(&path.poses[i]).unwrap());
             }
@@ -436,7 +441,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
 
     // AllMarginals: bulk selected inverse over the whole band -- every pose.
     let (allmarg_ms, allmarg_reps) = median_ms(budget, cap, || {
-        black_box(path.assemble_covariance(CovMode::AllMarginals).unwrap());
+        black_box(path.assemble_covariance_with(CovMode::AllMarginals, &opts, &mut ctx).unwrap());
     });
 
     CovScaling {

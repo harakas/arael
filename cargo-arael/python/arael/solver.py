@@ -493,6 +493,7 @@ class LmTiming(ctypes.Structure):
         ("linear_solve_count", ctypes.c_uint32),
         ("cost_eval_count", ctypes.c_uint32),
         ("advance_count", ctypes.c_uint32),
+        ("covariance", ctypes.c_double),
     ]
 
 
@@ -546,6 +547,25 @@ def _opt_int_property(field):
     def get(self):
         c = getattr(self, field)
         return int(c.v) if c.has else None
+
+    def set(self, value):
+        c = getattr(self, field)
+        if value is None:
+            c.has = False
+            c.v = 0
+        else:
+            c.has = True
+            c.v = int(value)
+
+    return property(get, set)
+
+
+def _opt_enum_property(field, enum):
+    """Property mapping a COpt struct field to an enum member or None."""
+
+    def get(self):
+        c = getattr(self, field)
+        return enum(c.v) if c.has else None
 
     def set(self, value):
         c = getattr(self, field)
@@ -626,6 +646,9 @@ def lm_types(fp):
             ("_observer_user", ctypes.c_void_p),
             ("_assembly_threads", COptU32),
             ("_max_accepted_iters", COptU32),
+            ("_covariance", COptU32),
+            ("covariance_ordering", ctypes.c_uint32),
+            ("covariance_block_supernodal", ctypes.c_uint32),
         ]
 
         gradient_tolerance = _opt_property("_gradient_tolerance")
@@ -636,6 +659,7 @@ def lm_types(fp):
         time_limit_seconds = _opt_property("_time_limit_seconds")
         assembly_threads = _opt_int_property("_assembly_threads")
         max_accepted_iters = _opt_int_property("_max_accepted_iters")
+        covariance = _opt_enum_property("_covariance", CovMode)
 
         @property
         def observer(self):

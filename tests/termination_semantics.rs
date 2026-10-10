@@ -790,6 +790,7 @@ fn synthetic_result() -> LmResult<f64> {
         final_lambda: 1e-6,
         solver: None,
         threads: Default::default(),
+        covariance: Err(arael::covariance::CovError::NotRequested),
         timing: Some(LmTiming {
             total: Duration::from_micros(900),
             assembly: Duration::from_micros(120),
@@ -806,6 +807,7 @@ fn synthetic_result() -> LmResult<f64> {
             linear_solve_count: 3,
             cost_eval_count: 2,
             advance_count: 1,
+            covariance: Duration::ZERO,
             steps: std::vec![
                 step(1, 0, false, true),   // factorization failed
                 step(2, 1, false, false),  // rejected

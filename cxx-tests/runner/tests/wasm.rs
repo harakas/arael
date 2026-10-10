@@ -147,4 +147,23 @@ fn wasm_interface_matches_rust_exactly() {
     for i in 0..4 {
         assert_eq!(g(&format!("vn_v{i}_after")), fit.vns[0].v.value.e[i]);
     }
+    // The session solve and the covariance over its context.
+    {
+        use arael::covariance::{CovMode, Covariance};
+        use arael::simple_lm::{LmSession, SparseFaer};
+        let mut sess = LmSession::new(SparseFaer::new());
+        let rs = sess.solve(&mut fit, &cfg).unwrap();
+        assert_eq!(g("sess_end"), rs.end_cost);
+        let cov = sess.assemble_covariance(&mut fit, CovMode::AllMarginals).unwrap();
+        assert_eq!(g("sess_cov_item0"), cov.marginal_cov(&fit.items[0]).unwrap()[(0, 0)]);
+    }
+    // The covariance asked for in the config, carried by the result.
+    {
+        use arael::covariance::{CovError, CovMode};
+        let cfgc = LmConfig { covariance: Some(CovMode::AllMarginals), ..cfg.clone() };
+        let rc = fit.solve_dense(&cfgc).unwrap();
+        assert_eq!(g("cfg_cov_item0"), rc.covariance.as_ref().unwrap().marginal_cov(&fit.items[0]).unwrap()[(0, 0)]);
+        assert_eq!(g("cfg_cov_absent"), 1.0);
+        assert_eq!(r.covariance.err(), Some(CovError::NotRequested));
+    }
 }

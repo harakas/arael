@@ -391,18 +391,18 @@ impl Path {
         self.global_delta.optimize = true;
         self.global_rot.optimize = true;
 
-        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        self.serialize(&mut params);
-        let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
-        let result = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::SparseFaer::<f32>::new(), self, &config).unwrap();
-        self.deserialize(&result.x);
+        // with_covariance: the solve also assembles the parameter covariance
+        // at its solution, for the globals' sigma below.
+        let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true)
+            .with_covariance(CovMode::PerQuery);
+        let result = self.solve_sparse(&config).unwrap();
         println!("optimise_center: {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
             result.iterations, result.start_cost, result.end_cost,
             self.global_delta.value, self.global_rot.value);
 
         // Global transform uncertainty (Sigma = 2 H^-1). Poses are frozen, so
         // std_dev over the root's own params -- the 6 globals -- is well-posed.
-        if let Some(sd) = self.assemble_covariance(CovMode::PerQuery).ok().map(|c| c.std_dev(self).unwrap()) {
+        if let Some(sd) = result.covariance.as_ref().ok().map(|c| c.std_dev(self).unwrap()) {
             println!("optimise_center: global sigma  delta=({:.4}, {:.4}, {:.4})m  rot=({:.4}, {:.4}, {:.4})rad",
                 sd[0], sd[1], sd[2], sd[3], sd[4], sd[5]);
         }
@@ -704,13 +704,9 @@ fn main() {
     for (pass, &scale) in isigma_scales.iter().enumerate() {
         path.frine_isigma_scale = scale;
 
-        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-        path.serialize(&mut params);
-
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
         let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
-        let result = arael::simple_lm::lm_solve(&params, &mut arael::simple_lm::SparseFaer::<f32>::new(), &mut path, &config).unwrap();
-        path.deserialize(&result.x);
+        let result = path.solve_sparse(&config).unwrap();
         println!("  {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
             result.iterations, result.start_cost, result.end_cost,
             path.global_delta.value, path.global_rot.value);
@@ -755,8 +751,10 @@ fn main() {
         println!("\nFinal cost: {:.4}", cost);
 
         println!("\n--- Absolute pose errors (with position 1-sigma from the covariance) ---");
-        // Per-pose position uncertainty (Sigma = 2 H^-1); the globals are held
-        // fixed, so H is positive definite. std_dev's first three are the position.
+        // Per-pose position uncertainty (Sigma = 2 H^-1) at the recentered
+        // parameters, so assembled here rather than by the last solve; the
+        // globals are held fixed, so H is positive definite. std_dev's
+        // first three are the position.
         let cov = match path.assemble_covariance(CovMode::AllMarginals) {
             Ok(c) => Some(c),
             Err(e) => { println!("(covariance unavailable: {e})"); None }

@@ -1649,20 +1649,22 @@
 //!
 //! # Parameter Covariance
 //!
-//! After a solve, recover the covariance of the estimated parameters,
-//! `Sigma = 2 H^-1`, from the same Hessian the solver builds -- the dense inverse
-//! is never formed. [`assemble_covariance`](covariance::Covariance) on the
-//! [`Covariance`](covariance::Covariance) trait (every `#[arael(root)]` model
-//! implements it) re-linearizes `H` at the current solution and returns an owned
-//! [`CovAssembly`](covariance::CovAssembly) to query.
+//! Recover the covariance of the estimated parameters, `Sigma = 2 H^-1`, from
+//! the same Hessian the solver builds -- the dense inverse is never formed.
+//! Ask for it in the config ([`LmConfig::with_covariance`](simple_lm::LmConfig::with_covariance))
+//! and read it off the result ([`LmResult::covariance`](simple_lm::LmResult::covariance)),
+//! an owned [`CovAssembly`](covariance::CovAssembly) to query.
 //!
 //! ```rust,ignore
-//! use arael::covariance::{Covariance, CovMode};
-//! model.solve_sparse(&cfg)?;
-//! let cov = model.assemble_covariance(CovMode::AllMarginals)?;
+//! use arael::covariance::{CovMode, Covariance};
+//! let cfg = LmConfig::well_conditioned().with_covariance(CovMode::AllMarginals);
+//! let r   = model.solve_sparse(&cfg)?;
+//! let cov = r.covariance?;                          // the assembly the solve built
 //! let sd  = cov.std_dev(&model.poses[0])?;          // 1-sigma per scalar (tangent coords)
 //! let s   = cov.marginal_cov(&model.landmarks[3])?; // full covariance block
 //! let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]);
+//!
+//! let cov = model.assemble_covariance(CovMode::AllMarginals)?;   // without a solve
 //! ```
 //!
 //! Query per-entity blocks by passing the entity itself: any [`Model`](model::Model)
@@ -1673,10 +1675,13 @@
 //! inverse up front -- many or all marginals), and `TriDiagonal` (a band
 //! forward/backward pass for a localization pose chain, no factorization).
 //!
-//! [`assemble_covariance_with`](covariance::Covariance) takes a
-//! [`CovOptions`](covariance::CovOptions) alongside the mode: the elimination
-//! ordering ([`CovOrdering`](covariance::CovOrdering)), and whether the block
-//! supernodal Cholesky factorizes. [`CovOrdering::Auto`](covariance::CovOrdering)
+//! [`CovOptions`](covariance::CovOptions)
+//! ([`LmConfig::with_covariance_options`](simple_lm::LmConfig::with_covariance_options), or
+//! [`assemble_covariance_with`](covariance::Covariance::assemble_covariance_with)
+//! on the model) chooses the elimination ordering
+//! ([`CovOrdering`](covariance::CovOrdering)), and whether the block
+//! supernodal Cholesky factorizes.
+//! [`CovOrdering::Auto`](covariance::CovOrdering)
 //! builds a symbolic factorization per candidate ordering to choose between
 //! them; naming the ordering skips that work.
 //! [`CovAssembly::plan`](covariance::CovAssembly::plan) reports what an
