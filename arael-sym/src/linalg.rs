@@ -58,7 +58,7 @@ impl SymVec {
     }
 
     /// Evaluate each element numerically given variable bindings.
-    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<Vec<f64>, String> {
+    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<Vec<f64>, crate::SymError> {
         self.0.iter().map(|e| e.eval(vars)).collect()
     }
 
@@ -227,7 +227,7 @@ impl SymMat {
     }
 
     /// Evaluate every element numerically, returning a nested `Vec<Vec<f64>>`.
-    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<Vec<Vec<f64>>, String> {
+    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<Vec<Vec<f64>>, crate::SymError> {
         let mut result = Vec::with_capacity(self.rows);
         for i in 0..self.rows {
             let mut row = Vec::with_capacity(self.cols);

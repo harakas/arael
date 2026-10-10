@@ -276,16 +276,16 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
 /// Inner-solve settings for the conjugate-gradient route. Each is a separate
 /// knob because the trade between inner accuracy and outer steps is per
 /// problem; only `tol` departs from arael's own default, see below.
-pub fn cg_options() -> arael::simple_lm::CgOptions {
+pub fn cg_options() -> arael::simple_lm::CgParams {
     fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
         std::env::var(k).ok().and_then(|v| v.parse().ok())
     }
-    let d = arael::simple_lm::CgOptions::default();
+    let d = arael::simple_lm::CgParams::default();
     // 1e-3, not the library's 1e-6: measured on Ladybug-372 and -1723 it halves
     // the CG work for two or three extra outer steps, and reaches a lower cost
     // on both. Intermediate values are worse than either end -- 1e-4 and 1e-5
     // cost 3-5x the outer steps of 1e-3.
-    arael::simple_lm::CgOptions {
+    arael::simple_lm::CgParams {
         tol: env("BAL_CG_TOL").unwrap_or(1e-3),
         max_iters: env("BAL_CG_MAXITER").unwrap_or(d.max_iters),
         restart_every: env("BAL_CG_RESTART").unwrap_or(d.restart_every),

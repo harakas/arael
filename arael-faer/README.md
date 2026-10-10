@@ -148,7 +148,7 @@ which suits a damped solve, where the step is a trial anyway.
 |---|---|
 | `solve(apply, m, b, x, opts, w)` | `apply` is the operator as a closure, so `A` can be a matrix held in block CSC (`mul_symmetric_upper`) or one that is never built at all |
 | `BlockJacobi::build` / `from_diagonal_blocks` | the preconditioner: the Cholesky factor of each diagonal block, from a matrix or from the blocks directly |
-| `CgOptions` / `CgStats` | tolerance and iteration cap in, iterations and final residual out |
+| `CgParams` / `CgStats` | tolerance and iteration cap in, iterations and final residual out |
 | `CgWorkspace` | the four vectors, reused across iterations |
 
 The reductions run in f64 whatever the storage type. Paired with `schur_apply`

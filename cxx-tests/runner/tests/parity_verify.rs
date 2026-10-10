@@ -431,14 +431,14 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     // The iterative Schur route through the options struct.
     {
         use arael::simple_lm::{
-            CgOptions, SolverReport, SparseFaer, SparseFaerOptions,
+            CgParams, SolverReport, SparseFaer, SparseFaerOptions,
         };
         let mut f15 = Fit::default();
         fill(&mut f15);
         let mut s15 = SparseFaer::from_options(
             &SparseFaerOptions::default()
                 .with_policy(arael::simple_lm::SchurPolicy::Force)
-                .with_iterative_schur(CgOptions::default()));
+                .with_iterative_schur(CgParams::default()));
         let r15 = f15.solve_with(&mut s15, &cfg).unwrap();
         assert_eq!(g("cg_end"), r15.end_cost);
         let p15 = match r15.solver {

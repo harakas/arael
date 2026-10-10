@@ -4014,7 +4014,9 @@ impl Default for SolveOrdering {
 /// Settings and outcome of the inner conjugate-gradient solve
 /// ([`SchurMethod::Iterative`]), re-exported so configuring the solver does not
 /// mean naming arael-faer.
-pub use arael_faer::cg::{CgOptions, CgStats};
+pub use arael_faer::cg::{CgParams, CgStats};
+#[allow(deprecated)]
+pub use arael_faer::cg::CgOptions;
 
 /// How to factor the reduced Schur system: under its envelope, or by sparse
 /// Cholesky.
@@ -4109,7 +4111,7 @@ pub enum SchurMethod {
     /// Worth it when factorizing the reduced system dominates the iteration,
     /// which is a question of how much fill it takes: on a bundle problem
     /// that share grows with the camera count.
-    Iterative(arael_faer::cg::CgOptions),
+    Iterative(arael_faer::cg::CgParams),
     /// The same conjugate gradients, on a reduced system that is never built:
     /// each product applies `B x - E C^-1 (E^T x)` by walking the Hessian.
     ///
@@ -4117,7 +4119,7 @@ pub enum SchurMethod {
     /// where a solve takes few products -- which is a property of the problem,
     /// not its size. Nothing picks between this and [`Self::Iterative`]; the
     /// caller does.
-    IterativeImplicit(arael_faer::cg::CgOptions),
+    IterativeImplicit(arael_faer::cg::CgParams),
 }
 
 /// Former name of [`SchurMethod`].
@@ -4126,7 +4128,7 @@ pub type SchurSolve = SchurMethod;
 
 impl SchurMethod {
     /// The CG settings, on either iterative route.
-    fn cg(self) -> Option<arael_faer::cg::CgOptions> {
+    fn cg(self) -> Option<arael_faer::cg::CgParams> {
         match self {
             SchurMethod::Factorize => None,
             SchurMethod::Iterative(c) | SchurMethod::IterativeImplicit(c) => Some(c),
@@ -4224,14 +4226,14 @@ impl SparseFaerOptions {
     /// of factorizing it ([`SchurMethod::Iterative`]). Pair with
     /// [`SchurPolicy::Force`]: without a reduction there is nothing for it to
     /// solve, and the solve fails rather than silently taking another route.
-    pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
+    pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgParams) -> Self {
         self.schur_solve = SchurMethod::Iterative(cg);
         self
     }
 
     /// As [`Self::with_iterative_schur`], but never forming the reduced
     /// system ([`SchurMethod::IterativeImplicit`]).
-    pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
+    pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgParams) -> Self {
         self.schur_solve = SchurMethod::IterativeImplicit(cg);
         self
     }

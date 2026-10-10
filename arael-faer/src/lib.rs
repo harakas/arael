@@ -134,7 +134,7 @@
 //! * [`BlockJacobi`](cg::BlockJacobi) -- the preconditioner: the Cholesky
 //!   factor of each diagonal block, built from a matrix or handed the blocks
 //!   directly
-//! * [`CgOptions`](cg::CgOptions) / [`CgStats`](cg::CgStats) -- tolerance and
+//! * [`CgParams`](cg::CgParams) / [`CgStats`](cg::CgStats) -- tolerance and
 //!   iteration cap in, iterations and final residual out
 //!
 //! The reductions run in f64 whatever the storage type. Paired with

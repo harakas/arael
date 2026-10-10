@@ -1641,7 +1641,7 @@ fn test_eval_unbound_symbol() {
     // "y" is missing -- should return Err, not panic
     let result = expr.eval(&vars);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("unbound symbol: y"));
+    assert!(matches!(result.unwrap_err(), SymError::UnboundSymbol(ref s) if s == "y"));
 
     // With both vars bound, should succeed
     vars.insert("y", 2.0);

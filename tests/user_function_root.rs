@@ -170,7 +170,7 @@ fn the_siblings_build_the_calls() {
     // With one it cannot: there is no root at runtime.
     let err = bowl(scene, x).eval(&std::collections::HashMap::from([("scene", 0.0), ("x", 3.0)]))
         .unwrap_err();
-    assert!(err.contains("no eval fn"), "{err}");
+    assert!(matches!(err, arael::sym::SymError::NoEval(_)), "{err}");
 }
 
 #[test]

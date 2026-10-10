@@ -1,15 +1,18 @@
 use std::collections::{BTreeSet, HashMap};
 use super::{Expr, E};
+use crate::SymError;
 
 impl Expr {
     /// Evaluate the expression numerically given variable bindings.
     ///
-    /// Returns `Err` if any symbol in the expression is not bound in `vars`.
-    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<f64, String> {
+    /// Fails with a [`SymError`]: an unbound symbol, a select index with
+    /// no arm, a function that evaluates only in generated code, or a
+    /// derivative that does not exist.
+    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<f64, SymError> {
         match self {
             Expr::Sym(name) => {
                 vars.get(name.as_str()).copied()
-                    .ok_or_else(|| format!("unbound symbol: {name}"))
+                    .ok_or_else(|| SymError::UnboundSymbol(name.clone()))
             }
             Expr::Const(v) => Ok(*v),
             Expr::NamedConst { value, .. } => Ok(*value),
@@ -67,10 +70,11 @@ impl Expr {
                         let (cname, context_arg, eval_fn, cargs) = match args[0].as_ref() {
                             Expr::Func { name, kind: crate::FuncKind::ExternNumericDerivs { context_arg, eval_fn, .. }, args, .. } =>
                                 (name, *context_arg, eval_fn, args),
-                            _ => return Err(format!("{name}: an output of something that is not a numeric-derivs call")),
+                            _ => return Err(SymError::bad_call(name.clone(),
+                                "is an output of something that is not a numeric-derivs call")),
                         };
                         let Some(f) = eval_fn else {
-                            return Err(format!("{cname} has no eval fn: it evaluates only where generated code calls it"));
+                            return Err(SymError::NoEval(cname.clone()));
                         };
                         let numbers = if context_arg { &cargs[1..] } else { &cargs[..] };
                         let vals: Result<Vec<f64>, _> = numbers.iter().map(|a| a.eval(vars)).collect();
@@ -78,13 +82,14 @@ impl Expr {
                         if *index == 0 {
                             return Ok(value);
                         }
-                        partials.get(index - 1).copied().ok_or_else(|| format!(
-                            "{cname} returned {} partials, partial {} asked for",
-                            partials.len(), index - 1))
+                        partials.get(index - 1).copied().ok_or_else(|| SymError::bad_call(
+                            cname.clone(),
+                            format!("returned {} partials, partial {} asked for", partials.len(), index - 1)))
                     }
-                    crate::FuncKind::ExternNumericDerivs { .. } => Err(format!(
-                        "{name} is the eval fn's whole result, value and partials; evaluate one of them")),
-                    crate::FuncKind::NoDerivative { of, why } => Err(format!("no derivative of {of}: {why}")),
+                    crate::FuncKind::ExternNumericDerivs { .. } => Err(SymError::bad_call(name.clone(),
+                        "is the eval fn's whole result, value and partials; evaluate one of them")),
+                    crate::FuncKind::NoDerivative { of, why } =>
+                        Err(SymError::NoDerivative { of: of.clone(), why: why.clone() }),
                     _ => if let Some(f) = kind.eval_fn() {
                         let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
                         Ok(f(&vals?))
@@ -228,9 +233,9 @@ impl Expr {
 /// must be an exact integer (a NaN or fractional index is an error, as the
 /// runtime `SelectIndex` conversion panics on it); `0..n` names an arm, any
 /// other value takes the default (`None`) or is an error when there is none.
-pub(crate) fn select_arm(v: f64, n: usize, has_default: bool) -> Result<Option<usize>, String> {
+pub(crate) fn select_arm(v: f64, n: usize, has_default: bool) -> Result<Option<usize>, SymError> {
     if !v.is_finite() || v.fract() != 0.0 {
-        return Err(format!("select index {v} is not an integer"));
+        return Err(SymError::SelectIndexNotInteger(v));
     }
     if v >= 0.0 && v < n as f64 {
         return Ok(Some(v as usize));
@@ -238,6 +243,6 @@ pub(crate) fn select_arm(v: f64, n: usize, has_default: bool) -> Result<Option<u
     if has_default {
         Ok(None)
     } else {
-        Err(format!("select index {v} out of range 0..{n}"))
+        Err(SymError::SelectIndexOutOfRange { value: v, arms: n })
     }
 }
