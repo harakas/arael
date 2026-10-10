@@ -106,6 +106,7 @@ is cut.
   `SymError` instead of a string. `ParseError` stays as the parser's
   error and is wrapped as `SymError::Parse`.
 - `LmResult` and `SolveFailure` no longer derive `Clone`.
+- The model's solve methods (`solve_sparse` and the rest) now require `Model`.
 
 ### Fixed
 

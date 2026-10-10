@@ -34,7 +34,7 @@ fn assert_close(what: &str, a: &[f64], b: &[f64], rel: f64) {
 /// would pass every numeric assertion while threading nothing.
 fn threaded_matches_sequential<R, B, S>(what: &str, build: B, stores: &S)
 where
-    R: RootProblem<f64> + LmProblemInternals<f64>,
+    R: RootProblem<f64> + LmProblemInternals<f64> + arael::model::Model,
     B: Fn() -> R,
     S: Fn(&Context) -> usize,
 {
@@ -71,7 +71,7 @@ where
 /// A full sparse solve at one thread and at four must land in the same place.
 fn threaded_solve_matches<R, B>(what: &str, build: B)
 where
-    R: RootProblem<f64> + LmProblemInternals<f64>,
+    R: RootProblem<f64> + LmProblemInternals<f64> + arael::model::Model,
     B: Fn() -> R,
 {
     let cfg = |t: usize| LmConfig::<f64> { max_iters: 60, num_threads: t, ..Default::default() };
