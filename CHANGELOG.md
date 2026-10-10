@@ -142,6 +142,13 @@ is cut.
   numpy array.
 - `cargo arael setup` sets the build profile that keeps model builds
   fast; exports leave unchanged files alone.
+- From C++ and Python a pose is an object you can multiply and invert.
+- Eigen conversions for every C++ math type.
+- Faster model building from Python: fill a whole collection in one
+  call, and read or write one field of every element at once as a
+  numpy array.
+- `cargo arael setup` sets the build profile that keeps model builds
+  fast; exports leave unchanged files alone.
 
 ## 0.8.3 - 2026-08-23
 

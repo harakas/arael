@@ -1432,8 +1432,10 @@
 //! the reduced system's block columns each; and the factorization's
 //! large panels, in windows. A threaded solve matches a sequential one
 //! to rounding, not to the bit. `assembly_threads` gives the sweeps a
-//! count of their own. The threads chart under [Benchmarks](#benchmarks)
-//! shows what the threads buy.
+//! count of their own. The workers stay parked for the life of the
+//! process; `arael::pool::shutdown()` joins them, and the next threaded
+//! solve spawns them again. The threads chart under
+//! [Benchmarks](#benchmarks) shows what the threads buy.
 //!
 //! The model is read from every thread at once, so a root must be
 //! [`Sync`]. A root that is not, or that should stay sequential, opts

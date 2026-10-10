@@ -578,6 +578,8 @@ factorization's large panels, in windows. Set `LmConfig::num_threads` (1 =
 sequential, the default; `n` = n threads; 0 = every core), or
 `ARAEL_NUM_THREADS` in the environment, which sets the default and yields to
 a count set in code; `assembly_threads` gives the sweeps a count of their own.
+The workers stay parked for the life of the process; `arael::pool::shutdown()`
+joins them, and the next threaded solve spawns them again.
 
 A threaded assembly adds up in a different order than the sequential one, so
 results differ in the last bits between thread counts. The model is read from

@@ -21,13 +21,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install system dependencies (egui/eframe build deps)
+      # Eigen is for the cxx-tests interop test, which skips without it.
+      - name: Install system dependencies (egui/eframe build deps, Eigen)
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libeigen3-dev
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: rustup toolchain install && rustup show
+      # The generated wasm crates (cxx-tests/runner/tests/wasm.rs) need the
+      # target and the wasm-bindgen CLI at the version the generated
+      # manifests pin, WASM_BINDGEN_VERSION in cargo-arael/src/emit_wasm.rs;
+      # without them the wasm tests skip.
+      - name: Install the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.129
       - uses: Swatinem/rust-cache@v2
       - name: Run workspace tests
         run: cargo test --workspace
