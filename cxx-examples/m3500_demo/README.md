@@ -34,9 +34,11 @@ python3 python/main.py
 
 Browser (`web/`): the same graph solved in the page as WebAssembly,
 through the generated JavaScript interface
-([docs/WASM.md](../../docs/WASM.md)). Drag a pose and a lock, a soft
-prior, follows the pointer and stays where it is released; `L` locks
-the selection in place, `F` fixes it (its parameters leave the solve),
+([docs/WASM.md](../../docs/WASM.md)). The actions are buttons in a
+column on the left, each with a tooltip and its key. Drag a pose and
+a lock, a soft prior, follows the pointer and stays where it is
+released; `L` locks the selection in place, `F` fixes it (its
+parameters leave the solve),
 `C` clears; Ctrl+Z (Cmd+Z on a Mac) undoes any of these, Shift with
 it or Ctrl+Y redoes; a click selects without locking; shift-click and
 shift-drag select; a locked or fixed pose

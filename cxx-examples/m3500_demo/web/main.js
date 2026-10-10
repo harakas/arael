@@ -31,6 +31,16 @@ const statusEl = document.getElementById("status");
 const versionEl = document.getElementById("version");
 const weightedEl = document.getElementById("weighted");
 const liveEl = document.getElementById("live");
+const tipEl = document.getElementById("tip");
+
+// The two toggle buttons in the tool column.
+function pressed(el) {
+  return el.getAttribute("aria-pressed") === "true";
+}
+
+function toggle(el) {
+  el.setAttribute("aria-pressed", pressed(el) ? "false" : "true");
+}
 
 let ds = null;
 let graph = null;
@@ -91,7 +101,7 @@ function build() {
   const s1 = new Float64Array(3 * m);
   const s2 = new Float64Array(3 * m);
   edgesAB = new Int32Array(2 * m);
-  const weighted = weightedEl.checked;
+  const weighted = pressed(weightedEl);
   ds.deltas.forEach((d, k) => {
     a[k] = refs[d.a];
     b[k] = refs[d.b];
@@ -462,7 +472,7 @@ function setStatus(s) {
 }
 
 function frame() {
-  if (drag && drag.pose >= 0 && drag.pending && liveEl.checked) {
+  if (drag && drag.pose >= 0 && drag.pending && pressed(liveEl)) {
     drag.pending = false;
     quick.initialLambda = drag.lambda ?? quickLambda0;
     const r = solve(quick);
@@ -560,7 +570,7 @@ canvas.addEventListener("pointermove", (e) => {
     const [x, y] = toWorld(sx, sy);
     const lock = graph.locks().at(i);
     lock.pos = { x, y };
-    if (!liveEl.checked) {
+    if (!pressed(liveEl)) {
       const pose = graph.poses().at(i);
       pose.pos = { x, y };
       xy[2 * i] = x;
@@ -633,12 +643,53 @@ window.addEventListener("keydown", (e) => {
   dirty = true;
 });
 
-document.getElementById("solve").addEventListener("click", () => { solve(full); dirty = true; });
-document.getElementById("reset").addEventListener("click", () => { reset(); dirty = true; });
-document.getElementById("recenter").addEventListener("click", () => { fit(); dirty = true; });
-document.getElementById("undo").addEventListener("click", () => { undoStep(); });
-document.getElementById("redo").addEventListener("click", () => { redoStep(); });
-weightedEl.addEventListener("change", () => { build(); solve(full); dirty = true; });
+// ------------------------------------------------------------- the tools
+
+const actions = {
+  solve: () => solve(full),
+  reset,
+  undo: undoStep,
+  redo: redoStep,
+  lock: lockSelection,
+  fix: fixSelection,
+  clear: clearSelection,
+  recenter: fit,
+  load: () => document.getElementById("file").click(),
+  weighted: () => { toggle(weightedEl); build(); solve(full); },
+  live: () => toggle(liveEl),
+};
+for (const [id, act] of Object.entries(actions)) {
+  document.getElementById(id).addEventListener("click", () => {
+    if (n === 0 && id !== "load") return;
+    act();
+    dirty = true;
+  });
+}
+
+// The tooltip: one panel, placed beside the hovered or focused button.
+function showTip(el) {
+  const text = el.dataset.tip;
+  if (!text) return;
+  tipEl.textContent = text;
+  tipEl.hidden = false;
+  const r = el.getBoundingClientRect();
+  const h = tipEl.offsetHeight;
+  const top = Math.max(4, Math.min(window.innerHeight - h - 4, r.top + r.height / 2 - h / 2));
+  tipEl.style.left = `${r.right + 8}px`;
+  tipEl.style.top = `${top}px`;
+}
+
+function hideTip() {
+  tipEl.hidden = true;
+}
+
+for (const el of document.querySelectorAll("#tools button")) {
+  el.addEventListener("pointerenter", () => showTip(el));
+  el.addEventListener("pointerleave", hideTip);
+  el.addEventListener("focus", () => showTip(el));
+  el.addEventListener("blur", hideTip);
+}
+
 document.getElementById("file").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   if (!f) return;
