@@ -69,6 +69,16 @@ pub fn ord_code(o: Option<arael::simple_lm::ReducedOrdering>) -> f64 {
     }
 }
 
+/// The skin's `arael_version_*` lines are `arael::VERSION`: the three
+/// numbers and the length of the pre-release tag.
+pub fn version_matches(g: &dyn Fn(&str) -> f64) {
+    let v = arael::VERSION;
+    assert_eq!(g("arael_version_major"), v.major as f64);
+    assert_eq!(g("arael_version_minor"), v.minor as f64);
+    assert_eq!(g("arael_version_patch"), v.patch as f64);
+    assert_eq!(g("arael_version_pre_len"), v.pre.len() as f64);
+}
+
 pub fn verify(got: &std::collections::HashMap<String, f64>) {
     let g = |n: &str| *got.get(n).unwrap_or_else(|| panic!("output missing `{n}`"));
 
@@ -79,6 +89,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     fill(&mut fit);
     assert!(fit.validate().is_clean());
     assert_eq!(g("log_smoke"), 1.0);
+    version_matches(&g);
     {
         use arael::simple_lm::LmStatus::*;
         for s in [Converged, CostThreshold, MaxIterations, GradientTolerance,

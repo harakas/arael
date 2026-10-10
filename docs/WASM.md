@@ -204,6 +204,10 @@ cov.plan();                 // what the assembly decided
 One method per entity type, since JavaScript has no overloading; `p` is
 an entity handle. The tags are the C ABI's.
 
+`araelVersion()` is the arael version the module was built with:
+`{ major, minor, patch, pre }`, `pre` the tag after the dash (`"dev"`
+in `0.9.0-dev`, empty for a release).
+
 ## Memory
 
 Every class instance lives on the WebAssembly side. Built with

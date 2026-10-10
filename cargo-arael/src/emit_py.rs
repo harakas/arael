@@ -1060,6 +1060,8 @@ class Covariance:
     sig(&mut py, &format!("{root_sn}_set_log_level"), &["ctypes.c_uint32"],
         "None");
     sig(&mut py, &format!("{root_sn}_pool_shutdown"), &[], "None");
+    sig(&mut py, &format!("{root_sn}_arael_version"),
+        &["ctypes.POINTER(_solver.AraelVersion)"], "None");
     sig(&mut py, &format!("{root_sn}_result_report"),
         &["ctypes.c_void_p", "ctypes.c_bool"], "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_result_plan"),
@@ -1370,7 +1372,8 @@ from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            FaerOrdering, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
-                           SolveFailureKind, StoreFootprint, ThreadReport)
+                           SolveFailureKind, StoreFootprint, ThreadReport,
+                           AraelVersion)
 
 LmIter = _f.LmIter
 
@@ -1422,6 +1425,15 @@ def pool_shutdown():
     built without the `rayon` feature.\"\"\"
     load()
     _f.{root_sn}_pool_shutdown()
+
+
+def arael_version():
+    \"\"\"The arael version the shim was built with
+    (arael.solver.AraelVersion).\"\"\"
+    load()
+    v = AraelVersion()
+    _f.{root_sn}_arael_version(ctypes.byref(v))
+    return v
 
 
 def _raw(r):

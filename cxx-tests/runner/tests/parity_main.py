@@ -52,6 +52,13 @@ def fill(f):
 fit.set_log_level(fit.LogLevel.WARN)
 pi("log_smoke", 1)
 
+
+_ver = fit.arael_version()
+pi("arael_version_major", _ver.major)
+pi("arael_version_minor", _ver.minor)
+pi("arael_version_patch", _ver.patch)
+pi("arael_version_pre_len", len(_ver.pre))
+
 # LmStatus helpers mirror Rust's is_success / as_str.
 for i in range(12):
     s = fit.LmStatus(i)

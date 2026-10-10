@@ -30,6 +30,11 @@ vn.wp = 0.7;
 vn.w = 1.3;
 
 const p = (name, v) => console.log(`${name} ${v}`);
+const ver = w.araelVersion();
+p("arael_version_major", ver.major);
+p("arael_version_minor", ver.minor);
+p("arael_version_patch", ver.patch);
+p("arael_version_pre_len", ver.pre.length);
 p("clean", fit.validate() === "" ? 1 : 0);
 p("n_obs", obs.length);
 p("n_items", items.length);

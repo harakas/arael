@@ -50,6 +50,7 @@ using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
 using arael::ThreadReport;
+using arael::AraelVersion;
 using arael::SweepReport;
 using arael::PhaseChoice;
 using arael::ParTiming;
@@ -493,6 +494,7 @@ bool fit_last_failure(const Fit*, SolveFailure*);
 const char* fit_validate(Fit*);
 void fit_set_log_level(uint32_t);
 void fit_pool_shutdown(void);
+void fit_arael_version(AraelVersion*);
 void fit_sparse_options(SparseOptions*);
 int32_t fit_solve_dense(Fit*, const LmConfig*, LmResultT<double>*);
 int32_t fit_solve_sparse(Fit*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
@@ -529,6 +531,13 @@ inline void set_log_level(LogLevel level) {
 /// worker is ever spawned and it returns at once.
 inline void pool_shutdown() {
     ffi::fit_pool_shutdown();
+}
+
+/// The arael version the shim was built with (arael::AraelVersion).
+inline AraelVersion arael_version() {
+    AraelVersion v{};
+    ffi::fit_arael_version(&v);
+    return v;
 }
 
 /// A completed solve: the plain result fields plus ownership of the

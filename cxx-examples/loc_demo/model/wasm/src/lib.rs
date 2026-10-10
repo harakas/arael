@@ -15,6 +15,19 @@ pub fn __arael_start() {
     console_error_panic_hook::set_once();
 }
 
+/// The arael version the module was built with: `{ major, minor, patch,
+/// pre }`, `pre` the tag after the dash, empty for a release.
+#[wasm_bindgen(js_name = "araelVersion")]
+pub fn arael_version() -> JsValue {
+    let v = arael::VERSION;
+    let o = js_sys::Object::new();
+    js_set(&o, "major", &JsValue::from_f64(v.major as f64));
+    js_set(&o, "minor", &JsValue::from_f64(v.minor as f64));
+    js_set(&o, "patch", &JsValue::from_f64(v.patch as f64));
+    js_set(&o, "pre", &JsValue::from_str(v.pre));
+    JsValue::from(o)
+}
+
 fn js_err(msg: &str) -> JsValue {
     js_sys::Error::new(msg).into()
 }

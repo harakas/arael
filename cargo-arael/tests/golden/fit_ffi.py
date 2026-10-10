@@ -200,6 +200,7 @@ SIGS = [
     ("fit_validate", [ctypes.c_void_p], ctypes.c_char_p),
     ("fit_set_log_level", [ctypes.c_uint32], None),
     ("fit_pool_shutdown", [], None),
+    ("fit_arael_version", [ctypes.POINTER(_solver.AraelVersion)], None),
     ("fit_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
     ("fit_result_plan", [ctypes.c_void_p, ctypes.POINTER(_solver.SchurPlan)], ctypes.c_bool),
     ("fit_result_steps", [ctypes.c_void_p, ctypes.POINTER(_solver.LmStep), ctypes.c_uint64], ctypes.c_uint64),
