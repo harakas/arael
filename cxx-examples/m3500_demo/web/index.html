@@ -2,14 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>m3500 in the browser</title>
+<title>Arael demo: pose-graph optimization in the browser</title>
+<meta name="description" content="A pose graph solved by the arael optimizer compiled to WebAssembly, in the browser: drag, lock and fix poses and watch the graph re-solve.">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { color-scheme: light dark; }
   html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
   header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; padding: 8px 12px; border-bottom: 1px solid #8884; }
+  .title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  #intro { margin: 0; font-size: 13px; opacity: 0.75; max-width: 70em; }
   h1 a { color: inherit; text-decoration: none; }
   h1 a:hover { text-decoration: underline; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 10px; vertical-align: middle; }
@@ -18,6 +21,7 @@
   .group { display: flex; flex-direction: column; gap: 4px; }
   #tools button { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: #8881; border: 1px solid #8886; border-radius: 4px; cursor: pointer; }
   #tools button:hover { background: #8883; }
+  #tools select { width: 100%; padding: 5px 6px; font: inherit; color: inherit; background: #8881; border: 1px solid #8886; border-radius: 4px; }
   #tools button::after { content: attr(data-key); font-size: 11px; opacity: 0.55; margin-left: 6px; }
   #tools button.toggle::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #8886; }
   #tools button.toggle[aria-pressed="true"] { background: #3a7bd52a; border-color: #3a7bd5; }
@@ -35,7 +39,10 @@
 </head>
 <body>
 <header>
-  <h1><a href="https://github.com/harakas/arael/tree/master/cxx-examples/m3500_demo" target="_blank" rel="noopener">Arael demo: pose-graph optimization in the browser</a></h1>
+  <div class="title">
+    <h1><a href="https://github.com/harakas/arael/tree/master/cxx-examples/m3500_demo" target="_blank" rel="noopener">Arael demo: pose-graph optimization in the browser</a></h1>
+    <p id="intro">A pose graph, a robot's trajectory tied together by relative measurements, solved by the arael optimizer compiled to WebAssembly in this tab.<br>Drag any point and the graph re-solves around it; lock two points and drag a third to bend it.</p>
+  </div>
   <span class="legend">
     <span style="background:#3a7bd5"></span>pose
     <span style="background:#e0a000"></span>locked
@@ -49,6 +56,7 @@
     <div class="group">
       <button id="solve" data-key="" data-tip="Solve the whole graph again from the poses as they are.">Solve</button>
       <button id="reset" data-key="R" data-tip="Put the dataset's poses back, release every lock and fix, and solve.">Reset</button>
+      <button id="recenter" data-key="" data-tip="Fit the view to the whole graph. A middle double-click does the same.">Recenter</button>
     </div>
     <div class="group">
       <button id="undo" data-key="Ctrl+Z" data-tip="Undo the last action: a drag, lock, fix, clear or reset. Cmd+Z on a Mac.">Undo</button>
@@ -60,7 +68,12 @@
       <button id="clear" data-key="C" data-tip="Release the selected poses, locks and fixes alike, and solve.">Clear</button>
     </div>
     <div class="group">
-      <button id="recenter" data-key="" data-tip="Fit the view to the whole graph. A middle double-click does the same.">Recenter</button>
+      <select id="dataset" data-tip="The pose graph to solve: the Manhattan world M3500 (3500 poses), the Intel Research Lab building (1728), City10000 (10000) or the Freiburg ais2klinik path (15115).">
+        <option value="datasets/input_M3500_g2o.g2o">M3500</option>
+        <option value="datasets/intel.g2o">Intel Lab</option>
+        <option value="datasets/city10000.g2o">City10000</option>
+        <option value="datasets/ais2klinik.g2o">ais2klinik</option>
+      </select>
       <button id="load" data-key="" data-tip="Load any 2D g2o file from your computer.">Load g2o</button>
       <input type="file" id="file" accept=".g2o,.txt" hidden>
     </div>

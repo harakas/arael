@@ -35,7 +35,8 @@ optimum and its numbers are not comparable.
 ## Datasets
 
 Vendored in `datasets/` (see `datasets/README.md` for provenance and
-citations; `./fetch_datasets.sh` re-downloads from the original sources):
+citations; `./fetch_datasets.sh` re-downloads from the original sources;
+`intel` and `ais2klinik` are there for the browser demo only):
 
 - **M3500** -- Olson's Manhattan world: 3500 poses, 5453 edges. The file
   shipped by tiny-solver-rs (Carlone's `input_M3500_g2o` revision), with

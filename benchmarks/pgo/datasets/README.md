@@ -38,4 +38,21 @@ license upstream.
   This copy: SE-Sync (github.com/david-m-rosen/SE-Sync),
   data/parking-garage.g2o.
 
+Two more 2D datasets, vendored for the browser demo
+(`cxx-examples/m3500_demo`) and not part of the benchmark:
+
+- `intel.g2o` -- the Intel Research Lab building (1728 poses, 2512
+  edges), the pose-graph form of the Intel dataset of the Radish
+  repository.
+  Cite: A. Howard, N. Roy, "The Robotics Data Set Repository
+  (Radish)", 2003, radish.sourceforge.net.
+  This copy: SE-Sync (github.com/david-m-rosen/SE-Sync),
+  data/intel.g2o.
+
+- `ais2klinik.g2o` -- the Freiburg ais2klinik dataset (15115 poses,
+  16727 edges), a path between two buildings recorded by the
+  Autonomous Intelligent Systems lab of the University of Freiburg.
+  This copy: SE-Sync (github.com/david-m-rosen/SE-Sync),
+  data/ais2klinik.g2o.
+
 `../fetch_datasets.sh` re-downloads all of them from the same sources.

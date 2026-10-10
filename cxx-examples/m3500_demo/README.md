@@ -45,21 +45,22 @@ shift-drag select; a locked or fixed pose
 is picked before the plain poses around it; the links are colored by
 their cost on a log scale, gray at the median and red at the worst
 percent (the `Log color` toggle makes it linear); the wheel zooms,
-a middle double-click fits the view; any 2D g2o file can be loaded. The
+a middle double-click fits the view; the vendored M3500, Intel Lab,
+City10000 and ais2klinik sets are a dropdown and any 2D g2o file can
+be loaded. The
 gauge is a very weak lock on pose 0, so every pose moves under a drag.
 Every re-solve runs through one `LmSession`.
-Build the wasm crate once (the target and the pinned CLI are named in
-`model/wasm/Cargo.toml`), then serve this directory; `web/datasets`
-links to the vendored g2o files under `benchmarks/pgo/datasets/`:
+`web/build.sh` builds the wasm crate (the target and the pinned CLI
+are named in `model/wasm/Cargo.toml`). `web/` is then the whole site:
+its `pkg`, `arael` and `datasets` entries link to the built module,
+the loader and the vendored g2o files under `benchmarks/pgo/datasets/`.
+Serve it, or copy it with the links dereferenced:
 
 ```
-cd model/wasm
-cargo build --release --target wasm32-unknown-unknown
-wasm-bindgen --target web --weak-refs --out-dir pkg \
-    target/wasm32-unknown-unknown/release/m3500_demo_wasm.wasm
-cd ../..
-python3 -m http.server
-# http://localhost:8000/web/
+web/build.sh
+python3 -m http.server -d web
+# http://localhost:8000/
+cp -rL web/ /srv/www/arael-demo       # a deployable copy
 ```
 
 After changing the model, regenerate the interfaces:
