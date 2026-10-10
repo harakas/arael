@@ -32,7 +32,8 @@ cargo build --release -p m3500-demo-capi
 python3 python/main.py
 ```
 
-Browser (`web/`): the same graph solved in the page as WebAssembly,
+Browser (`web/`, live at [arael.mare.ee/pgo](https://arael.mare.ee/pgo/)):
+the same graph solved in the page as WebAssembly,
 through the generated JavaScript interface
 ([docs/WASM.md](../../docs/WASM.md)). The actions are buttons in a
 column on the left, each with a tooltip and its key. Drag a pose and

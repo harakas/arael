@@ -7,9 +7,10 @@ builds a model, sets its parameters, solves and reads the result back.
 The whole solver runs in the page, in WebAssembly, on one thread.
 
 [cxx-examples/m3500_demo](../cxx-examples/m3500_demo) has a working
-page under `web/`: the M3500 pose graph composed from a g2o file,
-solved through one session, drawn on a canvas, with poses to drag, lock
-and fix. Its README has the build and serve commands.
+page under `web/`, live at [arael.mare.ee/pgo](https://arael.mare.ee/pgo/):
+a pose graph composed from a g2o file, solved through one session,
+drawn on a canvas, with poses to drag, lock and fix. Its README has
+the build and serve commands.
 
 ## Prerequisites
 
