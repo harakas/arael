@@ -1212,6 +1212,12 @@
 //! [`cxx-examples/`](https://github.com/harakas/arael/tree/master/cxx-examples)
 //! carries four demos with C++ and Python drivers over shared models.
 //!
+//! A page built on the JavaScript skin runs at
+//! [arael.mare.ee/pgo](https://arael.mare.ee/pgo/): a pose graph solved
+//! in the browser, with poses to drag, lock and fix and the graph
+//! re-solving around them. Its source is
+//! [cxx-examples/m3500_demo](https://github.com/harakas/arael/tree/master/cxx-examples/m3500_demo).
+//!
 //! # Solvers
 //!
 //! arael ships a Levenberg-Marquardt solver with multiple linear-
@@ -2375,6 +2381,29 @@
 //!   -- deeper comparison of sparse backends on the
 //!   SLAM model, with assembly vs solve breakdown and numeric
 //!   cross-check of the solutions.
+//!
+//! ## External and larger examples
+//!
+//! - **[Pose-graph optimization in the browser](https://arael.mare.ee/pgo/)**
+//!   -- the JavaScript interface running the solver as WebAssembly: a
+//!   pose graph with poses to drag, lock and fix, re-solved live.
+//!   Source in [cxx-examples/m3500_demo](https://github.com/harakas/arael/tree/master/cxx-examples/m3500_demo).
+//! - **[arael-sketch](https://github.com/harakas/arael/blob/master/docs/ARAEL_SKETCH.md)**
+//!   -- the constraint-based 2D sketch editor,
+//!   [live in the browser](https://sketch.mare.ee/): geometric
+//!   constraints, parametric dimensions, undo, a command interface and
+//!   an MCP server, all on arael.
+//! - **[rtabmap-arael](https://github.com/harakas/rtabmap-arael)** --
+//!   RTAB-Map with arael as a graph optimizer: pose-graph optimization
+//!   and bundle adjustment with marginal covariance, measured against
+//!   its Ceres, GTSAM, g2o and TORO backends. The models and the
+//!   numbers are in
+//!   [corelib/src/optimizer/arael](https://github.com/harakas/rtabmap-arael/tree/arael-optimizer/corelib/src/optimizer/arael).
+//! - **[slam_toolbox-arael](https://github.com/harakas/slam_toolbox-arael)**
+//!   -- ROS 2 slam_toolbox with an arael solver plugin reproducing its
+//!   Ceres plugin's residual, measured against it on 2D pose-graph
+//!   datasets. The model and the numbers are in
+//!   [solvers/arael](https://github.com/harakas/slam_toolbox-arael/tree/arael-solver/solvers/arael).
 //!
 //! # 2D Sketch Editor
 //!

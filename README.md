@@ -460,6 +460,13 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[bench_sparse](examples/bench_sparse.rs)** -- sparse Cholesky backends (faer) vs dense on SLAM.
 - **[bench_investigate](examples/bench_investigate.rs)** -- deeper comparison of sparse backends on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
 
+### External and larger examples
+
+- **[Pose-graph optimization in the browser](https://arael.mare.ee/pgo/)** -- the JavaScript interface running the solver as WebAssembly: a pose graph with poses to drag, lock and fix, re-solved live. Source in [cxx-examples/m3500_demo](cxx-examples/m3500_demo).
+- **[arael-sketch](docs/ARAEL_SKETCH.md)** -- the constraint-based 2D sketch editor, [live in the browser](https://sketch.mare.ee/): geometric constraints, parametric dimensions, undo, a command interface and an MCP server, all on arael.
+- **[rtabmap-arael](https://github.com/harakas/rtabmap-arael)** -- RTAB-Map with arael as a graph optimizer: pose-graph optimization and bundle adjustment with marginal covariance, measured against its Ceres, GTSAM, g2o and TORO backends. The models and the numbers are in [corelib/src/optimizer/arael](https://github.com/harakas/rtabmap-arael/tree/arael-optimizer/corelib/src/optimizer/arael).
+- **[slam_toolbox-arael](https://github.com/harakas/slam_toolbox-arael)** -- ROS 2 slam_toolbox with an arael solver plugin reproducing its Ceres plugin's residual, measured against it on 2D pose-graph datasets. The model and the numbers are in [solvers/arael](https://github.com/harakas/slam_toolbox-arael/tree/arael-solver/solvers/arael).
+
 ## Solvers
 
 Levenberg-Marquardt with pluggable linear-algebra backends behind one
@@ -742,6 +749,12 @@ r = f.solve_sparse(cfg)                   # raises AraelError on failure
 [`cxx-examples/`](cxx-examples/) carries four demos with C++ and
 Python drivers over shared models. See [docs/CXX.md](docs/CXX.md),
 [docs/PYTHON.md](docs/PYTHON.md) and [docs/WASM.md](docs/WASM.md).
+
+A page built on the JavaScript skin runs at
+[arael.mare.ee/pgo](https://arael.mare.ee/pgo/): a pose graph solved
+in the browser, with poses to drag, lock and fix and the graph
+re-solving around them. Its source is
+[cxx-examples/m3500_demo](cxx-examples/m3500_demo).
 
 ## Instrumentation and troubleshooting
 
