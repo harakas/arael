@@ -3,6 +3,19 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.9.1 - 2026-10-11
+
+### Fixed
+
+- A typed `#[arael::function]` can read matrix and vector elements by
+  index.
+- On Linux, a shared library that links a C++ interface exported by
+  cargo-arael no longer exports the interface's symbols. Exported, the
+  matrix routines faer uses on x86-64 could crash or return wrong
+  results.
+- On x86-64, arael-faer requires private-gemm-x86 0.1.22 or newer, so
+  updating arael moves a project off the yanked 0.1.20.
+
 ## 0.9.0 - 2026-10-10
 
 ### Added
@@ -138,13 +151,6 @@ is cut.
 
 - **A JavaScript / WebAssembly export**, with classes shaped like the
   Python package. See docs/WASM.md.
-- From C++ and Python a pose is an object you can multiply and invert.
-- Eigen conversions for every C++ math type.
-- Faster model building from Python: fill a whole collection in one
-  call, and read or write one field of every element at once as a
-  numpy array.
-- `cargo arael setup` sets the build profile that keeps model builds
-  fast; exports leave unchanged files alone.
 - From C++ and Python a pose is an object you can multiply and invert.
 - Eigen conversions for every C++ math type.
 - Faster model building from Python: fill a whole collection in one
