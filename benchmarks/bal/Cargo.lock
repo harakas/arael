@@ -46,6 +46,7 @@ version = "0.9.0"
 dependencies = [
  "faer",
  "nano-gemm",
+ "private-gemm-x86",
 ]
 
 [[package]]

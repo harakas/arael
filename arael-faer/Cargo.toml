@@ -29,3 +29,9 @@ faer = { version = "0.24", default-features = false, features = ["std", "sparse-
 # execution API is unsafe (raw pointers and strides); the one call site proves
 # and asserts its preconditions.
 nano-gemm = "0.2.2"
+
+# faer's x86-64 GEMM kernels, not called directly: the minimum moves a project
+# that depends on arael off the yanked 0.1.20, which an older Cargo.lock keeps
+# otherwise. Features as faer sets them (rayon only through faer/rayon).
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+private-gemm-x86 = { version = "0.1.22", default-features = false }
