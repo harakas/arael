@@ -4,11 +4,13 @@
 //! a tuple; a constraint body destructures it, another returns it as
 //! the residual rows through a second typed function. Both models must
 //! produce the cost, gradient and Hessian of the residual written
-//! inline, and the emitted fns stay callable from Rust.
+//! inline, and the emitted fns stay callable from Rust. A third reads a
+//! matrix's rows and elements by index.
 
+use arael::matrix::matrix3d;
 use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{LmProblem, RootProblem};
-use arael::sym::{symbol, vect2sym, vect3sym, E};
+use arael::sym::{matrix3sym, symbol, vect2sym, vect3sym, E};
 use arael::vect::{vect2, vect3};
 
 /// Pinhole projection of a camera-frame point `p` at focal `f` and
@@ -34,6 +36,16 @@ fn pixel_residual(p: vect3sym, f: E, c: vect2sym, obs: vect2sym) -> [E; 2] {
 fn scaled(r: E, kind: E) -> E {
     let half = r * 0.5;
     match kind { 0 => r, _ => half }
+}
+
+/// The doubled vector part of the quaternion of rotation matrix `r`,
+/// read from its elements by index.
+#[arael::function]
+fn quat_vec2(r: matrix3sym) -> vect3sym {
+    let s = r - r.transpose();
+    let row0 = r[0];
+    let denom = safe_sqrt(row0.x + r[1].y + r[2][2] + 1.0);
+    vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom)
 }
 
 #[arael::model]
@@ -77,6 +89,32 @@ struct Plain {
     c: vect2<f64>,
     obs: vect2<f64>,
     hb: SelfBlock<Plain>,
+}
+
+#[arael::model]
+#[arael(root, jacobian)]
+#[arael(constraint(hb, name = "rot", {
+    let v = quat_vec2(rotf.meas * matrix3sym::rotation_from_euler_angles(rotf.ea).transpose());
+    [v.x, v.y, v.z]
+}))]
+struct RotF {
+    ea: Param<vect3<f64>>,
+    meas: matrix3d,
+    hb: SelfBlock<RotF>,
+}
+
+#[arael::model]
+#[arael(root, jacobian)]
+#[arael(constraint(hb, name = "rot", {
+    let r = roti.meas * matrix3sym::rotation_from_euler_angles(roti.ea).transpose();
+    let s = r - r.transpose();
+    let denom = safe_sqrt(r[0].x + r[1].y + r[2].z + 1.0);
+    [s[2].y / denom, s[0].z / denom, s[1].x / denom]
+}))]
+struct RotI {
+    ea: Param<vect3<f64>>,
+    meas: matrix3d,
+    hb: SelfBlock<RotI>,
 }
 
 const P: [f64; 3] = [0.3, -0.2, 2.0];
@@ -171,6 +209,26 @@ fn typed_fn_kind_picks_the_arm() {
     };
     let (_, cost, _, _) = evaluate(&mut halved);
     assert!((cost - 12.5).abs() < 1e-9, "halved cost {} != 12.5", cost);
+}
+
+#[test]
+fn typed_fn_reads_matrix_elements() {
+    let ea = vect3::new(0.1, -0.2, 0.3);
+    let meas = matrix3d::rotation_from_euler_angles(vect3::new(0.15, -0.1, 0.25));
+    let mut f = RotF { ea: Param::new(ea), meas, hb: SelfBlock::new() };
+    let mut i = RotI { ea: Param::new(ea), meas, hb: SelfBlock::new() };
+    let (_, cost_i, g_i, h_i) = evaluate(&mut i);
+    assert!(cost_i > 1e-4, "cost {} leaves nothing to compare", cost_i);
+    let (_, cost_f, g_f, h_f) = evaluate(&mut f);
+    assert_same("cost", &[cost_f], &[cost_i]);
+    assert_same("gradient", &g_f, &g_i);
+    assert_same("hessian", &h_f, &h_i);
+
+    let v = quat_vec2(matrix3sym::new("r"));
+    let s = format!("{}", v.x);
+    for e in ["r[2].y", "r[1].z", "r[0].x", "r[1].y", "r[2].z"] {
+        assert!(s.contains(e), "x printed as {:?}, no {}", s, e);
+    }
 }
 
 #[test]

@@ -138,6 +138,18 @@ impl ops::Rem<vect3sym> for vect3sym {
     }
 }
 
+impl ops::Index<usize> for vect3sym {
+    type Output = E;
+    fn index(&self, index: usize) -> &E {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            2 => &self.z,
+            _ => panic!("vect3sym: index {} out of bounds", index)
+        }
+    }
+}
+
 impl vect3sym {
     /// Squared length (dot product with self).
     pub fn square(&self) -> E {
@@ -240,6 +252,17 @@ impl ops::Div<E> for vect2sym {
     type Output = vect2sym;
     fn div(self, rhs: E) -> vect2sym {
         vect2sym { x: self.x / rhs.clone(), y: self.y / rhs }
+    }
+}
+
+impl ops::Index<usize> for vect2sym {
+    type Output = E;
+    fn index(&self, index: usize) -> &E {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            _ => panic!("vect2sym: index {} out of bounds", index)
+        }
     }
 }
 

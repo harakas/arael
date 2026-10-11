@@ -249,6 +249,9 @@ the `%` operator, mirroring the runtime `vect3` -- and adds
 `.rotation_matrix()` (intrinsic ZYX Euler angles -> `matrix3sym`) plus
 the usual dot / scaled / negate / add / sub.
 
+`v[i]` is component `i` (0 is `x`) and a matrix's `m[i]` is row `i`, so
+`m[i][j]` is an element, as on the runtime types.
+
 Both `from_components` constructors are also available inside
 `#[arael(constraint(...))]` bodies (`vect3sym::from_components(a, b, c)`)
 for assembling a vector from scalar expressions -- e.g. the vee of a

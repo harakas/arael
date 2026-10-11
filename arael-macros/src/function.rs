@@ -420,7 +420,8 @@ fn form_c(
 
     // The Rust twin: the same block over the arael-sym types. Reads of
     // parameters and `let` locals are cloned, since the sym types are
-    // owned values with by-value operators; builtins and the sym types'
+    // owned values with by-value operators, and so is an indexed
+    // element, read in place; builtins and the sym types'
     // constructors get their full paths; `match` lowers to `select`.
     let mut twin = (*input.block).clone();
     let mut locals: Vec<String> = param_strs.clone();
@@ -430,6 +431,24 @@ fn form_c(
         }
     }
     struct Twin { locals: Vec<String>, error: Option<syn::Error> }
+    impl Twin {
+        fn is_local(&self, e: &syn::Expr) -> bool {
+            matches!(e, syn::Expr::Path(p) if p.qself.is_none()
+                && p.path.get_ident().is_some_and(|id| self.locals.iter().any(|l| id == l)))
+        }
+        /// The base of an index chain: a local is indexed in place, so
+        /// it is left uncloned; the indices are visited as usual.
+        fn visit_index_base(&mut self, e: &mut syn::Expr) {
+            match e {
+                syn::Expr::Index(ix) => {
+                    self.visit_index_base(&mut ix.expr);
+                    syn::visit_mut::VisitMut::visit_expr_mut(self, &mut ix.index);
+                }
+                _ if self.is_local(e) => {}
+                _ => syn::visit_mut::VisitMut::visit_expr_mut(self, e),
+            }
+        }
+    }
     impl syn::visit_mut::VisitMut for Twin {
         fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
             // Children first: nested matches are calls, operands cloned.
@@ -456,9 +475,19 @@ fn form_c(
                         }
                     }
                 }
+                syn::Expr::Index(ix) => {
+                    self.visit_index_base(&mut ix.expr);
+                    self.visit_expr_mut(&mut ix.index);
+                }
                 _ => syn::visit_mut::visit_expr_mut(self, e),
             }
             match e {
+                // An index yields a place inside its base: the element
+                // read is cloned out of it.
+                syn::Expr::Index(_) => {
+                    let place = e.clone();
+                    *e = syn::parse_quote!(::core::clone::Clone::clone(&#place));
+                }
                 syn::Expr::Path(p) if p.qself.is_none() => {
                     if let Some(id) = p.path.get_ident()
                         && self.locals.iter().any(|l| id == l)
