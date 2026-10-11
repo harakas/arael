@@ -10,3 +10,11 @@ add_subdirectory(${MODEL_CXX_DIR} arael_gen)
 
 add_executable(smoke main.cpp)
 target_link_libraries(smoke PRIVATE arael::cxx_fit)
+
+# A shared library linking the target, and a program using it. The
+# staticlib's symbols must stay inside the library; the driving test reads
+# its exports.
+add_library(consumer_shared SHARED shared.cpp)
+target_link_libraries(consumer_shared PRIVATE arael::cxx_fit)
+add_executable(smoke_shared smoke_shared.cpp)
+target_link_libraries(smoke_shared PRIVATE consumer_shared)

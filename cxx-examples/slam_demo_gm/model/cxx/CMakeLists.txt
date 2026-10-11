@@ -33,5 +33,12 @@ if(UNIX)
   set_property(TARGET arael_slam_demo_gm APPEND PROPERTY
     INTERFACE_LINK_LIBRARIES pthread dl m)
 endif()
+# Keep the staticlib's symbols inside whatever links it. Exported from a
+# shared library, the asm routines faer uses on x86-64 (private-gemm-x86)
+# call one another through lazily bound PLT slots, which they do not survive.
+if(UNIX AND NOT APPLE)
+  set_property(TARGET arael_slam_demo_gm APPEND PROPERTY
+    INTERFACE_LINK_OPTIONS "LINKER:--exclude-libs,libslam_demo_gm_capi.a")
+endif()
 add_dependencies(arael_slam_demo_gm slam_demo_gm_capi_build)
 add_library(arael::slam_demo_gm ALIAS arael_slam_demo_gm)

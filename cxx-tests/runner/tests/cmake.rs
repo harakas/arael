@@ -41,4 +41,46 @@ fn cmake_consumer_builds_and_runs() {
         String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("m ") && text.contains("end_cost "), "{text}");
+
+    // The same interface linked into a shared library.
+    let out = Command::new(build.join("smoke_shared")).output().expect("smoke_shared run");
+    assert!(out.status.success(), "smoke_shared failed: {}{}",
+        String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+
+    // The staticlib's symbols stay inside the shared library: exported, the
+    // asm routines faer uses on x86-64 (private-gemm-x86) call one another
+    // through lazily bound PLT slots, which they do not survive.
+    #[cfg(target_os = "linux")]
+    {
+        if !have("nm") {
+            eprintln!("cmake consumer: nm missing, export check skipped");
+            return;
+        }
+        let out = Command::new("nm").args(["-D", "--defined-only"])
+            .arg(build.join("libconsumer_shared.so"))
+            .output().expect("nm spawn");
+        assert!(out.status.success(), "nm failed");
+        let names: Vec<String> = String::from_utf8_lossy(&out.stdout).lines()
+            .filter_map(|l| l.split_whitespace().last().map(str::to_string))
+            .collect();
+        assert!(names.iter().any(|n| n == "consumer_fit_slope"), "{names:?}");
+        let leaked: Vec<&String> = names.iter()
+            .filter(|n| n.starts_with("fit_") || is_rust_symbol(n))
+            .collect();
+        assert!(leaked.is_empty(),
+            "{} staticlib symbols exported, e.g. {:?}", leaked.len(), &leaked[..leaked.len().min(5)]);
+    }
+}
+
+// A Rust symbol: v0 mangling, or legacy mangling ending in the hash
+// `17h<16 hex digits>E`.
+#[cfg(target_os = "linux")]
+fn is_rust_symbol(name: &str) -> bool {
+    if name.starts_with("_R") {
+        return true;
+    }
+    let b = name.as_bytes();
+    name.starts_with("_ZN") && b.len() > 20 && name.ends_with('E')
+        && &name[b.len() - 20..b.len() - 17] == "17h"
+        && name[b.len() - 17..b.len() - 1].bytes().all(|c| c.is_ascii_hexdigit())
 }

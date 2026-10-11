@@ -71,6 +71,13 @@ alongside the C++17 compiler. Without CMake: compile against
 `-I cxx/include`, link the staticlib cargo builds from `capi/`, plus
 `-lpthread -ldl -lm`.
 
+On Linux the target also links with `--exclude-libs,lib<model>_capi.a`,
+which keeps the staticlib's symbols inside a shared library built on
+it. Without CMake, pass `-Wl,--exclude-libs,lib<model>_capi.a` when
+linking a shared library. Exported, the assembly routines faer uses on
+x86-64 call one another through lazily bound PLT slots, and crash or
+compute wrong results.
+
 ```cpp
 #include <mymodel.hpp>
 using namespace mymodel;   // the model AND the re-exported arael math
