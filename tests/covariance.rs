@@ -915,3 +915,173 @@ fn covariance_with_a_pushing_hook() {
         }
     }
 }
+
+// A chain of 3-DOF nodes with a loop closure every three nodes: a pose graph,
+// which a sparse solve factorizes whole, in block form.
+fn looped_chain3(n: usize) -> Chain3 {
+    let mut c = chain3(n);
+    let mut i = 0;
+    while i + 7 < n {
+        c.ties.push(Tie3 { a: c.nodes.ref_at(i), b: c.nodes.ref_at(i + 7), isig: 0.5, hb: CrossBlock::new() });
+        i += 3;
+    }
+    c
+}
+
+// Every query of `got` equals the same query of `want`, to rounding.
+fn same_queries(label: &str, c: &Chain3, got: &CovAssembly, want: &CovAssembly) {
+    let close = |what: &str, i: usize, a: &[f64], b: &[f64]| {
+        assert_eq!(a.len(), b.len(), "{label} {what} node {i}");
+        for (x, y) in a.iter().zip(b) {
+            assert!((x - y).abs() < 1e-10, "{label} {what} node {i}: {x} vs {y}");
+        }
+    };
+    let n = c.nodes.len();
+    for i in 0..n {
+        let (a, b) = (&c.nodes[i], &c.nodes[(i + 5) % n]);
+        close("marginal", i, got.marginal_cov(a).unwrap().as_slice(), want.marginal_cov(a).unwrap().as_slice());
+        close("conditional", i, got.conditional_cov(a).unwrap().as_slice(), want.conditional_cov(a).unwrap().as_slice());
+        close("cross", i, got.cross_cov(a, b).unwrap().as_slice(), want.cross_cov(a, b).unwrap().as_slice());
+        close("std_dev", i, &got.std_dev(a).unwrap(), &want.std_dev(a).unwrap());
+    }
+}
+
+#[test]
+fn a_solve_hands_its_analysis_to_the_covariance() {
+    // A pose graph solves whole, in block form; the covariance it carries
+    // factorizes under that analysis, with no symbolic of its own, and
+    // answers every query as the model's own covariance does.
+    use arael::simple_lm::LmConfig;
+    let mut c = looped_chain3(40);
+    let r = c.solve_sparse(&LmConfig::<f64>::conservative().with_covariance(CovMode::PerQuery)).unwrap();
+    let got = r.covariance.as_ref().unwrap();
+    assert!(got.took_block_route());
+    assert_eq!(got.plan().symbolics_built, 0, "{:?}", got.plan());
+    assert_eq!(got.plan().ordering, CovOrdering::Amd);
+    let want = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    assert_eq!(want.plan().symbolics_built, 2, "the model's own form prices both orderings");
+    same_queries("per query", &c, got, &want);
+}
+
+#[test]
+fn the_covariance_ordering_decides_whether_the_analysis_is_taken() {
+    // Auto takes the order the solve chose; a named ordering only its own.
+    // Taken or not, the covariance is the same.
+    use arael::simple_lm::{LmConfig, SolveOrdering, SparseFaer, SparseFaerOptions};
+    let mut c = looped_chain3(40);
+    let want = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    // (solve ordering, covariance ordering, taken, ordering the plan reports)
+    let cases = [
+        (SolveOrdering::Auto, CovOrdering::Auto, true, CovOrdering::Amd),
+        (SolveOrdering::Auto, CovOrdering::Amd, true, CovOrdering::Amd),
+        (SolveOrdering::Auto, CovOrdering::NestedDissection, false, CovOrdering::NestedDissection),
+        (SolveOrdering::Auto, CovOrdering::Natural, false, CovOrdering::Natural),
+        (SolveOrdering::NestedDissection, CovOrdering::Auto, true, CovOrdering::NestedDissection),
+        (SolveOrdering::NestedDissection, CovOrdering::NestedDissection, true, CovOrdering::NestedDissection),
+        (SolveOrdering::NestedDissection, CovOrdering::Amd, false, CovOrdering::Amd),
+        (SolveOrdering::Natural, CovOrdering::Natural, true, CovOrdering::Natural),
+    ];
+    for (solve, cov, taken, reported) in cases {
+        let mut solver = SparseFaer::from_options(&SparseFaerOptions::default().with_ordering(solve));
+        let cfg = LmConfig::<f64>::conservative()
+            .with_covariance(CovMode::PerQuery)
+            .with_covariance_options(CovOptions::auto().with_ordering(cov));
+        let got = c.solve_with(&mut solver, &cfg).unwrap().covariance.unwrap();
+        let label = format!("{solve:?} solve, {cov:?} covariance");
+        assert_eq!(got.plan().symbolics_built == 0, taken, "{label}: {:?}", got.plan());
+        assert_eq!(got.plan().ordering, reported, "{label}");
+        same_queries(&label, &c, &got, &want);
+    }
+}
+
+#[test]
+fn all_marginals_takes_the_solves_block_order() {
+    // AllMarginals factorizes in scalar form; it takes the solve's block
+    // order as its permutation instead of pricing its own.
+    use arael::simple_lm::LmConfig;
+    let mut c = looped_chain3(40);
+    let r = c.solve_sparse(&LmConfig::<f64>::conservative().with_covariance(CovMode::AllMarginals)).unwrap();
+    let got = r.covariance.as_ref().unwrap();
+    assert!(!got.took_block_route());
+    assert_eq!(got.plan().symbolics_built, 0, "{:?}", got.plan());
+    let want = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+    same_queries("all marginals", &c, got, &want);
+}
+
+#[test]
+fn a_solve_without_a_whole_block_analysis_leaves_the_covariance_its_own() {
+    // The Dense solver, faer's scalar route and a reduced solve keep no
+    // analysis of the whole Hessian in block form: the covariance orders and
+    // analyses on its own, and is the same.
+    use arael::simple_lm::{LmConfig, SchurPolicy, SparseFaer, SparseFaerOptions};
+    let mut c = looped_chain3(40);
+    let want = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let cfg = LmConfig::<f64>::conservative().with_covariance(CovMode::PerQuery);
+
+    let dense = c.solve_dense(&cfg).unwrap().covariance.unwrap();
+    assert_eq!(dense.plan().symbolics_built, 2, "dense: {:?}", dense.plan());
+    same_queries("dense", &c, &dense, &want);
+
+    let mut scalar = SparseFaer::from_options(
+        &SparseFaerOptions::default().with_block_supernodal(BlockSupernodalMode::Never),
+    );
+    let got = c.solve_with(&mut scalar, &cfg).unwrap().covariance.unwrap();
+    assert_eq!(got.plan().symbolics_built, 2, "faer scalar route: {:?}", got.plan());
+    same_queries("faer scalar route", &c, &got, &want);
+
+    // Nodes 1 and 4 share no tie, so they marginalize.
+    let mut reduced = SparseFaer::from_options(
+        &SparseFaerOptions::default().with_marginalize(3..6).with_marginalize(12..15).with_policy(SchurPolicy::Force),
+    );
+    let r = c.solve_with(&mut reduced, &cfg).unwrap();
+    assert!(matches!(r.solver, Some(arael::simple_lm::SolverReport::Schur(p)) if p.reduced), "{:?}", r.solver);
+    let got = r.covariance.unwrap();
+    assert_eq!(got.plan().symbolics_built, 2, "reduced: {:?}", got.plan());
+    same_queries("reduced", &c, &got, &want);
+}
+
+#[test]
+fn a_session_hands_its_analysis_to_the_covariance() {
+    // A session's solves and its own assemble_covariance take the analysis;
+    // a model of another size, or an invalidated session, has none to take.
+    use arael::simple_lm::{LmConfig, LmSession, SparseFaer};
+    let mut c = looped_chain3(40);
+    let want = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let cfg = LmConfig::<f64>::conservative();
+    let mut session = LmSession::new(SparseFaer::new());
+
+    let r = session.solve(&mut c, &cfg.clone().with_covariance(CovMode::PerQuery)).unwrap();
+    assert_eq!(r.covariance.as_ref().unwrap().plan().symbolics_built, 0);
+    same_queries("session solve", &c, r.covariance.as_ref().unwrap(), &want);
+
+    // A warm solve that does not ask, then the session's own covariance.
+    session.solve(&mut c, &cfg).unwrap();
+    let got = session.assemble_covariance(&mut c, CovMode::PerQuery).unwrap();
+    assert_eq!(got.plan().symbolics_built, 0, "{:?}", got.plan());
+    same_queries("session covariance", &c, &got, &want);
+
+    // The analysis is of a 40-node model; a 30-node one gets its own.
+    let mut other = looped_chain3(30);
+    let got = session.assemble_covariance(&mut other, CovMode::PerQuery).unwrap();
+    assert_eq!(got.plan().symbolics_built, 2, "{:?}", got.plan());
+    let other_want = other.assemble_covariance(CovMode::PerQuery).unwrap();
+    same_queries("another model", &other, &got, &other_want);
+
+    session.invalidate();
+    let got = session.assemble_covariance(&mut c, CovMode::PerQuery).unwrap();
+    assert_eq!(got.plan().symbolics_built, 2, "{:?}", got.plan());
+    same_queries("invalidated", &c, &got, &want);
+}
+
+#[cfg(feature = "threads")]
+#[test]
+fn the_covariance_a_solve_carries_factorizes_on_its_threads() {
+    // The same covariance at one thread and at four, to rounding.
+    use arael::simple_lm::LmConfig;
+    let mut c = looped_chain3(120);
+    let cfg = LmConfig::<f64>::conservative().with_covariance(CovMode::PerQuery);
+    let one = c.solve_sparse(&cfg.clone().with_num_threads(1)).unwrap().covariance.unwrap();
+    let four = c.solve_sparse(&cfg.with_num_threads(4)).unwrap().covariance.unwrap();
+    assert_eq!(four.plan().symbolics_built, 0);
+    same_queries("threads", &c, &four, &one);
+}

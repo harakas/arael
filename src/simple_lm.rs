@@ -39,6 +39,7 @@ use crate::store::PositionStream;
 use crate::utils::Float;
 use arael_faer::{value_index, SparseIndex, ValueIndex};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
@@ -931,7 +932,7 @@ pub trait LmProblem<T> {
         let mut ctx = crate::threads::Context::new();
         let mut result = lm_solve_with_context(&params, solver, self, config, &mut ctx)?;
         self.deserialize(&result.x);
-        finish_covariance(self, config, &mut ctx, &mut result);
+        finish_covariance(self, config, &mut ctx, solver.solve_analysis(), &mut result);
         Ok(result)
     }
 
@@ -2024,6 +2025,16 @@ pub trait LmSolver<T: Float> {
     fn assembly_time(&self) -> Option<Duration> {
         None
     }
+
+    /// The structure the last solve analysed the whole Hessian into, for the
+    /// covariance the solve carries ([`LmConfig::with_covariance`]) to
+    /// factorize under instead of analysing again.
+    ///
+    /// `None`, the default, when the solver keeps none: the covariance then
+    /// orders and analyses on its own. The covariance is the same either way.
+    fn solve_analysis(&self) -> Option<crate::covariance::SolveAnalysis> {
+        None
+    }
 }
 
 /// Dense Cholesky solver (nalgebra).
@@ -2568,16 +2579,25 @@ fn cov_placeholder<T: Float>(
 
 /// The covariance the config asked for, assembled at the solution over the
 /// solve's own context and placed in the result; its time into the timing
-/// when gathered.
+/// when gathered. It factorizes under the solver's analysis when the solver
+/// hands one over, on the solve's threads.
 fn finish_covariance<T: Float, P: crate::covariance::Covariance<T>>(
     model: &mut P,
     config: &LmConfig<T>,
     ctx: &mut crate::threads::Context,
+    analysis: Option<crate::covariance::SolveAnalysis>,
     result: &mut LmResult<T>,
 ) {
     let Some(mode) = config.covariance else { return };
     let start = config.gather_timing.then(Instant::now);
-    result.covariance = model.assemble_covariance_with(mode, &config.covariance_options, ctx);
+    result.covariance = crate::covariance::assemble_after_solve(
+        model,
+        mode,
+        &config.covariance_options,
+        ctx,
+        analysis.as_ref(),
+        crate::threads::pool_size(config.num_threads),
+    );
     if let (Some(start), Some(t)) = (start, result.timing.as_mut()) {
         t.covariance = start.elapsed();
     }
@@ -3487,7 +3507,8 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
     where
         P: crate::covariance::Covariance<T>,
     {
-        model.assemble_covariance_with(mode, opts, &mut self.ctx)
+        let analysis = self.solver.solve_analysis();
+        crate::covariance::assemble_after_solve(model, mode, opts, &mut self.ctx, analysis.as_ref(), 1)
     }
 
     /// Solve the model through the session: serialize -> optimize ->
@@ -3502,7 +3523,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
         model.serialize(&mut params);
         let mut result = self.solve_x0(&params, model, config)?;
         model.deserialize(&result.x);
-        finish_covariance(model, config, &mut self.ctx, &mut result);
+        finish_covariance(model, config, &mut self.ctx, self.solver.solve_analysis(), &mut result);
         Ok(result)
     }
 
@@ -4826,8 +4847,9 @@ pub struct SparseFaer<T = f64> {
     assembly_time: Duration,
     did_setup: bool,
     // Structure, built on the first compute of a solve and reused for
-    // every following iteration and damping retry.
-    positions: Option<PositionStream>,
+    // every following iteration and damping retry. Shared, so the
+    // covariance a solve carries can take it (solve_analysis).
+    positions: Option<Arc<PositionStream>>,
     bdiag_pos: Vec<ValueIndex>,
     schur: Option<arael_faer::schur::SchurSymbolic<SparseIndex>>,
     s: Option<arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>,
@@ -4876,7 +4898,14 @@ pub struct SparseFaer<T = f64> {
     sn_batch_ratio: Option<f64>,
     sn_memory_lean: bool,
     sn_active: bool,
-    sn_sym: Option<arael_faer::supernodal::SupernodalSymbolic>,
+    sn_sym: Option<Arc<arael_faer::supernodal::SupernodalSymbolic>>,
+    // On the whole-system route: the block pattern sn_sym analyses and the
+    // ordering it was built under, for solve_analysis. None on every other
+    // route, and for an order no covariance ordering names.
+    sn_whole: Option<(
+        Arc<arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>>,
+        crate::covariance::CovOrdering,
+    )>,
     sn_factor: Vec<T>,
     sn_ctx: arael_faer::supernodal::SupernodalContext<T>,
     // Conjugate gradients on the reduced system ([`SchurMethod::Iterative`]).
@@ -4939,6 +4968,7 @@ impl<T> SparseFaer<T> {
             sn_memory_lean: false,
             sn_active: false,
             sn_sym: None,
+            sn_whole: None,
             sn_factor: Vec::new(),
             sn_ctx: arael_faer::supernodal::SupernodalContext::new(),
             schur_solve: SchurMethod::default(),
@@ -5132,7 +5162,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 self.assembly_time += t.elapsed();
             }
         }
-        self.positions = Some(positions);
+        self.positions = Some(Arc::new(positions));
         Ok(cost)
     }
 
@@ -5237,7 +5267,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             self.assembly_time = t.elapsed();
         }
         matrix.h = Some(h);
-        self.positions = Some(positions);
+        self.positions = Some(Arc::new(positions));
         Ok(cost)
     }
 
@@ -5313,13 +5343,27 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         };
         // The symbolic of the winning order, when pricing built it already.
         let mut priced: Option<arael_faer::supernodal::SupernodalSymbolic> = None;
+        // Which covariance ordering the chosen order is, for solve_analysis;
+        // None for an order no covariance ordering names (a set first).
+        let mut order_kind: Option<crate::covariance::CovOrdering> = None;
         let block_order: Option<Vec<usize>> = match self.ordering {
-            _ if block_order_in.is_some() => block_order_in,
-            SolveOrdering::NestedDissection => Some(arael_faer::nd::order_graph(
-                &arael_faer::nd::Graph::of_blocks(&hsym),
-                arael_faer::nd::NdParams::default(),
-            )),
-            SolveOrdering::Natural => None,
+            // The one caller that passes an order is the reduction gate,
+            // with the nested dissection it priced.
+            _ if block_order_in.is_some() => {
+                order_kind = Some(crate::covariance::CovOrdering::NestedDissection);
+                block_order_in
+            }
+            SolveOrdering::NestedDissection => {
+                order_kind = Some(crate::covariance::CovOrdering::NestedDissection);
+                Some(arael_faer::nd::order_graph(
+                    &arael_faer::nd::Graph::of_blocks(&hsym),
+                    arael_faer::nd::NdParams::default(),
+                ))
+            }
+            SolveOrdering::Natural => {
+                order_kind = Some(crate::covariance::CovOrdering::Natural);
+                None
+            }
             _ if marg_first => {
                 let mut order: Vec<usize> = Vec::with_capacity(nblk);
                 let mut taken = vec![false; nblk];
@@ -5388,11 +5432,17 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 // No candidate produced a symbolic at all: leave the order
                 // unset and let the factorization below report the failure.
                 choice.map(|c| {
+                    if c.winner == 1 {
+                        order_kind = Some(crate::covariance::CovOrdering::Amd);
+                    }
                     priced = Some(c.symbolic);
                     c.order
                 })
             }
-            _ => Some(arael_faer::supernodal::amd_block_order(&hsym)),
+            _ => {
+                order_kind = Some(crate::covariance::CovOrdering::Amd);
+                Some(arael_faer::supernodal::amd_block_order(&hsym))
+            }
         };
         let sn = match priced {
             Some(sn) => sn,
@@ -5416,7 +5466,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 sn.factor_val_count(),
             );
         }
-        self.sn_sym = Some(sn);
+        self.sn_whole = order_kind.map(|k| (Arc::new(hsym.clone()), k));
+        self.sn_sym = Some(Arc::new(sn));
 
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
         let mut positions = PositionStream::new();
@@ -5451,7 +5502,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             self.assembly_time = t.elapsed();
         }
         matrix.h = Some(h);
-        self.positions = Some(positions);
+        self.positions = Some(Arc::new(positions));
         Ok(cost)
     }
 
@@ -5585,6 +5636,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.envelope_sym = None;
         self.envelope_active = false;
         self.sn_sym = None;
+        self.sn_whole = None;
         self.sn_active = false;
         self.plan = None;
         self.cg_iters = 0;
@@ -5623,6 +5675,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         (self.measure && self.did_setup).then_some(self.assembly_time)
     }
 
+    // The whole-system block route's pattern, binding and symbolic, when the
+    // order is one a covariance ordering names.
+    fn solve_analysis(&self) -> Option<crate::covariance::SolveAnalysis> {
+        let (pattern, ordering) = self.sn_whole.as_ref()?;
+        Some(crate::covariance::SolveAnalysis {
+            pattern: pattern.clone(),
+            positions: self.positions.clone()?,
+            symbolic: self.sn_sym.clone()?,
+            ordering: *ordering,
+        })
+    }
+
     fn new_matrix(&self, n: usize) -> FaerMatrix<T> {
         FaerMatrix { n, h: None, csc: None }
     }
@@ -5656,6 +5720,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.envelope_active = false;
         self.sn_active = false;
         self.sn_sym = None;
+        self.sn_whole = None;
         let n = matrix.n;
 
         // Verbose mode narrates the one-time structural work below: what was
@@ -6479,7 +6544,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     sn.factor_val_count(),
                 );
             }
-            self.sn_sym = Some(sn);
+            self.sn_sym = Some(Arc::new(sn));
             self.sn_active = true;
             if let Some(plan) = self.plan.as_mut() {
                 plan.block_supernodal = true;
@@ -6556,7 +6621,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.assembly_time = t.elapsed();
         }
         matrix.h = Some(h);
-        self.positions = Some(positions);
+        self.positions = Some(Arc::new(positions));
         Ok(cost)
     }
 
