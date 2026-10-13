@@ -3,6 +3,14 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.9.2 - 2026-10-12
+
+### Performance
+
+- A covariance asked for in the solve's config reuses the solve's analysis
+  of the problem instead of redoing it, and runs on the solve's threads.
+  Large pose graphs solve faster with their covariance.
+
 ## 0.9.1 - 2026-10-11
 
 ### Fixed
