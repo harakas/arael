@@ -59,7 +59,7 @@ Each field has `name`, a `kind`, and kind-specific keys:
 | `optional` | `of` | `Option<Entity>` -- zero or one instance |
 | `collection` | `container` (`vec` / `deque` / `arena`), `of` (element type), `spelled` (full spelling) | entity collection |
 | `ref` | `of` (target type), `target` (resolution path, e.g. `root.poses`) | `Ref<T>` handle |
-| `self_block` / `cross_block` | `scalar`; cross adds `a`, `b` | Hessian block storage -- no external accessor |
+| `self_block` / `cross_block` | `scalar`; cross adds `a`, `b`; `var: true` on a `VarSelfBlock` or `VarCrossBlock` | Hessian block storage -- no external accessor |
 | `skip` | `of` | excluded from the model (`#[arael(skip)]`, deriv caches, constraint indices) |
 | `opaque` | `of` | present but not representable (e.g. `String`, user types) -- generators list these so nothing silently disappears |
 

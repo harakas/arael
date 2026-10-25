@@ -83,6 +83,31 @@ enum SymFieldType {
     Skip,
 }
 
+/// A cross block field of a registered struct: `CrossBlock<A, B>` or
+/// `VarCrossBlock<A, B>`.
+#[derive(Clone, Debug)]
+struct CrossField {
+    /// The field's name.
+    name: String,
+    /// The A side's type.
+    a: String,
+    /// The B side's type.
+    b: String,
+    /// `#[arael(cross = (a, b))]`: the ref fields that fill the sides
+    /// when the declaration-order mapping is ambiguous.
+    over: Option<(String, String)>,
+    /// Declared `VarCrossBlock`: the block is stored at its live size.
+    var: bool,
+}
+
+impl CrossField {
+    /// The field's type as the model spells it, `CrossBlock<A, B>` or
+    /// `VarCrossBlock<A, B>`, for messages.
+    fn spelled(&self) -> String {
+        format!("{}<{}, {}>", if self.var { "VarCrossBlock" } else { "CrossBlock" }, self.a, self.b)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct SymLayout {
     fields: Vec<(String, SymFieldType)>,
@@ -148,13 +173,13 @@ struct SymLayout {
     /// precision at this holding -- the layout alone loses the spelling,
     /// so the root check resolves "generic" through these records.
     inst_precisions: Vec<(String, String, String)>,
-    /// `CrossBlock<A, B>` / `BoxedCrossBlock<A, B>` fields on this struct:
-    /// (field name, A type, B type, `#[arael(cross = (a, b))]` ref-field
-    /// override). Lets a child's `parent.<field>` block spec resolve a
-    /// shared cross accumulator on the containing parent; the override
-    /// picks which parent ref fields fill the (A, B) slots when the
-    /// declaration-order mapping is ambiguous.
-    cross_block_fields: Vec<(String, String, String, Option<(String, String)>)>,
+    /// `CrossBlock<A, B>` / `VarCrossBlock<A, B>` fields on this struct.
+    /// Lets a child's `parent.<field>` block spec resolve a shared cross
+    /// accumulator on the containing parent, and tells the root's store
+    /// which array each field takes.
+    cross_block_fields: Vec<CrossField>,
+    /// The self block field is a `VarSelfBlock`: stored at its live size.
+    self_block_var: bool,
     /// `#[arael(root)]` struct. A root's expansion consumes the constraint
     /// stash; the registration-time ordering guard errors on any model
     /// type that registers later yet is reachable from this root -- its
@@ -1453,19 +1478,21 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     let mut suspect_wrappers_reg: Vec<(String, String, String)> = Vec::new();
     let mut block_precision_reg: Option<(String, String)> = None;
     let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
-    let mut cross_block_fields_reg: Vec<(String, String, String, Option<(String, String)>)> = Vec::new();
+    let mut cross_block_fields_reg: Vec<CrossField> = Vec::new();
     let mut spelled_types_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field -- this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
+    let mut self_block_var_reg = false;
     for field in fields {
         let field_name = field.ident.as_ref().unwrap().to_string();
-        if is_self_block_for(&field.ty, &name.to_string()) {
+        if let Some(var) = is_self_block_for(&field.ty, &name.to_string()) {
             if self_block_field_reg.is_some() {
                 return Err(syn::Error::new_spanned(field,
                     format!("`{}` already has a SelfBlock<Self> field; at most one is allowed", name)));
             }
             self_block_field_reg = Some(field_name);
+            self_block_var_reg = var;
         }
     }
     for field in fields {
@@ -1544,7 +1571,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
             } else { &field.ty };
             if let syn::Type::Path(tp) = bare
                 && let Some(seg) = tp.path.segments.last()
-                && (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock")
+                && (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock" || seg.ident == "VarCrossBlock")
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     let mut type_idents = args.args.iter().filter_map(|a| {
                         if let syn::GenericArgument::Type(syn::Type::Path(atp)) = a {
@@ -1557,7 +1584,9 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
                                 Some((refs[0].clone(), refs[1].clone())),
                             _ => None,
                         };
-                        cross_block_fields_reg.push((field_name.clone(), a, b, over));
+                        cross_block_fields_reg.push(CrossField {
+                            name: field_name.clone(), a, b, over, var: seg.ident == "VarCrossBlock",
+                        });
                     }
                 }
         }
@@ -1719,6 +1748,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
         block_precision: block_precision_reg,
         inst_precisions: inst_precisions_reg,
         cross_block_fields: cross_block_fields_reg,
+        self_block_var: self_block_var_reg,
         is_root: has_struct_attr_ident(&input.attrs, "root"),
         scalar_generic: scalar_generic.clone(),
         spelled_types: spelled_types_reg,
@@ -1916,7 +1946,10 @@ fn inner_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
 /// Detect whether `ty` is `SelfBlock<SelfName, ...>` (possibly wrapped in
 /// Option<>) -- used by `#[arael::model]` to find the struct's canonical
 /// self-block field for grad + A-A Hessian accumulation.
-fn is_self_block_for(ty: &syn::Type, self_name: &str) -> bool {
+/// Whether `ty` is this struct's own block, `SelfBlock<Self>` or
+/// `VarSelfBlock<Self>` (an `Option` of one included), and if so
+/// whether it is the variable-width form.
+fn is_self_block_for(ty: &syn::Type, self_name: &str) -> Option<bool> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
             if seg.ident == "Option" {
@@ -1924,22 +1957,24 @@ fn is_self_block_for(ty: &syn::Type, self_name: &str) -> bool {
                     && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                         return is_self_block_for(inner_ty, self_name);
                     }
-                return false;
+                return None;
             }
-            if (seg.ident == "SelfBlock" || seg.ident == "BoxedSelfBlock")
+            if (seg.ident == "SelfBlock" || seg.ident == "BoxedSelfBlock" || seg.ident == "VarSelfBlock")
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
                 && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_tp))) = args.args.first()
                 && let Some(inner_seg) = inner_tp.path.segments.last()
+                && inner_seg.ident == self_name
             {
-                return inner_seg.ident == self_name;
+                return Some(seg.ident == "VarSelfBlock");
             }
         }
-    false
+    None
 }
 
-/// Rewrite SelfBlock<A> to SelfBlock<A, {A_PARAM_COUNT}, {N(N+1)/2}> and
+/// Rewrite SelfBlock<A> to SelfBlock<A, {A_PARAM_COUNT}, {N(N+1)/2}>,
 /// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}, {NA*NB}>
-/// (both with an optional trailing f32 float arg). The BoxedSelfBlock /
+/// and VarCrossBlock<A, B> to VarCrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>
+/// (each with an optional trailing f32 float arg). The BoxedSelfBlock /
 /// BoxedCrossBlock variants take the identical const dims -- they wrap the
 /// inline block behind a Box -- so they are rewritten the same way, preserving
 /// the original type name.
@@ -1979,6 +2014,77 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                             }
                     }
                 }
+            } else if type_name == "VarSelfBlock"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let type_args: Vec<&syn::Type> = args.args.iter()
+                        .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+                        .collect();
+                    if (type_args.len() == 1 || type_args.len() == 2)
+                        && let syn::Type::Path(a_path) = type_args[0]
+                        && let Some(a_seg) = a_path.path.segments.last()
+                    {
+                        let const_name = syn::Ident::new(
+                            &format!("{}_PARAM_COUNT", a_seg.ident),
+                            a_seg.ident.span(),
+                        );
+                        let a_path = type_args[0];
+                        // The values are not sized by the type, so only
+                        // the count follows the model.
+                        if type_args.len() == 2 {
+                            // <A, f32> -> <A, {N}, f32>
+                            let float_ty = type_args[1];
+                            let new_ty: syn::Type = syn::parse_quote! {
+                                #block_ident<#a_path, { #const_name }, #float_ty>
+                            };
+                            *ty = new_ty;
+                        } else {
+                            // <A> -> <A, {N}>
+                            let new_ty: syn::Type = syn::parse_quote! {
+                                #block_ident<#a_path, { #const_name }>
+                            };
+                            *ty = new_ty;
+                        }
+                    }
+            } else if type_name == "VarCrossBlock"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let type_args: Vec<&syn::Type> = args.args.iter()
+                        .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+                        .collect();
+                    if (type_args.len() == 2 || type_args.len() == 3)
+                        && let (syn::Type::Path(a_path), syn::Type::Path(b_path)) =
+                            (type_args[0], type_args[1])
+                            && let (Some(a_seg), Some(b_seg)) = (a_path.path.segments.last(), b_path.path.segments.last()) {
+                                registry_record_cross(
+                                    &a_seg.ident.to_string(),
+                                    &b_seg.ident.to_string(),
+                                );
+                                let a_const = syn::Ident::new(
+                                    &format!("{}_PARAM_COUNT", a_seg.ident),
+                                    a_seg.ident.span(),
+                                );
+                                let b_const = syn::Ident::new(
+                                    &format!("{}_PARAM_COUNT", b_seg.ident),
+                                    b_seg.ident.span(),
+                                );
+                                let a_ty = type_args[0];
+                                let b_ty = type_args[1];
+                                // The values are not sized by the type, so
+                                // no product follows the two counts.
+                                if type_args.len() == 3 {
+                                    // <A, B, f32> -> <A, B, {NA}, {NB}, f32>
+                                    let float_ty = type_args[2];
+                                    let new_ty: syn::Type = syn::parse_quote! {
+                                        #block_ident<#a_ty, #b_ty, { #a_const }, { #b_const }, #float_ty>
+                                    };
+                                    *ty = new_ty;
+                                } else {
+                                    // <A, B> -> <A, B, {NA}, {NB}>
+                                    let new_ty: syn::Type = syn::parse_quote! {
+                                        #block_ident<#a_ty, #b_ty, { #a_const }, { #b_const }>
+                                    };
+                                    *ty = new_ty;
+                                }
+                            }
             } else if (type_name == "CrossBlock" || type_name == "BoxedCrossBlock")
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     let type_args: Vec<&syn::Type> = args.args.iter()
@@ -2104,7 +2210,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // one (a grouping sub-model, a `skip_self_block` bag of parameters)
     // owns no span and reports nothing.
     let self_block_field: Option<syn::Ident> = fields.iter()
-        .find(|f| is_self_block_for(&f.ty, &name.to_string()))
+        .find(|f| is_self_block_for(&f.ty, &name.to_string()).is_some())
         .and_then(|f| f.ident.clone());
 
     // Detect euler angle param types and generate precompute calls
@@ -2755,13 +2861,15 @@ fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
     None
 }
 
-/// Check if a type is `SelfBlock<...>` or `CrossBlock<...>`.
+/// Check if a type is `SelfBlock<...>`, `CrossBlock<...>` or one of
+/// their variable-width forms.
 fn is_hessian_block_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return matches!(name.as_str(),
-                "SelfBlock" | "CrossBlock" | "BoxedSelfBlock" | "BoxedCrossBlock");
+                "SelfBlock" | "VarSelfBlock" | "CrossBlock" | "VarCrossBlock"
+                | "BoxedSelfBlock" | "BoxedCrossBlock");
         }
     false
 }
@@ -2867,7 +2975,7 @@ fn collect_wrapper_suspects(
         "Vec" | "Deque" | "Arena" | "Option" | "Ref" => {
             for t in type_args { collect_wrapper_suspects(t, scalar_generic, out); }
         }
-        "SelfBlock" | "CrossBlock" | "BoxedSelfBlock" | "BoxedCrossBlock"
+        "SelfBlock" | "VarSelfBlock" | "CrossBlock" | "VarCrossBlock" | "BoxedSelfBlock" | "BoxedCrossBlock"
         | "Param" | "SimpleEulerAngleParam" | "EulerAngleParam" | "QuaternionParam"
         | "PhantomData" => {}
         _ => {
@@ -2893,8 +3001,8 @@ fn block_field_precision(ty: &syn::Type, scalar_generic: Option<&str>) -> Option
     let syn::Type::Path(tp) = ty else { return None };
     let seg = tp.path.segments.last()?;
     let scalar_pos = match seg.ident.to_string().as_str() {
-        "SelfBlock" | "BoxedSelfBlock" => 1,
-        "CrossBlock" | "BoxedCrossBlock" => 2,
+        "SelfBlock" | "BoxedSelfBlock" | "VarSelfBlock" => 1,
+        "CrossBlock" | "BoxedCrossBlock" | "VarCrossBlock" => 2,
         _ => return None,
     };
     let type_args: Vec<&syn::Type> = match &seg.arguments {

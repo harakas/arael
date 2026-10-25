@@ -1,10 +1,10 @@
-use arael::model::{CrossBlock, Model, Param, SelfBlock};
+use arael::model::{CrossBlock, Model, Param, SelfBlock, VarCrossBlock, VarSelfBlock};
 use arael::refs;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
 use arael::utils::Float;
 use arael::matrix::matrixd;
 use arael::vect::{vect2, vect3, vect3d, vectd};
-use export_consumer::{Bias, BiasLink, MarkLink, World32, World64};
+use export_consumer::{Bias, BiasLink, BiasVarLink, MarkLink, World32, World64};
 use export_models::{Beacon, Cal, Dir, Kind, Mark, Spring, Trio};
 
 fn target(k: usize) -> vect3d {
@@ -18,6 +18,7 @@ macro_rules! build_world {
             biases: refs::Vec::new(),
             springs: std::vec::Vec::new(),
             links: std::vec::Vec::new(),
+            var_links: std::vec::Vec::new(),
             cals: refs::Vec::new(),
             marks: refs::Vec::new(),
             mark_links: std::vec::Vec::new(),
@@ -43,8 +44,9 @@ macro_rules! build_world {
                 hb: CrossBlock::new(),
             });
         }
-        let bias = w.biases.push(Bias { v: Param::new(0.2 as $t), hb: SelfBlock::new() });
+        let bias = w.biases.push(Bias { v: Param::new(0.2 as $t), hb: VarSelfBlock::new() });
         w.links.push(BiasLink { bk: brefs[1], bl: bias, m: 1.1 as $t, hb: CrossBlock::new() });
+        w.var_links.push(BiasVarLink { bk: brefs[0], bl: bias, m: -0.4 as $t, hb: VarCrossBlock::new() });
         let mk = w.marks.push(Mark { anchor: 0.9 as $t, w: 0.5 as $t });
         w.mark_links.push(MarkLink { bk: brefs[2], bl: bias, mk, hb: CrossBlock::new() });
         w.cals.push(Cal {

@@ -143,6 +143,8 @@ reach:
 |---|---|---|
 | **`SelfBlock<T>`** | the `(T, T)` diagonal block -- entity T coupled with itself | **mandatory on every params-having struct** |
 | **`CrossBlock<A, B>`** | the `(A, B)` off-diagonal block, and its transpose | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock. When many constraints couple the SAME (A, B) pair, share one block on a containing parent via `constraint(parent.<field>, ...)` (below) |
+| **`VarCrossBlock<A, B>`** | the same block, stored at the size of the two entities' live parameters | **entities whose parameters are commonly held**, in whole or in part: a held parameter then costs the assembly nothing (see "Blocks stored at their live size" below) |
+| **`VarSelfBlock<T>`** | the `(T, T)` diagonal block, stored at the size of the entity's live parameters | **an entity whose parameters are commonly held** and which many residuals write (same section) |
 | **`coo`** (a keyword, not a field) | across-entity pairs a constraint does not name, kept as row, column and value in a list the solve owns | pairs between an entity's params and the root's or a containing parent's (`[hb, coo]`), N-ary constraints without a block per pair (`constraint(coo, ...)`), and the `ExtendedModel` hook, which is handed the list. Slower to assemble than a `CrossBlock`: every entry is a push. When the constraint touches ONLY root params (the entity is pure data), name the root's SelfBlock as the primary block instead, `constraint(root.hb, ...)` -- dense writes, no list |
 
 `SelfBlock<Self>` is required on every Model that has parameters --
@@ -166,6 +168,51 @@ struct PosePair {
     #[arael(ref = root.poses)] prev: Ref<Pose>,
     #[arael(ref = root.poses)] cur:  Ref<Pose>,
     hb: CrossBlock<Pose, Pose, f32>, // only the (prev, cur) cross block
+}
+```
+
+### Blocks stored at their live size
+
+A `CrossBlock<A, B>` stores the full `NA x NB` tile of its two
+entities whatever parameters are held, and the assembly zeroes,
+writes and scatters all of it. `VarCrossBlock<A, B>` stores the
+rectangle of the two entities' live parameters instead, so a held
+parameter costs the assembly nothing: a write over every parameter
+walks the block's live ones, and a write over a subset maps each to
+its place. A `CrossBlock` write is at constant offsets instead, so
+pick the variable-width block where parameters are commonly held and
+keep `CrossBlock` where every parameter is usually live. The
+declaration is otherwise
+the same: on the constraint struct or on a containing parent
+(`parent.<field>`, below), with `#[arael(cross = (a, b))]`, aliased,
+at either precision.
+
+`VarSelfBlock<T>` is the same for an entity's own block: the
+triangle and the gradient stash over its live parameters, the plain
+write walking them, the subset write mapping. It pays where the
+entity's parameters are commonly held and many residuals write the
+block, a camera seen from thousands of observations with its
+principal point held; an entity whose parameters are usually all
+live keeps `SelfBlock`.
+
+```rust,ignore
+// The camera's intrinsics are mostly held: store the live ones.
+#[arael::model]
+struct Cam {
+    f: Param<vect2d>,
+    c: Param<vect2d>,          // the principal point, usually held
+    k: Param<vect2d>,
+    hb: VarSelfBlock<Cam>,
+}
+
+#[arael::model]
+#[arael(constraint([hb_point_cam], parent = image, {
+    project(image.cam, point.pos) - obs.px
+}))]
+struct Obs {
+    #[arael(ref = root.points)] point: Ref<Point>,
+    px: vect2d,
+    hb_point_cam: VarCrossBlock<Point, Cam>,
 }
 ```
 

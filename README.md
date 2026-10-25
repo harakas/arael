@@ -56,7 +56,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel`
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
-- **Hessian blocks** -- markers declaring which parameters a constraint couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one entity with another, and the `coo` keyword for pairs a constraint does not name
+- **Hessian blocks** -- markers declaring which parameters a constraint couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one entity with another (each with a variable-width form, `VarSelfBlock` and `VarCrossBlock`, for entities whose parameters are commonly held), and the `coo` keyword for pairs a constraint does not name
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
 - **Parameter covariance** -- `assemble_covariance` recovers `Sigma = 2 H^-1` at the solution without forming the dense inverse; per-entity marginal / conditional / cross blocks and std devs, with a `PerQuery` / `AllMarginals` (selected inverse) / `TriDiagonal` (band, no factorization) mode per workload
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation

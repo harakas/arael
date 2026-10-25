@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/mixed_bad_parent_field.rs:24: `parent.nosuch` does not name a CrossBlock field of the containing parent `Image` -- it has CrossBlock<Point, Cam> `hb_other`
+error: $DIR/tests/constraint_attr_errors/mixed_bad_parent_field.rs:24: `parent.nosuch` does not name a cross block field of the containing parent `Image` -- it has CrossBlock<Point, Cam> `hb_other`
   --> tests/constraint_attr_errors/mixed_bad_parent_field.rs:40:1
    |
 40 | #[arael::model]

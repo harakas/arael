@@ -99,8 +99,9 @@
 //!   operators into constraint bodies with `#[arael::function]`
 //! - **Hessian blocks** -- markers declaring which parameters a constraint
 //!   couples: `SelfBlock<A>` an entity with itself, `CrossBlock<A, B>` one
-//!   entity with another, and the `coo` keyword for pairs a constraint
-//!   does not name
+//!   entity with another (each with a variable-width form, `VarSelfBlock`
+//!   and `VarCrossBlock`, for entities whose parameters are commonly
+//!   held), and the `coo` keyword for pairs a constraint does not name
 //! - **Jacobian computation** -- `#[arael(root, jacobian)]` generates
 //!   `calc_jacobian()` returning a sparse [`Jacobian<T>`](model::Jacobian)
 //!   matrix for DOF analysis via SVD.
@@ -572,6 +573,8 @@
 //! |---|---|---|
 //! | [`SelfBlock<T>`](model::SelfBlock) | the `(T, T)` diagonal block -- entity T coupled with itself | **mandatory on every params-having struct** |
 //! | [`CrossBlock<A, B>`](model::CrossBlock) | the `(A, B)` off-diagonal block, and its transpose | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One per unordered (A, B) entity pair; (A, A) / (B, B) diagonals stay on each entity's `SelfBlock` |
+//! | [`VarCrossBlock<A, B>`](model::VarCrossBlock) | the same block, stored at the size of the two entities' live parameters | **entities whose parameters are commonly held**, in whole or in part: a held parameter then costs the assembly nothing. A `CrossBlock` write is at constant offsets, so keep it where every parameter is usually live |
+//! | [`VarSelfBlock<T>`](model::VarSelfBlock) | the `(T, T)` diagonal block, stored at the size of the entity's live parameters | **an entity whose parameters are commonly held** and which many residuals write |
 //! | `coo` (a keyword, not a field) | across-entity pairs a constraint does not name, kept as row, column and value in a list the solve owns | pairs between an entity's params and the root's or a containing parent's (`[hb, coo]`), N-ary constraints without a block per pair (`constraint(coo, ...)`), and the [`ExtendedModel`](model::ExtendedModel) hook, which is handed the list. Slower to assemble than a `CrossBlock`: every entry is a push |
 //!
 //! `SelfBlock<Self>` is required on every Model that has

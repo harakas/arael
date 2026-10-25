@@ -10,7 +10,8 @@
 //!
 //! Per root the macro generates a `<Root>Blocks` struct holding one
 //! [`SelfBlockArray`] per entity container with a self block and one
-//! [`CrossBlockArray`] per cross-block field, plus the COO list. A
+//! [`CrossBlockArray`] (or [`VarCrossBlockArray`] for a `VarCrossBlock`
+//! field) per cross-block field, plus the COO list. A
 //! [`Context`] owns one such store per thread,
 //! type-erased behind [`BlockStore`], and a [`Cut`] says which slot range
 //! of each walk a store covers. A sweep takes its store, walks the ranges
@@ -1871,6 +1872,1030 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
 
 
 
+// ---------------------------------------------------------------------------
+// Variable-width cross blocks
+// ---------------------------------------------------------------------------
+
+/// A fixed slot position in a block's row map.
+const VAR_NO_ROW: u16 = u16::MAX;
+/// A fixed slot position in a block's column map.
+const VAR_NO_COL: u8 = u8::MAX;
+
+/// One block of a [`VarCrossBlockArray`]: where its live rectangle lies
+/// in the values, each side's first live global index and live width,
+/// and per side the live slot positions and the compact place of every
+/// slot position. A side's live indices are one ascending run (what
+/// [`tile_extent`] asserts), so a live slot's compact place is its
+/// index minus the side's first.
+#[derive(Clone, Copy, Debug)]
+pub struct VarCrossMeta<const NA: usize, const NB: usize> {
+    /// First value of the block.
+    off: u32,
+    /// First live global index of the A side; `u32::MAX` when every
+    /// slot of the side is fixed and the block stores nothing.
+    sa: u32,
+    /// The same for the B side.
+    sb: u32,
+    /// Live width of the A side.
+    wa: u8,
+    /// Live width of the B side.
+    wb: u8,
+    /// The live slot positions of the A side, ascending, in the first
+    /// `wa` entries: what a write over every slot walks.
+    live_a: [u8; NA],
+    /// The same for the B side, `wb` entries.
+    live_b: [u8; NB],
+    /// Slot position to the offset of its row, `ci * wb`; `VAR_NO_ROW`
+    /// for a fixed one. What a write over a subset of slots maps through.
+    rows: [u16; NA],
+    /// Slot position to its column `cj`; `VAR_NO_COL` for a fixed one.
+    cols: [u8; NB],
+}
+
+impl<const NA: usize, const NB: usize> VarCrossMeta<NA, NB> {
+    /// The block of index rows `a` and `b`, its values from `off`.
+    fn new(a: &[u32; NA], b: &[u32; NB], off: usize) -> Self {
+        let (sa, wa) = tile_extent(a);
+        let (sb, wb) = tile_extent(b);
+        let mut rows = [VAR_NO_ROW; NA];
+        let mut live_a = [0u8; NA];
+        for i in 0..NA {
+            if a[i] != u32::MAX {
+                let ci = (a[i] - sa) as usize;
+                rows[i] = (ci * wb) as u16;
+                live_a[ci] = i as u8;
+            }
+        }
+        let mut cols = [VAR_NO_COL; NB];
+        let mut live_b = [0u8; NB];
+        for j in 0..NB {
+            if b[j] != u32::MAX {
+                let cj = (b[j] - sb) as usize;
+                cols[j] = cj as u8;
+                live_b[cj] = j as u8;
+            }
+        }
+        let off = u32::try_from(off)
+            .expect("a variable-width cross array holds up to 2^32 values");
+        VarCrossMeta { off, sa, sb, wa: wa as u8, wb: wb as u8, live_a, live_b, rows, cols }
+    }
+
+    /// The values the block holds.
+    #[inline]
+    fn len(&self) -> usize { self.wa as usize * self.wb as usize }
+}
+
+/// `values += scale * dr_a * dr_b^T` over the rows `at_a` and the
+/// columns `at_b` of a variable-width block, each position mapped
+/// through the block's row and column maps; a fixed position adds
+/// nothing. Always inlined: the positions are literals at the call.
+#[inline(always)]
+fn var_cross_add<const NA: usize, const NB: usize, const KA: usize, const KB: usize, T: crate::utils::Float>(
+    values: &mut [T], rows: &[u16; NA], cols: &[u8; NB], scale: T,
+    dr_a: &[T; KA], at_a: &[usize; KA], dr_b: &[T; KB], at_b: &[usize; KB],
+) {
+    debug_assert!(at_a.windows(2).all(|w| w[0] < w[1]) && at_a.last().is_none_or(|&l| l < NA)
+        && at_b.windows(2).all(|w| w[0] < w[1]) && at_b.last().is_none_or(|&l| l < NB),
+        "positions must ascend and lie within the block");
+    for i in 0..KA {
+        let ro = rows[at_a[i]];
+        if ro == VAR_NO_ROW { continue; }
+        let sai = scale * dr_a[i];
+        let ro = ro as usize;
+        for j in 0..KB {
+            let cj = cols[at_b[j]];
+            if cj == VAR_NO_COL { continue; }
+            values[ro + cj as usize] += sai * dr_b[j];
+        }
+    }
+}
+
+/// A list of cross blocks each stored at its live size: per block the
+/// `wa x wb` rectangle of its two sides' live parameters, row-major,
+/// the blocks back to back in one value array, and a [`VarCrossMeta`]
+/// saying where and how wide. What a
+/// [`VarCrossBlock`](crate::model::VarCrossBlock) field declares.
+///
+/// Against [`CrossBlockArray`], which stores the full `NA x NB` tile
+/// whatever the indices say: a fixed parameter takes no room here, so
+/// the zeroing, the sweep's writes and the scatter touch the live cells
+/// only. A write over every slot walks the block's live positions and
+/// gathers their partials, `wa x wb` products; a write over a subset of
+/// slots maps each through the block's meta, which a fixed-width block
+/// does not need. The build pushes the index rows as for a
+/// `CrossBlockArray`, then [`finish`](Self::finish) sizes the values; a
+/// block's tile and its readers follow from its extents alone, compact
+/// row `ci` being global index `sa + ci`.
+#[derive(Clone)]
+pub struct VarCrossBlockArray<const NA: usize, const NB: usize, T: crate::utils::Float = f64> {
+    meta: std::vec::Vec<VarCrossMeta<NA, NB>>,
+    values: std::vec::Vec<T>,
+    /// The values the blocks pushed take: the next block's offset.
+    total: usize,
+    /// As [`CrossBlockArray::base`].
+    base: u32,
+}
+
+impl<const NA: usize, const NB: usize, T: crate::utils::Float> Default for VarCrossBlockArray<NA, NB, T> {
+    fn default() -> Self { Self::new() }
+}
+
+/// One block of a [`VarCrossBlockArray`], borrowed for the sweep's
+/// writes. The same methods as [`CrossBlockMut`].
+pub struct VarCrossBlockMut<'a, const NA: usize, const NB: usize, T: crate::utils::Float> {
+    values: &'a mut [T],
+    /// The live slot positions of each side, `wa` and `wb` long.
+    live_a: &'a [u8],
+    live_b: &'a [u8],
+    rows: &'a [u16; NA],
+    cols: &'a [u8; NB],
+}
+
+impl<const NA: usize, const NB: usize, T: crate::utils::Float> VarCrossBlockMut<'_, NA, NB, T> {
+    /// Reset the values to zero.
+    #[inline]
+    pub fn zero(&mut self) {
+        self.values.fill(T::zero());
+    }
+
+    /// Add one residual's cross pairs `2 dr_a dr_b^T` over the live
+    /// parameters, walking the block's live positions; a fixed one is
+    /// never read.
+    #[inline]
+    pub fn add_residual_cross(&mut self, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        self.add(T::two(), dr_a, dr_b);
+    }
+
+    /// [`add_residual_cross`](Self::add_residual_cross) with the pairs
+    /// scaled by the loss weight `w`.
+    #[inline]
+    pub fn add_residual_cross_with_loss(&mut self, w: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        self.add(T::two() * w, dr_a, dr_b);
+    }
+
+    /// [`add_residual_cross`](Self::add_residual_cross) over the `KA`
+    /// A-side parameters at the positions `at_a` and the `KB` B-side
+    /// parameters at `at_b` (ascending); the row's other partials are
+    /// zero and add nothing.
+    #[inline(always)]
+    pub fn add_residual_cross_at<const KA: usize, const KB: usize>(
+        &mut self, dr_a: &[T; KA], at_a: &[usize; KA], dr_b: &[T; KB], at_b: &[usize; KB],
+    ) {
+        var_cross_add(self.values, self.rows, self.cols, T::two(), dr_a, at_a, dr_b, at_b);
+    }
+
+    /// [`add_residual_cross_at`](Self::add_residual_cross_at) with the
+    /// pairs scaled by the loss weight `w`.
+    #[inline(always)]
+    pub fn add_residual_cross_with_loss_at<const KA: usize, const KB: usize>(
+        &mut self, w: T, dr_a: &[T; KA], at_a: &[usize; KA], dr_b: &[T; KB], at_b: &[usize; KB],
+    ) {
+        var_cross_add(self.values, self.rows, self.cols, T::two() * w, dr_a, at_a, dr_b, at_b);
+    }
+
+    /// `values += scale * dr_a * dr_b^T` over the live slots: a walk of
+    /// the block's live positions, gathering each side's partials, so
+    /// the work is the live rectangle whatever the declared width. A
+    /// row whose `dr_a` is zero is skipped.
+    #[inline]
+    fn add(&mut self, scale: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        let wb = self.live_b.len();
+        for (ia, &i) in self.live_a.iter().enumerate() {
+            let dai = dr_a[i as usize];
+            if dai == T::zero() { continue; }
+            let sai = scale * dai;
+            let row = &mut self.values[ia * wb..(ia + 1) * wb];
+            for (cell, &j) in row.iter_mut().zip(self.live_b) {
+                *cell += sai * dr_b[j as usize];
+            }
+        }
+    }
+}
+
+impl<const NA: usize, const NB: usize, T: crate::utils::Float> VarCrossBlockArray<NA, NB, T> {
+    const CHECK_SIDES: () = assert!(NA <= u8::MAX as usize && NB <= u8::MAX as usize,
+        "VarCrossBlockArray: a side holds up to 255 parameters");
+
+    /// An empty list.
+    pub fn new() -> Self {
+        let () = Self::CHECK_SIDES;
+        VarCrossBlockArray {
+            meta: std::vec::Vec::new(),
+            values: std::vec::Vec::new(),
+            total: 0,
+            base: 0,
+        }
+    }
+
+    /// The number of blocks.
+    pub fn len(&self) -> usize { self.meta.len() }
+
+    /// Bytes one block takes besides its values.
+    pub const META_BYTES: usize = std::mem::size_of::<VarCrossMeta<NA, NB>>();
+
+    /// The blocks held and the bytes of the arrays.
+    pub fn footprint(&self) -> StoreFootprint {
+        StoreFootprint {
+            self_blocks: 0,
+            cross_blocks: self.meta.len(),
+            coo_entries: 0,
+            bytes: self.value_bytes() + self.meta.len() * Self::META_BYTES,
+        }
+    }
+
+    /// Bytes the blocks' values take.
+    pub fn value_bytes(&self) -> usize { self.values.len() * std::mem::size_of::<T>() }
+
+    /// True if the list holds no block.
+    pub fn is_empty(&self) -> bool { self.meta.is_empty() }
+
+    /// Drop every block; the value storage stays for `finish`.
+    pub fn clear(&mut self) {
+        self.meta.clear();
+        self.total = 0;
+    }
+
+    /// Room for `n` more blocks.
+    pub fn reserve(&mut self, n: usize) {
+        self.meta.reserve(n);
+    }
+
+    /// Append a block with its parameter indices (`u32::MAX` for a fixed
+    /// one). Each side's live indices must be one ascending run, as an
+    /// entity's are.
+    #[inline]
+    pub fn push(&mut self, a: &[u32; NA], b: &[u32; NB]) {
+        let m = VarCrossMeta::new(a, b, self.total);
+        self.total += m.len();
+        self.meta.push(m);
+    }
+
+    /// Size the value array to the blocks pushed: a fresh zeroed
+    /// allocation when the length changed, else the existing storage,
+    /// whose stale values the sweep's [`zero`](Self::zero) clears.
+    pub fn finish(&mut self) {
+        if self.values.len() != self.total {
+            self.values = vec![T::zero(); self.total];
+        }
+    }
+
+    /// Reset every block.
+    pub fn zero(&mut self) {
+        self.values.fill(T::zero());
+    }
+
+    /// The block at the marker's global `slot`, for writing; `split` as
+    /// for [`CrossBlockArray::block_mut`].
+    #[inline]
+    pub fn block_mut(&mut self, split: bool, slot: usize) -> VarCrossBlockMut<'_, NA, NB, T> {
+        let k = if split { slot - self.base as usize } else { slot };
+        let m = &self.meta[k];
+        let off = m.off as usize;
+        VarCrossBlockMut {
+            values: &mut self.values[off..off + m.len()],
+            live_a: &m.live_a[..m.wa as usize],
+            live_b: &m.live_b[..m.wb as usize],
+            rows: &m.rows,
+            cols: &m.cols,
+        }
+    }
+
+    /// The global slot this array opens on.
+    pub fn base(&self) -> u32 { self.base }
+
+    /// Set the global slot this array opens on.
+    pub fn set_base(&mut self, base: u32) { self.base = base; }
+
+    /// The extent of block `k`: each side's first live global index
+    /// (`u32::MAX` when the side is entirely fixed) and live width, as
+    /// `(sa, wa, sb, wb)`.
+    pub fn extent(&self, k: usize) -> (u32, usize, u32, usize) {
+        let m = &self.meta[k];
+        (m.sa, m.wa as usize, m.sb, m.wb as usize)
+    }
+
+    /// The values of block `k`, row-major `wa x wb`.
+    pub fn values(&self, k: usize) -> &[T] {
+        let m = &self.meta[k];
+        &self.values[m.off as usize..m.off as usize + m.len()]
+    }
+
+    /// The pairs of block `k`: the A and B global indices and the value,
+    /// in row-major order over the live rectangle.
+    #[inline]
+    fn pairs(&self, k: usize) -> impl Iterator<Item = (u32, u32, T)> + '_ {
+        let m = &self.meta[k];
+        let (wa, wb) = (m.wa as usize, m.wb as usize);
+        let v = &self.values[m.off as usize..m.off as usize + wa * wb];
+        (0..wa).flat_map(move |ci| {
+            (0..wb).map(move |cj| (m.sa + ci as u32, m.sb + cj as u32, v[ci * wb + cj]))
+        })
+    }
+
+    /// Append one representative scalar coordinate of each block's cell,
+    /// over every block. Structure only, no values.
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for m in &self.meta {
+            if m.wa > 0 && m.wb > 0 {
+                out.push((m.sa.min(m.sb), m.sa.max(m.sb)));
+            }
+        }
+    }
+
+    /// Record where each block scatters in the assembled value buffer,
+    /// over every block, as array `array` of store `store`: its tile, or
+    /// one position per entry on a pattern without tiles. See
+    /// [`LmProblemInternals::bind_hessian_positions`](crate::simple_lm::LmProblemInternals::bind_hessian_positions).
+    pub fn bind_hessian_positions(&self, binder: &mut HessianBinder, out: &mut PositionStream, store: usize, array: usize) {
+        out.reserve_tiles(self.meta.len());
+        let resolve = match binder {
+            HessianBinder::Tiled(bind) => {
+                out.tiled = true;
+                for (k, m) in self.meta.iter().enumerate() {
+                    if m.wa == 0 || m.wb == 0 {
+                        continue;
+                    }
+                    // The tile holds the upper block triangle, so the
+                    // lower-numbered side walks the rows.
+                    let (r, rows, c, cols) = if m.sa <= m.sb {
+                        (m.sa, m.wa, m.sb, m.wb)
+                    } else {
+                        (m.sb, m.wb, m.sa, m.wa)
+                    };
+                    let (base, stride, panel) = bind(r, c);
+                    out.push_tile(base, stride, panel, store, array, k, rows as usize, cols as usize);
+                }
+                return;
+            }
+            HessianBinder::Scalar(resolve) => resolve,
+        };
+        for k in 0..self.meta.len() {
+            for (gi, gj, _) in self.pairs(k) {
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                out.push_position(resolve(lo, hi));
+            }
+        }
+    }
+
+    /// Write block `k` over its tile, which lies in `vals` from `base`
+    /// with its columns `stride` apart (see [`TileSource`]).
+    #[inline]
+    pub fn assign_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        self.tile::<true, F>(k, vals, base, stride);
+    }
+
+    /// Add block `k` to what its tile holds.
+    #[inline]
+    pub fn add_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        self.tile::<false, F>(k, vals, base, stride);
+    }
+
+    /// Write block `k` into its tile, the cell `(r, c)` of the tile at
+    /// `base + c * stride + r`, the lower-numbered side walking the
+    /// rows. With `ASSIGN` the whole tile is written, else the block is
+    /// added to what it holds. The tile is the live rectangle, so every
+    /// cell is reached and no index is tested.
+    #[inline]
+    fn tile<const ASSIGN: bool, F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        let m = &self.meta[k];
+        let (wa, wb) = (m.wa as usize, m.wb as usize);
+        let v = &self.values[m.off as usize..m.off as usize + wa * wb];
+        if m.sa == m.sb {
+            // Aliased: both sides index one entity, so the pairs land on
+            // a diagonal tile and which side is the row flips per
+            // element. Two pairs share a cell, so an assigning block
+            // clears the tile and adds; a pair on the diagonal counts
+            // for both symmetric halves.
+            if ASSIGN {
+                for c in 0..wa {
+                    vals[base + c * stride..base + c * stride + wa].fill(F::zero());
+                }
+            }
+            for ci in 0..wa {
+                for cj in 0..wb {
+                    let (lo, hi) = if ci <= cj { (ci, cj) } else { (cj, ci) };
+                    let val = F::from(v[ci * wb + cj]).unwrap();
+                    let val = if ci == cj { val + val } else { val };
+                    vals[base + hi * stride + lo] += val;
+                }
+            }
+            return;
+        }
+        let (step_a, step_b) = if m.sa < m.sb { (1, stride) } else { (stride, 1) };
+        for ci in 0..wa {
+            let pa = base + ci * step_a;
+            let row = &v[ci * wb..(ci + 1) * wb];
+            for cj in 0..wb {
+                let at = pa + cj * step_b;
+                let val = F::from(row[cj]).unwrap();
+                if ASSIGN {
+                    vals[at] = val;
+                } else {
+                    vals[at] += val;
+                }
+            }
+        }
+    }
+
+    /// Add every block into the dense symmetric Hessian, at `(A, B)` and
+    /// its transpose.
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+        let n_total = (hessian.len() as f64).sqrt() as usize;
+        for k in 0..self.meta.len() {
+            for (gi, gj, v) in self.pairs(k) {
+                let (gi, gj) = (gi as usize, gj as usize);
+                let val = F::from(v).unwrap();
+                hessian[gi * n_total + gj] += val;
+                hessian[gj * n_total + gi] += val;
+            }
+        }
+    }
+
+    /// Add every block into an upper-band Hessian of half-bandwidth `kd`
+    /// (LAPACK layout). Errors when an entry falls outside the band.
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
+        -> Result<(), crate::simple_lm::SetupError>
+    {
+        let ldab = kd + 1;
+        for k in 0..self.meta.len() {
+            for (gi, gj, v) in self.pairs(k) {
+                let (gi, gj) = (gi as usize, gj as usize);
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                if hi - lo > kd {
+                    return Err(crate::simple_lm::SetupError::BandOverflow { row: lo, col: hi, kd });
+                }
+                let val = F::from(v).unwrap();
+                // Aliased diagonal: see cross_band.
+                let val = if gi == gj { val + val } else { val };
+                band[(kd + lo - hi) + hi * ldab] += val;
+            }
+        }
+        Ok(())
+    }
+
+    /// Push every block into a COO Hessian as `(row, col, value)`
+    /// triplets, upper triangle only.
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+        for k in 0..self.meta.len() {
+            for (gi, gj, v) in self.pairs(k) {
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                let val = F::from(v).unwrap();
+                let val = if gi == gj { val + val } else { val };
+                coo.push(lo, hi, val);
+            }
+        }
+    }
+
+    /// Add every block straight into an already-patterned CSC Hessian,
+    /// looking each entry up by column.
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+        for k in 0..self.meta.len() {
+            for (gi, gj, v) in self.pairs(k) {
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                let val = F::from(v).unwrap();
+                let val = if gi == gj { val + val } else { val };
+                if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
+                    csc.vals[pos] += val;
+                }
+            }
+        }
+    }
+
+    /// Add every block into the assembled value buffer through the
+    /// per-entry positions [`bind_hessian_positions`](Self::bind_hessian_positions)
+    /// recorded against a pattern without tiles, reading them in the same
+    /// order.
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+        for k in 0..self.meta.len() {
+            for (gi, gj, v) in self.pairs(k) {
+                let val = F::from(v).unwrap();
+                let val = if gi == gj { val + val } else { val };
+                vals[take_position(positions, cursor)] += val;
+            }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Variable-width self blocks
+// ---------------------------------------------------------------------------
+
+/// A fixed slot position in a block's position map.
+const VAR_NO_POS: u8 = u8::MAX;
+
+/// One entity's block in a [`VarSelfBlockArray`]: where its compact
+/// triangle and stash lie in the values, its first live global index
+/// and live width, the live slot positions and the compact place of
+/// every slot position. The live indices are one ascending run, so a
+/// live slot's compact place is its index minus the first.
+#[derive(Clone, Copy, Debug)]
+pub struct VarSelfMeta<const N: usize> {
+    /// First value of the block: the triangle, then the stash.
+    off: u32,
+    /// First live global index; `u32::MAX` when every slot is fixed
+    /// and the block stores nothing.
+    s: u32,
+    /// Live width.
+    w: u8,
+    /// The live slot positions, ascending, in the first `w` entries:
+    /// what a write over every slot walks.
+    live: [u8; N],
+    /// Slot position to its compact place; `VAR_NO_POS` for a fixed
+    /// one. What a write over a subset of slots maps through.
+    pos: [u8; N],
+}
+
+impl<const N: usize> VarSelfMeta<N> {
+    /// The block of index row `indices`, its values from `off`.
+    fn new(indices: &[u32; N], off: usize) -> Self {
+        let (s, w) = tile_extent(indices);
+        let mut live = [0u8; N];
+        let mut pos = [VAR_NO_POS; N];
+        for i in 0..N {
+            if indices[i] != u32::MAX {
+                let ci = (indices[i] - s) as usize;
+                pos[i] = ci as u8;
+                live[ci] = i as u8;
+            }
+        }
+        let off = u32::try_from(off)
+            .expect("a variable-width self array holds up to 2^32 values");
+        VarSelfMeta { off, s, w: w as u8, live, pos }
+    }
+
+    /// The entries of the triangle.
+    #[inline]
+    fn tri(&self) -> usize {
+        let w = self.w as usize;
+        w * (w + 1) / 2
+    }
+
+    /// The values the block holds: the triangle, then the stash.
+    #[inline]
+    fn len(&self) -> usize { self.tri() + self.w as usize }
+}
+
+/// A slab of self blocks each stored at its live size: per entity the
+/// upper triangle over its `w` live parameters and their `w` gradient
+/// entries, back to back in one value array, and a [`VarSelfMeta`]
+/// saying where and how wide. What a
+/// [`VarSelfBlock`](crate::model::VarSelfBlock) field declares.
+///
+/// Against [`SelfBlockArray`], which stores the full `N` by `N`
+/// triangle and the `N` stash whatever the indices say: a fixed
+/// parameter takes no room here, so the zeroing, the sweep's writes,
+/// the gather and the scatter touch the live cells only. A write over
+/// every slot walks the block's live positions and gathers their
+/// partials; a write over a subset of slots maps each through the
+/// block's meta. The slab is built and addressed as a `SelfBlockArray`
+/// is (`push`, `push_at`, the map of a split store, `slab_of`), and
+/// its readers work from the extent alone, compact position `ci` being
+/// global index `s + ci`.
+#[derive(Clone)]
+pub struct VarSelfBlockArray<const N: usize, T: crate::utils::Float = f64> {
+    entity: std::vec::Vec<u32>,
+    meta: std::vec::Vec<VarSelfMeta<N>>,
+    data: std::vec::Vec<T>,
+    /// The values the blocks pushed take: the next block's offset.
+    total: usize,
+    /// As [`SelfBlockArray`]'s map: global slot to slab position for a
+    /// slab holding only some of the entities.
+    map: std::vec::Vec<u32>,
+}
+
+impl<const N: usize, T: crate::utils::Float> Default for VarSelfBlockArray<N, T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
+    const CHECK_WIDTH: () = assert!(N <= u8::MAX as usize,
+        "VarSelfBlockArray: an entity holds up to 255 parameters");
+
+    /// An empty slab.
+    pub fn new() -> Self {
+        let () = Self::CHECK_WIDTH;
+        VarSelfBlockArray {
+            entity: std::vec::Vec::new(),
+            meta: std::vec::Vec::new(),
+            data: std::vec::Vec::new(),
+            total: 0,
+            map: std::vec::Vec::new(),
+        }
+    }
+
+    /// The number of entities.
+    pub fn len(&self) -> usize { self.entity.len() }
+
+    /// Bytes one block takes besides its values: its meta and its slot.
+    pub const META_BYTES: usize = std::mem::size_of::<VarSelfMeta<N>>() + 4;
+
+    /// The blocks held and the bytes of the arrays, the map included.
+    pub fn footprint(&self) -> StoreFootprint {
+        StoreFootprint {
+            self_blocks: self.entity.len(),
+            cross_blocks: 0,
+            coo_entries: 0,
+            bytes: self.value_bytes() + self.entity.len() * Self::META_BYTES + self.map.len() * 4,
+        }
+    }
+
+    /// Bytes the blocks' values take.
+    pub fn value_bytes(&self) -> usize { self.data.len() * std::mem::size_of::<T>() }
+
+    /// Bytes the values of every entity held by any of `arrays` take,
+    /// each entity once: the split stores of a solve hold an entity in
+    /// every store whose range touches it, and the whole model holds it
+    /// once.
+    pub fn whole_value_bytes<'a>(arrays: impl Iterator<Item = &'a Self>) -> usize
+    where
+        T: 'a,
+    {
+        let mut seen: std::vec::Vec<bool> = std::vec::Vec::new();
+        let mut values = 0usize;
+        for a in arrays {
+            for (k, &e) in a.entity.iter().enumerate() {
+                let e = e as usize;
+                if seen.len() <= e {
+                    seen.resize(e + 1, false);
+                }
+                if !seen[e] {
+                    seen[e] = true;
+                    values += a.meta[k].len();
+                }
+            }
+        }
+        values * std::mem::size_of::<T>()
+    }
+
+    /// True if the slab holds no entity.
+    pub fn is_empty(&self) -> bool { self.entity.is_empty() }
+
+    /// Drop every entity; the value storage stays for `finish`. The map
+    /// goes too, as for [`SelfBlockArray::clear`].
+    pub fn clear(&mut self) {
+        self.entity.clear();
+        self.meta.clear();
+        self.map.clear();
+        self.total = 0;
+    }
+
+    /// True if `slot` already has a place in this slab.
+    #[inline]
+    pub fn holds(&self, slot: usize) -> bool {
+        self.map.get(slot).is_some_and(|&k| k != u32::MAX)
+    }
+
+    /// Room for `n` more entities.
+    pub fn reserve(&mut self, n: usize) {
+        self.entity.reserve(n);
+        self.meta.reserve(n);
+    }
+
+    /// Append the entity at container slot `entity` with its parameter
+    /// indices (`u32::MAX` for a fixed one, the live ones one ascending
+    /// run), and return the slab slot it took.
+    #[inline]
+    pub fn push(&mut self, entity: u32, indices: &[u32; N]) -> u32 {
+        let k = self.entity.len() as u32;
+        let m = VarSelfMeta::new(indices, self.total);
+        self.total += m.len();
+        self.entity.push(entity);
+        self.meta.push(m);
+        k
+    }
+
+    /// Record that global `slot` sits at slab slot `k`; see
+    /// [`SelfBlockArray::map_resize`] for the sizing.
+    #[inline]
+    fn map_to(&mut self, slot: u32, k: u32) {
+        if self.map.len() <= slot as usize {
+            debug_assert!(false,
+                "slot {} lies past the map's {} entries: the build presized it short",
+                slot, self.map.len());
+            self.map.resize(slot as usize + 1, u32::MAX);
+        }
+        self.map[slot as usize] = k;
+    }
+
+    /// Room for `n` global slots in the map.
+    pub fn map_resize(&mut self, n: usize) {
+        if self.map.len() < n { self.map.resize(n, u32::MAX); }
+    }
+
+    /// Take global `slot` into this slab, returning where it landed.
+    pub fn push_at(&mut self, slot: u32, entity: u32, indices: &[u32; N]) -> u32 {
+        let k = self.push(entity, indices);
+        self.map_to(slot, k);
+        k
+    }
+
+    /// Where global `slot` sits in this slab; see [`SelfBlockArray::slab_of`].
+    #[inline(always)]
+    pub fn slab_of(&self, split: bool, slot: usize) -> usize {
+        if !split {
+            return slot;
+        }
+        let k = self.map[slot];
+        debug_assert!(k != u32::MAX,
+            "slot {} is written by this store's sweep but the build gave it no place \
+             in the slab", slot);
+        k as usize
+    }
+
+    /// Size the value array to the entities pushed: a fresh zeroed
+    /// allocation when the length changed, else the existing storage,
+    /// whose stale values [`zero`](Self::zero) clears.
+    pub fn finish(&mut self) {
+        if self.data.len() != self.total {
+            self.data = vec![T::zero(); self.total];
+        }
+    }
+
+    /// Reset every triangle and every gradient stash.
+    pub fn zero(&mut self) {
+        self.data.fill(T::zero());
+    }
+
+    /// The container slot of entity `k`.
+    pub fn entity(&self, k: usize) -> u32 { self.entity[k] }
+
+    /// The extent of entity `k`: its first live global index
+    /// (`u32::MAX` when every slot is fixed) and its live width.
+    pub fn extent(&self, k: usize) -> (u32, usize) {
+        let m = &self.meta[k];
+        (m.s, m.w as usize)
+    }
+
+    /// The values of entity `k`: its compact upper triangle, row-major
+    /// over the live parameters, then its gradient stash.
+    pub fn values(&self, k: usize) -> &[T] {
+        let m = &self.meta[k];
+        &self.data[m.off as usize..m.off as usize + m.len()]
+    }
+
+    /// Add one residual's contribution to the entity at global `slot`:
+    /// `2 r dr` into its gradient stash and `2 dr dr^T` into its
+    /// triangle, walking the block's live positions; a fixed
+    /// parameter's partial is never read.
+    #[inline]
+    pub fn add_residual(&mut self, split: bool, slot: usize, r: T, dr: &[T; N]) {
+        let k = self.slab_of(split, slot);
+        self.add_scaled(k, T::two(), r, dr);
+    }
+
+    /// [`add_residual`](Self::add_residual) scaled by the loss weight `w`.
+    #[inline]
+    pub fn add_residual_with_loss(&mut self, split: bool, slot: usize, w: T, r: T, dr: &[T; N]) {
+        let k = self.slab_of(split, slot);
+        self.add_scaled(k, T::two() * w, r, dr);
+    }
+
+    /// [`add_residual`](Self::add_residual) over the `K` parameters at
+    /// the positions `at` (ascending, below `N`), each mapped to its
+    /// place; a fixed one adds nothing.
+    #[inline(always)]
+    pub fn add_residual_at<const K: usize>(
+        &mut self, split: bool, slot: usize, r: T, dr: &[T; K], at: &[usize; K],
+    ) {
+        let k = self.slab_of(split, slot);
+        self.add_scaled_at(k, T::two(), r, dr, at);
+    }
+
+    /// [`add_residual_at`](Self::add_residual_at) scaled by the loss
+    /// weight `w`.
+    #[inline(always)]
+    pub fn add_residual_with_loss_at<const K: usize>(
+        &mut self, split: bool, slot: usize, w: T, r: T, dr: &[T; K], at: &[usize; K],
+    ) {
+        let k = self.slab_of(split, slot);
+        self.add_scaled_at(k, T::two() * w, r, dr, at);
+    }
+
+    #[inline]
+    fn add_scaled(&mut self, k: usize, scale: T, r: T, dr: &[T; N]) {
+        let m = self.meta[k];
+        let w = m.w as usize;
+        let tri = m.tri();
+        let off = m.off as usize;
+        let (h, g) = self.data[off..off + tri + w].split_at_mut(tri);
+        let live = &m.live[..w];
+        let sr = scale * r;
+        for (ia, &i) in live.iter().enumerate() {
+            let di = dr[i as usize];
+            g[ia] += sr * di;
+            let tdi = scale * di;
+            // The row's entries `(ia, ia..w)` of the triangle are one run.
+            let start = tri_idx(w, ia, ia);
+            let row = &mut h[start..start + w - ia];
+            for (cell, &j) in row.iter_mut().zip(&live[ia..]) {
+                *cell += tdi * dr[j as usize];
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn add_scaled_at<const K: usize>(&mut self, k: usize, scale: T, r: T, dr: &[T; K], at: &[usize; K]) {
+        debug_assert!(at.windows(2).all(|w| w[0] < w[1]) && at.last().is_none_or(|&l| l < N),
+            "positions must ascend and lie below the entity's parameter count");
+        let m = self.meta[k];
+        let w = m.w as usize;
+        let tri = m.tri();
+        let off = m.off as usize;
+        let (h, g) = self.data[off..off + tri + w].split_at_mut(tri);
+        let sr = scale * r;
+        for i in 0..K {
+            let ci = m.pos[at[i]];
+            if ci == VAR_NO_POS { continue; }
+            let ci = ci as usize;
+            g[ci] += sr * dr[i];
+            let tdi = scale * dr[i];
+            for j in i..K {
+                let cj = m.pos[at[j]];
+                if cj == VAR_NO_POS { continue; }
+                h[tri_idx(w, ci, cj as usize)] += tdi * dr[j];
+            }
+        }
+    }
+
+    /// The pairs of entity `k`'s triangle: both global indices (row at
+    /// or below column) and the value, row-major.
+    #[inline]
+    fn pairs(&self, k: usize) -> impl Iterator<Item = (u32, u32, T)> + '_ {
+        let m = &self.meta[k];
+        let w = m.w as usize;
+        let h = &self.data[m.off as usize..m.off as usize + m.tri()];
+        (0..w).flat_map(move |ci| {
+            (ci..w).map(move |cj| (m.s + ci as u32, m.s + cj as u32, h[tri_idx(w, ci, cj)]))
+        })
+    }
+
+    /// Add every entity's stash into the global gradient at its live
+    /// indices.
+    pub fn scatter_grad<F: crate::utils::Float>(&self, grad: &mut [F]) {
+        for m in &self.meta {
+            let w = m.w as usize;
+            let g = &self.data[m.off as usize + m.tri()..m.off as usize + m.tri() + w];
+            for ci in 0..w {
+                grad[m.s as usize + ci] += F::from(g[ci]).unwrap();
+            }
+        }
+    }
+
+    /// Append entity `k`'s `(offset, width)` span of the flat parameter
+    /// vector, or nothing when all of its params are fixed.
+    pub fn collect_param_block(&self, k: usize, out: &mut std::vec::Vec<(u32, u32)>) {
+        let m = &self.meta[k];
+        if m.w > 0 {
+            out.push((m.s, m.w as u32));
+        }
+    }
+
+    /// Append one representative scalar coordinate of each entity's
+    /// triangle, over every entity. Structure only, no values.
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for m in &self.meta {
+            if m.w > 0 {
+                out.push((m.s, m.s));
+            }
+        }
+    }
+
+    /// Record where each entity's triangle scatters in the assembled
+    /// value buffer, over every entity, as array `array` of store
+    /// `store`: its tile, or one position per entry on a pattern
+    /// without tiles. See
+    /// [`LmProblemInternals::bind_hessian_positions`](crate::simple_lm::LmProblemInternals::bind_hessian_positions).
+    pub fn bind_hessian_positions(&self, binder: &mut HessianBinder, out: &mut PositionStream, store: usize, array: usize) {
+        out.reserve_tiles(self.meta.len());
+        let resolve = match binder {
+            HessianBinder::Tiled(bind) => {
+                out.tiled = true;
+                for (k, m) in self.meta.iter().enumerate() {
+                    if m.w == 0 {
+                        continue;
+                    }
+                    let (base, stride, panel) = bind(m.s, m.s);
+                    out.push_tile(base, stride, panel, store, array, k, m.w as usize, m.w as usize);
+                }
+                return;
+            }
+            HessianBinder::Scalar(resolve) => resolve,
+        };
+        for k in 0..self.meta.len() {
+            for (gi, gj, _) in self.pairs(k) {
+                out.push_position(resolve(gi, gj));
+            }
+        }
+    }
+
+    /// Write entity `k`'s triangle over its tile, which lies in `vals`
+    /// from `base` with its columns `stride` apart (see [`TileSource`]).
+    #[inline]
+    pub fn assign_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        self.tile::<true, F>(k, vals, base, stride);
+    }
+
+    /// Add entity `k`'s triangle to what its tile holds.
+    #[inline]
+    pub fn add_block<F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        self.tile::<false, F>(k, vals, base, stride);
+    }
+
+    /// Write entity `k`'s triangle into its tile, the cell `(r, c)` at
+    /// `base + c * stride + r`. With `ASSIGN` the whole tile is written,
+    /// its lower triangle as zeros; without, the triangle is added.
+    #[inline]
+    fn tile<const ASSIGN: bool, F: crate::utils::Float>(&self, k: usize, vals: &mut [F], base: usize, stride: usize) {
+        let m = &self.meta[k];
+        let w = m.w as usize;
+        let h = &self.data[m.off as usize..m.off as usize + m.tri()];
+        for ci in 0..w {
+            for cj in ci..w {
+                let val = F::from(h[tri_idx(w, ci, cj)]).unwrap();
+                if ASSIGN {
+                    vals[base + cj * stride + ci] = val;
+                    if ci != cj {
+                        vals[base + ci * stride + cj] = F::zero();
+                    }
+                } else {
+                    vals[base + cj * stride + ci] += val;
+                }
+            }
+        }
+    }
+
+    /// Add every entity's triangle into the dense symmetric Hessian,
+    /// both sides of the diagonal.
+    pub fn accumulate_hessian<F: crate::utils::Float>(&self, hessian: &mut [F]) {
+        let n_total = (hessian.len() as f64).sqrt() as usize;
+        for k in 0..self.meta.len() {
+            for (gi, gj, v) in self.pairs(k) {
+                let (gi, gj) = (gi as usize, gj as usize);
+                let val = F::from(v).unwrap();
+                hessian[gi * n_total + gj] += val;
+                if gi != gj {
+                    hessian[gj * n_total + gi] += val;
+                }
+            }
+        }
+    }
+
+    /// Add every entity's triangle into an upper-band Hessian of
+    /// half-bandwidth `kd` (LAPACK layout). Errors when an entry falls
+    /// outside the band.
+    pub fn accumulate_hessian_band<F: crate::utils::Float>(&self, band: &mut [F], kd: usize)
+        -> Result<(), crate::simple_lm::SetupError>
+    {
+        let ldab = kd + 1;
+        for k in 0..self.meta.len() {
+            for (lo, hi, v) in self.pairs(k) {
+                let (lo, hi) = (lo as usize, hi as usize);
+                if hi - lo > kd {
+                    return Err(crate::simple_lm::SetupError::BandOverflow { row: lo, col: hi, kd });
+                }
+                band[(kd + lo - hi) + hi * ldab] += F::from(v).unwrap();
+            }
+        }
+        Ok(())
+    }
+
+    /// Push every entity's triangle into a COO Hessian as `(row, col,
+    /// value)` triplets.
+    pub fn accumulate_hessian_sparse<F: crate::utils::Float>(&self, coo: &mut crate::simple_lm::CooMatrix<F>) {
+        for k in 0..self.meta.len() {
+            for (lo, hi, v) in self.pairs(k) {
+                coo.push(lo, hi, F::from(v).unwrap());
+            }
+        }
+    }
+
+    /// Add every entity's triangle straight into an already-patterned
+    /// CSC Hessian, looking each entry up by column.
+    pub fn accumulate_hessian_sparse_direct<F: crate::utils::Float>(&self, csc: &mut crate::simple_lm::CscMatrix<F>) {
+        for k in 0..self.meta.len() {
+            for (lo, hi, v) in self.pairs(k) {
+                if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
+                    csc.vals[pos] += F::from(v).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Add every entity's triangle into the assembled value buffer
+    /// through the per-entry positions
+    /// [`bind_hessian_positions`](Self::bind_hessian_positions) recorded
+    /// against a pattern without tiles, reading them in the same order.
+    pub fn accumulate_hessian_sparse_indexed<F: crate::utils::Float>(&self, vals: &mut [F], positions: &[ValueIndex], cursor: &mut usize) {
+        for k in 0..self.meta.len() {
+            for (_, _, v) in self.pairs(k) {
+                vals[take_position(positions, cursor)] += F::from(v).unwrap();
+            }
+        }
+    }
+}
+
+
 /// Expand an upper-band matrix (LAPACK layout, `ldab = kd + 1`) into a
 /// full dense symmetric `n * n` matrix. For the tests of the band walks.
 #[cfg(test)]
@@ -2747,5 +3772,518 @@ mod tests {
     fn cross_subset_writes_match_the_full_write() {
         cross_subset_writes_match::<f64>();
         cross_subset_writes_match::<f32>();
+    }
+
+    // The variable-width cross array against the fixed-width one: the
+    // same index rows and the same writes, read through every route.
+
+    /// The index rows of 3 by 4 blocks: every slot live, fixed slots at
+    /// the front, in the middle and at the back, one live slot a side, a
+    /// side entirely fixed, the B side below the A side, and a block on
+    /// the tile of an earlier one. Indices lie in `0..N20`.
+    const N20: usize = 20;
+    fn var_patterns() -> std::vec::Vec<([u32; 3], [u32; 4])> {
+        const X: u32 = u32::MAX;
+        vec![
+            ([0, 1, 2], [3, 4, 5, 6]),
+            ([7, X, 8], [9, 10, 11, 12]),
+            ([13, 14, 15], [X, 16, 17, X]),
+            ([X, X, 18], [19, X, X, X]),
+            ([X, X, X], [0, 1, 2, 3]),
+            ([4, 5, 6], [X, X, X, X]),
+            ([9, 10, 11], [0, 1, 2, X]),
+            ([7, X, 8], [9, 10, 11, 12]),
+        ]
+    }
+
+    /// Three residuals into block `k` of both arrays: the plain write on
+    /// both, then the plain write on the full array against the `_at`
+    /// write on the variable one, with and without a loss weight.
+    fn var_write<T: crate::utils::Float>(
+        full: &mut CrossBlockArray<3, 4, 12, T>, var: &mut VarCrossBlockArray<3, 4, T>, k: usize,
+    ) {
+        let c = |v: f64| T::from(v).unwrap();
+        let s = k as f64;
+        let dr_a = [c(1.0 + s), c(-0.5), c(0.25 * s)];
+        let dr_b = [c(0.3), c(2.0 - s), c(-1.5), c(0.75)];
+        full.block_mut(false, k).add_residual_cross(&dr_a, &dr_b);
+        var.block_mut(false, k).add_residual_cross(&dr_a, &dr_b);
+        let w = c(0.4);
+        full.block_mut(false, k).add_residual_cross_with_loss(w,
+            &[c(0.0), c(0.6), c(-0.2)], &[c(1.1), c(0.0), c(0.0), c(-0.9)]);
+        var.block_mut(false, k).add_residual_cross_with_loss_at(w,
+            &[c(0.6), c(-0.2)], &[1, 2], &[c(1.1), c(-0.9)], &[0, 3]);
+        full.block_mut(false, k).add_residual_cross(
+            &[c(0.0), c(0.0), c(2.5)], &[c(0.0), c(-0.7), c(0.0), c(0.0)]);
+        var.block_mut(false, k).add_residual_cross_at(&[c(2.5)], &[2], &[c(-0.7)], &[1]);
+    }
+
+    fn var_pair<T: crate::utils::Float>() -> (CrossBlockArray<3, 4, 12, T>, VarCrossBlockArray<3, 4, T>) {
+        let mut full = CrossBlockArray::new();
+        let mut var = VarCrossBlockArray::new();
+        let patterns = var_patterns();
+        for (a, b) in &patterns {
+            full.push(a, b);
+            var.push(a, b);
+        }
+        full.finish();
+        var.finish();
+        for k in 0..patterns.len() {
+            var_write(&mut full, &mut var, k);
+        }
+        (full, var)
+    }
+
+    #[test]
+    fn a_var_cross_array_stores_the_live_rectangles() {
+        let (full, var) = var_pair::<f64>();
+        const X: u32 = u32::MAX;
+        let extents = [(0, 3, 3, 4), (7, 2, 9, 4), (13, 3, 16, 2), (18, 1, 19, 1),
+                       (X, 0, 0, 4), (4, 3, X, 0), (9, 3, 0, 3), (7, 2, 9, 4)];
+        for (k, e) in extents.iter().enumerate() {
+            assert_eq!(var.extent(k), *e, "block {}", k);
+        }
+        assert_eq!(var.values.len(), 12 + 8 + 6 + 1 + 0 + 0 + 9 + 8);
+        assert_eq!(var.len(), full.len());
+        // Block 1: A slots 0 and 2 live, every B slot; its values are the
+        // full tile's rows 0 and 2.
+        assert_eq!(var.values(1), [&full.values(1)[0..4], &full.values(1)[8..12]].concat());
+        assert_eq!(&var.meta[1].live_a[..2], &[0, 2]);
+        assert_eq!(&var.meta[2].live_b[..2], &[1, 2], "block 2: B slots 1 and 2 live");
+        assert_eq!(var.meta[1].rows, [0, VAR_NO_ROW, 4]);
+        assert_eq!(var.meta[2].cols, [VAR_NO_COL, 0, 1, VAR_NO_COL]);
+        assert!(var.footprint().bytes < full.footprint().bytes);
+        assert_eq!(var.footprint().cross_blocks, 8);
+        let mut cells = std::vec::Vec::new();
+        var.collect_hessian_cells(&mut cells);
+        let mut expected = std::vec::Vec::new();
+        full.collect_hessian_cells(&mut expected);
+        assert_eq!(cells, expected);
+    }
+
+    fn var_cross_matches_the_full_tile<T: crate::utils::Float>() {
+        let (full, var) = var_pair::<T>();
+        let n = N20;
+        // Dense.
+        let (mut hf, mut hv) = (vec![T::zero(); n * n], vec![T::zero(); n * n]);
+        full.accumulate_hessian(&mut hf);
+        var.accumulate_hessian(&mut hv);
+        assert_eq!(hf, hv);
+        // Band, wide enough for every pair.
+        let kd = n - 1;
+        let (mut bf, mut bv) = (vec![T::zero(); (kd + 1) * n], vec![T::zero(); (kd + 1) * n]);
+        full.accumulate_hessian_band(&mut bf, kd).unwrap();
+        var.accumulate_hessian_band(&mut bv, kd).unwrap();
+        assert_eq!(bf, bv);
+        assert!(var.accumulate_hessian_band(&mut bv, 2).is_err(), "a pair outside the band");
+        // COO: the same triplets in the same order.
+        let mut cf = crate::simple_lm::CooMatrix::<T>::new(n);
+        let mut cv = crate::simple_lm::CooMatrix::<T>::new(n);
+        full.accumulate_hessian_sparse(&mut cf);
+        var.accumulate_hessian_sparse(&mut cv);
+        assert_eq!((&cf.rows, &cf.cols, &cf.vals), (&cv.rows, &cv.cols, &cv.vals));
+        // Direct CSC over the pattern the COO gives, its diagonal added
+        // so that the pattern is a Hessian's.
+        for i in 0..n as u32 {
+            cf.push(i, i, T::one());
+            cv.push(i, i, T::one());
+        }
+        let mut df = cf.to_csc().unwrap();
+        let mut dv = cv.to_csc().unwrap();
+        df.vals.fill(T::zero());
+        dv.vals.fill(T::zero());
+        full.accumulate_hessian_sparse_direct(&mut df);
+        var.accumulate_hessian_sparse_direct(&mut dv);
+        assert_eq!(df.vals, dv.vals);
+        // One position per entry, as a pattern without tiles binds.
+        let mut scalar = |i: u32, j: u32| i as usize * n + j as usize;
+        let (mut sf, mut sv) = (PositionStream::new(), PositionStream::new());
+        full.bind_hessian_positions(&mut HessianBinder::Scalar(&mut scalar), &mut sf, 0, 0);
+        var.bind_hessian_positions(&mut HessianBinder::Scalar(&mut scalar), &mut sv, 0, 0);
+        assert_eq!(sf.positions(), sv.positions());
+        let (mut mf, mut mv) = (vec![T::zero(); n * n], vec![T::zero(); n * n]);
+        let (mut kf, mut kv) = (0usize, 0usize);
+        full.accumulate_hessian_sparse_indexed(&mut mf, sf.positions(), &mut kf);
+        var.accumulate_hessian_sparse_indexed(&mut mv, sv.positions(), &mut kv);
+        assert_eq!(kf, sf.positions().len());
+        assert_eq!(kv, kf);
+        assert_eq!(mf, mv);
+    }
+
+    #[test]
+    fn a_var_cross_array_matches_the_full_tile_on_every_route() {
+        var_cross_matches_the_full_tile::<f64>();
+        var_cross_matches_the_full_tile::<f32>();
+    }
+
+    struct FullOnly(CrossBlockArray<3, 4, 12, f64>);
+    struct VarOnly(VarCrossBlockArray<3, 4, f64>);
+
+    impl TileSource for FullOnly {
+        fn assign_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.assign_block(index as usize, vals, base, stride);
+        }
+        fn add_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.add_block(index as usize, vals, base, stride);
+        }
+    }
+
+    impl TileSource for VarOnly {
+        fn assign_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.assign_block(index as usize, vals, base, stride);
+        }
+        fn add_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.add_block(index as usize, vals, base, stride);
+        }
+    }
+
+    /// A dense `N20` by `N20` column-major buffer as the tiled pattern:
+    /// tile `(i, j)` at `j * N20 + i`, its columns `N20` apart.
+    fn dense_tiles_20(i: u32, j: u32) -> (usize, usize, usize) {
+        ((j as usize) * N20 + i as usize, N20, (j as usize) * N20)
+    }
+
+    /// The tiled scatter of the variable array leaves what the full
+    /// array's leaves: the assigned tiles, the one tile two blocks bind
+    /// to summed, and the buffer's garbage everywhere else.
+    #[test]
+    fn a_var_cross_array_scatters_its_tiles_like_the_full_one() {
+        let (full, var) = var_pair::<f64>();
+        let (mut sf, mut sv) = (PositionStream::new(), PositionStream::new());
+        full.bind_hessian_positions(&mut HessianBinder::Tiled(&mut dense_tiles_20), &mut sf, 0, 0);
+        var.bind_hessian_positions(&mut HessianBinder::Tiled(&mut dense_tiles_20), &mut sv, 0, 0);
+        assert_eq!(sf.tiles(), 6, "the two blocks with a fixed side bind no tile");
+        assert_eq!(sv.tiles(), sf.tiles());
+        sf.finish(1);
+        sv.finish(1);
+        assert_eq!(sf.covered, sv.covered);
+        let (mut vf, mut vv) = (vec![9.0; N20 * N20], vec![9.0; N20 * N20]);
+        scatter_tiles(&[FullOnly(full)], &sf, &mut vf);
+        scatter_tiles(&[VarOnly(var)], &sv, &mut vv);
+        assert_eq!(vf, vv);
+        assert!(vf.iter().filter(|&&v| v != 9.0).count() >= 12 + 8 + 6 + 1 + 9, "the tiles were written");
+    }
+
+    /// An aliased block (both sides one entity) with a fixed slot: the
+    /// diagonal tile as the full array writes it, assigned over garbage
+    /// and added to.
+    fn aliased_var_cross_matches<T: crate::utils::Float + Send + Sync>() {
+        const X: u32 = u32::MAX;
+        let mut full: CrossBlockArray<2, 2, 4, T> = CrossBlockArray::new();
+        let mut var: VarCrossBlockArray<2, 2, T> = VarCrossBlockArray::new();
+        for (a, b) in [([2, 3], [2, 3]), ([X, 5], [X, 5]), ([2, 3], [2, 3])] {
+            full.push(&a, &b);
+            var.push(&a, &b);
+        }
+        full.finish();
+        var.finish();
+        let c = |v: f64| T::from(v).unwrap();
+        for k in 0..3 {
+            let (dr_a, dr_b) = ([c(0.3 + k as f64), c(0.7)], [c(-0.6), c(0.1 * k as f64)]);
+            full.block_mut(false, k).add_residual_cross(&dr_a, &dr_b);
+            var.block_mut(false, k).add_residual_cross(&dr_a, &dr_b);
+        }
+        assert_eq!(var.extent(1), (5, 1, 5, 1));
+        let n = 6;
+        let (mut hf, mut hv) = (vec![T::zero(); n * n], vec![T::zero(); n * n]);
+        full.accumulate_hessian(&mut hf);
+        var.accumulate_hessian(&mut hv);
+        assert_eq!(hf, hv);
+        let mut tiles = |i: u32, j: u32| ((j as usize) * n + i as usize, n, (j as usize) * n);
+        let (mut sf, mut sv) = (PositionStream::new(), PositionStream::new());
+        full.bind_hessian_positions(&mut HessianBinder::Tiled(&mut tiles), &mut sf, 0, 0);
+        var.bind_hessian_positions(&mut HessianBinder::Tiled(&mut tiles), &mut sv, 0, 0);
+        sf.finish(1);
+        sv.finish(1);
+        struct Full2<T: crate::utils::Float>(CrossBlockArray<2, 2, 4, T>);
+        struct Var2<T: crate::utils::Float>(VarCrossBlockArray<2, 2, T>);
+        impl<T: crate::utils::Float + Sync> TileSource for Full2<T> {
+            fn assign_block<F: crate::utils::Float>(&self, _a: u8, k: u32, vals: &mut [F], base: usize, stride: usize) {
+                self.0.assign_block(k as usize, vals, base, stride);
+            }
+            fn add_block<F: crate::utils::Float>(&self, _a: u8, k: u32, vals: &mut [F], base: usize, stride: usize) {
+                self.0.add_block(k as usize, vals, base, stride);
+            }
+        }
+        impl<T: crate::utils::Float + Sync> TileSource for Var2<T> {
+            fn assign_block<F: crate::utils::Float>(&self, _a: u8, k: u32, vals: &mut [F], base: usize, stride: usize) {
+                self.0.assign_block(k as usize, vals, base, stride);
+            }
+            fn add_block<F: crate::utils::Float>(&self, _a: u8, k: u32, vals: &mut [F], base: usize, stride: usize) {
+                self.0.add_block(k as usize, vals, base, stride);
+            }
+        }
+        let (mut vf, mut vv) = (vec![c(5.0); n * n], vec![c(5.0); n * n]);
+        scatter_tiles(&[Full2(full)], &sf, &mut vf);
+        scatter_tiles(&[Var2(var)], &sv, &mut vv);
+        assert_eq!(vf, vv);
+        assert_eq!(vv[5 * n + 5], hv[5 * n + 5], "the one-slot block's cell");
+        assert_eq!(vv[3 * n + 2], hv[2 * n + 3]);
+        assert_eq!(vv[2 * n + 3], T::zero(), "the lower triangle of the diagonal tile is cleared");
+    }
+
+    #[test]
+    fn an_aliased_var_cross_block_matches_the_full_one() {
+        aliased_var_cross_matches::<f64>();
+        aliased_var_cross_matches::<f32>();
+    }
+
+    #[test]
+    fn a_based_var_cross_array_matches_the_whole_one() {
+        const X: u32 = u32::MAX;
+        let mut whole: VarCrossBlockArray<2, 3, f64> = VarCrossBlockArray::new();
+        for k in 0..4u32 { whole.push(&[2 * k, 2 * k + 1], &[X, 8 + 2 * k, 9 + 2 * k]); }
+        whole.finish();
+        let mut run: VarCrossBlockArray<2, 3, f64> = VarCrossBlockArray::new();
+        for k in 2..4u32 { run.push(&[2 * k, 2 * k + 1], &[X, 8 + 2 * k, 9 + 2 * k]); }
+        run.finish();
+        run.set_base(2);
+        for slot in 2..4usize {
+            let dr_a = [1.0 + slot as f64, -0.5];
+            let dr_b = [0.4, 0.25, 2.0 - slot as f64];
+            whole.block_mut(false, slot).add_residual_cross(&dr_a, &dr_b);
+            run.block_mut(true, slot).add_residual_cross(&dr_a, &dr_b);
+        }
+        assert_eq!(whole.values(2), run.values(0), "slot 2 is the run's first block");
+        assert_eq!(whole.values(3), run.values(1));
+        assert_eq!(whole.values(3).len(), 4, "two by two live");
+    }
+
+    #[test]
+    #[should_panic(expected = "form one run")]
+    fn a_var_cross_block_refuses_a_gap_in_a_side() {
+        let mut arr: VarCrossBlockArray<3, 4, f64> = VarCrossBlockArray::new();
+        arr.push(&[0, u32::MAX, 2], &[3, 4, 5, 6]);
+    }
+
+    // The variable-width self slab against the fixed-width one: the
+    // same index rows and the same writes, read through every route.
+
+    /// The index rows of 5-wide entities: every slot live, fixed at the
+    /// front, in the middle, at the back, one live, every slot fixed.
+    /// Indices lie in `0..N20` and no two entities share one.
+    fn var_self_patterns() -> std::vec::Vec<[u32; 5]> {
+        const X: u32 = u32::MAX;
+        vec![
+            [0, 1, 2, 3, 4],
+            [X, X, 5, 6, 7],
+            [8, X, 9, 10, X],
+            [11, 12, 13, X, X],
+            [X, X, 14, X, X],
+            [X, X, X, X, X],
+            [15, 16, 17, 18, 19],
+        ]
+    }
+
+    /// Three residuals into entity `k` of both slabs: the plain write on
+    /// both, then the plain write on the full slab against the `_at`
+    /// write on the variable one, with and without a loss weight.
+    fn var_self_write<T: crate::utils::Float>(
+        full: &mut SelfBlockArray<5, 15, T>, var: &mut VarSelfBlockArray<5, T>, k: usize,
+    ) {
+        let c = |v: f64| T::from(v).unwrap();
+        let s = k as f64;
+        let r = c(0.7 - 0.1 * s);
+        let dr = [c(1.5 + s), c(-0.5), c(0.25 * s), c(2.0), c(-1.25)];
+        full.add_residual(false, k, r, &dr);
+        var.add_residual(false, k, r, &dr);
+        let w = c(0.3);
+        full.add_residual_with_loss(false, k, w, r, &[c(0.0), c(-0.5), c(0.0), c(0.0), c(3.0)]);
+        var.add_residual_with_loss_at(false, k, w, r, &[c(-0.5), c(3.0)], &[1, 4]);
+        full.add_residual(false, k, r, &[c(1.25), c(0.0), c(-2.0), c(0.0), c(0.0)]);
+        var.add_residual_at(false, k, r, &[c(1.25), c(-2.0)], &[0, 2]);
+    }
+
+    fn var_self_pair<T: crate::utils::Float>() -> (SelfBlockArray<5, 15, T>, VarSelfBlockArray<5, T>) {
+        let mut full = SelfBlockArray::new();
+        let mut var = VarSelfBlockArray::new();
+        let patterns = var_self_patterns();
+        for (e, idx) in patterns.iter().enumerate() {
+            full.push(e as u32, idx);
+            var.push(e as u32, idx);
+        }
+        full.finish();
+        var.finish();
+        for k in 0..patterns.len() {
+            var_self_write(&mut full, &mut var, k);
+        }
+        (full, var)
+    }
+
+    #[test]
+    fn a_var_self_slab_stores_the_live_triangles() {
+        let (full, var) = var_self_pair::<f64>();
+        const X: u32 = u32::MAX;
+        let extents = [(0, 5), (5, 3), (8, 3), (11, 3), (14, 1), (X, 0), (15, 5)];
+        for (k, e) in extents.iter().enumerate() {
+            assert_eq!(var.extent(k), *e, "entity {}", k);
+        }
+        // A width w takes w (w + 3) / 2 values: the triangle and the stash.
+        assert_eq!(var.data.len(), 20 + 9 + 9 + 9 + 2 + 0 + 20);
+        assert_eq!(&var.meta[2].live[..3], &[0, 2, 3]);
+        assert_eq!(var.meta[2].pos, [0, VAR_NO_POS, 1, 2, VAR_NO_POS]);
+        assert!(var.footprint().bytes < full.footprint().bytes);
+        assert_eq!(var.footprint().self_blocks, 7);
+        assert_eq!(var.len(), full.len());
+        // Entity 2's stash is the full slab's at its live slots.
+        let g = &var.values(2)[6..9];
+        let gf = &full.data[2 * 20 + 15..2 * 20 + 20];
+        assert_eq!(g, &[gf[0], gf[2], gf[3]]);
+        let (mut cells, mut expected) = (std::vec::Vec::new(), std::vec::Vec::new());
+        var.collect_hessian_cells(&mut cells);
+        full.collect_hessian_cells(&mut expected);
+        assert_eq!(cells, expected);
+        let (mut spans, mut spans_full) = (std::vec::Vec::new(), std::vec::Vec::new());
+        for k in 0..7 {
+            var.collect_param_block(k, &mut spans);
+            full.collect_param_block(k, &mut spans_full);
+        }
+        assert_eq!(spans, spans_full);
+        // The whole-model bytes count an entity once over several slabs.
+        let twice = VarSelfBlockArray::<5, f64>::whole_value_bytes([&var, &var].into_iter());
+        assert_eq!(twice, var.value_bytes());
+    }
+
+    fn var_self_matches_the_full_slab<T: crate::utils::Float>() {
+        let (full, var) = var_self_pair::<T>();
+        let n = N20;
+        let (mut gf, mut gv) = (vec![T::zero(); n], vec![T::zero(); n]);
+        full.scatter_grad(&mut gf);
+        var.scatter_grad(&mut gv);
+        assert_eq!(gf, gv);
+        let (mut hf, mut hv) = (vec![T::zero(); n * n], vec![T::zero(); n * n]);
+        full.accumulate_hessian(&mut hf);
+        var.accumulate_hessian(&mut hv);
+        assert_eq!(hf, hv);
+        let kd = n - 1;
+        let (mut bf, mut bv) = (vec![T::zero(); (kd + 1) * n], vec![T::zero(); (kd + 1) * n]);
+        full.accumulate_hessian_band(&mut bf, kd).unwrap();
+        var.accumulate_hessian_band(&mut bv, kd).unwrap();
+        assert_eq!(bf, bv);
+        assert!(var.accumulate_hessian_band(&mut bv, 1).is_err(), "a pair outside the band");
+        let mut cf = crate::simple_lm::CooMatrix::<T>::new(n);
+        let mut cv = crate::simple_lm::CooMatrix::<T>::new(n);
+        full.accumulate_hessian_sparse(&mut cf);
+        var.accumulate_hessian_sparse(&mut cv);
+        assert_eq!((&cf.rows, &cf.cols, &cf.vals), (&cv.rows, &cv.cols, &cv.vals));
+        let mut df = cf.to_csc().unwrap();
+        let mut dv = cv.to_csc().unwrap();
+        df.vals.fill(T::zero());
+        dv.vals.fill(T::zero());
+        full.accumulate_hessian_sparse_direct(&mut df);
+        var.accumulate_hessian_sparse_direct(&mut dv);
+        assert_eq!(df.vals, dv.vals);
+        let mut scalar = |i: u32, j: u32| i as usize * n + j as usize;
+        let (mut sf, mut sv) = (PositionStream::new(), PositionStream::new());
+        full.bind_hessian_positions(&mut HessianBinder::Scalar(&mut scalar), &mut sf, 0, 0);
+        var.bind_hessian_positions(&mut HessianBinder::Scalar(&mut scalar), &mut sv, 0, 0);
+        assert_eq!(sf.positions(), sv.positions());
+        let (mut mf, mut mv) = (vec![T::zero(); n * n], vec![T::zero(); n * n]);
+        let (mut kf, mut kv) = (0usize, 0usize);
+        full.accumulate_hessian_sparse_indexed(&mut mf, sf.positions(), &mut kf);
+        var.accumulate_hessian_sparse_indexed(&mut mv, sv.positions(), &mut kv);
+        assert_eq!(kv, kf);
+        assert_eq!(mf, mv);
+    }
+
+    #[test]
+    fn a_var_self_slab_matches_the_full_slab_on_every_route() {
+        var_self_matches_the_full_slab::<f64>();
+        var_self_matches_the_full_slab::<f32>();
+    }
+
+    struct FullSelfOnly(SelfBlockArray<5, 15, f64>);
+    struct VarSelfOnly(VarSelfBlockArray<5, f64>);
+
+    impl TileSource for FullSelfOnly {
+        fn assign_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.assign_block(index as usize, vals, base, stride);
+        }
+        fn add_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.add_block(index as usize, vals, base, stride);
+        }
+    }
+
+    impl TileSource for VarSelfOnly {
+        fn assign_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.assign_block(index as usize, vals, base, stride);
+        }
+        fn add_block<F: crate::utils::Float>(&self, _array: u8, index: u32, vals: &mut [F], base: usize, stride: usize) {
+            self.0.add_block(index as usize, vals, base, stride);
+        }
+    }
+
+    /// The tiled scatter of the variable slab leaves what the full
+    /// slab's leaves: each live triangle over its tile, the tile's lower
+    /// triangle cleared, the buffer's garbage everywhere else.
+    #[test]
+    fn a_var_self_slab_scatters_its_tiles_like_the_full_one() {
+        let (full, var) = var_self_pair::<f64>();
+        let (mut sf, mut sv) = (PositionStream::new(), PositionStream::new());
+        full.bind_hessian_positions(&mut HessianBinder::Tiled(&mut dense_tiles_20), &mut sf, 0, 0);
+        var.bind_hessian_positions(&mut HessianBinder::Tiled(&mut dense_tiles_20), &mut sv, 0, 0);
+        assert_eq!(sf.tiles(), 6, "the all-fixed entity binds no tile");
+        assert_eq!(sv.tiles(), sf.tiles());
+        sf.finish(1);
+        sv.finish(1);
+        let (mut vf, mut vv) = (vec![9.0; N20 * N20], vec![9.0; N20 * N20]);
+        scatter_tiles(&[FullSelfOnly(full)], &sf, &mut vf);
+        scatter_tiles(&[VarSelfOnly(var)], &sv, &mut vv);
+        assert_eq!(vf, vv);
+        // Column-major: cell (row 9, column 8) of entity 2's tile is its
+        // lower triangle, (row 8, column 9) its upper.
+        assert_eq!(vv[8 * N20 + 9], 0.0, "entity 2's tile: the lower triangle is cleared");
+        assert_ne!(vv[9 * N20 + 8], 9.0, "and its upper triangle written");
+    }
+
+    /// A slab holding some of the entities, addressed through its map,
+    /// accumulates what the whole slab does for those it holds, with a
+    /// fixed slot among them.
+    #[test]
+    fn a_mapped_var_self_slab_matches_the_whole_one() {
+        const X: u32 = u32::MAX;
+        let rows_of = |e: u32| -> [u32; 3] {
+            if e == 1 { [3, X, 4] } else { [3 * e, 3 * e + 1, 3 * e + 2] }
+        };
+        let mut whole: VarSelfBlockArray<3, f64> = VarSelfBlockArray::new();
+        for e in 0..4u32 { whole.push(e, &rows_of(e)); }
+        whole.finish();
+        let mut part: VarSelfBlockArray<3, f64> = VarSelfBlockArray::new();
+        part.map_resize(4);
+        part.push_at(3, 3, &rows_of(3));
+        part.push_at(1, 1, &rows_of(1));
+        part.finish();
+        assert_eq!(part.slab_of(true, 3), 0);
+        assert_eq!(part.slab_of(true, 1), 1);
+        assert!(part.holds(1) && !part.holds(2));
+        let rows = [(1usize, 0.5, [1.0, -0.25, 0.75]), (3, -0.4, [0.2, 1.5, -0.6]),
+                    (1, 0.9, [-1.0, 0.3, 0.1])];
+        for (slot, r, dr) in rows {
+            whole.add_residual(false, slot, r, &dr);
+            part.add_residual(true, slot, r, &dr);
+        }
+        for (slot, r, dr) in rows {
+            whole.add_residual_with_loss(false, slot, 0.25, r, &dr);
+            part.add_residual_with_loss(true, slot, 0.25, r, &dr);
+        }
+        let n = 12;
+        let (mut a, mut b) = (vec![0.0; n * n], vec![0.0; n * n]);
+        whole.accumulate_hessian(&mut a);
+        part.accumulate_hessian(&mut b);
+        assert_eq!(a, b, "the mapped slab's Hessian must be the whole one's");
+        let (mut ga, mut gb) = (vec![0.0; n], vec![0.0; n]);
+        whole.scatter_grad(&mut ga);
+        part.scatter_grad(&mut gb);
+        assert_eq!(ga, gb, "and its gradient too");
+        assert_eq!(whole.extent(1), (3, 2));
+        assert_eq!(VarSelfBlockArray::<3, f64>::whole_value_bytes([&whole, &part].into_iter()),
+            whole.value_bytes(), "the whole counts each entity once");
+    }
+
+    #[test]
+    #[should_panic(expected = "form one run")]
+    fn a_var_self_block_refuses_a_gap() {
+        let mut arr: VarSelfBlockArray<3, f64> = VarSelfBlockArray::new();
+        arr.push(0, &[0, u32::MAX, 2]);
     }
 }

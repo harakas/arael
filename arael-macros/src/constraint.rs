@@ -3217,18 +3217,22 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
                 let type_args: Vec<&syn::Type> = args.args.iter()
                     .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
                     .collect();
-                if (seg.ident == "SelfBlock" || seg.ident == "BoxedSelfBlock") && !type_args.is_empty() {
+                if (seg.ident == "SelfBlock" || seg.ident == "BoxedSelfBlock" || seg.ident == "VarSelfBlock")
+                    && !type_args.is_empty()
+                {
                     let a = type_ident_name(type_args[0])?;
                     return Ok((a, None));
                 }
-                if (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock") && type_args.len() >= 2 {
+                if (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock" || seg.ident == "VarCrossBlock")
+                    && type_args.len() >= 2
+                {
                     let a = type_ident_name(type_args[0])?;
                     let b = type_ident_name(type_args[1])?;
                     return Ok((a, Some(b)));
                 }
             }
         }
-    Err(syn::Error::new_spanned(ty, "expected SelfBlock<A> or CrossBlock<A, B>"))
+    Err(syn::Error::new_spanned(ty, "expected SelfBlock<A>, CrossBlock<A, B> or VarCrossBlock<A, B>"))
 }
 
 /// A `parent.<crossblock>` primary resolved against the containing parent:
@@ -3307,20 +3311,18 @@ fn detect_mixed_parent(
     let mut blocks: Vec<(syn::Ident, String, String, Option<(String, String)>)> = Vec::new();
     for bf in &constraint.block_fields {
         let Some(rest) = bf.strip_prefix("parent.") else { continue };
-        if let Some((_, a, b, over)) = playout.cross_block_fields.iter()
-            .find(|(n, _, _, _)| n == rest)
-        {
+        if let Some(f) = playout.cross_block_fields.iter().find(|f| f.name == rest) {
             blocks.push((syn::Ident::new(rest, proc_macro2::Span::call_site()),
-                a.clone(), b.clone(), over.clone()));
+                f.a.clone(), f.b.clone(), f.over.clone()));
         } else if playout.self_block_field.as_deref() == Some(rest) {
             return Ok(None);
         } else {
             let have: Vec<String> = playout.cross_block_fields.iter()
-                .map(|(n, a, b, _)| format!("CrossBlock<{}, {}> `{}`", a, b, n)).collect();
-            let have = if have.is_empty() { "no CrossBlock fields".to_string() }
+                .map(|f| format!("{} `{}`", f.spelled(), f.name)).collect();
+            let have = if have.is_empty() { "no cross block fields".to_string() }
                 else { have.join(", ") };
             return Err(err(format!(
-                "`parent.{}` does not name a CrossBlock field of the containing parent \
+                "`parent.{}` does not name a cross block field of the containing parent \
                  `{}` -- it has {}", rest, parent_type, have)));
         }
     }
@@ -4885,13 +4887,13 @@ pub fn generate_root_methods(
                 tp.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
             } else { String::new() };
             match seg_name.as_str() {
-                "SelfBlock" => {
+                "SelfBlock" | "VarSelfBlock" => {
                     let (a, b) = extract_block_type_args(&root_field.ty)?;
                     if a != root_name.to_string() || b.is_some() {
                         return Err(syn::Error::new(proc_macro2::Span::call_site(),
                             format!("{}:{}: `root.{}` must be the root's `SelfBlock<Self>`, \
-                                     found `SelfBlock<{}>`",
-                                sc.attr_file, sc.attr_line, rest, a)));
+                                     found `{}<{}>`",
+                                sc.attr_file, sc.attr_line, rest, seg_name, a)));
                     }
                 }
                 _ => {
@@ -5004,8 +5006,8 @@ pub fn generate_root_methods(
                 }
                 parent_self_primary = Some((
                     syn::Ident::new(&rest, proc_macro2::Span::call_site()), parent_type));
-            } else if let Some((_, ca, cb, cross_over)) = playout.cross_block_fields.iter()
-                .find(|(n, _, _, _)| *n == rest).cloned()
+            } else if let Some(crate::CrossField { a: ca, b: cb, over: cross_over, .. }) =
+                playout.cross_block_fields.iter().find(|f| f.name == rest).cloned()
             {
                 if constraint.block_fields.len() != 1 {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
@@ -5144,8 +5146,8 @@ pub fn generate_root_methods(
                 if let Some(sb) = &playout.self_block_field {
                     have.push(format!("SelfBlock `{}`", sb));
                 }
-                for (n, a, b, _) in &playout.cross_block_fields {
-                    have.push(format!("CrossBlock<{}, {}> `{}`", a, b, n));
+                for f in &playout.cross_block_fields {
+                    have.push(format!("{} `{}`", f.spelled(), f.name));
                 }
                 let have = if have.is_empty() { "no block fields".to_string() }
                     else { have.join(", ") };
@@ -7984,13 +7986,13 @@ pub fn generate_root_methods(
         for tn in names {
             if attr_count_per_struct.contains_key(tn.as_str()) { continue; }
             let Some(l) = registry_lookup(tn) else { continue };
-            for (fname, a, b, _) in &l.cross_block_fields {
-                if !claimed_parent_blocks.contains(&(tn.clone(), fname.clone())) {
+            for f in &l.cross_block_fields {
+                if !claimed_parent_blocks.contains(&(tn.clone(), f.name.clone())) {
                     return Err(syn::Error::new(root_name.span(),
-                        format!("`{}` declares `{}: CrossBlock<{}, {}>` but no constraint \
+                        format!("`{}` declares `{}: {}` but no constraint \
                                  writes to it -- add a `constraint(parent.{}, ...)` on a \
                                  struct held inside `{}`, or remove the field",
-                            tn, fname, a, b, fname, tn)));
+                            tn, f.name, f.spelled(), f.name, tn)));
                 }
             }
         }
@@ -8754,6 +8756,12 @@ pub fn generate_root_methods(
     // shape a build is recorded under.
     let mut store_cross_counts: std::collections::HashMap<String, Vec<TokenStream2>> =
         std::collections::HashMap::new();
+    // The arrays stored at their live size, whose value bytes a build
+    // reads off the stores rather than off a per-block constant: the
+    // cross ones, held by one store each, and the self ones, held by
+    // every store whose range touches the entity.
+    let mut store_var_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut store_var_self_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut build_walks: Vec<TokenStream2> = Vec::new();
     {
         let mut types: Vec<&String> = reachable.iter().collect();
@@ -8762,6 +8770,7 @@ pub fn generate_root_methods(
         for type_name in types {
             let Some(layout) = registry_lookup(type_name) else { continue };
             let self_field = layout.self_block_field.clone();
+            let self_var = layout.self_block_var;
             let cross_fields = layout.cross_block_fields.clone();
             if self_field.is_none() && cross_fields.is_empty() { continue; }
             let paths: Vec<Vec<AccessSegment>> = if type_name == &root_str {
@@ -8819,7 +8828,14 @@ pub fn generate_root_methods(
                         store_self_counts.entry(name.to_string()).or_default()
                             .push(slot_count_expr(&path));
                         if store_seen.insert(name.to_string()) {
-                            let ty = quote! { arael::store::SelfBlockArray<#n, #m, #cast_type> };
+                            // A `VarSelfBlock` field takes the slab that
+                            // stores each entity at its live size.
+                            let ty = if self_var {
+                                store_var_self_names.insert(name.to_string());
+                                quote! { arael::store::VarSelfBlockArray<#n, #cast_type> }
+                            } else {
+                                quote! { arael::store::SelfBlockArray<#n, #m, #cast_type> }
+                            };
                             store_ty_of.insert(name.to_string(), ty.clone());
                             store_self_names.push(name.clone());
                             store_names.push(name);
@@ -8828,7 +8844,8 @@ pub fn generate_root_methods(
                     }
                 }
                 // Each cross tile: its two sides are its type arguments.
-                for (fname, a_type, b_type, over) in &cross_fields {
+                for field in &cross_fields {
+                    let (fname, a_type, b_type, over) = (&field.name, &field.a, &field.b, &field.over);
                     let (na, nb) = (param_total(a_type), param_total(b_type));
                     if na == 0 || nb == 0 { continue; }
                     // A block with no array has nowhere to be written, so
@@ -8838,11 +8855,11 @@ pub fn generate_root_methods(
                         type_name, a_type, b_type, over.as_ref(), &item, &ancestors, &root_str)
                     else {
                         return Err(syn::Error::new(proc_macro2::Span::call_site(), format!(
-                            "`{}`: cannot tell which instances `{}.{}: CrossBlock<{}, {}>` \
+                            "`{}`: cannot tell which instances `{}.{}: {}` \
                              couples. Each side is a `Ref` field of `{}` (taken in \
                              declaration order), the containing parent, or the root; name \
                              them with #[arael(cross = (a, b))] when several refs fit.",
-                            root_name, type_name, fname, a_type, b_type, type_name)));
+                            root_name, type_name, fname, field.spelled(), type_name)));
                     };
                     let ai = syn::Ident::new("__ai", proc_macro2::Span::call_site());
                     let bi = syn::Ident::new("__bi", proc_macro2::Span::call_site());
@@ -8876,7 +8893,14 @@ pub fn generate_root_methods(
                     store_cross_counts.entry(name.to_string()).or_default()
                         .push(slot_count_expr(&path));
                     if store_seen.insert(name.to_string()) {
-                        let ty = quote! { arael::store::CrossBlockArray<#na, #nb, #pcount, #cast_type> };
+                        // A `VarCrossBlock` field takes the array that
+                        // stores each block at its live size.
+                        let ty = if field.var {
+                            store_var_names.insert(name.to_string());
+                            quote! { arael::store::VarCrossBlockArray<#na, #nb, #cast_type> }
+                        } else {
+                            quote! { arael::store::CrossBlockArray<#na, #nb, #pcount, #cast_type> }
+                        };
                         store_ty_of.insert(name.to_string(), ty.clone());
                         store_cross_names.push(name.clone());
                         store_names.push(name);
@@ -8942,15 +8966,41 @@ pub fn generate_root_methods(
             let key = name.to_string();
             let ty = &store_ty_of[&key];
             let terms = store_self_counts.get(&key).or_else(|| store_cross_counts.get(&key)).unwrap();
-            quote! { <#ty>::BLOCK_BYTES * ((0u64 #(+ #terms)*) as usize) }
+            if store_var_names.contains(&key) || store_var_self_names.contains(&key) {
+                quote! { <#ty>::META_BYTES * ((0u64 #(+ #terms)*) as usize) }
+            } else {
+                quote! { <#ty>::BLOCK_BYTES * ((0u64 #(+ #terms)*) as usize) }
+            }
         })
         .collect();
+    // The values of a variable-width array vary with the live
+    // parameters, so their bytes are read off the built stores while
+    // those are still borrowed: a cross block is held by one store, so
+    // the sum over the stores is the whole model's; a self block is
+    // held by every store whose range touches its entity, so the slab
+    // counts each entity once over the stores. A root without such an
+    // array emits nothing here.
+    let var_names: Vec<&syn::Ident> = store_cross_names.iter()
+        .filter(|n| store_var_names.contains(&n.to_string())).collect();
+    let var_self_names: Vec<&syn::Ident> = store_self_names.iter()
+        .filter(|n| store_var_self_names.contains(&n.to_string())).collect();
+    let var_self_tys: Vec<&TokenStream2> = var_self_names.iter()
+        .map(|n| &store_ty_of[&n.to_string()]).collect();
+    let (whole_pre, var_bytes_term) = if var_names.is_empty() && var_self_names.is_empty() {
+        (quote! {}, quote! {})
+    } else {
+        (quote! {
+            let __var_bytes: usize = 0usize
+                #(+ __stores.iter().map(|__s| __s.#var_names.value_bytes()).sum::<usize>())*
+                #(+ <#var_self_tys>::whole_value_bytes(__stores.iter().map(|__s| &__s.#var_self_names)))*;
+        }, quote! { + __var_bytes })
+    };
     let set_whole = quote! {
         ctx.set_whole(arael::store::StoreFootprint {
             self_blocks: (0u64 #(+ #whole_self_terms)*) as usize,
             cross_blocks: (0u64 #(+ #whole_cross_terms)*) as usize,
             coo_entries: 0,
-            bytes: 0usize #(+ #whole_bytes_terms)*,
+            bytes: 0usize #(+ #whole_bytes_terms)* #var_bytes_term,
         });
     };
 
@@ -9107,7 +9157,7 @@ pub fn generate_root_methods(
             // Every block field the type declares, in a stable order.
             let mut fields: Vec<String> = Vec::new();
             if let Some(hb) = &layout.self_block_field { fields.push(hb.clone()); }
-            for (f, _, _, _) in &layout.cross_block_fields { fields.push(f.clone()); }
+            for f in &layout.cross_block_fields { fields.push(f.name.clone()); }
             if fields.is_empty() { continue; }
             let field_idents: Vec<syn::Ident> = fields.iter()
                 .map(|f| syn::Ident::new(f, proc_macro2::Span::call_site()))
@@ -9424,6 +9474,7 @@ pub fn generate_root_methods(
                 for (__s, __store) in __stores.iter_mut().enumerate() {
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
+                #whole_pre
                 ctx.set_shape(&__shape);
                 #set_whole
             }
@@ -9713,6 +9764,7 @@ pub fn generate_root_methods(
                 for (__s, __store) in __stores.iter_mut().enumerate() {
                     self.__build_blocks_at(__store, __cut.store(__s), &mut __base);
                 }
+                #whole_pre
                 ctx.set_shape(&self.__shape());
                 #set_whole
             }

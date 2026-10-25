@@ -1343,6 +1343,143 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
 pub type BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T = f64> =
     CrossBlock<A, B, NA, NB, P, T>;
 
+/// Declares an entity's own Hessian block, stored at its live size.
+///
+/// A [`SelfBlock`] stores the full triangle over the entity's `N`
+/// parameters and their `N` gradient entries whatever parameters are
+/// held, and every residual on the entity writes all of it. A
+/// `VarSelfBlock` stores the triangle and the stash over the live
+/// parameters only, so a held parameter costs the assembly nothing: a
+/// write over every parameter walks the live ones, and a write over a
+/// subset maps each to its place. Pick it for an entity whose
+/// parameters are commonly held, in whole or in part, and which many
+/// residuals write; keep `SelfBlock` where every parameter is usually
+/// live, whose writes are at constant offsets.
+///
+/// Everything else is as for `SelfBlock`: one per entity type with
+/// parameters, named by the constraints that write it, the gradient
+/// and the diagonal block in one place. `N = A::PARAM_COUNT`; `T` is
+/// the float type (f32 or f64, default f64).
+///
+/// ```rust,ignore
+/// #[arael::model]
+/// struct Cam {
+///     f: Param<f64>,
+///     c: Param<vect2d>,      // the principal point, usually held
+///     k: Param<f64>,
+///     hb: VarSelfBlock<Cam>,
+/// }
+/// ```
+pub struct VarSelfBlock<A, const N: usize, T: crate::utils::Float = f64> {
+    /// See [`SelfBlock::slot`].
+    slot: u32,
+    _marker: std::marker::PhantomData<(A, T)>,
+}
+
+impl<A, const N: usize, T: crate::utils::Float> Clone for VarSelfBlock<A, N, T> {
+    fn clone(&self) -> Self {
+        VarSelfBlock { slot: self.slot, _marker: std::marker::PhantomData }
+    }
+}
+
+impl<A, const N: usize, T: crate::utils::Float> Default for VarSelfBlock<A, N, T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<A, const N: usize, T: crate::utils::Float> VarSelfBlock<A, N, T> {
+    /// A new, unwired block.
+    pub fn new() -> Self {
+        VarSelfBlock { slot: u32::MAX, _marker: std::marker::PhantomData }
+    }
+
+    /// Return the number of parameters of model A.
+    pub fn n(&self) -> usize { N }
+
+    /// See [`SelfBlock::slot`].
+    #[inline]
+    pub fn slot(&self) -> u32 { self.slot }
+
+    /// See [`SelfBlock::set_slot`].
+    #[inline]
+    pub fn set_slot(&mut self, slot: u32) { self.slot = slot; }
+
+    /// No-op: the block owns no storage to free.
+    pub fn release(&mut self) {}
+}
+
+/// Declares that two entities are coupled in the Hessian, with the block
+/// stored at its live size.
+///
+/// A [`CrossBlock`] stores the full `NA x NB` tile of its two entities
+/// whatever parameters are held, and the assembly zeroes, writes and
+/// scatters all of it. A `VarCrossBlock` stores the `wa x wb` rectangle
+/// of the two entities' live parameters, so a held parameter costs the
+/// assembly nothing: a write over every parameter walks the block's
+/// live ones, and a write over a subset maps each to its place in the
+/// rectangle. Pick it when the entities' parameters are commonly held,
+/// in whole or in part; keep `CrossBlock` where every parameter is
+/// usually live, whose writes are at constant offsets.
+///
+/// Everything else is as for `CrossBlock`: the placement on the
+/// constraint struct or on a containing parent (`constraint(parent.<field>,
+/// ...)`), an aliased pair, and the writes the generated sweep makes.
+/// The values live in a
+/// [`VarCrossBlockArray`](crate::store::VarCrossBlockArray) of the block
+/// store. `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`; `T` is the float
+/// type (f32 or f64, default f64).
+///
+/// ```rust,ignore
+/// #[arael::model]
+/// #[arael(constraint([hb_point_cam], parent = image, {
+///     project(image.cam, point.pos) - obs.px
+/// }))]
+/// struct Obs {
+///     #[arael(ref = root.points)]
+///     point: Ref<Point>,
+///     px: vect2d,
+///     // The camera's intrinsics are mostly held: store the live ones.
+///     hb_point_cam: VarCrossBlock<Point, Cam>,
+/// }
+/// ```
+pub struct VarCrossBlock<A, B, const NA: usize, const NB: usize, T: crate::utils::Float = f64> {
+    /// See [`SelfBlock::slot`].
+    slot: u32,
+    _marker: std::marker::PhantomData<(A, B, T)>,
+}
+
+impl<A, B, const NA: usize, const NB: usize, T: crate::utils::Float> Clone for VarCrossBlock<A, B, NA, NB, T> {
+    fn clone(&self) -> Self {
+        VarCrossBlock { slot: self.slot, _marker: std::marker::PhantomData }
+    }
+}
+
+impl<A, B, const NA: usize, const NB: usize, T: crate::utils::Float> Default for VarCrossBlock<A, B, NA, NB, T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<A, B, const NA: usize, const NB: usize, T: crate::utils::Float> VarCrossBlock<A, B, NA, NB, T> {
+    /// A new, unwired block.
+    pub fn new() -> Self {
+        VarCrossBlock { slot: u32::MAX, _marker: std::marker::PhantomData }
+    }
+
+    /// Return the number of parameters belonging to model A.
+    pub fn na(&self) -> usize { NA }
+    /// Return the number of parameters belonging to model B.
+    pub fn nb(&self) -> usize { NB }
+
+    /// See [`SelfBlock::slot`].
+    #[inline]
+    pub fn slot(&self) -> u32 { self.slot }
+
+    /// See [`SelfBlock::set_slot`].
+    #[inline]
+    pub fn set_slot(&mut self, slot: u32) { self.slot = slot; }
+
+    /// No-op: the block owns no storage to free.
+    pub fn release(&mut self) {}
+}
+
 
 /// Hessian entries in coordinate form: row, column and value, one entry at
 /// a time.
@@ -1653,6 +1790,9 @@ impl<T: crate::utils::Float> Coo<T> {
 impl<A, const N: usize, const M: usize, T: crate::utils::Float> Model for SelfBlock<A, N, M, T> {}
 impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Model
     for CrossBlock<A, B, NA, NB, P, T> {}
+impl<A, B, const NA: usize, const NB: usize, T: crate::utils::Float> Model
+    for VarCrossBlock<A, B, NA, NB, T> {}
+impl<A, const N: usize, T: crate::utils::Float> Model for VarSelfBlock<A, N, T> {}
 
 // ---------------------------------------------------------------------------
 // Jacobian -- sparse Jacobian matrix for analysis (DOF, SVD, etc.)

@@ -2,7 +2,7 @@
 // invocation, then defines its own entity, a cross-crate constraint, and
 // f64 + f32 roots mixing local and imported types.
 
-use arael::model::{CrossBlock, Param, SelfBlock};
+use arael::model::{CrossBlock, Param, SelfBlock, VarCrossBlock, VarSelfBlock};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
 use export_models::{Beacon, Cal, Mark, Spring, Trio};
@@ -12,14 +12,15 @@ export_models::arael_import!();
 // two dependencies both re-exporting the same model crate).
 export_models::arael_import!();
 
-/// A local entity: one shared bias, weakly pulled to zero.
+/// A local entity: one shared bias, weakly pulled to zero, its block
+/// stored at its live size.
 #[arael::model]
 #[arael(constraint(hb, {
     [bias.v * 0.1]
 }))]
 pub struct Bias<T: Float> {
     pub v: Param<T>,
-    pub hb: SelfBlock<Bias<T>, T>,
+    pub hb: VarSelfBlock<Bias<T>, T>,
 }
 
 /// A LOCAL constraint over an IMPORTED entity and a local one -- the
@@ -35,6 +36,21 @@ pub struct BiasLink<T: Float> {
     pub bl: Ref<Bias<T>>,
     pub m: T,
     pub hb: CrossBlock<Beacon<T>, Bias<T>, T>,
+}
+
+/// The same coupling through a block stored at its live size: the
+/// `VarCrossBlock` rewrite resolves the imported count too.
+#[arael::model]
+#[arael(constraint(hb, {
+    [(bk.pos.y - bl.v - biasvarlink.m) * 1.5]
+}))]
+pub struct BiasVarLink<T: Float> {
+    #[arael(ref = root.beacons)]
+    pub bk: Ref<Beacon<T>>,
+    #[arael(ref = root.biases)]
+    pub bl: Ref<Bias<T>>,
+    pub m: T,
+    pub hb: VarCrossBlock<Beacon<T>, Bias<T>, T>,
 }
 
 /// A local constraint reading an IMPORTED param-less record through a
@@ -60,6 +76,7 @@ pub struct World64 {
     pub biases: refs::Vec<Bias<f64>>,
     pub springs: std::vec::Vec<Spring<f64>>,
     pub links: std::vec::Vec<BiasLink<f64>>,
+    pub var_links: std::vec::Vec<BiasVarLink<f64>>,
     pub cals: refs::Vec<Cal<f64>>,
     pub marks: refs::Vec<Mark<f64>>,
     pub mark_links: std::vec::Vec<MarkLink<f64>>,
@@ -72,6 +89,7 @@ pub struct World32 {
     pub biases: refs::Vec<Bias<f32>>,
     pub springs: std::vec::Vec<Spring<f32>>,
     pub links: std::vec::Vec<BiasLink<f32>>,
+    pub var_links: std::vec::Vec<BiasVarLink<f32>>,
     pub cals: refs::Vec<Cal<f32>>,
     pub marks: refs::Vec<Mark<f32>>,
     pub mark_links: std::vec::Vec<MarkLink<f32>>,

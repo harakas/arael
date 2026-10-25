@@ -142,10 +142,13 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
     let head = bare.split('<').next().unwrap_or(bare);
     let head_last = head.rsplit("::").next().unwrap_or(head);
 
-    if matches!(head_last, "SelfBlock" | "BoxedSelfBlock") {
+    if matches!(head_last, "SelfBlock" | "BoxedSelfBlock" | "VarSelfBlock") {
         parts.push("\"kind\": \"self_block\"".into());
         parts.push(format!("\"scalar\": {}", q(block_scalar(bare))));
-    } else if matches!(head_last, "CrossBlock" | "BoxedCrossBlock") {
+        if head_last == "VarSelfBlock" {
+            parts.push("\"var\": true".into());
+        }
+    } else if matches!(head_last, "CrossBlock" | "BoxedCrossBlock" | "VarCrossBlock") {
         parts.push("\"kind\": \"cross_block\"".into());
         let inner = generic_inner(bare);
         let args: Vec<&str> = inner.split(',').map(str::trim).collect();
@@ -154,6 +157,9 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
             parts.push(format!("\"b\": {}", q(args[1])));
         }
         parts.push(format!("\"scalar\": {}", q(block_scalar(bare))));
+        if head_last == "VarCrossBlock" {
+            parts.push("\"var\": true".into());
+        }
     } else if layout.param_fields.iter().any(|f| f == fname) {
         let (variant, is_euler) = if layout.euler_angle_fields.iter().any(|f| f == fname) {
             ("simple", true)
