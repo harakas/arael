@@ -3533,6 +3533,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn branch_simplify_equal_sides() {
+        sym! {
+            let q = symbol("q");
+            let a = symbol("a");
+            // Both sides zero: the derivative of a guarded residual with
+            // respect to a parameter it does not touch.
+            assert!(branch(q.clone(), c(0.0), c(0.0)).simplify().is_zero());
+            // Both sides the same expression, after each side simplifies.
+            assert_eq!(format!("{}", branch(q.clone(), a.clone() * 2.0, a.clone() + a.clone()).simplify()), "2 * a");
+            // Different sides stay a branch.
+            assert!(matches!(branch(q, a, c(0.0)).simplify().as_ref(), Expr::Branch(..)));
+        }
+    }
+
+    #[test]
+    fn select_simplify_equal_arms() {
+        sym! {
+            let i = symbol("i");
+            let a = symbol("a");
+            // Every arm and the default the same: that value.
+            assert!(select(i.clone(), vec![c(0.0), c(0.0)], Some(c(0.0))).simplify().is_zero());
+            assert_eq!(format!("{}", select(i.clone(), vec![a.clone(), a.clone()], Some(a.clone())).simplify()), "a");
+            // Without a default the node stays: an index past the arms panics.
+            assert!(matches!(select(i.clone(), vec![c(0.0), c(0.0)], None).simplify().as_ref(), Expr::Select { .. }));
+            // A default that differs keeps the switch.
+            assert!(matches!(select(i, vec![a.clone(), a], Some(c(0.0))).simplify().as_ref(), Expr::Select { .. }));
+        }
+    }
+
     // --- clamp-based safe_asin tests (simple_func1 version) ---
 
     #[test]

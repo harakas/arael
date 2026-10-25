@@ -847,6 +847,13 @@ impl Expr {
                 if let Expr::Const(qv) = q2.as_ref() {
                     return if *qv >= 0.0 { a2 } else { b2 };
                 }
+                // The same value on both sides is that value whatever the
+                // condition: the derivative of a guarded residual with
+                // respect to a parameter it does not touch, `branch(q, 0,
+                // 0)`, is zero.
+                if a2 == b2 {
+                    return a2;
+                }
                 if std::rc::Rc::ptr_eq(&q2.0, &q.0) && std::rc::Rc::ptr_eq(&a2.0, &a.0) && std::rc::Rc::ptr_eq(&b2.0, &b.0) {
                     orig.clone()
                 } else {
@@ -866,6 +873,13 @@ impl Expr {
                             Some(i) => arms2[i].clone(),
                             None => default2.unwrap(),
                         };
+                    }
+                // Every arm the same value, with a default: that value for
+                // any index. Without a default the node stays, since an
+                // index outside the arms must still panic.
+                if let Some(d) = &default2
+                    && arms2.iter().all(|a| a == d) {
+                        return d.clone();
                     }
                 let same = std::rc::Rc::ptr_eq(&index2.0, &index.0)
                     && arms2.iter().zip(arms).all(|(n, o)| std::rc::Rc::ptr_eq(&n.0, &o.0))

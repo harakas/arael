@@ -1209,6 +1209,29 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         self.add_scaled(k, T::two() * w, r, dr);
     }
 
+    /// [`add_residual`](Self::add_residual) over the `K` parameters at
+    /// the positions `at` (ascending, below `N`) of the entity; the
+    /// row's other partials are zero and add nothing. Generated code
+    /// passes `at` as a literal, and the write is always inlined so the
+    /// positions are constants in it.
+    #[inline(always)]
+    pub fn add_residual_at<const K: usize>(
+        &mut self, split: bool, slot: usize, r: T, dr: &[T; K], at: &[usize; K],
+    ) {
+        let k = self.slab_of(split, slot);
+        self.add_scaled_at(k, T::two(), r, dr, at);
+    }
+
+    /// [`add_residual_at`](Self::add_residual_at) scaled by the loss
+    /// weight `w`.
+    #[inline(always)]
+    pub fn add_residual_with_loss_at<const K: usize>(
+        &mut self, split: bool, slot: usize, w: T, r: T, dr: &[T; K], at: &[usize; K],
+    ) {
+        let k = self.slab_of(split, slot);
+        self.add_scaled_at(k, T::two() * w, r, dr, at);
+    }
+
     #[inline]
     fn add_scaled(&mut self, k: usize, scale: T, r: T, dr: &[T; N]) {
         let base = k * Self::STRIDE;
@@ -1221,6 +1244,24 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
             let tdi = scale * dr[i];
             for j in i..N {
                 h[tri_idx(N, i, j)] += tdi * dr[j];
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn add_scaled_at<const K: usize>(&mut self, k: usize, scale: T, r: T, dr: &[T; K], at: &[usize; K]) {
+        debug_assert!(at.windows(2).all(|w| w[0] < w[1]) && at.last().is_none_or(|&l| l < N),
+            "positions must ascend and lie below the entity's parameter count");
+        let base = k * Self::STRIDE;
+        let (h, g) = self.data[base..base + Self::STRIDE].split_at_mut(M);
+        let h: &mut [T; M] = h.try_into().unwrap();
+        let g: &mut [T; N] = g.try_into().unwrap();
+        let sr = scale * r;
+        for i in 0..K {
+            g[at[i]] += sr * dr[i];
+            let tdi = scale * dr[i];
+            for j in i..K {
+                h[tri_idx(N, at[i], at[j])] += tdi * dr[j];
             }
         }
     }
@@ -1344,6 +1385,26 @@ fn cross_add<const NA: usize, const NB: usize, const P: usize, T: crate::utils::
         let row = i * NB;
         for j in 0..NB {
             values[row + j] += scale * dai * dr_b[j];
+        }
+    }
+}
+
+/// [`cross_add`] over the rows `at_a` and the columns `at_b` of the tile
+/// (ascending positions, below `NA` and `NB`): the pairs of the row's
+/// live partials on each side. Always inlined: the positions are
+/// literals at the call.
+#[inline(always)]
+fn cross_add_at<const NB: usize, const P: usize, const KA: usize, const KB: usize, T: crate::utils::Float>(
+    values: &mut [T; P], scale: T, dr_a: &[T; KA], at_a: &[usize; KA], dr_b: &[T; KB], at_b: &[usize; KB],
+) {
+    debug_assert!(at_a.windows(2).all(|w| w[0] < w[1]) && at_a.last().is_none_or(|&l| l * NB < P)
+        && at_b.windows(2).all(|w| w[0] < w[1]) && at_b.last().is_none_or(|&l| l < NB),
+        "positions must ascend and lie within the tile");
+    for i in 0..KA {
+        let sai = scale * dr_a[i];
+        let row = at_a[i] * NB;
+        for j in 0..KB {
+            values[row + at_b[j]] += sai * dr_b[j];
         }
     }
 }
@@ -1610,6 +1671,26 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
     #[inline]
     pub fn add_residual_cross_with_loss(&mut self, w: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
         cross_add(self.values, T::two() * w, dr_a, dr_b);
+    }
+
+    /// [`add_residual_cross`](Self::add_residual_cross) over the `KA`
+    /// A-side parameters at the positions `at_a` and the `KB` B-side
+    /// parameters at `at_b` (ascending); the row's other partials are
+    /// zero and add nothing.
+    #[inline(always)]
+    pub fn add_residual_cross_at<const KA: usize, const KB: usize>(
+        &mut self, dr_a: &[T; KA], at_a: &[usize; KA], dr_b: &[T; KB], at_b: &[usize; KB],
+    ) {
+        cross_add_at::<NB, P, KA, KB, T>(self.values, T::two(), dr_a, at_a, dr_b, at_b);
+    }
+
+    /// [`add_residual_cross_at`](Self::add_residual_cross_at) with the
+    /// pairs scaled by the loss weight `w`.
+    #[inline(always)]
+    pub fn add_residual_cross_with_loss_at<const KA: usize, const KB: usize>(
+        &mut self, w: T, dr_a: &[T; KA], at_a: &[usize; KA], dr_b: &[T; KB], at_b: &[usize; KB],
+    ) {
+        cross_add_at::<NB, P, KA, KB, T>(self.values, T::two() * w, dr_a, at_a, dr_b, at_b);
     }
 }
 
@@ -2605,5 +2686,66 @@ mod tests {
         assert_eq!(tile_extent(&[u32::MAX, 4, 5, 6]), (4, 3));
         assert_eq!(tile_extent(&[7, u32::MAX, u32::MAX]), (7, 1));
         assert_eq!(tile_extent(&[u32::MAX, u32::MAX]), (u32::MAX, 0));
+    }
+
+    /// A self write over a subset of the positions equals the full write
+    /// with zeros elsewhere: the gradient stash and the triangle, plain
+    /// and with a loss weight, in both precisions.
+    fn self_subset_writes_match<T: crate::utils::Float>() {
+        let mut full: SelfBlockArray<5, 15, T> = SelfBlockArray::default();
+        let mut sub: SelfBlockArray<5, 15, T> = SelfBlockArray::default();
+        for arr in [&mut full, &mut sub] {
+            arr.push(0, &[0, 1, 2, 3, 4]);
+            arr.push(1, &[5, u32::MAX, 7, 8, 9]);
+            arr.finish();
+        }
+        let c = |v: f64| T::from(v).unwrap();
+        let r = c(0.7);
+        let w = c(0.3);
+        // Slot 0: positions 0, 2, 3 live (plain).
+        full.add_residual(false, 0, r, &[c(1.5), c(0.0), c(-2.0), c(0.25), c(0.0)]);
+        sub.add_residual_at(false, 0, r, &[c(1.5), c(-2.0), c(0.25)], &[0, 2, 3]);
+        // Slot 1: positions 1 and 4 live, under a loss weight.
+        full.add_residual_with_loss(false, 1, w, r, &[c(0.0), c(-0.5), c(0.0), c(0.0), c(3.0)]);
+        sub.add_residual_with_loss_at(false, 1, w, r, &[c(-0.5), c(3.0)], &[1, 4]);
+        // One live position, and an empty subset.
+        full.add_residual(false, 0, r, &[c(0.0), c(0.0), c(0.0), c(0.0), c(1.25)]);
+        sub.add_residual_at(false, 0, r, &[c(1.25)], &[4]);
+        sub.add_residual_at::<0>(false, 1, r, &[], &[]);
+        assert_eq!(full.data, sub.data);
+    }
+
+    #[test]
+    fn self_subset_writes_match_the_full_write() {
+        self_subset_writes_match::<f64>();
+        self_subset_writes_match::<f32>();
+    }
+
+    /// A cross write over subsets of both sides equals the full write
+    /// with zeros elsewhere, plain and with a loss weight.
+    fn cross_subset_writes_match<T: crate::utils::Float>() {
+        let mut full: CrossBlockArray<3, 4, 12, T> = CrossBlockArray::new();
+        let mut sub: CrossBlockArray<3, 4, 12, T> = CrossBlockArray::new();
+        for arr in [&mut full, &mut sub] {
+            arr.push(&[0, 1, 2], &[3, 4, 5, 6]);
+            arr.finish();
+        }
+        let c = |v: f64| T::from(v).unwrap();
+        full.block_mut(false, 0).add_residual_cross(
+            &[c(1.0), c(0.0), c(-0.5)], &[c(0.0), c(2.0), c(0.0), c(0.75)]);
+        sub.block_mut(false, 0).add_residual_cross_at(
+            &[c(1.0), c(-0.5)], &[0, 2], &[c(2.0), c(0.75)], &[1, 3]);
+        let w = c(0.4);
+        full.block_mut(false, 0).add_residual_cross_with_loss(w,
+            &[c(0.0), c(0.3), c(0.0)], &[c(-1.0), c(0.0), c(0.0), c(0.0)]);
+        sub.block_mut(false, 0).add_residual_cross_with_loss_at(w,
+            &[c(0.3)], &[1], &[c(-1.0)], &[0]);
+        assert_eq!(full.values, sub.values);
+    }
+
+    #[test]
+    fn cross_subset_writes_match_the_full_write() {
+        cross_subset_writes_match::<f64>();
+        cross_subset_writes_match::<f32>();
     }
 }
