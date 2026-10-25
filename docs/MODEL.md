@@ -1076,7 +1076,12 @@ code. The dialect:
   the shorthand over all six built-in kernels. A dispatching
   constraint always takes the with-loss path, even when kind 0 selects
   plain least squares; a model that only ever wants one kernel should
-  still write it directly.
+  still write it directly. When the arms of a `match` in a residual
+  body touch different parameters, the block writes are emitted once
+  per arm over the parameters that arm touches, so an entity can carry
+  the parameters of every variant (a camera with the parameters of
+  every model, one `match` on the model) and a variant pays only for
+  its own.
 - **Vectors / matrices / quaternions**: fields of runtime type
   `vect2*/vect3*/matrix2*/matrix3*/quatern*` dispatch through their
   symbolic companions -- arithmetic, `transpose`, `det`, indexing

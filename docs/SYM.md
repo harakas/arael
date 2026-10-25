@@ -193,7 +193,7 @@ sym! {
 
 ## Walking the Tree
 
-An expression is a DAG: a shared subexpression is one node. `e.for_each_node(&mut |n| ...)` calls the closure on every node once, children before parents. `e.map_nodes(&mut |n| ...)` rebuilds the expression bottom-up; the closure returns the replacement node, or `None` to keep it, and the result is not simplified. `e.dag_size()` counts the unique nodes.
+An expression is a DAG: a shared subexpression is one node. `e.for_each_node(&mut |n| ...)` calls the closure on every node once, children before parents. `e.for_each_node_while(&mut |n| ...)` visits top-down, parents first, and descends into a node's children only when the closure returns `true`, so a walk can stop at a kind of node (the outermost `branch` of every path, say). `e.map_nodes(&mut |n| ...)` rebuilds the expression bottom-up; the closure returns the replacement node, or `None` to keep it, and the result is not simplified. `e.dag_size()` counts the unique nodes.
 
 ## Linear Algebra
 

@@ -2571,16 +2571,20 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
 
 /// The one `branch` condition every expression sits under, when replacing
 /// each `branch` by its other side leaves every expression exactly zero.
-/// `None` when there is no branch, more than one distinct condition, or
-/// anything survives on the other side.
+/// `None` when there is no branch, more than one distinct outermost
+/// condition, or anything survives on the other side. A branch inside
+/// another's arm is that arm's business and does not count.
 fn off_branch_guard(exprs: &[arael_sym::E]) -> Option<arael_sym::E> {
     let mut conds: Vec<arael_sym::E> = Vec::new();
     for e in exprs {
-        e.for_each_node(&mut |n| {
-            if let arael_sym::Expr::Branch(q, _, _) = n.as_ref()
-                && !conds.contains(q)
-            {
-                conds.push(q.clone());
+        e.for_each_node_while(&mut |n| {
+            if let arael_sym::Expr::Branch(q, _, _) = n.as_ref() {
+                if !conds.contains(q) {
+                    conds.push(q.clone());
+                }
+                false
+            } else {
+                true
             }
         });
     }
@@ -4062,6 +4066,155 @@ fn split_gh(stmts: &[GhStmt]) -> (Vec<TokenStream2>, Vec<TokenStream2>) {
         }
     }
     (seq, par)
+}
+
+// ---- Writes per select arm --------------------------------------------
+
+/// The `match` of a constraint body that the row writes dispatch on, and
+/// per arm which outputs of the gradient/Hessian batch are zero when it
+/// takes that arm. A partial an arm does not touch is the literal zero
+/// inside the arm; the writes of that arm skip it, where the merged code
+/// after the match cannot (docs/dev/ARM_WRITES.md).
+struct ArmWrites {
+    /// The select index after CSE, evaluated again at the dispatch.
+    index: E,
+    /// Per numbered arm, then the default arm when there is one: the zero
+    /// flag of every output of the batch.
+    arms: Vec<Vec<bool>>,
+    has_default: bool,
+    /// The match's position among the top-level statements, when it is
+    /// one of them: the epilogue is then emitted inside its arms.
+    top_level: Option<usize>,
+}
+
+/// What a name of the CSE output stands for.
+enum Binding<'a> {
+    Let(&'a E),
+    /// Output `pos` of the match at `id` in the flat match list.
+    Match { id: usize, pos: usize },
+}
+
+/// Flatten the matches of `inters`, nested arms included, and bind every
+/// name; `top` collects the names bound outside any arm, `top_index` per
+/// match its position among the top-level statements, when it is one.
+fn bind_cse_names<'a>(
+    inters: &'a [arael_sym::cse::Intermediate],
+    at_top: bool,
+    all_matches: &mut Vec<&'a arael_sym::cse::Intermediate>,
+    top_index: &mut Vec<Option<usize>>,
+    env: &mut HashMap<&'a str, Binding<'a>>,
+    top: &mut std::collections::HashSet<&'a str>,
+) {
+    use arael_sym::cse::Intermediate;
+    for (i, it) in inters.iter().enumerate() {
+        match it {
+            Intermediate::Let { name, expr } => {
+                env.insert(name, Binding::Let(expr));
+                if at_top { top.insert(name); }
+            }
+            Intermediate::Match { names, arms, default, .. } => {
+                let id = all_matches.len();
+                all_matches.push(it);
+                top_index.push(if at_top { Some(i) } else { None });
+                for (pos, name) in names.iter().enumerate() {
+                    env.insert(name, Binding::Match { id, pos });
+                    if at_top { top.insert(name); }
+                }
+                for arm in arms.iter().chain(default.iter()) {
+                    bind_cse_names(&arm.inters, false, all_matches, top_index, env, top);
+                }
+            }
+        }
+    }
+}
+
+/// Whether `e` is zero when the match at `chosen` takes arm `arm` (`None`
+/// for its default arm): constants, the bound names, and the operators
+/// that pass a zero through; any other match is zero only when every arm
+/// of it is.
+fn zero_under(
+    e: &E, chosen: usize, arm: Option<usize>,
+    all_matches: &[&arael_sym::cse::Intermediate], env: &HashMap<&str, Binding>,
+    memo: &mut HashMap<*const arael_sym::Expr, bool>,
+) -> bool {
+    use arael_sym::Expr as X;
+    let key = e.as_ref() as *const X;
+    if let Some(&z) = memo.get(&key) { return z; }
+    let zero = |x: &E, memo: &mut HashMap<*const X, bool>| {
+        zero_under(x, chosen, arm, all_matches, env, memo)
+    };
+    let z = match e.as_ref() {
+        X::Const(v) => *v == 0.0,
+        X::Sym(name) => match env.get(name.as_str()) {
+            Some(Binding::Let(def)) => zero(def, memo),
+            Some(Binding::Match { id, pos }) => {
+                let arael_sym::cse::Intermediate::Match { arms, default, .. } = all_matches[*id]
+                    else { unreachable!() };
+                if *id == chosen {
+                    let taken = match arm {
+                        Some(k) => &arms[k],
+                        None => default.as_ref().expect("the default arm exists"),
+                    };
+                    zero(&taken.values[*pos], memo)
+                } else {
+                    arms.iter().chain(default.iter()).all(|a| zero(&a.values[*pos], memo))
+                }
+            }
+            None => false,
+        },
+        X::Neg(a) => zero(a, memo),
+        X::Add(a, b) | X::Sub(a, b) => zero(a, memo) && zero(b, memo),
+        X::Mul(a, b) => zero(a, memo) || zero(b, memo),
+        X::Div(a, _) => zero(a, memo),
+        X::Pow(a, p) => matches!(p.as_ref(), X::Const(v) if *v > 0.0) && zero(a, memo),
+        X::Branch(_, a, b) => zero(a, memo) && zero(b, memo),
+        X::Select { arms, default, .. } => arms.iter().chain(default.iter()).all(|a| zero(a, memo)),
+        _ => false,
+    };
+    memo.insert(key, z);
+    z
+}
+
+/// The match to specialize the row writes on: the one whose arms have the
+/// most partials (the batch outputs at `partials`) zero beyond the merged
+/// flags; none when no arm has any, or when its index reads a name bound
+/// inside an arm (it is evaluated again after the math).
+fn arm_writes(
+    inters: &[arael_sym::cse::Intermediate], outputs: &[E], partials: &[usize],
+) -> Option<ArmWrites> {
+    use arael_sym::cse::{Intermediate, Switch};
+    let mut all_matches = Vec::new();
+    let mut top_index = Vec::new();
+    let mut env = HashMap::new();
+    let mut top = std::collections::HashSet::new();
+    bind_cse_names(inters, true, &mut all_matches, &mut top_index, &mut env, &mut top);
+    let merged: Vec<bool> = outputs.iter().map(|e| e.is_zero()).collect();
+    let mut best: Option<(usize, ArmWrites)> = None;
+    for (id, it) in all_matches.iter().enumerate() {
+        let Intermediate::Match { switch: Switch::Index(index), arms, default, .. } = it
+            else { continue };
+        if index.free_vars().iter().any(|v| env.contains_key(v.as_str()) && !top.contains(v.as_str())) {
+            continue;
+        }
+        let variants = (0..arms.len()).map(Some).chain(default.iter().map(|_| None));
+        let mut flags = Vec::with_capacity(arms.len() + 1);
+        let mut gain = 0usize;
+        for arm in variants {
+            let mut memo = HashMap::new();
+            let f: Vec<bool> = outputs.iter()
+                .map(|e| zero_under(e, id, arm, &all_matches, &env, &mut memo))
+                .collect();
+            gain += partials.iter().filter(|&&i| f[i] && !merged[i]).count();
+            flags.push(f);
+        }
+        if gain > 0 && best.as_ref().is_none_or(|(g, _)| gain > *g) {
+            best = Some((gain, ArmWrites {
+                index: index.clone(), arms: flags, has_default: default.is_some(),
+                top_level: top_index[id],
+            }));
+        }
+    }
+    best.map(|(_, aw)| aw)
 }
 
 // ---- The block store -----------------------------------------------
@@ -6387,6 +6540,18 @@ pub fn generate_root_methods(
         } else {
             quote! { add_residual_cross_at }
         };
+        // The same writes over the live positions of a span, in an arm of
+        // the dispatch on a body `match`.
+        let s_add_at: TokenStream2 = if loss_present {
+            quote! { add_residual_with_loss_at }
+        } else {
+            quote! { add_residual_at }
+        };
+        let m_cross_at: TokenStream2 = if loss_present {
+            quote! { add_residual_cross_with_loss_at }
+        } else {
+            quote! { add_residual_cross_at }
+        };
         // Build the finalize statements (compute rho, and for the gh path the
         // weight) from the loss expression, sharing the residual pipeline:
         // differentiate for the weight, then substitute + fast_atan + CSE.
@@ -6479,13 +6644,51 @@ pub fn generate_root_methods(
         if fast_atan { replace_atan_fast(&mut all_gh_exprs); }
         // Dead-branch skip: when every row and derivative sits under one
         // `branch` condition with zero on its other side, the rows are all
-        // zero off that side, and the row and write statements are emitted
-        // behind the same test. The condition joins the batch so the CSE
-        // shares its work with the rows.
+        // zero off that side. Every branch on it then takes its on side,
+        // and everything from the CSE statements to the writes runs behind
+        // the condition, computed first from its own CSE. The Jacobian
+        // rows keep the branches: a row is zero on the off side.
         let off_guard = off_branch_guard(&all_gh_exprs);
-        if let Some(q) = &off_guard { all_gh_exprs.push(q.clone()); }
+        let jac_exprs: Option<Vec<arael_sym::E>> =
+            if jacobian && off_guard.is_some() { Some(all_gh_exprs.clone()) } else { None };
+        let guard_code: Option<(Vec<TokenStream2>, Expr)> = match &off_guard {
+            Some(q) => {
+                let mut on_side = |n: &arael_sym::E| match n.as_ref() {
+                    arael_sym::Expr::Branch(c, a, _) if c == q => Some(a.clone()),
+                    _ => None,
+                };
+                for e in all_gh_exprs.iter_mut() { *e = e.map_nodes(&mut on_side); }
+                let mut cond = vec![q.clone()];
+                finish_batch(&mut cond, proc_macro2::Span::call_site(), false)?;
+                let (q_ints, q_simplified) = arael_sym::cse_scoped(&cond);
+                Some((cse_stmts(&q_ints, Some(""))?, parse_sym_code(&q_simplified[0].to_rust(""))?))
+            }
+            None => None,
+        };
         finish_batch(&mut all_gh_exprs, proc_macro2::Span::call_site(), false)?;
         let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
+        let (jac_intermediates, jac_simplified) = match jac_exprs {
+            Some(mut exprs) => {
+                finish_batch(&mut exprs, proc_macro2::Span::call_site(), false)?;
+                arael_sym::cse_scoped(&exprs)
+            }
+            None => (gh_intermediates.clone(), gh_simplified.clone()),
+        };
+        // A `match` of the body whose arms leave partials zero that the
+        // merged flags cannot see: at the top level of the statements the
+        // rows, the loss and the writes are emitted inside its arms, each
+        // over the arm's partials; nested in another switch the writes
+        // alone dispatch on it after the math.
+        let n_partials = param_strs.len();
+        let partial_outputs: Vec<usize> = (0..residual_exprs.len())
+            .flat_map(|ri| (0..n_partials).map(move |pi| ri * (1 + n_partials) + 1 + pi))
+            .collect();
+        let arm_writes = arm_writes(&gh_intermediates, &gh_simplified, &partial_outputs);
+        let arm_index_code: Option<Expr> = match &arm_writes {
+            Some(aw) => Some(parse_sym_code(&aw.index.to_rust(""))?),
+            None => None,
+        };
+        let sink: Option<usize> = arm_writes.as_ref().and_then(|aw| aw.top_level);
 
         // The sequential sweep's statements and, for a threaded root, the
         // split-store sweep's: the same computes, the writes into the
@@ -6541,10 +6744,18 @@ pub fn generate_root_methods(
             Some(quote! { #access.#block_ident })
         } else { None };
 
-        for s in cse_stmts(&gh_intermediates, Some(""))? { gh.push(GhStmt::Both(s)); }
-        // Everything from here to the deferred writes is skipped when the
-        // dead-branch test is off.
+        // The dead-branch condition's own statements; everything from here
+        // to the deferred writes is skipped when the test is off.
+        if let Some((q_stmts, _)) = &guard_code {
+            for s in q_stmts { gh.push(GhStmt::Both(s.clone())); }
+        }
         let skip_split = gh.len();
+        // The statements before a sunk match; the rest go inside its arms.
+        let cse_head = match sink {
+            Some(m) => &gh_intermediates[..m],
+            None => &gh_intermediates[..],
+        };
+        for s in cse_stmts(cse_head, Some(""))? { gh.push(GhStmt::Both(s)); }
 
         // Pre-residual setup for the `[hb, coo]` forms (joined to the
         // root or to the parent): build __all_idx (concatenation of entity
@@ -6598,6 +6809,14 @@ pub fn generate_root_methods(
             }));
         }
 
+        // The epilogue of the sweep: the rows (residual, cost, partials and
+        // the block writes), the loss finalize and the deferred writes.
+        // `flags` are the zero flags of the batch outputs for one arm of a
+        // sunk match; without them the merged flags, and the writes
+        // dispatch on a nested match when there is one.
+        let epilogue = |flags: Option<&[bool]>| -> syn::Result<Vec<TokenStream2>> {
+        let mut out: Vec<TokenStream2> = Vec::new();
+        let mut deferred: Vec<TokenStream2> = Vec::new();
         let mut idx = 0;
         // Remote-block constraints write only through the target path (plus
         // per-frine cross blocks in multi-cross mode): emit ALL rows'
@@ -6611,7 +6830,6 @@ pub fn generate_root_methods(
         // A loss forces deferral: every write is scaled by __w = rho'(s),
         // which is only known once __block_cost has summed all rows.
         let defer_writes = is_remote_block || loss_present;
-        let mut deferred_writes: Vec<GhStmt> = Vec::new();
         for ri in 0..n_residuals {
             // Residual rows interleave reads (residual + derivative
             // evaluation through shared borrows) and writes (temporary
@@ -6619,7 +6837,7 @@ pub fn generate_root_methods(
             // end the previous row's shared borrows, so every row after the
             // first re-establishes the ref bindings.
             if ri > 0 && !resolve_reread_stmts.is_empty() && !defer_writes {
-                gh.push(GhStmt::Seq(quote! { #(#resolve_reread_stmts)* }));
+                out.push(quote! { #(#resolve_reread_stmts)* });
             }
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
@@ -6629,10 +6847,10 @@ pub fn generate_root_methods(
             // model evaluation in the LM loop). Under a loss this sums into
             // __block_cost = |r|^2 instead, and rho(s) is added to __cost once.
             let acc = row_acc(&r_ident);
-            gh.push(GhStmt::Both(quote! {
+            out.push(quote! {
                 let #r_ident= #r_expr;
                 #acc
-            }));
+            });
             idx += 1;
             // The leading argument every accumulation call passes: the residual
             // cast to the block type, prefixed by the weight when a loss is on.
@@ -6650,321 +6868,402 @@ pub fn generate_root_methods(
             // inline 0.0 literals where a full-width slice is still needed,
             // and elide whole block calls when an entity's span is all
             // zeros -- the accumulated contribution would be exactly 0.
-            let mut dr_zero: Vec<bool> = Vec::with_capacity(n_params);
-            let mut dr_f64: Vec<TokenStream2> = Vec::with_capacity(n_params);
+            let row_first = idx;
+            let mut merged_zero: Vec<bool> = Vec::with_capacity(n_params);
             for pi in 0..n_params {
-                let zero = gh_simplified[idx].is_zero();
-                dr_zero.push(zero);
-                if zero {
-                    dr_f64.push(quote! { 0.0 as #cast_type });
-                } else {
+                let zero = match flags {
+                    Some(f) => f[idx],
+                    None => gh_simplified[idx].is_zero(),
+                };
+                merged_zero.push(zero);
+                if !zero {
                     let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
                     let dr_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
-                    gh.push(GhStmt::Both(quote! { let #dr_ident= #dr_expr; }));
-                    dr_f64.push(quote! { #dr_ident as #cast_type });
+                    out.push(quote! { let #dr_ident= #dr_expr; });
                 }
                 idx += 1;
             }
-            let span_zero = |start: usize, count: usize| -> bool {
-                count == 0 || dr_zero[start..start + count].iter().all(|&z| z)
+            // The row's writes: once over the flags in hand, or once per
+            // arm of the dispatch match over the arm's flags (a partial
+            // zero in the merged flags is zero in every arm, so every
+            // partial a variant reads is declared). Either way a span
+            // the row touches in part is written over its live positions.
+            let variants: Vec<(Vec<bool>, bool)> = match (flags, &arm_writes) {
+                (Some(_), _) | (None, None) => vec![(merged_zero.clone(), true)],
+                (None, Some(aw)) => aw.arms.iter()
+                    .map(|f| (f[row_first..row_first + n_params].to_vec(), true))
+                    .collect(),
             };
-            // A self-block write over an entity's span: nothing for a span
-            // of zeros, the plain call over a live span, and the `_at`
-            // call over the live positions of a span the row touches in
-            // part, so a structurally zero partial costs no products.
-            let self_write = |arr: &syn::Ident, slot: TokenStream2, start: usize, count: usize| -> TokenStream2 {
-                if span_zero(start, count) { return quote! {}; }
-                let live: Vec<usize> = (0..count).filter(|&i| !dr_zero[start + i]).collect();
-                if live.len() == count {
-                    let entity_dr = &dr_f64[start..start + count];
-                    quote! {
-                        __store.#arr.#s_add(__split,
-                            #slot.slot() as usize, #wr, &[#(#entity_dr),*]);
+            let mut variant_writes: Vec<TokenStream2> = Vec::with_capacity(variants.len());
+            for (dr_zero, masked) in &variants {
+                let masked = *masked;
+                let dr_f64: Vec<TokenStream2> = (0..n_params).map(|pi| {
+                    if dr_zero[pi] {
+                        quote! { 0.0 as #cast_type }
+                    } else {
+                        let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
+                        quote! { #dr_ident as #cast_type }
                     }
-                } else {
-                    let vals = live.iter().map(|&i| &dr_f64[start + i]);
-                    quote! {
-                        __store.#arr.#s_add_at(__split,
-                            #slot.slot() as usize, #wr, &[#(#vals),*], &[#(#live),*]);
+                }).collect();
+                let span_zero = |start: usize, count: usize| -> bool {
+                    count == 0 || dr_zero[start..start + count].iter().all(|&z| z)
+                };
+                // A self-block write over an entity's span: nothing for a span
+                // of zeros, the plain call over a live span, and in an arm
+                // variant the `_at` call over the live positions of a mixed
+                // span.
+                let self_write = |arr: &syn::Ident, slot: TokenStream2, start: usize, count: usize| -> TokenStream2 {
+                    if span_zero(start, count) { return quote! {}; }
+                    let live: Vec<usize> = (0..count).filter(|&i| !dr_zero[start + i]).collect();
+                    if !masked || live.len() == count {
+                        let entity_dr = &dr_f64[start..start + count];
+                        quote! {
+                            __store.#arr.#s_add(__split,
+                                #slot.slot() as usize, #wr, &[#(#entity_dr),*]);
+                        }
+                    } else {
+                        let vals = live.iter().map(|&i| &dr_f64[start + i]);
+                        quote! {
+                            __store.#arr.#s_add_at(__split,
+                                #slot.slot() as usize, #wr, &[#(#vals),*], &[#(#live),*]);
+                        }
                     }
-                }
-            };
-            // The same for a cross tile over two spans.
-            let cross_write = |arr: &syn::Ident, target: TokenStream2,
-                               a_start: usize, a_count: usize, b_start: usize, b_count: usize| -> TokenStream2 {
-                if span_zero(a_start, a_count) || span_zero(b_start, b_count) { return quote! {}; }
-                let live_a: Vec<usize> = (0..a_count).filter(|&i| !dr_zero[a_start + i]).collect();
-                let live_b: Vec<usize> = (0..b_count).filter(|&i| !dr_zero[b_start + i]).collect();
-                if live_a.len() == a_count && live_b.len() == b_count {
-                    let dr_a = &dr_f64[a_start..a_start + a_count];
-                    let dr_b = &dr_f64[b_start..b_start + b_count];
-                    quote! {
-                        __store.#arr.block_mut(__split,#target.slot() as usize)
-                            .#m_cross(#w_only &[#(#dr_a),*], &[#(#dr_b),*]);
+                };
+                // The same for a cross tile over two spans.
+                let cross_write = |arr: &syn::Ident, target: TokenStream2,
+                                   a_start: usize, a_count: usize, b_start: usize, b_count: usize| -> TokenStream2 {
+                    if span_zero(a_start, a_count) || span_zero(b_start, b_count) { return quote! {}; }
+                    let live_a: Vec<usize> = (0..a_count).filter(|&i| !dr_zero[a_start + i]).collect();
+                    let live_b: Vec<usize> = (0..b_count).filter(|&i| !dr_zero[b_start + i]).collect();
+                    if !masked || (live_a.len() == a_count && live_b.len() == b_count) {
+                        let dr_a = &dr_f64[a_start..a_start + a_count];
+                        let dr_b = &dr_f64[b_start..b_start + b_count];
+                        quote! {
+                            __store.#arr.block_mut(__split,#target.slot() as usize)
+                                .#m_cross(#w_only &[#(#dr_a),*], &[#(#dr_b),*]);
+                        }
+                    } else {
+                        let va = live_a.iter().map(|&i| &dr_f64[a_start + i]);
+                        let vb = live_b.iter().map(|&i| &dr_f64[b_start + i]);
+                        quote! {
+                            __store.#arr.block_mut(__split,#target.slot() as usize)
+                                .#m_cross_at(#w_only &[#(#va),*], &[#(#live_a),*], &[#(#vb),*], &[#(#live_b),*]);
+                        }
                     }
-                } else {
-                    let va = live_a.iter().map(|&i| &dr_f64[a_start + i]);
-                    let vb = live_b.iter().map(|&i| &dr_f64[b_start + i]);
-                    quote! {
-                        __store.#arr.block_mut(__split,#target.slot() as usize)
-                            .#m_cross_at(#w_only &[#(#va),*], &[#(#live_a),*], &[#(#vb),*], &[#(#live_b),*]);
+                };
+                let writes: TokenStream2 = if is_triplet {
+                    // `coo`: per-entity SelfBlock writes grad + within-entity
+                    // diagonals; the COO list gets only cross-entity pairs.
+                    let mut triplet_calls: Vec<TokenStream2> = Vec::new();
+                    for (var_id, type_id, start, count) in &triplet_entities {
+                        let hb = registry_lookup(&type_id.to_string())
+                            .and_then(|l| l.self_block_field.clone())
+                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                                format!("type `{}` must declare a `SelfBlock<Self>` field (required as a `coo` participant)", type_id)))?;
+                        let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                        if span_zero(*start, *count) { continue; }
+                        // Write through a fresh temporary exclusive borrow of the
+                        // entity's owning collection slot.
+                        let access = entity_access_expr(&var_id.to_string())?;
+                        let arr = store_array_ident(&type_id.to_string(), &hb);
+                        triplet_calls.push(self_write(&arr, quote! { #access.#hb_ident }, *start, *count));
                     }
-                }
-            };
-            if is_triplet {
-                // `coo`: per-entity SelfBlock writes grad + within-entity
-                // diagonals; the COO list gets only cross-entity pairs.
-                let mut triplet_calls: Vec<TokenStream2> = Vec::new();
-                for (var_id, type_id, start, count) in &triplet_entities {
-                    let hb = registry_lookup(&type_id.to_string())
-                        .and_then(|l| l.self_block_field.clone())
-                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as a `coo` participant)", type_id)))?;
-                    let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                    if span_zero(*start, *count) { continue; }
-                    // Write through a fresh temporary exclusive borrow of the
-                    // entity's owning collection slot.
-                    let access = entity_access_expr(&var_id.to_string())?;
-                    let arr = store_array_ident(&type_id.to_string(), &hb);
-                    triplet_calls.push(self_write(&arr, quote! { #access.#hb_ident }, *start, *count));
-                }
-                // Cross pairs need two live spans: with <= 1 nonzero span
-                // every cross product is structurally zero.
-                let nonzero_spans = triplet_entities.iter()
-                    .filter(|(_, _, start, count)| !span_zero(*start, *count))
-                    .count();
-                let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
-                    __store.__coo.#m_cross(
-                        #w_only
-                        &__all_idx,
-                        &[#(#dr_f64),*],
-                        &__entity_offsets,
-                    );
-                }};
-                let writes = GhStmt::Seq(quote! {
-                    #(#triplet_calls)*
-                    #cross_call
-                });
-                if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
-            } else if is_multi_cross {
-                // Multi-cross: per-entity SelfBlock writes (same as triplet)
-                // + one CrossBlock.add_residual_cross per declared CrossBlock
-                // field. Every unordered pair of entities is covered by
-                // exactly one CrossBlock (verified by routing build).
-                //
-                // Three per-entity emission modes:
-                //   - Root entity (type matches root_name): write via
-                //     (&mut *self).<root_hb>.add_residual — no Ref cast.
-                //   - Remote-block primary (is_remote_block && type matches
-                //     the remote target type): skip the per-entity call;
-                //     the __target_block.add_residual below (inside is_remote
-                //     branch) handles pose's SelfBlock.
-                //   - Regular Ref entity: unsafe *const→*mut cast pattern.
-                let root_ident_str = root_name.to_string();
-                let remote_target_type: Option<String> = if is_remote_block {
-                    remote_block_info.as_ref().map(|(_, _, t)| t.clone())
-                } else { None };
-                let mut self_block_calls: Vec<TokenStream2> = Vec::new();
-                let mut remote_self_block_call: Option<TokenStream2> = None;
-                for (var_id, type_id, start, count) in &triplet_entities {
-                    if span_zero(*start, *count) { continue; }
-                    let type_id_str = type_id.to_string();
-                    if type_id_str == root_ident_str {
-                        // Root: its block is a root field, disjoint from the
-                        // iterated collection -- write directly through self.
+                    // Cross pairs need two live spans: with <= 1 nonzero span
+                    // every cross product is structurally zero.
+                    let nonzero_spans = triplet_entities.iter()
+                        .filter(|(_, _, start, count)| !span_zero(*start, *count))
+                        .count();
+                    let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
+                        __store.__coo.#m_cross(
+                            #w_only
+                            &__all_idx,
+                            &[#(#dr_f64),*],
+                            &__entity_offsets,
+                        );
+                    }};
+                    quote! {
+                        #(#triplet_calls)*
+                        #cross_call
+                    }
+                } else if is_multi_cross {
+                    // Multi-cross: per-entity SelfBlock writes (same as triplet)
+                    // + one CrossBlock.add_residual_cross per declared CrossBlock
+                    // field. Every unordered pair of entities is covered by
+                    // exactly one CrossBlock (verified by routing build).
+                    //
+                    // Three per-entity emission modes:
+                    //   - Root entity (type matches root_name): write via
+                    //     (&mut *self).<root_hb>.add_residual — no Ref cast.
+                    //   - Remote-block primary (is_remote_block && type matches
+                    //     the remote target type): skip the per-entity call;
+                    //     the __target_block.add_residual below (inside is_remote
+                    //     branch) handles pose's SelfBlock.
+                    //   - Regular Ref entity: unsafe *const→*mut cast pattern.
+                    let root_ident_str = root_name.to_string();
+                    let remote_target_type: Option<String> = if is_remote_block {
+                        remote_block_info.as_ref().map(|(_, _, t)| t.clone())
+                    } else { None };
+                    let mut self_block_calls: Vec<TokenStream2> = Vec::new();
+                    let mut remote_self_block_call: Option<TokenStream2> = None;
+                    for (var_id, type_id, start, count) in &triplet_entities {
+                        if span_zero(*start, *count) { continue; }
+                        let type_id_str = type_id.to_string();
+                        if type_id_str == root_ident_str {
+                            // Root: its block is a root field, disjoint from the
+                            // iterated collection -- write directly through self.
+                            let hb = registry_lookup(&type_id_str)
+                                .and_then(|l| l.self_block_field.clone())
+                                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                                    format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
+                            let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                            let arr = store_array_ident(&type_id_str, &hb);
+                            self_block_calls.push(self_write(&arr, quote! { self.#hb_ident }, *start, *count));
+                            continue;
+                        }
+                        if remote_target_type.as_deref() == Some(type_id_str.as_str()) {
+                            // Remote primary: write through the remote target path.
+                            let rtw = remote_target_write.as_ref().unwrap();
+                            let rhb = registry_lookup(&type_id_str)
+                                .and_then(|l| l.self_block_field.clone())
+                                .unwrap_or_default();
+                            let arr = store_array_ident(&type_id_str, &rhb);
+                            remote_self_block_call = Some(self_write(&arr, quote! { #rtw }, *start, *count));
+                            // Written above, in entity order.
+                            continue;
+                        }
                         let hb = registry_lookup(&type_id_str)
                             .and_then(|l| l.self_block_field.clone())
                             .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                                format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
+                                format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                        let access = entity_access_expr(&var_id.to_string())?;
                         let arr = store_array_ident(&type_id_str, &hb);
-                        self_block_calls.push(self_write(&arr, quote! { self.#hb_ident }, *start, *count));
-                        continue;
+                        self_block_calls.push(self_write(&arr, quote! { #access.#hb_ident }, *start, *count));
                     }
-                    if remote_target_type.as_deref() == Some(type_id_str.as_str()) {
-                        // Remote primary: write through the remote target path.
-                        let rtw = remote_target_write.as_ref().unwrap();
-                        let rhb = registry_lookup(&type_id_str)
+                    let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
+                    for route in &multi_cross_routing {
+                        if span_zero(route.a_start, route.a_count)
+                            || span_zero(route.b_start, route.b_count) { continue; }
+                        let block = &route.block_ident;
+                        // A parent-owned tile is written through the parent
+                        // prefix binding, a field disjoint from the iterated
+                        // collection.
+                        let (target, holder): (TokenStream2, String) = if route.parent_owned {
+                            let ctn = nested_container(&cross_prefix);
+                            let pt = find_containing_parent(&root_name.to_string(), &sc.struct_name)
+                                .unwrap_or_else(|| sc.struct_name.clone());
+                            (quote! { #ctn.#block }, pt)
+                        } else {
+                            (quote! { __frine.#block }, sc.struct_name.clone())
+                        };
+                        let arr = store_array_ident(&holder, &block.to_string());
+                        cross_block_calls.push(cross_write(&arr, target,
+                            route.a_start, route.a_count, route.b_start, route.b_count));
+                    }
+                    quote! {
+                        #(#self_block_calls)*
+                        #remote_self_block_call
+                        #(#cross_block_calls)*
+                    }
+                } else if is_remote_block {
+                    let rtw = remote_target_write.as_ref().unwrap();
+                    let rty = remote_block_info.as_ref().unwrap().2.clone();
+                    let arr = store_array_ident(&rty, &block_ident.to_string());
+                    self_write(&arr, quote! { #rtw }, 0, n_params)
+                } else if is_self_block {
+                    if is_root_joined {
+                        // Root-coupled self-primary: [hb, root.hbt] or a
+                        // `root.<selfblock>` primary. dr_f64 is
+                        // [dr_self..., dr_root...], and either span may be
+                        // absent (a param-less entity has no self entry;
+                        // `root.<selfblock>` never has one). Up to three
+                        // writes preserve every J^T J pair:
+                        //   1. __item.<hb_self>.add_residual  -- (self, self)
+                        //      diagonal + grad.
+                        //   2. self.<hb_root>.add_residual -- (root, root)
+                        //      diagonal + grad (root fields are disjoint from
+                        //      the iterated collection).
+                        //   3. the COO write -- the (self, root) across-entity
+                        //      pairs; only for `[hb, coo]` and when both spans
+                        //      live.
+                        let self_entry = triplet_entities.iter()
+                            .find(|(v, _, _, _)| *v == "__item").cloned();
+                        let root_entry = triplet_entities.iter()
+                            .find(|(v, _, _, _)| *v != "__item").cloned();
+                        let joined_hb = registry_lookup(&joined_type)
                             .and_then(|l| l.self_block_field.clone())
-                            .unwrap_or_default();
-                        let arr = store_array_ident(&type_id_str, &rhb);
-                        remote_self_block_call = Some(self_write(&arr, quote! { #rtw }, *start, *count));
-                        // Written above, in entity order.
-                        continue;
-                    }
-                    let hb = registry_lookup(&type_id_str)
-                        .and_then(|l| l.self_block_field.clone())
-                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
-                    let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                    let access = entity_access_expr(&var_id.to_string())?;
-                    let arr = store_array_ident(&type_id_str, &hb);
-                    self_block_calls.push(self_write(&arr, quote! { #access.#hb_ident }, *start, *count));
-                }
-                let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
-                for route in &multi_cross_routing {
-                    if span_zero(route.a_start, route.a_count)
-                        || span_zero(route.b_start, route.b_count) { continue; }
-                    let block = &route.block_ident;
-                    // A parent-owned tile is written through the parent
-                    // prefix binding, a field disjoint from the iterated
-                    // collection.
-                    let (target, holder): (TokenStream2, String) = if route.parent_owned {
-                        let ctn = nested_container(&cross_prefix);
-                        let pt = find_containing_parent(&root_name.to_string(), &sc.struct_name)
-                            .unwrap_or_else(|| sc.struct_name.clone());
-                        (quote! { #ctn.#block }, pt)
+                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                                format!("`{}` must declare a `SelfBlock<Self>` field (required as coupled participant)", joined_type)))?;
+                        if let Some(named) = &root_self_primary
+                            && named.to_string() != joined_hb {
+                            return Err(syn::Error::new_spanned(&struct_ident,
+                                format!("`root.{}` does not name the root's `SelfBlock<Self>` \
+                                         field (which is `{}`)", named, joined_hb)));
+                        }
+                        let joined_hb_ident = syn::Ident::new(&joined_hb, proc_macro2::Span::call_site());
+                        let self_call = match &self_entry {
+                            Some((_, _, s_start, s_count)) => {
+                                let arr = store_array_ident(&a_type, &block_ident.to_string());
+                                self_write(&arr, quote! { __item.#block_ident }, *s_start, *s_count)
+                            }
+                            None => quote! {},
+                        };
+                        let root_call = match &root_entry {
+                            Some((_, _, r_start, r_count)) => {
+                                let arr = store_array_ident(&joined_type, &joined_hb);
+                                self_write(&arr, quote! { #joined_accessor.#joined_hb_ident }, *r_start, *r_count)
+                            }
+                            None => quote! {},
+                        };
+                        // The (self, joined) cross pairs need `coo` in the
+                        // list -- joined to the root or to the parent -- and
+                        // both spans live. The entries go to the store's list.
+                        let owned_triplet: Option<syn::Ident> = root_triplet_field.clone()
+                            .or_else(|| parent_triplet.as_ref().map(|(i, _)| i.clone()));
+                        let cross_call = match (&owned_triplet, &self_entry, &root_entry) {
+                            (Some(_), Some((_, _, ss, sc_)), Some((_, _, rs, rc)))
+                                if !span_zero(*ss, *sc_) && !span_zero(*rs, *rc) => quote! {
+                                    __store.__coo
+                                        .#m_cross(
+                                            #w_only
+                                            &__all_idx,
+                                            &[#(#dr_f64),*],
+                                            &__entity_offsets,
+                                        );
+                                },
+                            _ => quote! {},
+                        };
+                        quote! {
+                            #self_call
+                            #root_call
+                            #cross_call
+                        }
                     } else {
-                        (quote! { __frine.#block }, sc.struct_name.clone())
-                    };
-                    let arr = store_array_ident(&holder, &block.to_string());
-                    cross_block_calls.push(cross_write(&arr, target,
-                        route.a_start, route.a_count, route.b_start, route.b_count));
-                }
-                let writes = GhStmt::Seq(quote! {
-                    #(#self_block_calls)*
-                    #remote_self_block_call
-                    #(#cross_block_calls)*
-                });
-                if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
-            } else if is_remote_block {
-                let rtw = remote_target_write.as_ref().unwrap();
-                let rty = remote_block_info.as_ref().unwrap().2.clone();
-                let arr = store_array_ident(&rty, &block_ident.to_string());
-                let write = self_write(&arr, quote! { #rtw }, 0, n_params);
-                if !write.is_empty() {
-                    deferred_writes.push(GhStmt::Seq(write));
-                }
-            } else if is_self_block {
-                if is_root_joined {
-                    // Root-coupled self-primary: [hb, root.hbt] or a
-                    // `root.<selfblock>` primary. dr_f64 is
-                    // [dr_self..., dr_root...], and either span may be
-                    // absent (a param-less entity has no self entry;
-                    // `root.<selfblock>` never has one). Up to three
-                    // writes preserve every J^T J pair:
-                    //   1. __item.<hb_self>.add_residual  -- (self, self)
-                    //      diagonal + grad.
-                    //   2. self.<hb_root>.add_residual -- (root, root)
-                    //      diagonal + grad (root fields are disjoint from
-                    //      the iterated collection).
-                    //   3. the COO write -- the (self, root) across-entity
-                    //      pairs; only for `[hb, coo]` and when both spans
-                    //      live.
-                    let self_entry = triplet_entities.iter()
-                        .find(|(v, _, _, _)| *v == "__item").cloned();
-                    let root_entry = triplet_entities.iter()
-                        .find(|(v, _, _, _)| *v != "__item").cloned();
-                    let joined_hb = registry_lookup(&joined_type)
-                        .and_then(|l| l.self_block_field.clone())
-                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                            format!("`{}` must declare a `SelfBlock<Self>` field (required as coupled participant)", joined_type)))?;
-                    if let Some(named) = &root_self_primary
-                        && named.to_string() != joined_hb {
-                        return Err(syn::Error::new_spanned(&struct_ident,
-                            format!("`root.{}` does not name the root's `SelfBlock<Self>` \
-                                     field (which is `{}`)", named, joined_hb)));
+                        let arr = store_array_ident(&a_type, &block_ident.to_string());
+                        self_write(&arr, quote! { __item.#block_ident }, 0, n_params)
                     }
-                    let joined_hb_ident = syn::Ident::new(&joined_hb, proc_macro2::Span::call_site());
-                    let self_call = match &self_entry {
-                        Some((_, _, s_start, s_count)) => {
-                            let arr = store_array_ident(&a_type, &block_ident.to_string());
-                            self_write(&arr, quote! { __item.#block_ident }, *s_start, *s_count)
-                        }
-                        None => quote! {},
-                    };
-                    let root_call = match &root_entry {
-                        Some((_, _, r_start, r_count)) => {
-                            let arr = store_array_ident(&joined_type, &joined_hb);
-                            self_write(&arr, quote! { #joined_accessor.#joined_hb_ident }, *r_start, *r_count)
-                        }
-                        None => quote! {},
-                    };
-                    // The (self, joined) cross pairs need `coo` in the
-                    // list -- joined to the root or to the parent -- and
-                    // both spans live. The entries go to the store's list.
-                    let owned_triplet: Option<syn::Ident> = root_triplet_field.clone()
-                        .or_else(|| parent_triplet.as_ref().map(|(i, _)| i.clone()));
-                    let cross_call = match (&owned_triplet, &self_entry, &root_entry) {
-                        (Some(_), Some((_, _, ss, sc_)), Some((_, _, rs, rc)))
-                            if !span_zero(*ss, *sc_) && !span_zero(*rs, *rc) => quote! {
-                                __store.__coo
-                                    .#m_cross(
-                                        #w_only
-                                        &__all_idx,
-                                        &[#(#dr_f64),*],
-                                        &__entity_offsets,
-                                    );
-                            },
-                        _ => quote! {},
-                    };
-                    let writes = GhStmt::Seq(quote! {
-                        #self_call
-                        #root_call
-                        #cross_call
-                    });
-                    if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
                 } else {
-                    let arr = store_array_ident(&a_type, &block_ident.to_string());
-                    let write = self_write(&arr, quote! { __item.#block_ident }, 0, n_params);
-                    if !write.is_empty() {
-                        let writes = GhStmt::Seq(write);
-                        if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
+                    // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
+                    // (next b_param_count). Three calls: A's SelfBlock gets
+                    // grad[A] + H[A,A] diagonal; B's SelfBlock same for B; the
+                    // cross block holds only the A-B rectangular cross Hessian.
+                    // Each write takes a fresh temporary exclusive borrow.
+                    let a_target = a_write_target.as_ref().unwrap();
+                    let b_target = b_write_target.as_ref().unwrap();
+                    let a_hb_name = registry_lookup(&a_type)
+                        .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
+                    let b_hb_name = b_type.as_ref().and_then(|b| registry_lookup(b))
+                        .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
+                    let a_arr = store_array_ident(&a_type, &a_hb_name);
+                    let b_arr = store_array_ident(b_type.as_deref().unwrap_or(""), &b_hb_name);
+                    let a_call = self_write(&a_arr, quote! { #a_target }, 0, a_param_count);
+                    let b_call = self_write(&b_arr, quote! { #b_target }, a_param_count, b_param_count);
+                    // The cross tile: the constraint's own block, or the shared
+                    // parent-owned block reached through the prefix binding
+                    // (disjoint field from the iterated collection, so the
+                    // borrow splits cleanly).
+                    let (cross_target, cross_holder): (TokenStream2, String) =
+                        if let Some(pc) = &parent_cross {
+                            let ctn = nested_container(&cross_prefix);
+                            (quote! { #ctn.#block_ident }, pc.parent_type.clone())
+                        } else {
+                            (quote! { __frine.#block_ident }, sc.struct_name.clone())
+                        };
+                    let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
+                    let cross_call = cross_write(&cross_arr, cross_target,
+                        0, a_param_count, a_param_count, b_param_count);
+                    // The partials through the entities' slots, the cross tile
+                    // on the constraint's.
+                    quote! {
+                        #a_call
+                        #b_call
+                        #cross_call
                     }
-                }
-            } else {
-                // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
-                // (next b_param_count). Three calls: A's SelfBlock gets
-                // grad[A] + H[A,A] diagonal; B's SelfBlock same for B; the
-                // cross block holds only the A-B rectangular cross Hessian.
-                // Each write takes a fresh temporary exclusive borrow.
-                let a_target = a_write_target.as_ref().unwrap();
-                let b_target = b_write_target.as_ref().unwrap();
-                let a_hb_name = registry_lookup(&a_type)
-                    .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
-                let b_hb_name = b_type.as_ref().and_then(|b| registry_lookup(b))
-                    .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
-                let a_arr = store_array_ident(&a_type, &a_hb_name);
-                let b_arr = store_array_ident(b_type.as_deref().unwrap_or(""), &b_hb_name);
-                let a_call = self_write(&a_arr, quote! { #a_target }, 0, a_param_count);
-                let b_call = self_write(&b_arr, quote! { #b_target }, a_param_count, b_param_count);
-                // The cross tile: the constraint's own block, or the shared
-                // parent-owned block reached through the prefix binding
-                // (disjoint field from the iterated collection, so the
-                // borrow splits cleanly).
-                let (cross_target, cross_holder): (TokenStream2, String) =
-                    if let Some(pc) = &parent_cross {
-                        let ctn = nested_container(&cross_prefix);
-                        (quote! { #ctn.#block_ident }, pc.parent_type.clone())
+                };
+                variant_writes.push(writes);
+            }
+            // One variant: its writes as they are. Several: a `match` on
+            // the select index picks the arm's.
+            let writes: TokenStream2 = match (flags, &arm_writes, &arm_index_code) {
+                (None, Some(aw), Some(index_code)) if !variant_writes.iter().all(|w| w.is_empty()) => {
+                    let numbered = aw.arms.len() - usize::from(aw.has_default);
+                    let arms = variant_writes[..numbered].iter().enumerate().map(|(k, w)| {
+                        let k = proc_macro2::Literal::i64_unsuffixed(k as i64);
+                        quote! { #k => { #w } }
+                    });
+                    let rest = if aw.has_default {
+                        let w = &variant_writes[numbered];
+                        quote! { _ => { #w } }
                     } else {
-                        (quote! { __frine.#block_ident }, sc.struct_name.clone())
+                        // The math's match has panicked on such an index already.
+                        quote! { _ => unreachable!() }
                     };
-                let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
-                let cross_call = cross_write(&cross_arr, cross_target,
-                    0, a_param_count, a_param_count, b_param_count);
-                // The partials through the entities' slots, the cross tile
-                // on the constraint's.
-                let writes = GhStmt::Seq(quote! {
-                    #a_call
-                    #b_call
-                    #cross_call
-                });
-                if defer_writes { deferred_writes.push(writes); } else { gh.push(writes); }
+                    quote! { match (#index_code).select_index() { #(#arms)* #rest } }
+                }
+                (None, Some(_), _) => quote! {},
+                _ => variant_writes.pop().unwrap(),
+            };
+            if !writes.is_empty() {
+                if defer_writes { deferred.push(writes); } else { out.push(writes); }
             }
         }
 
         // Finalize the loss before the deferred writes: __cost += rho(s) and
         // let __w = rho'(s), which every deferred write below scales by.
-        gh.push(GhStmt::Both(loss_gh_finalize));
-        if !deferred_writes.is_empty() {
-            let (dw_seq, _) = split_gh(&deferred_writes);
-            gh.push(GhStmt::Seq(quote! { #(#dw_seq)* }));
+        out.push(loss_gh_finalize.clone());
+        out.extend(deferred);
+        Ok(out)
+        };
+
+        match sink {
+            Some(m) => {
+                // The sunk match: each arm holds its own statements, its
+                // values as lets, the statements after the match and the
+                // epilogue over the arm's partials. An index past the arms
+                // panics as the fused match did.
+                let aw = arm_writes.as_ref().unwrap();
+                let index_code = arm_index_code.as_ref().unwrap();
+                let arael_sym::cse::Intermediate::Match { names, arms, default, .. } = &gh_intermediates[m]
+                    else { unreachable!() };
+                let after = cse_stmts(&gh_intermediates[m + 1..], Some(""))?;
+                let mut arm_blocks: Vec<TokenStream2> = Vec::new();
+                for (k, arm) in arms.iter().chain(default.iter()).enumerate() {
+                    let inters = cse_stmts(&arm.inters, Some(""))?;
+                    let mut lets: Vec<TokenStream2> = Vec::new();
+                    for (name, value) in names.iter().zip(&arm.values) {
+                        let id = syn::Ident::new(name, proc_macro2::Span::call_site());
+                        let e: Expr = parse_sym_code(&value.to_rust(""))?;
+                        lets.push(quote! { let #id = #e; });
+                    }
+                    let body = epilogue(Some(&aw.arms[k]))?;
+                    let pat = if k < arms.len() {
+                        let lit = proc_macro2::Literal::i64_unsuffixed(k as i64);
+                        quote! { #lit }
+                    } else {
+                        quote! { _ }
+                    };
+                    arm_blocks.push(quote! {
+                        #pat => { #(#inters)* #(#lets)* #(#after)* #(#body)* }
+                    });
+                }
+                let rest = if default.is_some() {
+                    quote! {}
+                } else {
+                    let n = arms.len();
+                    quote! { _ => panic!("select index {} out of range 0..{}", __sel, #n) }
+                };
+                gh.push(GhStmt::Seq(quote! {
+                    { let __sel = (#index_code).select_index(); match __sel { #(#arm_blocks)* #rest } }
+                }));
+            }
+            None => {
+                for s in epilogue(None)? { gh.push(GhStmt::Seq(s)); }
+            }
         }
-        if off_guard.is_some() {
-            // The condition is the batch's last output. Off that side every
-            // row is zero, so the cost, the loss (rho(0) = 0) and the writes
-            // contribute nothing; a NaN condition is off, as in `branch`.
-            let q_code: Expr = parse_sym_code(&gh_simplified[gh_simplified.len() - 1].to_rust(""))?;
+        if let Some((_, q_code)) = &guard_code {
+            // Off that side every row is zero, so the cost, the loss
+            // (rho(0) = 0) and the writes contribute nothing; a NaN
+            // condition is off, as in `branch`.
             let tail = gh.split_off(skip_split);
             let (tail_seq, _) = split_gh(&tail);
             gh.push(GhStmt::Seq(
@@ -6977,7 +7276,7 @@ pub fn generate_root_methods(
         let mut jac_stmts = Vec::new();
         if jacobian {
             // Reuse the same CSE'd expressions
-            jac_stmts.extend(cse_stmts(&gh_intermediates, Some(""))?);
+            jac_stmts.extend(cse_stmts(&jac_intermediates, Some(""))?);
             // Under a robust loss, rows and entries are scaled by
             // sqrt(rho'(s)) -- the same weight the gradient/Hessian
             // assembly applies -- so J^T J and 2 J^T r reproduce the
@@ -7008,7 +7307,7 @@ pub fn generate_root_methods(
             let mut jidx = 0;
             for ri in 0..n_residuals {
                 let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
-                let r_expr: Expr = parse_sym_code(&gh_simplified[jidx].to_rust(""))?;
+                let r_expr: Expr = parse_sym_code(&jac_simplified[jidx].to_rust(""))?;
                 jac_stmts.push(quote! { let #r_ident= #r_expr; });
                 if loss_present {
                     jac_stmts.push(quote! { __block_cost += #r_ident * #r_ident; });
@@ -7018,7 +7317,7 @@ pub fn generate_root_methods(
                 let mut dr_idents = Vec::new();
                 for pi in 0..n_params {
                     let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
-                    let dr_expr: Expr = parse_sym_code(&gh_simplified[jidx].to_rust(""))?;
+                    let dr_expr: Expr = parse_sym_code(&jac_simplified[jidx].to_rust(""))?;
                     jac_stmts.push(quote! { let #dr_ident= #dr_expr; });
                     dr_idents.push(dr_ident);
                     jidx += 1;

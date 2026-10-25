@@ -616,6 +616,24 @@ impl E {
         walk(self, &mut std::collections::HashSet::new(), f);
     }
 
+    /// Calls `f` on nodes top-down, parents before children, and descends
+    /// into a node's children only when `f` returns `true`; a shared node
+    /// is visited once. For a walk that stops at a kind of node, such as
+    /// the outermost `branch` of every path.
+    pub fn for_each_node_while(&self, f: &mut dyn FnMut(&E) -> bool) {
+        fn walk(e: &E, seen: &mut std::collections::HashSet<*const Expr>, f: &mut dyn FnMut(&E) -> bool) {
+            if !seen.insert(Rc::as_ptr(&e.0)) {
+                return;
+            }
+            if f(e) {
+                for c in crate::cse::children(e) {
+                    walk(c, seen, f);
+                }
+            }
+        }
+        walk(self, &mut std::collections::HashSet::new(), f);
+    }
+
     /// Rebuilds the expression bottom-up with `f` at every node: `f` sees
     /// a node with its children already rebuilt and returns the node to
     /// put in its place, or `None` to keep it. Nodes are rebuilt raw,
