@@ -4217,6 +4217,82 @@ fn arm_writes(
     best.map(|(_, aw)| aw)
 }
 
+/// `it` with `consts` substituted into every expression it holds, nested
+/// arms included. A plain `let` is folded by [`fold_arm_consts`]; this
+/// keeps a match's shape.
+fn subst_inter(it: &arael_sym::cse::Intermediate, consts: &[(E, E)]) -> arael_sym::cse::Intermediate {
+    use arael_sym::cse::{Arm, Intermediate, Switch};
+    match it {
+        Intermediate::Let { name, expr } => {
+            Intermediate::Let { name: name.clone(), expr: expr.substitute(consts) }
+        }
+        Intermediate::Match { switch, names, arms, default } => {
+            let switch = match switch {
+                Switch::Index(e) => Switch::Index(e.substitute(consts)),
+                Switch::Sign(e) => Switch::Sign(e.substitute(consts)),
+            };
+            let arm = |a: &Arm| Arm {
+                inters: a.inters.iter().map(|i| subst_inter(i, consts)).collect(),
+                values: a.values.iter().map(|v| v.substitute(consts)).collect(),
+            };
+            Intermediate::Match {
+                switch,
+                names: names.clone(),
+                arms: arms.iter().map(arm).collect(),
+                default: default.as_ref().map(arm),
+            }
+        }
+    }
+}
+
+/// The statements after a sunk match, emitted for one arm with the arm's
+/// constants folded in: a `let` whose expression becomes a constant under
+/// `consts` joins them instead of being emitted, so a product with a
+/// partial the arm does not have is gone rather than computed. A nested
+/// match keeps its shape with the constants substituted.
+fn fold_arm_consts(
+    inters: &[arael_sym::cse::Intermediate], consts: &mut Vec<(E, E)>,
+) -> syn::Result<Vec<TokenStream2>> {
+    use arael_sym::cse::Intermediate;
+    let mut out = Vec::new();
+    for it in inters {
+        let folded = match it {
+            Intermediate::Let { name, expr } => {
+                let e = expr.substitute(consts);
+                if matches!(e.as_ref(), arael_sym::Expr::Const(_)) {
+                    consts.push((arael_sym::symbol(name), e));
+                    continue;
+                }
+                Intermediate::Let { name: name.clone(), expr: e }
+            }
+            Intermediate::Match { .. } => subst_inter(it, consts),
+        };
+        out.extend(cse_stmts(std::slice::from_ref(&folded), Some(""))?);
+    }
+    Ok(out)
+}
+
+/// Split a CSE result into the statements the guard condition `q` needs,
+/// transitively, and the rest, each run in its order: the first before the
+/// test, the rest behind it.
+fn split_before_guard(
+    inters: Vec<arael_sym::cse::Intermediate>, q: &E,
+) -> (Vec<arael_sym::cse::Intermediate>, Vec<arael_sym::cse::Intermediate>) {
+    let mut needed = q.free_vars();
+    let mut keep = vec![false; inters.len()];
+    for (i, it) in inters.iter().enumerate().rev() {
+        if it.names().iter().any(|n| needed.contains(*n)) {
+            keep[i] = true;
+            needed.extend(it.free_vars());
+        }
+    }
+    let (mut pre, mut rest) = (Vec::new(), Vec::new());
+    for (it, k) in inters.into_iter().zip(keep) {
+        if k { pre.push(it) } else { rest.push(it) }
+    }
+    (pre, rest)
+}
+
 // ---- The block store -----------------------------------------------
 //
 // One array per containment path and block field, built by one walk
@@ -6540,18 +6616,6 @@ pub fn generate_root_methods(
         } else {
             quote! { add_residual_cross_at }
         };
-        // The same writes over the live positions of a span, in an arm of
-        // the dispatch on a body `match`.
-        let s_add_at: TokenStream2 = if loss_present {
-            quote! { add_residual_with_loss_at }
-        } else {
-            quote! { add_residual_at }
-        };
-        let m_cross_at: TokenStream2 = if loss_present {
-            quote! { add_residual_cross_with_loss_at }
-        } else {
-            quote! { add_residual_cross_at }
-        };
         // Build the finalize statements (compute rho, and for the gh path the
         // weight) from the loss expression, sharing the residual pipeline:
         // differentiate for the weight, then substitute + fast_atan + CSE.
@@ -6651,22 +6715,31 @@ pub fn generate_root_methods(
         let off_guard = off_branch_guard(&all_gh_exprs);
         let jac_exprs: Option<Vec<arael_sym::E>> =
             if jacobian && off_guard.is_some() { Some(all_gh_exprs.clone()) } else { None };
-        let guard_code: Option<(Vec<TokenStream2>, Expr)> = match &off_guard {
+        let mut guard_code: Option<(Vec<TokenStream2>, Expr)> = None;
+        let (gh_intermediates, gh_simplified) = match &off_guard {
             Some(q) => {
                 let mut on_side = |n: &arael_sym::E| match n.as_ref() {
                     arael_sym::Expr::Branch(c, a, _) if c == q => Some(a.clone()),
                     _ => None,
                 };
                 for e in all_gh_exprs.iter_mut() { *e = e.map_nodes(&mut on_side); }
-                let mut cond = vec![q.clone()];
-                finish_batch(&mut cond, proc_macro2::Span::call_site(), false)?;
-                let (q_ints, q_simplified) = arael_sym::cse_scoped(&cond);
-                Some((cse_stmts(&q_ints, Some(""))?, parse_sym_code(&q_simplified[0].to_rust(""))?))
+                // One CSE over the condition and the rows, so the rows
+                // reuse what the condition computes: the statements it
+                // needs run before the test, the rest behind it.
+                let mut joint = vec![q.clone()];
+                joint.extend(all_gh_exprs.iter().cloned());
+                finish_batch(&mut joint, proc_macro2::Span::call_site(), false)?;
+                let (ints, mut simplified) = arael_sym::cse_scoped(&joint);
+                let q_simplified = simplified.remove(0);
+                let (pre, rest) = split_before_guard(ints, &q_simplified);
+                guard_code = Some((cse_stmts(&pre, Some(""))?, parse_sym_code(&q_simplified.to_rust(""))?));
+                (rest, simplified)
             }
-            None => None,
+            None => {
+                finish_batch(&mut all_gh_exprs, proc_macro2::Span::call_site(), false)?;
+                arael_sym::cse_scoped(&all_gh_exprs)
+            }
         };
-        finish_batch(&mut all_gh_exprs, proc_macro2::Span::call_site(), false)?;
-        let (gh_intermediates, gh_simplified) = arael_sym::cse_scoped(&all_gh_exprs);
         let (jac_intermediates, jac_simplified) = match jac_exprs {
             Some(mut exprs) => {
                 finish_batch(&mut exprs, proc_macro2::Span::call_site(), false)?;
@@ -6814,7 +6887,10 @@ pub fn generate_root_methods(
         // `flags` are the zero flags of the batch outputs for one arm of a
         // sunk match; without them the merged flags, and the writes
         // dispatch on a nested match when there is one.
-        let epilogue = |flags: Option<&[bool]>| -> syn::Result<Vec<TokenStream2>> {
+        // `consts`: inside a sunk arm, the names the arm binds to constants
+        // and what folds to a constant under them; the rows read them as
+        // the constants they are.
+        let epilogue = |flags: Option<&[bool]>, consts: &[(E, E)]| -> syn::Result<Vec<TokenStream2>> {
         let mut out: Vec<TokenStream2> = Vec::new();
         let mut deferred: Vec<TokenStream2> = Vec::new();
         let mut idx = 0;
@@ -6840,7 +6916,8 @@ pub fn generate_root_methods(
                 out.push(quote! { #(#resolve_reread_stmts)* });
             }
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
-            let r_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
+            let under = |e: &E| if consts.is_empty() { e.clone() } else { e.substitute(consts) };
+            let r_expr: Expr = parse_sym_code(&under(&gh_simplified[idx]).to_rust(""))?;
             // Accumulate the cost alongside the derivatives: the residual
             // value is already in hand, so the fused calc_cost_grad_hessian_*
             // entry points get the cost for free (saves a separate cost-only
@@ -6871,14 +6948,15 @@ pub fn generate_root_methods(
             let row_first = idx;
             let mut merged_zero: Vec<bool> = Vec::with_capacity(n_params);
             for pi in 0..n_params {
+                let e = under(&gh_simplified[idx]);
                 let zero = match flags {
-                    Some(f) => f[idx],
-                    None => gh_simplified[idx].is_zero(),
+                    Some(f) => f[idx] || e.is_zero(),
+                    None => e.is_zero(),
                 };
                 merged_zero.push(zero);
                 if !zero {
                     let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
-                    let dr_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
+                    let dr_expr: Expr = parse_sym_code(&e.to_rust(""))?;
                     out.push(quote! { let #dr_ident= #dr_expr; });
                 }
                 idx += 1;
@@ -7225,17 +7303,26 @@ pub fn generate_root_methods(
                 let index_code = arm_index_code.as_ref().unwrap();
                 let arael_sym::cse::Intermediate::Match { names, arms, default, .. } = &gh_intermediates[m]
                     else { unreachable!() };
-                let after = cse_stmts(&gh_intermediates[m + 1..], Some(""))?;
                 let mut arm_blocks: Vec<TokenStream2> = Vec::new();
                 for (k, arm) in arms.iter().chain(default.iter()).enumerate() {
                     let inters = cse_stmts(&arm.inters, Some(""))?;
+                    // A value the arm binds to a constant is folded into
+                    // the statements after the match and the rows, not
+                    // bound: what a partial the arm does not have
+                    // multiplies is gone rather than computed.
+                    let mut consts: Vec<(E, E)> = Vec::new();
                     let mut lets: Vec<TokenStream2> = Vec::new();
                     for (name, value) in names.iter().zip(&arm.values) {
+                        if matches!(value.as_ref(), arael_sym::Expr::Const(_)) {
+                            consts.push((arael_sym::symbol(name), value.clone()));
+                            continue;
+                        }
                         let id = syn::Ident::new(name, proc_macro2::Span::call_site());
                         let e: Expr = parse_sym_code(&value.to_rust(""))?;
                         lets.push(quote! { let #id = #e; });
                     }
-                    let body = epilogue(Some(&aw.arms[k]))?;
+                    let after = fold_arm_consts(&gh_intermediates[m + 1..], &mut consts)?;
+                    let body = epilogue(Some(&aw.arms[k]), &consts)?;
                     let pat = if k < arms.len() {
                         let lit = proc_macro2::Literal::i64_unsuffixed(k as i64);
                         quote! { #lit }
@@ -7257,7 +7344,7 @@ pub fn generate_root_methods(
                 }));
             }
             None => {
-                for s in epilogue(None)? { gh.push(GhStmt::Seq(s)); }
+                for s in epilogue(None, &[])? { gh.push(GhStmt::Seq(s)); }
             }
         }
         if let Some((_, q_code)) = &guard_code {

@@ -76,8 +76,9 @@ impl Intermediate {
         }
     }
 
-    /// Free variables read by this statement, nested arms included.
-    fn free_vars(&self) -> BTreeSet<String> {
+    /// Free variables read by this statement, nested arms included: what
+    /// it depends on, against [`names`](Self::names), what it defines.
+    pub fn free_vars(&self) -> BTreeSet<String> {
         match self {
             Intermediate::Let { expr, .. } => expr.free_vars(),
             Intermediate::Match { switch, arms, default, .. } => {
