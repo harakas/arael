@@ -24,6 +24,7 @@ fn constraint_body_compile_errors() {
     t.compile_fail("tests/constraint_body_errors/transform_residual.rs");
     t.compile_fail("tests/constraint_body_errors/transform_scale_on_rigid.rs");
     t.compile_fail("tests/constraint_body_errors/match_vector_arm.rs");
+    t.compile_fail("tests/constraint_body_errors/match_tuple_shape.rs");
     t.compile_fail("tests/constraint_body_errors/match_vector_scrutinee.rs");
     t.compile_fail("tests/constraint_body_errors/match_out_of_order.rs");
     t.compile_fail("tests/constraint_body_errors/match_sparse.rs");

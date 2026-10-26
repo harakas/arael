@@ -1065,8 +1065,21 @@ code. The dialect:
   an arm by an integer at runtime. It compiles to a `match` that
   evaluates only the taken arm, and differentiates to that arm's
   derivative. Patterns are the integer literals `0, 1, ...` in that
-  order, optionally ending with `_` as the default; arms are scalars;
-  without `_` any other value panics. The scrutinee is normally an
+  order, optionally ending with `_` as the default; without `_` any
+  other value panics. An arm is an expression or a block with `let`s,
+  and yields a scalar, a vector, a matrix, a quaternion, or a tuple or
+  array of those, every arm the same kind; one `match` then switches
+  several values at once:
+
+  ```rust,ignore
+  let (d, fy) = match cam.model {
+      0 => (n, cam.fy),
+      1 => (radial(n, cam.k1, cam.k2), cam.fx),
+      _ => (opencv(n, cam.k1, cam.k2, cam.p1, cam.p2), cam.fy),
+  };
+  ```
+
+  The scrutinee is normally an
   integer data field (`u32`, `i32`, `bool`); a float works when it
   holds an integer value and panics otherwise. Works in residual
   bodies, in `#[arael::function]` bodies, and in the `loss =` clause,
@@ -1309,11 +1322,12 @@ body would have produced written out, derivatives included. The body
 sees only its parameters and its `let`s; `self`, `parent` and `root`
 are not in scope.
 
-A tuple is destructured, or it is the residual: `let (u, v) =
-project(...);` in a body, or a call returning `(E, E)` or `[E; 2]` as
-the body's final expression, whose elements become the rows. A tuple
-is not a value to compute with, and its elements are scalars, vectors
-or matrices, never a tuple.
+A tuple is destructured, it is the residual, or it is the value of a
+`match` arm: `let (u, v) = project(...);` in a body, a call returning
+`(E, E)` or `[E; 2]` as the body's final expression, whose elements
+become the rows, or `let (d, s) = match k { 0 => (a, 1.0), _ => (b,
+c) };`. A tuple is not a value to compute with, and its elements are
+scalars, vectors or matrices, never a tuple.
 
 ```rust,ignore
 use arael::sym::{vect2sym, vect3sym, E};

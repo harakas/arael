@@ -956,8 +956,9 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             }
         }
 
-        // `match k { 0 => a, 1 => b, _ => d }` on a scalar: a select node,
-        // arms in pattern order, `_` (optional, last) as the default.
+        // `match k { 0 => a, 1 => b, _ => d }` on a scalar: arms in pattern
+        // order, `_` (optional, last) as the default. The arms yield one
+        // kind of value; each scalar of it is a select node on `k`.
         Expr::Match(em) => {
             let index = match eval_expr(&em.expr, ctx)? {
                 SymVal::Scalar(e) => e,
@@ -967,10 +968,10 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             let (arm_pats, default_pat) = match_arm_patterns(&em.arms)?;
             let mut arms = Vec::with_capacity(arm_pats.len());
             for arm in &em.arms[..arm_pats.len()] {
-                arms.push(match_arm_scalar(&arm.body, ctx)?);
+                arms.push(eval_expr(&arm.body, ctx)?);
             }
             let default = match default_pat {
-                Some(i) => Some(match_arm_scalar(&em.arms[i].body, ctx)?),
+                Some(i) => Some(eval_expr(&em.arms[i].body, ctx)?),
                 None => None,
             };
             if let arael_sym::Expr::Const(v) = index.as_ref()
@@ -979,7 +980,23 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     return Err(syn::Error::new_spanned(&em.expr,
                         format!("match on the constant {} has no arm for it", v)));
                 }
-            Ok(SymVal::Scalar(arael_sym::select(index, arms, default)))
+            // Every arm's value against the first's: same kind, same
+            // dimensions, same tuple shape.
+            let bodies: Vec<&Expr> = em.arms.iter().map(|a| &*a.body).collect();
+            let mut shape: Option<ValueShape> = None;
+            for (v, body) in arms.iter().chain(default.iter()).zip(&bodies) {
+                let s = ValueShape::of(v).ok_or_else(|| syn::Error::new_spanned(body,
+                    format!("a match arm yields a scalar, a vector, a matrix, a quaternion, \
+                             or a tuple or array of those; this one yields a {}", v.type_name())))?;
+                match &shape {
+                    None => shape = Some(s),
+                    Some(first) if *first != s => return Err(syn::Error::new_spanned(body,
+                        format!("this arm yields a {}, the first a {}: every arm of a match \
+                                 yields the same kind of value", s, first))),
+                    Some(_) => {}
+                }
+            }
+            Ok(switch_values(&index, &shape.expect("a match has an arm"), arms, default))
         }
 
         _ => Err(syn::Error::new_spanned(expr, "unsupported expression in constraint")),
@@ -1030,11 +1047,104 @@ pub(crate) fn match_arm_patterns(arms: &[syn::Arm]) -> syn::Result<(Vec<usize>, 
     Ok((numbered, default))
 }
 
-fn match_arm_scalar(body: &Expr, ctx: &mut ConstraintCtx) -> syn::Result<arael_sym::E> {
-    match eval_expr(body, ctx)? {
-        SymVal::Scalar(e) => Ok(e),
-        other => Err(syn::Error::new_spanned(body,
-            format!("match arms must be scalars, got {}", other.type_name()))),
+/// The kind and dimensions of a value a `match` arm may yield.
+#[derive(PartialEq)]
+enum ValueShape {
+    Scalar,
+    Vec2,
+    Vec3,
+    VecN(usize),
+    Mat2,
+    Mat3,
+    MatN(usize, usize),
+    Quat,
+    Tuple(Vec<ValueShape>),
+}
+
+impl ValueShape {
+    /// `None` for the values a `match` does not switch: transforms and
+    /// euler-angle field values.
+    fn of(v: &SymVal) -> Option<ValueShape> {
+        Some(match v {
+            SymVal::Scalar(_) => ValueShape::Scalar,
+            SymVal::Vec2(_) => ValueShape::Vec2,
+            SymVal::Vec3(_) => ValueShape::Vec3,
+            SymVal::VecN(v) => ValueShape::VecN(v.e.len()),
+            SymVal::Mat2(_) => ValueShape::Mat2,
+            SymVal::Mat3(_) => ValueShape::Mat3,
+            SymVal::MatN(m) => ValueShape::MatN(m.nrows(), m.ncols()),
+            SymVal::Quat(_) => ValueShape::Quat,
+            SymVal::Tuple(items) => ValueShape::Tuple(
+                items.iter().map(ValueShape::of).collect::<Option<_>>()?),
+            SymVal::UniversalEulerAngles { .. } | SymVal::Transform(_) => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for ValueShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ValueShape::Scalar => write!(f, "scalar"),
+            ValueShape::Vec2 => write!(f, "vec2"),
+            ValueShape::Vec3 => write!(f, "vec3"),
+            ValueShape::VecN(n) => write!(f, "vect<{}>", n),
+            ValueShape::Mat2 => write!(f, "mat2"),
+            ValueShape::Mat3 => write!(f, "mat3"),
+            ValueShape::MatN(r, c) => write!(f, "matrix<{}, {}>", r, c),
+            ValueShape::Quat => write!(f, "quat"),
+            ValueShape::Tuple(items) => {
+                write!(f, "(")?;
+                for (i, s) in items.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", s)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// The `match` value over `arms` and `default`, all of `shape`: each
+/// scalar component a select on `index`.
+fn switch_values(index: &E, shape: &ValueShape, arms: Vec<SymVal>, default: Option<SymVal>) -> SymVal {
+    use arael_sym::Select;
+    macro_rules! switch {
+        ($var:ident, $ty:ty) => {{
+            let take = |v: SymVal| match v {
+                SymVal::$var(x) => x,
+                _ => unreachable!("the arms' shapes are checked"),
+            };
+            SymVal::$var(<$ty>::select_arms(index, arms.into_iter().map(take).collect(), default.map(take)))
+        }};
+    }
+    match shape {
+        ValueShape::Scalar => switch!(Scalar, E),
+        ValueShape::Vec2 => switch!(Vec2, vect2sym),
+        ValueShape::Vec3 => switch!(Vec3, vect3sym),
+        ValueShape::VecN(_) => switch!(VecN, arael_sym::vectsym),
+        ValueShape::Mat2 => switch!(Mat2, matrix2sym),
+        ValueShape::Mat3 => switch!(Mat3, matrix3sym),
+        ValueShape::MatN(..) => switch!(MatN, arael_sym::matrixsym),
+        ValueShape::Quat => switch!(Quat, quaternsym),
+        ValueShape::Tuple(items) => {
+            let take = |v: SymVal| match v {
+                SymVal::Tuple(x) => x,
+                _ => unreachable!("the arms' shapes are checked"),
+            };
+            let mut by_item: Vec<Vec<SymVal>> = items.iter().map(|_| Vec::with_capacity(arms.len())).collect();
+            for arm in arms {
+                for (k, v) in take(arm).into_iter().enumerate() {
+                    by_item[k].push(v);
+                }
+            }
+            let mut default_items: Vec<Option<SymVal>> = match default {
+                Some(d) => take(d).into_iter().map(Some).collect(),
+                None => items.iter().map(|_| None).collect(),
+            };
+            SymVal::Tuple(items.iter().zip(by_item).zip(default_items.drain(..))
+                .map(|((s, a), d)| switch_values(index, s, a, d))
+                .collect())
+        }
     }
 }
 

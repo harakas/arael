@@ -1,5 +1,6 @@
-//! A `match` in a body has scalar arms only: a vector arm is rejected
-//! with the arm's type named, not spliced or silently narrowed.
+//! Every arm of a body `match` yields the same kind of value: a vector
+//! arm after a scalar one is rejected with both kinds named, not
+//! spliced or silently narrowed.
 
 use arael::model::{Param, SelfBlock};
 use arael::vect::vect3d;

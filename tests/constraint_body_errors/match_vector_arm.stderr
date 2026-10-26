@@ -1,21 +1,21 @@
-error: $DIR/tests/constraint_body_errors/match_vector_arm.rs:9: match arms must be scalars, got vec3
- --> tests/constraint_body_errors/match_vector_arm.rs:7:1
+error: $DIR/tests/constraint_body_errors/match_vector_arm.rs:10: this arm yields a vec3, the first a scalar: every arm of a match yields the same kind of value
+ --> tests/constraint_body_errors/match_vector_arm.rs:8:1
   |
-7 | #[arael::model]
+8 | #[arael::model]
   | ^^^^^^^^^^^^^^^
   |
   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: unused imports: `Param` and `SelfBlock`
- --> tests/constraint_body_errors/match_vector_arm.rs:4:20
+ --> tests/constraint_body_errors/match_vector_arm.rs:5:20
   |
-4 | use arael::model::{Param, SelfBlock};
+5 | use arael::model::{Param, SelfBlock};
   |                    ^^^^^  ^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused import: `arael::vect::vect3d`
- --> tests/constraint_body_errors/match_vector_arm.rs:5:5
+ --> tests/constraint_body_errors/match_vector_arm.rs:6:5
   |
-5 | use arael::vect::vect3d;
+6 | use arael::vect::vect3d;
   |     ^^^^^^^^^^^^^^^^^^^

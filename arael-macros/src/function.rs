@@ -22,7 +22,7 @@
 //!   evaluated by the constraint-body interpreter at every call site, so
 //!   a call inlines exactly what the body would have written. The fn is
 //!   emitted as ordinary Rust over the arael-sym types (reads of locals
-//!   cloned, `match` lowered to `select`) so it stays callable from user
+//!   cloned, `match` lowered to `select_value`) so it stays callable from user
 //!   code.
 //!
 //! Forms A and B insert no `.clone()`: body / deriv tokens are
@@ -424,12 +424,18 @@ fn form_c(
     // element, read in place; builtins and the sym types'
     // constructors get their full paths; `match` lowers to `select`.
     let mut twin = (*input.block).clone();
-    let mut locals: Vec<String> = param_strs.clone();
-    for stmt in &twin.stmts {
-        if let syn::Stmt::Local(local) = stmt {
-            collect_pattern_idents(&local.pat, &mut locals);
+    // The parameters and every `let` name, those in a match arm's block
+    // included.
+    struct Lets(Vec<String>);
+    impl syn::visit_mut::VisitMut for Lets {
+        fn visit_local_mut(&mut self, local: &mut syn::Local) {
+            collect_pattern_idents(&local.pat, &mut self.0);
+            syn::visit_mut::visit_local_mut(self, local);
         }
     }
+    let mut lets = Lets(param_strs.clone());
+    syn::visit_mut::VisitMut::visit_block_mut(&mut lets, &mut twin);
+    let locals = lets.0;
     struct Twin { locals: Vec<String>, error: Option<syn::Error> }
     impl Twin {
         fn is_local(&self, e: &syn::Expr) -> bool {
@@ -531,24 +537,23 @@ fn collect_pattern_idents(pat: &syn::Pat, out: &mut Vec<String>) {
     }
 }
 
-/// A `match` in a Form C twin as arael-sym's `select(index, arms,
-/// default)` call, valid Rust over `E`.
+/// A `match` in a Form C twin as arael-sym's `select_value(index, arms,
+/// default)` call, valid Rust over the sym types: an arm of any value
+/// kind, a block arm kept as a block.
 fn match_to_rust_select(m: &syn::ExprMatch) -> syn::Result<syn::Expr> {
     let (numbered, default) = crate::constraint::match_arm_patterns(&m.arms)?;
     let scrutinee = &*m.expr;
-    let arms: Vec<syn::Expr> = (0..numbered.len())
-        .map(|i| arm_expr(&m.arms[i]))
-        .collect::<syn::Result<_>>()?;
+    let arms: Vec<&syn::Expr> = m.arms[..numbered.len()].iter().map(|a| &*a.body).collect();
     let default: TokenStream2 = match default {
         Some(d) => {
-            let e = arm_expr(&m.arms[d])?;
-            quote!(::core::option::Option::Some(::arael::sym::E::from(#e)))
+            let e = &*m.arms[d].body;
+            quote!(::core::option::Option::Some(::arael::sym::IntoSelect::into_select(#e)))
         }
         None => quote!(::core::option::Option::None),
     };
-    Ok(syn::parse_quote!(::arael::sym::select(
+    Ok(syn::parse_quote!(::arael::sym::select_value(
         #scrutinee,
-        ::std::vec![#(::arael::sym::E::from(#arms)),*],
+        ::std::vec![#(::arael::sym::IntoSelect::into_select(#arms)),*],
         #default)))
 }
 

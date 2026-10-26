@@ -644,6 +644,17 @@ The piecewise function of one variable, written as one reads its definition: `a0
 
 An N-way switch on an integer index: `select(i, a0, a1, ...)` is `a0` for `i = 0`, `a1` for `i = 1`, and so on. Any other value takes the default when there is one (`select_or`, default last) and otherwise panics in generated code and errors in `eval`. The index must be an integer value: integer and `bool` fields convert exactly, a float index that is NaN or has a fraction panics rather than silently taking arm 0. It compiles to a `match`, so **only the taken arm is evaluated**, and differentiation selects the taken arm's derivative, the index contributing nothing, as with `branch`. In Rust the constructor is `select(index, arms, default)` with `arms: Vec<E>` and `default: Option<E>`; the parser accepts both spellings above. Use it where a body has to pick one of several formulas at runtime, such as a robust loss chosen per solve (`loss_select`). `cse_scoped` (see Common Subexpression Elimination above) keeps each arm's work inside the arm. A `select_or` whose arms and default all simplify to the same expression is that expression; a `select` without a default keeps the switch, since an index past its arms must still panic.
 
+`select_value(index, arms, default)` is `select` over values made of scalars: vectors, matrices, quaternions, and tuples or arrays of those (the `Select` trait). Each scalar component is its own `select` on `index`, and `cse_scoped` emits the selects on one index as one `match`. `IntoSelect` converts a number to `E` and leaves the sym types as they are, element by element through tuples and arrays.
+
+```rust
+use arael_sym::{select_value, symbol, vect2sym, IntoSelect};
+let k = symbol("k");
+let arms = vec![(vect2sym::new("a"), 1.0).into_select(), (vect2sym::new("b"), 2.0).into_select()];
+let (p, w) = select_value(k, arms, None);
+assert_eq!(format!("{}", p.y), "select(k, a.y, b.y)");
+assert_eq!(format!("{}", w), "select(k, 1, 2)");
+```
+
 ### `min(a, b)`, `max(a, b)`, `sign(x)`
 
 `min` and `max` return the smaller and larger of two arguments. They are built on `branch` (`min(a, b) = branch(b - a, a, b)`, `max(a, b) = branch(a - b, a, b)`), so they are differentiable away from the kink -- the derivative is the taken side's. At a tie (`a == b`) both return `a` and use `a`'s derivative.
