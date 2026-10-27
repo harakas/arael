@@ -21,7 +21,7 @@ eframe = "0.31"
 egui_extras = "0.31"
 egui_commonmark = "0.20"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-rfd = "0.15"
+rfd = "0.17"
 pollster = "0.4"
 web-time = "1"
 
