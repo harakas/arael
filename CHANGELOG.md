@@ -33,6 +33,13 @@ is cut.
 - arael-sym simplifies a `branch` whose two sides are the same
   expression, and a `select_or` whose arms and default all are, to that
   expression.
+- arael-sketch: the undo history and the rollbacks of failed edits keep
+  their snapshots with postcard instead of bincode, which is
+  unmaintained. The snapshots live in memory only; no file format
+  changes.
+- arael-sketch: the open and save dialogs use rfd 0.17, which on Linux
+  no longer goes through zbus. The lock file takes tokio 1.54.1, past
+  RUSTSEC-2026-0386.
 
 ### Performance
 
