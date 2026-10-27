@@ -162,7 +162,7 @@ fn span_test_matches_push_and_recompute() {
 }
 
 // The GUI's background DOF worker computes the rank analysis on a
-// bincode round-tripped copy of the sketch; the returned basis must
+// snapshot round-tripped copy of the sketch; the returned basis must
 // answer probe rows built from the live sketch's Params. That holds
 // because serialization order is deterministic over identical
 // structure, so both assign identical parameter indices.
@@ -176,8 +176,8 @@ fn rank_from_serialized_copy_answers_live_probes() {
     let mut params = Vec::new();
     s.serialize(&mut params);
 
-    let bytes = bincode::serialize(&s).unwrap();
-    let mut copy: Sketch = bincode::deserialize(&bytes).unwrap();
+    let bytes = postcard::to_allocvec(&s).unwrap();
+    let mut copy: Sketch = postcard::from_bytes(&bytes).unwrap();
     let from_copy = copy.rank_analysis().unwrap();
     let live = s.rank_analysis().unwrap();
 

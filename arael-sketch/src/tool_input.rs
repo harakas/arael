@@ -1697,7 +1697,7 @@ impl EditorApp {
         if l.is_empty() && a.is_empty() && p.is_empty() {
             return;
         }
-        let Ok(pre_snapshot) = bincode::serialize(&self.sketch) else { return };
+        let Ok(pre_snapshot) = postcard::to_allocvec(&self.sketch) else { return };
         self.scale_pending = Some(ScalePending {
             pre_snapshot,
             history_cursor_before: self.history.cursor,
@@ -1744,7 +1744,7 @@ impl EditorApp {
         }
         let pre_snapshot = p.pre_snapshot.clone();
         let history_cursor_before = p.history_cursor_before;
-        if let Ok(s) = bincode::deserialize::<Sketch>(&pre_snapshot) {
+        if let Ok(s) = postcard::from_bytes::<Sketch>(&pre_snapshot) {
             self.sketch = s.into();
         }
         self.history.actions.truncate(history_cursor_before);
@@ -1801,7 +1801,7 @@ impl EditorApp {
     /// Escape: restore the pre-scale sketch and end the session.
     pub(crate) fn cancel_pending_scale(&mut self) {
         let Some(p) = self.scale_pending.take() else { return };
-        if let Ok(s) = bincode::deserialize::<Sketch>(&p.pre_snapshot) {
+        if let Ok(s) = postcard::from_bytes::<Sketch>(&p.pre_snapshot) {
             self.sketch = s.into();
         }
         self.history.actions.truncate(p.history_cursor_before);

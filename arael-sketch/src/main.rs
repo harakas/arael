@@ -1118,7 +1118,7 @@ impl EditorApp {
     /// auto-perpendicular proposals that would be rejected on release.
     ///
     /// Cheap variant: push one entry, recompute DOF, pop it back.
-    /// No bincode round-trip and no solve. Still costs one full SVD
+    /// No snapshot round-trip and no solve. Still costs one full SVD
     /// on the Jacobian which can be tens of milliseconds on big
     /// sketches -- too much at 60 Hz during a drag. So: once the
     /// check fails for a given (a, b) pair, cache that failure for
@@ -1383,7 +1383,7 @@ impl EditorApp {
         self.show_hints = false;
         // Save pre-drag state before adding drag apparatus
         self.drag_saved_cost = self.last_cost;
-        self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
+        self.drag_saved_snapshot = postcard::to_allocvec(&self.sketch).ok();
         self.drag_pre_snapshot = self.drag_saved_snapshot.clone();
 
         // Pre-compute pairs that are already perpendicular now, so the
@@ -1773,12 +1773,12 @@ impl EditorApp {
             // If cost is good, save the state as the best snapshot.
             // The apparatus rides along in the bytes; the rare
             // worse-cost revert at release strips it there (refs
-            // survive the bincode round trip), so the per-move cost
+            // survive the snapshot round trip), so the per-move cost
             // is one serialize instead of a round trip plus the
             // collection sweeps of remove_drag.
             if self.last_cost < self.drag_saved_cost + 1e-3 {
                 self.drag_saved_cost = self.last_cost;
-                self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
+                self.drag_saved_snapshot = postcard::to_allocvec(&self.sketch).ok();
             }
         }
     }
@@ -1829,7 +1829,7 @@ impl EditorApp {
         // tracks the gesture instead of undoing it.
         let exit = self.take_drag_state();
         if let Some(snap) = exit.pre_snapshot
-            && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+            && let Ok(restored) = postcard::from_bytes::<Sketch>(&snap) {
                 self.sketch = restored.into();
                 let result = self.sketch.solve();
                 self.last_cost = result.end_cost;
@@ -1857,7 +1857,7 @@ impl EditorApp {
             // tolerates both.
             if self.last_cost > self.drag_saved_cost + 1e-3
                 && let Some(snap) = exit.best_snapshot
-                    && let Ok(mut restored) = bincode::deserialize::<Sketch>(&snap) {
+                    && let Ok(mut restored) = postcard::from_bytes::<Sketch>(&snap) {
                         restored.remove_drag(&app);
                         self.sketch = restored.into();
                         let result = self.sketch.solve();
@@ -1870,7 +1870,7 @@ impl EditorApp {
             // surfaced after the auto-snap section (which clears
             // status_error for its own rejections).
             let mut snapshot_err: Option<String> = None;
-            match bincode::serialize(&self.sketch) {
+            match postcard::to_allocvec(&self.sketch) {
                 Ok(snapshot) => {
                     let action = Action::Drag { snapshot };
                     self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
@@ -2421,7 +2421,7 @@ impl EditorApp {
     /// Apply a user parameter change with solve and cost check.
     /// Rolls back if the change causes constraints to break.
     pub fn apply_param_change(&mut self, action: Action) {
-        let snapshot = bincode::serialize(&self.sketch).ok();
+        let snapshot = postcard::to_allocvec(&self.sketch).ok();
         let old_cost = self.sketch.current_cost();
         self.begin_group();
         self.exec(action);
@@ -2430,7 +2430,7 @@ impl EditorApp {
         self.last_cost = new_cost;
         if new_cost > old_cost + 1e-3
             && let Some(ref snap) = snapshot
-                && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+                && let Ok(restored) = postcard::from_bytes::<Sketch>(snap) {
                     self.sketch = restored.into();
                     self.status_error = Some("Parameter change rejected: could not satisfy all constraints".into());
                 }
@@ -3375,7 +3375,7 @@ impl EditorApp {
 
     fn try_start_gui_corner_op(&mut self, kind: CornerKind, spec: CornerSpec, shortest_len: f64) {
         if shortest_len < 1e-6 { return; }
-        let pre_snapshot = match bincode::serialize(&self.sketch) {
+        let pre_snapshot = match postcard::to_allocvec(&self.sketch) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -3452,7 +3452,7 @@ impl EditorApp {
     /// Restore the pre-fillet sketch and reapply every pending
     /// corner from scratch through the typed backend engine. Called
     /// whenever the radius or the corner list changes during an
-    /// active fillet edit. Cheap enough for live typing (one bincode
+    /// active fillet edit. Cheap enough for live typing (one snapshot
     /// deserialize + a handful of corner ops).
     pub fn reapply_fillets(&mut self) {
         use arael_sketch_backend::corner_ops::{apply_corner_ops, CornerOpConfig};
@@ -3470,7 +3470,7 @@ impl EditorApp {
         let kind = p.kind;
 
         // Restore pre-fillet state so the reapply is deterministic.
-        if let Ok(s) = bincode::deserialize::<Sketch>(&pre_snapshot) {
+        if let Ok(s) = postcard::from_bytes::<Sketch>(&pre_snapshot) {
             self.sketch = s.into();
         }
         self.history.actions.truncate(history_cursor_before);
@@ -3535,7 +3535,7 @@ impl EditorApp {
     /// edit.
     pub fn cancel_pending_fillet(&mut self) {
         let Some(p) = self.fillet_pending.take() else { return; };
-        if let Ok(s) = bincode::deserialize::<Sketch>(&p.pre_snapshot) {
+        if let Ok(s) = postcard::from_bytes::<Sketch>(&p.pre_snapshot) {
             self.sketch = s.into();
         }
         self.history.actions.truncate(p.history_cursor_before);

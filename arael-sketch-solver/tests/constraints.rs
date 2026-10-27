@@ -1128,8 +1128,8 @@ fn test_expr_dim_derived_property() {
 // test_expr_dim_reference which uses add_expr_dimension (the proper API)
 
 #[test]
-fn test_bincode_roundtrip() {
-    // Reproduces undo crash: bincode serialize/deserialize of Sketch
+fn test_snapshot_roundtrip() {
+    // Reproduces undo crash: snapshot serialize/deserialize of Sketch
     // with dimensions (including expr_str field).
     let mut sketch = Sketch::new();
     let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 4.0));
@@ -1144,9 +1144,9 @@ fn test_bincode_roundtrip() {
     });
     sketch.next_dimension_id = 1;
 
-    // Serialize and deserialize with bincode (same as History)
-    let bytes = bincode::serialize(&sketch).unwrap();
-    let restored: Sketch = bincode::deserialize(&bytes).unwrap();
+    // Serialize and deserialize with postcard (same as History)
+    let bytes = postcard::to_allocvec(&sketch).unwrap();
+    let restored: Sketch = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(restored.dimensions.len(), 1);
     assert_near(restored.dimensions[0].value, 5.0, 0.001);
 }
@@ -1802,8 +1802,8 @@ fn test_user_param_serialization() {
     sketch.user_params.push(UserParam {
         name: "half".into(), expr_str: "width / 2".into(), value: 5.0, broken: false,
     });
-    let bytes = bincode::serialize(&sketch).unwrap();
-    let restored: Sketch = bincode::deserialize(&bytes).unwrap();
+    let bytes = postcard::to_allocvec(&sketch).unwrap();
+    let restored: Sketch = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(restored.user_params.len(), 2);
     assert_eq!(restored.user_params[0].name, "width");
     assert_eq!(restored.user_params[1].expr_str, "width / 2");
@@ -2173,9 +2173,9 @@ fn test_constraint_names_migration() {
     sketch.parallel.push(Parallel { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.collinear.push(Collinear { a, b: c, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.equal_length.push(EqualLength { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
-    // Simulate legacy save -> load via bincode (round-trips NaN / f64 cleanly).
-    let bytes = bincode::serialize(&sketch).unwrap();
-    let mut reloaded: Sketch = bincode::deserialize(&bytes).unwrap();
+    // Simulate legacy save -> load via postcard (round-trips NaN / f64 cleanly).
+    let bytes = postcard::to_allocvec(&sketch).unwrap();
+    let mut reloaded: Sketch = postcard::from_bytes(&bytes).unwrap();
     // nids survive round-trip as 0 because we haven't assigned yet.
     assert_eq!(reloaded.parallel[0].nid, 0);
     assert_eq!(reloaded.collinear[0].nid, 0);

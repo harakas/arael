@@ -45,7 +45,7 @@
 //! duplicate the "add line then coincident-where-needed" shape,
 //! but they converge on the same low-level `Action` alphabet. That
 //! convergence is what makes [`History`](crate::History)'s
-//! bincode-snapshot model work uniformly across GUI edits,
+//! snapshot model work uniformly across GUI edits,
 //! scripted batches, and MCP tool calls.
 
 use arael::model::{Param, CrossBlock};
@@ -2057,7 +2057,7 @@ impl Action {
             Action::Drag { snapshot } => {
                 // A corrupt snapshot (e.g. from a damaged save replay)
                 // leaves the sketch as-is rather than crashing.
-                match bincode::deserialize(snapshot) {
+                match postcard::from_bytes(snapshot) {
                     Ok(s) => *sketch = s,
                     Err(e) => eprintln!("BUG: drag snapshot deserialize failed: {}", e),
                 }

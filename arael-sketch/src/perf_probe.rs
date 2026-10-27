@@ -111,13 +111,13 @@ fn probe_scene(name: &str, gui: &mut Gui, drag_from: Option<(f64, f64)>) {
     println!("  build_markers         avg {:8.1} us   max {:8.1} us", avg, max);
 
     let (avg, max) = time_us(50, || {
-        let _ = bincode::serialize(&*app.sketch).unwrap();
+        let _ = postcard::to_allocvec(&*app.sketch).unwrap();
     });
     println!("  sketch serialize      avg {:8.1} us   max {:8.1} us", avg, max);
 
-    let snap = bincode::serialize(&*app.sketch).unwrap();
+    let snap = postcard::to_allocvec(&*app.sketch).unwrap();
     let (avg, max) = time_us(50, || {
-        let _: arael_sketch_solver::Sketch = bincode::deserialize(&snap).unwrap();
+        let _: arael_sketch_solver::Sketch = postcard::from_bytes(&snap).unwrap();
     });
     println!("  sketch deserialize    avg {:8.1} us   max {:8.1} us", avg, max);
 
@@ -209,12 +209,12 @@ fn perf_probe_polygon128_drag_pieces() {
     let (avg, max) = {
         let app: &crate::EditorApp = app;
         time_us(60, || {
-            let snap = bincode::serialize(&*app.sketch).unwrap();
-            let mut clean: arael_sketch_solver::Sketch = bincode::deserialize(&snap).unwrap();
+            let snap = postcard::to_allocvec(&*app.sketch).unwrap();
+            let mut clean: arael_sketch_solver::Sketch = postcard::from_bytes(&snap).unwrap();
             if let Some(a) = &app.drag_apparatus {
                 clean.remove_drag(a);
             }
-            let _ = bincode::serialize(&clean).unwrap();
+            let _ = postcard::to_allocvec(&clean).unwrap();
         })
     };
     println!("  snapshot chain        avg {:8.1} us   max {:8.1} us", avg, max);
@@ -547,9 +547,9 @@ fn perf_probe_large_grid() {
 
     // Building blocks, standalone.
     let (avg, max) = time_us(5, || {
-        let _ = bincode::serialize(&*gui.app.sketch).unwrap();
+        let _ = postcard::to_allocvec(&*gui.app.sketch).unwrap();
     });
-    println!("bincode snapshot     avg {:9.1} ms  max {:9.1} ms", avg / 1e3, max / 1e3);
+    println!("postcard snapshot    avg {:9.1} ms  max {:9.1} ms", avg / 1e3, max / 1e3);
     let (avg, max) = time_us(5, || {
         let _ = gui.app.sketch.current_cost();
     });

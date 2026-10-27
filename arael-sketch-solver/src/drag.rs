@@ -173,7 +173,7 @@ impl Sketch {
     /// referencing the helpers -- by identity, via the registry --
     /// then the helpers themselves and the arc shape locks. Borrows
     /// the token: the same apparatus can be removed from a
-    /// bincode-identical clone of the sketch (refs survive the round
+    /// snapshot-identical clone of the sketch (refs survive the round
     /// trip), which the GUI's best-cost snapshot path relies on.
     pub fn remove_drag(&mut self, apparatus: &DragApparatus) {
         self.remove_drag_auto_anchors(&apparatus.anchors);

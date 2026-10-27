@@ -22,7 +22,7 @@
 //!    of dropping it to the origin.
 //!
 //! 4. **Snapshot storage, not replay.** Each push serialises the
-//!    post-apply sketch via bincode. Undo/redo deserialises the
+//!    post-apply sketch with postcard. Undo/redo deserialises the
 //!    snapshot and calls `sketch.solve()` once; it does *not*
 //!    replay the action log forward. This is deliberate:
 //!    `Action::apply` is non-deterministic in general (drag
@@ -31,8 +31,8 @@
 //!    exact.
 //!
 //! The cost is that every push serialises the whole sketch. In
-//! practice that is tens to low hundreds of kilobytes of bincode
-//! and has been fine for interactive use. If that ever becomes a
+//! practice that is tens to low hundreds of kilobytes and has been
+//! fine for interactive use. If that ever becomes a
 //! bottleneck -- for instance, recording thousands of frames of
 //! procedural generation -- the likely fix is a delta-snapshot
 //! scheme or a determinism contract on `Action::apply` that lets
@@ -67,7 +67,7 @@ pub struct CursorState {
 
 pub struct History {
     pub actions: Vec<Action>,
-    pub snapshots: Vec<Vec<u8>>,  // bincode-serialized Sketch after each action
+    pub snapshots: Vec<Vec<u8>>,  // postcard-serialized Sketch after each action
     pub cursors: Vec<CursorState>,
     pub groups: Vec<u32>,         // group id for each action
     pub cursor: usize,            // number of applied actions (0 = initial state)
@@ -83,7 +83,7 @@ impl History {
             // Pushes before the first begin_group carry group 0; the
             // first explicit group must not share that id.
             cursor: 0, next_group: 1, current_group: 0,
-            initial_snapshot: bincode::serialize(sketch).unwrap(),
+            initial_snapshot: postcard::to_allocvec(sketch).unwrap(),
         }
     }
 
@@ -100,7 +100,7 @@ impl History {
         self.groups.truncate(self.cursor);
         // Push new
         self.actions.push(action);
-        self.snapshots.push(bincode::serialize(sketch).unwrap());
+        self.snapshots.push(postcard::to_allocvec(sketch).unwrap());
         self.cursors.push(cursor);
         self.groups.push(self.current_group);
         self.cursor += 1;
@@ -124,7 +124,7 @@ impl History {
         self.cursors.truncate(self.cursor);
         self.groups.truncate(self.cursor);
         let bytes = if self.cursor == 0 { &self.initial_snapshot } else { &self.snapshots[self.cursor - 1] };
-        let mut sketch: Sketch = bincode::deserialize(bytes).unwrap();
+        let mut sketch: Sketch = postcard::from_bytes(bytes).unwrap();
         sketch.solve();
         Some(sketch)
     }
@@ -144,11 +144,11 @@ impl History {
             self.cursor -= 1;
         }
         if self.cursor == 0 {
-            let mut sketch: Sketch = bincode::deserialize(&self.initial_snapshot).unwrap();
+            let mut sketch: Sketch = postcard::from_bytes(&self.initial_snapshot).unwrap();
             sketch.solve();
             Some((sketch, restored_cursor))
         } else {
-            let mut sketch: Sketch = bincode::deserialize(&self.snapshots[self.cursor - 1]).unwrap();
+            let mut sketch: Sketch = postcard::from_bytes(&self.snapshots[self.cursor - 1]).unwrap();
             sketch.solve();
             Some((sketch, restored_cursor))
         }
@@ -161,7 +161,7 @@ impl History {
         while self.cursor < self.actions.len() && self.groups[self.cursor] == group {
             self.cursor += 1;
         }
-        let mut sketch: Sketch = bincode::deserialize(&self.snapshots[self.cursor - 1]).unwrap();
+        let mut sketch: Sketch = postcard::from_bytes(&self.snapshots[self.cursor - 1]).unwrap();
         sketch.solve();
         // Each saved cursor state is the one from just before its
         // action, so the state after the redone group is the next

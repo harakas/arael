@@ -20,4 +20,4 @@ web-time = "1"
 
 [dev-dependencies]
 serde_json = "1"
-bincode = "1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }

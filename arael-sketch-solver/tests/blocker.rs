@@ -91,9 +91,9 @@ fn coincident_pp_blocked_by_hdist_and_vdist_singly() {
     });
     base.assign_constraint_names();
     // Snapshot pre and candidate-added post.
-    let snap = bincode::serialize(&base).expect("serialize");
-    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
-    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    let snap = postcard::to_allocvec(&base).expect("serialize");
+    let mut pre: Sketch = postcard::from_bytes(&snap).expect("deserialize pre");
+    let mut post: Sketch = postcard::from_bytes(&snap).expect("deserialize post");
     post.coincident_pp.push(CoincidentPP {
         a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
@@ -134,9 +134,9 @@ fn distance_pp_blocked_by_existing_distance() {
     base.assign_constraint_names();
     base.solve();
 
-    let snap = bincode::serialize(&base).expect("serialize");
-    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
-    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    let snap = postcard::to_allocvec(&base).expect("serialize");
+    let mut pre: Sketch = postcard::from_bytes(&snap).expect("deserialize pre");
+    let mut post: Sketch = postcard::from_bytes(&snap).expect("deserialize post");
     post.distance_pp.push(DistancePP {
         a, b, distance: 5.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
@@ -220,9 +220,9 @@ fn independent_candidate_no_blocker() {
     base.assign_constraint_names();
     base.solve();
 
-    let snap = bincode::serialize(&base).expect("serialize");
-    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
-    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    let snap = postcard::to_allocvec(&base).expect("serialize");
+    let mut pre: Sketch = postcard::from_bytes(&snap).expect("deserialize pre");
+    let mut post: Sketch = postcard::from_bytes(&snap).expect("deserialize post");
     post.distance_pp.push(DistancePP {
         a: c, b: d, distance: 3.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
@@ -279,9 +279,9 @@ fn certificate_path_matches_dense_on_k1_blockers() {
         a, b, distance: 0.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     base.assign_constraint_names();
-    let snap = bincode::serialize(&base).expect("serialize");
-    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
-    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    let snap = postcard::to_allocvec(&base).expect("serialize");
+    let mut pre: Sketch = postcard::from_bytes(&snap).expect("deserialize pre");
+    let mut post: Sketch = postcard::from_bytes(&snap).expect("deserialize post");
     post.coincident_pp.push(CoincidentPP { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
     post.assign_constraint_names();
 
@@ -306,9 +306,9 @@ fn certificate_path_no_blocker_on_independent_candidate() {
         a, b, distance: 5.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     base.assign_constraint_names();
-    let snap = bincode::serialize(&base).expect("serialize");
-    let mut pre: Sketch = bincode::deserialize(&snap).expect("deserialize pre");
-    let mut post: Sketch = bincode::deserialize(&snap).expect("deserialize post");
+    let snap = postcard::to_allocvec(&base).expect("serialize");
+    let mut pre: Sketch = postcard::from_bytes(&snap).expect("deserialize pre");
+    let mut post: Sketch = postcard::from_bytes(&snap).expect("deserialize post");
     post.vdistance_pp.push(VerticalDistancePP {
         a, b, distance: 0.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });

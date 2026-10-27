@@ -314,7 +314,7 @@ pub fn validate_and_apply_constraint(
 ) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
 
-    let snapshot = bincode::serialize(sketch).ok();
+    let snapshot = postcard::to_allocvec(sketch).ok();
     let old_cost = {
         let mut params = Vec::new();
         sketch.serialize(&mut params);
@@ -376,7 +376,7 @@ pub fn validate_and_apply_constraint(
     // Cost rejection
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
-            && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+            && let Ok(restored) = postcard::from_bytes::<Sketch>(snap) {
                 *sketch = restored;
                 let hint = dimension_rejection_hint(sketch, action);
                 return Err(Rejection::msg(format!(
@@ -397,7 +397,7 @@ pub fn validate_and_apply_constraint(
         if let Some((which, val)) = bad {
             let name = a.name.clone();
             if let Some(ref snap) = snapshot
-                && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+                && let Ok(restored) = postcard::from_bytes::<Sketch>(snap) {
                     *sketch = restored;
                     return Err(Rejection::msg(format!(
                         "Constraint rejected: {} got negative {} ({:.4}). This is likely a solver bug -- please report it.",
@@ -418,7 +418,7 @@ pub fn validate_and_apply_constraint(
                 } else {
                     (String::new(), Vec::new())
                 };
-                if let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+                if let Ok(restored) = postcard::from_bytes::<Sketch>(snap) {
                     *sketch = restored;
                     return Err(Rejection {
                         message: format!(
@@ -448,7 +448,7 @@ pub(crate) fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -
     // deserialize without re-running calc_jacobian. Expression
     // constraints don't have nids, so they're identified by
     // description (also stable across rebuilds).
-    let mut pre: Sketch = match bincode::deserialize::<Sketch>(pre_snap) {
+    let mut pre: Sketch = match postcard::from_bytes::<Sketch>(pre_snap) {
         Ok(s) => s,
         Err(_) => return (String::new(), Vec::new()),
     };

@@ -384,7 +384,7 @@ fn strip_force(args: &str) -> (&str, bool) {
 /// Intended for the `explain` command and for UI code that wants to
 /// preview whether a proposed constraint would succeed.
 pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
-    let snapshot = bincode::serialize(&ctx.sketch).ok();
+    let snapshot = postcard::to_allocvec(&ctx.sketch).ok();
     let history_cursor_before = ctx.history.cursor;
     let status_err_before = ctx.status_error.take();
     let blockers_before = ctx.status_blocker_names.take();
@@ -397,7 +397,7 @@ pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
     let blockers = ctx.status_blocker_names.take();
 
     if let Some(snap) = snapshot
-        && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+        && let Ok(restored) = postcard::from_bytes::<Sketch>(&snap) {
         ctx.sketch = restored.into();
     }
     // Roll history back: drop any entries the inner command pushed

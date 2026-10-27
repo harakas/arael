@@ -46,7 +46,7 @@ pub(crate) fn cmd_param(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let name = tokens[0].trim();
     let expr = tokens[1].trim();
     // Snapshot for rollback
-    let snapshot = bincode::serialize(&ctx.sketch).ok();
+    let snapshot = postcard::to_allocvec(&ctx.sketch).ok();
     let old_cost = ctx.sketch.current_cost();
     // Check if param exists -> update
     let is_update = ctx.sketch.user_params.iter().any(|p| p.name == name);
@@ -67,7 +67,7 @@ pub(crate) fn cmd_param(ctx: &mut CommandContext, args: &str) -> CmdResult {
     // Reject if cost increased significantly
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
-            && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+            && let Ok(restored) = postcard::from_bytes::<Sketch>(snap) {
                 ctx.sketch = restored.into();
                 return Err("Parameter change rejected: could not satisfy all constraints".into());
             }
@@ -235,7 +235,7 @@ pub(crate) fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let target_pos = parse_coord(ctx, tokens[1], Some(current_pos))?;
 
     // Snapshot
-    let snapshot = bincode::serialize(&ctx.sketch).ok();
+    let snapshot = postcard::to_allocvec(&ctx.sketch).ok();
     let old_cost = ctx.sketch.current_cost();
 
     // Helper positions per target; LineBody moves both endpoints by
@@ -266,7 +266,7 @@ pub(crate) fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CmdResult {
     let new_cost = ctx.sketch.current_cost();
     if new_cost > old_cost + 1e-3
         && let Some(ref snap) = snapshot
-            && let Ok(restored) = bincode::deserialize::<Sketch>(snap) {
+            && let Ok(restored) = postcard::from_bytes::<Sketch>(snap) {
                 ctx.sketch = restored.into();
                 return Err("Drag failed: could not satisfy constraints".into());
             }
@@ -275,7 +275,7 @@ pub(crate) fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CmdResult {
     // state snapshot -- so undo reverts the drag instead of eating
     // the previous action.
     ctx.begin_group();
-    if let Ok(snap) = bincode::serialize(&ctx.sketch) {
+    if let Ok(snap) = postcard::to_allocvec(&ctx.sketch) {
         ctx.history.push(
             Action::Drag { snapshot: snap },
             &ctx.sketch,
