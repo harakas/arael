@@ -3,6 +3,46 @@
 Released versions only; entries are written from the commit log when a release
 is cut.
 
+## 0.9.3 - 2026-10-27
+
+### Added
+
+- `VarCrossBlock<A, B>` and `VarSelfBlock<A>`: Hessian blocks stored at
+  the size of their entities' free parameters, so a parameter held fixed
+  costs the assembly nothing. For entities with many parameters that are
+  often held, such as a camera type that carries the parameters of
+  several camera models.
+- A `match` in a constraint body can yield a vector, a matrix, a
+  quaternion, or a tuple or array of those, so one `match` switches
+  several values at once. Every arm yields the same kind of value; arms
+  of different kinds are a compile error naming both.
+- A `match` arm in a typed `#[arael::function]` can be a block with
+  `let` bindings.
+- arael-sym: `select_value` with the `Select` and `IntoSelect` traits, a
+  `select` over values made of scalars; `E::for_each_node_while`, a
+  top-down walk that can stop at a node; `cse::Intermediate::free_vars`
+  is public.
+- cargo-arael: `interfaces = [...]` under `[package.metadata.arael]` in
+  the model crate's `Cargo.toml` chooses which of the C, C++, Python and
+  JavaScript interfaces `export` writes and `check` covers;
+  `--interfaces` does the same for one run. Without either, all four,
+  as before.
+
+### Changed
+
+- arael-sym simplifies a `branch` whose two sides are the same
+  expression, and a `select_or` whose arms and default all are, to that
+  expression.
+
+### Performance
+
+- A residual that uses only part of an entity's parameters writes only
+  that part of the entity's Hessian blocks.
+- In a constraint body with a `match`, each arm computes and writes only
+  the Hessian entries of the parameters it uses, with the constants it
+  fixes folded into its arithmetic. An entity that carries the
+  parameters of several variants pays only for the variant in use.
+
 ## 0.9.2 - 2026-10-12
 
 ### Performance
