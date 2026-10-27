@@ -1190,7 +1190,9 @@
 //! staticlib), C++ wrapper classes with vendored math headers
 //! (`cxx/`, with CMake glue), a pure-`ctypes` Python package
 //! (`python/`, stdlib only -- one cdylib serves every CPython 3.x), and
-//! a wasm-bindgen crate for the browser (`wasm/`).
+//! a wasm-bindgen crate for the browser (`wasm/`); `interfaces =
+//! ["cxx"]` under `[package.metadata.arael]` in the crate's `Cargo.toml`
+//! writes only the trees listed.
 //!
 //! The three skins carry the full surface: composing the problem, all
 //! solvers (dense/sparse/band), robust losses, configs with the real

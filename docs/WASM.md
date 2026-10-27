@@ -1,6 +1,7 @@
 # The JavaScript interface
 
-`cargo arael export` writes, beside the C++ and Python trees, a
+`cargo arael export` writes, beside the C++ and Python trees (unless
+the crate's `interfaces` leave it out, see [CXX.md](CXX.md)), a
 wasm-bindgen crate under `wasm/` in the model crate: JavaScript classes
 over the root model, shaped like the Python package, for a web page that
 builds a model, sets its parameters, solves and reads the result back.

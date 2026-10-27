@@ -13,7 +13,8 @@ wherever a sequence is, never required.
 ## Generating the package
 
 The same `cargo arael export` that writes `capi/` and `cxx/` also
-writes `python/{ns}/`, named like the C++ namespace: one ffi/api
+writes `python/{ns}/` (unless the crate's `interfaces` leave it out,
+see [CXX.md](CXX.md)), named like the C++ namespace: one ffi/api
 module pair per root and a vendored `arael/` subpackage (math value
 types, camera, g2o reader, solver surface, array transport). Commit
 the tree; `cargo arael check` reports drift.

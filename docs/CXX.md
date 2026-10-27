@@ -44,6 +44,11 @@ build profile since it builds the model too. Rerun `export` after
 model changes. Every
 command takes `--manifest-dir <path>` to name the model crate instead
 of the current directory.
+`interfaces = ["cxx"]` under `[package.metadata.arael]` in the model
+crate's `Cargo.toml` limits `export` and `check` to the trees listed
+(`capi`, `cxx`, `python`, `wasm`; `cxx` and `python` bring `capi`,
+which they call); without it all four are written, and `--interfaces
+<list>` overrides it for one run. A tree left out is not deleted.
 `capi/Cargo.toml` is written once and then left alone -- edit it
 freely (dependencies, crate settings); delete the file to regenerate
 it. Everything else is regenerated on every export, but a file whose

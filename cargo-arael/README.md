@@ -20,6 +20,19 @@ cd mymodel/ && cargo arael export
 | `python/` | a pure-`ctypes` Python package; one cdylib serves every CPython 3.x |
 | `wasm/` | a wasm-bindgen crate for the browser |
 
+To write only some of them, list them in the model crate's
+`Cargo.toml`; `export` and `check` both follow it:
+
+```toml
+[package.metadata.arael]
+interfaces = ["cxx"]
+```
+
+The names are the directories: `capi`, `cxx`, `python`, `wasm`. `cxx`
+and `python` call the C ABI, so either brings `capi`. Without the key,
+all four are written; `--interfaces cxx,python` overrides it for one
+run. A tree left out is not deleted.
+
 The interfaces are additive across releases: a name once generated
 keeps its type.
 

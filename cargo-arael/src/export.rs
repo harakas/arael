@@ -29,6 +29,102 @@ pub enum WriteAction {
     Unchanged,
 }
 
+/// The interface trees an export writes: `capi/` (the C ABI crate),
+/// `cxx/`, `python/` and `wasm/`. `cxx` and `python` call the C ABI,
+/// so either brings `capi` with it; `wasm` builds on the model crate
+/// alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interfaces {
+    pub capi: bool,
+    pub cxx: bool,
+    pub python: bool,
+    pub wasm: bool,
+}
+
+impl Interfaces {
+    /// Every tree: what an export writes when nothing narrows it.
+    pub const ALL: Interfaces = Interfaces { capi: true, cxx: true, python: true, wasm: true };
+
+    /// The names, which are also the trees' directories.
+    pub const NAMES: [&'static str; 4] = ["capi", "cxx", "python", "wasm"];
+
+    /// The trees `names` lists, `capi` added under `cxx` or `python`.
+    /// Empty names (a trailing comma) are skipped; an unknown one, or
+    /// none at all, is an error.
+    pub fn parse<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Interfaces, String> {
+        let mut s = Interfaces { capi: false, cxx: false, python: false, wasm: false };
+        let mut any = false;
+        for n in names.into_iter().map(str::trim).filter(|n| !n.is_empty()) {
+            match n {
+                "capi" => s.capi = true,
+                "cxx" => s.cxx = true,
+                "python" => s.python = true,
+                "wasm" => s.wasm = true,
+                _ => return Err(format!("unknown interface `{n}` (one of: {})", Self::NAMES.join(", "))),
+            }
+            any = true;
+        }
+        if !any {
+            return Err(format!("no interface named (one of: {})", Self::NAMES.join(", ")));
+        }
+        s.capi |= s.cxx || s.python;
+        Ok(s)
+    }
+
+    fn has(&self, name: &str) -> bool {
+        match name {
+            "capi" => self.capi,
+            "cxx" => self.cxx,
+            "python" => self.python,
+            "wasm" => self.wasm,
+            _ => false,
+        }
+    }
+
+    /// The selected names, in `NAMES` order.
+    pub fn names(&self) -> Vec<&'static str> {
+        Self::NAMES.into_iter().filter(|n| self.has(n)).collect()
+    }
+}
+
+/// The `interfaces = [...]` list under `[package.metadata.arael]` of a
+/// manifest's text, `None` when there is none. The list may span lines.
+pub fn manifest_interfaces(text: &str) -> Result<Option<Interfaces>, String> {
+    const KEY_ERR: &str = "`interfaces` under [package.metadata.arael] is a list of names, \
+                           for example [\"cxx\"]";
+    let mut section = String::new();
+    let mut list: Option<String> = None;
+    for line in text.lines() {
+        let t = line.split('#').next().unwrap_or("").trim();
+        if let Some(acc) = list.as_mut() {
+            acc.push(' ');
+            acc.push_str(t);
+        } else if t.starts_with('[') {
+            section = t.to_string();
+            continue;
+        } else if section == "[package.metadata.arael]" {
+            let Some(value) = t.strip_prefix("interfaces")
+                .and_then(|rest| rest.trim_start().strip_prefix('=')) else { continue };
+            let value = value.trim();
+            if !value.starts_with('[') {
+                return Err(KEY_ERR.to_string());
+            }
+            list = Some(value.to_string());
+        }
+        if let Some(acc) = &list
+            && let Some(end) = acc.find(']')
+        {
+            let inner = &acc[1..end];
+            let names = inner.split(',').map(|n| n.trim().trim_matches('"').trim_matches('\''));
+            return Interfaces::parse(names).map(Some);
+        }
+    }
+    match list {
+        Some(_) => Err("the `interfaces` list under [package.metadata.arael] is not closed".to_string()),
+        None => Ok(None),
+    }
+}
+
 pub fn write_action(rel: &Path, on_disk: Option<&str>, content: &str) -> WriteAction {
     let scaffold = rel == Path::new("capi/Cargo.toml") || rel == Path::new("wasm/Cargo.toml");
     match on_disk {
@@ -70,14 +166,23 @@ const MATH_HEADERS: &[(&str, &str)] = &[
     ("solver.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/solver.hpp"))),
 ];
 
+/// What an export reads from the model crate's manifest.
+struct Manifest {
+    name: String,
+    arael_dep: String,
+    namespace: Option<String>,
+    interfaces: Option<Interfaces>,
+}
+
 /// Minimal Cargo.toml scan: `name = "..."` in [package], the
-/// `arael = ...` dependency line from [dependencies], and an optional
-/// `namespace = "..."` under [package.metadata.arael] (the C++
-/// namespace; defaults to the crate name with hyphens as
-/// underscores).
-fn scan_manifest(dir: &Path) -> Result<(String, String, Option<String>), String> {
+/// `arael = ...` dependency line from [dependencies], and under
+/// [package.metadata.arael] an optional `namespace = "..."` (the C++
+/// namespace; defaults to the crate name with hyphens as underscores)
+/// and an optional `interfaces = [...]` (see [`manifest_interfaces`]).
+fn scan_manifest(dir: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(dir.join("Cargo.toml"))
         .map_err(|e| format!("read {}/Cargo.toml: {e}", dir.display()))?;
+    let interfaces = manifest_interfaces(&text)?;
     let mut section = String::new();
     let mut name = None;
     let mut arael_dep = None;
@@ -107,24 +212,68 @@ fn scan_manifest(dir: &Path) -> Result<(String, String, Option<String>), String>
     }
     let name = name.ok_or("no [package] name in Cargo.toml")?;
     let arael_dep = arael_dep.ok_or("no `arael` entry under [dependencies]")?;
-    Ok((name, arael_dep, namespace))
+    Ok(Manifest { name, arael_dep, namespace, interfaces })
 }
 
 /// The generated files for a crate's models, as (relative path,
-/// content). One root gets today's flat layout; several roots share
-/// one capi crate (each root's shim in its own module -- symbols are
-/// root-prefixed) and each root's header nests its namespace:
-/// `{ns}::{root_sn}`.
+/// content), every interface tree. One root gets today's flat layout;
+/// several roots share one capi crate (each root's shim in its own
+/// module -- symbols are root-prefixed) and each root's header nests
+/// its namespace: `{ns}::{root_sn}`.
 pub fn generate(
     models: &[&Model],
     crate_name: &str,
     arael_dep: &str,
     namespace: Option<&str>,
 ) -> Result<Vec<(PathBuf, String)>, String> {
+    generate_interfaces(models, crate_name, arael_dep, namespace, Interfaces::ALL)
+}
+
+/// [`generate`] for the trees `interfaces` selects.
+pub fn generate_interfaces(
+    models: &[&Model],
+    crate_name: &str,
+    arael_dep: &str,
+    namespace: Option<&str>,
+    interfaces: Interfaces,
+) -> Result<Vec<(PathBuf, String)>, String> {
     let rust_ident = crate_name.replace('-', "_");
     let ns = namespace.map(str::to_string).unwrap_or_else(|| rust_ident.clone());
     let multi = models.len() > 1;
+    let roots_label = models.iter().map(|m| m.root.as_str())
+        .collect::<Vec<_>>().join("` / `");
+    let arael_dep = if arael_dep.contains("path = \"") && !arael_dep.contains("path = \"/") {
+        // Relative path dep: the capi and wasm crates are one directory deeper.
+        arael_dep.replacen("path = \"", "path = \"../", 1)
+    } else {
+        arael_dep.to_string()
+    };
+    let mut files = Vec::new();
 
+    if interfaces.capi {
+        files.extend(capi_files(models, crate_name, &rust_ident, multi, &roots_label, &arael_dep)?);
+    }
+    if interfaces.cxx {
+        files.extend(cxx_files(models, &rust_ident, &ns, multi, &roots_label)?);
+    }
+    if interfaces.python {
+        files.extend(python_files(models, &rust_ident, &ns)?);
+    }
+    if interfaces.wasm {
+        files.extend(wasm_files(models, crate_name, &rust_ident, &arael_dep)?);
+    }
+    Ok(files)
+}
+
+/// `capi/`: the C ABI shim crate.
+fn capi_files(
+    models: &[&Model],
+    crate_name: &str,
+    rust_ident: &str,
+    multi: bool,
+    roots_label: &str,
+    arael_dep: &str,
+) -> Result<Vec<(PathBuf, String)>, String> {
     let ffi = if multi {
         let roots: Vec<&str> = models.iter().map(|m| m.root.as_str()).collect();
         let mut out = format!(
@@ -135,50 +284,11 @@ pub fn generate(
         for m in models {
             let root_sn = crate::ir::snake(&m.root);
             out.push_str(&format!("\npub mod {root_sn} {{\n\n{}\n}} // mod {root_sn}\n",
-                crate::emit_ffi::emit_body(m, &rust_ident)?));
+                crate::emit_ffi::emit_body(m, rust_ident)?));
         }
         out
     } else {
-        crate::emit_ffi::emit(models[0], &rust_ident)?
-    };
-
-    let mut headers = Vec::new();
-    for m in models {
-        let root_sn = crate::ir::snake(&m.root);
-        let root_ns = if multi { format!("{ns}::{root_sn}") } else { ns.clone() };
-        headers.push((root_sn, crate::emit_hpp::emit(m, &root_ns)?));
-    }
-
-    let lib_ident_py = format!("{}_capi", rust_ident);
-    let mut py_modules = Vec::new();
-    for m in models {
-        let root_sn = crate::ir::snake(&m.root);
-        let (ffi_py, api_py) = crate::emit_py::emit(m, &lib_ident_py)?;
-        py_modules.push((root_sn, ffi_py, api_py));
-    }
-    let py_init = {
-        let roots: Vec<&str> = py_modules.iter().map(|(sn, _, _)| sn.as_str()).collect();
-        let mut init = format!(
-"# {MARKER}: package init for the `{}` model interface. Do not edit.
-from . import arael  # noqa: F401
-", roots.join("` / `"));
-        for sn in &roots {
-            init.push_str(&format!("from . import {sn}  # noqa: F401\n"));
-        }
-        if roots.len() == 1 {
-            init.push_str(&format!("from .{} import *  # noqa: F401,F403\n", roots[0]));
-        }
-        init
-    };
-
-    let roots_label = models.iter().map(|m| m.root.as_str())
-        .collect::<Vec<_>>().join("` / `");
-
-    let arael_dep = if arael_dep.contains("path = \"") && !arael_dep.contains("path = \"/") {
-        // Relative path dep: the capi crate is one directory deeper.
-        arael_dep.replacen("path = \"", "path = \"../", 1)
-    } else {
-        arael_dep.to_string()
+        crate::emit_ffi::emit(models[0], rust_ident)?
     };
 
     let capi_toml = format!(
@@ -196,9 +306,29 @@ crate-type = [\"cdylib\", \"staticlib\"]
 arael = {arael_dep}
 ",
         );
+    Ok(vec![
+        (PathBuf::from("capi/Cargo.toml"), capi_toml),
+        (PathBuf::from("capi/src/lib.rs"), ffi),
+    ])
+}
+
+/// `cxx/`: the headers, the vendored math headers and the CMake glue.
+fn cxx_files(
+    models: &[&Model],
+    rust_ident: &str,
+    ns: &str,
+    multi: bool,
+    roots_label: &str,
+) -> Result<Vec<(PathBuf, String)>, String> {
+    let mut headers = Vec::new();
+    for m in models {
+        let root_sn = crate::ir::snake(&m.root);
+        let root_ns = if multi { format!("{ns}::{root_sn}") } else { ns.to_string() };
+        headers.push((root_sn, crate::emit_hpp::emit(m, &root_ns)?));
+    }
 
     let lib_ident = format!("{}_capi", rust_ident);
-    let target = rust_ident.clone();
+    let target = rust_ident;
     let cmake = format!(
 "# {MARKER}: build glue for the `{roots_label}` model interface. Do not edit.
 ") + &format!("
@@ -246,11 +376,7 @@ add_dependencies(arael_{target} {target}_capi_build)
 add_library(arael::{target} ALIAS arael_{target})
 ");
 
-    let mut files = vec![
-        (PathBuf::from("capi/Cargo.toml"), capi_toml),
-        (PathBuf::from("capi/src/lib.rs"), ffi),
-        (PathBuf::from("cxx/CMakeLists.txt"), cmake),
-    ];
+    let mut files = vec![(PathBuf::from("cxx/CMakeLists.txt"), cmake)];
     for (sn, hpp) in headers {
         files.push((PathBuf::from(format!("cxx/include/{sn}.hpp")), hpp));
     }
@@ -260,8 +386,34 @@ add_library(arael::{target} ALIAS arael_{target})
         let stamped = format!("// {MARKER} (vendored math header). Do not edit.\n{content}");
         files.push((PathBuf::from(format!("cxx/include/arael/{name}")), stamped));
     }
+    Ok(files)
+}
 
-    files.push((PathBuf::from(format!("python/{ns}/__init__.py")), py_init));
+/// `python/{ns}/`: the ctypes package and its vendored support library.
+fn python_files(models: &[&Model], rust_ident: &str, ns: &str) -> Result<Vec<(PathBuf, String)>, String> {
+    let lib_ident_py = format!("{}_capi", rust_ident);
+    let mut py_modules = Vec::new();
+    for m in models {
+        let root_sn = crate::ir::snake(&m.root);
+        let (ffi_py, api_py) = crate::emit_py::emit(m, &lib_ident_py)?;
+        py_modules.push((root_sn, ffi_py, api_py));
+    }
+    let py_init = {
+        let roots: Vec<&str> = py_modules.iter().map(|(sn, _, _)| sn.as_str()).collect();
+        let mut init = format!(
+"# {MARKER}: package init for the `{}` model interface. Do not edit.
+from . import arael  # noqa: F401
+", roots.join("` / `"));
+        for sn in &roots {
+            init.push_str(&format!("from . import {sn}  # noqa: F401\n"));
+        }
+        if roots.len() == 1 {
+            init.push_str(&format!("from .{} import *  # noqa: F401,F403\n", roots[0]));
+        }
+        init
+    };
+
+    let mut files = vec![(PathBuf::from(format!("python/{ns}/__init__.py")), py_init)];
     for (sn, ffi_py, api_py) in py_modules {
         files.push((PathBuf::from(format!("python/{ns}/_{sn}_ffi.py")), ffi_py));
         files.push((PathBuf::from(format!("python/{ns}/{sn}.py")), api_py));
@@ -270,13 +422,21 @@ add_library(arael::{target} ALIAS arael_{target})
         let stamped = format!("# {MARKER} (vendored python support). Do not edit.\n{content}");
         files.push((PathBuf::from(format!("python/{ns}/arael/{name}")), stamped));
     }
+    Ok(files)
+}
 
-    // The wasm-bindgen crate: its own workspace beside capi, with the
-    // JavaScript support library vendored next to the build output.
-    files.push((PathBuf::from("wasm/Cargo.toml"),
-        crate::emit_wasm::manifest(crate_name, &arael_dep)));
-    files.push((PathBuf::from("wasm/src/lib.rs"),
-        crate::emit_wasm::emit(models, &rust_ident)?));
+/// `wasm/`: the wasm-bindgen crate, its own workspace beside capi, with
+/// the JavaScript support library vendored next to the build output.
+fn wasm_files(
+    models: &[&Model],
+    crate_name: &str,
+    rust_ident: &str,
+    arael_dep: &str,
+) -> Result<Vec<(PathBuf, String)>, String> {
+    let mut files = vec![
+        (PathBuf::from("wasm/Cargo.toml"), crate::emit_wasm::manifest(crate_name, arael_dep)),
+        (PathBuf::from("wasm/src/lib.rs"), crate::emit_wasm::emit(models, rust_ident)?),
+    ];
     files.push((PathBuf::from("wasm/.gitignore"),
         format!("# {MARKER}: the wasm crate's build output and lock file. Do not edit.\n/target\n/pkg\n/Cargo.lock\n")));
     for (name, content) in JS_SUPPORT {
@@ -523,14 +683,41 @@ fn pick<'m>(models: &'m [Model], root: Option<&str>) -> Result<Vec<&'m Model>, S
     }
 }
 
+/// The trees to write: `chosen` when given (`--interfaces`), else the
+/// manifest's `interfaces`, else every tree. Prints the choice when it
+/// is not every tree, and names each existing tree it leaves alone.
+fn selected(dir: &Path, manifest: &Manifest, chosen: Option<Interfaces>) -> Interfaces {
+    let interfaces = chosen.or(manifest.interfaces).unwrap_or(Interfaces::ALL);
+    if interfaces != Interfaces::ALL {
+        println!("interfaces: {}", interfaces.names().join(", "));
+        for name in Interfaces::NAMES {
+            if !interfaces.has(name) && dir.join(name).is_dir() {
+                println!("{}/ is not among the interfaces: left as it is", dir.join(name).display());
+            }
+        }
+    }
+    interfaces
+}
+
 pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
-    let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
-    stub_capi(dir, &crate_name)?;
+    run_export_with(dir, root, None)
+}
+
+/// [`run_export`] writing the trees `interfaces` selects, or, when
+/// `None`, those the manifest's `interfaces` lists (every tree when it
+/// lists none).
+pub fn run_export_with(dir: &Path, root: Option<&str>, interfaces: Option<Interfaces>) -> Result<(), String> {
+    let manifest = scan_manifest(dir)?;
+    let interfaces = selected(dir, &manifest, interfaces);
+    if interfaces.capi {
+        stub_capi(dir, &manifest.name)?;
+    }
     // Before the harvest, which is itself a build of the model.
     ensure_macro_profiles(dir);
     let models = harvest(dir)?;
     let picked = pick(&models, root)?;
-    let files = generate(&picked, &crate_name, &arael_dep, ns.as_deref())?;
+    let files = generate_interfaces(&picked, &manifest.name, &manifest.arael_dep,
+        manifest.namespace.as_deref(), interfaces)?;
     let mut unchanged = 0usize;
     for (rel, content) in &files {
         let path = dir.join(rel);
@@ -565,13 +752,21 @@ pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
 }
 
 pub fn run_check(dir: &Path, root: Option<&str>) -> Result<(), String> {
-    let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
+    run_check_with(dir, root, None)
+}
+
+/// [`run_check`] over the trees `interfaces` selects, or the
+/// manifest's, as in [`run_export_with`].
+pub fn run_check_with(dir: &Path, root: Option<&str>, interfaces: Option<Interfaces>) -> Result<(), String> {
+    let manifest = scan_manifest(dir)?;
+    let interfaces = selected(dir, &manifest, interfaces);
     if let Some(notice) = macro_profile_notice(dir) {
         eprintln!("{notice}");
     }
     let models = harvest(dir)?;
     let picked = pick(&models, root)?;
-    let files = generate(&picked, &crate_name, &arael_dep, ns.as_deref())?;
+    let files = generate_interfaces(&picked, &manifest.name, &manifest.arael_dep,
+        manifest.namespace.as_deref(), interfaces)?;
     let mut stale = Vec::new();
     for (rel, content) in &files {
         let path = dir.join(rel);

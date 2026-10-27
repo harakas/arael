@@ -21,6 +21,11 @@ commands:
 options:
   --manifest-dir <path>   model crate directory (default: current)
   --root <name>           pick a root when the crate has several
+  --interfaces <list>     the trees export and check cover, comma-separated
+                          among capi, cxx, python, wasm (cxx and python bring
+                          capi); default: `interfaces` under
+                          [package.metadata.arael] in the crate's Cargo.toml,
+                          else all four
 ";
 
 fn main() {
@@ -31,6 +36,7 @@ fn main() {
     }
     let mut dir = std::path::PathBuf::from(".");
     let mut root: Option<String> = None;
+    let mut interfaces: Option<export::Interfaces> = None;
     let mut cmd: Option<String> = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -42,6 +48,16 @@ fn main() {
                 });
             }
             "--root" => root = it.next(),
+            "--interfaces" => {
+                let list = it.next().unwrap_or_else(|| {
+                    eprintln!("--interfaces needs a value");
+                    std::process::exit(2);
+                });
+                interfaces = Some(export::Interfaces::parse(list.split(',')).unwrap_or_else(|e| {
+                    eprintln!("--interfaces: {e}");
+                    std::process::exit(2);
+                }));
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return;
@@ -54,8 +70,8 @@ fn main() {
         }
     }
     let result = match cmd.as_deref() {
-        Some("export") => export::run_export(&dir, root.as_deref()),
-        Some("check") => export::run_check(&dir, root.as_deref()),
+        Some("export") => export::run_export_with(&dir, root.as_deref(), interfaces),
+        Some("check") => export::run_check_with(&dir, root.as_deref(), interfaces),
         Some("setup") => export::run_setup(&dir),
         _ => {
             eprint!("{USAGE}");
