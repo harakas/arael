@@ -281,6 +281,9 @@ pub fn safe_sqrt<T: Float>(v: T) -> T {
 /// Standard atan2(y, x).
 pub fn atan2<T: Float>(y: T, x: T) -> T { y.atan2(x) }
 
+/// Standard powf(base, exponent).
+pub fn powf<T: Float>(base: T, exponent: T) -> T { base.powf(exponent) }
+
 /// Fast approximate atan. Max error < 1e-6 radians.
 pub fn fast_atan<T: Float>(x: T) -> T { x.fast_atan() }
 

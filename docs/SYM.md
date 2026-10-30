@@ -366,7 +366,7 @@ You don't need `use arael::matrix::matrix2sym;` -- the macro matches `matrix2sym
 
 ## Output Formatting / Code Generation
 
-Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
+Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context; an `atan2` or `powf` whose first argument is a constant is then written as a call, `arael::utils::atan2(1.0, x)`, since rustc cannot call a method on an unsuffixed literal. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
 
 ```rust
 sym! {

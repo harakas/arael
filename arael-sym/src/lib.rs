@@ -2662,6 +2662,29 @@ mod tests {
     }
 
     #[test]
+    fn literal_receiver_emits_the_free_function() {
+        // `1.0.atan2(x)` does not compile: rustc cannot call a method on an
+        // unsuffixed literal. The type-inferred context calls the free
+        // function, which takes its type from the other argument.
+        let x = symbol("x");
+        assert_eq!(atan2(constant(1.0), x.clone()).to_rust(""), "arael::utils::atan2(1.0, x)");
+        assert_eq!(pow(constant(2.0), x.clone()).to_rust(""), "arael::utils::powf(2.0, x)");
+        // A named constant and a folded constant subtree are literals too.
+        assert_eq!(atan2(pi(), x.clone()).to_rust(""),
+            "arael::utils::atan2(3.141592653589793, x)");
+        assert_eq!(atan2(constant(2.0) * constant(0.5), x.clone()).to_rust(""),
+            "arael::utils::atan2(1.0, x)");
+        // A symbolic receiver, a whole exponent and the typed contexts keep
+        // the method form.
+        assert_eq!(atan2(symbol("y"), x.clone()).to_rust(""), "y.atan2(x)");
+        assert_eq!(pow(x.clone(), constant(1.5)).to_rust(""), "x.powf(1.5)");
+        assert_eq!(pow(x.clone(), constant(3.0)).to_rust(""), "x.powi(3)");
+        assert_eq!(atan2(constant(1.0), x.clone()).to_rust("f64"), "1.0_f64.atan2(x)");
+        assert_eq!(atan2(constant(1.0), x.clone()).to_rust_generic(), "__c(1.0).atan2(x)");
+        assert_eq!(pow(constant(2.0), x.clone()).to_rust("f32"), "2.0_f32.powf(x)");
+    }
+
+    #[test]
     fn nonfinite_constants_emit_valid_rust() {
         // Constants folded to inf/NaN emitted `inf_f64` / `NaN_f64` --
         // not valid Rust tokens.

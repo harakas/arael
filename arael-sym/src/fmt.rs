@@ -68,6 +68,15 @@ fn push_wrapped_literal(buf: &mut String, v: f64) {
     buf.push(')');
 }
 
+/// Whether `e` is emitted as an unsuffixed literal: the type-inferred
+/// context writes every symbol-free subtree that way. rustc cannot call a
+/// method such as `atan2` on one (an ambiguous numeric type), so a
+/// two-argument call whose receiver this is goes through the free function
+/// in `arael::utils`, which takes its type from the other argument.
+fn is_untyped_literal(e: &Expr, ft: &str) -> bool {
+    ft.is_empty() && crate::E::new(e.clone()).symbols().is_empty()
+}
+
 /// A power's exponent, when it is a whole number of a size a chain of
 /// multiplications serves.
 fn whole_exponent(e: &Expr) -> Option<i32> {
@@ -621,17 +630,21 @@ impl Expr {
                 b.write_rust(buf, ft, 7); // right side of div: parens for mul/div
             }
             Expr::Pow(a, b) => {
-                a.write_rust(buf, ft, 8);
                 // A whole exponent compiles to multiplications through
                 // `powi`; `powf` is a library call for all but the square.
                 if let Some(n) = whole_exponent(b) {
+                    a.write_rust(buf, ft, 8);
                     buf.push_str(".powi(");
                     buf.push_str(&n.to_string());
+                    buf.push(')');
+                } else if is_untyped_literal(a, ft) {
+                    Self::write_rust_call(buf, ft, "arael::utils::powf", &[a, b]);
                 } else {
+                    a.write_rust(buf, ft, 8);
                     buf.push_str(".powf(");
                     b.write_rust(buf, ft, 0);
+                    buf.push(')');
                 }
-                buf.push(')');
             }
             Expr::Sin(a) => Self::write_rust_method(buf, ft, a, "sin"),
             Expr::Cos(a) => Self::write_rust_method(buf, ft, a, "cos"),
@@ -640,10 +653,14 @@ impl Expr {
             Expr::Acos(a) => Self::write_rust_method(buf, ft, a, "acos"),
             Expr::Atan(a) => Self::write_rust_method(buf, ft, a, "atan"),
             Expr::Atan2(y, x) => {
-                y.write_rust(buf, ft, 8);
-                buf.push_str(".atan2(");
-                x.write_rust(buf, ft, 0);
-                buf.push(')');
+                if is_untyped_literal(y, ft) {
+                    Self::write_rust_call(buf, ft, "arael::utils::atan2", &[y, x]);
+                } else {
+                    y.write_rust(buf, ft, 8);
+                    buf.push_str(".atan2(");
+                    x.write_rust(buf, ft, 0);
+                    buf.push(')');
+                }
             }
             Expr::Sinh(a) => Self::write_rust_method(buf, ft, a, "sinh"),
             Expr::Cosh(a) => Self::write_rust_method(buf, ft, a, "cosh"),
@@ -746,6 +763,17 @@ impl Expr {
         buf.push('.');
         buf.push_str(method);
         buf.push_str("()");
+    }
+
+    /// `path(args...)`: a free-function call.
+    fn write_rust_call(buf: &mut String, ft: &str, path: &str, args: &[&Expr]) {
+        buf.push_str(path);
+        buf.push('(');
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 { buf.push_str(", "); }
+            arg.write_rust(buf, ft, 0);
+        }
+        buf.push(')');
     }
 
     /// `(index).select_index()`: the runtime conversion of a select index
