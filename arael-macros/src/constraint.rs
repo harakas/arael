@@ -10731,13 +10731,18 @@ fn interpret_constraint_body(
                 .map(|(vn, _)| vn.clone()).unwrap_or(parent_name.clone())
         };
 
-        for slot in param_slots(&a_type) {
-            let sym_base = if slot.universal_delta {
-                format!("{}.{}.delta", a_var_name, slot.path)
-            } else {
-                format!("{}.{}.work()", a_var_name, slot.path)
-            };
-            add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
+        // A remote block holds its target's (B's) params only: the
+        // containing parent (A) has no block in this form, so its params
+        // do not join the span the write covers.
+        if !is_remote {
+            for slot in param_slots(&a_type) {
+                let sym_base = if slot.universal_delta {
+                    format!("{}.{}.delta", a_var_name, slot.path)
+                } else {
+                    format!("{}.{}.work()", a_var_name, slot.path)
+                };
+                add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
+            }
         }
         if let Some(ref b_type_name) = b_type {
             let b_var = var_infos.iter().find(|(vn, tn)| {
@@ -10852,6 +10857,28 @@ fn interpret_constraint_body(
         for r in &residuals { all_vars.extend(r.free_vars()); }
         for var in &all_vars {
             if var.contains(".work()") { param_symbols.push(var.clone()); }
+        }
+    }
+
+    // A remote block takes the derivatives of its target's params and no
+    // others; any other param the body reads would lose its derivatives.
+    if is_remote && !is_triplet && !is_multi_cross {
+        let known: std::collections::HashSet<&str> =
+            param_symbols.iter().map(|s| s.as_str()).collect();
+        let mut outside = std::collections::BTreeSet::new();
+        for r in &residuals {
+            outside.extend(r.free_vars().into_iter()
+                .filter(|v| v.contains(".work()") && !known.contains(v.as_str())));
+        }
+        if !outside.is_empty() {
+            let list: Vec<String> = outside.into_iter()
+                .map(|v| v.replace(".work()", "")).collect();
+            return Err(syn::Error::new_spanned(struct_name, format!(
+                "`{}` writes only the remote block `{}`, which holds `{}`'s params; \
+                 it reads [{}], params outside that block, whose derivatives would \
+                 have nowhere to go",
+                struct_name, constraint.primary_block_field(),
+                b_type.as_deref().unwrap_or("?"), list.join(", "))));
         }
     }
 

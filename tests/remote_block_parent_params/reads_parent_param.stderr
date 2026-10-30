@@ -1,0 +1,7 @@
+error: $DIR/tests/remote_block_parent_params/reads_parent_param.rs:14: `SObs` writes only the remote block `b.hb`, which holds `Beacon`'s params; it reads [st.bias], params outside that block, whose derivatives would have nowhere to go
+  --> tests/remote_block_parent_params/reads_parent_param.rs:29:1
+   |
+29 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
