@@ -1085,3 +1085,57 @@ fn the_covariance_a_solve_carries_factorizes_on_its_threads() {
     assert_eq!(four.plan().symbolics_built, 0);
     same_queries("threads", &c, &four, &one);
 }
+
+// AllMarginals on a factor faer keeps simplicial. faer forces a supernodal
+// factor only when its flop count is above zero, and an AMD-ordered factor
+// with nothing below the diagonal counts zero, so a one-parameter root or a
+// root parameter beside uncoupled entities got a simplicial factor, and the
+// assembly panicked ("unreachable: assemble_covariance forced supernodal").
+// Such a factor now answers by column solves, as PerQuery does.
+
+#[arael::model]
+#[arael(constraint(root.hb, { [fo.y - fline.k * fo.x] }))]
+struct Fo { x: f64, y: f64 }
+
+#[arael::model]
+#[arael(root)]
+struct FLine { k: Param<f64>, obs: std::vec::Vec<Fo>, hb: SelfBlock<FLine> }
+
+#[arael::model]
+#[arael(constraint(root.hb, { [go.y - groot.g * go.x] }))]
+struct Go { x: f64, y: f64 }
+
+#[arael::model]
+#[arael(constraint(hb, { [(gv.v - gv.t) * 2.0] }))]
+struct Gv { v: Param<f64>, t: f64, hb: SelfBlock<Gv> }
+
+#[arael::model]
+#[arael(root)]
+struct GRoot { g: Param<f64>, obs: std::vec::Vec<Go>, vs: std::vec::Vec<Gv>, hb: SelfBlock<GRoot> }
+
+#[test]
+fn all_marginals_on_a_simplicial_factor() {
+    let mut l = FLine {
+        k: Param::new(1.0),
+        obs: vec![Fo { x: 1.0, y: 2.1 }, Fo { x: 2.0, y: 3.9 }, Fo { x: 3.0, y: 6.2 }],
+        hb: SelfBlock::new(),
+    };
+    let all = l.assemble_covariance(CovMode::AllMarginals).unwrap();
+    let per = l.assemble_covariance(CovMode::PerQuery).unwrap();
+    let k = all.marginal_cov(&l).unwrap();
+    assert!((k[(0, 0)] - 1.0 / 14.0).abs() < 1e-12, "{}", k[(0, 0)]);
+    assert_eq!(k, per.marginal_cov(&l).unwrap());
+
+    let mut g = GRoot {
+        g: Param::new(1.0),
+        obs: vec![Go { x: 1.0, y: 1.0 }, Go { x: 2.0, y: 2.0 }],
+        vs: (0..3).map(|i| Gv { v: Param::new(0.0), t: i as f64, hb: SelfBlock::new() }).collect(),
+        hb: SelfBlock::new(),
+    };
+    let all = g.assemble_covariance(CovMode::AllMarginals).unwrap();
+    let per = g.assemble_covariance(CovMode::PerQuery).unwrap();
+    let joint = all.marginal_cov(&g).unwrap();
+    assert_eq!(joint.nrows(), 4);
+    assert!((joint - per.marginal_cov(&g).unwrap()).abs().max() < 1e-14);
+    assert_eq!(all.marginal_cov(&g.vs[1]).unwrap(), per.marginal_cov(&g.vs[1]).unwrap());
+}

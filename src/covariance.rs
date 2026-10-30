@@ -248,7 +248,9 @@ pub struct SolveAnalysis {
 
 enum Backend {
     // faer sparse Cholesky: PerQuery solves on demand, AllMarginals also holds a
-    // selected-inverse cache. `h` (the CSC upper triangle) serves conditional_cov.
+    // selected-inverse cache when faer's factor is supernodal (see
+    // `selected_inverse_supernodal`). `h` (the CSC upper triangle) serves
+    // conditional_cov.
     Factored {
         symbolic: fchol::SymbolicCholesky<usize>,
         l_vals: Vec<f64>,
@@ -562,15 +564,20 @@ impl SelInv {
 //   S_RJ = -S_RR M                          (matmul; S_RR gathered from later supernodes)
 //   S_JJ =  L_JJ^-T L_JJ^-1 - S_RJ^T M      (matmul)
 // The result is flattened into the scalar-CSC SelInv used by the query path.
-fn selected_inverse_supernodal(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> SelInv {
+//
+// `None` for a simplicial factor. AllMarginals asks faer for a supernodal one
+// (FORCE_SUPERNODAL), but faer forces it only when the factor's flop count is
+// above zero, and an AMD-ordered factor with nothing below the diagonal counts
+// zero (a one-parameter root, a diagonal H). Without the cache every query
+// solves its columns, as under PerQuery, to the same values.
+fn selected_inverse_supernodal(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> Option<SelInv> {
     use faer::linalg::matmul::matmul;
     use faer::linalg::triangular_solve::{solve_lower_triangular_in_place, solve_upper_triangular_in_place};
     use faer::{Accum, Mat, MatRef, Par};
 
     let sup = match symbolic.raw() {
         fchol::SymbolicCholeskyRaw::Supernodal(s) => s,
-        // INVARIANT: AllMarginals sets FORCE_SUPERNODAL before this runs.
-        fchol::SymbolicCholeskyRaw::Simplicial(_) => unreachable!("assemble_covariance forced supernodal"),
+        fchol::SymbolicCholeskyRaw::Simplicial(_) => return None,
     };
     let inv: Vec<usize> = symbolic
         .perm()
@@ -708,7 +715,7 @@ fn selected_inverse_supernodal(symbolic: &fchol::SymbolicCholesky<usize>, l_vals
         }
     }
 
-    SelInv { col_ptr, row_idx, vals, inv }
+    Some(SelInv { col_ptr, row_idx, vals, inv })
 }
 
 // Solve H X = E in place (E is column-major n x k), leaving X = H^-1 E.
@@ -1363,7 +1370,7 @@ pub(crate) fn assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
         .map_err(|_| CovError::NotPositiveDefinite)?;
 
     let sel = if mode == CovMode::AllMarginals {
-        Some(selected_inverse_supernodal(&symbolic, &l_vals, n))
+        selected_inverse_supernodal(&symbolic, &l_vals, n)
     } else {
         None
     };
