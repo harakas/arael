@@ -63,7 +63,9 @@ pub enum CovError {
     /// no anchor the problem has unobservable directions and `H` is singular
     /// (e.g. free-gauge SLAM). Fix a pose / add a prior.
     NotPositiveDefinite,
-    /// The model has no optimizable parameters.
+    /// No optimizable parameters: the model has none, or a query names a
+    /// part of it that has none (a fixed parameter, an entity whose
+    /// parameters are all fixed, a data-only entity).
     Empty,
     /// [`CovMode::TriDiagonal`] was requested but `H` is not block-tridiagonal in
     /// serialization order: some off-band block couples non-adjacent entities (a
@@ -94,7 +96,8 @@ impl std::fmt::Display for CovError {
         match self {
             CovError::NotPositiveDefinite => write!(f,
                 "Hessian is not positive definite (unfixed gauge? add an anchor or a prior)"),
-            CovError::Empty => write!(f, "model has no optimizable parameters"),
+            CovError::Empty => write!(f,
+                "no optimizable parameters (the model has none, or the query names a part that has none)"),
             CovError::NotTriDiagonal => write!(f,
                 "Hessian is not block-tridiagonal (loop closure or free landmark?); use PerQuery or AllMarginals"),
             CovError::NotRequested => write!(f,
@@ -354,8 +357,9 @@ impl CovAssembly {
     }
 
     /// Scalar parameter indices covered by a model (an entity's contiguous
-    /// live-parameter ranges, or every element's for a collection).
-    fn indices<M: Model + ?Sized>(m: &M) -> Vec<usize> {
+    /// live-parameter ranges, or every element's for a collection), or
+    /// [`CovError::Empty`] when it covers none.
+    fn indices<M: Model + ?Sized>(m: &M) -> Result<Vec<usize>, CovError> {
         let mut spans: Vec<(u32, u32)> = Vec::new();
         m.collect_param_blocks(&mut spans);
         let mut idx = Vec::new();
@@ -364,19 +368,24 @@ impl CovAssembly {
                 idx.push(i as usize);
             }
         }
-        idx
+        if idx.is_empty() {
+            return Err(CovError::Empty);
+        }
+        Ok(idx)
     }
 
-    /// Marginal covariance of a model: one entity for its own covariance, or a
-    /// whole collection for the joint over all its entities. In tangent
+    /// Marginal covariance of a model: one entity for its own covariance, a
+    /// parameter or component field for its block alone, or a whole
+    /// collection for the joint over all its entities. In tangent
     /// coordinates.
     ///
-    /// Errors: [`CovError::UnsupportedQuery`] when the
+    /// Errors: [`CovError::Empty`] when `m` holds no optimizable
+    /// parameters; [`CovError::UnsupportedQuery`] when the
     /// [`CovMode::TriDiagonal`] backend is asked a non-single-band-block
     /// query; [`CovError::NotPositiveDefinite`] when the block is singular
     /// (unobservable).
     pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> Result<DMatrix<f64>, CovError> {
-        let idx = Self::indices(m);
+        let idx = Self::indices(m)?;
         match &self.backend {
             Backend::Factored { .. } | Backend::BlockFactored { .. } => {
                 Ok(self.factored_block(&idx, &idx))
@@ -396,7 +405,7 @@ impl CovAssembly {
     ///
     /// Errors as [`marginal_cov`](Self::marginal_cov).
     pub fn conditional_cov<M: Model + ?Sized>(&self, m: &M) -> Result<DMatrix<f64>, CovError> {
-        let idx = Self::indices(m);
+        let idx = Self::indices(m)?;
         let k = idx.len();
         let hb = match &self.backend {
             Backend::Factored { h, .. } => {
@@ -434,7 +443,7 @@ impl CovAssembly {
     ///
     /// Errors as [`marginal_cov`](Self::marginal_cov).
     pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Result<Vec<f64>, CovError> {
-        let idx = Self::indices(m);
+        let idx = Self::indices(m)?;
         let block = match &self.backend {
             Backend::Factored { .. } | Backend::BlockFactored { .. } => {
                 self.factored_block(&idx, &idx)
@@ -450,12 +459,13 @@ impl CovAssembly {
     /// Cross-covariance block between two models (the off-diagonal `A x B`
     /// block of the joint covariance). In tangent coordinates.
     ///
-    /// Errors: [`CovError::UnsupportedQuery`] on the
+    /// Errors: [`CovError::Empty`] when `a` or `b` holds no optimizable
+    /// parameters; [`CovError::UnsupportedQuery`] on the
     /// [`CovMode::TriDiagonal`] backend, which stores only the band and has
     /// no off-diagonal blocks -- assemble with `AllMarginals` or `PerQuery`.
     pub fn cross_cov<A: Model + ?Sized, B: Model + ?Sized>(&self, a: &A, b: &B) -> Result<DMatrix<f64>, CovError> {
-        let ia = Self::indices(a);
-        let ib = Self::indices(b);
+        let ia = Self::indices(a)?;
+        let ib = Self::indices(b)?;
         match &self.backend {
             Backend::Factored { .. } | Backend::BlockFactored { .. } => {
                 Ok(self.factored_block(&ia, &ib))

@@ -46,15 +46,19 @@ a solve already has.
 
 Query per-entity blocks by passing the entity itself. Any `Model` reports its
 live-parameter span (`collect_param_blocks`), so a single pose, a single
-landmark, or a whole `refs::Vec` collection are all valid arguments:
+landmark, one parameter or component field of it, a whole `refs::Vec`
+collection, or the root (the joint over everything) are all valid arguments:
 
-Each query returns a `Result`: `Err(CovError::NotPositiveDefinite)` for a
-singular (unobservable) block, `Err(CovError::UnsupportedQuery)` for a
-query the assembled mode cannot answer.
+Each query returns a `Result`: `Err(CovError::Empty)` when what it names
+holds no optimizable parameter (a fixed parameter, a data-only entity),
+`Err(CovError::NotPositiveDefinite)` for a singular (unobservable) block,
+`Err(CovError::UnsupportedQuery)` for a query the assembled mode cannot
+answer.
 
 ```rust,ignore
 let sd = cov.std_dev(&model.poses[0])?;            // Vec<f64>, one per scalar param
 let m  = cov.marginal_cov(&model.landmarks[3])?;   // DMatrix<f64>, its covariance block
+let r  = cov.marginal_cov(&model.poses[0].r2w)?;   // one parameter field's block alone
 let c  = cov.conditional_cov(&model.poses[0])?;    // DMatrix<f64>, others held fixed
 let x  = cov.cross_cov(&model.poses[0], &model.landmarks[3])?; // joint off-diagonal
 let n  = cov.dim();                                // number of optimized scalars
@@ -181,8 +185,8 @@ problem defined only up to a similarity -- `H` is rank-deficient and
 before recovering covariance: anchor a pose (hold its parameters constant), or add
 a prior. The covariance is then relative to whatever the gauge fixes.
 
-Other errors: `Empty` (the model has no optimizable parameters) and
-`NotTriDiagonal` (above).
+Other errors: `Empty` (the model, or what a query names, has no
+optimizable parameters) and `NotTriDiagonal` (above).
 
 ## Cost
 

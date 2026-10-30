@@ -301,6 +301,9 @@ where
         Model::fold_param_span(&self.w, min, count);
         Model::fold_param_span(&self.d, min, count);
     }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        crate::model::push_own_span(self, out)
+    }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.w", base), out);
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.d", base), out);
@@ -777,6 +780,9 @@ where
         Model::fold_param_span(&self.w, min, count);
         Model::fold_param_span(&self.d, min, count);
         Model::fold_param_span(&self.log_s, min, count);
+    }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        crate::model::push_own_span(self, out)
     }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<vect3<T>> as Model>::param_symbols(&format!("{}.w", base), out);

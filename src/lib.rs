@@ -1667,6 +1667,7 @@
 //! let cov = r.covariance?;                          // the assembly the solve built
 //! let sd  = cov.std_dev(&model.poses[0])?;          // 1-sigma per scalar (tangent coords)
 //! let s   = cov.marginal_cov(&model.landmarks[3])?; // full covariance block
+//! let p   = cov.marginal_cov(&model.poses[0].r2w)?; // one parameter field alone
 //! let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]);
 //!
 //! let cov = model.assemble_covariance(CovMode::AllMarginals)?;   // without a solve

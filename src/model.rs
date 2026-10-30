@@ -232,9 +232,10 @@ pub trait Model {
     /// Append this model's parameter blocks as `(offset, width)` spans of
     /// the flat parameter vector -- one span per entity, folded from the
     /// entity's own parameter slots (see
-    /// [`fold_param_span`](Self::fold_param_span)). Valid only after
-    /// `serialize` has assigned indices. Entities whose params are all
-    /// fixed contribute nothing.
+    /// [`fold_param_span`](Self::fold_param_span)). A parameter or a
+    /// component reports its own span, so a covariance query can name
+    /// one. Valid only after `serialize` has assigned indices. Entities
+    /// whose params are all fixed contribute nothing.
     fn collect_param_blocks(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
 
     /// Fold this model's own parameter slots into a running `(smallest
@@ -262,6 +263,17 @@ pub trait Model {
     /// nesting depth are advanced.
     fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
+}
+
+/// The [`collect_param_blocks`](Model::collect_param_blocks) of a parameter
+/// type or component: its own live span, folded by
+/// [`fold_param_span`](Model::fold_param_span), when any of it is live.
+pub(crate) fn push_own_span<M: Model + ?Sized>(m: &M, out: &mut std::vec::Vec<(u32, u32)>) {
+    let mut span = (u32::MAX, 0u32);
+    m.fold_param_span(&mut span.0, &mut span.1);
+    if span.1 > 0 {
+        out.push(span);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +461,9 @@ impl<T: ParamType> Model for Param<T> {
     fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
         ParamSlot::fold_param_span(self, min, count)
     }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        push_own_span(self, out)
+    }
 
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
         if self.optimize {
@@ -619,6 +634,9 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 impl<T: crate::utils::Float> Model for SimpleEulerAngleParam<T> where vect3<T>: ParamType {
     fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
         ParamSlot::fold_param_span(self, min, count)
+    }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        push_own_span(self, out)
     }
 
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
@@ -792,6 +810,9 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamType {
     fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
         ParamSlot::fold_param_span(self, min, count)
+    }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        push_own_span(self, out)
     }
 
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
@@ -1009,6 +1030,9 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamType {
     fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
         ParamSlot::fold_param_span(self, min, count)
+    }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        push_own_span(self, out)
     }
 
     fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {

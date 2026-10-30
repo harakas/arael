@@ -2250,6 +2250,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // `Param` fields and its `#[arael(component)]` fields, in
     // declaration order, which is the order they serialize in.
     let mut span_fold_stmts: Vec<TokenStream2> = Vec::new();
+    // Whether `collect_param_blocks` reports that span: an entity (a
+    // struct with a self block) or a component.
+    let reports_own_span = self_block_field.is_some() || is_component_struct;
 
     // The struct's scalar type parameter, when generic: a bare `T` data
     // field is excluded from the Model walks below -- for concrete scalars
@@ -2304,8 +2307,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 }
 
                 let ty = &field.ty;
+                // A param or component field folds into this struct's own
+                // span (`span_fold_stmts`).
+                let mut in_own_span = false;
 
                 if is_param_type(ty) {
+                    in_own_span = true;
                     param_count_terms.push(quote! {
                         <#ty as arael::model::Model>::PARAM_COUNT
                     });
@@ -2337,6 +2344,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     // A component-typed field: its params fold into this
                     // struct's span (serialize recursion below carries them;
                     // the count, symbol and span walks must too).
+                    in_own_span = true;
                     param_count_terms.push(quote! {
                         <#ty as arael::model::Model>::PARAM_COUNT
                     });
@@ -2384,9 +2392,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     arael::model::Model::serialize_size(&self.#ident) as usize
                 }, elem_name));
                 // The self block no longer reports the span: this struct
-                // does, from its own parameters, below. Every other field
-                // recurses, so entities nested in a sub-model are reached.
-                if self_block_field.as_ref() != Some(ident) {
+                // does, from its own parameters, below. A param or
+                // component field is already in that span when the struct
+                // reports one, and would be reported twice. Every other
+                // field recurses, so entities nested in a sub-model are
+                // reached.
+                if self_block_field.as_ref() != Some(ident)
+                    && !(in_own_span && reports_own_span)
+                {
                     collect_param_blocks_stmts.push(quote! {
                         arael::model::Model::collect_param_blocks(&self.#ident, out);
                     });
@@ -2462,9 +2475,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // An entity reports one span of the parameter vector: the smallest
     // live index of its own slots and how many live components they
     // hold. A fixed slot takes no room in the vector, so the live ones
-    // stay contiguous there and the pair describes them exactly. Only a
-    // struct with a self block is an entity; the rest report nothing.
-    let own_param_span: TokenStream2 = if self_block_field.is_some() {
+    // stay contiguous there and the pair describes them exactly. A
+    // struct with a self block is an entity, and a component reports its
+    // own span like a parameter does, so a query can name one; the rest
+    // report nothing of their own.
+    let own_param_span: TokenStream2 = if reports_own_span {
         quote! {
             {
                 let mut __span = (u32::MAX, 0u32);

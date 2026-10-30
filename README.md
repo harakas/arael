@@ -608,6 +608,7 @@ let r   = model.solve_sparse(&cfg)?;               // solution written back into
 let cov = r.covariance?;                           // the assembly the solve built
 let sd  = cov.std_dev(&model.poses[0])?;           // one entity's 1-sigma (tangent coords)
 let s   = cov.marginal_cov(&model.landmarks[3])?;  // its full covariance block
+let p   = cov.marginal_cov(&model.poses[0].r2w)?;  // one parameter field alone
 let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]); // joint off-diagonal block
 
 let cov = model.assemble_covariance(CovMode::AllMarginals)?;   // without a solve

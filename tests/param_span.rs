@@ -165,8 +165,9 @@ fn cell() -> Cell {
            hb: SelfBlock::new() }
 }
 
-/// A `#[arael(component)]` field has no span of its own; its slots
-/// belong to the entity that holds it, which reports one span of two.
+/// A `#[arael(component)]` field's slots belong to the entity that holds
+/// it, which reports one span of two. Asked alone, the component and a
+/// parameter field report their own part of it, once.
 #[test]
 fn component_slots_fold_into_the_owner() {
     let mut s = Sheet { cells: arael::refs::Vec::new() };
@@ -178,8 +179,9 @@ fn component_slots_fold_into_the_owner() {
     assert_eq!(params.len(), 4);
     assert_eq!(span_of(&s.cells[0]), vec![(0, 2)]);
     assert_eq!(span_of(&s.cells[1]), vec![(2, 2)]);
-    // The component itself is not an entity: it reports no span.
-    assert_eq!(span_of(&s.cells[0].s), vec![]);
+    assert_eq!(span_of(&s.cells[0].w), vec![(0, 1)]);
+    assert_eq!(span_of(&s.cells[0].s), vec![(1, 1)]);
+    assert_eq!(span_of(&s.cells[1].s), vec![(3, 1)]);
 }
 
 // --- components inside components, and euler slots inside components ---
@@ -242,9 +244,11 @@ fn nested_component_slots_fold_into_the_entity() {
     assert_eq!(<Rig as Model>::PARAM_COUNT, 8);
     assert_eq!(span_of(&f.rigs[0]), vec![(0, 8)]);
     assert_eq!(span_of(&f.rigs[1]), vec![(8, 8)]);
-    // Neither component is an entity, at either depth.
-    assert_eq!(span_of(&f.rigs[0].o), vec![]);
-    assert_eq!(span_of(&f.rigs[0].o.inner), vec![]);
+    // Each component, at either depth, and each slot reports its own part.
+    assert_eq!(span_of(&f.rigs[0].o), vec![(1, 7)]);
+    assert_eq!(span_of(&f.rigs[0].o.inner), vec![(4, 4)]);
+    assert_eq!(span_of(&f.rigs[0].o.inner.r), vec![(5, 3)]);
+    assert_eq!(span_of(&f.rigs[1].o.a), vec![(9, 3)]);
     assert_eq!(span_of(&f.rigs[0].hb), vec![], "a block carries no span");
 }
 
@@ -441,6 +445,17 @@ fn every_param_type_folds_into_the_entity_span() {
     assert_eq!(params.len(), 52);
     assert_eq!(span_of(&k.items[0]), vec![(0, 26)]);
     assert_eq!(span_of(&k.items[1]), vec![(26, 26)]);
+    // Each parameter field reports its own part of that span, so a
+    // covariance query can name one.
+    let e = &k.items[1];
+    assert_eq!(span_of(&e.p), vec![(26, 1)]);
+    assert_eq!(span_of(&e.a), vec![(27, 1)]);
+    assert_eq!(span_of(&e.u), vec![(28, 2)]);
+    assert_eq!(span_of(&e.se), vec![(30, 3)]);
+    assert_eq!(span_of(&e.e), vec![(33, 3)]);
+    assert_eq!(span_of(&e.q), vec![(36, 3)]);
+    assert_eq!(span_of(&e.t), vec![(39, 6)]);
+    assert_eq!(span_of(&e.st), vec![(45, 7)]);
 }
 
 /// Fixing one slot drops exactly that type's components from the span,
@@ -474,4 +489,9 @@ fn fixing_a_slot_of_any_param_type_shortens_the_span() {
     assert_eq!(span_of(&k.items[1]), vec![(25, 24)]);
     assert_eq!(span_of(&k.items[2]), vec![(49, 23)]);
     assert_eq!(span_of(&k.items[3]), vec![(72, 19)]);
+    // A fixed field reports nothing; a half-fixed transform its live half.
+    assert_eq!(span_of(&k.items[0].a), vec![]);
+    assert_eq!(span_of(&k.items[1].u), vec![]);
+    assert_eq!(span_of(&k.items[2].t), vec![(62, 3)]);
+    assert_eq!(span_of(&k.items[3].st), vec![]);
 }

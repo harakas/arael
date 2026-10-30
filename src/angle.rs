@@ -135,6 +135,9 @@ where
     fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
         Model::fold_param_span(&self.angle, min, count);
     }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        crate::model::push_own_span(self, out)
+    }
     fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
         <Param<T> as Model>::param_symbols(&format!("{}.angle", base), out);
     }
