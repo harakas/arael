@@ -48,12 +48,19 @@ of the current directory.
 crate's `Cargo.toml` limits `export` and `check` to the trees listed
 (`capi`, `cxx`, `python`, `wasm`; `cxx` and `python` bring `capi`,
 which they call); without it all four are written, and `--interfaces
-<list>` overrides it for one run. A tree left out is not deleted.
+<list>` overrides it for one run.
 `capi/Cargo.toml` is written once and then left alone -- edit it
 freely (dependencies, crate settings); delete the file to regenerate
-it. Everything else is regenerated on every export, but a file whose
-content did not change is not rewritten, so its timestamp stays and a
-consumer's build recompiles only what the export changed.
+it. Only its generated first line is kept up to date. Everything else
+is regenerated on every export, but a file whose content did not
+change is not rewritten, so its timestamp stays and a consumer's build
+recompiles only what the export changed.
+
+A generated file the export no longer writes is removed: a dropped
+root's header and module, a tree left out of `interfaces`. Only files
+carrying cargo-arael's stamp on their first line are removed, never a
+written-once `Cargo.toml` or a file of your own, and a directory goes
+only once it is empty. `check` lists such files as stale.
 
 Several roots in one crate work: the one capi crate carries every
 root's shim (symbols are root-prefixed), each root gets its own

@@ -31,7 +31,9 @@ interfaces = ["cxx"]
 The names are the directories: `capi`, `cxx`, `python`, `wasm`. `cxx`
 and `python` call the C ABI, so either brings `capi`. Without the key,
 all four are written; `--interfaces cxx,python` overrides it for one
-run. A tree left out is not deleted.
+run. A tree left out loses its generated files: `export` removes every
+file it generated and no longer writes, never one of your own or a
+written-once `Cargo.toml`, and a directory only once it is empty.
 
 The interfaces are additive across releases: a name once generated
 keeps its type.

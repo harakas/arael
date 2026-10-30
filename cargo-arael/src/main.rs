@@ -10,8 +10,9 @@ usage: cargo arael <command> [options]
 
 commands:
   export    build the model crate, harvest its sidecar, and (re)generate
-            the interface tree (capi/, cxx/, python/, wasm/); adds the macro
-            build profile to the workspace Cargo.toml when it is missing
+            the interface tree (capi/, cxx/, python/, wasm/); removes the
+            files it generated and no longer writes; adds the macro build
+            profile to the workspace Cargo.toml when it is missing
   check     regenerate in memory and fail if the committed tree is stale;
             modifies nothing, notes a missing macro build profile
   setup     add the macro build profile to the workspace Cargo.toml: the
