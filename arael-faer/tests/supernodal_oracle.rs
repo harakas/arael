@@ -725,6 +725,33 @@ fn same_solution(a: &[f64], b: &[f64], tol: f64) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol * (1.0 + x.abs()))
 }
 
+/// The threaded factorization reads each finished descendant through a
+/// slice of that panel alone. Workers write panels of other subtrees at
+/// the same time, so one slice over the whole buffer before the current
+/// panel aliased their writes, undefined behaviour that Miri reports. No
+/// faer oracle, so the test runs under Miri:
+///
+/// ```text
+/// cargo +nightly miri test -p arael-faer --features threads \
+///     --test supernodal_oracle threaded_factor_slices_only_finished_panels
+/// ```
+#[cfg(feature = "threads")]
+#[test]
+fn threaded_factor_slices_only_finished_panels() {
+    let sym = two_components(40, 23);
+    let (a, _, _) = spd_on(sym.clone(), 23, 2.0);
+    let nd = nd_block_order(&sym);
+    let sn = SupernodalSymbolic::new(a.symbolic(), Some(&nd), &SupernodalParams::default()).unwrap();
+    let mut seq = vec![f64::NAN; sn.factor_val_count()];
+    supernodal_factorize(&sn, &a, &mut seq, &mut SupernodalContext::new(), 1).unwrap();
+    for threads in [2usize, 4] {
+        assert!(sn.subtree_chunks(threads) >= 2, "must split at {threads} threads");
+        let mut par = vec![f64::NAN; sn.factor_val_count()];
+        supernodal_factorize(&sn, &a, &mut par, &mut SupernodalContext::new(), threads).unwrap();
+        assert!(same_factor(&sn, &seq, &par, 1e-12), "threads {threads}: factor differs");
+    }
+}
+
 /// Every thread count factors what the sequential path does, to
 /// rounding, run after run, in f64 and f32; the sequential factor
 /// matches faer's.

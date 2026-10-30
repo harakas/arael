@@ -1175,7 +1175,7 @@ struct Windows {
 fn apply_pair<T: SchurReal>(
     sym: &SupernodalSymbolic,
     pi: usize,
-    head: &[T],
+    factor: FactorPtr<T>,
     panel: FactorPtr<T>,
     blk_row: &[u32],
     upd: &mut [T],
@@ -1203,7 +1203,8 @@ fn apply_pair<T: SchurReal>(
     } else {
         dh
     }) - r0;
-    let dpanel = &head[sym.val_ptr[d] as usize..sym.val_ptr[d + 1] as usize];
+    // SAFETY: `d` is a descendant of the panel being computed.
+    let dpanel = unsafe { factor.descendant(sym, d) };
 
     // Rows j0..j1 of the descendant's update rows, all its columns.
     let rows = |j0: usize, j1: usize| unsafe {
@@ -1383,7 +1384,7 @@ fn apply_bucket<T: SchurReal>(
     b: usize,
     p0: u32,
     p1: u32,
-    head: &[T],
+    factor: FactorPtr<T>,
     panel: FactorPtr<T>,
     blk_row: &[u32],
     a_cat: &mut [T],
@@ -1420,7 +1421,8 @@ fn apply_bucket<T: SchurReal>(
         let dh = sym.nrows[d] as usize;
         let dpat = sym.supernode_pattern(d);
         let drow = sym.supernode_pattern_rows(d);
-        let dpanel = &head[sym.val_ptr[d] as usize..sym.val_ptr[d + 1] as usize];
+        // SAFETY: `d` is a descendant of the panel being computed.
+        let dpanel = unsafe { factor.descendant(sym, d) };
         for e in start as usize..dpat.len() {
             let kb = dpat[e] as usize;
             let w = (sym.sc_start[kb + 1] - sym.sc_start[kb]) as usize;
@@ -1525,6 +1527,19 @@ impl<T> FactorPtr<T> {
     fn ptr(&self) -> *mut T {
         self.0
     }
+
+    /// Supernode `d`'s panel, through the pointer to the whole buffer.
+    ///
+    /// # Safety
+    /// `self` points at the start of the factor buffer, and `d` is a
+    /// descendant of the panel being computed: its panel is complete and
+    /// no thread writes it any more. The slice covers that panel alone, so
+    /// it never spans a panel another worker is writing.
+    #[inline]
+    unsafe fn descendant<'a>(self, sym: &SupernodalSymbolic, d: usize) -> &'a [T] {
+        let (lo, hi) = (sym.val_ptr[d] as usize, sym.val_ptr[d + 1] as usize);
+        unsafe { core::slice::from_raw_parts(self.0.add(lo), hi - lo) }
+    }
 }
 // SAFETY: see the invariant above; every worker writes a disjoint range.
 unsafe impl<T> Send for FactorPtr<T> {}
@@ -1580,7 +1595,7 @@ impl<T> Scratch<T> {
 fn update_panel<T: SchurReal>(
     sym: &SupernodalSymbolic,
     s: usize,
-    head: &[T],
+    factor: FactorPtr<T>,
     panel: FactorPtr<T>,
     blk_row: &[u32],
     upd: &mut [T],
@@ -1594,17 +1609,17 @@ fn update_panel<T: SchurReal>(
 ) {
     if sym.bucket_end.is_empty() {
         for pi in sym.desc_ptr[s]..sym.desc_ptr[s + 1] {
-            apply_pair(sym, pi as usize, head, panel, blk_row, upd, runs, h, col0, win, par);
+            apply_pair(sym, pi as usize, factor, panel, blk_row, upd, runs, h, col0, win, par);
         }
     } else {
         let mut p0 = sym.desc_ptr[s];
         for b in sym.tb_ptr[s]..sym.tb_ptr[s + 1] {
             let p1 = sym.bucket_end[b as usize];
             if p1 - p0 == 1 {
-                apply_pair(sym, p0 as usize, head, panel, blk_row, upd, runs, h, col0, win, par);
+                apply_pair(sym, p0 as usize, factor, panel, blk_row, upd, runs, h, col0, win, par);
             } else {
                 apply_bucket(
-                    sym, b as usize, p0, p1, head, panel, blk_row, a_cat, b_cat, h, col0, win,
+                    sym, b as usize, p0, p1, factor, panel, blk_row, a_cat, b_cat, h, col0, win,
                     par,
                 );
             }
@@ -1647,17 +1662,12 @@ fn factor_panel<T: SchurReal>(
         blk_row[sym.pat_blk[p as usize] as usize] = sym.pat_row[p as usize];
     }
 
-    // SAFETY: `head` is everything already written, which this panel only
-    // reads; `panel` is this supernode's own range, which nothing else in
-    // this call writes. The parallel path upholds the same split per
-    // worker -- see `factor_subtrees`.
+    // SAFETY: `panel` is this supernode's own range, which nothing else
+    // writes. The descendants it reads are sliced one panel at a time
+    // (`FactorPtr::descendant`), never as one range over the buffer that
+    // would span panels other workers are writing -- see `factor_subtrees`.
     let base = sym.val_ptr[s] as usize;
-    let (head, panel) = unsafe {
-        (
-            core::slice::from_raw_parts(factor.0, base),
-            core::slice::from_raw_parts_mut(factor.0.add(base), h * q),
-        )
-    };
+    let panel = unsafe { core::slice::from_raw_parts_mut(factor.0.add(base), h * q) };
 
     // Zero and seed this panel now, while it is about to be hot:
     // every stored tile of its columns lands at its precomputed
@@ -1704,13 +1714,13 @@ fn factor_panel<T: SchurReal>(
         crate::pool::run_over(&mut tasks, |t, (upd, runs, a_cat, b_cat)| {
             let win = Windows { q, nw, wins: nw * t / threads..nw * (t + 1) / threads };
             update_panel(
-                sym, s, head, pp, blk_row, upd, runs, a_cat, b_cat, h, col0, &win,
+                sym, s, factor, pp, blk_row, upd, runs, a_cat, b_cat, h, col0, &win,
                 faer::Par::Seq,
             );
         });
     } else {
         let win = Windows { q, nw, wins: 0..nw };
-        update_panel(sym, s, head, pp, blk_row, upd, runs, a_cat, b_cat, h, col0, &win, par);
+        update_panel(sym, s, factor, pp, blk_row, upd, runs, a_cat, b_cat, h, col0, &win, par);
     }
 
     // Dense diagonal factor, then the panel below it.
