@@ -10,10 +10,14 @@ gauge requirement.
 
 At the solution the parameter covariance is `Sigma = (J^T J)^-1`. arael assembles
 `H = 2 J^T J` (the cost is `sum r^2`, so `add_residual` carries a factor of 2),
-so `Sigma = 2 H^-1`. Covariances come back in **local tangent coordinates**:
-rotation parameters are already minimal 3-DOF retractions (a small delta around a
-re-centered reference rotation), so there is no manifold projection to undo -- a
-6-DOF pose block is `[translation, rotation-delta]`.
+so `Sigma = 2 H^-1`. Covariances come back in **local tangent coordinates**, the
+parameters' own steps, so there is no manifold projection to undo. A rotation
+(`QuaternionParam`, `EulerAngleParam` to first order, a `TransformParam`'s) steps
+on the right by a rotation vector, `R = R_ref exp(w)`: its block is in the body
+frame and in full angles; for a convention that steps on the left by half the
+angle, `v = R w / 2`. A `TransformParam`'s block is `[w, d]`, the translation
+also in the body frame, `t = t_ref + R_ref d`; `SimpleEulerAngleParam` steps in
+the euler angles themselves.
 
 ## The API
 
