@@ -340,7 +340,8 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
 ///
 /// Supports standard infix notation with `+`, `-`, `*`, `/`, `^` (power),
 /// parentheses, and function calls: `sin`, `cos`, `tan`, `asin`, `acos`,
-/// `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`,
+/// `atan`, `sinh`, `cosh`, `tanh`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log2`,
+/// `log10`, `sqrt`,
 /// `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`,
 /// `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`,
 /// `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`,

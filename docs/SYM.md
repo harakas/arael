@@ -2,7 +2,7 @@
 
 `arael-sym` provides a lightweight computer algebra system built around a reference-counted expression tree (`E`). Expressions are constructed from symbols and constants, combined with standard arithmetic operators (which auto-simplify), and then differentiated, evaluated, pretty-printed, or compiled to Rust source code.
 
-This crate is the symbolic engine behind the [`arael`](https://docs.rs/arael) optimization framework, where it powers compile-time constraint differentiation and code generation. It can also be used independently for any symbolic math task: building, differentiating, evaluating and printing expressions need nothing else. The Rust code it generates calls into arael for a few built-ins (`rad_diff`, `rad_sum`, `safe_sqrt`, `epsilon_for`, `fast_atan`, `fast_atan2`, `select`).
+This crate is the symbolic engine behind the [`arael`](https://docs.rs/arael) optimization framework, where it powers compile-time constraint differentiation and code generation. It can also be used independently for any symbolic math task: building, differentiating, evaluating and printing expressions need nothing else. The Rust code it generates calls into arael for a few built-ins (`rad_diff`, `rad_sum`, `safe_sqrt`, `epsilon_for`, `fast_atan`, `fast_atan2`, `ln_1p`, `exp_m1`, `select`).
 
 See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough of the basics below (`cargo run --example sym_demo`).
 
@@ -466,7 +466,7 @@ let (__m0, __m1) = { let __sel = k.select_index(); match __sel {
            let (__m3, __m4) = if __x2 >= 0.0 { (s, 1.0_f64) }
                else { let __x5 = (k2 * s).sqrt(); (-k2 + 2.0_f64 * __x5, k2 / __x5) };
            (__m3, __m4) },
-    2 => { let __x6 = s / k2 + 1.0_f64; (k2 * __x6.ln(), 1.0_f64 / __x6) },
+    2 => { let __x6 = s / k2; (k2 * arael::utils::ln_1p(__x6), 1.0_f64 / (__x6 + 1.0_f64)) },
     _ => panic!("select index {} out of range 0..3", __sel) } };
 __m0 __m1
 ```
@@ -731,7 +731,7 @@ The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon_for`-regu
 | `loss_geman_mcclure(s, c2)` | `c2*s/(c2 + s)`, saturating at `c2` | `(c2/(c2 + s))^2` | smooth, redescends fast: a gross outlier's cost is capped and its weight falls toward zero |
 | `loss_tukey(s, c2)` | `(c2/3)(1 - (1 - s/c2)^3)`, capped at `c2/3` | `(1 - s/c2)^2`, then `0` | rejects `s >= c2` outright |
 
-They are composed from `branch`, `sqrt`, and `ln`, so they differentiate, CSE, and generate code with no special handling.
+They are composed from `branch`, `sqrt`, and `ln_1p`, so they differentiate, CSE, and generate code with no special handling. Each cost keeps its precision for `s` far below the scale: Cauchy goes through `ln_1p`, and soft-L1 and Tukey are computed in forms without the cancellation in `sqrt(1 + s/k2) - 1` and `1 - (1 - s/c2)^3`, with their derivatives given in closed form.
 
 `loss_select(kind, s, k2)` picks one of them by an integer at runtime: `0` none (`rho = s`), `1` Huber, `2` soft-L1, `3` Cauchy, `4` Geman-McClure, `5` Tukey, the table's order of increasing aggressiveness. Any other `kind` panics. It is a `select` over the kernels, so only the taken one is evaluated and `cse_scoped` keeps each kernel's work inside its arm (the CSE section shows the emitted shape); a hand-written `select` compiles only the kernels it lists.
 
@@ -753,7 +753,7 @@ println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * si
 ```
 
 <!-- Keep this list in sync with FUNCTIONS in arael-sym/src/lib.rs and the parse() doc in arael-sym/src/parse.rs. -->
-Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`, `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`, `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`, `select`, `select_or`, `multibranch`, `piecewise`. The same list is `FUNCTIONS`, enumerable at runtime via `function_names()`.
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`, `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`, `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`, `select`, `select_or`, `multibranch`, `piecewise`. The same list is `FUNCTIONS`, enumerable at runtime via `function_names()`.
 
 `function_by_name(name)` looks a built-in up by name and returns a `FunctionRef`: `Unary`, `Binary` or `Ternary` holding the function, or `Variadic` for the functions that take a variable number of arguments, which check the count themselves and report a bad call as an error string. `FUNCTIONS` is the table behind it.
 

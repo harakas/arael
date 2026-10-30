@@ -1172,7 +1172,7 @@ mod tests {
              let (__m3, __m4) = if __x2 >= 0.0 { (s, 1.0_f64) } \
              else { let __x5 = (k2 * s).sqrt(); (-k2 + 2.0_f64 * __x5, k2 / __x5) }; \
              (__m3, __m4) }, \
-             2 => { let __x6 = s / k2 + 1.0_f64; (k2 * __x6.ln(), 1.0_f64 / __x6) }, \
+             2 => { let __x6 = s / k2; (k2 * arael::utils::ln_1p(__x6), 1.0_f64 / (__x6 + 1.0_f64)) }, \
              _ => panic!(\"select index {} out of range 0..3\", __sel) } };");
     }
 

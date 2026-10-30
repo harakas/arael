@@ -284,6 +284,12 @@ pub fn atan2<T: Float>(y: T, x: T) -> T { y.atan2(x) }
 /// Standard powf(base, exponent).
 pub fn powf<T: Float>(base: T, exponent: T) -> T { base.powf(exponent) }
 
+/// `ln(1 + x)`, accurate also when `x` is near zero.
+pub fn ln_1p<T: Float>(x: T) -> T { x.ln_1p() }
+
+/// `exp(x) - 1`, accurate also when `x` is near zero.
+pub fn exp_m1<T: Float>(x: T) -> T { x.exp_m1() }
+
 /// Fast approximate atan. Max error < 1e-6 radians.
 pub fn fast_atan<T: Float>(x: T) -> T { x.fast_atan() }
 

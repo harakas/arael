@@ -1113,8 +1113,24 @@ pub fn cosh(e: E) -> E { E::new(Expr::Cosh(e)) }
 pub fn tanh(e: E) -> E { E::new(Expr::Tanh(e)) }
 /// Symbolic exponential function (e^x).
 pub fn exp(e: E) -> E { E::new(Expr::Exp(e)) }
+/// `exp(x) - 1`, accurate also when `x` is near zero, where `exp(x) - 1`
+/// cancels and loses the digits of `x`. Codegen emits
+/// `arael::utils::exp_m1(x)`; the derivative is `exp(x)`.
+pub fn exp_m1(x: E) -> E {
+    extern_func1("exp_m1", "arael::utils::exp_m1",
+        |x| [exp(x)],
+        |args| args[0].exp_m1())(x)
+}
 /// Symbolic natural logarithm.
 pub fn ln(e: E) -> E { E::new(Expr::Ln(e)) }
+/// `ln(1 + x)`, accurate also when `x` is near zero, where `ln(1 + x)`
+/// rounds `1 + x` first and loses the digits of `x`. Codegen emits
+/// `arael::utils::ln_1p(x)`; the derivative is `1 / (1 + x)`.
+pub fn ln_1p(x: E) -> E {
+    extern_func1("ln_1p", "arael::utils::ln_1p",
+        |x| [c(1.0) / (c(1.0) + x)],
+        |args| args[0].ln_1p())(x)
+}
 /// Symbolic base-2 logarithm.
 pub fn log2(e: E) -> E { E::new(Expr::Log2(e)) }
 /// Symbolic base-10 logarithm.
@@ -1270,19 +1286,33 @@ pub fn loss_huber(s: E, k2: E) -> E {
 /// Cauchy (Lorentzian) loss on the squared norm.
 /// `rho(s) = c2 * ln(1 + s/c2)`, weight `rho'(s) = c2/(c2 + s)`.
 /// Smooth everywhere, redescends slowly (weight never reaches zero).
+/// Computed through [`ln_1p`], so the cost keeps its precision for `s`
+/// far below `c2`.
 pub fn loss_cauchy(s: E, c2: E) -> E {
-    c2.clone() * ln(c(1.0) + s / c2)
+    c2.clone() * ln_1p(s / c2)
 }
 
 /// Tukey biweight loss on the squared norm. Redescending: an observation
 /// with `s >= c2` gets weight exactly zero and drops out.
 /// `rho(s) = (c2/3)(1 - (1 - s/c2)^3)` for `s <= c2`, else the constant
 /// `c2/3`. Weight `rho'(s) = (1 - s/c2)^2` then `0`.
+/// The cost is computed as `s (1 - u + u^2/3)` with `u = s/c2`, the same
+/// polynomial without the cancellation in `1 - (1 - u)^3` for `s` far
+/// below `c2`; the derivatives are the closed forms.
 pub fn loss_tukey(s: E, c2: E) -> E {
-    let u = c(1.0) - s.clone() / c2.clone(); // 1 - s/c2
-    let cube = u.clone() * u.clone() * u;
-    let third = c2.clone() / c(3.0);
-    branch(c2 - s, third.clone() * (c(1.0) - cube), third)
+    simple_func2_derivs("loss_tukey",
+        |s, c2| {
+            let u = s.clone() / c2.clone();
+            branch(c2.clone() - s.clone(),
+                s * (c(1.0) - u.clone() + u.clone() * u / c(3.0)),
+                c2 / c(3.0))
+        },
+        |s, c2| {
+            let u = s.clone() / c2.clone();
+            let v = c(1.0) - u.clone();
+            [branch(c2.clone() - s.clone(), v.clone() * v, c(0.0)),
+             branch(c2 - s, u.clone() * u.clone() * (c(1.0) - c(2.0) / c(3.0) * u), c(1.0) / c(3.0))]
+        })(s, c2)
 }
 
 /// Geman-McClure loss on the squared norm. Smooth and redescending with
@@ -1297,8 +1327,18 @@ pub fn loss_geman_mcclure(s: E, c2: E) -> E {
 /// Soft-L1 loss on the squared norm: `rho(s) = 2*k2*(sqrt(1 + s/k2) - 1)`,
 /// weight `rho'(s) = 1/sqrt(1 + s/k2)`. Quadratic near zero, linear far
 /// out, smooth where Huber has a kink. Convex, never fully rejects.
+/// The cost is computed as `2s / (sqrt(1 + s/k2) + 1)`, the same function
+/// without the cancellation in `sqrt(1 + s/k2) - 1` for `s` far below
+/// `k2`; the derivatives are the closed forms.
 pub fn loss_soft_l1(s: E, k2: E) -> E {
-    c(2.0) * k2.clone() * (sqrt(c(1.0) + s / k2) - c(1.0))
+    simple_func2_derivs("loss_soft_l1",
+        |s, k2| c(2.0) * s.clone() / (sqrt(c(1.0) + s / k2) + c(1.0)),
+        |s, k2| {
+            let x = s / k2;
+            let q = sqrt(c(1.0) + x.clone());
+            let qp1 = q.clone() + c(1.0);
+            [c(1.0) / q.clone(), x.clone() * x / (q * qp1.clone() * qp1)]
+        })(s, k2)
 }
 
 /// Select a robust kernel at runtime by integer `kind`, in order of
@@ -1371,7 +1411,9 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("tanh", FunctionRef::Unary(tanh)),
     // Unary exp / log / pow-ish
     ("exp", FunctionRef::Unary(exp)),
+    ("exp_m1", FunctionRef::Unary(exp_m1)),
     ("ln", FunctionRef::Unary(ln)),
+    ("ln_1p", FunctionRef::Unary(ln_1p)),
     ("log2", FunctionRef::Unary(log2)),
     ("log10", FunctionRef::Unary(log10)),
     ("sqrt", FunctionRef::Unary(sqrt)),
@@ -2568,6 +2610,76 @@ mod tests {
         assert!((at(&w, 4.0) - 0.5).abs() < 1e-12); // c2/(c2+s) = 4/8
         assert!((at(&w, 12.0) - 0.25).abs() < 1e-12);
         assert!((at(&rho, 1e-8) - 1e-8).abs() < 1e-14);
+    }
+
+    #[test]
+    fn ln_1p_and_exp_m1_builtins() {
+        let x = symbol("x");
+        let ev = |e: &E, v: f64| e.eval(&[("x", v)].into()).unwrap();
+
+        let f = ln_1p(x.clone());
+        assert_eq!(ev(&f, 1e-12), 1e-12f64.ln_1p());
+        assert!((ev(&f.diff("x"), 0.5) - 1.0 / 1.5).abs() < 1e-15);
+        assert_eq!(f.to_rust(""), "arael::utils::ln_1p(x)");
+        assert!(function_by_name("ln_1p").is_some());
+        assert_eq!(ev(&parse("ln_1p(x)").unwrap(), 0.25), 0.25f64.ln_1p());
+
+        let g = exp_m1(x.clone());
+        assert_eq!(ev(&g, 1e-12), 1e-12f64.exp_m1());
+        assert!((ev(&g.diff("x"), 0.5) - 0.5f64.exp()).abs() < 1e-15);
+        assert_eq!(g.to_rust(""), "arael::utils::exp_m1(x)");
+        assert!(function_by_name("exp_m1").is_some());
+        assert_eq!(ev(&parse("exp_m1(x)").unwrap(), 0.25), 0.25f64.exp_m1());
+
+        // Inverses of each other, exact to rounding near zero.
+        let round = exp_m1(ln_1p(x.clone()));
+        assert!((ev(&round, 1e-14) - 1e-14).abs() < 1e-28);
+    }
+
+    #[test]
+    fn loss_kernels_keep_precision_far_below_the_scale() {
+        // At x = s/c2 << 1 each cost is s times a short series in x, exact
+        // to rounding at these x. `c2 * ln(1 + x)`, `1 - (1 - x)^3` and
+        // `sqrt(1 + x) - 1` lost the digits of x (relative error eps / x).
+        let (s, k) = (symbol("s"), symbol("k"));
+        let kv = 4.0;
+        for x in [1e-6, 1e-9, 1e-12, 1e-15] {
+            let sv = x * kv;
+            let vars: HashMap<&str, f64> = [("s", sv), ("k", kv)].into();
+            for (name, rho, reference) in [
+                ("cauchy", loss_cauchy(s.clone(), k.clone()), sv * (1.0 - x / 2.0 + x * x / 3.0)),
+                ("tukey", loss_tukey(s.clone(), k.clone()), sv * (1.0 - x + x * x / 3.0)),
+                ("soft_l1", loss_soft_l1(s.clone(), k.clone()), sv * (1.0 - x / 4.0 + x * x / 8.0)),
+            ] {
+                let v = rho.eval(&vars).unwrap();
+                assert!(((v - reference) / reference).abs() < 1e-15,
+                    "{name} at s/c2 = {x:e}: {v:e} vs {reference:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn loss_kernel_derivatives_match_finite_differences() {
+        // Tukey and Soft-L1 carry hand-written derivatives in both
+        // arguments; check them against central differences.
+        let (s, k) = (symbol("s"), symbol("k"));
+        let ev = |e: &E, sv: f64, kv: f64| e.eval(&[("s", sv), ("k", kv)].into()).unwrap();
+        for (name, rho) in [
+            ("tukey", loss_tukey(s.clone(), k.clone())),
+            ("soft_l1", loss_soft_l1(s.clone(), k.clone())),
+        ] {
+            let (ds, dk) = (rho.diff("s"), rho.diff("k"));
+            for (sv, kv) in [(0.3, 2.0), (1.7, 2.0), (5.0, 2.0), (0.01, 9.0)] {
+                let h = 1e-6;
+                let fs = (ev(&rho, sv + h, kv) - ev(&rho, sv - h, kv)) / (2.0 * h);
+                let fk = (ev(&rho, sv, kv + h) - ev(&rho, sv, kv - h)) / (2.0 * h);
+                assert!((ev(&ds, sv, kv) - fs).abs() < 1e-8, "{name} d/ds at ({sv}, {kv})");
+                assert!((ev(&dk, sv, kv) - fk).abs() < 1e-8, "{name} d/dk at ({sv}, {kv})");
+            }
+            // The displayed form parses back to the same function.
+            let back = parse(&format!("{}", rho)).unwrap();
+            assert_eq!(ev(&back, 0.3, 2.0), ev(&rho, 0.3, 2.0), "{name} reparse");
+        }
     }
 
     #[test]
