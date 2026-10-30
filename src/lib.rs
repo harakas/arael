@@ -2417,6 +2417,13 @@
 //!   Ceres plugin's residual, measured against it on 2D pose-graph
 //!   datasets. The model and the numbers are in
 //!   [solvers/arael](https://github.com/harakas/slam_toolbox-arael/tree/arael-solver/solvers/arael).
+//! - **[colmap-arael](https://github.com/harakas/colmap-arael)** --
+//!   COLMAP with arael as its bundle adjustment backend: the incremental
+//!   mapper's local and global bundle adjustments on the Ceres backend's
+//!   problem (every camera model, rigs, loss functions, position priors),
+//!   measured against Ceres and the GPU solver caspar. The model and the
+//!   numbers are in
+//!   [src/colmap/estimators/arael](https://github.com/harakas/colmap-arael/tree/arael-optimizer/src/colmap/estimators/arael).
 //!
 //! # 2D Sketch Editor
 //!

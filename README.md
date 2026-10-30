@@ -466,6 +466,7 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[arael-sketch](docs/ARAEL_SKETCH.md)** -- the constraint-based 2D sketch editor, [live in the browser](https://sketch.mare.ee/): geometric constraints, parametric dimensions, undo, a command interface and an MCP server, all on arael.
 - **[rtabmap-arael](https://github.com/harakas/rtabmap-arael)** -- RTAB-Map with arael as a graph optimizer: pose-graph optimization and bundle adjustment with marginal covariance, measured against its Ceres, GTSAM, g2o and TORO backends. The models and the numbers are in [corelib/src/optimizer/arael](https://github.com/harakas/rtabmap-arael/tree/arael-optimizer/corelib/src/optimizer/arael).
 - **[slam_toolbox-arael](https://github.com/harakas/slam_toolbox-arael)** -- ROS 2 slam_toolbox with an arael solver plugin reproducing its Ceres plugin's residual, measured against it on 2D pose-graph datasets. The model and the numbers are in [solvers/arael](https://github.com/harakas/slam_toolbox-arael/tree/arael-solver/solvers/arael).
+- **[colmap-arael](https://github.com/harakas/colmap-arael)** -- COLMAP with arael as its bundle adjustment backend: the incremental mapper's local and global bundle adjustments on the Ceres backend's problem (every camera model, rigs, loss functions, position priors), measured against Ceres and the GPU solver caspar. The model and the numbers are in [src/colmap/estimators/arael](https://github.com/harakas/colmap-arael/tree/arael-optimizer/src/colmap/estimators/arael).
 
 ## Solvers
 
