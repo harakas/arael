@@ -1852,7 +1852,9 @@ fn classify_field_sym_type(ty: &syn::Type, scalar_generic: Option<&str>) -> SymF
                 return SymFieldType::Scalar;
             }
             return match name.as_str() {
-                "f32" | "f64" | "bool" | "u32" | "i32" | "usize" => SymFieldType::Scalar,
+                "f32" | "f64" | "bool"
+                | "u8" | "u16" | "u32" | "u64" | "usize"
+                | "i8" | "i16" | "i32" | "i64" | "isize" => SymFieldType::Scalar,
                 "vect2f" | "vect2d" | "vect2" => SymFieldType::Vec2,
                 "vect3f" | "vect3d" | "vect3" => SymFieldType::Vec3,
                 "matrix3f" | "matrix3d" | "matrix3" => SymFieldType::Mat3,

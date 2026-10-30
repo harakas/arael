@@ -402,6 +402,9 @@ struct ConstraintCtx {
     // A root-taking function gets that variable's symbol as its first
     // argument. `None` in a symbolic-field precompute.
     root: Option<(String, String)>,
+    // Integer and bool data fields: symbol -> (body path, type). They may
+    // only pick a `match` arm; see `check_integer_reads`.
+    int_fields: HashMap<String, (String, String)>,
 }
 
 impl ConstraintCtx {
@@ -414,6 +417,7 @@ impl ConstraintCtx {
             subs: Vec::new(),
             typed_fn: Vec::new(),
             root: None,
+            int_fields: HashMap::new(),
         }
     }
 
@@ -2975,6 +2979,14 @@ fn register_bindings_body(
                                 rot: composed_rot,
                             });
                     } else {
+                        if !is_param
+                            && let Some((_, ty)) = layout.spelled_types.iter()
+                                .find(|(n, _)| n == field_name)
+                            && is_integer_or_bool(ty)
+                        {
+                            ctx.int_fields.entry(sym_base.clone())
+                                .or_insert_with(|| (binding_key.clone(), ty.clone()));
+                        }
                         ctx.bindings.insert(binding_key,
                             ConstraintCtx::make_sym_val(&sym_base, sft));
                     }
@@ -10917,7 +10929,55 @@ fn interpret_constraint_body(
         None
     };
 
+    check_integer_reads(struct_name,
+        residuals.iter().chain(loss_expr.iter()), &ctx.int_fields)?;
+
     Ok((residuals, param_symbols, loss_expr, ctx.subs))
+}
+
+/// An integer or bool type, by the last segment of its spelling.
+fn is_integer_or_bool(ty: &str) -> bool {
+    matches!(ty.rsplit("::").next().unwrap_or(ty),
+        "bool" | "u8" | "u16" | "u32" | "u64" | "usize"
+        | "i8" | "i16" | "i32" | "i64" | "isize")
+}
+
+/// A body computes in the root's float type, so an integer or bool data
+/// field may only pick a `match` arm (a select index); any other read is an
+/// error naming the field. The select indices that are such a field are
+/// blanked first; an integer field still free afterwards is read elsewhere.
+fn check_integer_reads<'a>(
+    struct_name: &syn::Ident,
+    exprs: impl Iterator<Item = &'a E>,
+    int_fields: &HashMap<String, (String, String)>,
+) -> syn::Result<()> {
+    if int_fields.is_empty() {
+        return Ok(());
+    }
+    let is_int_sym = |e: &E| matches!(e.as_ref(),
+        arael_sym::Expr::Sym(s) if int_fields.contains_key(s));
+    let mut misread = std::collections::BTreeSet::new();
+    for e in exprs {
+        let blanked = e.map_nodes(&mut |n| match n.as_ref() {
+            arael_sym::Expr::Select { index, arms, default } if is_int_sym(index) =>
+                Some(E::from(arael_sym::Expr::Select {
+                    index: arael_sym::c(0.0),
+                    arms: arms.clone(),
+                    default: default.clone(),
+                })),
+            _ => None,
+        });
+        misread.extend(blanked.free_vars().into_iter()
+            .filter_map(|v| int_fields.get(&v).cloned()));
+    }
+    if let Some((path, ty)) = misread.into_iter().next() {
+        return Err(syn::Error::new_spanned(struct_name, format!(
+            "`{}` is a `{}`: a constraint body computes in the root's float type, so \
+             an integer or bool field can only pick a `match` arm (or a `loss_select` \
+             kernel). Store a quantity as a float field",
+            path, ty)));
+    }
+    Ok(())
 }
 
 /// Zero-cost source-origin marker: emits a doc-attribute on a nested dummy

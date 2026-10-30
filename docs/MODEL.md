@@ -1081,7 +1081,9 @@ code. The dialect:
 
   The scrutinee is normally an
   integer data field (`u32`, `i32`, `bool`); a float works when it
-  holds an integer value and panics otherwise. Works in residual
+  holds an integer value and panics otherwise. An integer or bool
+  field is read only this way: a body computes in the root's float
+  type, so any other read of one is a compile error naming the field. Works in residual
   bodies, in `#[arael::function]` bodies, and in the `loss =` clause,
   where it picks a robust kernel per solve from one residual body:
   `loss = |s| match obs.kind { 0 => s, 1 => loss_huber(s, obs.k2), _

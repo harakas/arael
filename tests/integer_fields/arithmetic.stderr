@@ -1,0 +1,7 @@
+error: $DIR/tests/integer_fields/arithmetic.rs:5: `p.k` is a `u32`: a constraint body computes in the root's float type, so an integer or bool field can only pick a `match` arm (or a `loss_select` kernel). Store a quantity as a float field
+  --> tests/integer_fields/arithmetic.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
