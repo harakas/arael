@@ -50,7 +50,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
 - **Threads** -- with the `threads` feature the cost and assembly sweeps and the linear solve run on as many threads as `num_threads` says ([docs/SOLVERS.md](docs/SOLVERS.md#threads))
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
-- **Mixed precision** -- an f32 factor under an f64 solve; surgical f64 computation in an f32 model with `with_wide`; mixed parameter types that keep their state in f64
+- **Mixed precision** -- an f32 factor under an f64 solve; surgical wide computation in an f32 model with `with_wide`, in f64 or in `df32` (two f32s) where there is no f64; mixed parameter types that keep their state wide
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
 - **C++, Python and JavaScript interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust; the JavaScript one runs the solver in the browser as WebAssembly ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md), [docs/WASM.md](docs/WASM.md))

@@ -53,7 +53,7 @@ Each field has `name`, a `kind`, and kind-specific keys:
 |---|---|---|
 | `data` | `of` (type spelling), `symbolic` (optional, `true`) | plain scalar or math value (`f64`, `bool`, `vect3f`, `matrix3f`, `quaternd`, ...). Symbolic fields are computed reads in constraint bodies but stay settable data |
 | `param` | `of` (inner type), `params` (scalar count) | `Param<T>` -- optimized value |
-| `euler_param` | `variant` (`simple` / `universal` / `mixed` / `rotvec`), `scalar`, `params` | rotation parameter (`SimpleEulerAngleParam`, `EulerAngleParam`, `MixedEulerAngleParam` whose value is f64 whatever `scalar`, `QuaternionParam`) |
+| `euler_param` | `variant` (`simple` / `universal` / `mixed` / `rotvec`), `scalar`, `params`; for `mixed` also `wide`, the scalar of its `value` (`f64`, or `df32`, which the generators do not map) | rotation parameter (`SimpleEulerAngleParam`, `EulerAngleParam`, `MixedEulerAngleParam<T, H>`, `QuaternionParam`) |
 | `component` | `of` | compound parameter field (`#[arael(component)]` type); its params fold into this struct's count |
 | `struct` | `of` | direct-composed sub-model |
 | `optional` | `of` | `Option<Entity>` -- zero or one instance |

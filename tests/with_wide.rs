@@ -3,6 +3,7 @@
 //! stay in the body's scalar, an f64 body is unchanged, and the scope
 //! composes with `branch`.
 
+use arael::df32;
 use arael::matrix::matrix3d;
 use arael::model::{EulerAngleParam, JacobianModel, MixedEulerAngleParam, Model, Param, SelfBlock};
 use arael::refs;
@@ -276,9 +277,10 @@ fn a_mixed_rotation_is_read_in_f64_inside_the_scope() {
 }
 
 /// Re-centering the mixed param's reference a thousand times leaves it a
-/// rotation to f64 rounding; the f32 param's reference drifts.
+/// rotation to the wide scalar's rounding, f64 or df32; the f32 param's
+/// reference drifts.
 #[test]
-fn the_mixed_reference_rotation_is_kept_in_f64() {
+fn the_mixed_reference_rotation_is_kept_wide() {
     fn drift<P: Model>(p: &mut P, rotation: fn(&mut P) -> matrix3d) -> f64 {
         let mut x: Vec<f32> = Vec::new();
         p.serialize_params(&mut x);
@@ -296,7 +298,53 @@ fn the_mixed_reference_rotation_is_kept_in_f64() {
     let rounded = mixed.rotation_matrix_wide.cast::<f32>();
     assert!((0..3).all(|i| mixed.rotation_matrix[i].x == rounded[i].x
         && mixed.rotation_matrix[i].y == rounded[i].y && mixed.rotation_matrix[i].z == rounded[i].z));
+    let mut two = MixedEulerAngleParam::<f32, df32>::new(df32_angles(vect3f::new(0.3, -0.2, 0.7)));
+    let d = drift(&mut two, |p| { p.__precompute(); p.rotation_matrix_wide.cast::<f64>() });
+    assert!(d < 1e-11, "MixedEulerAngleParam<f32, df32> reference drift {d:e}");
     let mut plain = EulerAngleParam::<f32>::new(vect3f::new(0.3, -0.2, 0.7));
     let d = drift(&mut plain, |p| { p.__precompute(); p.rotation_matrix.cast::<f64>() });
     assert!(d > 1e-7, "an f32 EulerAngleParam's reference was expected to drift, got {d:e}");
+}
+
+// --- the same with df32, the two-float wide scalar ---
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let q = rotscopedf.ea.rotation_matrix() * rotscopedf.p + rotscopedf.t;
+    [with_wide(q.x - rotscopedf.d)]
+}))]
+struct RotScopeDf {
+    ea: MixedEulerAngleParam<f32, df32>,
+    p: vect3<f32>,
+    t: vect3<f32>,
+    d: f32,
+    hb: SelfBlock<RotScopeDf, f32>,
+}
+
+#[arael::model]
+#[arael(root, f32, jacobian, wide = df32)]
+struct RotScopeDfF32 { rows: refs::Vec<RotScopeDf> }
+
+fn df32_angles(ea: vect3f) -> vect3<df32> {
+    vect3::<df32>::new(df32::from_f32(ea.x), df32::from_f32(ea.y), df32::from_f32(ea.z))
+}
+
+/// The scope and the mixed param in df32: the residuals as good as with
+/// f64 (the f32 rounding of the residual's own value is what remains),
+/// the derivatives those of the f64 wide model to f32 rounding.
+#[test]
+fn df32_is_a_wide_scalar_too() {
+    let two = |ea: vect3f| MixedEulerAngleParam::<f32, df32>::new(df32_angles(ea));
+    let (r, d, _) = evaluate(&mut build_rotation!(RotScopeDfF32, RotScopeDf, two));
+    let worst = worst_rotation_error(&r);
+    assert!(worst < 1e-6, "df32 scope: residuals off by {worst:e} relative");
+    let wide64 = |ea: vect3f| MixedEulerAngleParam::new(ea.cast::<f64>());
+    let (r64, d64, _) = evaluate(&mut build_rotation!(RotScopeMixedF32, RotScopeMixed, wide64));
+    for (i, (a, b)) in d.iter().zip(&d64).enumerate() {
+        assert!(rel(*a, *b) < 1e-6, "row {i}: df32 derivative {a} against f64's {b}");
+    }
+    // The two wide scalars agree on the residual to the f32 rounding of it.
+    for (a, b) in r.iter().zip(&r64) {
+        assert!(rel(*a, *b) < 1e-6, "df32 residual {a} against f64's {b}");
+    }
 }

@@ -2926,10 +2926,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         // opts out with `seq`. Without the feature, or with the keyword,
         // the root keeps one store and is the sequential one.
         let par = !root_seq && cfg!(feature = "threads");
-        constraint::generate_root_methods(
+        let methods = constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64, root_grad_kahan, root_grad_f64,
-            &root_wide, &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?
+            &root_wide, &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?;
+        // ARAEL_DUMP_ROOT=<RootName> prints the root's generated code to
+        // stderr at compile time, for reading what a body became.
+        if std::env::var("ARAEL_DUMP_ROOT").is_ok_and(|n| n == name.to_string()) {
+            eprintln!("// --- ARAEL_DUMP_ROOT {} ---\n{}\n// --- end {} ---", name, methods, name);
+        }
+        methods
     } else {
         quote! {}
     };

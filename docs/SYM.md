@@ -628,7 +628,8 @@ plain `atan`/`atan2` in a model onto them via `replace_function`.
 code around it. The wide scalar is f64 by default; a code generator names
 another through `cse_scoped_wide` (the arael macro takes it from the root's
 `wide = <type>` keyword), a type implementing `arael::utils::Wide<T>` over
-the surrounding scalar `T`. The generated code reads the symbols inside
+the surrounding scalar `T`, such as arael's `df32`, two f32s for a target
+without f64. The generated code reads the symbols inside
 through `<H as arael::utils::Wide<_>>::widen`, evaluates everything inside
 in `H`, and narrows the result back through `arael::utils::narrow`. The
 derivative is the derivative of `x` in the surrounding scalar, the scope

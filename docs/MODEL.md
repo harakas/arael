@@ -566,7 +566,7 @@ struct Path {
 | `#[arael(root, cost_plain)]` | the cost is summed with plain adds in the root's precision, one partial per loop (the default; see [The cost sum](#the-cost-sum)) |
 | `#[arael(root, cost_kahan)]` | every add of the cost sum is compensated (Kahan), so the sum's rounding does not grow with the row count |
 | `#[arael(root, cost_f64)]` | the cost sum is accumulated in f64 on an f32 root; ignored on an f64 root; combines with `cost_kahan` |
-| `#[arael(root, wide = <type>)]` | the scalar the bodies' `with_wide` scopes compute in, a type path implementing `arael::utils::Wide<T>` over the body scalar; `f64` when absent. A `MixedEulerAngleParam<T, H>` in the model must have the same `H` |
+| `#[arael(root, wide = <type>)]` | the scalar the bodies' `with_wide` scopes compute in, a type path implementing `arael::utils::Wide<T>` over the body scalar: `f64` when absent, or `arael::df32`, two f32s with 48 bits of significand for a target without f64. A `MixedEulerAngleParam<T, H>` in the model must have the same `H` |
 | `#[arael(root, grad_plain)]` / `grad_kahan` / `grad_f64` | the same three choices for the gradient: how each entity's gradient entries sum the terms of its residuals in the block stores (see [The gradient sum](#the-gradient-sum)) |
 | `#[arael(root, seq)]` | keep the cost and assembly sweeps on one thread whatever `num_threads` says; the linear solve still threads. For a root that is not `Sync` (a `Cell`, `RefCell` or `Rc` field) or one that should stay sequential. Without it, under the `threads` cargo feature, every root's sweeps thread (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)). |
 | `#[arael(root, marginalize(field, ...))]` | mark landmark-style fields (small blocks coupled to poses but never to each other) for the sparse solver to marginalize. Generates `LmProblemInternals::marginalize_hint()` with the fields' parameter ranges, which `SparseFaer` reads off the model itself. Optional: without it the solver finds the marginalizable families in the model's coupling graph anyway. Use it to override that -- the named blocks are used as given, and must be mutually uncoupled |
@@ -1116,7 +1116,8 @@ code. The dialect:
   ```
 
   The scope computes in the root's wide scalar, `wide = <type>` on the
-  root attribute, f64 when absent. Inside the scope a
+  root attribute: f64 when absent, or `df32` (two f32s, 48 bits of
+  significand, f32 arithmetic only) for a target without f64. Inside the scope a
   `MixedEulerAngleParam`'s rotation is read from the wide rotation the
   parameter keeps beside its rounded `rotation_matrix` (above,
   "Parameter types"); outside the scope, and in every derivative, the
@@ -1220,7 +1221,9 @@ code. The dialect:
 - **Errors**: body and attribute diagnostics are prefixed with the
   constraint's `file:line` (spans do not survive the macro's stash
   round trip, so the error arrow points at the root struct -- read the
-  prefix).
+  prefix). A type error inside generated code is read from the code
+  itself: `ARAEL_DUMP_ROOT=<RootName> cargo build` prints the root's
+  generated methods to stderr.
 
 ## User-defined functions (`#[arael::function]`)
 

@@ -79,9 +79,10 @@
 //!   says (see [Threads](#threads))
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
-//! - **Mixed precision** -- an f32 factor under an f64 solve; surgical f64
-//!   computation in an f32 model with `with_wide`; mixed parameter types
-//!   that keep their state in f64
+//! - **Mixed precision** -- an f32 factor under an f64 solve; surgical
+//!   wide computation in an f32 model with `with_wide`, in f64 or in
+//!   [`df32`] (two f32s) where there is no f64; mixed parameter types that
+//!   keep their state wide
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
 //! - **Cross-crate models** -- `arael::export_models!()` bundles a
 //!   crate's pub models; the importing crate registers them all with one
@@ -2546,6 +2547,8 @@ pub const VERSION: Version = Version {
 pub use arael_faer::ValueIndex;
 /// Model trait, parameter types, and Hessian blocks.
 pub mod angle;
+pub mod twofloat;
+pub use twofloat::df32;
 pub mod model;
 pub mod twist;
 /// The `twist` module's name through 0.8.

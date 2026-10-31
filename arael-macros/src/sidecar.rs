@@ -176,6 +176,11 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
             parts.push("\"kind\": \"euler_param\"".into());
             parts.push(format!("\"variant\": {}", q(variant)));
             parts.push(format!("\"scalar\": {}", q(generic_inner(spelling))));
+            // The mixed variant's value is in its wide scalar, not the
+            // field's; the generators type it from this.
+            if let Some((_, wide)) = layout.mixed_euler_angle_fields.iter().find(|(f, _)| f == fname) {
+                parts.push(format!("\"wide\": {}", q(wide)));
+            }
             parts.push("\"params\": 3".into());
         } else {
             parts.push("\"kind\": \"param\"".into());
