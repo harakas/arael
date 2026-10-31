@@ -493,6 +493,7 @@ impl CovAssembly {
                 &mut e,
                 k,
                 &mut ctx.borrow_mut(),
+                1,
             );
             let mut m = DMatrix::zeros(rows.len(), k);
             for c in 0..k {

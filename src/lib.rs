@@ -58,6 +58,10 @@
 //! - **Block supernodal Cholesky** -- the sparse backend factorizes the
 //!   Hessian in block form by default, one dense panel per supernode, not
 //!   flattened to scalar CSC
+//! - **Mixed precision** -- opt-in: the supernodal factor in `f32` under an
+//!   `f64` solve, each step refined against the `f64` matrix; half the
+//!   factor memory, and faster where the factor is large (bundle
+//!   adjustment, landmark maps)
 //! - **Schur marginalization** -- landmark-like blocks eliminated before the
 //!   factorization and recovered by back-substitution, taken automatically
 //!   when the backend prices it faster

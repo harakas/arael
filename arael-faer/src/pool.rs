@@ -36,6 +36,30 @@ use std::thread::JoinHandle;
 type Task = dyn Fn(usize) + Sync;
 type Panic = Box<dyn Any + Send + 'static>;
 
+/// A buffer the tasks of one [`run`] write disjoint parts of.
+///
+/// Rust cannot express "these threads write non-overlapping ranges of one
+/// allocation" through `&mut`, so a stage hands its tasks the pointer, and
+/// states at each use why the ranges cannot overlap. The wrapper is what a
+/// closure captures, so the closure stays `Sync`.
+pub struct SharedMut<T>(pub *mut T);
+impl<T> Clone for SharedMut<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for SharedMut<T> {}
+unsafe impl<T: Send> Send for SharedMut<T> {}
+unsafe impl<T: Sync> Sync for SharedMut<T> {}
+impl<T> SharedMut<T> {
+    /// The pointer, through the wrapper so that a closure captures the
+    /// wrapper rather than the raw pointer.
+    #[inline]
+    pub fn ptr(&self) -> *mut T {
+        self.0
+    }
+}
+
 /// One job: the task and the index it runs for. The task lives on the
 /// caller's stack; the caller does not return from [`run`] until every
 /// job has finished, which keeps the pointer valid while a worker holds

@@ -41,6 +41,7 @@ mod sealed {
 pub trait SchurReal:
     sealed::Sealed
     + ComplexField
+    + crate::bsc::WidenTo<f64>
     + Copy
     + Send
     + Sync

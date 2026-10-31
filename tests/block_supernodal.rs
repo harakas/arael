@@ -8,7 +8,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::simple_lm::{
     BlockSupernodalMode,
-    lm_solve, EnvelopeMode, LmConfig, RootProblem, SchurPolicy, SparseFaer,
+    lm_solve, EnvelopeMode, LmConfig, MixedPrecision, RootProblem, SchurPolicy, SparseFaer,
 };
 use arael::refs::{self, Ref};
 
@@ -278,6 +278,40 @@ fn threads_do_not_change_the_supernodal_route_or_its_answer() {
     }
 }
 
+/// The mixed route at several thread counts: the f32 factor, the threaded
+/// solve and the threaded residual agree with the sequential run to
+/// rounding, the plan still reporting the f32 factor and its refinement.
+#[cfg(feature = "threads")]
+#[test]
+fn threads_do_not_change_the_mixed_precision_answer() {
+    let solve = |num_threads| {
+        let cfg = LmConfig { max_iters: 60, num_threads, ..Default::default() };
+        let mut w = build(0.1, 2);
+        let mut params = Vec::new();
+        RootProblem::serialize(&mut w, &mut params);
+        let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_policy(SchurPolicy::Never)
+            .with_block_supernodal(BlockSupernodalMode::Always)
+            .with_mixed_precision(Some(MixedPrecision::default())));
+        let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
+        let plan = solver.plan().expect("a plan");
+        assert!(plan.block_supernodal && plan.f32_factor, "the f32 factor at {} threads", num_threads);
+        assert!(plan.refinements.expect("refinement counted") > 0);
+        (r.end_cost, r.x)
+    };
+    let (c1, x1) = solve(1);
+    assert!(c1 < 1e-12, "end_cost {}", c1);
+    for threads in [2usize, 4] {
+        let (c, x) = solve(threads);
+        assert!((c1 - c).abs() <= 1e-12, "same cost to rounding at {} threads: {} vs {}", threads, c1, c);
+        assert_eq!(x1.len(), x.len());
+        for (a, b) in x1.iter().zip(&x) {
+            assert!((a - b).abs() <= 1e-6 * (1.0 + a.abs()),
+                "same parameters to rounding at {} threads: {} vs {}", threads, a, b);
+        }
+    }
+}
+
 /// A DECLINED reduction (Auto weighed it and said no) must still land on
 /// the supernodal for the whole system -- the decline path is a different
 /// branch from "nothing to marginalize", and it used to fall through to
@@ -436,4 +470,118 @@ fn f32_supernodal_schur_route_solves() {
     let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     assert!(solver.plan().expect("a plan").block_supernodal);
     assert!(r.end_cost < 1e-6, "end_cost {}", r.end_cost);
+}
+
+/// On an f32 solver the factor is single precision already; the setting
+/// adds the refinement, in f64 over the f32 matrix, and the route still
+/// lands on the optimum at the solver's precision with the plan reporting
+/// the factor and the steps.
+#[test]
+fn f32_solver_with_mixed_precision_refines_and_solves() {
+    let run = |mixed: Option<MixedPrecision>| {
+        let cfg = LmConfig::<f32> { max_iters: 60, ..Default::default() };
+        let mut w = build_f32(0.1, 2);
+        let mut params = Vec::new();
+        RootProblem::serialize(&mut w, &mut params);
+        let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_block_supernodal(BlockSupernodalMode::Always)
+            .with_mixed_precision(mixed));
+        let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
+        let plan = solver.plan().expect("a plan");
+        assert!(plan.block_supernodal);
+        (r.end_cost, r.x, plan.f32_factor, plan.refinements)
+    };
+    let (c_plain, x_plain, f_plain, steps_plain) = run(None);
+    assert!(!f_plain && steps_plain.is_none());
+    let (c_mixed, x_mixed, f_mixed, steps_mixed) = run(Some(MixedPrecision::default()));
+    assert!(f_mixed, "the plan reports the f32 factor on an f32 solver too");
+    assert!(steps_mixed.expect("refinement counted") > 0);
+    assert!(c_plain < 1e-6 && c_mixed < 1e-6, "{} {}", c_plain, c_mixed);
+    assert_eq!(x_plain.len(), x_mixed.len());
+    for (a, b) in x_plain.iter().zip(&x_mixed) {
+        assert!((a - b).abs() <= 1e-3 * (1.0 + a.abs()), "refinement moved an f32 parameter: {} vs {}", a, b);
+    }
+}
+
+/// The f32 factor with refinement, on the reduced Schur system: the f64
+/// optimum, and the plan says the factor was single precision and how
+/// many refinement steps the solve took.
+#[test]
+fn mixed_precision_schur_route_reaches_the_f64_optimum() {
+    let mut default = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Force)
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always));
+    let (x_64, c_64) = solve(&mut default, 2);
+    assert!(!default.plan().expect("a plan").f32_factor);
+    assert_eq!(default.plan().unwrap().refinements, None);
+
+    let mut mixed = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Force)
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always)
+        .with_mixed_precision(Some(MixedPrecision::default())));
+    let (x_32, c_32) = solve(&mut mixed, 2);
+    let plan = mixed.plan().expect("a plan");
+    assert!(plan.reduced && plan.block_supernodal && plan.f32_factor);
+    let steps = plan.refinements.expect("refinement counted");
+    assert!(steps > 0, "an f32 solve needs refinement to reach 1e-10");
+    assert_eq!(plan.refinement_shortfalls, Some(0), "well conditioned: every solve refines to tolerance");
+
+    assert!(c_64 < 1e-12 && c_32 < 1e-12, "{} {}", c_64, c_32);
+    for (a, b) in std::iter::zip(&x_64, &x_32) {
+        assert!((a - b).abs() < 1e-9, "mixed precision changed the answer: {} vs {}", a, b);
+    }
+}
+
+/// The same on the whole system (no reduction), against the scalar route.
+#[test]
+fn mixed_precision_whole_system_reaches_the_f64_optimum() {
+    let mut scalar = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Never));
+    let (x_s, c_s) = solve(&mut scalar, 2);
+
+    let mut mixed = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always)
+        .with_mixed_precision(Some(MixedPrecision::default())));
+    let (x_m, c_m) = solve(&mut mixed, 2);
+    let plan = mixed.plan().expect("a plan");
+    assert!(!plan.reduced && plan.block_supernodal && plan.f32_factor);
+    assert!(plan.refinements.expect("refinement counted") > 0);
+
+    assert!(c_s < 1e-12 && c_m < 1e-12, "{} {}", c_s, c_m);
+    for (a, b) in std::iter::zip(&x_s, &x_m) {
+        assert!((a - b).abs() < 1e-9, "mixed precision changed the answer: {} vs {}", a, b);
+    }
+}
+
+/// With the step cap at zero the single-precision solution is taken as it
+/// is: an inexact step the LM loop still converges on, with no refinement
+/// counted. The scalar route ignores the setting altogether.
+#[test]
+fn mixed_precision_without_refinement_and_off_the_block_route() {
+    let mp = MixedPrecision { max_refinements: 0, tol: 1e-10 };
+    let mut raw = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always)
+        .with_mixed_precision(Some(mp)));
+    let (_, c) = solve(&mut raw, 2);
+    let plan = raw.plan().expect("a plan");
+    assert!(plan.f32_factor);
+    assert_eq!(plan.refinements, Some(0));
+    assert_eq!(plan.refinement_shortfalls, Some(0));
+    assert!(c < 1e-10, "an unrefined f32 step still converges: {}", c);
+
+    let mut scalar = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Never)
+        .with_mixed_precision(Some(MixedPrecision::default())));
+    let (_, c) = solve(&mut scalar, 2);
+    let plan = scalar.plan().expect("a plan");
+    assert!(!plan.block_supernodal && !plan.f32_factor);
+    assert_eq!(plan.refinements, None);
+    assert!(c < 1e-12);
 }

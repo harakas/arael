@@ -43,6 +43,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
   - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
 - **Block supernodal Cholesky** -- the sparse backend factorizes the Hessian in block form by default, one dense panel per supernode, not flattened to scalar CSC
+- **Mixed precision** -- opt-in: the supernodal factor in `f32` under an `f64` solve, each step refined against the `f64` matrix; half the factor memory, and faster where the factor is large (bundle adjustment, landmark maps)
 - **Schur marginalization** -- landmark-like blocks eliminated before the factorization and recovered by back-substitution, taken automatically when the backend prices it faster
 - **Conjugate gradients** -- the reduced system solved iteratively rather than factorized, preconditioned per block: no fill, no factor to store, an inexact step. A second, implicit form skips building the reduced system altogether, working straight off the Hessian to save its memory
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration

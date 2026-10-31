@@ -284,7 +284,7 @@ fn check(
     assert!(max_rel < 1e-12, "{label}: factor differs from faer's by {max_rel:.3e}");
     assert_eq!(pads, 0, "{label}: {pads} padded entries are not exactly zero");
     let mut x = rhs.to_vec();
-    supernodal_solve(&sn, &factor, &mut x, &mut ctx);
+    supernodal_solve(&sn, &factor, &mut x, &mut ctx, 1);
     let resid = rel_resid(dense, n, &x, rhs);
     assert!(resid < 1e-10, "{label}: residual {resid:.3e}");
     sn
@@ -340,7 +340,7 @@ fn factor_matches_faer_under_our_permutation() {
             for k in [1usize, 7, 131] {
                 let many: Vec<f64> = (0..n * k).map(|_| rng.unit()).collect();
                 let mut x = many.clone();
-                supernodal_solve_multi(&sn, &factor, &mut x, k, &mut ctx);
+                supernodal_solve_multi(&sn, &factor, &mut x, k, &mut ctx, 1);
                 for c in 0..k {
                     let r = rel_resid(&dense, n, &x[c * n..(c + 1) * n], &many[c * n..(c + 1) * n]);
                     assert!(r < 1e-10, "seed {seed} k {k} column {c}: residual {r:.3e}");
@@ -495,7 +495,7 @@ fn wide_panels_match_faer() {
         assert!(max_rel < 1e-4, "wide f32 {oname}: factor differs from faer's f32 by {max_rel:.3e}");
         assert_eq!(pads, 0, "wide f32 {oname}: padded entries not exactly zero");
         let mut x: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
-        supernodal_solve(&sn, &factor, &mut x, &mut ctx);
+        supernodal_solve(&sn, &factor, &mut x, &mut ctx, 1);
         let x64: Vec<f64> = x.iter().map(|&v| v as f64).collect();
         let resid = rel_resid(&dense, n, &x64, &rhs);
         assert!(resid < 1e-4, "wide f32 {oname}: residual {resid:.3e}");
@@ -582,8 +582,8 @@ fn an_empty_matrix_factors_to_nothing() {
         let mut ctx = SupernodalContext::new();
         supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
         let mut x: Vec<f64> = Vec::new();
-        supernodal_solve(&sn, &factor, &mut x, &mut ctx);
-        supernodal_solve_multi(&sn, &factor, &mut x, 3, &mut ctx);
+        supernodal_solve(&sn, &factor, &mut x, &mut ctx, 1);
+        supernodal_solve_multi(&sn, &factor, &mut x, 3, &mut ctx, 1);
         #[cfg(feature = "threads")]
         supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 4).unwrap();
     }
@@ -613,7 +613,7 @@ fn zero_right_hand_sides_are_a_no_op() {
     let mut ctx = SupernodalContext::new();
     supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
     let mut x: Vec<f64> = Vec::new();
-    supernodal_solve_multi(&sn, &factor, &mut x, 0, &mut ctx);
+    supernodal_solve_multi(&sn, &factor, &mut x, 0, &mut ctx, 1);
     assert!(x.is_empty());
 }
 
@@ -767,7 +767,7 @@ fn every_thread_count_matches_the_sequential_factor() {
         let mut ctx = SupernodalContext::new();
         supernodal_factorize(&sn, &a, &mut seq, &mut ctx, 1).unwrap();
         let mut x_seq = rhs.clone();
-        supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx);
+        supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx, 1);
         for threads in [2usize, 3, 8, 16] {
             assert!(sn.subtree_chunks(threads) >= 2, "{comp} blocks x2 must split at {threads} threads");
             for repeat in 0..2 {
@@ -776,7 +776,7 @@ fn every_thread_count_matches_the_sequential_factor() {
                 supernodal_factorize(&sn, &a, &mut par, &mut ctx, threads).unwrap();
                 assert!(same_factor(&sn, &seq, &par, 1e-12), "comp {comp} threads {threads} repeat {repeat}: factor differs");
                 let mut x = rhs.clone();
-                supernodal_solve(&sn, &par, &mut x, &mut ctx);
+                supernodal_solve(&sn, &par, &mut x, &mut ctx, 1);
                 assert!(same_solution(&x, &x_seq, 1e-9), "comp {comp} threads {threads} repeat {repeat}: solution differs");
             }
         }
@@ -956,7 +956,7 @@ fn windowed_panels_agree_at_every_thread_count() {
         let mut ctx = SupernodalContext::new();
         supernodal_factorize(&sn, &a, &mut seq, &mut ctx, 1).unwrap();
         let mut x_seq = rhs.clone();
-        supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx);
+        supernodal_solve(&sn, &seq, &mut x_seq, &mut ctx, 1);
         for threads in [2usize, 3, 4, 8, 16] {
             let mut par = vec![f64::NAN; sn.factor_val_count()];
             let mut ctx = SupernodalContext::new();
@@ -966,7 +966,7 @@ fn windowed_panels_agree_at_every_thread_count() {
             assert_eq!(pads, 0, "{name} threads {threads}: padded entries not exactly zero");
             assert!(same_factor(&sn, &seq, &par, 1e-12), "{name} threads {threads}: factor differs");
             let mut x = rhs.clone();
-            supernodal_solve(&sn, &par, &mut x, &mut ctx);
+            supernodal_solve(&sn, &par, &mut x, &mut ctx, 1);
             assert!(same_solution(&x, &x_seq, 1e-9), "{name} threads {threads}: solution differs");
         }
 

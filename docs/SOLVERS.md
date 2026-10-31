@@ -173,6 +173,34 @@ amalgamation relaxes fewer supernodes together, trading a few percent of
 speed for a smaller factor. `SchurPlan::block_supernodal` reports which
 route ran.
 
+A third knob trades the factor's precision for memory and speed:
+
+```rust,ignore
+SparseFaer::from_options(&SparseFaerOptions::default()
+    .with_mixed_precision(Some(MixedPrecision::default())))  // f32 factor, solves refined to f64
+```
+
+The factor is computed and stored in `f32` -- half the memory, the
+single-precision kernels' speed -- while the matrix and the right-hand
+side stay `f64`. Each damped solve is then refined against the `f64`
+matrix: `r = b - A x`, `A dx = r` through the `f32` factor, `x += dx`,
+until the relative residual is under `tol` or `max_refinements` steps
+are spent (defaults 1e-10 and 4). A step costs one solve and one
+matrix-vector product, both on the solver's threads like the
+factorization, no refactorization. A system too ill-conditioned
+for single precision stops refining early and hands the LM loop an
+inexact step, which it meets with more damping. `SchurPlan::f32_factor`,
+`refinements` and `refinement_shortfalls` report what the solve took.
+Only the supernodal block route factors this way. The refinement runs in
+`f64` whatever the solver's scalar, the residual accumulated from the
+matrix's entries as they are read; on an `f32` solver the factor is
+single precision already and the setting adds only that refinement,
+with `tol` floored at a few `f32` epsilons (about 1e-6) since the step
+is handed back in `f32`. It pays where the factor is large -- bundle adjustment from
+a few hundred cameras up, SLAM maps with landmarks -- and it is a loss
+on pose graphs, whose factors are small and whose refinement converges
+slowly.
+
 **Manage the parameter vector yourself.** The generated methods own the
 serialize -> solve -> deserialize round trip. Drop to `lm_solve`, the raw
 form every method is built on, when you need the flat parameter vector

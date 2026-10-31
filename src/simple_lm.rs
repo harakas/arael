@@ -1782,14 +1782,29 @@ fn render_threads(t: &ThreadReport, style: Style) -> String {
     out
 }
 
+/// The plan's precision note: empty on a double-precision factor.
+fn render_precision(plan: &SchurPlan) -> String {
+    if !plan.f32_factor {
+        return String::new();
+    }
+    let mut out = format!("f32 factor, {} refinement steps", plan.refinements.unwrap_or(0));
+    if let Some(m) = plan.refinement_shortfalls.filter(|&m| m > 0) {
+        out.push_str(&format!(", {m} solves short of tolerance"));
+    }
+    out
+}
+
 fn render_plan(plan: &SchurPlan, style: Style) -> String {
     if !plan.reduced {
+        let precision = render_precision(plan);
         return format!(
-            "  backend   {} (factorized the whole system{})\n",
+            "  backend   {} (factorized the whole system{}{}{})\n",
             style.paint("2", "no Schur reduction"),
             // Without a reduction the envelope is the whole Hessian's, which
             // is the with_narrow_band route.
             if plan.envelope { ", under its band" } else { "" },
+            if precision.is_empty() { "" } else { ", " },
+            precision,
         );
     }
     let mut out = format!(
@@ -1819,6 +1834,9 @@ fn render_plan(plan: &SchurPlan, style: Style) -> String {
         if plan.envelope { "factored under its envelope" }
         else { "factored by sparse Cholesky" }.to_string(),
     );
+    if plan.f32_factor {
+        why.push(render_precision(plan));
+    }
     if !why.is_empty() {
         out.push_str(&format!("            {}\n", style.paint("2", &why.join(", "))));
     }
@@ -4247,6 +4265,54 @@ pub enum BlockSupernodalMode {
     Never,
 }
 
+/// Factor in single precision, solve to the solver's precision: the
+/// supernodal block route's mixed-precision mode
+/// ([`SparseFaerOptions::with_mixed_precision`]).
+///
+/// The factorization -- most of a solve's arithmetic, and its memory --
+/// runs in `f32` on a factor half the size. The matrix, the right-hand side
+/// and the solution stay in the solver's scalar, and each damped solve is
+/// refined against the matrix: `r = b - A x`, `A dx = r` through the `f32`
+/// factor, `x += dx`, until `||r|| <= tol * ||b||` or `max_refinements`
+/// steps. Each step costs one solve and one matrix-vector product, no
+/// refactorization. A step that does not reduce the residual is undone and
+/// the refinement stops there: on a system too ill-conditioned for single
+/// precision the step stays inexact, which the LM loop meets with more
+/// damping. [`SchurPlan::refinements`] and
+/// [`SchurPlan::refinement_shortfalls`] report what the solve took.
+///
+/// Only the supernodal block route factors this way
+/// ([`BlockSupernodalMode`]); the scalar, envelope and iterative routes
+/// ignore the setting. The refinement itself runs in `f64` whatever the
+/// solver's scalar: the residual is accumulated in `f64` from the matrix's
+/// entries and the iterate kept in `f64` until it is handed back. An `f32`
+/// solver's factor is single precision already, so there the setting adds
+/// only that refinement, with `tol` floored at a few `f32` epsilons (about
+/// 1e-6) since the step is handed back in `f32`.
+///
+/// The solves and the residual run on the solver's threads, like the
+/// factorization.
+///
+/// ```rust,ignore
+/// SparseFaer::from_options(&SparseFaerOptions::default()
+///     .with_mixed_precision(Some(MixedPrecision::default())))
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MixedPrecision {
+    /// Refinement steps at most, per damped solve. 0 takes the
+    /// single-precision solution as it is.
+    pub max_refinements: usize,
+    /// Stop refining once `||b - A x|| <= tol * ||b||`.
+    pub tol: f64,
+}
+
+impl Default for MixedPrecision {
+    /// Four steps at most, to a relative residual of 1e-10.
+    fn default() -> Self {
+        MixedPrecision { max_refinements: 4, tol: 1e-10 }
+    }
+}
+
 /// How the reduced system is solved once the Schur reduction has formed it.
 ///
 /// Only consulted on the reduced route: with nothing marginalized there is no
@@ -4329,6 +4395,9 @@ pub struct SparseFaerOptions {
     /// Memory-lean amalgamation for the supernodal block route (see
     /// [`Self::with_block_supernodal_memory_lean`]). Off by default.
     pub block_supernodal_memory_lean: bool,
+    /// Single-precision factor with refinement on the supernodal block route
+    /// (see [`Self::with_mixed_precision`]). `None`, off, by default.
+    pub mixed_precision: Option<MixedPrecision>,
     /// Parameter ranges to marginalize, named explicitly rather than left to
     /// the policy to detect.
     pub marginalize: Vec<std::ops::Range<usize>>,
@@ -4355,6 +4424,7 @@ impl SparseFaerOptions {
             block_supernodal_batch: arael_faer::supernodal::SupernodalParams::default()
                 .batch_ratio,
             block_supernodal_memory_lean: false,
+            mixed_precision: None,
             marginalize: Vec::new(),
         }
     }
@@ -4524,6 +4594,17 @@ impl SparseFaerOptions {
     /// [`SupernodalParams::memory_lean`]: arael_faer::supernodal::SupernodalParams::memory_lean
     pub fn with_block_supernodal_memory_lean(mut self, on: bool) -> Self {
         self.block_supernodal_memory_lean = on;
+        self
+    }
+
+    /// Factor in single precision and refine each solve against the
+    /// double-precision matrix on the supernodal block route -- see
+    /// [`MixedPrecision`]. Half the factor memory and the single-precision
+    /// kernels' speed, at the price of the refinement's solves and products.
+    /// `None` (the default) factors in the solver's own scalar; ignored
+    /// unless the supernodal route runs at all.
+    pub fn with_mixed_precision(mut self, mixed: Option<MixedPrecision>) -> Self {
+        self.mixed_precision = mixed;
         self
     }
 
@@ -4784,6 +4865,240 @@ pub struct SchurPlan {
     /// As with [`envelope`](Self::envelope), which system depends on
     /// [`reduced`](Self::reduced).
     pub block_supernodal: bool,
+    /// Whether the factor was single precision
+    /// ([`SparseFaerOptions::with_mixed_precision`]). Only ever true with
+    /// [`block_supernodal`](Self::block_supernodal).
+    pub f32_factor: bool,
+    /// Refinement steps summed over the solve, when the factor was single
+    /// precision; `None` otherwise. Divided by the attempt count, what each
+    /// damped solve took on top of its factorization.
+    pub refinements: Option<usize>,
+    /// Damped solves that ended above the refinement tolerance -- at the
+    /// step cap, or when a step no longer reduced the residual. `None` when
+    /// the factor was not single precision.
+    pub refinement_shortfalls: Option<usize>,
+}
+
+/// The supernodal route's numeric state: the factor, in the matrix's scalar
+/// or in `f32` under [`MixedPrecision`], the kernels' context for each, and
+/// the refinement's scratch and counters.
+struct SnNumeric<T> {
+    mixed: Option<MixedPrecision>,
+    factor: Vec<T>,
+    ctx: arael_faer::supernodal::SupernodalContext<T>,
+    factor32: Vec<f32>,
+    ctx32: arael_faer::supernodal::SupernodalContext<f32>,
+    // Refinement scratch, all f64 whatever T: the right-hand side and the
+    // iterate, the residual (which becomes the correction), the iterate
+    // before the last step so a step that did not help can be undone, and
+    // the threaded residual's partial sums.
+    b64: Vec<f64>,
+    x64: Vec<f64>,
+    r: Vec<f64>,
+    x_prev: Vec<f64>,
+    mv: Vec<f64>,
+    // Summed over the solver's life, like cg_iters: steps taken, and solves
+    // that ended above the tolerance.
+    steps: usize,
+    shortfalls: usize,
+}
+
+impl<T> SnNumeric<T> {
+    fn new() -> Self {
+        SnNumeric {
+            mixed: None,
+            factor: Vec::new(),
+            ctx: arael_faer::supernodal::SupernodalContext::new(),
+            factor32: Vec::new(),
+            ctx32: arael_faer::supernodal::SupernodalContext::new(),
+            b64: Vec::new(),
+            x64: Vec::new(),
+            r: Vec::new(),
+            x_prev: Vec::new(),
+            mv: Vec::new(),
+            steps: 0,
+            shortfalls: 0,
+        }
+    }
+
+    /// Release every buffer; the counters stay.
+    fn clear(&mut self) {
+        self.factor = Vec::new();
+        self.factor32 = Vec::new();
+        self.b64 = Vec::new();
+        self.x64 = Vec::new();
+        self.r = Vec::new();
+        self.x_prev = Vec::new();
+        self.mv = Vec::new();
+    }
+}
+
+impl<T: crate::utils::Float> SnNumeric<T> {
+    /// Size the factor for a new symbolic: the scalar in use is allocated,
+    /// the other released.
+    fn resize(&mut self, count: usize) {
+        if self.mixed.is_some() {
+            self.factor32.resize(count, 0.0);
+            self.factor = Vec::new();
+        } else {
+            self.factor.resize(count, T::zero());
+            self.factor32 = Vec::new();
+        }
+    }
+}
+
+impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> SnNumeric<T> {
+    /// Factor `a` and solve `a x = b` into `x`. `Err` when the factorization
+    /// fails (a pivot that is not positive; the caller raises lambda).
+    ///
+    /// On the mixed route the factor is `f32` and the solution is refined
+    /// against `a` as [`MixedPrecision`] describes, the counters updated.
+    fn solve(
+        &mut self,
+        sn: &arael_faer::supernodal::SupernodalSymbolic,
+        a: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>,
+        b: &[T],
+        x: &mut [T],
+        threads: usize,
+        verbose: bool,
+    ) -> Result<(), arael_faer::supernodal::SupernodalError> {
+        use arael_faer::supernodal::{supernodal_factorize, supernodal_factorize_as, supernodal_solve, supernodal_solve_as};
+        // Where the time goes, for the verbose log only: the clock is not
+        // read otherwise.
+        let mut clock = verbose.then(std::time::Instant::now);
+        let mut lap = |acc: &mut f64| {
+            if let Some(t) = clock.as_mut() {
+                let now = std::time::Instant::now();
+                *acc += now.duration_since(*t).as_secs_f64() * 1e3;
+                *t = now;
+            }
+        };
+        let (mut t_factor, mut t_solve, mut t_residual) = (0.0, 0.0, 0.0);
+        let Some(mp) = self.mixed else {
+            supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads)?;
+            lap(&mut t_factor);
+            x.copy_from_slice(b);
+            supernodal_solve(sn, &self.factor, x, &mut self.ctx, threads);
+            lap(&mut t_solve);
+            if verbose {
+                info!("supernodal: factor {:.1} ms, solve {:.1} ms", t_factor, t_solve);
+            }
+            return Ok(());
+        };
+        supernodal_factorize_as(sn, a, &mut self.factor32, &mut self.ctx32, threads)?;
+        lap(&mut t_factor);
+        x.copy_from_slice(b);
+        supernodal_solve_as(sn, &self.factor32, x, &mut self.ctx32, threads);
+        lap(&mut t_solve);
+        if mp.max_refinements == 0 {
+            if verbose {
+                info!("mixed precision: factor {:.1} ms, solve {:.1} ms, no refinement", t_factor, t_solve);
+            }
+            return Ok(());
+        }
+        // The refinement runs in f64 whatever T: the residual accumulated in
+        // f64 from the matrix's entries, the iterate kept in f64 until it is
+        // handed back. For an f64 solver that is the native arithmetic; for
+        // an f32 solver it is what makes the residual see below f32.
+        use arael_faer::schur::SchurReal;
+        let n = x.len();
+        self.r.resize(n, 0.0);
+        self.x_prev.resize(n, 0.0);
+        self.b64.clear();
+        self.b64.extend(b.iter().map(|&v| SchurReal::to_f64(v)));
+        self.x64.clear();
+        self.x64.extend(x.iter().map(|&v| SchurReal::to_f64(v)));
+        let bnorm = norm2_f64(&self.b64);
+        // The step is handed back in T, so no tolerance below a few of its
+        // epsilons buys anything: an f32 solver refines to about 1e-6.
+        let floor = 8.0 * SchurReal::to_f64(<T as num::Float>::epsilon());
+        let tol = mp.tol.max(floor) * bnorm;
+        let mut steps = 0;
+        let mut rnorm = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
+        lap(&mut t_residual);
+        while rnorm > tol && steps < mp.max_refinements {
+            self.x_prev.copy_from_slice(&self.x64);
+            supernodal_solve_as(sn, &self.factor32, &mut self.r, &mut self.ctx32, threads);
+            for (xi, di) in self.x64.iter_mut().zip(&self.r) {
+                *xi += *di;
+            }
+            lap(&mut t_solve);
+            steps += 1;
+            let next = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
+            lap(&mut t_residual);
+            if next >= rnorm {
+                // The factor is too far off for the correction to help: the
+                // iterate before it is the best one.
+                self.x64.copy_from_slice(&self.x_prev);
+                break;
+            }
+            rnorm = next;
+        }
+        for (xi, &v) in x.iter_mut().zip(&self.x64) {
+            *xi = <T as SchurReal>::from_f64(v);
+        }
+        let short = rnorm > tol;
+        self.steps += steps;
+        if short {
+            self.shortfalls += 1;
+        }
+        if verbose {
+            info!(
+                "mixed precision: {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
+                steps,
+                if bnorm > 0.0 { rnorm / bnorm } else { 0.0 },
+                if short { " -- short of tolerance" } else { "" },
+                t_factor,
+                steps + 1,
+                t_solve,
+                steps + 1,
+                t_residual,
+            );
+        }
+        Ok(())
+    }
+
+    /// Write the counters into the plan, on the mixed route.
+    fn report_into(&self, plan: &mut Option<SchurPlan>) {
+        if self.mixed.is_none() {
+            return;
+        }
+        if let Some(plan) = plan.as_mut() {
+            plan.refinements = Some(self.steps);
+            plan.refinement_shortfalls = Some(self.shortfalls);
+        }
+    }
+}
+
+/// `||v||`, accumulated in f64 whatever the scalar.
+fn norm2_f64<T: arael_faer::schur::SchurReal>(v: &[T]) -> f64 {
+    v.iter()
+        .map(|&x| {
+            let x = arael_faer::schur::SchurReal::to_f64(x);
+            x * x
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// `r = b - a x` in f64 for a symmetric block matrix held as its upper
+/// triangle, its entries widened as they are read; the product on `threads`
+/// threads with `scratch` for their partial sums. Returns `||r||`.
+fn residual_into<T: faer::traits::RealField + arael_faer::schur::SchurReal>(
+    a: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>,
+    x: &[f64],
+    b: &[f64],
+    r: &mut [f64],
+    threads: usize,
+    scratch: &mut Vec<f64>,
+) -> f64 {
+    a.mul_symmetric_upper_threaded::<f64>(x, r, threads, scratch);
+    let mut s = 0.0f64;
+    for (ri, bi) in r.iter_mut().zip(b) {
+        *ri = *bi - *ri;
+        s += *ri * *ri;
+    }
+    s.sqrt()
 }
 
 /// Sparse Cholesky via faer, pure Rust -- the default backend.
@@ -4893,7 +5208,8 @@ pub struct SparseFaer<T = f64> {
     // system -- reduced S, or the whole block Hessian -- directly in block
     // form under a block-level ordering. No scalar CSC, no scalar symbolic.
     // block_supernodal is the mode; sn_active is whether this solve took
-    // the route; sn_sym and sn_factor are its structure and factor buffer.
+    // the route; sn_sym is its structure, sn_num its factor (f64 or f32)
+    // and refinement state.
     block_supernodal: BlockSupernodalMode,
     sn_batch_ratio: Option<f64>,
     sn_memory_lean: bool,
@@ -4906,8 +5222,7 @@ pub struct SparseFaer<T = f64> {
         Arc<arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>>,
         crate::covariance::CovOrdering,
     )>,
-    sn_factor: Vec<T>,
-    sn_ctx: arael_faer::supernodal::SupernodalContext<T>,
+    sn_num: SnNumeric<T>,
     // Conjugate gradients on the reduced system ([`SchurMethod::Iterative`]).
     // The preconditioner is rebuilt per damped solve -- S changes with every
     // lambda -- while the scratch vectors persist so no iteration allocates.
@@ -4969,8 +5284,7 @@ impl<T> SparseFaer<T> {
             sn_active: false,
             sn_sym: None,
             sn_whole: None,
-            sn_factor: Vec::new(),
-            sn_ctx: arael_faer::supernodal::SupernodalContext::new(),
+            sn_num: SnNumeric::new(),
             schur_solve: SchurMethod::default(),
             cg_work: arael_faer::cg::CgWorkspace::default(),
             cg_iters: 0,
@@ -5013,6 +5327,7 @@ impl<T> SparseFaer<T> {
         solver.block_supernodal = opts.block_supernodal;
         solver.sn_batch_ratio = opts.block_supernodal_batch;
         solver.sn_memory_lean = opts.block_supernodal_memory_lean;
+        solver.sn_num.mixed = opts.mixed_precision;
         solver.schur_solve = opts.schur_solve;
         solver.marginalize = opts.marginalize.clone();
         solver
@@ -5257,6 +5572,9 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             kept_bandwidth: band,
             envelope: true,
             block_supernodal: false,
+            f32_factor: false,
+            refinements: None,
+            refinement_shortfalls: None,
         });
 
         // First numeric fill. Everything above it was analysis.
@@ -5453,7 +5771,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             )
             .map_err(|_| SetupError::SymbolicFactorization { reduced: false })?,
         };
-        self.sn_factor.resize(sn.factor_val_count(), T::zero());
+        self.sn_num.resize(sn.factor_val_count());
         self.sn_active = true;
         self.envelope_active = false;
         self.envelope_sym = None;
@@ -5492,6 +5810,9 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             kept_bandwidth: 0,
             envelope: false,
             block_supernodal: true,
+            f32_factor: self.sn_num.mixed.is_some(),
+            refinements: None,
+            refinement_shortfalls: None,
         });
 
         // First numeric fill. Everything above it was analysis.
@@ -5640,6 +5961,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.sn_active = false;
         self.plan = None;
         self.cg_iters = 0;
+        self.sn_num.steps = 0;
+        self.sn_num.shortfalls = 0;
         // Buffer allocations are kept; they are resized when the next
         // structure is built. The elimination hint and the policy are
         // configuration, not cache, and survive.
@@ -5778,6 +6101,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 kept_bandwidth: 0,
                 envelope: false,
                 block_supernodal: false,
+                f32_factor: false,
+                refinements: None,
+                refinement_shortfalls: None,
             });
             return self.setup_full(problem, ctx, params, grad, matrix, n, None, None, vb);
         }
@@ -5894,6 +6220,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 kept_bandwidth: 0,
                 envelope: false,
                 block_supernodal: false,
+                f32_factor: false,
+                refinements: None,
+                refinement_shortfalls: None,
             });
             return self.setup_full(
                 problem,
@@ -6255,6 +6584,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             kept_bandwidth: if reduced { band } else { 0 },
             envelope: false,
             block_supernodal: false,
+            f32_factor: false,
+            refinements: None,
+            refinement_shortfalls: None,
         });
 
         // A DECLINED reduction marginalizes nothing, so the block layout
@@ -6466,7 +6798,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.l_vals = Vec::new();
             self.factor_mem = Vec::new();
             self.solve_mem = Vec::new();
-            self.sn_factor = Vec::new();
+            self.sn_num.clear();
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense), solving it with \
@@ -6531,7 +6863,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 )
                 .map_err(|_| SetupError::SymbolicFactorization { reduced: true })?,
             };
-            self.sn_factor.resize(sn.factor_val_count(), T::zero());
+            self.sn_num.resize(sn.factor_val_count());
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
@@ -6548,6 +6880,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.sn_active = true;
             if let Some(plan) = self.plan.as_mut() {
                 plan.block_supernodal = true;
+                plan.f32_factor = self.sn_num.mixed.is_some();
             }
         } else {
             // General sparse route: S flattened to scalar CSC and factorized
@@ -6691,17 +7024,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if self.schur.is_none() {
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
-                if arael_faer::supernodal::supernodal_factorize(
-                    sn, h, &mut self.sn_factor, &mut self.sn_ctx, self.ctx.threads(),
-                )
-                .is_err()
-                {
+                let threads = self.ctx.threads();
+                if self.sn_num.solve(sn, h, grad, delta, threads, self.verbose).is_err() {
                     return false;
                 }
-                delta.copy_from_slice(grad);
-                arael_faer::supernodal::supernodal_solve(
-                    sn, &self.sn_factor, delta, &mut self.sn_ctx,
-                );
+                self.sn_num.report_into(&mut self.plan);
                 return true;
             }
             let bsym = self.envelope_sym.as_ref().unwrap();
@@ -6804,17 +7131,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // ordering baked into the seed scatter.
             let sn = self.sn_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
-            if arael_faer::supernodal::supernodal_factorize(
-                sn, s, &mut self.sn_factor, &mut self.sn_ctx, self.ctx.threads(),
-            )
-            .is_err()
+            let threads = self.ctx.threads();
+            if self
+                .sn_num
+                .solve(sn, s, &self.rhs_kept, &mut self.x_kept, threads, self.verbose)
+                .is_err()
             {
                 return false;
             }
-            self.x_kept.copy_from_slice(&self.rhs_kept);
-            arael_faer::supernodal::supernodal_solve(
-                sn, &self.sn_factor, &mut self.x_kept, &mut self.sn_ctx,
-            );
+            self.sn_num.report_into(&mut self.plan);
         } else {
             self.s.as_ref().unwrap().csc_vals_into(&mut self.s_vals);
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(

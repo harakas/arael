@@ -26,6 +26,8 @@ use crate::{SparseIndex, ValueIndex};
 
 const NONE: u32 = u32::MAX;
 
+use crate::pool::SharedMut;
+
 /// Amalgamation and batching control.
 ///
 /// `relax`: merge a supernode into its parent while the merged panel
@@ -1493,6 +1495,12 @@ pub struct SupernodalContext<T> {
     workers: Vec<Scratch<T>>,
     x: Vec<T>,
     tmp: Vec<T>,
+    /// The threaded solve's per-worker scratch: a `tmp` each, and the
+    /// partial each gathers for the rows of the top.
+    solve_workers: Vec<SolveScratch<T>>,
+    /// The partials of a big panel's transposed product in the backward
+    /// sweep, `threads * max_ncols * k`.
+    red: Vec<T>,
 }
 
 impl<T> SupernodalContext<T> {
@@ -1502,6 +1510,8 @@ impl<T> SupernodalContext<T> {
             workers: Vec::new(),
             x: Vec::new(),
             tmp: Vec::new(),
+            solve_workers: Vec::new(),
+            red: Vec::new(),
         }
     }
 }
@@ -1636,10 +1646,10 @@ fn update_panel<T: SchurReal>(
 /// the analysis cut into windows is shared out over the pool, each thread
 /// taking a run of its windows; alone, this thread computes every panel
 /// whole.
-fn factor_panel<T: SchurReal>(
+fn factor_panel<M: SchurReal, T: SchurReal>(
     sym: &SupernodalSymbolic,
     asym: &SymbolicSparseBlockColMat<SparseIndex>,
-    vals: &[T],
+    vals: &[M],
     factor: FactorPtr<T>,
     s: usize,
     sc: &mut Scratch<T>,
@@ -1684,13 +1694,17 @@ fn factor_panel<T: SchurReal>(
         let dst0 = t.dst as usize - base;
         if !t.trans {
             for c in 0..wj {
-                panel[dst0 + c * stride..dst0 + c * stride + wi]
-                    .clone_from_slice(&src[c * wi..(c + 1) * wi]);
+                for (d, &v) in core::iter::zip(
+                    &mut panel[dst0 + c * stride..dst0 + c * stride + wi],
+                    &src[c * wi..(c + 1) * wi],
+                ) {
+                    *d = T::from_f64(v.to_f64());
+                }
             }
         } else {
             for c in 0..wi {
                 for r in 0..wj {
-                    panel[dst0 + c * stride + r] = src[c + r * wi];
+                    panel[dst0 + c * stride + r] = T::from_f64(src[c + r * wi].to_f64());
                 }
             }
         }
@@ -1797,6 +1811,24 @@ pub fn supernodal_factorize<T: SchurReal>(
     ctx: &mut SupernodalContext<T>,
     threads: usize,
 ) -> Result<(), SupernodalError> {
+    supernodal_factorize_as(sym, a, factor, ctx, threads)
+}
+
+/// [`supernodal_factorize`] with the factor in another scalar than the
+/// matrix: `M` is the matrix's, `T` the factor's. The seed converts each
+/// tile as it lands in its panel; every kernel then runs in `T`. The case
+/// that matters is `M = f64, T = f32`: half the factor memory and the
+/// dense kernels at twice the SIMD width, for a factor accurate to single
+/// precision -- which iterative refinement against the f64 matrix recovers
+/// from (see [`supernodal_solve_as`]). With `M = T` this is
+/// `supernodal_factorize`.
+pub fn supernodal_factorize_as<M: SchurReal, T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    a: &SparseBlockColMat<SparseIndex, M>,
+    factor: &mut [T],
+    ctx: &mut SupernodalContext<T>,
+    threads: usize,
+) -> Result<(), SupernodalError> {
     assert_eq!(factor.len(), sym.factor_val_count());
     let asym = a.symbolic();
     assert_eq!(asym.nblocks(), sym.tiles.len());
@@ -1834,6 +1866,43 @@ struct Cut {
     /// sequentially after the chunks join, with the dense kernels
     /// threaded (they are the big panels).
     top: Vec<usize>,
+}
+
+impl Cut {
+    /// The supernodes of each chunk, in elimination order.
+    ///
+    /// Ownership flows from a chunk root DOWN to its descendants, and a
+    /// parent's index is always above its children's, so this walks the
+    /// supernodes backwards: by the time a child is reached its parent has
+    /// been decided. (Forwards it would reach only a root's immediate
+    /// children and silently leave the rest of the subtree unfactored.)
+    fn orders(&self, sym: &SupernodalSymbolic) -> Vec<Vec<usize>> {
+        let mut order: Vec<Vec<usize>> = self.chunks.iter().map(|_| Vec::new()).collect();
+        let mut owner = vec![usize::MAX; sym.ns];
+        for (i, &r) in self.chunks.iter().enumerate() {
+            owner[r] = i;
+        }
+        for s in (0..sym.ns).rev() {
+            if owner[s] == usize::MAX
+                && let Some(p) = sym.supernode_parent(s)
+            {
+                owner[s] = owner[p];
+            }
+            if owner[s] != usize::MAX {
+                order[owner[s]].push(s);
+            }
+        }
+        for v in order.iter_mut() {
+            v.sort_unstable();
+        }
+        // Every supernode is in exactly one chunk, or in the top.
+        debug_assert_eq!(
+            order.iter().map(|v| v.len()).sum::<usize>() + self.top.len(),
+            sym.ns,
+            "the cut lost supernodes",
+        );
+        order
+    }
 }
 
 /// Cut the elimination tree for `workers` threads, or `None` when the
@@ -1905,47 +1974,17 @@ fn subtree_cut(sym: &SupernodalSymbolic, workers: usize) -> Option<Cut> {
 /// supernode that contributes to `s` is a descendant of `s`. A worker
 /// owning a subtree therefore reads and writes only panels inside it, and
 /// panels of different supernodes are disjoint ranges of the factor.
-fn factor_subtrees<T: SchurReal>(
+fn factor_subtrees<M: SchurReal, T: SchurReal>(
     sym: &SupernodalSymbolic,
     asym: &SymbolicSparseBlockColMat<SparseIndex>,
-    vals: &[T],
+    vals: &[M],
     ptr: FactorPtr<T>,
     ctx: &mut SupernodalContext<T>,
     par: faer::Par,
     workers: usize,
     cut: &Cut,
 ) -> Result<(), SupernodalError> {
-    // The supernodes of each chunk, in elimination order.
-    //
-    // Ownership flows from a chunk root DOWN to its descendants, and a
-    // parent's index is always above its children's, so this walks the
-    // supernodes backwards: by the time a child is reached its parent has
-    // been decided. (Forwards it would reach only a root's immediate
-    // children and silently leave the rest of the subtree unfactored.)
-    let mut order: Vec<Vec<usize>> = cut.chunks.iter().map(|_| Vec::new()).collect();
-    let mut owner = vec![usize::MAX; sym.ns];
-    for (i, &r) in cut.chunks.iter().enumerate() {
-        owner[r] = i;
-    }
-    for s in (0..sym.ns).rev() {
-        if owner[s] == usize::MAX
-            && let Some(p) = sym.supernode_parent(s)
-        {
-            owner[s] = owner[p];
-        }
-        if owner[s] != usize::MAX {
-            order[owner[s]].push(s);
-        }
-    }
-    for v in order.iter_mut() {
-        v.sort_unstable();
-    }
-    // Every supernode is factored exactly once: in a chunk, or in the top.
-    debug_assert_eq!(
-        order.iter().map(|v| v.len()).sum::<usize>() + cut.top.len(),
-        sym.ns,
-        "the cut lost supernodes",
-    );
+    let order = cut.orders(sym);
 
     // Inside a chunk the panels are small; the kernels stay sequential
     // and the threads are spent on whole subtrees instead.
@@ -2006,6 +2045,13 @@ fn contiguous_below(sym: &SupernodalSymbolic, s: usize, m: usize) -> Option<usiz
 /// [`supernodal_factorize`]. The permutation is applied on entry and
 /// undone on exit; `rhs` stays in the matrix's own ordering.
 ///
+/// `threads` as in [`supernodal_factorize`]: independent subtrees run on
+/// separate threads of [`crate::pool`], each gathering what its rows owe
+/// the rows above the subtrees into a partial of its own, and the big
+/// panels above them split their products between the threads; 0 and 1
+/// run on the calling thread. The result matches the sequential one to
+/// rounding.
+///
 /// # Panics
 ///
 /// As [`supernodal_solve_multi`] does.
@@ -2014,13 +2060,32 @@ pub fn supernodal_solve<T: SchurReal>(
     factor: &[T],
     rhs: &mut [T],
     ctx: &mut SupernodalContext<T>,
+    threads: usize,
 ) {
-    supernodal_solve_multi(sym, factor, rhs, 1, ctx);
+    supernodal_solve_multi_as(sym, factor, rhs, 1, ctx, threads);
+}
+
+/// [`supernodal_solve`] through a factor of another scalar: the right-hand
+/// side (scalar `M`) is converted into the factor's scalar `T` on entry and
+/// the solution back on exit. The solve itself runs in `T`, so a solution
+/// through an f32 factor carries f32 rounding; one step of refinement --
+/// `r = b - A x` in `M`, `A dx = r` through this solve, `x += dx` -- gains
+/// about `cond(A) * eps_f32` relative digits, and repeats until the f64
+/// residual is down.
+pub fn supernodal_solve_as<M: SchurReal, T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    rhs: &mut [M],
+    ctx: &mut SupernodalContext<T>,
+    threads: usize,
+) {
+    supernodal_solve_multi_as(sym, factor, rhs, 1, ctx, threads);
 }
 
 /// Solve `A X = RHS` in place for `k` right-hand sides at once. `rhs` is
 /// column-major `n x k`. The permutation is applied on entry and undone on
-/// exit; `rhs` stays in the matrix's own ordering.
+/// exit; `rhs` stays in the matrix's own ordering. `threads` as in
+/// [`supernodal_solve`].
 ///
 /// Each supernode panel is read once for all `k` columns and its kernels are
 /// matrix-matrix rather than matrix-vector, so this costs far less than `k`
@@ -2037,6 +2102,20 @@ pub fn supernodal_solve_multi<T: SchurReal>(
     rhs: &mut [T],
     k: usize,
     ctx: &mut SupernodalContext<T>,
+    threads: usize,
+) {
+    supernodal_solve_multi_as(sym, factor, rhs, k, ctx, threads);
+}
+
+/// [`supernodal_solve_multi`] through a factor of another scalar; see
+/// [`supernodal_solve_as`].
+pub fn supernodal_solve_multi_as<M: SchurReal, T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    rhs: &mut [M],
+    k: usize,
+    ctx: &mut SupernodalContext<T>,
+    threads: usize,
 ) {
     assert_eq!(factor.len(), sym.factor_val_count());
     assert_eq!(rhs.len(), sym.n * k);
@@ -2051,11 +2130,13 @@ pub fn supernodal_solve_multi<T: SchurReal>(
         })
         .max()
         .unwrap_or(0);
+    let workers = threads.max(1);
     // x and tmp are column-major with leading dimensions n and max_below: a
     // column's rows stay contiguous, so a row range is one strided submatrix.
     ctx.x.resize(n * k, T::ZERO);
     ctx.tmp.resize(max_below * k, T::ZERO);
-    let (x, tmp) = (&mut ctx.x, &mut ctx.tmp);
+    ctx.red.resize(workers * sym.max_ncols * k, T::ZERO);
+    let x = &mut ctx.x;
 
     // Into elimination order, every column.
     for b in 0..sym.nblk {
@@ -2064,145 +2145,39 @@ pub fn supernodal_solve_multi<T: SchurReal>(
         let src = sym.old_start[ob] as usize;
         let dst = sym.sc_start[b] as usize;
         for c in 0..k {
-            x[c * n + dst..c * n + dst + w]
-                .clone_from_slice(&rhs[c * n + src..c * n + src + w]);
-        }
-    }
-
-    // Forward sweep: L Y = X.
-    for s in 0..sym.ns {
-        let (q, h) = sym.supernode_dims(s);
-        let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
-        let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
-        let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
-        let xp = x.as_mut_ptr();
-        {
-            // SAFETY: rows c0..c0+q of each of the k columns, which are n apart.
-            let x_top =
-                unsafe { faer::MatMut::from_raw_parts_mut(xp.add(c0), q, k, 1, n as isize) };
-            faer::linalg::triangular_solve::solve_lower_triangular_in_place(
-                l11,
-                x_top,
-                faer::Par::Seq,
-            );
-        }
-        if h > q {
-            let m = h - q;
-            let bot = unsafe {
-                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize)
-            };
-            // A contiguous pattern (one scalar run below the supernode,
-            // the common banded/trajectory case) subtracts straight into
-            // the x segment; scattered patterns go through tmp.
-            if let Some(seg) = contiguous_below(sym, s, m) {
-                debug_assert!(c0 + q <= seg, "below-rows overlap the supernode's own columns");
-                // SAFETY: within a column [c0, c0+q) and [seg, seg+m) are
-                // disjoint (c0 + q <= seg) and the columns are n apart, so the
-                // read and write views never alias.
-                let x_top =
-                    unsafe { faer::MatRef::from_raw_parts(xp.add(c0), q, k, 1, n as isize) };
-                let dst =
-                    unsafe { faer::MatMut::from_raw_parts_mut(xp.add(seg), m, k, 1, n as isize) };
-                faer::linalg::matmul::matmul(
-                    dst,
-                    faer::Accum::Add,
-                    bot,
-                    x_top,
-                    minus_one::<T>(),
-                    faer::Par::Seq,
-                );
-            } else {
-                // SAFETY: x_top only reads; tmp is a separate allocation.
-                let x_top =
-                    unsafe { faer::MatRef::from_raw_parts(xp.add(c0), q, k, 1, n as isize) };
-                let t = unsafe {
-                    faer::MatMut::from_raw_parts_mut(tmp.as_mut_ptr(), m, k, 1, m as isize)
-                };
-                faer::linalg::matmul::matmul(
-                    t,
-                    faer::Accum::Replace,
-                    bot,
-                    x_top,
-                    one::<T>(),
-                    faer::Par::Seq,
-                );
-                for (e, &blk) in sym.supernode_pattern(s).iter().enumerate() {
-                    let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
-                    let w = (sym.sc_start[blk as usize + 1] - sym.sc_start[blk as usize]) as usize;
-                    let dst = sym.sc_start[blk as usize] as usize;
-                    for c in 0..k {
-                        for r in 0..w {
-                            x[c * n + dst + r] = x[c * n + dst + r] - tmp[c * m + dr + r];
-                        }
-                    }
-                }
+            for (d, &v) in core::iter::zip(
+                &mut x[c * n + dst..c * n + dst + w],
+                &rhs[c * n + src..c * n + src + w],
+            ) {
+                *d = T::from_f64(v.to_f64());
             }
         }
     }
 
-    // Backward sweep: L^T X = Y.
-    for s in (0..sym.ns).rev() {
-        let (q, h) = sym.supernode_dims(s);
-        let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
-        let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
-        let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
-        if h > q {
-            let m = h - q;
-            let bot = unsafe {
-                faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize)
-            };
-            if let Some(seg) = contiguous_below(sym, s, m) {
-                debug_assert!(c0 + q <= seg, "below-rows overlap the supernode's own columns");
-                let xp = x.as_mut_ptr();
-                // SAFETY: disjoint row ranges within each column, as above.
-                let xseg =
-                    unsafe { faer::MatRef::from_raw_parts(xp.add(seg), m, k, 1, n as isize) };
-                let x_top =
-                    unsafe { faer::MatMut::from_raw_parts_mut(xp.add(c0), q, k, 1, n as isize) };
-                faer::linalg::matmul::matmul(
-                    x_top,
-                    faer::Accum::Add,
-                    bot.transpose(),
-                    xseg,
-                    minus_one::<T>(),
-                    faer::Par::Seq,
-                );
-            } else {
-                for (e, &blk) in sym.supernode_pattern(s).iter().enumerate() {
-                    let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
-                    let w = (sym.sc_start[blk as usize + 1] - sym.sc_start[blk as usize]) as usize;
-                    let src = sym.sc_start[blk as usize] as usize;
-                    for c in 0..k {
-                        tmp[c * m + dr..c * m + dr + w]
-                            .clone_from_slice(&x[c * n + src..c * n + src + w]);
-                    }
-                }
-                let t =
-                    unsafe { faer::MatRef::from_raw_parts(tmp.as_ptr(), m, k, 1, m as isize) };
-                // SAFETY: tmp is a separate allocation from x.
-                let x_top = unsafe {
-                    faer::MatMut::from_raw_parts_mut(x.as_mut_ptr().add(c0), q, k, 1, n as isize)
+    match (workers > 1).then(|| subtree_cut(sym, workers)).flatten() {
+        Some(cut) => solve_subtrees(sym, factor, ctx, k, max_below, workers, &cut),
+        None => {
+            // One sweep each way on this thread, the big panels' products
+            // split between the pool's threads.
+            let x = SharedMut(ctx.x.as_mut_ptr());
+            let no_top = TopRows { pos: Vec::new(), rows: 0 };
+            for s in 0..sym.ns {
+                // SAFETY: the only sweep running, over the whole of x.
+                unsafe {
+                    forward_supernode(
+                        sym, factor, s, x, n, k, &mut ctx.tmp, &mut [], &no_top, usize::MAX, workers,
+                    )
                 };
-                faer::linalg::matmul::matmul(
-                    x_top,
-                    faer::Accum::Add,
-                    bot.transpose(),
-                    t,
-                    minus_one::<T>(),
-                    faer::Par::Seq,
-                );
+            }
+            for s in (0..sym.ns).rev() {
+                // SAFETY: as above.
+                unsafe {
+                    backward_supernode(sym, factor, s, x, n, k, &mut ctx.tmp, &mut ctx.red, workers)
+                };
             }
         }
-        // SAFETY: rows c0..c0+q of each of the k columns.
-        let x_top = unsafe {
-            faer::MatMut::from_raw_parts_mut(x.as_mut_ptr().add(c0), q, k, 1, n as isize)
-        };
-        faer::linalg::triangular_solve::solve_upper_triangular_in_place(
-            l11.transpose(),
-            x_top,
-            faer::Par::Seq,
-        );
     }
+    let x = &ctx.x;
 
     // Back to the matrix's ordering.
     for b in 0..sym.nblk {
@@ -2211,10 +2186,487 @@ pub fn supernodal_solve_multi<T: SchurReal>(
         let dst = sym.old_start[ob] as usize;
         let src = sym.sc_start[b] as usize;
         for c in 0..k {
-            rhs[c * n + dst..c * n + dst + w]
-                .clone_from_slice(&x[c * n + src..c * n + src + w]);
+            for (d, &v) in core::iter::zip(
+                &mut rhs[c * n + dst..c * n + dst + w],
+                &x[c * n + src..c * n + src + w],
+            ) {
+                *d = M::from_f64(v.to_f64());
+            }
         }
     }
+}
+
+/// The rows of the top packed together: `pos[t]` is where top supernode
+/// `t`'s rows start inside a worker's partial, `u32::MAX` for a chunk
+/// supernode; `rows` is their total. A worker's partial is `rows * k`,
+/// column-major.
+struct TopRows {
+    pos: Vec<u32>,
+    rows: usize,
+}
+
+impl TopRows {
+    fn of(sym: &SupernodalSymbolic, top: &[usize]) -> Self {
+        let mut pos = vec![u32::MAX; sym.ns];
+        let mut rows = 0;
+        for &t in top {
+            pos[t] = rows as u32;
+            rows += sym.supernode_dims(t).0;
+        }
+        TopRows { pos, rows }
+    }
+
+    /// Where the rows of permuted block `blk`, inside a top supernode,
+    /// start in a partial.
+    #[inline]
+    fn offset(&self, sym: &SupernodalSymbolic, blk: usize) -> usize {
+        let t = sym.supernode_of(blk);
+        let c0 = sym.sc_start[sym.sup_begin[t] as usize] as usize;
+        self.pos[t] as usize + sym.sc_start[blk] as usize - c0
+    }
+}
+
+/// A worker's scratch on the threaded solve.
+struct SolveScratch<T> {
+    /// The gather/scatter buffer of a scattered pattern, `max_below * k`.
+    tmp: Vec<T>,
+    /// What this worker's subtrees owe the rows of the top in the forward
+    /// sweep, `TopRows::rows * k`.
+    part: Vec<T>,
+}
+
+impl<T> SolveScratch<T> {
+    fn new() -> Self {
+        SolveScratch { tmp: Vec::new(), part: Vec::new() }
+    }
+}
+
+/// The threaded solve over a [`Cut`]: each worker takes whole subtrees,
+/// gathering what their rows owe the top into a partial of its own; the
+/// partials are summed into the top; the top runs on the calling thread
+/// with its big products split between the threads; the backward sweep
+/// retraces it, the top first, then the subtrees in parallel, every row
+/// they read being final by then.
+///
+/// Correctness rests on the same property as [`factor_subtrees`]: a
+/// supernode's pattern holds only its ancestors, so a chunk's forward
+/// sweep writes rows inside the chunk or in the top, and its backward
+/// sweep reads rows inside the chunk or in the top.
+fn solve_subtrees<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    ctx: &mut SupernodalContext<T>,
+    k: usize,
+    max_below: usize,
+    workers: usize,
+    cut: &Cut,
+) {
+    use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    let n = sym.n;
+    let order = cut.orders(sym);
+    let top = TopRows::of(sym, &cut.top);
+    // Per chunk supernode, the first entry of its pattern in the top. The
+    // pattern is sorted and the ancestors of a top supernode are top, so
+    // the entries from there on all are.
+    let mut split = vec![u32::MAX; sym.ns];
+    for chunk in &order {
+        for &s in chunk {
+            let pat = sym.supernode_pattern(s);
+            split[s] = pat
+                .iter()
+                .position(|&b| top.pos[sym.supernode_of(b as usize)] != u32::MAX)
+                .unwrap_or(pat.len()) as u32;
+        }
+    }
+    let SupernodalContext { x, tmp, red, solve_workers, .. } = ctx;
+    solve_workers.resize_with(workers, SolveScratch::new);
+    let xp = SharedMut(x.as_mut_ptr());
+
+    // Forward, the subtrees: largest first, each worker taking the next.
+    let next = AtomicUsize::new(0);
+    crate::pool::run_over(solve_workers, |_, w| {
+        w.tmp.resize(max_below * k, T::ZERO);
+        w.part.clear();
+        w.part.resize(top.rows * k, T::ZERO);
+        loop {
+            let i = next.fetch_add(1, Relaxed);
+            if i >= order.len() {
+                return;
+            }
+            for &s in &order[i] {
+                // SAFETY: the rows of x this writes are s's own and its
+                // ancestors' inside chunk i, which no other worker touches;
+                // what it owes the top goes to this worker's partial.
+                unsafe {
+                    forward_supernode(
+                        sym, factor, s, xp, n, k, &mut w.tmp, &mut w.part, &top,
+                        split[s] as usize, 1,
+                    )
+                };
+            }
+        }
+    });
+    // What the subtrees owe the top.
+    for &t in &cut.top {
+        let (q, _) = sym.supernode_dims(t);
+        let c0 = sym.sc_start[sym.sup_begin[t] as usize] as usize;
+        let p = top.pos[t] as usize;
+        for w in solve_workers.iter() {
+            for c in 0..k {
+                let xs = &mut x[c * n + c0..c * n + c0 + q];
+                let ps = &w.part[c * top.rows + p..c * top.rows + p + q];
+                for (xi, pi) in xs.iter_mut().zip(ps) {
+                    *xi += *pi;
+                }
+            }
+        }
+    }
+    // The top, forward then backward, its big products split between the
+    // threads.
+    for &t in &cut.top {
+        // SAFETY: one sweep on this thread; the subtrees have joined.
+        unsafe { forward_supernode(sym, factor, t, xp, n, k, tmp, &mut [], &top, usize::MAX, workers) };
+    }
+    for &t in cut.top.iter().rev() {
+        // SAFETY: as above.
+        unsafe { backward_supernode(sym, factor, t, xp, n, k, tmp, red, workers) };
+    }
+    // Backward, the subtrees: every row they read is final.
+    let next = AtomicUsize::new(0);
+    crate::pool::run_over(solve_workers, |_, w| loop {
+        let i = next.fetch_add(1, Relaxed);
+        if i >= order.len() {
+            return;
+        }
+        for &s in order[i].iter().rev() {
+            // SAFETY: writes only s's own rows; reads its ancestors', which
+            // are final (the top's from the sweep above, the chunk's from
+            // this loop, in reverse elimination order).
+            unsafe { backward_supernode(sym, factor, s, xp, n, k, &mut w.tmp, &mut [], 1) };
+        }
+    });
+}
+
+/// `m * q * k` from which a panel's product in the solve is split between
+/// the threads. The test build lowers it so that small panels take that
+/// path too.
+const PAR_MIN_SOLVE: usize = if cfg!(test) { 1 << 10 } else { 1 << 19 };
+
+/// How many runs of rows a product of `m` rows and `per_row` scalars of
+/// work per row goes in: one unless it pays for a dispatch, then up to
+/// `threads`, each run at least 64 rows.
+fn row_runs(m: usize, per_row: usize, threads: usize) -> usize {
+    if threads <= 1 || m * per_row < PAR_MIN_SOLVE {
+        return 1;
+    }
+    threads.min(m / 64).max(1)
+}
+
+/// `dst = accum(dst) + alpha * a * b` for `a` of `m` rows, `b` of `k`
+/// columns, `dst` the `m x k` block at `dst` with leading dimension `ld`;
+/// the rows split between the pool's threads when the product is big
+/// enough to pay for it.
+///
+/// # Safety
+///
+/// `dst` must be writable over the strided `m x k` range and alias
+/// neither `a` nor `b`.
+unsafe fn product_by_rows<T: SchurReal>(
+    dst: SharedMut<T>,
+    ld: usize,
+    a: faer::MatRef<T>,
+    b: faer::MatRef<T>,
+    accum: faer::Accum,
+    alpha: T,
+    threads: usize,
+) {
+    let (m, k) = (a.nrows(), b.ncols());
+    let nt = row_runs(m, a.ncols() * k, threads);
+    let run = |t: usize| {
+        let (r0, r1) = (m * t / nt, m * (t + 1) / nt);
+        if r1 > r0 {
+            // SAFETY: rows r0..r1 of dst, disjoint between the runs.
+            let d = unsafe {
+                faer::MatMut::from_raw_parts_mut(dst.ptr().add(r0), r1 - r0, k, 1, ld as isize)
+            };
+            faer::linalg::matmul::matmul(d, accum, a.subrows(r0, r1 - r0), b, alpha, faer::Par::Seq);
+        }
+    };
+    if nt > 1 {
+        crate::pool::run(nt, &run);
+    } else {
+        run(0);
+    }
+}
+
+/// `dst -= a^T * src` for `a` of `m` rows and `q` columns, `src` of `m`
+/// rows and `k` columns, `dst` the `q x k` block at `dst` with leading
+/// dimension `ld`; the rows split between the pool's threads into one
+/// partial each in `red` (`threads * q * k`) and summed, when the product
+/// is big enough to pay for it.
+///
+/// # Safety
+///
+/// `dst` must be writable over the strided `q x k` range and alias
+/// neither `a` nor `src`.
+unsafe fn sub_transposed_product<T: SchurReal>(
+    dst: SharedMut<T>,
+    ld: usize,
+    a: faer::MatRef<T>,
+    src: faer::MatRef<T>,
+    red: &mut [T],
+    threads: usize,
+) {
+    let (m, q, k) = (a.nrows(), a.ncols(), src.ncols());
+    let nt = row_runs(m, q * k, threads);
+    if nt <= 1 {
+        // SAFETY: the q x k block the caller vouches for.
+        let d = unsafe { faer::MatMut::from_raw_parts_mut(dst.ptr(), q, k, 1, ld as isize) };
+        faer::linalg::matmul::matmul(
+            d,
+            faer::Accum::Add,
+            a.transpose(),
+            src,
+            minus_one::<T>(),
+            faer::Par::Seq,
+        );
+        return;
+    }
+    debug_assert!(red.len() >= nt * q * k, "the reduction scratch is too small");
+    let rp = SharedMut(red.as_mut_ptr());
+    crate::pool::run(nt, &|t| {
+        let (r0, r1) = (m * t / nt, m * (t + 1) / nt);
+        // SAFETY: partial t is its own q x k block of red.
+        let mut d =
+            unsafe { faer::MatMut::from_raw_parts_mut(rp.ptr().add(t * q * k), q, k, 1, q as isize) };
+        if r1 > r0 {
+            faer::linalg::matmul::matmul(
+                d,
+                faer::Accum::Replace,
+                a.subrows(r0, r1 - r0).transpose(),
+                src.subrows(r0, r1 - r0),
+                one::<T>(),
+                faer::Par::Seq,
+            );
+        } else {
+            d.fill(T::ZERO);
+        }
+    });
+    for t in 0..nt {
+        for c in 0..k {
+            for r in 0..q {
+                // SAFETY: inside the q x k block the caller vouches for.
+                unsafe {
+                    let p = dst.ptr().add(c * ld + r);
+                    *p -= red[t * q * k + c * q + r];
+                }
+            }
+        }
+    }
+}
+
+/// One supernode of the forward sweep `L Y = X` on `x` (`k` columns of
+/// leading dimension `n`): the triangular solve of its own rows, then
+/// its panel below the diagonal times those rows subtracted from the
+/// rows of its pattern. Pattern entries from `split` on are rows of the
+/// top and are subtracted from `part` (packed as `top` says) instead of
+/// `x`. `threads` above 1 splits a big panel's product over the pool.
+///
+/// # Safety
+///
+/// No other thread may touch the rows of `x` this writes -- the
+/// supernode's own and those of its pattern before `split` -- while it
+/// runs. `tmp` must hold `(h - q) * k` scalars when the pattern is not
+/// one contiguous run, `part` the top's rows when `split` is inside the
+/// pattern.
+#[allow(clippy::too_many_arguments)]
+unsafe fn forward_supernode<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    s: usize,
+    x: SharedMut<T>,
+    n: usize,
+    k: usize,
+    tmp: &mut [T],
+    part: &mut [T],
+    top: &TopRows,
+    split: usize,
+    threads: usize,
+) {
+    let (q, h) = sym.supernode_dims(s);
+    let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
+    let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
+    // SAFETY: the panel's diagonal block, column-major with leading
+    // dimension h.
+    let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+    let xp = x.ptr();
+    {
+        // SAFETY: rows c0..c0+q of each of the k columns, which are n apart.
+        let x_top = unsafe { faer::MatMut::from_raw_parts_mut(xp.add(c0), q, k, 1, n as isize) };
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(l11, x_top, faer::Par::Seq);
+    }
+    if h == q {
+        return;
+    }
+    let m = h - q;
+    // SAFETY: the panel below the diagonal block; x_top only reads.
+    let bot = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize) };
+    let x_top = unsafe { faer::MatRef::from_raw_parts(xp.add(c0), q, k, 1, n as isize) };
+    let pat = sym.supernode_pattern(s);
+    let split = split.min(pat.len());
+    // The rows of the panel below the diagonal that stay in x: all of
+    // them, or those before the first top entry.
+    let rs = if split < pat.len() { sym.supernode_pattern_rows(s)[split] as usize - q } else { m };
+    // A contiguous pattern (one scalar run below the supernode, the
+    // common banded/trajectory case) subtracts straight into the x
+    // segment; scattered patterns go through tmp.
+    if let Some(seg) = contiguous_below(sym, s, m) {
+        debug_assert!(c0 + q <= seg, "below-rows overlap the supernode's own columns");
+        if rs > 0 {
+            // SAFETY: within a column [c0, c0+q) and [seg, seg+rs) are
+            // disjoint (c0 + q <= seg) and the columns are n apart, so the
+            // read and write views never alias.
+            unsafe {
+                product_by_rows(
+                    SharedMut(xp.add(seg)),
+                    n,
+                    bot.subrows(0, rs),
+                    x_top,
+                    faer::Accum::Add,
+                    minus_one::<T>(),
+                    threads,
+                )
+            };
+        }
+        if rs < m {
+            // The run's top rows are consecutive in the partial too: every
+            // scalar between two of them is a pattern row, hence a top row.
+            let off = top.offset(sym, pat[split] as usize);
+            // SAFETY: rows off..off+(m-rs) of each of the partial's k
+            // columns, which are top.rows apart.
+            let dst = unsafe {
+                faer::MatMut::from_raw_parts_mut(
+                    part.as_mut_ptr().add(off), m - rs, k, 1, top.rows as isize,
+                )
+            };
+            faer::linalg::matmul::matmul(
+                dst,
+                faer::Accum::Add,
+                bot.subrows(rs, m - rs),
+                x_top,
+                minus_one::<T>(),
+                faer::Par::Seq,
+            );
+        }
+    } else {
+        // SAFETY: x_top only reads; tmp is a separate allocation of m * k.
+        unsafe {
+            product_by_rows(
+                SharedMut(tmp.as_mut_ptr()),
+                m,
+                bot,
+                x_top,
+                faer::Accum::Replace,
+                one::<T>(),
+                threads,
+            )
+        };
+        for (e, &blk) in pat.iter().enumerate() {
+            let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
+            let blk = blk as usize;
+            let w = (sym.sc_start[blk + 1] - sym.sc_start[blk]) as usize;
+            if e < split {
+                let dst = sym.sc_start[blk] as usize;
+                for c in 0..k {
+                    for r in 0..w {
+                        // SAFETY: a pattern row before split, this
+                        // supernode's to write.
+                        unsafe {
+                            let p = xp.add(c * n + dst + r);
+                            *p -= tmp[c * m + dr + r];
+                        }
+                    }
+                }
+            } else {
+                let dst = top.offset(sym, blk);
+                for c in 0..k {
+                    for r in 0..w {
+                        let p = &mut part[c * top.rows + dst + r];
+                        *p -= tmp[c * m + dr + r];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One supernode of the backward sweep `L^T X = Y` on `x`: its rows minus
+/// its panel below the diagonal, transposed, times the rows of its
+/// pattern, then the triangular solve. `threads` above 1 splits a big
+/// product over the pool, through `red` (`threads * q * k`).
+///
+/// # Safety
+///
+/// No other thread may touch the supernode's own rows of `x` while it
+/// runs, and the rows of its pattern must be final. `tmp` must hold
+/// `(h - q) * k` scalars when the pattern is not one contiguous run.
+#[allow(clippy::too_many_arguments)]
+unsafe fn backward_supernode<T: SchurReal>(
+    sym: &SupernodalSymbolic,
+    factor: &[T],
+    s: usize,
+    x: SharedMut<T>,
+    n: usize,
+    k: usize,
+    tmp: &mut [T],
+    red: &mut [T],
+    threads: usize,
+) {
+    let (q, h) = sym.supernode_dims(s);
+    let c0 = sym.sc_start[sym.sup_begin[s] as usize] as usize;
+    let panel = &factor[sym.val_ptr[s] as usize..sym.val_ptr[s + 1] as usize];
+    // SAFETY: the panel's diagonal block, column-major with leading
+    // dimension h.
+    let l11 = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr(), q, q, 1, h as isize) };
+    let xp = x.ptr();
+    if h > q {
+        let m = h - q;
+        // SAFETY: the panel below the diagonal block.
+        let bot = unsafe { faer::MatRef::from_raw_parts(panel.as_ptr().add(q), m, q, 1, h as isize) };
+        if let Some(seg) = contiguous_below(sym, s, m) {
+            debug_assert!(c0 + q <= seg, "below-rows overlap the supernode's own columns");
+            // SAFETY: disjoint row ranges within each column, as in the
+            // forward sweep; the pattern's rows are final and only read.
+            unsafe {
+                let xseg = faer::MatRef::from_raw_parts(xp.add(seg), m, k, 1, n as isize);
+                sub_transposed_product(SharedMut(xp.add(c0)), n, bot, xseg, red, threads);
+            }
+        } else {
+            for (e, &blk) in sym.supernode_pattern(s).iter().enumerate() {
+                let dr = sym.supernode_pattern_rows(s)[e] as usize - q;
+                let w = (sym.sc_start[blk as usize + 1] - sym.sc_start[blk as usize]) as usize;
+                let src = sym.sc_start[blk as usize] as usize;
+                for c in 0..k {
+                    for r in 0..w {
+                        // SAFETY: a pattern row, final and only read.
+                        tmp[c * m + dr + r] = unsafe { *xp.add(c * n + src + r) };
+                    }
+                }
+            }
+            // SAFETY: tmp is a separate allocation from x.
+            unsafe {
+                let t = faer::MatRef::from_raw_parts(tmp.as_ptr(), m, k, 1, m as isize);
+                sub_transposed_product(SharedMut(xp.add(c0)), n, bot, t, red, threads);
+            }
+        }
+    }
+    // SAFETY: rows c0..c0+q of each of the k columns.
+    let x_top = unsafe { faer::MatMut::from_raw_parts_mut(xp.add(c0), q, k, 1, n as isize) };
+    faer::linalg::triangular_solve::solve_upper_triangular_in_place(
+        l11.transpose(),
+        x_top,
+        faer::Par::Seq,
+    );
 }
 
 #[cfg(test)]
@@ -2490,6 +2942,54 @@ mod tests {
         (num / den).sqrt()
     }
 
+    /// An f32 factor under an f64 matrix: the plain solve is accurate to
+    /// single precision, and refinement against the f64 matrix brings it
+    /// to double in a few steps. The same-type entry points are the typed
+    /// ones with both scalars equal, so this also pins that path.
+    #[test]
+    fn f32_factor_refines_to_f64_accuracy() {
+        for seed in [3u64, 44] {
+            let (a, dense, rhs) = random_spd(48, 4, 2, seed);
+            let n = a.symbolic().ncols();
+            let nd = order_graph(&Graph::of_blocks(a.symbolic()), NdParams::default());
+            let sn = SupernodalSymbolic::new(a.symbolic(), Some(&nd), &SupernodalParams::default())
+                .unwrap();
+            let mut factor = vec![0.0f32; sn.factor_val_count()];
+            let mut ctx = SupernodalContext::<f32>::new();
+            supernodal_factorize_as(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
+            let mut x = rhs.clone();
+            supernodal_solve_as(&sn, &factor, &mut x, &mut ctx, 1);
+            let r0 = rel_resid(&dense, n, &x, &rhs);
+            assert!(r0 < 1e-4, "f32 factor: resid {} seed {}", r0, seed);
+            let mut last = r0;
+            for step in 1..=3 {
+                // r = rhs - A x in f64, A dx = r through the f32 factor
+                let mut r = vec![0.0f64; n];
+                for i in 0..n {
+                    let mut ax = 0.0;
+                    for j in 0..n {
+                        ax += dense[i + j * n] * x[j];
+                    }
+                    r[i] = rhs[i] - ax;
+                }
+                supernodal_solve_as(&sn, &factor, &mut r, &mut ctx, 1);
+                for i in 0..n {
+                    x[i] += r[i];
+                }
+                let ri = rel_resid(&dense, n, &x, &rhs);
+                assert!(ri < last || ri < 1e-13, "step {} did not refine: {} -> {}", step, last, ri);
+                last = ri;
+            }
+            assert!(last < 1e-11, "after refinement: resid {} seed {}", last, seed);
+            // the same-type wrappers still are the plain f64 route
+            let mut f64f = vec![0.0f64; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a, &mut f64f, &mut SupernodalContext::new(), 1).unwrap();
+            let mut x64 = rhs.clone();
+            supernodal_solve(&sn, &f64f, &mut x64, &mut SupernodalContext::new(), 1);
+            assert!(rel_resid(&dense, n, &x64, &rhs) < 1e-10);
+        }
+    }
+
     /// Factor + solve against the dense twin, across orders and with
     /// amalgamation on and off.
     #[test]
@@ -2518,7 +3018,7 @@ mod tests {
                         let mut factor = vec![0.0f64; sn.factor_val_count()];
                         supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
                         let mut x = rhs.clone();
-                        supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
+                        supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new(), 1);
                         let resid = rel_resid(&dense, n, &x, &rhs);
                         assert!(
                             resid < 1e-10,
@@ -2551,7 +3051,7 @@ mod tests {
         let mut factor = vec![0.0f32; sn.factor_val_count()];
         supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
         let mut x32: Vec<f32> = rhs.iter().map(|&v| v as f32).collect();
-        supernodal_solve(&sn, &factor, &mut x32, &mut SupernodalContext::new());
+        supernodal_solve(&sn, &factor, &mut x32, &mut SupernodalContext::new(), 1);
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
         let resid = rel_resid(&dense, n, &x, &rhs);
         assert!(resid < 1e-3, "resid {}", resid);
@@ -2677,7 +3177,7 @@ mod tests {
             let mut factor = vec![0.0f64; sn.factor_val_count()];
             supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
             let mut x = rhs.clone();
-            supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new());
+            supernodal_solve(&sn, &factor, &mut x, &mut SupernodalContext::new(), 1);
             (x, sn.batched_pairs())
         };
         let (x_plain, b_plain) = solve_with(None);
@@ -2766,7 +3266,7 @@ mod tests {
             for _ in 0..3 {
                 supernodal_factorize(&sn, &a, &mut factor, &mut ctx, 1).unwrap();
                 let mut x = rhs.clone();
-                supernodal_solve(&sn, &factor, &mut x, &mut ctx);
+                supernodal_solve(&sn, &factor, &mut x, &mut ctx, 1);
                 let resid = rel_resid(&dense, n, &x, &rhs);
                 assert!(resid < 1e-10, "resid {} nblk {}", resid, nblk);
             }
@@ -2798,11 +3298,11 @@ mod tests {
                     (0..n * k).map(|_| (rng.next() % 2000) as f64 / 1000.0 - 1.0).collect();
 
                 let mut batched = batched_in.clone();
-                supernodal_solve_multi(&sn, &factor, &mut batched, k, &mut ctx);
+                supernodal_solve_multi(&sn, &factor, &mut batched, k, &mut ctx, 1);
 
                 for c in 0..k {
                     let mut one = batched_in[c * n..(c + 1) * n].to_vec();
-                    supernodal_solve(&sn, &factor, &mut one, &mut ctx);
+                    supernodal_solve(&sn, &factor, &mut one, &mut ctx, 1);
                     for i in 0..n {
                         let (b, s) = (batched[c * n + i], one[i]);
                         assert!((b - s).abs() <= 1e-12 * (1.0 + s.abs()),
@@ -2891,13 +3391,74 @@ mod tests {
 
             let mut ctx = SupernodalContext::new();
             let (mut xs, mut xp) = (rhs.clone(), rhs.clone());
-            supernodal_solve(&sn, &seq, &mut xs, &mut ctx);
-            supernodal_solve(&sn, &par_f, &mut xp, &mut ctx);
+            supernodal_solve(&sn, &seq, &mut xs, &mut ctx, 1);
+            supernodal_solve(&sn, &par_f, &mut xp, &mut ctx, 1);
             for (i, (s, p)) in xs.iter().zip(&xp).enumerate() {
                 assert!((s - p).abs() <= 1e-9 * (1.0 + s.abs()), "nblk {}: x[{}] {} vs {}", nblk, i, s, p);
             }
             let resid = rel_resid(&dense, n, &xp, &rhs);
             assert!(resid < 1e-10, "nblk {}: resid {}", nblk, resid);
+        }
+    }
+
+    /// The threaded solve matches the sequential one to rounding: on a
+    /// tree that splits into subtrees (the workers' partials merged into
+    /// the top) and on one that does not (the big panels' products split
+    /// by rows -- the test build lowers the gate so that small panels take
+    /// that path), for one right-hand side and for several, and the
+    /// threaded symmetric product the refinement uses matches too.
+    #[cfg(feature = "threads")]
+    #[test]
+    fn the_threaded_solve_matches_the_sequential_one() {
+        for (nblk, max_w, extra, seed, splits) in
+            [(900usize, 4usize, 1usize, 21u64, true), (60, 12, 20, 5, false)]
+        {
+            let (a, dense, rhs) = random_spd(nblk, max_w, extra, seed);
+            let n = a.symbolic().ncols();
+            let order = order_graph(&Graph::of_blocks(a.symbolic()), NdParams::default());
+            let sn = SupernodalSymbolic::new(
+                a.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
+            assert_eq!(subtree_cut(&sn, 4).is_some(), splits, "nblk {}: the cut", nblk);
+            let mut factor = vec![0.0f64; sn.factor_val_count()];
+            supernodal_factorize(&sn, &a, &mut factor, &mut SupernodalContext::new(), 1).unwrap();
+
+            for k in [1usize, 3] {
+                let mut b = Vec::new();
+                for c in 0..k {
+                    b.extend(rhs.iter().map(|v| v * (c as f64 + 1.0)));
+                }
+                let mut seq = b.clone();
+                supernodal_solve_multi(&sn, &factor, &mut seq, k, &mut SupernodalContext::new(), 1);
+                if k == 1 {
+                    assert!(rel_resid(&dense, n, &seq, &rhs) < 1e-10);
+                }
+                for threads in [2usize, 4, 8] {
+                    let mut ctx = SupernodalContext::new();
+                    for round in 0..2 {
+                        let mut par = b.clone();
+                        supernodal_solve_multi(&sn, &factor, &mut par, k, &mut ctx, threads);
+                        for (i, (s, p)) in seq.iter().zip(&par).enumerate() {
+                            assert!(
+                                (s - p).abs() <= 1e-9 * (1.0 + s.abs()),
+                                "nblk {} k {} threads {} round {}: x[{}] {} vs {}",
+                                nblk, k, threads, round, i, s, p
+                            );
+                        }
+                    }
+                }
+            }
+
+            let mut want = vec![0.0; n];
+            a.mul_symmetric_upper(&rhs, &mut want);
+            let mut scratch = Vec::new();
+            for threads in [2usize, 3, 8] {
+                let mut got = vec![f64::NAN; n];
+                a.mul_symmetric_upper_threaded(&rhs, &mut got, threads, &mut scratch);
+                for i in 0..n {
+                    assert!((got[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                        "nblk {} threads {}: y[{}] {} vs {}", nblk, threads, i, got[i], want[i]);
+                }
+            }
         }
     }
 

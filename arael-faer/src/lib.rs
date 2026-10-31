@@ -187,7 +187,11 @@
 //!   and hands the pool to the dense kernels of the panels too big to
 //!   chunk; the result matches the sequential one to rounding
 //! * [`supernodal_solve`](supernodal::supernodal_solve) -- solve `A x = rhs`
-//!   from the factor
+//!   from the factor. Its thread count runs independent subtrees on
+//!   separate threads, each gathering what it owes the rows above the
+//!   subtrees into a partial of its own, and splits the big panels'
+//!   products between the threads; the result matches the sequential one
+//!   to rounding
 //! * [`SupernodalParams`](supernodal::SupernodalParams) -- amalgamation table,
 //!   update-batching ratio, postordering, and the work thresholds
 //!   (`window_update`, `window_solve`) past which a threaded factorization

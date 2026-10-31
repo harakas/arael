@@ -659,23 +659,28 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
 /// still bounds-checks every element, because nothing tells the compiler the
 /// slice is `NR` long. Converting once per tile moves that check out of the
 /// inner loop, which is the whole point of specializing.
+///
+/// The arithmetic runs in `A`, the vectors' scalar: the matrix's `T`
+/// itself, or a wider one its entries are converted to as they are read
+/// ([`WidenTo`]), which costs no extra pass over the matrix.
 #[inline(always)]
-fn tile_both_ways<T, const NR: usize>(
+fn tile_both_ways<T, A, const NR: usize>(
     payload: &[T],
-    xr: &[T; NR],
-    yr: &mut [T; NR],
-    xc: &[T],
-    yc: &mut [T],
+    xr: &[A; NR],
+    yr: &mut [A; NR],
+    xc: &[A],
+    yc: &mut [A],
     ncols: usize,
 ) where
-    T: ComplexField + Copy + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
+    T: WidenTo<A>,
+    A: ComplexField + Copy + core::ops::Add<Output = A> + core::ops::Mul<Output = A>,
 {
     for lc in 0..ncols {
         let xcj = xc[lc];
         let col: &[T; NR] = payload[lc * NR..lc * NR + NR].try_into().unwrap();
-        let mut acc = zero::<T>();
+        let mut acc = zero::<A>();
         for lr in 0..NR {
-            let a = col[lr];
+            let a = col[lr].widen();
             yr[lr] = yr[lr] + a * xcj;
             acc = acc + a * xr[lr];
         }
@@ -685,27 +690,51 @@ fn tile_both_ways<T, const NR: usize>(
 
 /// [`tile_both_ways`] for a width with no specialization.
 #[inline]
-fn tile_both_ways_dyn<T>(
+fn tile_both_ways_dyn<T, A>(
     payload: &[T],
-    xr: &[T],
-    yr: &mut [T],
-    xc: &[T],
-    yc: &mut [T],
+    xr: &[A],
+    yr: &mut [A],
+    xc: &[A],
+    yc: &mut [A],
     ncols: usize,
     nr: usize,
 ) where
-    T: ComplexField + Copy + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
+    T: WidenTo<A>,
+    A: ComplexField + Copy + core::ops::Add<Output = A> + core::ops::Mul<Output = A>,
 {
     for lc in 0..ncols {
         let xcj = xc[lc];
         let col = &payload[lc * nr..lc * nr + nr];
-        let mut acc = zero::<T>();
+        let mut acc = zero::<A>();
         for lr in 0..nr {
-            let a = col[lr];
+            let a = col[lr].widen();
             yr[lr] = yr[lr] + a * xcj;
             acc = acc + a * xr[lr];
         }
         yc[lc] = yc[lc] + acc;
+    }
+}
+
+/// A scalar a matrix entry can be read as: itself, or a wider type. The
+/// symmetric products take their vectors in the wider scalar and convert
+/// each entry as they read it, so an `f32` matrix times an `f64` vector
+/// accumulates in `f64` -- what the refinement of an `f32` system needs
+/// for a residual accurate beyond `f32`.
+pub trait WidenTo<A>: Copy {
+    fn widen(self) -> A;
+}
+
+impl<T: Copy> WidenTo<T> for T {
+    #[inline(always)]
+    fn widen(self) -> T {
+        self
+    }
+}
+
+impl WidenTo<f64> for f32 {
+    #[inline(always)]
+    fn widen(self) -> f64 {
+        self as f64
     }
 }
 
@@ -738,7 +767,108 @@ where
         for v in y.iter_mut() {
             *v = zero();
         }
+        self.mul_symmetric_upper_cols(0..sym.nblk_cols(), x, y);
+    }
+
+    /// [`mul_symmetric_upper`](Self::mul_symmetric_upper) on `threads`
+    /// threads of [`crate::pool`]: the block columns go in runs of about
+    /// equal value count, one per thread, each accumulated into a copy of
+    /// `y` of its own (`scratch`, grown to `(threads - 1) * nrows`), and
+    /// the copies are summed into `y`, the rows split between the threads.
+    /// No two threads write one entry. 0 and 1 are the sequential product;
+    /// the result matches it to rounding.
+    ///
+    /// The arithmetic runs in `A`, the vectors' scalar: `T` itself, or a
+    /// wider one the entries are converted to as they are read
+    /// ([`WidenTo`]); an `f32` matrix times `f64` vectors accumulates in
+    /// `f64`.
+    ///
+    /// # Panics
+    ///
+    /// As [`mul_symmetric_upper`](Self::mul_symmetric_upper).
+    pub fn mul_symmetric_upper_threaded<A>(
+        &self,
+        x: &[A],
+        y: &mut [A],
+        threads: usize,
+        scratch: &mut Vec<A>,
+    ) where
+        T: WidenTo<A> + Sync,
+        A: ComplexField + Copy + core::ops::Add<Output = A> + core::ops::Mul<Output = A> + Send + Sync,
+    {
+        let sym = &self.symbolic;
+        let nt = threads.max(1).min(sym.nblk_cols());
+        if nt <= 1 {
+            assert_eq!(x.len(), sym.ncols(), "x length must match the column count");
+            assert_eq!(y.len(), sym.nrows(), "y length must match the row count");
+            for v in y.iter_mut() {
+                *v = zero();
+            }
+            return self.mul_symmetric_upper_cols(0..sym.nblk_cols(), x, y);
+        }
+        assert_eq!(x.len(), sym.ncols(), "x length must match the column count");
+        assert_eq!(y.len(), sym.nrows(), "y length must match the row count");
+        debug_assert_eq!(sym.row_part(), sym.col_part(), "not a symmetric partition");
+        let n = y.len();
+        // Runs of block columns of about equal value count. A run may be
+        // empty when a few columns hold most of the values.
+        let total = sym.val_count();
+        let mut bounds = vec![0usize];
+        let mut seen = 0usize;
         for j in 0..sym.nblk_cols() {
+            let r = sym.col_range(j);
+            if !r.is_empty() {
+                seen += sym.val_range(r.end - 1).end - sym.val_range(r.start).start;
+            }
+            if bounds.len() < nt && seen * nt >= total * bounds.len() {
+                bounds.push(j + 1);
+            }
+        }
+        bounds.resize(nt + 1, sym.nblk_cols());
+        bounds[nt] = sym.nblk_cols();
+
+        scratch.resize((nt - 1) * n, zero());
+        let yp = crate::pool::SharedMut(y.as_mut_ptr());
+        let sp = crate::pool::SharedMut(scratch.as_mut_ptr());
+        crate::pool::run(nt, &|t| {
+            // SAFETY: run 0 owns y, run t > 0 its own copy in scratch; no two
+            // runs share one, and the call does not return before every run
+            // has finished.
+            let out = unsafe {
+                if t == 0 {
+                    core::slice::from_raw_parts_mut(yp.ptr(), n)
+                } else {
+                    core::slice::from_raw_parts_mut(sp.ptr().add((t - 1) * n), n)
+                }
+            };
+            for v in out.iter_mut() {
+                *v = zero();
+            }
+            self.mul_symmetric_upper_cols(bounds[t]..bounds[t + 1], x, out);
+        });
+        let copies: &[A] = scratch;
+        crate::pool::run(nt, &|t| {
+            let (r0, r1) = (n * t / nt, n * (t + 1) / nt);
+            // SAFETY: rows r0..r1 of y, disjoint between the runs; the copies
+            // are only read.
+            let out = unsafe { core::slice::from_raw_parts_mut(yp.ptr().add(r0), r1 - r0) };
+            for p in 0..nt - 1 {
+                for (o, v) in out.iter_mut().zip(&copies[p * n + r0..p * n + r1]) {
+                    *o = *o + *v;
+                }
+            }
+        });
+    }
+
+    /// The product of block columns `cols`, accumulated into `y`, in the
+    /// vectors' scalar `A`.
+    fn mul_symmetric_upper_cols<A>(&self, cols: core::ops::Range<usize>, x: &[A], y: &mut [A])
+    where
+        T: WidenTo<A>,
+        A: ComplexField + Copy + core::ops::Add<Output = A> + core::ops::Mul<Output = A>,
+    {
+        let sym = &self.symbolic;
+        for j in cols {
             let cols = sym.col_span(j);
             for b in sym.col_range(j) {
                 let r = sym.blk_row(b);
@@ -748,7 +878,7 @@ where
                 if r == j {
                     for (lc, cj) in cols.clone().enumerate() {
                         for lr in 0..=lc {
-                            let a = payload[lc * nr + lr];
+                            let a = payload[lc * nr + lr].widen();
                             let ri = rows.start + lr;
                             y[ri] = y[ri] + a * x[cj];
                             if lr != lc {
@@ -775,7 +905,7 @@ where
                     let xc = &x[cols.clone()];
                     macro_rules! fixed {
                         ($w:expr) => {
-                            tile_both_ways::<T, $w>(
+                            tile_both_ways::<T, A, $w>(
                                 payload,
                                 xr.try_into().unwrap(),
                                 (&mut yr[..]).try_into().unwrap(),
@@ -1187,6 +1317,63 @@ mod tests {
     // A diagonal tile's strictly-lower half is allocated zero and never
     // written, so reading the whole tile there loses the off-diagonal
     // coupling. Guards against a "simplification" back to a full-tile read.
+    /// An f32 matrix times f64 vectors accumulates in f64: the result is
+    /// the f64 product of the matrix's (f32-valued) entries, where the f32
+    /// product of the same matrix loses digits.
+    #[test]
+    fn the_widened_symmetric_matvec_accumulates_in_f64() {
+        let m = doodle_symmetric();
+        let n = m.symbolic().nrows();
+        // Entries far apart in magnitude, so the f32 sums cancel badly.
+        let scaled: Vec<f64> = m.vals().iter().enumerate()
+            .map(|(i, &v)| if i % 3 == 0 { v * 1e4 } else { v + 0.1 })
+            .collect();
+        let as_f32: Vec<f32> = scaled.iter().map(|&v| v as f32).collect();
+        let m32 = SparseBlockColMat::<usize, f32>::new(m.symbolic().clone(), as_f32.clone());
+        let rounded = SparseBlockColMat::<usize, f64>::new(
+            m.symbolic().clone(), as_f32.iter().map(|&v| v as f64).collect());
+        let x: Vec<f64> = (0..n).map(|i| 1.0 - 0.37 * i as f64).collect();
+        let mut want = vec![0.0; n];
+        rounded.mul_symmetric_upper(&x, &mut want);
+
+        let mut scratch = Vec::new();
+        for threads in [1usize, 3] {
+            let mut got = vec![f64::NAN; n];
+            m32.mul_symmetric_upper_threaded::<f64>(&x, &mut got, threads, &mut scratch);
+            for i in 0..n {
+                assert!((got[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                    "threads {} row {}: got {}, want {}", threads, i, got[i], want[i]);
+            }
+        }
+        // The same product in f32 does not reach that.
+        let x32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+        let mut got32 = vec![0.0f32; n];
+        m32.mul_symmetric_upper(&x32, &mut got32);
+        let worst = (0..n).map(|i| ((got32[i] as f64 - want[i]) / (1.0 + want[i].abs())).abs())
+            .fold(0.0, f64::max);
+        assert!(worst > 1e-9, "the f32 product was expected to lose digits, worst {:e}", worst);
+    }
+
+    /// The threaded product matches the sequential one, with more threads
+    /// than block columns too.
+    #[test]
+    fn the_threaded_symmetric_matvec_matches_the_sequential_one() {
+        let m = doodle_symmetric();
+        let n = m.symbolic().nrows();
+        let x: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.5).collect();
+        let mut want = vec![0.0; n];
+        m.mul_symmetric_upper(&x, &mut want);
+        let mut scratch = Vec::new();
+        for threads in [0usize, 1, 2, 3, 8, 64] {
+            let mut got = vec![f64::NAN; n];
+            m.mul_symmetric_upper_threaded(&x, &mut got, threads, &mut scratch);
+            for i in 0..n {
+                assert!((got[i] - want[i]).abs() < 1e-12,
+                    "threads {} row {}: got {}, want {}", threads, i, got[i], want[i]);
+            }
+        }
+    }
+
     #[test]
     fn symmetric_matvec_mirrors_diagonal_tiles() {
         let m = doodle_symmetric();
