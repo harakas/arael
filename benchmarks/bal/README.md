@@ -403,6 +403,7 @@ BAL_ONLY=1723-clean cargo run --release              # the exploratory dataset
 BAL_COV=1 cargo run --release                        # covariance recovery (above)
 cargo run -r --bin schur_stats                       # S's size, density, cost split
 cargo run -r --bin f32_floor datasets/problem-372-47423-pre.txt 1e-4   # where f32 loses (below)
+cargo run -r --bin wide_cost datasets/problem-49-7776-pre.txt         # the with_wide scope in f64 against df32 (below)
 ```
 
 The run prints all of its settings in a header, so a pasted result carries what
@@ -442,6 +443,13 @@ cameras' rotation is a `MixedEulerAngleParam`, whose f64 rotation the scope
 reads; together they bring the f32 model's residuals to within 2e-8 px of the
 f64 model's at the same point, at no measurable cost per iteration at 372 and
 one to five percent at 49.
+
+`wide_cost <dataset> [repeats]` compares the scope's two wide scalars on the
+f32 model at the dataset's initial point: f64 against `df32` (two f32s, for a
+target without f64), the residuals of both against the f64 model's and against
+each other, and the time of the cost and of the assembly for each. On this
+CPU the two agree to rounding ties and df32 costs 2.4x the assembly, f64 being
+native here; the number is what a GPU without fast f64 would carry.
 | `TIMING` | arael's per-solve phase breakdown |
 | `BAL_NO_MEM` | skip the peak-memory pass |
 
