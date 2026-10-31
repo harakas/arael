@@ -869,6 +869,14 @@ pub struct DecaySparseOptions {
     pub block_supernodal_batch: f64,
     #[wasm_bindgen(js_name = "blockSupernodalMemoryLean")]
     pub block_supernodal_memory_lean: bool,
+    /// Factor in single precision on the block supernodal route and
+    /// refine each solve against the double-precision matrix.
+    #[wasm_bindgen(js_name = "mixedPrecision")]
+    pub mixed_precision: bool,
+    #[wasm_bindgen(js_name = "maxRefinements")]
+    pub max_refinements: u32,
+    #[wasm_bindgen(js_name = "refineTol")]
+    pub refine_tol: f64,
 }
 
 #[wasm_bindgen]
@@ -916,6 +924,9 @@ impl DecaySparseOptions {
             },
             block_supernodal_batch: d.block_supernodal_batch.unwrap_or(0.0),
             block_supernodal_memory_lean: d.block_supernodal_memory_lean,
+            mixed_precision: d.mixed_precision.is_some(),
+            max_refinements: d.mixed_precision.unwrap_or_default().max_refinements as u32,
+            refine_tol: d.mixed_precision.unwrap_or_default().tol,
         }
     }
     fn to_options(&self) -> Result<SparseFaerOptions, JsValue> {
@@ -957,7 +968,11 @@ impl DecaySparseOptions {
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
-            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean);
+            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean)
+            .with_mixed_precision(self.mixed_precision.then(|| arael::simple_lm::MixedPrecision {
+                max_refinements: self.max_refinements as usize,
+                tol: self.refine_tol,
+            }));
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
@@ -1154,6 +1169,9 @@ impl DecayLmResult {
         js_set(&o, "keptBandwidth", &JsValue::from_f64(p.kept_bandwidth as f64));
         js_set(&o, "envelope", &JsValue::from_bool(p.envelope));
         js_set(&o, "blockSupernodal", &JsValue::from_bool(p.block_supernodal));
+        js_set(&o, "f32Factor", &JsValue::from_bool(p.f32_factor));
+        js_set(&o, "refinements", &js_opt(p.refinements.map(|n| n as f64)));
+        js_set(&o, "refinementShortfalls", &js_opt(p.refinement_shortfalls.map(|n| n as f64)));
         o.into()
     }
     /// The per-attempt timeline, one object per attempted step; empty
@@ -1776,6 +1794,14 @@ pub struct LineSparseOptions {
     pub block_supernodal_batch: f64,
     #[wasm_bindgen(js_name = "blockSupernodalMemoryLean")]
     pub block_supernodal_memory_lean: bool,
+    /// Factor in single precision on the block supernodal route and
+    /// refine each solve against the double-precision matrix.
+    #[wasm_bindgen(js_name = "mixedPrecision")]
+    pub mixed_precision: bool,
+    #[wasm_bindgen(js_name = "maxRefinements")]
+    pub max_refinements: u32,
+    #[wasm_bindgen(js_name = "refineTol")]
+    pub refine_tol: f64,
 }
 
 #[wasm_bindgen]
@@ -1823,6 +1849,9 @@ impl LineSparseOptions {
             },
             block_supernodal_batch: d.block_supernodal_batch.unwrap_or(0.0),
             block_supernodal_memory_lean: d.block_supernodal_memory_lean,
+            mixed_precision: d.mixed_precision.is_some(),
+            max_refinements: d.mixed_precision.unwrap_or_default().max_refinements as u32,
+            refine_tol: d.mixed_precision.unwrap_or_default().tol,
         }
     }
     fn to_options(&self) -> Result<SparseFaerOptions, JsValue> {
@@ -1864,7 +1893,11 @@ impl LineSparseOptions {
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
-            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean);
+            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean)
+            .with_mixed_precision(self.mixed_precision.then(|| arael::simple_lm::MixedPrecision {
+                max_refinements: self.max_refinements as usize,
+                tol: self.refine_tol,
+            }));
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
@@ -2061,6 +2094,9 @@ impl LineLmResult {
         js_set(&o, "keptBandwidth", &JsValue::from_f64(p.kept_bandwidth as f64));
         js_set(&o, "envelope", &JsValue::from_bool(p.envelope));
         js_set(&o, "blockSupernodal", &JsValue::from_bool(p.block_supernodal));
+        js_set(&o, "f32Factor", &JsValue::from_bool(p.f32_factor));
+        js_set(&o, "refinements", &js_opt(p.refinements.map(|n| n as f64)));
+        js_set(&o, "refinementShortfalls", &js_opt(p.refinement_shortfalls.map(|n| n as f64)));
         o.into()
     }
     /// The per-attempt timeline, one object per attempted step; empty

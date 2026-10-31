@@ -273,6 +273,13 @@ class SparseOptions(ctypes.Structure):
         # Memory-lean amalgamation for that route: a smaller factor,
         # at some cost in speed.
         ("block_supernodal_memory_lean", ctypes.c_bool),
+        # Factor in single precision on that route and refine each
+        # solve against the double-precision matrix, by at most
+        # max_refinements steps or until the relative residual is
+        # under refine_tol.
+        ("mixed_precision", ctypes.c_bool),
+        ("max_refinements", ctypes.c_uint32),
+        ("refine_tol", ctypes.c_double),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
@@ -326,7 +333,10 @@ class SchurPlan(ctypes.Structure):
     factored system was ordered, and the evidence behind the Auto
     decisions. `envelope` says the system was factored in block form
     under its envelope and `block_supernodal` that the block supernodal
-    Cholesky factorized it rather than faer's scalar one; optional
+    Cholesky factorized it rather than faer's scalar one; `f32_factor`
+    that the factor was single precision, with `refinements` the
+    refinement steps summed over the solve and `refinement_shortfalls`
+    the damped solves that ended above the tolerance; optional
     statistics read as None when absent."""
     _fields_ = [
         ("reduced", ctypes.c_bool),
@@ -341,6 +351,9 @@ class SchurPlan(ctypes.Structure):
         ("kept_bandwidth", ctypes.c_uint32),
         ("envelope", ctypes.c_bool),
         ("block_supernodal", ctypes.c_bool),
+        ("f32_factor", ctypes.c_bool),
+        ("_refinements", _OptU32),
+        ("_refinement_shortfalls", _OptU32),
     ]
 
     fill_ratio = _plan_opt("_fill_ratio", float)
@@ -348,6 +361,8 @@ class SchurPlan(ctypes.Structure):
     cg_iterations = _plan_opt("_cg_iterations", int)
     flop_ratio = _plan_opt("_flop_ratio", float)
     ordering = _plan_opt("_ordering", ReducedOrdering)
+    refinements = _plan_opt("_refinements", int)
+    refinement_shortfalls = _plan_opt("_refinement_shortfalls", int)
 
 
 class FormTiming(ctypes.Structure):

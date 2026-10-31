@@ -266,8 +266,11 @@ views are named by their container's nature: `PathPosesDeque`,
   MarginalizeFirst / Natural / NestedDissection), the envelope route
   for the reduced system (Auto / Always / Never, plus panel width),
   supernodal on/off, narrow band, and the block supernodal Cholesky
-  (`BlockSupernodalMode` Auto / Always / Never, its batching ratio and
-  its memory-lean amalgamation). Constructed with the actual Rust
+  (`BlockSupernodalMode` Auto / Always / Never, its batching ratio,
+  its memory-lean amalgamation, and `mixed_precision` with
+  `max_refinements` and `refine_tol`: an f32 factor refined against the
+  f64 matrix, reported by the plan's `f32_factor`, `refinements` and
+  `refinement_shortfalls`). Constructed with the actual Rust
   defaults; the one-argument `solve_sparse(cfg)` uses them.
 - **LmSession**: warm reuse over repeated sparse solves --
   `LmSession sess;` (optionally over a `SparseOptions`), then

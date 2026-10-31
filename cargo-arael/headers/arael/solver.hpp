@@ -314,6 +314,13 @@ struct SparseOptionsT {
     /// Memory-lean amalgamation for that route: a smaller factor, at
     /// some cost in speed.
     bool block_supernodal_memory_lean;
+    /// Factor in single precision on that route and refine each solve
+    /// against the double-precision matrix (Rust's MixedPrecision), by
+    /// at most max_refinements steps or until the relative residual is
+    /// under refine_tol. Off by default.
+    bool mixed_precision;
+    uint32_t max_refinements;
+    double refine_tol;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
@@ -445,6 +452,13 @@ struct SchurPlan {
     /// Factored by the block supernodal Cholesky rather than faer's
     /// scalar one, over the same system `envelope` refers to.
     bool block_supernodal;
+    /// The factor was single precision (SparseOptions::mixed_precision).
+    bool f32_factor;
+    /// Refinement steps summed over the solve, and damped solves that
+    /// ended above the refinement tolerance; present on a
+    /// single-precision factor.
+    option<uint32_t> refinements;
+    option<uint32_t> refinement_shortfalls;
 };
 
 /// One form's share of a sweep phase, summed over its calls (mirrors

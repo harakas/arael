@@ -389,7 +389,10 @@ fields and pass it to `solve_sparse`: `schur` (`SchurPolicy`),
 `envelope_panel_width`, `supernodal`, `narrow_band`, `schur_solve`
 (`SchurSolve`), and the block supernodal Cholesky knobs
 `block_supernodal` (`BlockSupernodalMode`), `block_supernodal_batch`,
-`block_supernodal_memory_lean`. An enum setter rejects a value
+`block_supernodal_memory_lean`, and `mixed_precision` with
+`max_refinements` and `refine_tol` (an f32 factor refined against the
+f64 matrix; the plan's `f32_factor`, `refinements` and
+`refinement_shortfalls` report it). An enum setter rejects a value
 outside the enum with `ValueError`.
 
 ```python
