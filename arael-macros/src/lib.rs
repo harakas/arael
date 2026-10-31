@@ -57,6 +57,28 @@ use std::sync::Mutex;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+
+/// The keywords of a `#[arael(root, ...)]` attribute, parsed.
+struct RootKeywords {
+    /// `f32` or `f64`.
+    precision: String,
+    /// `extended`: the root implements `ExtendedModel` by hand.
+    custom: bool,
+    /// `jacobian`: emit the Jacobian and cost-table diagnostics.
+    jacobian: bool,
+    /// `fast_atan`: the fast atan / atan2 in the generated code.
+    fast_atan: bool,
+    /// `marginalize(fields)`: the landmark-like fields named.
+    marginalize: Vec<syn::Ident>,
+    /// `cost_kahan` / `cost_f64`: how the cost sums.
+    cost_kahan: bool,
+    cost_f64: bool,
+    /// `grad_kahan` / `grad_f64`: how the gradient stashes sum.
+    grad_kahan: bool,
+    grad_f64: bool,
+    /// `seq`: the sweeps stay on one thread.
+    seq: bool,
+}
 use syn::{
     parse_macro_input,
     Expr, Pat, Stmt,
@@ -937,6 +959,10 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   in the cost at a slight computational cost. `cost_f64` sums in
 ///   f64 on an f32 root (ignored on an f64 root). The two combine.
 ///   docs/MODEL.md, "The cost sum".
+/// - `grad_plain` (the default), `grad_kahan`, `grad_f64` -- the same
+///   for the gradient: how each entity's gradient entries sum the terms
+///   of its residuals in the block stores. docs/MODEL.md, "The gradient
+///   sum".
 /// - `marginalize(field, ...)` -- marks landmark-style fields (small
 ///   parameter blocks coupled to other parameters but never to each
 ///   other) for the sparse solver to eliminate first. Generates
@@ -2573,6 +2599,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             let mut cost_plain = false;
             let mut cost_kahan = false;
             let mut cost_f64 = false;
+            let mut grad_plain = false;
+            let mut grad_kahan = false;
+            let mut grad_f64 = false;
             let mut seq = false;
             let mut marginalize: Vec<syn::Ident> = Vec::new();
             let mut pos = 1;
@@ -2600,6 +2629,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             cost_kahan = true;
                         } else if kw_str == "cost_f64" {
                             cost_f64 = true;
+                        } else if kw_str == "grad_plain" {
+                            grad_plain = true;
+                        } else if kw_str == "grad_kahan" {
+                            grad_kahan = true;
+                        } else if kw_str == "grad_f64" {
+                            grad_f64 = true;
                         } else if kw_str == "seq" {
                             seq = true;
                         } else if kw_str == "marginalize" {
@@ -2629,7 +2664,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `seq`, or `marginalize(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `grad_plain`, `grad_kahan`, `grad_f64`, `seq`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -2648,7 +2683,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 return Some(Err(syn::Error::new(id.span(),
                     "`cost_plain` cannot be combined with `cost_kahan` or `cost_f64`")));
             }
-            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize, cost_kahan, cost_f64, seq)));
+            if grad_plain && (grad_kahan || grad_f64) {
+                return Some(Err(syn::Error::new(id.span(),
+                    "`grad_plain` cannot be combined with `grad_kahan` or `grad_f64`")));
+            }
+            return Some(Ok(RootKeywords {
+                precision, custom, jacobian, fast_atan, marginalize,
+                cost_kahan, cost_f64, grad_kahan, grad_f64, seq,
+            }));
         }
         None
     });
@@ -2656,14 +2698,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         Some(r) => Some(r?),
         None => None,
     };
-    let root_precision = root_info.as_ref().map(|(p, _, _, _, _, _, _, _)| p.clone());
-    let root_custom = root_info.as_ref().map(|(_, c, _, _, _, _, _, _)| *c).unwrap_or(false);
-    let root_jacobian = root_info.as_ref().map(|(_, _, j, _, _, _, _, _)| *j).unwrap_or(false);
-    let root_fast_atan = root_info.as_ref().map(|(_, _, _, f, _, _, _, _)| *f).unwrap_or(false);
-    let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e, _, _, _)| e.clone()).unwrap_or_default();
-    let root_cost_kahan = root_info.as_ref().map(|(_, _, _, _, _, k, _, _)| *k).unwrap_or(false);
-    let root_cost_f64 = root_info.as_ref().map(|(_, _, _, _, _, _, w, _)| *w).unwrap_or(false);
-    let root_seq = root_info.as_ref().map(|(_, _, _, _, _, _, _, s)| *s).unwrap_or(false);
+    let root_precision = root_info.as_ref().map(|r| r.precision.clone());
+    let root_custom = root_info.as_ref().is_some_and(|r| r.custom);
+    let root_jacobian = root_info.as_ref().is_some_and(|r| r.jacobian);
+    let root_fast_atan = root_info.as_ref().is_some_and(|r| r.fast_atan);
+    let root_eliminate = root_info.as_ref().map(|r| r.marginalize.clone()).unwrap_or_default();
+    let root_cost_kahan = root_info.as_ref().is_some_and(|r| r.cost_kahan);
+    let root_cost_f64 = root_info.as_ref().is_some_and(|r| r.cost_f64);
+    let root_grad_kahan = root_info.as_ref().is_some_and(|r| r.grad_kahan);
+    let root_grad_f64 = root_info.as_ref().is_some_and(|r| r.grad_f64);
+    let root_seq = root_info.as_ref().is_some_and(|r| r.seq);
 
     // Schur auto-detection: which parameter blocks may be marginalized.
     //
@@ -2839,7 +2883,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let par = !root_seq && cfg!(feature = "threads");
         constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
-            root_fast_atan, root_cost_kahan, root_cost_f64,
+            root_fast_atan, root_cost_kahan, root_cost_f64, root_grad_kahan, root_grad_f64,
             &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?
     } else {
         quote! {}

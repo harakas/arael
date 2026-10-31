@@ -4698,6 +4698,8 @@ pub fn generate_root_methods(
     fast_atan: bool,
     cost_kahan: bool,
     cost_f64: bool,
+    grad_kahan: bool,
+    grad_f64: bool,
     marginalize_hint_fn: &Option<TokenStream2>,
     marginalize_candidates_fn: &Option<TokenStream2>,
     uses_coo: bool,
@@ -4709,6 +4711,15 @@ pub fn generate_root_methods(
     let cast_type: syn::Type = syn::parse_str(precision)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
             format!("invalid precision type '{}': {}", precision, e)))?;
+    // The gradient stash's policy in the block stores (docs/MODEL.md, "The
+    // gradient sum"): `grad_f64` widens it on an f32 root, `grad_kahan`
+    // compensates its adds.
+    let grad_policy: TokenStream2 = match (grad_f64, grad_kahan) {
+        (false, false) => quote! { arael::store::GradPlain },
+        (false, true) => quote! { arael::store::GradKahan },
+        (true, false) => quote! { arael::store::GradWide },
+        (true, true) => quote! { arael::store::GradWideKahan },
+    };
     // The cost accumulator: `cost_f64` widens it to f64 (a no-op on an f64
     // root), `cost_kahan` compensates the rounding of every add. Both cost
     // paths, the cost-only sweep and the one fused into the block assembly,
@@ -9340,9 +9351,9 @@ pub fn generate_root_methods(
                             // stores each entity at its live size.
                             let ty = if self_var {
                                 store_var_self_names.insert(name.to_string());
-                                quote! { arael::store::VarSelfBlockArray<#n, #cast_type> }
+                                quote! { arael::store::VarSelfBlockArray<#n, #cast_type, #grad_policy> }
                             } else {
-                                quote! { arael::store::SelfBlockArray<#n, #m, #cast_type> }
+                                quote! { arael::store::SelfBlockArray<#n, #m, #cast_type, #grad_policy> }
                             };
                             store_ty_of.insert(name.to_string(), ty.clone());
                             store_self_names.push(name.clone());

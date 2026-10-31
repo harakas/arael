@@ -1003,6 +1003,79 @@ fn self_mapped<const N: usize, const M: usize, T: crate::utils::Float, F: crate:
     }
 }
 
+/// How an entity's gradient stash accumulates, chosen by the root keywords
+/// `grad_kahan` and `grad_f64` (docs/MODEL.md, "The gradient sum"): in the
+/// root's scalar with plain adds (the default), in f64 on an f32 root,
+/// with compensated adds, or both. The plain policy keeps the stash inside
+/// the block's value run, next to the triangle a residual writes with it;
+/// the others hold it in an array of its own.
+pub trait GradPolicy<T: crate::utils::Float>: Clone + Default + 'static {
+    /// The stash's scalar.
+    type Acc: crate::utils::Float;
+    /// Compensated (Kahan) adds: every entry carries a running remainder.
+    const KAHAN: bool;
+    /// The stash lives apart from the triangle, in the policy's scalar.
+    const APART: bool;
+    /// A term of the root's scalar as the stash accumulates it.
+    fn widen(x: T) -> Self::Acc;
+}
+
+/// Plain adds in the root's scalar; the default.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct GradPlain;
+/// Compensated adds in the root's scalar (`grad_kahan`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct GradKahan;
+/// An f64 stash on an f32 root (`grad_f64`); on an f64 root, plain adds.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct GradWide;
+/// An f64 stash with compensated adds (`grad_f64, grad_kahan`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct GradWideKahan;
+
+impl<T: crate::utils::Float> GradPolicy<T> for GradPlain {
+    type Acc = T;
+    const KAHAN: bool = false;
+    const APART: bool = false;
+    #[inline(always)]
+    fn widen(x: T) -> T { x }
+}
+impl<T: crate::utils::Float> GradPolicy<T> for GradKahan {
+    type Acc = T;
+    const KAHAN: bool = true;
+    const APART: bool = true;
+    #[inline(always)]
+    fn widen(x: T) -> T { x }
+}
+impl GradPolicy<f32> for GradWide {
+    type Acc = f64;
+    const KAHAN: bool = false;
+    const APART: bool = true;
+    #[inline(always)]
+    fn widen(x: f32) -> f64 { x as f64 }
+}
+impl GradPolicy<f64> for GradWide {
+    type Acc = f64;
+    const KAHAN: bool = false;
+    const APART: bool = false;
+    #[inline(always)]
+    fn widen(x: f64) -> f64 { x }
+}
+impl GradPolicy<f32> for GradWideKahan {
+    type Acc = f64;
+    const KAHAN: bool = true;
+    const APART: bool = true;
+    #[inline(always)]
+    fn widen(x: f32) -> f64 { x as f64 }
+}
+impl GradPolicy<f64> for GradWideKahan {
+    type Acc = f64;
+    const KAHAN: bool = true;
+    const APART: bool = true;
+    #[inline(always)]
+    fn widen(x: f64) -> f64 { x }
+}
+
 /// A slab of self blocks with the indices apart from the values: per
 /// entity its container slot and its N parameter indices in one array,
 /// the M entries of its upper triangle and its N gradient entries in one
@@ -1017,27 +1090,36 @@ fn self_mapped<const N: usize, const M: usize, T: crate::utils::Float, F: crate:
 /// One entity's triangle and its gradient stash are adjacent in `data`,
 /// at stride `M + N`: a residual writes both, so they share the region
 /// the write pulls in rather than sitting in two arrays a thread has to
-/// stream separately.
+/// stream separately. Under a [`GradPolicy`] that widens or compensates
+/// the stash, the stash is in `grad` instead and the `N` entries in
+/// `data` stay zero.
 #[derive(Clone)]
-pub struct SelfBlockArray<const N: usize, const M: usize, T: crate::utils::Float = f64> {
+pub struct SelfBlockArray<const N: usize, const M: usize, T: crate::utils::Float = f64, P: GradPolicy<T> = GradPlain> {
     entity: std::vec::Vec<u32>,
     indices: std::vec::Vec<[u32; N]>,
     /// Per entity: `M` triangle entries, then `N` gradient entries.
     data: std::vec::Vec<T>,
+    /// Per entity under a policy that keeps the stash apart: `N` entries
+    /// in the policy's scalar, then `N` Kahan remainders when it
+    /// compensates. Empty under the plain policy.
+    grad: std::vec::Vec<P::Acc>,
     /// Global slot to this slab's position, for a slab holding only some
     /// of the entities. Empty on a slab that holds them all, where the
     /// marker's slot addresses the data directly.
     map: std::vec::Vec<u32>,
 }
 
-impl<const N: usize, const M: usize, T: crate::utils::Float> Default for SelfBlockArray<N, M, T> {
+impl<const N: usize, const M: usize, T: crate::utils::Float, P: GradPolicy<T>> Default for SelfBlockArray<N, M, T, P> {
     fn default() -> Self { Self::new() }
 }
 
-impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M, T> {
+impl<const N: usize, const M: usize, T: crate::utils::Float, P: GradPolicy<T>> SelfBlockArray<N, M, T, P> {
     const CHECK_M: () = assert!(M == N * (N + 1) / 2, "SelfBlockArray: M must equal N*(N+1)/2");
     /// One entity's span of [`data`](Self::data): the triangle then the stash.
     const STRIDE: usize = M + N;
+    /// One entity's span of [`grad`](Self::grad): the stash, and the
+    /// remainders when the policy compensates.
+    const GSTRIDE: usize = if P::KAHAN { 2 * N } else { N };
 
     /// An empty slab.
     pub fn new() -> Self {
@@ -1046,6 +1128,7 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
             entity: std::vec::Vec::new(),
             indices: std::vec::Vec::new(),
             data: std::vec::Vec::new(),
+            grad: std::vec::Vec::new(),
             map: std::vec::Vec::new(),
         }
     }
@@ -1055,7 +1138,9 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
 
     /// Bytes one block takes in a whole store: its triangle and stash,
     /// its indices and its entity slot.
-    pub const BLOCK_BYTES: usize = Self::STRIDE * std::mem::size_of::<T>() + N * 4 + 4;
+    pub const BLOCK_BYTES: usize = Self::STRIDE * std::mem::size_of::<T>()
+        + if P::APART { Self::GSTRIDE * std::mem::size_of::<P::Acc>() } else { 0 }
+        + N * 4 + 4;
 
     /// The blocks held and the bytes of the arrays, the map included.
     pub fn footprint(&self) -> StoreFootprint {
@@ -1064,6 +1149,7 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
             cross_blocks: 0,
             coo_entries: 0,
             bytes: self.data.len() * std::mem::size_of::<T>()
+                + self.grad.len() * std::mem::size_of::<P::Acc>()
                 + self.indices.len() * N * 4 + self.entity.len() * 4 + self.map.len() * 4,
         }
     }
@@ -1172,11 +1258,18 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         if self.data.len() != n {
             self.data = vec![T::zero(); n];
         }
+        if P::APART {
+            let ng = self.entity.len() * Self::GSTRIDE;
+            if self.grad.len() != ng {
+                self.grad = vec![<P::Acc as num::Zero>::zero(); ng];
+            }
+        }
     }
 
     /// Reset every triangle and every gradient stash.
     pub fn zero(&mut self) {
         self.data.fill(T::zero());
+        self.grad.fill(<P::Acc as num::Zero>::zero());
     }
 
     /// The container slot of entity `k`.
@@ -1189,6 +1282,34 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
     fn block(&self, k: usize) -> &[T; M] {
         let base = k * Self::STRIDE;
         (&self.data[base..base + M]).try_into().unwrap()
+    }
+
+    /// Add `x` (a term in the root's scalar) to entry `i` of entity `k`'s
+    /// stash the way the policy says: into `data` under the plain one,
+    /// else into `grad`, compensated when it says so.
+    #[inline(always)]
+    fn stash_add(data_g: &mut [T; N], grad: &mut [P::Acc], k: usize, i: usize, x: T) {
+        if P::APART {
+            let base = k * Self::GSTRIDE;
+            if P::KAHAN {
+                let (sum, comp) = grad[base..base + Self::GSTRIDE].split_at_mut(N);
+                crate::utils::kahan_add(&mut sum[i], &mut comp[i], P::widen(x));
+            } else {
+                grad[base + i] += P::widen(x);
+            }
+        } else {
+            data_g[i] += x;
+        }
+    }
+
+    /// Entry `i` of entity `k`'s stash.
+    #[inline]
+    fn stash(&self, k: usize, i: usize) -> P::Acc {
+        if P::APART {
+            self.grad[k * Self::GSTRIDE + i]
+        } else {
+            P::widen(self.data[k * Self::STRIDE + M + i])
+        }
     }
 
     /// Add one residual's contribution to the entity at global `slot`
@@ -1241,7 +1362,7 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         let g: &mut [T; N] = g.try_into().unwrap();
         let sr = scale * r;
         for i in 0..N {
-            g[i] += sr * dr[i];
+            Self::stash_add(g, &mut self.grad, k, i, sr * dr[i]);
             let tdi = scale * dr[i];
             for j in i..N {
                 h[tri_idx(N, i, j)] += tdi * dr[j];
@@ -1259,7 +1380,7 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
         let g: &mut [T; N] = g.try_into().unwrap();
         let sr = scale * r;
         for i in 0..K {
-            g[at[i]] += sr * dr[i];
+            Self::stash_add(g, &mut self.grad, k, at[i], sr * dr[i]);
             let tdi = scale * dr[i];
             for j in i..K {
                 h[tri_idx(N, at[i], at[j])] += tdi * dr[j];
@@ -1272,12 +1393,10 @@ impl<const N: usize, const M: usize, T: crate::utils::Float> SelfBlockArray<N, M
     pub fn scatter_grad<F: crate::utils::Float>(&self, grad: &mut [F]) {
         for k in 0..self.entity.len() {
             let idx = &self.indices[k];
-            let base = k * Self::STRIDE + M;
-            let g = &self.data[base..base + N];
             for i in 0..N {
                 let gi = idx[i];
                 if gi == u32::MAX { continue; }
-                grad[gi as usize] += F::from(g[i]).unwrap();
+                grad[gi as usize] += F::from(self.stash(k, i)).unwrap();
             }
         }
     }
@@ -2393,6 +2512,9 @@ const VAR_NO_POS: u8 = u8::MAX;
 pub struct VarSelfMeta<const N: usize> {
     /// First value of the block: the triangle, then the stash.
     off: u32,
+    /// First entry of the block's stash in the array a [`GradPolicy`]
+    /// keeps apart: `w` entries, then `w` remainders when it compensates.
+    goff: u32,
     /// First live global index; `u32::MAX` when every slot is fixed
     /// and the block stores nothing.
     s: u32,
@@ -2407,8 +2529,9 @@ pub struct VarSelfMeta<const N: usize> {
 }
 
 impl<const N: usize> VarSelfMeta<N> {
-    /// The block of index row `indices`, its values from `off`.
-    fn new(indices: &[u32; N], off: usize) -> Self {
+    /// The block of index row `indices`, its values from `off` and its
+    /// apart stash from `goff`.
+    fn new(indices: &[u32; N], off: usize, goff: usize) -> Self {
         let (s, w) = tile_extent(indices);
         let mut live = [0u8; N];
         let mut pos = [VAR_NO_POS; N];
@@ -2421,7 +2544,9 @@ impl<const N: usize> VarSelfMeta<N> {
         }
         let off = u32::try_from(off)
             .expect("a variable-width self array holds up to 2^32 values");
-        VarSelfMeta { off, s, w: w as u8, live, pos }
+        let goff = u32::try_from(goff)
+            .expect("a variable-width self array holds up to 2^32 stash entries");
+        VarSelfMeta { off, goff, s, w: w as u8, live, pos }
     }
 
     /// The entries of the triangle.
@@ -2453,24 +2578,34 @@ impl<const N: usize> VarSelfMeta<N> {
 /// its readers work from the extent alone, compact position `ci` being
 /// global index `s + ci`.
 #[derive(Clone)]
-pub struct VarSelfBlockArray<const N: usize, T: crate::utils::Float = f64> {
+pub struct VarSelfBlockArray<const N: usize, T: crate::utils::Float = f64, P: GradPolicy<T> = GradPlain> {
     entity: std::vec::Vec<u32>,
     meta: std::vec::Vec<VarSelfMeta<N>>,
     data: std::vec::Vec<T>,
+    /// The stashes under a policy that keeps them apart (see
+    /// [`SelfBlockArray`]): per entity `w` entries, then `w` remainders
+    /// when it compensates, at the meta's `goff`. Empty under the plain
+    /// policy, whose stash follows the triangle in `data`.
+    grad: std::vec::Vec<P::Acc>,
     /// The values the blocks pushed take: the next block's offset.
     total: usize,
+    /// The apart stash entries the blocks pushed take.
+    total_g: usize,
     /// As [`SelfBlockArray`]'s map: global slot to slab position for a
     /// slab holding only some of the entities.
     map: std::vec::Vec<u32>,
 }
 
-impl<const N: usize, T: crate::utils::Float> Default for VarSelfBlockArray<N, T> {
+impl<const N: usize, T: crate::utils::Float, P: GradPolicy<T>> Default for VarSelfBlockArray<N, T, P> {
     fn default() -> Self { Self::new() }
 }
 
-impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
+impl<const N: usize, T: crate::utils::Float, P: GradPolicy<T>> VarSelfBlockArray<N, T, P> {
     const CHECK_WIDTH: () = assert!(N <= u8::MAX as usize,
         "VarSelfBlockArray: an entity holds up to 255 parameters");
+    /// Apart stash entries per live parameter: the entry, and its
+    /// remainder when the policy compensates.
+    const GPER: usize = if P::KAHAN { 2 } else { 1 };
 
     /// An empty slab.
     pub fn new() -> Self {
@@ -2479,7 +2614,9 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
             entity: std::vec::Vec::new(),
             meta: std::vec::Vec::new(),
             data: std::vec::Vec::new(),
+            grad: std::vec::Vec::new(),
             total: 0,
+            total_g: 0,
             map: std::vec::Vec::new(),
         }
     }
@@ -2500,8 +2637,10 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
         }
     }
 
-    /// Bytes the blocks' values take.
-    pub fn value_bytes(&self) -> usize { self.data.len() * std::mem::size_of::<T>() }
+    /// Bytes the blocks' values take, the apart stashes included.
+    pub fn value_bytes(&self) -> usize {
+        self.data.len() * std::mem::size_of::<T>() + self.grad.len() * std::mem::size_of::<P::Acc>()
+    }
 
     /// Bytes the values of every entity held by any of `arrays` take,
     /// each entity once: the split stores of a solve hold an entity in
@@ -2538,6 +2677,7 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
         self.meta.clear();
         self.map.clear();
         self.total = 0;
+        self.total_g = 0;
     }
 
     /// True if `slot` already has a place in this slab.
@@ -2558,8 +2698,11 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
     #[inline]
     pub fn push(&mut self, entity: u32, indices: &[u32; N]) -> u32 {
         let k = self.entity.len() as u32;
-        let m = VarSelfMeta::new(indices, self.total);
+        let m = VarSelfMeta::new(indices, self.total, self.total_g);
         self.total += m.len();
+        if P::APART {
+            self.total_g += m.w as usize * Self::GPER;
+        }
         self.entity.push(entity);
         self.meta.push(m);
         k
@@ -2610,11 +2753,33 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
         if self.data.len() != self.total {
             self.data = vec![T::zero(); self.total];
         }
+        if self.grad.len() != self.total_g {
+            self.grad = vec![<P::Acc as num::Zero>::zero(); self.total_g];
+        }
     }
 
     /// Reset every triangle and every gradient stash.
     pub fn zero(&mut self) {
         self.data.fill(T::zero());
+        self.grad.fill(<P::Acc as num::Zero>::zero());
+    }
+
+    /// Add `x` (a term in the root's scalar) to compact entry `ci` of a
+    /// block's stash the way the policy says: into the block's run in
+    /// `data` (`g`) under the plain one, else into `grad` from `goff`,
+    /// compensated when it says so.
+    #[inline(always)]
+    fn stash_add(g: &mut [T], grad: &mut [P::Acc], goff: usize, w: usize, ci: usize, x: T) {
+        if P::APART {
+            if P::KAHAN {
+                let (sum, comp) = grad[goff..goff + 2 * w].split_at_mut(w);
+                crate::utils::kahan_add(&mut sum[ci], &mut comp[ci], P::widen(x));
+            } else {
+                grad[goff + ci] += P::widen(x);
+            }
+        } else {
+            g[ci] += x;
+        }
     }
 
     /// The container slot of entity `k`.
@@ -2683,7 +2848,7 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
         let sr = scale * r;
         for (ia, &i) in live.iter().enumerate() {
             let di = dr[i as usize];
-            g[ia] += sr * di;
+            Self::stash_add(g, &mut self.grad, m.goff as usize, w, ia, sr * di);
             let tdi = scale * di;
             // The row's entries `(ia, ia..w)` of the triangle are one run.
             let start = tri_idx(w, ia, ia);
@@ -2708,7 +2873,7 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
             let ci = m.pos[at[i]];
             if ci == VAR_NO_POS { continue; }
             let ci = ci as usize;
-            g[ci] += sr * dr[i];
+            Self::stash_add(g, &mut self.grad, m.goff as usize, w, ci, sr * dr[i]);
             let tdi = scale * dr[i];
             for j in i..K {
                 let cj = m.pos[at[j]];
@@ -2735,9 +2900,13 @@ impl<const N: usize, T: crate::utils::Float> VarSelfBlockArray<N, T> {
     pub fn scatter_grad<F: crate::utils::Float>(&self, grad: &mut [F]) {
         for m in &self.meta {
             let w = m.w as usize;
-            let g = &self.data[m.off as usize + m.tri()..m.off as usize + m.tri() + w];
             for ci in 0..w {
-                grad[m.s as usize + ci] += F::from(g[ci]).unwrap();
+                let v = if P::APART {
+                    self.grad[m.goff as usize + ci]
+                } else {
+                    P::widen(self.data[m.off as usize + m.tri() + ci])
+                };
+                grad[m.s as usize + ci] += F::from(v).unwrap();
             }
         }
     }

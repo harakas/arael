@@ -565,6 +565,7 @@ struct Path {
 | `#[arael(root, cost_plain)]` | the cost is summed with plain adds in the root's precision, one partial per loop (the default; see [The cost sum](#the-cost-sum)) |
 | `#[arael(root, cost_kahan)]` | every add of the cost sum is compensated (Kahan), so the sum's rounding does not grow with the row count |
 | `#[arael(root, cost_f64)]` | the cost sum is accumulated in f64 on an f32 root; ignored on an f64 root; combines with `cost_kahan` |
+| `#[arael(root, grad_plain)]` / `grad_kahan` / `grad_f64` | the same three choices for the gradient: how each entity's gradient entries sum the terms of its residuals in the block stores (see [The gradient sum](#the-gradient-sum)) |
 | `#[arael(root, seq)]` | keep the cost and assembly sweeps on one thread whatever `num_threads` says; the linear solve still threads. For a root that is not `Sync` (a `Cell`, `RefCell` or `Rc` field) or one that should stay sequential. Without it, under the `threads` cargo feature, every root's sweeps thread (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)). |
 | `#[arael(root, marginalize(field, ...))]` | mark landmark-style fields (small blocks coupled to poses but never to each other) for the sparse solver to marginalize. Generates `LmProblemInternals::marginalize_hint()` with the fields' parameter ranges, which `SparseFaer` reads off the model itself. Optional: without it the solver finds the marginalizable families in the model's coupling graph anyway. Use it to override that -- the named blocks are used as given, and must be mutually uncoupled |
 | `#[arael(fit(coll, \|e\| body))]` / `fit64(...)` | shorthand: sum-of-squares fit of a residual body over one collection (f32; `fit64` is f64). Implements `FitProblem`, whose `fit()` / `fit_with()` run the dense LM round trip |
@@ -642,6 +643,44 @@ remains after the accumulation is exact. That is the floor a solver
 in that precision works against. For an f32 model `cost_f64` is the
 setting to use; for an f64 model the default is enough, and
 `cost_kahan` removes what is left of the accumulation.
+
+### The gradient sum
+
+An entity's gradient entries are sums too: one term `2 r dr` per
+residual that touches the entity, added into the entity's stash in its
+block store as the sweep runs, and the stashes of the threads added
+into the gradient at the end. A camera seen in hundreds of observations
+sums hundreds of terms per entry, and the terms cancel near the
+optimum, where the gradient is small and its rounding matters most. The
+root keywords `grad_plain`, `grad_kahan` and `grad_f64` choose how the
+stash sums, with the meanings of their `cost_` twins:
+
+```rust,ignore
+#[arael::model]
+#[arael(root, f32, cost_f64, grad_f64)]
+struct Scene { cameras: refs::Vec<Camera<f32>>, points: refs::Vec<Point<f32>>, obs: Vec<Obs<f32>> }
+```
+
+**`grad_plain`, the default.** Plain adds in the root's precision into
+a stash that sits next to the entity's Hessian triangle.
+
+**`grad_kahan`.** Every add is compensated; the stash carries a
+remainder per entry, in its own array.
+
+**`grad_f64`.** On an f32 root the stash is f64 and each term is formed
+in f64 from the f32 residual and partial; the sum is rounded to f32
+once, into the gradient. On an f64 root the keyword does nothing. It
+combines with `grad_kahan`. The terms and the adds are f64 arithmetic:
+free where f64 runs at f32's speed, not on hardware where it does not,
+which is where an f32 model usually runs. Measure before turning it on
+there.
+
+The keywords cover the block stores (`SelfBlock` and `VarSelfBlock`
+entities). A residual whose gradient goes straight into the gradient
+vector, as the `coo` storage's does, sums in the root's precision. The
+Hessian blocks sum in the root's precision in every case: a block entry
+is a sum of a few hundred squares at most, without the cancellation of
+the gradient.
 
 ### Generic models
 
