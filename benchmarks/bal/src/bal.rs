@@ -114,17 +114,45 @@ pub fn residual(cam: &CameraIn, rot: &matrix3d, point: vect3d, xy: vect2d) -> [f
     [cam.f * d * px - xy.x, cam.f * d * py - xy.y]
 }
 
+/// The near-plane guard, the experiment knob `BAL_GUARD_Z=<depth>`: an
+/// observation whose point lies closer than this to the camera's focal
+/// plane, or behind it, contributes nothing -- residual and derivatives
+/// zero in the arael models, and left out of the reference cost. A point
+/// left with no observation has no curvature, which
+/// `LmConfig::min_diagonal` lets through. `None` when unset: every
+/// observation counts as it is. A typo is rejected rather than silently
+/// ignored.
+///
+/// Clamping the depth instead was measured and dropped: a point behind
+/// the camera then projects at the clamp depth with a huge residual and
+/// no gradient in depth, and the f64 solve on Ladybug-49 went from 21
+/// iterations at 26689 to 57 at 529480.
+pub fn guard_z() -> Option<f64> {
+    std::env::var("BAL_GUARD_Z").ok().map(|v| {
+        v.parse().unwrap_or_else(|_| panic!("BAL_GUARD_Z={}: expected a depth, e.g. 1e-2", v))
+    })
+}
+
 /// Sum of squared reprojection residuals (no 1/2 factor). THE cost every
 /// system optimizes; each system's result is evaluated with this one
-/// function.
+/// function. Under [`guard_z`] the guarded observations are left out, as
+/// the arael models leave them out of the fit.
 pub fn reference_cost(ds: &Dataset, cams: &[CameraIn], points: &[vect3d]) -> f64 {
     assert_eq!(cams.len(), ds.cameras.len());
     assert_eq!(points.len(), ds.points.len());
+    let drop_under = guard_z();
     let rots: Vec<matrix3d> = cams.iter().map(|c| c.rot()).collect();
     let mut cost = 0.0;
     for o in &ds.observations {
         let c = &cams[o.cam as usize];
-        let r = residual(c, &rots[o.cam as usize], points[o.point as usize], o.xy);
+        let rot = &rots[o.cam as usize];
+        let p = points[o.point as usize];
+        if let Some(z) = drop_under {
+            if -(*rot * p + c.t).z < z {
+                continue;
+            }
+        }
+        let r = residual(c, rot, p, o.xy);
         cost += r[0] * r[0] + r[1] * r[1];
     }
     cost

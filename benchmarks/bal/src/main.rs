@@ -121,6 +121,12 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
         .rounds(rounds)
         .line("datasets", format!("{} [BAL_ONLY]", only.as_deref().unwrap_or("all")))
         .line("systems", format!("{} [BAL_SYSTEMS]", systems.as_deref().unwrap_or("all")))
+        .line("near-plane guard", match bal::guard_z() {
+            Some(z) => format!(
+                "observations closer than {:e} to the focal plane, or behind it, dropped by the \
+                 arael models and the reference cost [BAL_GUARD_Z]", z),
+            None => "off: every observation counts [BAL_GUARD_Z]".to_string(),
+        })
         .line("g2o rows", g2o_rows().iter().map(|r| r.label.as_str())
             .collect::<Vec<_>>().join(", ")
             + " [BAL_PCG_TOLS, BAL_PCG_ITERS]")

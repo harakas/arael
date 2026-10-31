@@ -11,78 +11,94 @@
 
 use arael::simple_lm::RootProblem;
 use crate::bal::{CameraIn, Dataset};
-use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
-use arael::quatern::{quaternd, quaternf};
+use arael::model::{CrossBlock, MixedEulerAngleParam, Param, SelfBlock};
+use arael::quatern::quaternd;
 use arael::refs::{self, Ref};
 use arael::utils::Float;
 use arael::vect::{vect2, vect3, vect3d};
 
 #[arael::model]
 #[derive(Clone)]
-struct Camera<T: Float> {
-    t: Param<vect3<T>>,
-    ea: EulerAngleParam<T>, // world-to-camera
-    intr: Param<vect3<T>>,  // (f, k1, k2)
-    hb: SelfBlock<Camera<T>, T>,
+pub struct Camera<T: Float> {
+    pub t: Param<vect3<T>>,
+    // World-to-camera. The mixed param keeps the rotation in f64 for the
+    // body's `with_wide` scope; in the f64 model it is an EulerAngleParam
+    // holding its rotation twice (the one struct serves both roots).
+    pub ea: MixedEulerAngleParam<T>,
+    pub intr: Param<vect3<T>>,  // (f, k1, k2)
+    // The near-plane guard (BAL_GUARD_Z): the depth under which an
+    // observation is dropped. Far negative when off, so every observation
+    // counts as it is.
+    pub zdrop: T,
+    pub hb: SelfBlock<Camera<T>, T>,
 }
 
 #[arael::model]
 #[derive(Clone)]
-struct Point<T: Float> {
-    pos: Param<vect3<T>>,
-    hb: SelfBlock<Point<T>, T>,
+pub struct Point<T: Float> {
+    pub pos: Param<vect3<T>>,
+    pub hb: SelfBlock<Point<T>, T>,
 }
 
 #[arael::model]
 #[arael(constraint(hb, {
     let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+    // The camera looks down -z, so the depth is -pc.z; the guard zeroes
+    // the residual and its derivatives under zdrop.
+    let keep = -pc.z - cam.zdrop;
     let px = -pc.x / pc.z;
     let py = -pc.y / pc.z;
     let r2 = px * px + py * py;
     let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
-    [cam.intr.x * d * px - obs.xy.x,
-     cam.intr.x * d * py - obs.xy.y]
+    // The residual VALUE in f64 whatever the root's scalar: an f32
+    // projection at focal length 1000 carries f * eps_f32 of a pixel,
+    // which the gradient's sums do not cancel. The derivatives stay in
+    // the root's scalar; on the f64 root the scope is the identity.
+    [branch(keep, with_wide(cam.intr.x * d * px - obs.xy.x), 0.0),
+     branch(keep, with_wide(cam.intr.x * d * py - obs.xy.y), 0.0)]
 }))]
 #[derive(Clone)]
-struct Obs<T: Float> {
+pub struct Obs<T: Float> {
     #[arael(ref = root.cameras)]
-    cam: Ref<Camera<T>>,
+    pub cam: Ref<Camera<T>>,
     #[arael(ref = root.points)]
-    pt: Ref<Point<T>>,
-    xy: vect2<T>,
-    hb: CrossBlock<Camera<T>, Point<T>, T>,
+    pub pt: Ref<Point<T>>,
+    pub xy: vect2<T>,
+    pub hb: CrossBlock<Camera<T>, Point<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
 pub struct Scene {
-    cameras: refs::Vec<Camera<f64>>,
-    points: refs::Vec<Point<f64>>,
-    observations: std::vec::Vec<Obs<f64>>,
+    pub cameras: refs::Vec<Camera<f64>>,
+    pub points: refs::Vec<Point<f64>>,
+    pub observations: std::vec::Vec<Obs<f64>>,
 }
 
 #[arael::model]
 #[arael(root, f32)]
 #[derive(Clone)]
 pub struct SceneF {
-    cameras: refs::Vec<Camera<f32>>,
-    points: refs::Vec<Point<f32>>,
-    observations: std::vec::Vec<Obs<f32>>,
+    pub cameras: refs::Vec<Camera<f32>>,
+    pub points: refs::Vec<Point<f32>>,
+    pub observations: std::vec::Vec<Obs<f32>>,
 }
 
 // ---------------------------------------------------------------- runners
 
-fn build_parts<T: Float>(ds: &Dataset)
+pub fn build_parts<T: Float>(ds: &Dataset)
     -> (refs::Vec<Camera<T>>, refs::Vec<Point<T>>, std::vec::Vec<Obs<T>>)
 {
     let c3 = |v: vect3d| -> vect3<T> { v.cast() };
+    let zdrop: T = T::from(crate::bal::guard_z().unwrap_or(-1e30)).unwrap();
     let mut cameras = refs::Vec::new();
     for c in &ds.cameras {
         cameras.push(Camera {
             t: Param::new(c3(c.t)),
-            ea: EulerAngleParam::new(c3(c.rot().get_euler_angles())),
+            ea: MixedEulerAngleParam::new(c.rot().get_euler_angles()),
             intr: Param::new(c3(vect3d::new(c.f, c.k1, c.k2))),
+            zdrop,
             hb: SelfBlock::new(),
         });
     }
@@ -397,7 +413,14 @@ impl bench_harness::arael::Model for Scene {
     fn build(p: &Problem) -> Self { build_f64(&p.ds) }
     fn serialize(&mut self, out: &mut Vec<f64>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f64]) { arael::simple_lm::RootProblem::deserialize(self, x); }
-    fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) { cfg.lambda_floor = lambda_floor(); }
+    fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) {
+        cfg.lambda_floor = lambda_floor();
+        // A dropped observation may leave a point with no curvature; the
+        // floor lets the factorization through (see LmConfig::min_diagonal).
+        if crate::bal::guard_z().is_some() {
+            cfg.min_diagonal = Some(1e-6);
+        }
+    }
     fn solution(&self) -> Solution {
         Solution {
             cameras: self.cameras.iter()
@@ -577,15 +600,21 @@ impl bench_harness::arael::Model for SceneF {
     fn build(p: &Problem) -> Self { build_f32(&p.ds) }
     fn serialize(&mut self, out: &mut Vec<f32>) { arael::simple_lm::RootProblem::serialize(self, out); }
     fn deserialize(&mut self, x: &[f32]) { arael::simple_lm::RootProblem::deserialize(self, x); }
-    fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) { cfg.lambda_floor = lambda_floor() as f32; }
+    fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) {
+        cfg.lambda_floor = lambda_floor() as f32;
+        if crate::bal::guard_z().is_some() {
+            cfg.min_diagonal = Some(1e-6);
+        }
+    }
     fn solution(&self) -> Solution {
         Solution {
             cameras: self.cameras.iter()
                 .map(|c| {
-                    let m = arael::matrix::matrix3f::rotation_from_euler_angles(c.ea.value);
-                    let (axis, angle) = quaternf::from_rotation_matrix(m).get_axis_angle();
+                    // The mixed param's value is f64 whatever the model's scalar.
+                    let m = arael::matrix::matrix3d::rotation_from_euler_angles(c.ea.value);
+                    let (axis, angle) = quaternd::from_rotation_matrix(m).get_axis_angle();
                     CameraIn {
-                        rodrigues: vect3d::from(axis * angle),
+                        rodrigues: axis * angle,
                         t: vect3d::from(c.t.value),
                         f: c.intr.value.x as f64,
                         k1: c.intr.value.y as f64,

@@ -206,7 +206,8 @@ the camera and fourteen on the optical centre (`pc.z` down to 3.65e-9), where
 the perspective divide is 0/0. f64 absorbs them; f32 turns them into a NaN on
 the Hessian diagonal and stops at iteration 0. `clean_bal.py` drops them and
 renumbers, giving the 1722-camera problem measured here; every runner is
-pointed at the same cleaned file.
+pointed at the same cleaned file. (`BAL_GUARD_Z=1e-2` lets the arael rows,
+f32 included, run the raw file; see the note under the table.)
 
 **Not a ranking.** With the damping in the Damping section the iterations are
 measurable, but no system reaches the shared 1e-5 tolerances here. They stop on
@@ -259,13 +260,19 @@ The factorized Schur route still beats the full sparse solve (1694 vs 2469 ms),
 on the largest reduced system in the suite -- 15,498 parameters. That holds only
 under nested dissection; see the section below.
 
-\*\* **arael's f32 rows run on the cleaned data but stop far short.** All four
-land at 4.32-4.54M against the 765440 plateau -- 1.06 px reprojection RMS for
-the f64 rows against 2.5-2.6 px for these. Their camera centres are close
-(3.4-3.5e-3, inside the gate the f32 rows are given), so the geometry is roughly
-right and the fine fit is not: at 485k parameters and 678k observations the
-single-precision accumulation floor is above the optimum. Cleaning the data
-removes the NaN, not the precision limit.
+\*\* **arael's f32 rows run on the cleaned data but stop far short** in this
+table. All four land at 4.32-4.54M against the 765440 plateau -- 1.06 px
+reprojection RMS for the f64 rows against 2.5-2.6 px for these. Their camera
+centres are close (3.4-3.5e-3, inside the gate the f32 rows are given), so the
+geometry is roughly right and the fine fit is not. The cause was measured
+later (`f32_floor`): the near-plane observations the cleaning does not remove
+(274 within 0.001 of depth at the optimum) and the f32 evaluation of the
+residual values. With both fixed -- `BAL_GUARD_Z=1e-2` and the body's
+`with_wide` scope around each residual -- the f32 rows reach the f64 rows'
+optimum on this file and on the raw Ladybug-1723 (2026-10-31, one round):
+f64 schur 764716.85 against f32 schur 764488.89 and f32 sparse 764631.65
+on the cleaned file, 764676.53 against 764717.02 and 764736.38 on the raw
+one, the percentiles 0.535/2.227 and 0.535/2.232 on every row.
 
 The four tables above, drawn as one iteration plus the setup it pays once,
 one cell per dataset:
@@ -395,6 +402,7 @@ ROUNDS=5 cargo run --release
 BAL_ONLY=1723-clean cargo run --release              # the exploratory dataset
 BAL_COV=1 cargo run --release                        # covariance recovery (above)
 cargo run -r --bin schur_stats                       # S's size, density, cost split
+cargo run -r --bin f32_floor datasets/problem-372-47423-pre.txt 1e-4   # where f32 loses (below)
 ```
 
 The run prints all of its settings in a header, so a pasted result carries what
@@ -417,7 +425,23 @@ produced it.
 | `DRIVER=fixed` | arael's fixed damping ladder instead of the gain-ratio driver it defaults to here |
 | `BAL_ORDERING=amd` | AMD on the reduced camera system instead of nested dissection |
 | `BAL_SCHUR_POLICY=auto` | let the fill analysis decide the reduction instead of forcing it |
+| `ARAEL_F32_FACTOR`, `ARAEL_REFINE_TOL` | the f32 factor under the f64 rows: refinement steps at most, and the relative residual to refine to (defaults 4 and 1e-10) |
+| `BAL_GUARD_Z` | the near-plane guard: an observation whose point is closer than this depth to the camera's focal plane, or behind it, is dropped by the arael models and by the reference cost. 1e-2 lets f32 reach the f64 optimum on every Ladybug file; 1e-3 makes both precisions thrash on the points at the cut. Off by default |
 | `VERBOSE` | arael's per-iteration solver trace |
+
+`f32_floor <dataset> <lambda0>` measures, at the f64 optimum, what an f32
+model can and cannot do with the problem: the cost rise from rounding the
+parameters to f32, the f32 residuals' error against f64, the f32 model's
+gradient and Hessian diagonal against the f64 model's at the same point
+(parameters and observations rounded to f32; the rotations are f64 in both
+models), the gradient
+error split between the Jacobian and the residuals through the two
+Jacobians, and the near-plane observations by depth. The arael bodies wrap
+each residual value in `with_wide` (docs/MODEL.md, "Precision scope") and the
+cameras' rotation is a `MixedEulerAngleParam`, whose f64 rotation the scope
+reads; together they bring the f32 model's residuals to within 2e-8 px of the
+f64 model's at the same point, at no measurable cost per iteration at 372 and
+one to five percent at 49.
 | `TIMING` | arael's per-solve phase breakdown |
 | `BAL_NO_MEM` | skip the peak-memory pass |
 
