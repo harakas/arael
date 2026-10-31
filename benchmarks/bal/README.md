@@ -123,6 +123,8 @@ What each column means:
 | **1st-iter ms** | one iteration plus the setup the others do not pay again. |
 | **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
 | **final cost** | evaluated by the one reference cost function for every system. |
+| **px p50/p95** | the median and the 95th-percentile reprojection error of the result, in pixels: what the reconstruction is worth, where the cost's low digits say little. |
+| **cam-rmse** | similarity-aligned relative camera-centre RMSE against the lowest-cost row (the validation distance). |
 
 full-iter, full-norm and 1st-iter are dropped ("-") for any system whose first
 iteration was not a single accepted step: such an iteration is mostly wasted

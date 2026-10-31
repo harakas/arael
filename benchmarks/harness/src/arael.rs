@@ -73,6 +73,26 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     fn par_timing(_ctx: &arael::threads::Context) -> Option<String> { None }
 }
 
+/// ARAEL_F32_FACTOR=<n> factors in single precision on the supernodal block
+/// route and refines each solve by at most n steps
+/// (SparseFaerOptions::with_mixed_precision); ARAEL_REFINE_TOL sets the
+/// relative residual the refinement stops at (library default otherwise).
+/// Unset keeps the double-precision factor. A typo is rejected rather than
+/// silently ignored.
+pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
+    let steps = std::env::var("ARAEL_F32_FACTOR").ok()?;
+    let max_refinements = steps.parse().unwrap_or_else(|_| {
+        panic!("ARAEL_F32_FACTOR={}: expected a refinement step count", steps)
+    });
+    let mut mp = arael::simple_lm::MixedPrecision { max_refinements, ..Default::default() };
+    if let Ok(t) = std::env::var("ARAEL_REFINE_TOL") {
+        mp.tol = t.parse().unwrap_or_else(|_| {
+            panic!("ARAEL_REFINE_TOL={}: expected a relative residual", t)
+        });
+    }
+    Some(mp)
+}
+
 /// ARAEL_LAMBDA0 overrides the model's damping, for experiments.
 pub fn lambda0<M: Model>(input: &M::Input) -> f64 {
     std::env::var("ARAEL_LAMBDA0")

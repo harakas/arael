@@ -365,7 +365,8 @@ impl bench_harness::arael::Model for World {
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())), m, cfg, ctx)
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -390,7 +391,8 @@ pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
         &mut SparseFaer::<f64>::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())),
         &mut world,
         &cfg,
     )
@@ -409,7 +411,8 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
         &mut SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())),
         &mut world,
         &cfg,
     )
@@ -448,7 +451,8 @@ impl bench_harness::arael::Model for WorldF {
             .with_envelope_schur(envelope_mode())
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())), m, cfg, ctx)
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;

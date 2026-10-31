@@ -438,7 +438,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                     .with_policy(arael::simple_lm::SchurPolicy::Never)
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())),
                 path,
                 cfg,
                 ctx,
@@ -457,7 +458,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())),
                 path,
                 cfg,
                 ctx,
@@ -540,7 +542,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                 .with_policy(arael::simple_lm::SchurPolicy::Never)
                 .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())),
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())),
             path,
             cfg,
             ctx,
@@ -554,7 +557,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                     .with_envelope_panel_width(envelope_panel_width())
                     .with_block_supernodal(block_supernodal())
                     .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean())), path, cfg, ctx)
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision())), path, cfg, ctx)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

@@ -733,6 +733,16 @@ impl bench_harness::table::Geometry for Geo<'_> {
         bal::aligned_relative_rmse(&bal::camera_centers(&a.cameras),
                                    &bal::camera_centers(&b.cameras))
     }
+
+    // What the result is worth as a reconstruction: the median and 95th
+    // percentile reprojection error in pixels, and the similarity-aligned
+    // relative camera-centre RMSE against the best row. Rows that reach the
+    // same figures are the same solution whatever their costs' low digits say.
+    const QUALITY_HEAD: &'static str = "px p50/p95   cam-rmse";
+    fn quality(&self, s: &Solution, best: &Solution) -> Option<String> {
+        let (p50, p95) = bal::reprojection_percentiles(self.0, &s.cameras, &s.points);
+        Some(format!("{:.3}/{:.3} {:>10.2e}", p50, p95, Self::distance(s, best)))
+    }
 }
 
 #[cfg(test)]

@@ -130,6 +130,30 @@ pub fn reference_cost(ds: &Dataset, cams: &[CameraIn], points: &[vect3d]) -> f64
     cost
 }
 
+/// Reprojection error percentiles in pixels: the median and the 95th
+/// percentile of the per-observation error norm. The quality figure of a
+/// bundle adjustment result -- two solutions whose costs differ in the fifth
+/// digit are the same reconstruction when these agree.
+pub fn reprojection_percentiles(ds: &Dataset, cams: &[CameraIn], points: &[vect3d]) -> (f64, f64) {
+    assert_eq!(cams.len(), ds.cameras.len());
+    assert_eq!(points.len(), ds.points.len());
+    let rots: Vec<matrix3d> = cams.iter().map(|c| c.rot()).collect();
+    let mut errs: Vec<f64> = ds.observations.iter().map(|o| {
+        let r = residual(&cams[o.cam as usize], &rots[o.cam as usize], points[o.point as usize], o.xy);
+        (r[0] * r[0] + r[1] * r[1]).sqrt()
+    }).collect();
+    (percentile(&mut errs, 0.5), percentile(&mut errs, 0.95))
+}
+
+/// The `q` quantile (0 to 1) of `v` by the nearest-rank rule: the smallest
+/// value that at least `q` of the values are at or below. Reorders `v`.
+pub fn percentile(v: &mut [f64], q: f64) -> f64 {
+    assert!(!v.is_empty(), "percentile of nothing");
+    let k = ((q * v.len() as f64).ceil() as usize).clamp(1, v.len()) - 1;
+    let (_, x, _) = v.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).expect("NaN error"));
+    *x
+}
+
 /// Camera optical centers (-R^T t) -- the geometric anchor for
 /// validation. Landmark positions are NOT a usable gate: BAL scenes
 /// contain weakly-observed points (two rays at tiny parallax) that
@@ -207,6 +231,36 @@ mod tests {
         // (Ceres's own example prints half of it: 8.509125e5).
         let c = reference_cost(&ds, &ds.cameras, &ds.points);
         assert!((c - 1701824.921362).abs() < 1e-3, "initial cost {}", c);
+    }
+
+    /// Nearest rank: the median of five values is the third, the 95th
+    /// percentile the fifth; of one hundred the 95th is the 95th smallest.
+    #[test]
+    fn percentiles_by_nearest_rank() {
+        let mut v = [5.0, 1.0, 4.0, 2.0, 3.0];
+        assert_eq!(percentile(&mut v, 0.5), 3.0);
+        assert_eq!(percentile(&mut v, 0.95), 5.0);
+        assert_eq!(percentile(&mut v, 0.0), 1.0);
+        let mut hundred: Vec<f64> = (1..=100).rev().map(|i| i as f64).collect();
+        assert_eq!(percentile(&mut hundred, 0.95), 95.0);
+        assert_eq!(percentile(&mut hundred, 0.5), 50.0);
+    }
+
+    /// One identity camera at unit focal length looking at points on the
+    /// plane z = -1 reprojects each point to its own (x, y); observations
+    /// displaced by 1..=20 pixels along x have those errors.
+    #[test]
+    fn reprojection_percentiles_are_pixel_errors() {
+        let cam = CameraIn { rodrigues: vect3d::new(0.0, 0.0, 0.0), t: vect3d::new(0.0, 0.0, 0.0),
+                             f: 1.0, k1: 0.0, k2: 0.0 };
+        let points: Vec<vect3d> = (0..20).map(|i| vect3d::new(0.1 * i as f64, 0.2, -1.0)).collect();
+        let observations = (0..20).map(|i| ObservationIn {
+            cam: 0, point: i as u32, xy: vect2d::new(0.1 * i as f64 + (i + 1) as f64, 0.2),
+        }).collect();
+        let ds = Dataset { cameras: vec![cam.clone()], points: points.clone(), observations };
+        let (p50, p95) = reprojection_percentiles(&ds, &[cam], &points);
+        assert!((p50 - 10.0).abs() < 1e-12, "median {}", p50);
+        assert!((p95 - 19.0).abs() < 1e-12, "95th {}", p95);
     }
 
     #[test]

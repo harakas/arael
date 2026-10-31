@@ -242,7 +242,8 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>,
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()));
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
@@ -263,7 +264,8 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()));
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision()));
     let r = arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -348,7 +350,8 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
         .with_policy(arael::simple_lm::SchurPolicy::Never)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()));
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 
@@ -359,7 +362,8 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
         .with_ordering(ordering)
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
-        .with_block_supernodal_memory_lean(block_supernodal_lean()));
+        .with_block_supernodal_memory_lean(block_supernodal_lean())
+        .with_mixed_precision(bench_harness::arael::mixed_precision()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, s, cfg, ctx)
 }
 

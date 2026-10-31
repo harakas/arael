@@ -128,6 +128,16 @@ pub trait Geometry {
     /// pgo's parking-garage and on plane at 900 poses); a real f32
     /// regression is still far outside it.
     const DISTANCE_GATE_F32: f64 = Self::DISTANCE_GATE * 10.0;
+    /// A quality figure for one solution, printed in a column after the cost.
+    /// The cost alone does not say how good a result is: bundle adjustment
+    /// reports reprojection-error percentiles in pixels and the camera-centre
+    /// error against `best`, the lowest-cost solution in the table. `None`
+    /// (the default) prints no column.
+    fn quality(&self, _solution: &Self::Solution, _best: &Self::Solution) -> Option<String> {
+        None
+    }
+    /// The header of the quality column.
+    const QUALITY_HEAD: &'static str = "quality";
 }
 
 pub struct Table<'a, G: Geometry> {
@@ -184,6 +194,17 @@ impl<'a, G: Geometry> Table<'a, G> {
             .iter()
             .find(|(l, _, _)| l == label)
             .and_then(|(_, r, _)| r.full_iter_ms())
+    }
+
+    /// The quality column: one entry per cell in cell order, and the column
+    /// width, `None` when no row has a figure and the column is dropped.
+    fn quality_column(&self, best: &G::Solution) -> (Vec<Option<String>>, Option<usize>) {
+        let quality: Vec<Option<String>> = self.cells.iter()
+            .map(|(_, r, _)| self.geometry.quality(&r.solution, best))
+            .collect();
+        let width = quality.iter().flatten().map(|q| q.len()).max()
+            .map(|n| n.max(G::QUALITY_HEAD.len()));
+        (quality, width)
     }
 
     fn note_order(&mut self, label: &str) {
@@ -279,25 +300,36 @@ impl<'a, G: Geometry> Table<'a, G> {
         // one there is nothing to divide by and the column is dropped whole.
         let reference = self.reference_full_iter();
         let norm_head = if reference.is_some() { format!(" {:>10}", "full-norm") } else { String::new() };
+        // The quality column exists only where the geometry has a figure.
+        let (quality, qw) = self.quality_column(&best_solution);
+        let q_head = match qw {
+            Some(qw) => format!(" {:>qw$}", G::QUALITY_HEAD, qw = qw),
+            None => String::new(),
+        };
+        let q_cell = |text: &str| match qw {
+            Some(qw) => format!(" {:>qw$}", text, qw = qw),
+            None => String::new(),
+        };
         // ms/iter divides the whole solve by every ATTEMPT, so it carries the
         // one-time setup amortized over however many iterations the solver took.
         // full-iter is what one COMPLETE iteration costs: min t(2 iters) - min
         // t(1 iter), the minima taken before the subtraction so a noisy pair
         // cannot difference into nonsense. It is blank where t(1) was not one
         // clean accepted iteration.
-        println!("\n{:<w$} {:>10} {:>9} {:>10} {:>10}{} {:>12}{} {:>14}",
+        println!("\n{:<w$} {:>10} {:>9} {:>10} {:>10}{} {:>12}{} {:>14}{}",
             "system", "total ms", "iters", "ms/iter", "full-iter", norm_head,
-            "1st-iter ms", mem_head, "final cost", w = w);
+            "1st-iter ms", mem_head, "final cost", q_head, w = w);
         for label in &self.order {
             if let Some((_, why)) = self.failed.iter().find(|(l, _)| l == label) {
                 let mem = if any_mem { format!("{:>9}", "-") } else { String::new() };
                 let norm = if reference.is_some() { format!(" {:>10}", "-") } else { String::new() };
-                println!("{:<w$} {:>10} {:>9} {:>10} {:>10}{} {:>12}{} {:>14}  <- {}",
-                    label, "-", "-", "-", "-", norm, "-", mem, "-", why, w = w);
+                println!("{:<w$} {:>10} {:>9} {:>10} {:>10}{} {:>12}{} {:>14}{}  <- {}",
+                    label, "-", "-", "-", "-", norm, "-", mem, "-", q_cell("-"), why, w = w);
                 continue;
             }
-            let (_, row, cost) = self.cells.iter().find(|(l, _, _)| l == label)
+            let (i, (_, row, cost)) = self.cells.iter().enumerate().find(|(_, (l, _, _))| l == label)
                 .expect("every ordered label is either a cell or a failure");
+            let q = q_cell(quality[i].as_deref().unwrap_or("-"));
             let cost = *cost;
             let iters = match row.accepted {
                 Some(a) => format!("{}({})", a, row.iterations),
@@ -334,10 +366,10 @@ impl<'a, G: Geometry> Table<'a, G> {
             } else {
                 String::new()
             };
-            println!("{:<w$} {:>10.2} {:>9} {:>10.2} {:>10}{} {:>12}{} {:>14.4}{}",
+            println!("{:<w$} {:>10.2} {:>9} {:>10.2} {:>10}{} {:>12}{} {:>14.4}{}{}",
                 label, row.solve_ms, iters,
                 row.solve_ms / row.iterations.max(1) as f64,
-                full, norm, fmt_ms(row.first_iter_ms), mem, cost, miss, w = w);
+                full, norm, fmt_ms(row.first_iter_ms), mem, cost, q, miss, w = w);
             if let Some(text) = &row.report {
                 println!("{}", text);
             }
@@ -460,6 +492,38 @@ mod tests {
         no_full.record("arael LM f64", row(10.0, None));
         no_full.set_reference("arael LM f64");
         assert_eq!(no_full.reference_full_iter(), None);
+    }
+
+    /// A geometry without a quality figure prints no quality column; one with
+    /// a figure gets every row scored against the best (lowest-cost) solution,
+    /// and the column is as wide as its widest entry or its header.
+    #[test]
+    fn the_quality_column_follows_the_geometry() {
+        let g = Scalar;
+        let mut t = Table::new(&g);
+        t.record("a", Row::new(1.0, 1.0, 1, 3.0));
+        t.record("b", Row::new(1.0, 1.0, 1, 1.0));
+        let (q, w) = t.quality_column(&1.0);
+        assert_eq!(q, vec![None, None]);
+        assert_eq!(w, None);
+
+        struct Scored;
+        impl Geometry for Scored {
+            type Solution = f64;
+            fn cost(&self, s: &f64) -> f64 { *s }
+            fn distance(a: &f64, b: &f64) -> f64 { (a - b).abs() }
+            fn quality(&self, s: &f64, best: &f64) -> Option<String> {
+                Some(format!("{:.1} above best", s - best))
+            }
+            const QUALITY_HEAD: &'static str = "gap";
+        }
+        let g = Scored;
+        let mut t = Table::new(&g);
+        t.record("a", Row::new(1.0, 1.0, 1, 3.0));
+        t.record("b", Row::new(1.0, 1.0, 1, 1.0));
+        let (q, w) = t.quality_column(&1.0);
+        assert_eq!(q, vec![Some("2.0 above best".to_string()), Some("0.0 above best".to_string())]);
+        assert_eq!(w, Some("2.0 above best".len()));
     }
 
     /// A reference that only FAILED is not a reference: the row exists in the
