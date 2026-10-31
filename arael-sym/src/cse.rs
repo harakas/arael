@@ -1449,11 +1449,14 @@ mod tests {
             .unwrap_or_else(|| panic!("the plain part hoists a * b: {outer:?}"));
         assert!(!inner_text.iter().any(|t| t.contains(&outer_ab)),
             "the block must not read the outer let {outer_ab}: {inner_text:?}");
-        // The block's statement: f64 inside, narrowed through `a`.
+        // The block's statement: f64 inside, narrowed through `a`. The
+        // block's own hoisted names are wide already and must not be
+        // widened again (an f32 `widen` of a wide value).
         let stmt = wide.to_rust("");
         assert!(stmt.starts_with("let (__w"), "{stmt}");
         assert!(stmt.contains("arael::utils::narrow("), "{stmt}");
         assert!(stmt.contains(", a)"), "{stmt}");
+        assert!(!stmt.contains("widen(__x"), "a hoisted wide value widened again: {stmt}");
         // The results refer to the block's names.
         assert!(matches!(results[0].as_ref(), Expr::Sym(n) if n.starts_with("__w")));
         assert!(matches!(results[1].as_ref(), Expr::Sym(n) if n.starts_with("__w")));

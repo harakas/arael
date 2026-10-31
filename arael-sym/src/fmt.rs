@@ -734,7 +734,8 @@ impl Expr {
                     // wide scalar it is given instead; the inline form has
                     // no scalar to take and is f64.
                     let inner = crate::strip_with_wide(&args[0]);
-                    write_narrowed(buf, &inner, &crate::narrow_witness(&inner), ft, "f64", parent_prec);
+                    let witness = crate::narrow_witness(&inner);
+                    write_narrowed(buf, &crate::widen_leaves(&inner), &witness, ft, "f64", parent_prec);
                 } else if name == "widen" && args.len() == 1 {
                     // A leaf of the body read into a scope: `ft` is the
                     // wide scalar inside a scope.
@@ -824,17 +825,18 @@ impl Expr {
 
 use crate::cse::{Arm, Intermediate, Switch};
 
-/// Write a `with_wide` scope's value `v`: in the wide scalar `wide_ft`
-/// over its widened leaves, narrowed back to the body's scalar through
-/// the `witness` symbol. With no witness the value is a constant, or
-/// constants and `wide` leaves only; a constant is written at the body's
-/// scalar and infers its type where it is used, the other has no type to
-/// narrow to and is written as a compile error naming the problem.
+/// Write a `with_wide` scope's value `v`, its leaves widened already
+/// ([`widen_leaves`](crate::widen_leaves)): in the wide scalar `wide_ft`,
+/// narrowed back to the body's scalar through the `witness` symbol. With
+/// no witness the value is a constant, or constants and `wide` leaves
+/// only; a constant is written at the body's scalar and infers its type
+/// where it is used, the other has no type to narrow to and is written as
+/// a compile error naming the problem.
 fn write_narrowed(buf: &mut String, v: &E, witness: &Option<String>, ft: &str, wide_ft: &str, parent_prec: u8) {
     match witness {
         Some(w) => {
             buf.push_str("arael::utils::narrow(");
-            crate::widen_leaves(v).write_rust(buf, wide_ft, 0);
+            v.write_rust(buf, wide_ft, 0);
             buf.push_str(", ");
             buf.push_str(w);
             buf.push(')');
