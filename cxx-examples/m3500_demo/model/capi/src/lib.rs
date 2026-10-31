@@ -456,6 +456,14 @@ pub struct CSparseOptions {
     pub block_supernodal_batch: f64,
     /// Memory-lean amalgamation for the block supernodal route.
     pub block_supernodal_memory_lean: bool,
+    /// Factor in single precision on the block supernodal route and
+    /// refine each solve against the double-precision matrix
+    /// (MixedPrecision). Off by default.
+    pub mixed_precision: bool,
+    /// Refinement steps at most per damped solve, under mixed_precision.
+    pub max_refinements: u32,
+    /// Relative residual the refinement stops at, under mixed_precision.
+    pub refine_tol: f64,
 }
 
 impl CSparseOptions {
@@ -506,7 +514,11 @@ impl CSparseOptions {
             .with_narrow_band(self.narrow_band)
             .with_block_supernodal(block_supernodal)
             .with_block_supernodal_batching((batch > 0.0).then_some(batch))
-            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean);
+            .with_block_supernodal_memory_lean(self.block_supernodal_memory_lean)
+            .with_mixed_precision(self.mixed_precision.then(|| arael::simple_lm::MixedPrecision {
+                max_refinements: self.max_refinements as usize,
+                tol: self.refine_tol,
+            }));
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
@@ -568,6 +580,9 @@ pub unsafe extern "C" fn graph_sparse_options(out: *mut CSparseOptions) {
         },
         block_supernodal_batch: d.block_supernodal_batch.unwrap_or(0.0),
         block_supernodal_memory_lean: d.block_supernodal_memory_lean,
+        mixed_precision: d.mixed_precision.is_some(),
+        max_refinements: d.mixed_precision.unwrap_or_default().max_refinements as u32,
+        refine_tol: d.mixed_precision.unwrap_or_default().tol,
     };
 }
 
@@ -903,6 +918,14 @@ pub struct CSchurPlan {
     /// Whether the block supernodal Cholesky factorized, rather than
     /// faer's scalar one.
     pub block_supernodal: bool,
+    /// Whether the factor was single precision (mixed_precision).
+    pub f32_factor: bool,
+    /// Refinement steps summed over the solve, on a single-precision
+    /// factor.
+    pub refinements: COptU32,
+    /// Damped solves that ended above the refinement tolerance, on a
+    /// single-precision factor.
+    pub refinement_shortfalls: COptU32,
 }
 
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
@@ -947,6 +970,15 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
         kept_bandwidth: p.kept_bandwidth as u32,
         envelope: p.envelope,
         block_supernodal: p.block_supernodal,
+        f32_factor: p.f32_factor,
+        refinements: match p.refinements {
+            Some(n) => COptU32 { has: true, v: n as u32 },
+            None => COptU32 { has: false, v: 0 },
+        },
+        refinement_shortfalls: match p.refinement_shortfalls {
+            Some(n) => COptU32 { has: true, v: n as u32 },
+            None => COptU32 { has: false, v: 0 },
+        },
     };
 }
 
