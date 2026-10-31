@@ -216,6 +216,10 @@ impl E {
                 // cached() is a STICKY barrier: d(cached(g))/dx = cached(dg/dx).
                 if name == "cached" && args.len() == 1 {
                     crate::cached(args[0].diff_var(var, memo))
+                } else if name == "with_wide" && args.len() == 1 {
+                    // The precision scope widens a value, not its
+                    // derivative: d(with_wide(g))/dx = dg/dx.
+                    args[0].diff_var(var, memo)
                 } else if let Some(body) = kind.auto_diff_body() {
                     super::expand_func(params, body, args).diff_var(var, memo)
                 } else if let crate::FuncKind::ExternOutput { index } = kind {

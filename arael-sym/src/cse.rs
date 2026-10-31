@@ -49,6 +49,17 @@ pub enum Intermediate {
     /// default panics on any index outside `0..arms.len()`; a branch
     /// always has its else side as the default.
     Match { switch: Switch, names: Vec<String>, arms: Vec<Arm>, default: Option<Arm> },
+    /// Every [`with_wide`](crate::with_wide) scope of the scope level in
+    /// one block of the wide scalar `wide_ft` (a Rust type path, `f64`
+    /// by default): `let (names, ..) = { inters; (narrow(values), ..)
+    /// };`. Inside, the symbols the scopes read are widened
+    /// (`<wide_ft as arael::utils::Wide<_>>::widen`), the intermediates
+    /// and values are wide, and each value is narrowed back to the
+    /// surrounding scalar through `witness`, one of those symbols, whose
+    /// type says what that scalar is. `None` when the values read no
+    /// symbol at all, which leaves them constants that infer their type
+    /// where they are used.
+    Wide { names: Vec<String>, witness: Option<String>, wide_ft: String, inters: Vec<Intermediate>, values: Vec<E> },
 }
 
 /// One arm of an [`Intermediate::Match`]: local intermediates, then one
@@ -64,7 +75,7 @@ impl Intermediate {
     pub fn as_let(&self) -> Option<(&str, &E)> {
         match self {
             Intermediate::Let { name, expr } => Some((name, expr)),
-            Intermediate::Match { .. } => None,
+            Intermediate::Match { .. } | Intermediate::Wide { .. } => None,
         }
     }
 
@@ -72,7 +83,8 @@ impl Intermediate {
     pub fn names(&self) -> Vec<&str> {
         match self {
             Intermediate::Let { name, .. } => vec![name],
-            Intermediate::Match { names, .. } => names.iter().map(String::as_str).collect(),
+            Intermediate::Match { names, .. } | Intermediate::Wide { names, .. } =>
+                names.iter().map(String::as_str).collect(),
         }
     }
 
@@ -89,8 +101,21 @@ impl Intermediate {
                 }
                 set
             }
+            Intermediate::Wide { witness, inters, values, .. } => {
+                let mut set = BTreeSet::new();
+                set.extend(witness.iter().cloned());
+                for i in inters { set.extend(i.free_vars()); }
+                for v in values { set.extend(v.free_vars()); }
+                set
+            }
         }
     }
+}
+
+/// Whether `e` is a [`with_wide`](crate::with_wide) scope, which the CSE
+/// never looks into: its inside is another scalar's business.
+fn is_wide(e: &E) -> bool {
+    crate::with_wide_arg(e).is_some()
 }
 
 /// What the CSE decides on for one node: a structural hash built from
@@ -207,8 +232,12 @@ fn path_counts(roots: &[&E], scoped: bool) -> (Vec<E>, HashMap<*const Expr, (usi
         if !seen.insert(e.as_ref() as *const Expr) {
             return;
         }
-        for c in children(e) {
-            visit(c, seen, order);
+        // A precision scope is a leaf here: its inside is counted by its
+        // own CSE, in its own scalar.
+        if !is_wide(e) {
+            for c in children(e) {
+                visit(c, seen, order);
+            }
         }
         order.push(e.clone());
     }
@@ -224,6 +253,9 @@ fn path_counts(roots: &[&E], scoped: bool) -> (Vec<E>, HashMap<*const Expr, (usi
         paths.entry(r.as_ref() as *const Expr).or_insert((0, 0)).0 += 1;
     }
     for e in &order {
+        if is_wide(e) {
+            continue;
+        }
         let (o, i) = paths.get(&(e.as_ref() as *const Expr)).copied().unwrap_or((0, 0));
         // The first child of a select or branch is its index or
         // condition; the rest are its arms.
@@ -372,6 +404,11 @@ fn replace_uncached(e: &E, target: &E, replacement: &E, memo: &mut Memo) -> E {
     if e == target {
         return replacement.clone();
     }
+    // Nothing is substituted into a precision scope: the scope recomputes
+    // its inside in f64 on purpose.
+    if is_wide(e) {
+        return e.clone();
+    }
     let rec = |c: &E, memo: &mut Memo| replace_memo(c, target, replacement, memo);
     match e.as_ref() {
         Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
@@ -448,6 +485,9 @@ fn replace_outside_arms(e: &E, target: &E, replacement: &E) -> E {
     if e == target {
         return replacement.clone();
     }
+    if is_wide(e) {
+        return e.clone();
+    }
     match e.as_ref() {
         Expr::Select { index, arms, default } => E::new(Expr::Select {
             index: replace_outside_arms(index, target, replacement),
@@ -464,6 +504,9 @@ fn replace_outside_arms(e: &E, target: &E, replacement: &E) -> E {
 /// first-appearance order. Switches inside another switch's arms are
 /// that arm's business.
 fn collect_switches(e: &E, out: &mut Vec<E>) {
+    if is_wide(e) {
+        return;
+    }
     let key = match e.as_ref() {
         Expr::Select { index, .. } => index,
         Expr::Branch(q, _, _) => q,
@@ -476,6 +519,25 @@ fn collect_switches(e: &E, out: &mut Vec<E>) {
         out.push(e.clone());
     }
     collect_switches(key, out);
+}
+
+/// Every distinct precision scope at this scope level, in first-appearance
+/// order: not inside a switch's arms (that arm's business) and not inside
+/// another scope (already f64).
+fn collect_wides(e: &E, out: &mut Vec<E>) {
+    if is_wide(e) {
+        if !out.contains(e) {
+            out.push(e.clone());
+        }
+        return;
+    }
+    match e.as_ref() {
+        Expr::Select { index, .. } => collect_wides(index, out),
+        Expr::Branch(q, _, _) => collect_wides(q, out),
+        _ => {
+            for c in children(e) { collect_wides(c, out); }
+        }
+    }
 }
 
 /// Apply many `target -> replacement` substitutions to `e` in one memoized
@@ -505,6 +567,28 @@ pub fn replace_many(e: &E, subs: &[(E, E)]) -> E {
     let shapes: std::collections::HashSet<Shape> = subs.iter().map(|(from, _)| shape(from)).collect();
     let mut memo: HashMap<*const Expr, E> = HashMap::new();
     replace_many_inner(e, &map, &shapes, &mut memo)
+}
+
+/// [`replace_many`] applied inside every [`with_wide`](crate::with_wide)
+/// scope of `e` and nowhere else: what a precomputed value reads as when
+/// the code around it is f64, such as the f64 copy of a cached rotation.
+pub fn substitute_in_with_wide(e: &E, subs: &[(E, E)]) -> E {
+    fn walk(e: &E, subs: &[(E, E)], memo: &mut HashMap<*const Expr, E>) -> E {
+        let ptr = e.as_ref() as *const Expr;
+        if let Some(r) = memo.get(&ptr) {
+            return r.clone();
+        }
+        let r = match crate::with_wide_arg(e) {
+            Some(inner) => crate::with_wide(replace_many(inner, subs)),
+            None => map_children(e, &mut |c| walk(c, subs, memo)),
+        };
+        memo.insert(ptr, r.clone());
+        r
+    }
+    if subs.is_empty() {
+        return e.clone();
+    }
+    walk(e, subs, &mut HashMap::new())
 }
 
 /// The shallow identity of a node: its variant and, for a symbol, a
@@ -625,10 +709,10 @@ fn build_mul_from_factors(coeff: f64, factors: Vec<E>) -> E {
 /// inside the arm instead.
 pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
     let mut counter = 0usize;
-    let (inters, results) = cse_scope(exprs, &mut counter, false);
+    let (inters, results) = cse_scope(exprs, &mut counter, false, "f64");
     let lets = inters.into_iter().map(|it| match it {
         Intermediate::Let { name, expr } => (name, expr),
-        Intermediate::Match { .. } => unreachable!("flat cse never fuses"),
+        Intermediate::Match { .. } | Intermediate::Wide { .. } => unreachable!("flat cse never fuses"),
     }).collect();
     (lets, results)
 }
@@ -643,13 +727,22 @@ pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
 /// inside their arm the same way. Names are unique across the whole
 /// result, nested scopes included. Returns the statements to emit, in
 /// dependency order, and the rewritten batch. For a batch without selects
-/// the result is [`cse`]'s, as `Let` statements.
+/// the result is [`cse`]'s, as `Let` statements. The
+/// [`with_wide`](crate::with_wide) scopes fuse into f64 blocks; see
+/// [`cse_scoped_wide`] for another wide scalar.
 pub fn cse_scoped(exprs: &[E]) -> (Vec<Intermediate>, Vec<E>) {
-    let mut counter = 0usize;
-    cse_scope(exprs, &mut counter, true)
+    cse_scoped_wide(exprs, "f64")
 }
 
-fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediate>, Vec<E>) {
+/// [`cse_scoped`] with the [`with_wide`](crate::with_wide) scopes fused
+/// into blocks of the scalar `wide_ft`, a Rust type path implementing
+/// `arael::utils::Wide<T>` over the body's scalar `T`.
+pub fn cse_scoped_wide(exprs: &[E], wide_ft: &str) -> (Vec<Intermediate>, Vec<E>) {
+    let mut counter = 0usize;
+    cse_scope(exprs, &mut counter, true, wide_ft)
+}
+
+fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool, wide_ft: &str) -> (Vec<Intermediate>, Vec<E>) {
     if exprs.is_empty() {
         return (vec![], vec![]);
     }
@@ -771,6 +864,49 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
         return (topo_sort_intermediates(intermediates), results);
     }
 
+    // Fuse: every precision scope at this level becomes one f64 block
+    // computing all of their values, with its own CSE inside over the
+    // widened expressions, and each scope is replaced by the name the
+    // block binds. The scopes may sit in a switch's key or in a let;
+    // never inside an arm (its own level) or another scope.
+    let mut wides: Vec<E> = Vec::new();
+    for r in &results {
+        collect_wides(r, &mut wides);
+    }
+    for it in &intermediates {
+        if let Intermediate::Let { expr, .. } = it {
+            collect_wides(expr, &mut wides);
+        }
+    }
+    if !wides.is_empty() {
+        let names: Vec<String> = wides.iter().map(|_| {
+            let n = format!("__w{}", *counter);
+            *counter += 1;
+            n
+        }).collect();
+        for (w, name) in wides.iter().zip(&names) {
+            let sym = symbol(name);
+            for r in results.iter_mut() {
+                *r = replace_outside_arms(r, w, &sym);
+            }
+            for it in intermediates.iter_mut() {
+                if let Intermediate::Let { expr, .. } = it {
+                    *expr = replace_outside_arms(expr, w, &sym);
+                }
+            }
+        }
+        let inner: Vec<E> = wides.iter()
+            .map(|w| crate::widen_leaves(crate::with_wide_arg(w).expect("a collected scope")))
+            .collect();
+        let witness = wides.iter()
+            .filter_map(crate::narrow_witness)
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .next();
+        let (inters, values) = cse_scope(&inner, counter, true, wide_ft);
+        intermediates.push(Intermediate::Wide { names, witness, wide_ft: wide_ft.to_string(), inters, values });
+    }
+
     // Fuse: every select at this scope level becomes part of one match
     // per (index, arm count, default presence), in first-appearance
     // order. Each member select is replaced by the name its match binds.
@@ -818,6 +954,9 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
                         let key = sw.expr_mut();
                         *key = replace_outside_arms(key, m, &sym);
                     }
+                    // A precision block's inside is a scope of its own
+                    // and holds no switch of this level.
+                    Intermediate::Wide { .. } => {}
                 }
             }
         }
@@ -830,12 +969,12 @@ fn cse_scope(exprs: &[E], counter: &mut usize, scoped: bool) -> (Vec<Intermediat
         };
         let arms: Vec<Arm> = (0..n_arms).map(|k| {
             let exprs: Vec<E> = members.iter().map(|m| parts(m).0[k].clone()).collect();
-            let (inters, values) = cse_scope(&exprs, counter, true);
+            let (inters, values) = cse_scope(&exprs, counter, true, wide_ft);
             Arm { inters, values }
         }).collect();
         let default = has_default.then(|| {
             let exprs: Vec<E> = members.iter().map(|m| parts(m).1.unwrap()).collect();
-            let (inters, values) = cse_scope(&exprs, counter, true);
+            let (inters, values) = cse_scope(&exprs, counter, true, wide_ft);
             Arm { inters, values }
         });
         intermediates.push(Intermediate::Match { switch, names, arms, default });
@@ -1023,14 +1162,14 @@ mod tests {
         match it {
             Intermediate::Match { switch, names, arms, default } =>
                 (switch.expr(), names, arms, default.as_ref()),
-            Intermediate::Let { .. } => panic!("expected a match, got {it}"),
+            _ => panic!("expected a match, got {it}"),
         }
     }
 
     fn the_switch(it: &Intermediate) -> &Switch {
         match it {
             Intermediate::Match { switch, .. } => switch,
-            Intermediate::Let { .. } => panic!("expected a match, got {it}"),
+            _ => panic!("expected a match, got {it}"),
         }
     }
 
@@ -1258,5 +1397,139 @@ mod tests {
         let arms = the_match(&inters[0]).2;
         assert_eq!(arms[0].inters.len(), 1);
         assert_eq!(arms[0].inters[0].as_let().unwrap().1, &(constant(1.0) / z));
+    }
+
+    // --- with_wide: an opaque scope in another scalar ---
+
+    /// The derivative drops the scope; a scope around a symbol, a
+    /// constant expression or another scope simplifies away.
+    #[test]
+    fn with_wide_differentiates_through_and_folds() {
+        let (x, y) = (symbol("x"), symbol("y"));
+        let e = crate::with_wide(x.clone() * x.clone() + y.clone());
+        assert_eq!(format!("{}", e.diff("x")), "2 * x");
+        assert_eq!(crate::with_wide(x.clone()).simplify(), x.clone());
+        assert_eq!(crate::with_wide(constant(2.0) * constant(3.0)).simplify(), constant(6.0));
+        let nested = crate::with_wide(crate::with_wide(x.clone() * y.clone()) + y.clone()).simplify();
+        assert!(crate::with_wide_arg(&nested).is_some());
+        assert_eq!(format!("{nested}"), format!("{}", crate::with_wide(x * y.clone() + y)));
+    }
+
+    /// Scopes fuse into one f64 block that shares their work; nothing of
+    /// theirs is hoisted outside, not even a subexpression that the plain
+    /// part of the batch also uses, and the block reads its leaves widened
+    /// and narrows its values through one of them.
+    #[test]
+    fn with_wide_scopes_fuse_into_one_opaque_block() {
+        let (a, b, c) = (symbol("a"), symbol("b"), symbol("c"));
+        let ab = a.clone() * b.clone();
+        let exprs = [
+            crate::with_wide(ab.clone() + c.clone()),
+            crate::with_wide(ab.clone() - c.clone()),
+            ab.clone() * c.clone(),
+            ab.clone() + a.clone(),
+        ];
+        let (inters, results) = cse_scoped(&exprs);
+        let wide = inters.iter().find(|it| matches!(it, Intermediate::Wide { .. }))
+            .expect("one fused block");
+        let Intermediate::Wide { names, witness, inters: inner, values, .. } = wide else { unreachable!() };
+        assert_eq!(names.len(), 2);
+        assert_eq!(witness.as_deref(), Some("a"));
+        assert_eq!(values.len(), 2);
+        // Inside: the widened product hoisted once, in f64, over widened
+        // leaves; the plain batch hoists its own a * b, which the block
+        // does not use.
+        let inner_text: Vec<String> = inner.iter().map(|it| it.to_rust("f64")).collect();
+        assert!(inner_text.iter().any(|t| t.contains("<f64 as arael::utils::Wide<_>>::widen(a) * <f64 as arael::utils::Wide<_>>::widen(b)")),
+            "{inner_text:?}");
+        let outer: Vec<String> = inters.iter()
+            .filter_map(|it| it.as_let().map(|(n, e)| format!("{n} = {e}"))).collect();
+        let outer_ab = inters.iter()
+            .find_map(|it| it.as_let().filter(|(_, e)| format!("{e}") == "a * b").map(|(n, _)| n.to_string()))
+            .unwrap_or_else(|| panic!("the plain part hoists a * b: {outer:?}"));
+        assert!(!inner_text.iter().any(|t| t.contains(&outer_ab)),
+            "the block must not read the outer let {outer_ab}: {inner_text:?}");
+        // The block's statement: f64 inside, narrowed through `a`.
+        let stmt = wide.to_rust("");
+        assert!(stmt.starts_with("let (__w"), "{stmt}");
+        assert!(stmt.contains("arael::utils::narrow("), "{stmt}");
+        assert!(stmt.contains(", a)"), "{stmt}");
+        // The results refer to the block's names.
+        assert!(matches!(results[0].as_ref(), Expr::Sym(n) if n.starts_with("__w")));
+        assert!(matches!(results[1].as_ref(), Expr::Sym(n) if n.starts_with("__w")));
+    }
+
+    /// Inline emission, without the scoped CSE: the widened inside and the
+    /// narrowing in one expression.
+    #[test]
+    fn with_wide_emits_inline_when_not_fused() {
+        let (a, b) = (symbol("a"), symbol("b"));
+        let e = crate::with_wide(a.clone() * b + constant(1.0));
+        assert_eq!(e.to_rust("f32"),
+            "arael::utils::narrow(<f64 as arael::utils::Wide<_>>::widen(a) * <f64 as arael::utils::Wide<_>>::widen(b) + 1.0_f64, a)");
+        // A scope inside a branch arm belongs to the arm and fuses there.
+        let g = crate::branch(a.clone(), e.clone(), constant(0.0));
+        let (inters, _) = cse_scoped(&[g]);
+        let arm0 = &the_match(&inters[0]).2[0];
+        assert!(arm0.inters.iter().any(|it| matches!(it, Intermediate::Wide { .. })), "{inters:?}");
+    }
+
+    /// A `wide` leaf is a value already in the wide scalar: read as it is,
+    /// and not the symbol the scope narrows through, even when its name
+    /// sorts first.
+    #[test]
+    fn with_wide_wide_leaves_are_wide_reads() {
+        let (aa, b) = (symbol("aa"), symbol("b"));
+        let e = crate::with_wide(crate::wide(aa) * b + constant(1.0));
+        assert_eq!(e.to_rust("f32"),
+            "arael::utils::narrow(<f64 as arael::utils::Wide<_>>::widen(b) * aa + 1.0_f64, b)");
+        let (inters, _) = cse_scoped(&[e]);
+        let Intermediate::Wide { witness, .. } = &inters[0] else { panic!("{inters:?}") };
+        assert_eq!(witness.as_deref(), Some("b"));
+        let stmt = inters[0].to_rust("f32");
+        assert!(stmt.contains("<f64 as arael::utils::Wide<_>>::widen(b) * aa"), "{stmt}");
+        assert!(stmt.contains(", b)"), "{stmt}");
+    }
+
+    /// Another wide scalar: the block is that type throughout, its leaves
+    /// widened into it, its literals written through `WideScalar`, its
+    /// values narrowed back through the witness.
+    #[test]
+    fn with_wide_takes_the_wide_scalar_it_is_given() {
+        let (a, b) = (symbol("a"), symbol("b"));
+        let e = crate::with_wide(a.clone() * b + constant(1.5));
+        let (inters, _) = cse_scoped_wide(&[e], "arael::utils::df32");
+        let Intermediate::Wide { wide_ft, .. } = &inters[0] else { panic!("{inters:?}") };
+        assert_eq!(wide_ft, "arael::utils::df32");
+        let stmt = inters[0].to_rust("f32");
+        assert!(stmt.contains("<arael::utils::df32 as arael::utils::Wide<_>>::widen(a)"), "{stmt}");
+        assert!(stmt.contains("<arael::utils::df32 as arael::utils::WideScalar>::from_f64(1.5_f64)"), "{stmt}");
+        assert!(stmt.contains("arael::utils::narrow(") && stmt.contains(", a)"), "{stmt}");
+        assert!(!stmt.contains("_f32") && !stmt.contains("1.5_f64, "), "{stmt}");
+    }
+
+    /// `substitute_in_with_wide` rewrites inside scopes only. A derivative
+    /// drops the scope, so a code generator differentiates first and
+    /// substitutes after: the derivative then reads the plain symbol.
+    #[test]
+    fn substitute_in_with_wide_touches_scopes_only() {
+        let (r, p) = (symbol("r"), symbol("p"));
+        let e = crate::with_wide(r.clone() * p.clone()) + r.clone();
+        let subs = [(r.clone(), crate::wide(symbol("r_wide")))];
+        let s = substitute_in_with_wide(&e, &subs);
+        assert_eq!(format!("{s}"), "r + with_wide(p * wide(r_wide))");
+        assert_eq!(format!("{}", substitute_in_with_wide(&e.diff("p"), &subs)), "r");
+        assert_eq!(format!("{}", s.diff("p")), "wide(r_wide)");
+        assert_eq!(substitute_in_with_wide(&e, &[]), e);
+    }
+
+    /// A scope that reads f64 caches and constants alone has nothing to
+    /// narrow through, and says so where the code would not type.
+    #[test]
+    fn with_wide_of_wide_leaves_alone_is_a_compile_error() {
+        let e = crate::with_wide(crate::wide(symbol("a")) * constant(2.0));
+        assert!(e.to_rust("f32").starts_with("compile_error!("), "{}", e.to_rust("f32"));
+        let (inters, _) = cse_scoped(&[e]);
+        assert!(inters[0].to_rust("f32").contains("compile_error!("), "{inters:?}");
     }
 }

@@ -904,6 +904,23 @@ impl Expr {
             }
             Expr::Func { name, params, kind, args } => {
                 let new_args: Vec<E> = args.iter().map(|a| a.simplify_once_memo(memo)).collect();
+                // A precision scope around a symbol or a symbol-free
+                // expression is the identity (the leaf is widened and
+                // narrowed back; a constant is exact either way), and a
+                // scope nested inside another is already in f64.
+                if name == "with_wide" && new_args.len() == 1 {
+                    let inner = crate::strip_with_wide(&new_args[0]);
+                    if matches!(inner.as_ref(), Expr::Sym(_)) || inner.symbols().is_empty() {
+                        return inner;
+                    }
+                    if std::rc::Rc::ptr_eq(&inner.0, &args[0].0) {
+                        return orig.clone();
+                    }
+                    return E::new(Expr::Func {
+                        name: name.clone(), params: params.clone(),
+                        kind: kind.clone(), args: vec![inner],
+                    });
+                }
                 // Constant-fold functions with a symbolic body; Extern stays opaque
                 if let Some(body) = kind.body()
                     && new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {

@@ -1423,6 +1423,7 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     // Unary "safe" variants
     ("identity", FunctionRef::Unary(identity)),
     ("cached", FunctionRef::Unary(cached)),
+    ("with_wide", FunctionRef::Unary(with_wide)),
     ("safe_sqrt", FunctionRef::Unary(safe_sqrt)),
     ("safe_asin", FunctionRef::Unary(safe_asin)),
     ("safe_acos", FunctionRef::Unary(safe_acos)),
@@ -2282,6 +2283,120 @@ pub fn cached(x: E) -> E {
     simple_func1("cached", |t| t)(x)
 }
 
+/// Precision scope: `with_wide(x) = x`, computed in f64 whatever the
+/// scalar of the code around it. The generated code casts the leaves of
+/// `x` (the symbols it reads) to f64, evaluates everything inside in
+/// f64, and narrows the result back to the surrounding scalar. The
+/// derivative is the derivative of `x` in the surrounding scalar, the
+/// scope dropped: `with_wide` widens a value, not the Jacobian.
+///
+/// Common subexpression elimination treats the scope as opaque. Nothing
+/// inside is hoisted out, even when the same subexpression occurs
+/// outside, since an f32 copy of it is exactly what the scope exists to
+/// avoid; several `with_wide` scopes in one batch share their work with
+/// each other in one wide block. In f64 code the scope is the identity.
+///
+/// The wide scalar is f64 by default; a code generator names another
+/// through [`cse::cse_scoped_wide`] (the arael macro takes it from the
+/// root's `wide = <type>` keyword). It implements `arael::utils::Wide<T>`
+/// over the body's scalar `T`, which is how the generated code widens a
+/// leaf and narrows the result.
+///
+/// Use it where an f32 body loses digits to the magnitude of its
+/// intermediates: a residual that is the difference of two large
+/// predicted and measured values, computed from a transform of large
+/// coordinates. `with_wide(f * d * px - obs)` costs one wide evaluation
+/// of the wrapped expression per residual and leaves the derivatives in
+/// f32.
+pub fn with_wide(x: E) -> E {
+    simple_func1("with_wide", |t| t)(x)
+}
+
+/// The wrapped expression of a [`with_wide`] node, `None` for any other.
+pub fn with_wide_arg(e: &E) -> Option<&E> {
+    match e.as_ref() {
+        Expr::Func { name, args, .. } if name == "with_wide" && args.len() == 1 => Some(&args[0]),
+        _ => None,
+    }
+}
+
+/// `e` with every [`with_wide`] scope in it removed: the inside of a scope
+/// is already wide, so a scope nested in it is the identity.
+pub(crate) fn strip_with_wide(e: &E) -> E {
+    if let Some(inner) = with_wide_arg(e) {
+        return strip_with_wide(inner);
+    }
+    crate::cse::map_children(e, &mut |c| strip_with_wide(c))
+}
+
+/// A read of `x` that is already in the wide scalar inside a [`with_wide`]
+/// scope, emitted as `x` itself. A bare symbol in a scope is a value of
+/// the body's scalar and is widened when the scope is emitted; a
+/// `wide(symbol)` leaf is a value a model keeps in the wide scalar next
+/// to its rounded copy, such as a cached rotation. The scope narrows its
+/// result through a bare symbol, so a scope of `wide` leaves and
+/// constants alone has no type to narrow to and fails to compile. Not a
+/// parsed built-in; for code generators that substitute wide caches into
+/// scopes, see [`cse::substitute_in_with_wide`].
+pub fn wide(x: E) -> E {
+    extern_func1("wide", "wide", grad1(|x| x), |a: &[f64]| a[0])(x)
+}
+
+/// A value of the body's scalar read into a [`with_wide`] scope: emitted
+/// as `<H as arael::utils::Wide<_>>::widen(x)` for the scope's wide
+/// scalar `H`. What [`widen_leaves`] wraps every bare symbol in.
+pub(crate) fn widen(x: E) -> E {
+    extern_func1("widen", "widen", grad1(|x| x), |a: &[f64]| a[0])(x)
+}
+
+/// Whether `e` is a [`wide`] leaf.
+pub(crate) fn is_wide_leaf(e: &E) -> bool {
+    matches!(e.as_ref(), Expr::Func { name, args, .. } if name == "wide" && args.len() == 1)
+}
+
+/// Whether `e` is a [`widen`] node.
+pub(crate) fn is_widen(e: &E) -> bool {
+    matches!(e.as_ref(), Expr::Func { name, args, .. } if name == "widen" && args.len() == 1)
+}
+
+/// `e` for emission inside a [`with_wide`] scope: every bare symbol
+/// wrapped in [`widen`]; a [`wide`] leaf, and a symbol widened already,
+/// left as they are. A `select` index stays as it is, since it is an
+/// integer, not a value of the body's scalar.
+pub(crate) fn widen_leaves(e: &E) -> E {
+    match e.as_ref() {
+        Expr::Sym(_) => widen(e.clone()),
+        _ if is_wide_leaf(e) || is_widen(e) => e.clone(),
+        Expr::Select { index, arms, default } => E::new(Expr::Select {
+            index: index.clone(),
+            arms: arms.iter().map(widen_leaves).collect(),
+            default: default.as_ref().map(widen_leaves),
+        }),
+        _ => crate::cse::map_children(e, &mut |c| widen_leaves(c)),
+    }
+}
+
+/// The symbol a [`with_wide`] scope narrows its result through: the first,
+/// in name order, of the symbols in `e` that are not under a [`wide`]
+/// leaf, so a value of the body's scalar. `None` when there is none.
+pub(crate) fn narrow_witness(e: &E) -> Option<String> {
+    fn walk(e: &E, out: &mut std::collections::BTreeSet<String>) {
+        match e.as_ref() {
+            Expr::Sym(name) => { out.insert(name.clone()); }
+            _ if is_wide_leaf(e) => {}
+            _ => { for c in crate::cse::children(e) { walk(c, out); } }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(e, &mut out);
+    out.into_iter().next()
+}
+
+/// Whether `e` reads any [`wide`] leaf.
+pub(crate) fn has_wide_leaf(e: &E) -> bool {
+    is_wide_leaf(e) || crate::cse::children(e).into_iter().any(has_wide_leaf)
+}
+
 /// Safe atan2 with non-diverging derivatives.
 ///
 /// $$\text{atan2\\_safe}(y, x) = \text{atan2}(y, x)$$
@@ -2442,7 +2557,7 @@ fn fast_atan2_eval(y: f64, x: f64) -> f64 {
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use parse::{parse, parse_with_functions, ParseError};
 pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym, transform3sym, vectsym, matrixsym};
-pub use cse::{cse, cse_scoped};
+pub use cse::{cse, cse_scoped, cse_scoped_wide};
 pub use select_value::{select_value, IntoSelect, Select};
 pub use arael_sym_macros::sym;
 

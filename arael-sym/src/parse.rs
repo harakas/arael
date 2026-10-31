@@ -342,7 +342,7 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
 /// parentheses, and function calls: `sin`, `cos`, `tan`, `asin`, `acos`,
 /// `atan`, `sinh`, `cosh`, `tanh`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log2`,
 /// `log10`, `sqrt`,
-/// `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`,
+/// `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `with_wide`,
 /// `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`,
 /// `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`,
 /// `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`,

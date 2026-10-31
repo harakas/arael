@@ -622,6 +622,49 @@ the exact rational forms. Usable directly in constraint bodies by
 name; the `#[arael(root, fast_atan)]` macro keyword rewrites every
 plain `atan`/`atan2` in a model onto them via `replace_function`.
 
+## Precision: `with_wide`
+
+`with_wide(x)` is `x` computed in a wide scalar whatever the scalar of the
+code around it. The wide scalar is f64 by default; a code generator names
+another through `cse_scoped_wide` (the arael macro takes it from the root's
+`wide = <type>` keyword), a type implementing `arael::utils::Wide<T>` over
+the surrounding scalar `T`. The generated code reads the symbols inside
+through `<H as arael::utils::Wide<_>>::widen`, evaluates everything inside
+in `H`, and narrows the result back through `arael::utils::narrow`. The
+derivative is the derivative of `x` in the surrounding scalar, the scope
+dropped: `with_wide` widens a value, not the Jacobian. In f64 code with the
+f64 wide scalar it is the identity, and the simplifier removes it around a
+symbol, a constant expression, or inside another `with_wide`.
+
+```rust,ignore
+// A residual whose intermediates are thousands of times its own size:
+// in f32 the predicted pixel rounds at f * eps_f32, about 6e-5 px at a
+// focal length of 1000, and the gradient's sums no longer cancel.
+[with_wide(f * d * px - obs_x), with_wide(f * d * py - obs_y)]
+```
+
+The scope is opaque to common subexpression elimination. Nothing inside is
+hoisted out, even a subexpression the plain part of the body also uses: an
+f32 copy of it is what the scope exists to avoid, so the inside is computed
+again in the wide scalar. Every `with_wide` of one scope level fuses into
+one wide block that shares the work between them (`cse_scoped` emits it as
+`let (__w0, __w1) = { ... };`), and a scope inside a `branch` or `select`
+arm belongs to that arm. The cost is one wide evaluation of the wrapped
+expressions per residual. Literals inside a block are written in the wide
+scalar: suffixed for `f32` / `f64`, through
+`arael::utils::WideScalar::from_f64` for any other type. `to_rust` on an
+expression that still holds a scope writes it inline, in f64.
+
+A bare symbol inside a scope is a value of the surrounding scalar, read
+widened. `wide(symbol)` marks a leaf that is already in the wide scalar: a
+value a model keeps there next to its rounded copy, such as a cached
+rotation. Code generators put these in with `cse::substitute_in_with_wide`,
+which rewrites inside scopes only, after differentiation (a derivative
+drops the scope and reads the rounded copy). The result is narrowed through
+the first bare symbol of the scope in name order; a scope of `wide` leaves
+and constants alone has no scalar to narrow to and is emitted as a
+`compile_error!` saying so. `wide` is not a parsed built-in.
+
 ## Switching and Clamping: `heaviside`, `clamp`, `branch`, `multibranch`, `piecewise`, `select`, `min`, `max`, `sign`
 
 ### `heaviside(x)`
@@ -753,7 +796,7 @@ println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * si
 ```
 
 <!-- Keep this list in sync with FUNCTIONS in arael-sym/src/lib.rs and the parse() doc in arael-sym/src/parse.rs. -->
-Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`, `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`, `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`, `select`, `select_or`, `multibranch`, `piecewise`. The same list is `FUNCTIONS`, enumerable at runtime via `function_names()`.
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `sign`, `identity`, `cached`, `with_wide`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `fast_atan`, `atan2`, `pow`, `safe_atan2`, `fast_atan2`, `rad_diff`, `rad_sum`, `min`, `max`, `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`, `loss_soft_l1`, `clamp`, `branch`, `loss_select`, `select`, `select_or`, `multibranch`, `piecewise`. The same list is `FUNCTIONS`, enumerable at runtime via `function_names()`.
 
 `function_by_name(name)` looks a built-in up by name and returns a `FunctionRef`: `Unary`, `Binary` or `Ternary` holding the function, or `Variadic` for the functions that take a variable number of arguments, which check the count themselves and report a bad call as an error string. `FUNCTIONS` is the table behind it.
 

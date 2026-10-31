@@ -91,7 +91,16 @@ fn whole_exponent(e: &Expr) -> Option<i32> {
     (v.fract() == 0.0 && v.abs() <= 64.0).then_some(v as i32)
 }
 
+/// Whether `ft` is a wide scalar other than `f32` / `f64`: a type path
+/// whose literals are written through `arael::utils::WideScalar`.
+fn is_software_wide(ft: &str) -> bool {
+    !ft.is_empty() && ft != "f32" && ft != "f64" && ft != GENERIC_FT
+}
+
 fn rust_float_literal(v: f64, ft: &str) -> String {
+    if is_software_wide(ft) {
+        return format!("<{ft} as arael::utils::WideScalar>::from_f64({})", rust_float_literal(v, "f64"));
+    }
     if !v.is_finite() {
         // `{v}` prints inf/NaN, which are not Rust tokens. Suffixed
         // contexts get the typed constant path; the type-inferred
@@ -601,6 +610,8 @@ impl Expr {
                     // an f32 context gets the f64 magnitude, which keeps
                     // the safe_* derivative guards finite.
                     buf.push_str(&rust_float_literal(*value, ""));
+                } else if is_software_wide(ft) {
+                    buf.push_str(&format!("<{ft} as arael::utils::WideScalar>::from_f64({rust_f64})"));
                 } else {
                     buf.push_str(rust_f64);
                 }
@@ -716,7 +727,26 @@ impl Expr {
                 buf.push_str(" } }");
             }
             Expr::Func { name, params, kind, args } => {
-                if let Some(body) = kind.body() {
+                if name == "with_wide" && args.len() == 1 {
+                    // A precision scope emitted inline, in f64: the inside
+                    // over widened leaves, narrowed back through one of
+                    // them. The scoped CSE fuses scopes into a block of the
+                    // wide scalar it is given instead; the inline form has
+                    // no scalar to take and is f64.
+                    let inner = crate::strip_with_wide(&args[0]);
+                    write_narrowed(buf, &inner, &crate::narrow_witness(&inner), ft, "f64", parent_prec);
+                } else if name == "widen" && args.len() == 1 {
+                    // A leaf of the body read into a scope: `ft` is the
+                    // wide scalar inside a scope.
+                    buf.push_str("<");
+                    buf.push_str(ft);
+                    buf.push_str(" as arael::utils::Wide<_>>::widen(");
+                    args[0].write_rust(buf, ft, 0);
+                    buf.push(')');
+                } else if name == "wide" && args.len() == 1 {
+                    // A value already in the wide scalar.
+                    args[0].write_rust(buf, ft, parent_prec);
+                } else if let Some(body) = kind.body() {
                     // Symbolic: inline the expanded body.
                     // Identity functions force parentheses to preserve eval order.
                     let prec = if name == "identity" || name == "cached" { 8 } else { parent_prec };
@@ -794,6 +824,29 @@ impl Expr {
 
 use crate::cse::{Arm, Intermediate, Switch};
 
+/// Write a `with_wide` scope's value `v`: in the wide scalar `wide_ft`
+/// over its widened leaves, narrowed back to the body's scalar through
+/// the `witness` symbol. With no witness the value is a constant, or
+/// constants and `wide` leaves only; a constant is written at the body's
+/// scalar and infers its type where it is used, the other has no type to
+/// narrow to and is written as a compile error naming the problem.
+fn write_narrowed(buf: &mut String, v: &E, witness: &Option<String>, ft: &str, wide_ft: &str, parent_prec: u8) {
+    match witness {
+        Some(w) => {
+            buf.push_str("arael::utils::narrow(");
+            crate::widen_leaves(v).write_rust(buf, wide_ft, 0);
+            buf.push_str(", ");
+            buf.push_str(w);
+            buf.push(')');
+        }
+        None if crate::has_wide_leaf(v) => {
+            buf.push_str("compile_error!(\"a with_wide scope of wide cached values alone has no \
+                value of the body's scalar to narrow its result through; include one in the scope\")");
+        }
+        None => v.write_rust(buf, ft, parent_prec),
+    }
+}
+
 fn write_names(buf: &mut String, names: &[String]) {
     if names.len() == 1 {
         buf.push_str(&names[0]);
@@ -868,6 +921,30 @@ impl Intermediate {
                 default.as_ref().expect("a fused branch has an else side").write_rust(buf, ft, true);
                 buf.push(';');
             }
+            Intermediate::Wide { names, witness, wide_ft, inters, values } => {
+                // The block is the wide scalar throughout: its
+                // intermediates and values are emitted with that type, the
+                // leaves having been widened when the scope was built.
+                buf.push_str("let ");
+                write_names(buf, names);
+                buf.push_str(" = { ");
+                for it in inters {
+                    it.write_rust(buf, wide_ft);
+                    buf.push(' ');
+                }
+                let narrow = |buf: &mut String, v: &E| write_narrowed(buf, v, witness, ft, wide_ft, 0);
+                if values.len() == 1 {
+                    narrow(buf, &values[0]);
+                } else {
+                    buf.push('(');
+                    for (i, v) in values.iter().enumerate() {
+                        if i > 0 { buf.push_str(", "); }
+                        narrow(buf, v);
+                    }
+                    buf.push(')');
+                }
+                buf.push_str(" };");
+            }
         }
     }
 }
@@ -917,6 +994,18 @@ impl fmt::Display for Intermediate {
                     Some(arm) => write!(f, " _ => {arm} }};"),
                     None => write!(f, " _ => panic }};"),
                 }
+            }
+            Intermediate::Wide { names, inters, values, .. } => {
+                let mut names_s = String::new();
+                write_names(&mut names_s, names);
+                write!(f, "let {names_s} = with_wide {{")?;
+                for it in inters {
+                    write!(f, " {it}")?;
+                }
+                for (i, v) in values.iter().enumerate() {
+                    write!(f, "{}{v}", if i == 0 { " " } else { ", " })?;
+                }
+                write!(f, " }};")
             }
             Intermediate::Match { switch: Switch::Sign(q), names, arms, default } => {
                 let mut names_s = String::new();
