@@ -165,6 +165,8 @@ fn field_kind(layout: &SymLayout, fname: &str, spelling: &str) -> String {
             ("simple", true)
         } else if layout.universal_euler_angle_fields.iter().any(|f| f == fname) {
             ("universal", true)
+        } else if layout.mixed_euler_angle_fields.iter().any(|(f, _)| f == fname) {
+            ("mixed", true)
         } else if layout.universal_rotvec_fields.iter().any(|f| f == fname) {
             ("rotvec", true)
         } else {

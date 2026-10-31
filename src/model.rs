@@ -864,6 +864,226 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
 }
 
 // ---------------------------------------------------------------------------
+// MixedEulerAngleParam -- EulerAngleParam with its state in a wide scalar
+// ---------------------------------------------------------------------------
+
+/// [`EulerAngleParam`] with its state in a wide scalar `H` whatever the
+/// body's `T`: the rotation an f32 model reads in `H` inside a `with_wide`
+/// scope of a constraint body.
+///
+/// `value`, the reference rotation, the delta and the composed rotation are
+/// `H`; what a body reads outside a scope, `work`, `rotation_matrix` and the
+/// rotation Jacobian, is `T`, narrowed from the `H` composition once per
+/// update. Re-centering composes in `H`, so accepted steps accumulate
+/// without `T` rounding. `H` is f64 by default and must be the root's wide
+/// scalar (`wide = <type>` on `#[arael(root, ...)]`, f64 when absent); the
+/// macro reports a mismatch. Same convention and parameterization as
+/// `EulerAngleParam`: a delta of euler angles (roll, pitch, yaw) composed
+/// with a reference, R = Rz(yaw) * Ry(pitch) * Rx(roll). With `T = H` it
+/// is `EulerAngleParam<H>` holding its rotation twice; use that instead.
+///
+/// ```rust,ignore
+/// #[arael::model]
+/// #[arael(constraint(hb, {
+///     let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+///     [with_wide(cam.f * (-pc.x / pc.z) - obs.x)]
+/// }))]
+/// struct Obs<T: Float> { /* ... */ }
+///
+/// struct Camera<T: Float> {
+///     ea: MixedEulerAngleParam<T>,   // f64 rotation inside the scope
+///     t: Param<vect3<T>>,
+///     f: Param<T>,
+///     hb: SelfBlock<Camera<T>, T>,
+/// }
+/// ```
+#[derive(Clone, Copy)]
+pub struct MixedEulerAngleParam<T: crate::utils::Float, H: crate::utils::Wide<T> = f64> {
+    /// Whether the solver moves this rotation.
+    pub optimize: bool,
+    /// The euler angles (roll, pitch, yaw) in `H`: initial in, optimized out.
+    pub value: vect3<H>,
+    work: vect3<T>,
+    index: u32,
+    #[doc(hidden)] pub ref_rotation: matrix3<H>,
+    #[doc(hidden)] pub delta: vect3<H>,
+    /// The composed rotation in `H`, and narrowed to `T`.
+    #[doc(hidden)] pub rotation_matrix_wide: matrix3<H>,
+    #[doc(hidden)] pub rotation_matrix: matrix3<T>,
+    /// d(rotation_matrix)/d(delta.{x,y,z}), composed in `H` and narrowed.
+    #[doc(hidden)] pub rotation_matrix_deriv: [matrix3<T>; 3],
+}
+
+/// `v` with every component narrowed to `T`.
+fn narrow_vect3<T: crate::utils::Float, H: crate::utils::Wide<T>>(v: vect3<H>) -> vect3<T> {
+    vect3::new(v.x.narrow(), v.y.narrow(), v.z.narrow())
+}
+
+/// `m` with every entry narrowed to `T`.
+fn narrow_matrix3<T: crate::utils::Float, H: crate::utils::Wide<T>>(m: matrix3<H>) -> matrix3<T> {
+    matrix3::from_rows(narrow_vect3(m[0]), narrow_vect3(m[1]), narrow_vect3(m[2]))
+}
+
+impl<T: crate::utils::Float, H: crate::utils::Wide<T>> Default for MixedEulerAngleParam<T, H> {
+    fn default() -> Self {
+        Self {
+            optimize: true,
+            value: vect3::<H>::default(),
+            work: vect3::<T>::default(),
+            index: u32::MAX,
+            ref_rotation: matrix3::<H>::identity(),
+            delta: vect3::<H>::default(),
+            rotation_matrix_wide: matrix3::<H>::identity(),
+            rotation_matrix: matrix3::<T>::identity(),
+            rotation_matrix_deriv: [matrix3::<T>::identity(),
+                                    matrix3::<T>::identity(),
+                                    matrix3::<T>::identity()],
+        }
+    }
+}
+
+impl<T: crate::utils::Float, H: crate::utils::Wide<T>> MixedEulerAngleParam<T, H> {
+    /// Create a new optimizable euler angle parameter with the given initial angles.
+    pub fn new(value: vect3<H>) -> Self {
+        Self { value, ..Default::default() }
+    }
+    /// Create a fixed (non-optimizable) euler angle parameter.
+    pub fn fixed(value: vect3<H>) -> Self {
+        Self { optimize: false, value, ..Default::default() }
+    }
+    /// Return the current working-copy euler angles in `T` (from ref_rotation * delta).
+    pub fn work(&self) -> vect3<T> { self.work }
+    /// Return this parameter's index into the flat parameter vector, or `u32::MAX` if fixed.
+    pub fn index(&self) -> u32 { self.index }
+    /// Write per-component indices into `out`, or `u32::MAX` if fixed.
+    pub fn write_indices(&self, out: &mut [u32]) { ParamSlot::write_param_indices(self, out) }
+    /// Absorb current delta into reference rotation and reset delta.
+    pub fn advance(&mut self) {
+        self.ref_rotation = self.ref_rotation
+            * matrix3::<H>::rotation_from_euler_angles(self.delta);
+        self.delta = vect3::<H>::default();
+    }
+    /// Precompute the composed rotation, its `T` narrowing and Jacobian, and
+    /// the work angles from the current delta + ref_rotation.
+    #[doc(hidden)]
+    pub fn __precompute(&mut self) {
+        let (s, c) = self.delta.sincos();
+        let dea_rot = matrix3::<H>::rotation_from_euler_angles_sincos(s, c);
+        self.rotation_matrix_wide = self.ref_rotation * dea_rot;
+        self.rotation_matrix = narrow_matrix3(self.rotation_matrix_wide);
+        // d(R_ref*R(d))/dd.k = R_ref * dR(d)/dd.k, composed in H and
+        // narrowed once per pose.
+        let dea_rot_deriv = matrix3::<H>::rotation_from_euler_angles_sincos_deriv(s, c);
+        self.rotation_matrix_deriv = [narrow_matrix3(self.ref_rotation * dea_rot_deriv[0]),
+                                      narrow_matrix3(self.ref_rotation * dea_rot_deriv[1]),
+                                      narrow_matrix3(self.ref_rotation * dea_rot_deriv[2])];
+        self.work = narrow_vect3(self.rotation_matrix_wide.get_euler_angles());
+    }
+}
+
+impl<T: crate::utils::Float, H: crate::utils::Wide<T>> ParamSlot for MixedEulerAngleParam<T, H> {
+    const COUNT: usize = 3;
+    fn param_index(&self) -> u32 { self.index }
+}
+
+impl<T: crate::utils::Float, H: crate::utils::Wide<T> + serde::Serialize> serde::Serialize for MixedEulerAngleParam<T, H> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("MixedEulerAngleParam", 2)?;
+        st.serialize_field("optimize", &self.optimize)?;
+        st.serialize_field("value", &self.value)?;
+        st.end()
+    }
+}
+
+impl<'de, T: crate::utils::Float, H: crate::utils::Wide<T> + serde::Deserialize<'de>> serde::Deserialize<'de> for MixedEulerAngleParam<T, H> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+        struct V<U, W>(std::marker::PhantomData<(U, W)>);
+        impl<'de2, U: crate::utils::Float, W: crate::utils::Wide<U> + serde::Deserialize<'de2>> Visitor<'de2> for V<U, W> {
+            type Value = MixedEulerAngleParam<U, W>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("MixedEulerAngleParam")
+            }
+            fn visit_map<A: MapAccess<'de2>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut opt = None; let mut val = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "optimize" => opt = Some(map.next_value()?),
+                        "value" => val = Some(map.next_value()?),
+                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                    }
+                }
+                Ok(MixedEulerAngleParam {
+                    optimize: opt.unwrap_or(true),
+                    value: val.unwrap_or_default(),
+                    ..Default::default()
+                })
+            }
+        }
+        d.deserialize_map(V::<T, H>(std::marker::PhantomData))
+    }
+}
+
+impl<T: crate::utils::Float, H: crate::utils::Wide<T>> Model for MixedEulerAngleParam<T, H>
+    where vect3<T>: ParamType, vect3<H>: ParamType
+{
+    fn fold_param_span(&self, min: &mut u32, count: &mut u32) {
+        ParamSlot::fold_param_span(self, min, count)
+    }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        push_own_span(self, out)
+    }
+
+    fn serialize_params<F: crate::utils::Float>(&mut self, data: &mut std::vec::Vec<F>) {
+        // Seed the reference from value for fixed params too -- constraints
+        // evaluate a fixed rotation through ref_rotation as well.
+        self.ref_rotation = matrix3::<H>::rotation_from_euler_angles(self.value);
+        if self.optimize {
+            self.index = data.len() as u32;
+            data.push(F::zero()); data.push(F::zero()); data.push(F::zero());
+        } else { self.index = u32::MAX; }
+    }
+    fn deserialize_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+        if self.index != u32::MAX {
+            let i = self.index as usize;
+            let dea = <vect3<H> as ParamType>::read_from(&data[i..i + 3]);
+            self.ref_rotation = self.ref_rotation
+                * matrix3::<H>::rotation_from_euler_angles(dea);
+            self.value = self.ref_rotation.get_euler_angles();
+            self.delta = vect3::<H>::default();
+        }
+    }
+    fn update_params<F: crate::utils::Float>(&mut self, data: &[F]) {
+        if self.index != u32::MAX {
+            let i = self.index as usize;
+            self.delta = <vect3<H> as ParamType>::read_from(&data[i..i + 3]);
+        } else { self.delta = vect3::<H>::default(); }
+    }
+    fn update_self(&mut self) {
+        self.ref_rotation = matrix3::<H>::rotation_from_euler_angles(self.value);
+        self.delta = vect3::<H>::default();
+        self.__precompute();
+    }
+
+    const PARAM_COUNT: u32 = 3;
+    fn serialize_size(&self) -> u32 { if self.optimize { 3 } else { 0 } }
+    fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
+        for suffix in <vect3<T> as ParamType>::SUFFIXES {
+            out.push(format!("{}{}", base, suffix));
+        }
+    }
+
+    fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
+        if self.index != u32::MAX {
+            let i = self.index as usize;
+            self.advance();
+            params[i] = F::zero(); params[i + 1] = F::zero(); params[i + 2] = F::zero();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // QuaternionParam -- gimbal-lock-free rotation with a quaternion reference
 // ---------------------------------------------------------------------------
 
@@ -2262,6 +2482,13 @@ impl<T: crate::utils::Float> ModelSym for SimpleEulerAngleParam<T>
 }
 
 impl<T: crate::utils::Float> ModelSym for EulerAngleParam<T>
+    where vect3<T>: ModelSym
+{
+    type Sym = <vect3<T> as ModelSym>::Sym;
+    fn sym(base: &str) -> Self::Sym { <vect3<T> as ModelSym>::sym(base) }
+}
+
+impl<T: crate::utils::Float, H: crate::utils::Wide<T>> ModelSym for MixedEulerAngleParam<T, H>
     where vect3<T>: ModelSym
 {
     type Sym = <vect3<T> as ModelSym>::Sym;

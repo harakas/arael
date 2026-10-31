@@ -1,0 +1,7 @@
+error: `node.ea` is a MixedEulerAngleParam<_, f32> but this root's wide scalar is `f64`: add `wide = f32` to the root's #[arael(root, ...)] or change the field
+  --> tests/constraint_attr_errors/mixed_wide_mismatch.rs:20:1
+   |
+20 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -11,7 +11,8 @@
 //! - Generates the `Model` trait implementation (serialize, deserialize,
 //!   update, Hessian-block accumulation) from the `Param<T>` fields, the
 //!   rotation parameters (`SimpleEulerAngleParam`, `EulerAngleParam`,
-//!   `QuaternionParam`) and the `#[arael(component)]` structs.
+//!   `MixedEulerAngleParam`, `QuaternionParam`) and the
+//!   `#[arael(component)]` structs.
 //! - Rewrites shorthand block types: `SelfBlock<A>` becomes
 //!   `SelfBlock<A, {A_PARAM_COUNT}>`, and `CrossBlock<A, B>` becomes
 //!   `CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>` (two const
@@ -78,6 +79,10 @@ struct RootKeywords {
     grad_f64: bool,
     /// `seq`: the sweeps stay on one thread.
     seq: bool,
+    /// `wide = <type>`: the scalar the bodies' `with_wide` scopes compute
+    /// in, a type path implementing `arael::utils::Wide<T>`; `f64` when
+    /// absent.
+    wide: String,
 }
 use syn::{
     parse_macro_input,
@@ -144,6 +149,9 @@ struct SymLayout {
     ref_paths: Vec<(String, String)>, // (field_name, resolution_path) for #[arael(ref = ...)]
     euler_angle_fields: Vec<String>,  // field names detected as SimpleEulerAngleParam
     universal_euler_angle_fields: Vec<String>, // field names detected as EulerAngleParam
+    /// Fields detected as `MixedEulerAngleParam<_, H>`, with `H`'s last path
+    /// segment (`f64` when absent): a wide rotation beside the T one.
+    mixed_euler_angle_fields: Vec<(String, String)>,
     universal_rotvec_fields: Vec<String>, // field names detected as QuaternionParam (rotation-vector delta)
     /// `#[arael(symbolic = <expr>)]` fields: (field name, expression source).
     /// Body reads of the field expand to the expression, evaluated over the
@@ -590,6 +598,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             ref_paths: Vec::new(),
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
+            mixed_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
             symbolic_fields: vec![
                 ("rotation_matrix".to_string(),
@@ -630,6 +639,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             ref_paths: Vec::new(),
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
+            mixed_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
             symbolic_fields: vec![
                 ("rotation_matrix".to_string(),
@@ -663,6 +673,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             ref_paths: Vec::new(),
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
+            mixed_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
             symbolic_fields: vec![
                 ("rotation_matrix".to_string(),
@@ -694,6 +705,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             ref_paths: Vec::new(),
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
+            mixed_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
             symbolic_fields: vec![
                 ("unit".to_string(),
@@ -1495,6 +1507,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     let mut ref_paths_for_reg: Vec<(String, String)> = Vec::new();
     let mut euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
+    let mut mixed_euler_angle_fields_reg: Vec<(String, String)> = Vec::new();
     let mut universal_rotvec_fields_reg: Vec<String> = Vec::new();
     let mut symbolic_fields_reg: Vec<(String, String)> = Vec::new();
     // (deriv field name, of = symbolic field, by = param field)
@@ -1621,6 +1634,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
             match ea_kind {
                 "simple" => euler_angle_fields_reg.push(field_name.clone()),
                 "universal" => universal_euler_angle_fields_reg.push(field_name.clone()),
+                "mixed" => mixed_euler_angle_fields_reg.push((field_name.clone(), wide_arg_of(&field.ty))),
                 "universal_rotvec" => universal_rotvec_fields_reg.push(field_name.clone()),
                 _ => {}
             }
@@ -1750,7 +1764,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     for ea_field in &euler_angle_fields_reg {
         sym_fields.push((format!("{}_rotation_matrix", ea_field), SymFieldType::Mat3));
     }
-    for ea_field in &universal_euler_angle_fields_reg {
+    for ea_field in universal_euler_angle_fields_reg.iter().chain(mixed_euler_angle_fields_reg.iter().map(|(f, _)| f)) {
         sym_fields.push((format!("{}_ref_rotation", ea_field), SymFieldType::Skip));
         sym_fields.push((format!("{}_delta", ea_field), SymFieldType::Skip));
         sym_fields.push((format!("{}_rotation_matrix", ea_field), SymFieldType::Mat3));
@@ -1763,6 +1777,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
         ref_paths: ref_paths_for_reg,
         euler_angle_fields: euler_angle_fields_reg.clone(),
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
+        mixed_euler_angle_fields: mixed_euler_angle_fields_reg.clone(),
         universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
         symbolic_fields: symbolic_fields_reg,
         deriv_fields: deriv_fields_reg,
@@ -1923,7 +1938,7 @@ fn param_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
                         return inner_type_size(inner, scalar_generic);
                     }
             if name == "SimpleEulerAngleParam" || name == "EulerAngleParam"
-                || name == "QuaternionParam" {
+                || name == "MixedEulerAngleParam" || name == "QuaternionParam" {
                 return 3; // always vect3 = 3 params
             }
         }
@@ -2603,6 +2618,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             let mut grad_kahan = false;
             let mut grad_f64 = false;
             let mut seq = false;
+            let mut wide = "f64".to_string();
             let mut marginalize: Vec<syn::Ident> = Vec::new();
             let mut pos = 1;
             while pos < tvec.len() {
@@ -2637,6 +2653,34 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             grad_f64 = true;
                         } else if kw_str == "seq" {
                             seq = true;
+                        } else if kw_str == "wide" {
+                            // `wide = <type path>`: the path's tokens up to
+                            // the next comma (identifiers and `::` only, a
+                            // generic argument would need its own commas).
+                            pos += 1;
+                            match tvec.get(pos) {
+                                Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                                _ => return Some(Err(syn::Error::new(kw.span(),
+                                    "`wide` takes a type: `wide = f64` or `wide = <path>`"))),
+                            }
+                            pos += 1;
+                            let mut path = String::new();
+                            while let Some(t) = tvec.get(pos) {
+                                match t {
+                                    proc_macro2::TokenTree::Ident(i) => path.push_str(&i.to_string()),
+                                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ':' => path.push(':'),
+                                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => break,
+                                    other => return Some(Err(syn::Error::new(other.span(),
+                                        "`wide = <type>` takes a plain type path"))),
+                                }
+                                pos += 1;
+                            }
+                            if path.is_empty() {
+                                return Some(Err(syn::Error::new(kw.span(),
+                                    "`wide = <type>` names no type")));
+                            }
+                            wide = path;
+                            continue;
                         } else if kw_str == "marginalize" {
                             // Takes a parenthesized field list:
                             // marginalize(landmarks) or (a, b).
@@ -2664,7 +2708,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `grad_plain`, `grad_kahan`, `grad_f64`, `seq`, or `marginalize(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, `cost_plain`, `cost_kahan`, `cost_f64`, `grad_plain`, `grad_kahan`, `grad_f64`, `seq`, `wide = <type>`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -2689,7 +2733,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
             return Some(Ok(RootKeywords {
                 precision, custom, jacobian, fast_atan, marginalize,
-                cost_kahan, cost_f64, grad_kahan, grad_f64, seq,
+                cost_kahan, cost_f64, grad_kahan, grad_f64, seq, wide,
             }));
         }
         None
@@ -2708,6 +2752,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let root_grad_kahan = root_info.as_ref().is_some_and(|r| r.grad_kahan);
     let root_grad_f64 = root_info.as_ref().is_some_and(|r| r.grad_f64);
     let root_seq = root_info.as_ref().is_some_and(|r| r.seq);
+    let root_wide = root_info.as_ref().map(|r| r.wide.clone()).unwrap_or_else(|| "f64".to_string());
 
     // Schur auto-detection: which parameter blocks may be marginalized.
     //
@@ -2884,7 +2929,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         constraint::generate_root_methods(
             name, fields, precision, root_custom, root_jacobian,
             root_fast_atan, root_cost_kahan, root_cost_f64, root_grad_kahan, root_grad_f64,
-            &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?
+            &root_wide, &marginalize_hint_fn, &marginalize_candidates_fn, uses_coo, par)?
     } else {
         quote! {}
     };
@@ -2904,9 +2949,22 @@ fn is_param_type(ty: &syn::Type) -> bool {
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return name == "Param" || name == "SimpleEulerAngleParam" || name == "EulerAngleParam"
-                || name == "QuaternionParam";
+                || name == "MixedEulerAngleParam" || name == "QuaternionParam";
         }
     false
+}
+
+/// The wide scalar of a `MixedEulerAngleParam<T, H>` field type: the last
+/// path segment of `H`, or `f64` when the default is taken.
+fn wide_arg_of(ty: &syn::Type) -> String {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(syn::Type::Path(h))) = args.args.iter().nth(1)
+        && let Some(last) = h.path.segments.last() {
+            return last.ident.to_string();
+        }
+    "f64".to_string()
 }
 
 fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
@@ -2915,6 +2973,9 @@ fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
             let name = seg.ident.to_string();
             if name == "SimpleEulerAngleParam" { return Some("simple"); }
             if name == "EulerAngleParam" { return Some("universal"); }
+            // MixedEulerAngleParam: the same composition, with the rotation
+            // kept in f64 beside the T one for `with_wide` scopes to read.
+            if name == "MixedEulerAngleParam" { return Some("mixed"); }
             // QuaternionParam: same ref_rotation * R(delta) composition, but the
             // delta is a rotation vector mapped through the exp map, not euler.
             if name == "QuaternionParam" { return Some("universal_rotvec"); }
@@ -3037,7 +3098,7 @@ fn collect_wrapper_suspects(
             for t in type_args { collect_wrapper_suspects(t, scalar_generic, out); }
         }
         "SelfBlock" | "VarSelfBlock" | "CrossBlock" | "VarCrossBlock" | "BoxedSelfBlock" | "BoxedCrossBlock"
-        | "Param" | "SimpleEulerAngleParam" | "EulerAngleParam" | "QuaternionParam"
+        | "Param" | "SimpleEulerAngleParam" | "EulerAngleParam" | "MixedEulerAngleParam" | "QuaternionParam"
         | "PhantomData" => {}
         _ => {
             // A registered model type's own generics are its scalar

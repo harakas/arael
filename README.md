@@ -43,7 +43,6 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
   - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
 - **Block supernodal Cholesky** -- the sparse backend factorizes the Hessian in block form by default, one dense panel per supernode, not flattened to scalar CSC
-- **Mixed precision** -- opt-in: the supernodal factor in `f32` under an `f64` solve, each step refined against the `f64` matrix; half the factor memory, and faster where the factor is large (bundle adjustment, landmark maps)
 - **Schur marginalization** -- landmark-like blocks eliminated before the factorization and recovered by back-substitution, taken automatically when the backend prices it faster
 - **Conjugate gradients** -- the reduced system solved iteratively rather than factorized, preconditioned per block: no fill, no factor to store, an inexact step. A second, implicit form skips building the reduced system altogether, working straight off the Hessian to save its memory
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
@@ -51,6 +50,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
 - **Threads** -- with the `threads` feature the cost and assembly sweeps and the linear solve run on as many threads as `num_threads` says ([docs/SOLVERS.md](docs/SOLVERS.md#threads))
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
+- **Mixed precision** -- an f32 factor under an f64 solve; surgical f64 computation in an f32 model with `with_wide`; mixed parameter types that keep their state in f64
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
 - **C++, Python and JavaScript interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust; the JavaScript one runs the solver in the browser as WebAssembly ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md), [docs/WASM.md](docs/WASM.md))

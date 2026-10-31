@@ -229,6 +229,61 @@ pub fn rad_diff<T: Float>(a: T, b: T) -> T { a.rad_diff(b) }
 /// Rollover-safe sum of two radian angles, result in [-pi, pi].
 pub fn rad_sum<T: Float>(a: T, b: T) -> T { a.rad_sum(b) }
 
+/// A scalar a `with_wide` precision scope computes in (docs/SYM.md): f64,
+/// or a wider software scalar on a target without f64.
+pub trait WideScalar: Float {
+    /// The scalar's value of an f64: how a scope's literals are written.
+    fn from_f64(v: f64) -> Self;
+}
+
+impl WideScalar for f64 {
+    #[inline(always)]
+    fn from_f64(v: f64) -> f64 { v }
+}
+
+impl WideScalar for f32 {
+    #[inline(always)]
+    fn from_f64(v: f64) -> f32 { v as f32 }
+}
+
+/// The wide scalar of a `with_wide` scope over a body scalar `T`: how a
+/// value of the body is read into the scope and the scope's value handed
+/// back. f64 is wide over every scalar (the identity over f64), so a
+/// generic model's `MixedEulerAngleParam<T>` needs no bound of its own;
+/// f32 over f32 is the identity.
+///
+/// ```
+/// use arael::utils::Wide;
+/// let wide = <f64 as Wide<f32>>::widen(0.1f32);
+/// assert_eq!(wide, 0.1f32 as f64);
+/// assert_eq!(<f64 as Wide<f32>>::narrow(wide), 0.1f32);
+/// ```
+pub trait Wide<T: Float>: WideScalar {
+    fn widen(v: T) -> Self;
+    fn narrow(self) -> T;
+}
+
+impl<T: Float> Wide<T> for f64 {
+    #[inline(always)]
+    fn widen(v: T) -> f64 { v.to_f64().unwrap() }
+    #[inline(always)]
+    fn narrow(self) -> T { T::from(self).unwrap() }
+}
+
+impl Wide<f32> for f32 {
+    #[inline(always)]
+    fn widen(v: f32) -> f32 { v }
+    #[inline(always)]
+    fn narrow(self) -> f32 { self }
+}
+
+/// `v` narrowed to the scalar of `like`: the value of a `with_wide` scope
+/// handed back to the body's scalar through a value of that scalar.
+#[inline(always)]
+pub fn narrow<T: Float, H: Wide<T>>(v: H, _like: T) -> T {
+    v.narrow()
+}
+
 /// Machine epsilon of the anchor value's type (`f32::EPSILON` / `f64::EPSILON`).
 ///
 /// The anchor value itself is ignored; only its TYPE is used, so the symbolic

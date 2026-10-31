@@ -158,6 +158,8 @@ pub fn leaves(model: &Model, t: &Type) -> Vec<Leaf> {
                 let ty = match (variant, scalar) {
                     ("rotvec", "f32") => math_ty("quaternf"),
                     ("rotvec", _) => math_ty("quaternd"),
+                    // MixedEulerAngleParam: the value is f64 whatever the scalar.
+                    ("mixed", _) => math_ty("vect3d"),
                     (_, "f32") => math_ty("vect3f"),
                     (_, _) => math_ty("vect3d"),
                 }.expect("builtin math type");
@@ -240,6 +242,22 @@ mod tests {
 
     fn names(lv: &[Leaf]) -> Vec<(String, String, usize)> {
         lv.iter().map(|l| (l.name.clone(), l.access.clone(), l.ty.slots())).collect()
+    }
+
+    /// A `MixedEulerAngleParam` holds its value in f64 whatever the model's
+    /// scalar, so its leaf crosses as a `vect3d` even in an f32 model.
+    #[test]
+    fn a_mixed_euler_param_value_is_f64_in_an_f32_model() {
+        let mut ea = field("ea", "euler_param", None);
+        ea.variant = Some("mixed".into());
+        ea.scalar = Some("f32".into());
+        let mut plain = field("eb", "euler_param", None);
+        plain.variant = Some("universal".into());
+        plain.scalar = Some("f32".into());
+        let (m, t) = model_with(vec![ea, plain]);
+        let lv = leaves(&m, &t);
+        assert_eq!(lv[0].ty, LeafTy::Math { scalar: "f64".into(), n: 3, mirror: "CVec3F64".into() });
+        assert_eq!(lv[2].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into() });
     }
 
     #[test]

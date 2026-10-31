@@ -2569,14 +2569,45 @@ pub fn generate_constraint_impl(
 /// returns pairs (from_expr, to_expr) that replace rotation matrix entries
 /// and their derivatives with precomputed matrix fields. Any sin/cos of the
 /// angles left outside those patterns stays inline (evaluated via `work()`).
-fn build_euler_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
-    let mut subs = Vec::new();
+/// A `MixedEulerAngleParam<_, H>` field against the root's wide scalar
+/// (`wide = ...`): a mismatch would read the field's rotation into a scope
+/// of another type, so it is reported here rather than as a type error in
+/// the generated code. Compared by the last path segment.
+fn check_wide_field(prefix: &str, field: &str, field_wide: &str, root_wide: &str) -> syn::Result<()> {
+    let last = |p: &str| p.rsplit("::").next().unwrap_or(p).to_string();
+    if last(field_wide) != last(root_wide) {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), format!(
+            "`{}.{}` is a MixedEulerAngleParam<_, {}> but this root's wide scalar is `{}`: \
+             add `wide = {}` to the root's #[arael(root, ...)] or change the field",
+            prefix, field, field_wide, root_wide, field_wide)));
+    }
+    Ok(())
+}
+
+/// The substitutions a constraint's expressions go through after
+/// differentiation: `subs` everywhere, `wide` only inside `with_wide`
+/// scopes, where a cached rotation entry reads its wide copy.
+#[derive(Default)]
+struct Substitutions {
+    subs: Vec<(arael_sym::E, arael_sym::E)>,
+    wide: Vec<(arael_sym::E, arael_sym::E)>,
+}
+
+impl Substitutions {
+    fn extend(&mut self, other: Substitutions) {
+        self.subs.extend(other.subs);
+        self.wide.extend(other.wide);
+    }
+}
+
+fn build_euler_substitutions(var_base: &str, field_name: &str) -> Substitutions {
+    let mut subs = Substitutions::default();
 
     let ea_sym = arael_sym::vect3sym::new(&format!("{}.{}.work()", var_base, field_name));
     let rot = ea_sym.rotation_matrix();
-    push_rotation_matrix_subs(&mut subs, &rot, var_base, field_name);
+    push_rotation_matrix_subs(&mut subs, &rot, var_base, field_name, false);
     let dvar_prefix = format!("{}.{}.work()", var_base, field_name);
-    push_rotation_deriv_subs(&mut subs, &rot, &dvar_prefix, var_base, field_name);
+    push_rotation_deriv_subs(&mut subs.subs, &rot, &dvar_prefix, var_base, field_name);
 
     subs
 }
@@ -2585,17 +2616,19 @@ fn build_euler_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym
 /// Substitutes composed rotation (R_ref * rotation(ea_delta)) entries and
 /// their derivatives with precomputed matrix fields. The delta is
 /// solver-internal, so no sin/cos of it can appear outside those patterns.
-fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
-    let mut subs = Vec::new();
+/// `wide` is the `MixedEulerAngleParam`, whose f64 rotation a `with_wide`
+/// scope reads.
+fn build_universal_euler_substitutions(var_base: &str, field_name: &str, wide: bool) -> Substitutions {
+    let mut subs = Substitutions::default();
 
     // Build composed rotation: R_ref * rotation(ea_delta)
     let r_ref_sym = matrix3sym::new(&format!("{}.{}.ref_rotation", var_base, field_name));
     let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
     let composed = r_ref_sym * dea_sym.rotation_matrix();
 
-    push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name);
+    push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name, wide);
     let dvar_prefix = format!("{}.{}.delta", var_base, field_name);
-    push_rotation_deriv_subs(&mut subs, &composed, &dvar_prefix, var_base, field_name);
+    push_rotation_deriv_subs(&mut subs.subs, &composed, &dvar_prefix, var_base, field_name);
 
     subs
 }
@@ -2617,21 +2650,29 @@ fn cache_rotation_entries(m: &matrix3sym) -> matrix3sym {
 }
 
 /// Push `cached(entry) -> <field>.rotation_matrix[row].col` substitutions for
-/// every entry of a composed rotation matrix. Shared by the three rotation-param
-/// substitution builders; the `from` is wrapped in `cached()` to match the
-/// cached entries the binding / `.rotation_matrix()` emits (see
-/// [`cache_rotation_entries`]).
+/// every entry of a composed rotation matrix, and with `wide` (a param that
+/// keeps its rotation in the wide scalar beside the rounded one) the
+/// entry's wide read inside `with_wide` scopes,
+/// `wide(<field>.rotation_matrix_wide[row].col)`. Shared by the three
+/// rotation-param substitution builders; the `from` is wrapped in
+/// `cached()` to match the cached entries the binding /
+/// `.rotation_matrix()` emits (see [`cache_rotation_entries`]).
 fn push_rotation_matrix_subs(
-    subs: &mut Vec<(arael_sym::E, arael_sym::E)>,
+    subs: &mut Substitutions,
     composed: &matrix3sym,
     var_base: &str,
     field_name: &str,
+    wide: bool,
 ) {
     use arael_sym::{symbol, cached};
     for (row, r) in composed.rows.iter().enumerate() {
         for (col_name, col_expr) in [("x", &r.x), ("y", &r.y), ("z", &r.z)] {
             let to_sym = symbol(&format!("{}.{}.rotation_matrix[{}].{}", var_base, field_name, row, col_name));
-            subs.push((cached(col_expr.clone()), to_sym));
+            subs.subs.push((cached(col_expr.clone()), to_sym.clone()));
+            if wide {
+                let to_wide = arael_sym::wide(symbol(&format!("{}.{}.rotation_matrix_wide[{}].{}", var_base, field_name, row, col_name)));
+                subs.wide.push((to_sym, to_wide));
+            }
         }
     }
 }
@@ -2672,14 +2713,14 @@ fn push_rotation_deriv_subs(
 /// transcendentals), so there is no sincos analog to precompute. Each `from`
 /// is wrapped in `cached()` to match the cached entries the binding emits (see
 /// [`cache_rotation_entries`]).
-fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
-    let mut subs = Vec::new();
+fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Substitutions {
+    let mut subs = Substitutions::default();
     let r_ref_sym = matrix3sym::new(&format!("{}.{}.ref_rotation", var_base, field_name));
     let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
     let composed = r_ref_sym * matrix3sym::from_rotation_vector_small(&dea_sym);
-    push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name);
+    push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name, false);
     let dvar_prefix = format!("{}.{}.delta", var_base, field_name);
-    push_rotation_deriv_subs(&mut subs, &composed, &dvar_prefix, var_base, field_name);
+    push_rotation_deriv_subs(&mut subs.subs, &composed, &dvar_prefix, var_base, field_name);
     subs
 }
 
@@ -2717,12 +2758,21 @@ fn off_branch_guard(exprs: &[arael_sym::E]) -> Option<arael_sym::E> {
 }
 
 /// Apply substitutions to a list of expressions. Returns the modified expressions.
-fn apply_substitutions(exprs: &mut Vec<arael_sym::E>, subs: &[(arael_sym::E, arael_sym::E)]) {
+fn apply_substitutions(exprs: &mut Vec<arael_sym::E>, subs: &Substitutions) {
     // Every target is a cached()/symbol node matched by exact structural
     // equality; replace_many resolves them all in one memoized pass, applying
     // subs in list order (first mapping wins on a duplicate target).
     for e in exprs.iter_mut() {
-        *e = arael_sym::cse::replace_many(e, subs);
+        *e = arael_sym::cse::replace_many(e, &subs.subs);
+    }
+    // Inside a `with_wide` scope a cached rotation reads its f64 copy: the
+    // rotation params keep `rotation_matrix_wide` next to `rotation_matrix`
+    // (src/model.rs), and the scope would otherwise widen the rounded T
+    // entries, whose error is most of what the scope exists to remove.
+    // Applied after differentiation, so a derivative, which drops the
+    // scope, reads the T entries.
+    for e in exprs.iter_mut() {
+        *e = arael_sym::cse::substitute_in_with_wide(e, &subs.wide);
     }
 }
 
@@ -2773,6 +2823,7 @@ fn collect_param_slots(type_name: &str, prefix: &str, out: &mut Vec<ParamSlot>) 
                     path,
                     sft: sft.clone(),
                     universal_delta: layout.universal_euler_angle_fields.contains(fname)
+                        || layout.mixed_euler_angle_fields.iter().any(|(f, _)| f == fname)
                         || layout.universal_rotvec_fields.contains(fname),
                 });
             }
@@ -2947,8 +2998,11 @@ fn register_bindings_body(
                     register_bindings_guarded(ctx, &nested_key, &nested_sym, inner_type, stack)?;
                 }
                 _ => {
+                    // The mixed Euler param binds like the universal one:
+                    // the same composition, read from the same T caches.
                     let is_universal_ea = is_param
-                        && layout.universal_euler_angle_fields.contains(field_name);
+                        && (layout.universal_euler_angle_fields.contains(field_name)
+                            || layout.mixed_euler_angle_fields.iter().any(|(f, _)| f == field_name));
                     let is_universal_rotvec = is_param
                         && layout.universal_rotvec_fields.contains(field_name);
                     if is_universal_ea || is_universal_rotvec {
@@ -4246,6 +4300,17 @@ fn bind_cse_names<'a>(
                     bind_cse_names(&arm.inters, false, all_matches, top_index, env, top);
                 }
             }
+            // A precision block binds its names to f64 values computed
+            // inside it; for the zero analysis each is its value
+            // expression (a widened one is never found zero, which is
+            // the safe answer).
+            Intermediate::Wide { names, inters, values, .. } => {
+                for (name, value) in names.iter().zip(values) {
+                    env.insert(name, Binding::Let(value));
+                    if at_top { top.insert(name); }
+                }
+                bind_cse_names(inters, false, all_matches, top_index, env, top);
+            }
         }
     }
 }
@@ -4364,6 +4429,13 @@ fn subst_inter(it: &arael_sym::cse::Intermediate, consts: &[(E, E)]) -> arael_sy
                 default: default.as_ref().map(arm),
             }
         }
+        Intermediate::Wide { names, witness, wide_ft, inters, values } => Intermediate::Wide {
+            names: names.clone(),
+            witness: witness.clone(),
+            wide_ft: wide_ft.clone(),
+            inters: inters.iter().map(|i| subst_inter(i, consts)).collect(),
+            values: values.iter().map(|v| v.substitute(consts)).collect(),
+        },
     }
 }
 
@@ -4387,7 +4459,7 @@ fn fold_arm_consts(
                 }
                 Intermediate::Let { name: name.clone(), expr: e }
             }
-            Intermediate::Match { .. } => subst_inter(it, consts),
+            Intermediate::Match { .. } | Intermediate::Wide { .. } => subst_inter(it, consts),
         };
         out.extend(cse_stmts(std::slice::from_ref(&folded), Some(""))?);
     }
@@ -4700,6 +4772,7 @@ pub fn generate_root_methods(
     cost_f64: bool,
     grad_kahan: bool,
     grad_f64: bool,
+    wide: &str,
     marginalize_hint_fn: &Option<TokenStream2>,
     marginalize_candidates_fn: &Option<TokenStream2>,
     uses_coo: bool,
@@ -6389,10 +6462,10 @@ pub fn generate_root_methods(
         check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
 
         // Apply euler_angles substitutions from all referenced types
-        let mut all_subs: Vec<(arael_sym::E, arael_sym::E)> = Vec::new();
+        let mut all_subs = Substitutions::default();
         // Symbolic component-field units (values + declared deriv caches),
         // collected while the bindings were registered.
-        all_subs.extend(component_subs);
+        all_subs.subs.extend(component_subs);
         // Build var_infos to know which variables reference which types
         let struct_layout_for_subs = registry_lookup(&sc.struct_name);
         let ref_paths_for_subs = struct_layout_for_subs.as_ref()
@@ -6408,7 +6481,11 @@ pub fn generate_root_methods(
                             all_subs.extend(build_euler_substitutions(field_name, ea));
                         }
                         for ea in &layout.universal_euler_angle_fields {
-                            all_subs.extend(build_universal_euler_substitutions(field_name, ea));
+                            all_subs.extend(build_universal_euler_substitutions(field_name, ea, false));
+                        }
+                        for (ea, h) in &layout.mixed_euler_angle_fields {
+                            check_wide_field(field_name, ea, h, wide)?;
+                            all_subs.extend(build_universal_euler_substitutions(field_name, ea, true));
                         }
                         for rv in &layout.universal_rotvec_fields {
                             all_subs.extend(build_universal_rotvec_substitutions(field_name, rv));
@@ -6447,7 +6524,11 @@ pub fn generate_root_methods(
                     all_subs.extend(build_euler_substitutions(prefix, ea));
                 }
                 for ea in &layout.universal_euler_angle_fields {
-                    all_subs.extend(build_universal_euler_substitutions(prefix, ea));
+                    all_subs.extend(build_universal_euler_substitutions(prefix, ea, false));
+                }
+                for (ea, h) in &layout.mixed_euler_angle_fields {
+                    check_wide_field(prefix, ea, h, wide)?;
+                    all_subs.extend(build_universal_euler_substitutions(prefix, ea, true));
                 }
                 for rv in &layout.universal_rotvec_fields {
                     all_subs.extend(build_universal_rotvec_substitutions(prefix, rv));
@@ -6766,7 +6847,7 @@ pub fn generate_root_methods(
             if want_weight { exprs.push(loss_e.diff(LOSS_ARG_SYM)); }
             apply_substitutions(&mut exprs, &all_subs);
             if fast_atan { replace_atan_fast(&mut exprs); }
-            let (ints, simplified) = arael_sym::cse_scoped(&exprs);
+            let (ints, simplified) = arael_sym::cse_scoped_wide(&exprs, wide);
             let stmts = cse_stmts(&ints, Some(""))?;
             let rho_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
             let weight_stmt = if want_weight {
@@ -6812,7 +6893,7 @@ pub fn generate_root_methods(
         apply_substitutions(&mut cost_exprs, &all_subs);
         if fast_atan { replace_atan_fast(&mut cost_exprs); }
         finish_batch(&mut cost_exprs, proc_macro2::Span::call_site(), false)?;
-        let (cost_intermediates, cost_simplified) = arael_sym::cse_scoped(&cost_exprs);
+        let (cost_intermediates, cost_simplified) = arael_sym::cse_scoped_wide(&cost_exprs, wide);
         let mut cost_stmts = Vec::new();
         cost_stmts.push(block_cost_decl.clone());
         cost_stmts.extend(cse_stmts(&cost_intermediates, Some(""))?);
@@ -6862,7 +6943,7 @@ pub fn generate_root_methods(
                 let mut joint = vec![q.clone()];
                 joint.extend(all_gh_exprs.iter().cloned());
                 finish_batch(&mut joint, proc_macro2::Span::call_site(), false)?;
-                let (ints, mut simplified) = arael_sym::cse_scoped(&joint);
+                let (ints, mut simplified) = arael_sym::cse_scoped_wide(&joint, wide);
                 let q_simplified = simplified.remove(0);
                 let (pre, rest) = split_before_guard(ints, &q_simplified);
                 guard_code = Some((cse_stmts(&pre, Some(""))?, parse_sym_code(&q_simplified.to_rust(""))?));
@@ -6870,13 +6951,13 @@ pub fn generate_root_methods(
             }
             None => {
                 finish_batch(&mut all_gh_exprs, proc_macro2::Span::call_site(), false)?;
-                arael_sym::cse_scoped(&all_gh_exprs)
+                arael_sym::cse_scoped_wide(&all_gh_exprs, wide)
             }
         };
         let (jac_intermediates, jac_simplified) = match jac_exprs {
             Some(mut exprs) => {
                 finish_batch(&mut exprs, proc_macro2::Span::call_site(), false)?;
-                arael_sym::cse_scoped(&exprs)
+                arael_sym::cse_scoped_wide(&exprs, wide)
             }
             None => (gh_intermediates.clone(), gh_simplified.clone()),
         };
@@ -7507,7 +7588,7 @@ pub fn generate_root_methods(
                 let mut exprs = vec![loss_e.diff(LOSS_ARG_SYM)];
                 apply_substitutions(&mut exprs, &all_subs);
                 if fast_atan { replace_atan_fast(&mut exprs); }
-                let (ints, simplified) = arael_sym::cse_scoped(&exprs);
+                let (ints, simplified) = arael_sym::cse_scoped_wide(&exprs, wide);
                 let stmts = cse_stmts(&ints, Some(""))?;
                 let w_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
                 (

@@ -24,6 +24,7 @@ treated as a constant.
 | `Param<vect<T, N>>` | N | N-dof parameter vector (calibration, biases, coefficients); components read as `v[i]` with literal indices |
 | `SimpleEulerAngleParam<T>` | 3 | three independent Euler angles (roll, pitch, yaw) stored directly |
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
+| `MixedEulerAngleParam<T, H = f64>` | 3 | `EulerAngleParam` with its state (value, reference, composed rotation) in the wide scalar `H` whatever `T`, and the caches a body reads (`work`, `rotation_matrix`, the rotation Jacobian) in `T`. For an f32 model whose body reads the rotation inside a `with_wide` scope; `value` is a `vect3<H>`, and `H` is the root's `wide` scalar |
 | `QuaternionParam<T>` | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised on every re-center so it never drifts off SO(3) |
 | `TransformParam<T>` | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is a twist (`twist3`), so a rotation correction carries the translation with it. Clear `optimize_translation` or `optimize_rotation` to hold either half |
 | `ScaledTransformParam<T>` | 7 | a similarity transform (Sim(3)): `TransformParam` plus a uniform scale, acting on a point as `s * (R * x) + t` -- the state of monocular loop closing. Bodies read `scale_factor`; the scale is optimized as its logarithm, so it stays positive and a scale-difference residual is linear. Clear `optimize_scale` to fix the scale (stereo/RGB-D) |
@@ -565,6 +566,7 @@ struct Path {
 | `#[arael(root, cost_plain)]` | the cost is summed with plain adds in the root's precision, one partial per loop (the default; see [The cost sum](#the-cost-sum)) |
 | `#[arael(root, cost_kahan)]` | every add of the cost sum is compensated (Kahan), so the sum's rounding does not grow with the row count |
 | `#[arael(root, cost_f64)]` | the cost sum is accumulated in f64 on an f32 root; ignored on an f64 root; combines with `cost_kahan` |
+| `#[arael(root, wide = <type>)]` | the scalar the bodies' `with_wide` scopes compute in, a type path implementing `arael::utils::Wide<T>` over the body scalar; `f64` when absent. A `MixedEulerAngleParam<T, H>` in the model must have the same `H` |
 | `#[arael(root, grad_plain)]` / `grad_kahan` / `grad_f64` | the same three choices for the gradient: how each entity's gradient entries sum the terms of its residuals in the block stores (see [The gradient sum](#the-gradient-sum)) |
 | `#[arael(root, seq)]` | keep the cost and assembly sweeps on one thread whatever `num_threads` says; the linear solve still threads. For a root that is not `Sync` (a `Cell`, `RefCell` or `Rc` field) or one that should stay sequential. Without it, under the `threads` cargo feature, every root's sweeps thread (see [docs/SOLVERS.md, Threads](SOLVERS.md#threads)). |
 | `#[arael(root, marginalize(field, ...))]` | mark landmark-style fields (small blocks coupled to poses but never to each other) for the sparse solver to marginalize. Generates `LmProblemInternals::marginalize_hint()` with the fields' parameter ranges, which `SparseFaer` reads off the model itself. Optional: without it the solver finds the marginalizable families in the model's coupling graph anyway. Use it to override that -- the named blocks are used as given, and must be mutually uncoupled |
@@ -1091,8 +1093,8 @@ code. The dialect:
 - **Scalar functions**: the arael-sym registry -- `sin cos tan asin
   acos atan sinh cosh tanh exp ln log2 log10 sqrt abs heaviside
   identity safe_sqrt safe_asin safe_acos atan2 pow safe_atan2 rad_diff
-  rad_sum clamp branch min max sign select multibranch piecewise` and
-  the robust kernels `loss_huber loss_soft_l1 loss_cauchy
+  rad_sum clamp branch min max sign select multibranch piecewise
+  with_wide` and the robust kernels `loss_huber loss_soft_l1 loss_cauchy
   loss_geman_mcclure loss_tukey loss_select` -- plus any
   `#[arael::function]` you define (next section). Derivative
   conventions for the `safe_*`/`heaviside`/`clamp`/`branch` family are
@@ -1100,6 +1102,29 @@ code. The dialect:
   >= 0.0 { a } else { b }`, so only the taken side runs and its
   derivative is the one selected; `piecewise` and `multibranch` are
   its N-way forms.
+- **Precision scope**: `with_wide(x)` computes `x` in f64 whatever the
+  root's scalar and narrows the value back; the derivatives of `x` stay
+  in the root's scalar, and on an f64 root the scope is the identity.
+  Use it in an f32 model around a residual whose intermediates are far
+  larger than the residual itself, such as a projection at a focal
+  length of 1000 whose predicted pixel rounds at 6e-5 px in f32:
+
+  ```rust,ignore
+  let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+  let px = -pc.x / pc.z;
+  [with_wide(cam.intr.x * px - obs.xy.x)]
+  ```
+
+  The scope computes in the root's wide scalar, `wide = <type>` on the
+  root attribute, f64 when absent. Inside the scope a
+  `MixedEulerAngleParam`'s rotation is read from the wide rotation the
+  parameter keeps beside its rounded `rotation_matrix` (above,
+  "Parameter types"); outside the scope, and in every derivative, the
+  body reads the rounded one. Every other precomputed value, the plain
+  rotation params' matrices, `symbolic =` fields and transforms, enters
+  the scope at its own precision. The cost is one wide evaluation of
+  the wrapped expressions per residual. Code generation: [SYM.md](SYM.md),
+  "Precision: `with_wide`".
 - **`match`**: `match k { 0 => a, 1 => b, _ => d }` on a scalar picks
   an arm by an integer at runtime. It compiles to a `match` that
   evaluates only the taken arm, and differentiates to that arm's

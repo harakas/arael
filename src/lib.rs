@@ -58,10 +58,6 @@
 //! - **Block supernodal Cholesky** -- the sparse backend factorizes the
 //!   Hessian in block form by default, one dense panel per supernode, not
 //!   flattened to scalar CSC
-//! - **Mixed precision** -- opt-in: the supernodal factor in `f32` under an
-//!   `f64` solve, each step refined against the `f64` matrix; half the
-//!   factor memory, and faster where the factor is large (bundle
-//!   adjustment, landmark maps)
 //! - **Schur marginalization** -- landmark-like blocks eliminated before the
 //!   factorization and recovered by back-substitution, taken automatically
 //!   when the backend prices it faster
@@ -83,6 +79,9 @@
 //!   says (see [Threads](#threads))
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
+//! - **Mixed precision** -- an f32 factor under an f64 solve; surgical f64
+//!   computation in an f32 model with `with_wide`; mixed parameter types
+//!   that keep their state in f64
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
 //! - **Cross-crate models** -- `arael::export_models!()` bundles a
 //!   crate's pub models; the importing crate registers them all with one
@@ -466,6 +465,7 @@
 //! | [`AngleParam<T>`](angle::AngleParam) | 1 | a 2D rotation (heading): the angle is optimized directly and its rotation matrix is cached, so constraints that rotate through it read a cached constant instead of recomputing sin/cos per observation |
 //! | [`SimpleEulerAngleParam<T>`](model::SimpleEulerAngleParam) | 3 | three direct Euler angles (roll, pitch, yaw) |
 //! | [`EulerAngleParam<T>`](model::EulerAngleParam) | 3 | "universal" delta composed with a fixed reference rotation; avoids parameterisation singularities for large-angle motion |
+//! | [`MixedEulerAngleParam<T, H = f64>`](model::MixedEulerAngleParam) | 3 | `EulerAngleParam` with its state in the wide scalar `H` whatever `T` and the caches a body reads in `T`; for an f32 model whose body reads the rotation inside a `with_wide` scope |
 //! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalized each re-center so it never drifts off SO(3) |
 //! | [`TransformParam<T>`](transform::TransformParam) | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it |
 //! | [`ScaledTransformParam<T>`](transform::ScaledTransformParam) | 7 | a similarity transform (Sim(3)): `TransformParam` plus a uniform scale acting as `s * (R * x) + t` -- monocular loop closing's state. The scale is optimized as its logarithm; clear `optimize_scale` to fix it |
