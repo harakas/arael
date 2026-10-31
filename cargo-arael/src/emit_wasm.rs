@@ -243,7 +243,7 @@ fn field_accessors(
             rw(out, &format!("{js}Optimize"), &conv("bool").unwrap(), &format!("e.{name}.optimize"));
         }
         "euler_param" => {
-            let scalar = f.scalar.as_deref().unwrap_or("f64");
+            let scalar = f.euler_value_scalar();
             let variant = f.variant.as_deref().unwrap_or("simple");
             let of = match (variant, scalar) {
                 ("rotvec", "f32") => "quaternf",

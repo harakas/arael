@@ -746,7 +746,7 @@ fn field_accessors(
                 &format!("{access}.{name}.optimize = v;"));
         }
         "euler_param" => {
-            let scalar = f.scalar.as_deref().unwrap_or("f64");
+            let scalar = f.euler_value_scalar();
             let variant = f.variant.as_deref().unwrap_or("simple");
             let m = match (variant, scalar) {
                 ("rotvec", "f32") => "CQuatF32",

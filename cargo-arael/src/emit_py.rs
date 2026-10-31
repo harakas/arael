@@ -52,7 +52,7 @@ fn value_ct(f: &Field) -> Option<(String, bool)> {
         "data" | "param" => ct_scalar(of).map(|t| (t.to_string(), false))
             .or_else(|| ct_math(of).map(|t| (t, true))),
         "euler_param" => {
-            let s = f.scalar.as_deref().unwrap_or("f64");
+            let s = f.euler_value_scalar();
             let t = match (f.variant.as_deref().unwrap_or("simple"), s) {
                 ("rotvec", "f32") => "_m.quaternf",
                 ("rotvec", _) => "_m.quaternd",

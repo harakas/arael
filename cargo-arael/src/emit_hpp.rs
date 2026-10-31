@@ -74,7 +74,7 @@ fn value_type(f: &Field) -> Option<String> {
     match f.kind.as_str() {
         "data" | "param" => scalar_cpp(of).map(str::to_string).or_else(|| math_cpp(of)),
         "euler_param" => {
-            let s = f.scalar.as_deref().unwrap_or("f64");
+            let s = f.euler_value_scalar();
             Some(match (f.variant.as_deref().unwrap_or("simple"), s) {
                 ("rotvec", "f32") => "quaternf",
                 ("rotvec", _) => "quaternd",

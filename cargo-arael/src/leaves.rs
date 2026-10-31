@@ -153,13 +153,12 @@ pub fn leaves(model: &Model, t: &Type) -> Vec<Leaf> {
                 }
             }
             "euler_param" => {
-                let scalar = f.scalar.as_deref().unwrap_or("f64");
+                // The scalar of `value`: a mixed param's wide one.
+                let scalar = f.euler_value_scalar();
                 let variant = f.variant.as_deref().unwrap_or("simple");
                 let ty = match (variant, scalar) {
                     ("rotvec", "f32") => math_ty("quaternf"),
                     ("rotvec", _) => math_ty("quaternd"),
-                    // MixedEulerAngleParam: the value is f64 whatever the scalar.
-                    ("mixed", _) => math_ty("vect3d"),
                     (_, "f32") => math_ty("vect3f"),
                     (_, _) => math_ty("vect3d"),
                 }.expect("builtin math type");
@@ -244,20 +243,39 @@ mod tests {
         lv.iter().map(|l| (l.name.clone(), l.access.clone(), l.ty.slots())).collect()
     }
 
-    /// A `MixedEulerAngleParam` holds its value in f64 whatever the model's
-    /// scalar, so its leaf crosses as a `vect3d` even in an f32 model.
+    /// A `MixedEulerAngleParam` holds its value in its wide scalar, f64
+    /// when the sidecar names none, so its leaf crosses as a `vect3d` in
+    /// an f32 model; with `wide` named, as that scalar.
     #[test]
-    fn a_mixed_euler_param_value_is_f64_in_an_f32_model() {
+    fn a_mixed_euler_param_value_is_its_wide_scalar() {
         let mut ea = field("ea", "euler_param", None);
         ea.variant = Some("mixed".into());
         ea.scalar = Some("f32".into());
         let mut plain = field("eb", "euler_param", None);
         plain.variant = Some("universal".into());
         plain.scalar = Some("f32".into());
-        let (m, t) = model_with(vec![ea, plain]);
+        let mut narrow = field("ec", "euler_param", None);
+        narrow.variant = Some("mixed".into());
+        narrow.scalar = Some("f32".into());
+        narrow.wide = Some("f32".into());
+        let (m, t) = model_with(vec![ea, plain, narrow]);
         let lv = leaves(&m, &t);
         assert_eq!(lv[0].ty, LeafTy::Math { scalar: "f64".into(), n: 3, mirror: "CVec3F64".into() });
         assert_eq!(lv[2].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into() });
+        assert_eq!(lv[4].ty, LeafTy::Math { scalar: "f32".into(), n: 3, mirror: "CVec3F32".into() });
+    }
+
+    /// A df32 value has no interface type: the export stops with a message
+    /// naming the field.
+    #[test]
+    #[should_panic(expected = "wide scalar `df32` cannot be exported")]
+    fn a_df32_mixed_euler_param_does_not_export() {
+        let mut ea = field("ea", "euler_param", None);
+        ea.variant = Some("mixed".into());
+        ea.scalar = Some("f32".into());
+        ea.wide = Some("df32".into());
+        let (m, t) = model_with(vec![ea]);
+        let _ = leaves(&m, &t);
     }
 
     #[test]

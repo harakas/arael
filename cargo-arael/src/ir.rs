@@ -56,6 +56,10 @@ pub struct Field {
     pub variant: Option<String>,
     #[serde(default)]
     pub scalar: Option<String>,
+    /// The `mixed` rotation variant's wide scalar, the scalar of its
+    /// `value` (`f64` when absent).
+    #[serde(default)]
+    pub wide: Option<String>,
     #[serde(default)]
     pub a: Option<String>,
     #[serde(default)]
@@ -70,6 +74,26 @@ pub struct Constraint {
     pub label: String,
     pub file: String,
     pub line: u32,
+}
+
+impl Field {
+    /// The scalar of a rotation parameter's `value`: the field's scalar,
+    /// or for the `mixed` variant its wide scalar, which has to be `f32`
+    /// or `f64` to cross an interface. A `df32` value has no interface
+    /// type and stops the export here.
+    pub fn euler_value_scalar(&self) -> &str {
+        let scalar = self.scalar.as_deref().unwrap_or("f64");
+        if self.variant.as_deref() != Some("mixed") {
+            return scalar;
+        }
+        match self.wide.as_deref().unwrap_or("f64") {
+            w @ ("f32" | "f64") => w,
+            other => panic!(
+                "field `{}`: a MixedEulerAngleParam with the wide scalar `{}` cannot be exported, \
+                 its value has no interface type",
+                self.name, other),
+        }
+    }
 }
 
 impl Model {
