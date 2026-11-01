@@ -1225,7 +1225,8 @@
 //!
 //! See `docs/CXX.md`, `docs/PYTHON.md` and `docs/WASM.md`;
 //! [`cxx-examples/`](https://github.com/harakas/arael/tree/master/cxx-examples)
-//! carries four demos with C++ and Python drivers over shared models.
+//! carries five demos with C++ and Python drivers over shared models,
+//! `bal_demo` among them on the CPU or a GPU.
 //!
 //! A page built on the JavaScript skin runs at
 //! [arael.mare.ee/pgo](https://arael.mare.ee/pgo/): a pose graph solved

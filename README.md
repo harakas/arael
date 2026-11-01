@@ -756,8 +756,9 @@ p.pos = (0, 0, 0)
 r = f.solve_sparse(cfg)                   # raises AraelError on failure
 ```
 
-[`cxx-examples/`](cxx-examples/) carries four demos with C++ and
-Python drivers over shared models. See [docs/CXX.md](docs/CXX.md),
+[`cxx-examples/`](cxx-examples/) carries five demos with C++ and
+Python drivers over shared models, `bal_demo` among them on the CPU or
+a GPU. See [docs/CXX.md](docs/CXX.md),
 [docs/PYTHON.md](docs/PYTHON.md) and [docs/WASM.md](docs/WASM.md).
 
 A page built on the JavaScript skin runs at

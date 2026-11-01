@@ -1,0 +1,10 @@
+[package]
+name = "bal-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arael = { path = "../../.." }
+
+[package.metadata.arael]
+interfaces = ["cxx"]
