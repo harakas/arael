@@ -907,6 +907,7 @@ using arael::FaerOrdering;
 using arael::EnvelopeMode;
 using arael::BlockSupernodalMode;
 using arael::SchurSolve;
+using arael::GpuBackend;
 using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;

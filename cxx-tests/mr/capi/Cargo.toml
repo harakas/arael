@@ -10,3 +10,8 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 cxx-mr = { path = ".." }
 arael = { path = "../../.." }
+
+[features]
+# The GPU routes of SparseOptions::gpu, on CUDA or HIP.
+gpu-cuda = ["arael/gpu-cuda"]
+gpu-hip = ["arael/gpu-hip"]

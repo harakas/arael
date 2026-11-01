@@ -239,6 +239,13 @@ class BlockSupernodalMode(enum.IntEnum):
     NEVER = 2
 
 
+class GpuBackend(enum.IntEnum):
+    """The GPU runtime of SparseOptions.gpu (matches the C ABI tag)."""
+    NONE = 0
+    CUDA = 1
+    HIP = 2
+
+
 class SparseOptions(ctypes.Structure):
     """The sparse backend's options (mirror of arael's
     SparseFaerOptions): whether and when to marginalize, the
@@ -281,6 +288,16 @@ class SparseOptions(ctypes.Structure):
         ("mixed_precision", ctypes.c_bool),
         ("max_refinements", ctypes.c_uint32),
         ("refine_tol", ctypes.c_double),
+        # The GPU the block supernodal route runs on (GpuBackend), device
+        # gpu_index of it, the process's shared state of it. On the
+        # reduced route the device also reduces, and with gpu_assembly
+        # (on by default) assembles and runs the LM loop when the model
+        # has a device form. Needs the capi built with the matching
+        # feature (gpu-cuda, gpu-hip); without it the solve fails with
+        # SolverUnavailable.
+        ("_gpu", ctypes.c_uint32),
+        ("gpu_index", ctypes.c_uint32),
+        ("gpu_assembly", ctypes.c_bool),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
@@ -288,6 +305,7 @@ class SparseOptions(ctypes.Structure):
     envelope = _enum_property("_envelope", EnvelopeMode)
     schur_solve = _enum_property("_schur_solve", SchurSolve)
     block_supernodal = _enum_property("_block_supernodal", BlockSupernodalMode)
+    gpu = _enum_property("_gpu", GpuBackend)
 
 
 class _OptDouble(ctypes.Structure):
@@ -337,8 +355,9 @@ class SchurPlan(ctypes.Structure):
     Cholesky factorized it rather than faer's scalar one; `f32_factor`
     that the factor was single precision, with `refinements` the
     refinement steps summed over the solve and `refinement_shortfalls`
-    the damped solves that ended above the tolerance; optional
-    statistics read as None when absent."""
+    the damped solves that ended above the tolerance; `gpu_factor` and
+    `gpu_assembly` that the factorization and the assembly ran on the
+    GPU; optional statistics read as None when absent."""
     _fields_ = [
         ("reduced", ctypes.c_bool),
         ("eliminated_blocks", ctypes.c_uint32),
@@ -355,6 +374,8 @@ class SchurPlan(ctypes.Structure):
         ("f32_factor", ctypes.c_bool),
         ("_refinements", _OptU32),
         ("_refinement_shortfalls", _OptU32),
+        ("gpu_factor", ctypes.c_bool),
+        ("gpu_assembly", ctypes.c_bool),
     ]
 
     fill_ratio = _plan_opt("_fill_ratio", float)
@@ -665,6 +686,11 @@ def lm_types(fp):
             ("_covariance", COptU32),
             ("covariance_ordering", ctypes.c_uint32),
             ("covariance_block_supernodal", ctypes.c_uint32),
+            # On a solve whose vectors stay on the GPU: hand the observer
+            # the parameters (a read per accepted step; otherwise its
+            # params are empty there), and the lambda driver the vectors.
+            ("device_observer_params", ctypes.c_bool),
+            ("device_driver_vectors", ctypes.c_bool),
         ]
 
         gradient_tolerance = _opt_property("_gradient_tolerance")

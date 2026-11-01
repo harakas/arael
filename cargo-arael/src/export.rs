@@ -390,6 +390,11 @@ crate-type = [\"cdylib\", \"staticlib\"]
 [dependencies]
 {crate_name} = {{ path = \"..\" }}
 arael = {arael_dep}
+
+[features]
+# The GPU routes of SparseOptions::gpu, on CUDA or HIP.
+gpu-cuda = [\"arael/gpu-cuda\"]
+gpu-hip = [\"arael/gpu-hip\"]
 ",
         );
     Ok(vec![
@@ -436,8 +441,18 @@ set(_arael_capi_dir \"${{CMAKE_CURRENT_SOURCE_DIR}}/../capi\")
 set(_arael_cargo_target \"${{CMAKE_CURRENT_BINARY_DIR}}/cargo\")
 set(_arael_capi_lib \"${{_arael_cargo_target}}/release/lib{lib_ident}.a\")
 
+# The GPU runtime the interface is built with, for SparseOptions::gpu:
+# cuda, hip, or empty for none.
+set(ARAEL_GPU \"\" CACHE STRING \"GPU runtime of the arael interface: cuda, hip or empty\")
+set(_arael_features \"\")
+if(ARAEL_GPU STREQUAL \"cuda\" OR ARAEL_GPU STREQUAL \"hip\")
+  set(_arael_features --features gpu-${{ARAEL_GPU}})
+elseif(NOT ARAEL_GPU STREQUAL \"\")
+  message(FATAL_ERROR \"ARAEL_GPU is '${{ARAEL_GPU}}': cuda, hip or empty\")
+endif()
+
 add_custom_target({target}_capi_build
-  COMMAND cargo build --release
+  COMMAND cargo build --release ${{_arael_features}}
           --manifest-path \"${{_arael_capi_dir}}/Cargo.toml\"
           --target-dir \"${{_arael_cargo_target}}\"
   BYPRODUCTS \"${{_arael_capi_lib}}\"

@@ -222,6 +222,13 @@ struct LmConfigT {
     /// How that covariance is assembled (Rust's CovOptions).
     CovOrdering covariance_ordering;
     BlockSupernodalMode covariance_block_supernodal;
+    /// On a solve whose vectors stay on the GPU (SparseOptionsT::gpu
+    /// with the device assembly), hand the observer the parameters, a
+    /// read per accepted step; otherwise its params are empty there.
+    bool device_observer_params;
+    /// On such a solve, read the gradient, the diagonal and the step back
+    /// for the lambda driver (Rust's device_driver_vectors).
+    bool device_driver_vectors;
 };
 
 /// Whether and when the sparse backend marginalizes (mirrors arael's
@@ -276,6 +283,13 @@ enum class SchurSolve : uint32_t {
     IterativeImplicit = 2,
 };
 
+/// The GPU runtime of SparseOptionsT::gpu.
+enum class GpuBackend : uint32_t {
+    None = 0,
+    Cuda = 1,
+    Hip = 2,
+};
+
 /// The sparse backend's options (mirrors arael's SparseFaerOptions).
 /// The generated SparseOptions fills the Rust defaults at
 /// construction; edit fields and pass to solve_sparse. Layout is part
@@ -321,6 +335,16 @@ struct SparseOptionsT {
     bool mixed_precision;
     uint32_t max_refinements;
     double refine_tol;
+    /// The GPU the block supernodal route runs on (Rust's `gpu`): device
+    /// gpu_index of that runtime, the process's shared state of it, so
+    /// repeated solves reuse its buffers. On the reduced route the device
+    /// also reduces, and with gpu_assembly (on by default) assembles and
+    /// runs the LM loop when the model has a device form. Needs the
+    /// interface built with the matching feature (the CMake cache variable
+    /// ARAEL_GPU); without it the solve fails with SolverUnavailable.
+    GpuBackend gpu;
+    uint32_t gpu_index;
+    bool gpu_assembly;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
@@ -459,6 +483,10 @@ struct SchurPlan {
     /// single-precision factor.
     option<uint32_t> refinements;
     option<uint32_t> refinement_shortfalls;
+    /// The factorization ran on the GPU (SparseOptions::gpu), and the
+    /// assembly too (SparseOptions::gpu_assembly).
+    bool gpu_factor;
+    bool gpu_assembly;
 };
 
 /// One form's share of a sweep phase, summed over its calls (mirrors

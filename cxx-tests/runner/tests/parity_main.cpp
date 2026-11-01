@@ -83,6 +83,8 @@ int main() {
     pi("cfg_grad_has", defs.gradient_tolerance.has_value() ? 1 : 0);
     pi("cfg_time_has", defs.time_limit_seconds.has_value() ? 1 : 0);
     pi("cfg_maxacc_has", defs.max_accepted_iters.has_value() ? 1 : 0);
+    pi("cfg_dev_obs", defs.device_observer_params ? 1 : 0);
+    pi("cfg_dev_drv", defs.device_driver_vectors ? 1 : 0);
     p("cfg_wc_lambda", LmConfig::well_conditioned().initial_lambda);
 
     // The ill_conditioned preset selects the Nielsen lambda driver;
@@ -217,6 +219,18 @@ int main() {
     pi("so_block_sn", long(so.block_supernodal));
     p("so_bs_batch", so.block_supernodal_batch);
     pi("so_bs_lean", so.block_supernodal_memory_lean ? 1 : 0);
+    pi("so_gpu", long(so.gpu));
+    pi("so_gpu_index", so.gpu_index);
+    pi("so_gpu_assembly", so.gpu_assembly ? 1 : 0);
+
+    // A GPU asked of an interface built without a GPU runtime: the
+    // solve fails as an unavailable solver.
+    Fit f30;
+    fill(f30);
+    SparseOptions so30;
+    so30.gpu = GpuBackend::Cuda;
+    SolveResult r30 = f30.solve_sparse(cfg, so30);
+    pi("gpu_kind", r30.is_err() ? long(r30.error().failure.kind) : -99);
 
     Fit f11;
     fill(f11);

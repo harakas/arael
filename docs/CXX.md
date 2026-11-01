@@ -272,6 +272,26 @@ views are named by their container's nature: `PathPosesDeque`,
   f64 matrix, reported by the plan's `f32_factor`, `refinements` and
   `refinement_shortfalls`). Constructed with the actual Rust
   defaults; the one-argument `solve_sparse(cfg)` uses them.
+- **GPU**: `SparseOptions::gpu` (`GpuBackend` None / Cuda / Hip) and
+  `gpu_index` run the block supernodal route on that device, the
+  process's shared state of it, so repeated solves reuse its buffers;
+  `gpu_assembly` (on by default) also assembles there and keeps the LM
+  loop on the device when the model has a device form. The plan's
+  `gpu_factor` and `gpu_assembly` report which ran. The interface must
+  be built with the runtime: the CMake cache variable `ARAEL_GPU`
+  (`cuda` or `hip`) builds the capi crate with the feature of that name
+  (`gpu-cuda`, `gpu-hip`); without it the solve fails with
+  `SolverUnavailable`. On such a solve the observer gets the parameters
+  and a driver the vectors only when `LmConfig::device_observer_params`
+  and `device_driver_vectors` ask (docs/SOLVERS.md, GPU):
+
+  ```cpp
+  // cmake -S cxx -B build -DARAEL_GPU=cuda
+  SparseOptions so;
+  so.gpu = GpuBackend::Cuda;
+  so.mixed_precision = true;    // optional: an f32 factor, refined
+  auto r = model.solve_sparse(cfg, so);
+  ```
 - **LmSession**: warm reuse over repeated sparse solves --
   `LmSession sess;` (optionally over a `SparseOptions`), then
   `sess.solve(model, cfg)` keeps the sparsity analysis (pattern,
@@ -366,8 +386,10 @@ Worked examples live in `cxx-examples/`: `slam2d_simple_demo` (2D
 SLAM, plotting, covariance ellipses), `slam_demo_gm` (visual-inertial
 SLAM with a robust loss, a graduated ramp, and relative covariance
 from `cross()`), `loc_demo` (localization against a known map on the
-band solver, TriDiagonal `std_dev`), and `m3500_demo` (pose graph
-from a g2o file, digit-for-digit with the Rust example).
+band solver, TriDiagonal `std_dev`), `m3500_demo` (pose graph
+from a g2o file, digit-for-digit with the Rust example), and `bal_demo`
+(bundle adjustment of a BAL file on the CPU or a GPU, the in-house test
+bed of the GPU options).
 
 The Python interface over the same C ABI is docs/PYTHON.md -- the
 same export writes it, the same parity suite holds it.

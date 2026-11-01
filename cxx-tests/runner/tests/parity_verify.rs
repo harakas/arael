@@ -123,6 +123,8 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cfg_grad_has"), d.gradient_tolerance.is_some() as u8 as f64);
         assert_eq!(g("cfg_time_has"), d.time_limit.is_some() as u8 as f64);
         assert_eq!(g("cfg_maxacc_has"), d.max_accepted_iters.is_some() as u8 as f64);
+        assert_eq!(g("cfg_dev_obs"), LmConfig::<f64>::default().device_observer_params as u8 as f64);
+        assert_eq!(g("cfg_dev_drv"), LmConfig::<f64>::default().device_driver_vectors as u8 as f64);
         assert_eq!(g("cfg_wc_lambda"), LmConfig::<f64>::well_conditioned().initial_lambda);
     }
 
@@ -309,6 +311,12 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("so_block_sn"), 0.0);
         assert_eq!(g("so_bs_batch"), d.block_supernodal_batch.unwrap_or(0.0));
         assert_eq!(g("so_bs_lean"), d.block_supernodal_memory_lean as u8 as f64);
+        assert!(d.gpu.is_none());
+        assert_eq!(g("so_gpu"), 0.0);
+        assert_eq!(g("so_gpu_index"), 0.0);
+        assert_eq!(g("so_gpu_assembly"), d.gpu_assembly as u8 as f64);
+        // the fixture's interface is built without a GPU runtime
+        assert_eq!(g("gpu_kind"), 8.0);
 
         let mut f11 = Fit::default();
         fill(&mut f11);

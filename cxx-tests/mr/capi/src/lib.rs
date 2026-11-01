@@ -366,6 +366,13 @@ pub struct CLmConfig {
     pub covariance_ordering: u32,
     /// The BlockSupernodalMode tag (0 Auto, 1 Always, 2 Never).
     pub covariance_block_supernodal: u32,
+    /// On a solve whose vectors stay on the GPU, hand the observer the
+    /// parameters (a read per accepted step); otherwise its params are
+    /// empty there.
+    pub device_observer_params: bool,
+    /// On such a solve, hand the lambda driver the gradient, the diagonal
+    /// and the step (a read per attempt).
+    pub device_driver_vectors: bool,
 }
 
 fn cov_mode_of(tag: u32) -> CovMode {
@@ -467,6 +474,15 @@ pub struct CSparseOptions {
     pub max_refinements: u32,
     /// Relative residual the refinement stops at, under mixed_precision.
     pub refine_tol: f64,
+    /// The GPU the block supernodal route runs on: 0 none, 1 CUDA, 2 HIP
+    /// (the process's shared state of device gpu_index). A capi built
+    /// without the matching `gpu-cuda` / `gpu-hip` feature fails the solve
+    /// with SolverUnavailable.
+    pub gpu: u32,
+    pub gpu_index: u32,
+    /// On the reduced GPU route, assemble on the device too when the model
+    /// has a device form (on by default).
+    pub gpu_assembly: bool,
 }
 
 impl CSparseOptions {
@@ -521,7 +537,14 @@ impl CSparseOptions {
             .with_mixed_precision(self.mixed_precision.then(|| arael::simple_lm::MixedPrecision {
                 max_refinements: self.max_refinements as usize,
                 tol: self.refine_tol,
-            }));
+            }))
+            .with_gpu(match self.gpu {
+                0 => None,
+                1 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cuda, self.gpu_index as usize)),
+                2 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Hip, self.gpu_index as usize)),
+                t => panic!("unknown gpu tag {t}"),
+            })
+            .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
@@ -586,6 +609,13 @@ pub unsafe extern "C" fn decay_sparse_options(out: *mut CSparseOptions) {
         mixed_precision: d.mixed_precision.is_some(),
         max_refinements: d.mixed_precision.unwrap_or_default().max_refinements as u32,
         refine_tol: d.mixed_precision.unwrap_or_default().tol,
+        gpu: match d.gpu.as_ref().map(|g| g.backend) {
+            None => 0,
+            Some(arael::simple_lm::GpuBackend::Cuda) => 1,
+            Some(arael::simple_lm::GpuBackend::Hip) => 2,
+        },
+        gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
+        gpu_assembly: d.gpu_assembly,
     };
 }
 
@@ -640,6 +670,8 @@ pub unsafe extern "C" fn decay_lm_config(preset: u32, out: *mut CLmConfig) {
         },
         covariance_ordering: cov_options_tags(&c.covariance_options).0,
         covariance_block_supernodal: cov_options_tags(&c.covariance_options).1,
+        device_observer_params: c.device_observer_params,
+        device_driver_vectors: c.device_driver_vectors,
     };
 }
 
@@ -668,6 +700,8 @@ impl CLmConfig {
         });
         c.covariance = self.covariance.has.then(|| cov_mode_of(self.covariance.v));
         c.covariance_options = cov_options_of(self.covariance_ordering, self.covariance_block_supernodal);
+        c.device_observer_params = self.device_observer_params;
+        c.device_driver_vectors = self.device_driver_vectors;
         if let Some(f) = self.observer {
             c = c.with_observer(CObserver { f, user: self.observer_user });
         }
@@ -929,6 +963,9 @@ pub struct CSchurPlan {
     /// Damped solves that ended above the refinement tolerance, on a
     /// single-precision factor.
     pub refinement_shortfalls: COptU32,
+    /// Whether the factorization ran on the GPU, and the assembly too.
+    pub gpu_factor: bool,
+    pub gpu_assembly: bool,
 }
 
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
@@ -982,6 +1019,8 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
             Some(n) => COptU32 { has: true, v: n as u32 },
             None => COptU32 { has: false, v: 0 },
         },
+        gpu_factor: p.gpu_factor,
+        gpu_assembly: p.gpu_assembly,
     };
 }
 
@@ -2465,6 +2504,13 @@ pub struct CLmConfig {
     pub covariance_ordering: u32,
     /// The BlockSupernodalMode tag (0 Auto, 1 Always, 2 Never).
     pub covariance_block_supernodal: u32,
+    /// On a solve whose vectors stay on the GPU, hand the observer the
+    /// parameters (a read per accepted step); otherwise its params are
+    /// empty there.
+    pub device_observer_params: bool,
+    /// On such a solve, hand the lambda driver the gradient, the diagonal
+    /// and the step (a read per attempt).
+    pub device_driver_vectors: bool,
 }
 
 fn cov_mode_of(tag: u32) -> CovMode {
@@ -2566,6 +2612,15 @@ pub struct CSparseOptions {
     pub max_refinements: u32,
     /// Relative residual the refinement stops at, under mixed_precision.
     pub refine_tol: f64,
+    /// The GPU the block supernodal route runs on: 0 none, 1 CUDA, 2 HIP
+    /// (the process's shared state of device gpu_index). A capi built
+    /// without the matching `gpu-cuda` / `gpu-hip` feature fails the solve
+    /// with SolverUnavailable.
+    pub gpu: u32,
+    pub gpu_index: u32,
+    /// On the reduced GPU route, assemble on the device too when the model
+    /// has a device form (on by default).
+    pub gpu_assembly: bool,
 }
 
 impl CSparseOptions {
@@ -2620,7 +2675,14 @@ impl CSparseOptions {
             .with_mixed_precision(self.mixed_precision.then(|| arael::simple_lm::MixedPrecision {
                 max_refinements: self.max_refinements as usize,
                 tol: self.refine_tol,
-            }));
+            }))
+            .with_gpu(match self.gpu {
+                0 => None,
+                1 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cuda, self.gpu_index as usize)),
+                2 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Hip, self.gpu_index as usize)),
+                t => panic!("unknown gpu tag {t}"),
+            })
+            .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
             max_iters: self.cg_max_iters as usize,
@@ -2685,6 +2747,13 @@ pub unsafe extern "C" fn line_sparse_options(out: *mut CSparseOptions) {
         mixed_precision: d.mixed_precision.is_some(),
         max_refinements: d.mixed_precision.unwrap_or_default().max_refinements as u32,
         refine_tol: d.mixed_precision.unwrap_or_default().tol,
+        gpu: match d.gpu.as_ref().map(|g| g.backend) {
+            None => 0,
+            Some(arael::simple_lm::GpuBackend::Cuda) => 1,
+            Some(arael::simple_lm::GpuBackend::Hip) => 2,
+        },
+        gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
+        gpu_assembly: d.gpu_assembly,
     };
 }
 
@@ -2739,6 +2808,8 @@ pub unsafe extern "C" fn line_lm_config(preset: u32, out: *mut CLmConfig) {
         },
         covariance_ordering: cov_options_tags(&c.covariance_options).0,
         covariance_block_supernodal: cov_options_tags(&c.covariance_options).1,
+        device_observer_params: c.device_observer_params,
+        device_driver_vectors: c.device_driver_vectors,
     };
 }
 
@@ -2767,6 +2838,8 @@ impl CLmConfig {
         });
         c.covariance = self.covariance.has.then(|| cov_mode_of(self.covariance.v));
         c.covariance_options = cov_options_of(self.covariance_ordering, self.covariance_block_supernodal);
+        c.device_observer_params = self.device_observer_params;
+        c.device_driver_vectors = self.device_driver_vectors;
         if let Some(f) = self.observer {
             c = c.with_observer(CObserver { f, user: self.observer_user });
         }
@@ -3028,6 +3101,9 @@ pub struct CSchurPlan {
     /// Damped solves that ended above the refinement tolerance, on a
     /// single-precision factor.
     pub refinement_shortfalls: COptU32,
+    /// Whether the factorization ran on the GPU, and the assembly too.
+    pub gpu_factor: bool,
+    pub gpu_assembly: bool,
 }
 
 unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
@@ -3081,6 +3157,8 @@ unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
             Some(n) => COptU32 { has: true, v: n as u32 },
             None => COptU32 { has: false, v: 0 },
         },
+        gpu_factor: p.gpu_factor,
+        gpu_assembly: p.gpu_assembly,
     };
 }
 

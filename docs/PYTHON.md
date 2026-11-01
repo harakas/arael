@@ -392,8 +392,12 @@ fields and pass it to `solve_sparse`: `schur` (`SchurPolicy`),
 `block_supernodal_memory_lean`, and `mixed_precision` with
 `max_refinements` and `refine_tol` (an f32 factor refined against the
 f64 matrix; the plan's `f32_factor`, `refinements` and
-`refinement_shortfalls` report it). An enum setter rejects a value
-outside the enum with `ValueError`.
+`refinement_shortfalls` report it), and the GPU: `gpu` (`GpuBackend`
+NONE / CUDA / HIP) with `gpu_index` and `gpu_assembly`, as in the C++
+interface (docs/CXX.md); the cdylib must then be built with the
+runtime's feature (`cargo build --release -p <crate>-capi --features
+gpu-cuda`), or the solve fails with `SolverUnavailable`. An enum setter
+rejects a value outside the enum with `ValueError`.
 
 ```python
 so = fit.SparseOptions()

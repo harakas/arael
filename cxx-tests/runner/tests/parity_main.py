@@ -88,6 +88,8 @@ p("cfg_lambda_floor", defs.lambda_floor)
 pi("cfg_grad_has", 1 if defs.gradient_tolerance is not None else 0)
 pi("cfg_time_has", 1 if defs.time_limit_seconds is not None else 0)
 pi("cfg_maxacc_has", 1 if defs.max_accepted_iters is not None else 0)
+pi("cfg_dev_obs", 1 if defs.device_observer_params else 0)
+pi("cfg_dev_drv", 1 if defs.device_driver_vectors else 0)
 p("cfg_wc_lambda", fit.LmConfig.well_conditioned().initial_lambda)
 
 # The ill_conditioned preset selects the Nielsen lambda driver; its
@@ -212,6 +214,21 @@ p("so_obvious", so.obvious_flop_ratio)
 pi("so_block_sn", int(so.block_supernodal))
 p("so_bs_batch", so.block_supernodal_batch)
 pi("so_bs_lean", 1 if so.block_supernodal_memory_lean else 0)
+pi("so_gpu", int(so.gpu))
+pi("so_gpu_index", so.gpu_index)
+pi("so_gpu_assembly", 1 if so.gpu_assembly else 0)
+
+# A GPU asked of an interface built without a GPU runtime: the solve fails
+# as an unavailable solver.
+f30 = fit.Fit()
+fill(f30)
+so30 = fit.SparseOptions()
+so30.gpu = fit.GpuBackend.CUDA
+try:
+    f30.solve_sparse(cfg, so30)
+    pi("gpu_kind", -99)
+except AraelError as e:
+    pi("gpu_kind", e.failure.kind if e.failure else -99)
 
 f11 = fit.Fit()
 fill(f11)
