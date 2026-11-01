@@ -111,6 +111,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CUDARC_CUDA_VERSION: "12090"
+      # CubeCL's CUDA runtime links LLVM statically, which makes a debug
+      # test binary about 750 MB: everything is checked, and only the
+      # targets with GPU tests are linked, without debug info.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (from rust-toolchain.toml)
@@ -120,10 +124,14 @@ jobs:
           key: gpu-cuda
       - name: Test arael-gpu without a device
         run: cargo test -p arael-gpu
-      - name: Build the CUDA tests and examples
+      - name: Check everything with the CUDA runtime
         run: |
-          cargo test -p arael-gpu --features cuda --no-run
-          cargo test -p arael --features gpu-cuda --no-run
+          cargo check -p arael-gpu --tests --examples --features cuda
+          cargo check -p arael --tests --examples --features gpu-cuda
+      - name: Link the targets with GPU tests
+        run: |
+          cargo test -p arael-gpu --features cuda --lib --no-run
+          cargo test -p arael --features gpu-cuda --lib --test device_assembly --test block_supernodal --no-run
 
   # The arael crate with no optional features (what docs.rs and plain
   # `cargo add arael` users get).
