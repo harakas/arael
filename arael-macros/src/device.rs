@@ -1,0 +1,513 @@
+//! The device head of `#[arael(root)]` (docs/dev/GPU.md, E9 stage 3): a
+//! constraint's body as two CubeCL kernels (the assembly's and the
+//! cost's) over its entities' parameter values, rotation caches and data
+//! leaves, the walk that packs a model's instances for them, and the
+//! launches, as an implementation of `arael::__gpu::DeviceRoot`. All of
+//! it is wrapped in `arael::__gpu_items!`, which drops it when arael is
+//! built without its `gpu` feature.
+//!
+//! Covered for now: root-level cross constraints (two entities with self
+//! blocks reached through refs, the holder's CrossBlock), without a guard,
+//! a loss or an index `select`, over Euler-angle rotations and `f32` or
+//! `f64` roots. A root with any other constraint gets no device route.
+
+use std::collections::BTreeSet;
+
+use arael_sym::cse::Intermediate;
+use arael_sym::E;
+use proc_macro2::TokenStream as TokenStream2;
+use quote::{format_ident, quote};
+
+/// One entity of a device constraint.
+pub(crate) struct DevSide {
+    pub ty: String,
+    /// The entity's binding in the walk (`cam`).
+    pub var: String,
+    /// Its SelfBlock field.
+    pub hb: String,
+    /// Its parameter symbols in slot order (`cam.t.work().x`, ...).
+    pub params: Vec<String>,
+}
+
+/// One device constraint, as the root's emission needs it.
+pub(crate) struct DevConstraint {
+    /// The cross group whose walk packs it.
+    pub group_key: String,
+    pub a: DevSide,
+    pub b: DevSide,
+    /// The CrossBlock's holder type and field.
+    pub holder: String,
+    pub block: syn::Ident,
+    /// The data leaves, as the Rust expressions the walk reads.
+    pub data: Vec<String>,
+    /// The rotation fields read: (side, field path, the offset of the
+    /// rotation's step among that entity's parameters).
+    pub rots: Vec<(usize, String, usize)>,
+    /// The two kernels, named by `cid`.
+    pub kernels: TokenStream2,
+    pub cid: usize,
+}
+
+/// A CSE temporary's name: `__x3`, `__w1`, `__m2`.
+fn is_temp(s: &str) -> bool {
+    let rest = s.strip_prefix("__x").or_else(|| s.strip_prefix("__w")).or_else(|| s.strip_prefix("__m"));
+    rest.is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn syms_of(e: &E, out: &mut BTreeSet<String>) {
+    for s in e.symbols() {
+        if !is_temp(&s) {
+            out.insert(s);
+        }
+    }
+}
+
+fn syms_of_inters(inters: &[Intermediate], out: &mut BTreeSet<String>) {
+    for it in inters {
+        match it {
+            Intermediate::Let { expr, .. } => syms_of(expr, out),
+            Intermediate::Match { switch, arms, default, .. } => {
+                match switch {
+                    arael_sym::cse::Switch::Index(e) | arael_sym::cse::Switch::Sign(e) => syms_of(e, out),
+                }
+                for arm in arms.iter().chain(default.iter()) {
+                    syms_of_inters(&arm.inters, out);
+                    for v in &arm.values {
+                        syms_of(v, out);
+                    }
+                }
+            }
+            Intermediate::Wide { inters, values, .. } => {
+                syms_of_inters(inters, out);
+                for v in values {
+                    syms_of(v, out);
+                }
+            }
+        }
+    }
+}
+
+/// A rotation cache read: `<var>.<path>.rotation_matrix[r].c` (`kind` 0),
+/// `..._wide[r].c` (1) or `..._deriv[k][r].c` (2), as (var, path, kind,
+/// offset within the entity's 9 or 27 values).
+fn rotation_leaf(s: &str) -> Option<(String, String, u8, usize)> {
+    let at = s.find(".rotation_matrix")?;
+    let (head, tail) = (&s[..at], &s[at + ".rotation_matrix".len()..]);
+    let (var, path) = head.split_once('.')?;
+    let (kind, rest) = if let Some(r) = tail.strip_prefix("_wide") {
+        (1u8, r)
+    } else if let Some(r) = tail.strip_prefix("_deriv") {
+        (2u8, r)
+    } else {
+        (0u8, tail)
+    };
+    fn idx(r: &str) -> Option<(usize, &str)> {
+        let r = r.strip_prefix('[')?;
+        let close = r.find(']')?;
+        Some((r[..close].trim().parse().ok()?, &r[close + 1..]))
+    }
+    let (first, rest) = idx(rest)?;
+    let (k, row, rest) = if kind == 2 {
+        let (row, rest) = idx(rest)?;
+        (first, row, rest)
+    } else {
+        (0, first, rest)
+    };
+    let col = match rest {
+        ".x" => 0,
+        ".y" => 1,
+        ".z" => 2,
+        _ => return None,
+    };
+    if row > 2 || k > 2 {
+        return None;
+    }
+    Some((var.to_string(), path.to_string(), kind, k * 9 + row * 3 + col))
+}
+
+/// What a leaf symbol reads in the kernel.
+enum Leaf {
+    Param(usize, usize),
+    Rot(usize, u8, usize),
+    Data(usize),
+}
+
+/// The kernels of a root-level cross constraint: `gh` and `guard` from the
+/// assembly's CSE (rows then partials, A's then B's), `cost` from the
+/// cost's. `ft` is the root's scalar.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_constraint(
+    cid: usize,
+    group_key: String,
+    ft: &str,
+    a: DevSide,
+    b: DevSide,
+    holder: String,
+    block: syn::Ident,
+    rows: usize,
+    gh: (&[Intermediate], &[E]),
+    guard: Option<(&[Intermediate], &E)>,
+    cost: (&[Intermediate], &[E]),
+) -> Result<DevConstraint, String> {
+    if ft != "f32" && ft != "f64" {
+        return Err(format!("a root of `{ft}` has no device assembly"));
+    }
+    let (na, nb) = (a.params.len(), b.params.len());
+    // the leaves each kernel reads
+    let mut gh_syms = BTreeSet::new();
+    syms_of_inters(gh.0, &mut gh_syms);
+    gh.1.iter().for_each(|e| syms_of(e, &mut gh_syms));
+    if let Some((pre, q)) = guard {
+        syms_of_inters(pre, &mut gh_syms);
+        syms_of(q, &mut gh_syms);
+    }
+    let mut cost_syms = BTreeSet::new();
+    syms_of_inters(cost.0, &mut cost_syms);
+    cost.1.iter().for_each(|e| syms_of(e, &mut cost_syms));
+    let all: BTreeSet<&String> = gh_syms.iter().chain(&cost_syms).collect();
+    // classified, the data leaves and the rotations numbered in order
+    let mut data: Vec<String> = Vec::new();
+    let mut rots: Vec<(usize, String, usize)> = Vec::new();
+    let mut leaf: std::collections::BTreeMap<String, Leaf> = Default::default();
+    for s in all {
+        let l = if let Some(p) = a.params.iter().position(|p| p == s) {
+            Leaf::Param(0, p)
+        } else if let Some(p) = b.params.iter().position(|p| p == s) {
+            Leaf::Param(1, p)
+        } else if let Some((var, path, kind, off)) = rotation_leaf(s) {
+            let side = if var == a.var {
+                0
+            } else if var == b.var {
+                1
+            } else {
+                return Err(format!("the rotation `{s}` is not of the constraint's entities"));
+            };
+            let r = match rots.iter().position(|(sd, p, _)| *sd == side && *p == path) {
+                Some(r) => r,
+                None => {
+                    // the rotation's step: its entity's `<var>.<path>.delta.x` slot
+                    let sd = if side == 0 { &a } else { &b };
+                    let step = format!("{}.{}.delta.x", sd.var, path);
+                    let off = sd.params.iter().position(|p| *p == step)
+                        .ok_or_else(|| format!("the rotation `{}.{}` has no step among its entity's parameters", sd.var, path))?;
+                    rots.push((side, path, off));
+                    rots.len() - 1
+                }
+            };
+            Leaf::Rot(r, kind, off)
+        } else {
+            data.push(s.clone());
+            Leaf::Data(data.len() - 1)
+        };
+        leaf.insert(s.clone(), l);
+    }
+    let nd = data.len();
+    let leaf_expr = |l: &Leaf| -> String {
+        match *l {
+            Leaf::Param(0, p) => format!("ev_a[__sa * {na}usize + {p}usize]"),
+            Leaf::Param(_, p) => format!("ev_b[__sb * {nb}usize + {p}usize]"),
+            Leaf::Rot(r, kind, off) => {
+                let s = if rots[r].0 == 0 { "__sa" } else { "__sb" };
+                match kind {
+                    0 => format!("rot_{r}[{s} * 9usize + {off}usize]"),
+                    1 => format!("rotw_{r}[{s} * 9usize + {off}usize]"),
+                    _ => format!("drot_{r}[{s} * 27usize + {off}usize]"),
+                }
+            }
+            Leaf::Data(j) => format!("data[__o * {nd}usize + {j}usize]"),
+        }
+    };
+    let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
+    let lets = |syms: &BTreeSet<String>| -> String {
+        syms.iter().map(|s| format!("let {} = {};\n", names[s], leaf_expr(&leaf[s]))).collect()
+    };
+    // the leaves by their kernel names; the CSE's temporaries print as they are
+    let map = |s: &str| -> Option<String> { names.get(s).cloned() };
+    let stmts = |inters: &[Intermediate]| -> Result<String, String> {
+        inters.iter().map(|i| i.to_cubecl_with(ft, &map).map_err(|e| e.0)).collect()
+    };
+    let expr = |e: &E| -> Result<String, String> { e.to_cubecl_with(ft, &map).map_err(|e| e.0) };
+    // the rotation buffers each kernel takes
+    let rot_params: String = (0..rots.len()).map(|r| format!("rot_{r}: &[{ft}], rotw_{r}: &[f64], drot_{r}: &[{ft}], ")).collect();
+    let slots = "let __sa = inst[__o * 3usize] as usize;\nlet __sb = inst[__o * 3usize + 1usize] as usize;\n";
+    // the assembly: rows, cost, and the three writes per row
+    let n_partials = na + nb;
+    let mut body = stmts(gh.0)?;
+    for ri in 0..rows {
+        let r = expr(&gh.1[ri * (1 + n_partials)])?;
+        body.push_str(&format!("let __r{ri} = {r};\n__c += f64::cast_from(__r{ri}) * f64::cast_from(__r{ri});\n"));
+        for p in 0..n_partials {
+            let d = expr(&gh.1[ri * (1 + n_partials) + 1 + p])?;
+            if p < na {
+                body.push_str(&format!("__dra[{p}usize] = {d};\n"));
+            } else {
+                body.push_str(&format!("__drb[{}usize] = {d};\n", p - na));
+            }
+        }
+        body.push_str(&format!(
+            "self_rank1::<{ft}>(h, g, idx_a, __sa * {na}usize, tile_a[__sa * 3usize] as usize, tile_a[__sa * 3usize + 1usize] as usize, tile_a[__sa * 3usize + 2usize], 2.0f64, __r{ri}, &__dra, {na}usize);\n\
+             self_rank1::<{ft}>(h, g, idx_b, __sb * {nb}usize, tile_b[__sb * 3usize] as usize, tile_b[__sb * 3usize + 1usize] as usize, tile_b[__sb * 3usize + 2usize], 2.0f64, __r{ri}, &__drb, {nb}usize);\n\
+             cross_rank1::<{ft}>(h, idx_a, __sa * {na}usize, tile_a[__sa * 3usize + 2usize], idx_b, __sb * {nb}usize, tile_b[__sb * 3usize + 2usize], tile_x[__sx * 3usize] as usize, tile_x[__sx * 3usize + 1usize] as usize, tile_x[__sx * 3usize + 2usize], 2.0f64, &__dra, &__drb, {na}usize, {nb}usize);\n"
+        ));
+    }
+    let arrays = format!("let mut __dra = Array::<{ft}>::new({na}usize);\nlet mut __drb = Array::<{ft}>::new({nb}usize);\n");
+    let gh_code = match guard {
+        Some((pre, q)) => format!(
+            "{}if {} >= 0.0{ft} {{\n{arrays}{body}}}\n",
+            stmts(pre)?,
+            expr(q)?
+        ),
+        None => format!("{arrays}{body}"),
+    };
+    let gh_kernel = format!(
+        "#[cube(launch_unchecked)]\n\
+         pub fn __dk{cid}_gh(inst: &[u32], data: &[{ft}], ev_a: &[{ft}], ev_b: &[{ft}], idx_a: &[u32], tile_a: &[u32], idx_b: &[u32], tile_b: &[u32], tile_x: &[u32], {rot_params}h: &mut [Atomic<f64>], g: &mut [Atomic<f64>], cost: &mut [Atomic<f64>], n: u32) {{\n\
+         let __o = ABSOLUTE_POS;\nlet mut __c = 0.0f64;\nif __o < n as usize {{\n{slots}let __sx = inst[__o * 3usize + 2usize] as usize;\n{}{gh_code}}}\ncost_add(cost, __c);\n}}\n",
+        lets(&gh_syms)
+    );
+    // the cost: the rows alone
+    let mut cbody = stmts(cost.0)?;
+    for (ri, r) in cost.1.iter().enumerate() {
+        let r = expr(r)?;
+        cbody.push_str(&format!("let __r{ri} = {r};\n__c += f64::cast_from(__r{ri}) * f64::cast_from(__r{ri});\n"));
+    }
+    let cost_kernel = format!(
+        "#[cube(launch_unchecked)]\n\
+         pub fn __dk{cid}_cost(inst: &[u32], data: &[{ft}], ev_a: &[{ft}], ev_b: &[{ft}], {rot_params}cost: &mut [Atomic<f64>], n: u32) {{\n\
+         let __o = ABSOLUTE_POS;\nlet mut __c = 0.0f64;\nif __o < n as usize {{\n{slots}{}{cbody}}}\ncost_add(cost, __c);\n}}\n",
+        lets(&cost_syms)
+    );
+    let kernels: TokenStream2 = format!("{gh_kernel}{cost_kernel}").parse().map_err(|e| format!("the generated device kernels do not parse: {e}"))?;
+    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, kernels, cid })
+}
+
+/// The walk of one cross group, as the root's emission hands it over.
+pub(crate) struct DevGroup {
+    pub rc_ident: syn::Ident,
+    pub resolve_stmts: Vec<TokenStream2>,
+    pub root_var_ident: syn::Ident,
+}
+
+/// The device items of a root whose every constraint has a device form.
+pub(crate) fn device_root(
+    root_name: &syn::Ident,
+    ft: &str,
+    store_ty: &syn::Ident,
+    constraints: &[DevConstraint],
+    groups: &std::collections::BTreeMap<String, DevGroup>,
+    array_ident: &dyn Fn(&str, &str) -> syn::Ident,
+) -> TokenStream2 {
+    let scalar: syn::Type = syn::parse_str(ft).unwrap();
+    // the device's numbering of the entity arrays, rotation fields and
+    // cross arrays the constraints read
+    let mut entities: Vec<(String, String, usize)> = Vec::new();
+    let mut rotations: Vec<(usize, String, usize)> = Vec::new();
+    let mut crosses: Vec<(String, String)> = Vec::new();
+    let entity_of = |entities: &mut Vec<(String, String, usize)>, s: &DevSide| -> usize {
+        match entities.iter().position(|(t, hb, _)| *t == s.ty && *hb == s.hb) {
+            Some(e) => e,
+            None => {
+                entities.push((s.ty.clone(), s.hb.clone(), s.params.len()));
+                entities.len() - 1
+            }
+        }
+    };
+    struct Ids {
+        ea: usize,
+        eb: usize,
+        x: usize,
+        rots: Vec<usize>,
+    }
+    let mut ids: Vec<Ids> = Vec::new();
+    for c in constraints {
+        let ea = entity_of(&mut entities, &c.a);
+        let eb = entity_of(&mut entities, &c.b);
+        let x = match crosses.iter().position(|(h, b)| *h == c.holder && c.block == b) {
+            Some(x) => x,
+            None => {
+                crosses.push((c.holder.clone(), c.block.to_string()));
+                crosses.len() - 1
+            }
+        };
+        let rots = c
+            .rots
+            .iter()
+            .map(|(side, path, off)| {
+                let e = if *side == 0 { ea } else { eb };
+                match rotations.iter().position(|(re, rp, _)| *re == e && rp == path) {
+                    Some(r) => r,
+                    None => {
+                        rotations.push((e, path.clone(), *off));
+                        rotations.len() - 1
+                    }
+                }
+            })
+            .collect();
+        ids.push(Ids { ea, eb, x, rots });
+    }
+    let rot_shape: Vec<TokenStream2> = rotations.iter().map(|(e, _, off)| quote! { (#e, #off) }).collect();
+    let entity_n: Vec<usize> = entities.iter().map(|e| e.2).collect();
+    let n_cross = crosses.len();
+    let cshape: Vec<TokenStream2> = constraints.iter().map(|c| {
+        let nd = c.data.len();
+        quote! { (3usize, #nd) }
+    }).collect();
+    let kernels: Vec<&TokenStream2> = constraints.iter().map(|c| &c.kernels).collect();
+    // tables: one store built for the model as it is, every slot in it
+    let table_entity: Vec<TokenStream2> = entities.iter().map(|(t, hb, _)| {
+        let arr = array_ident(t, hb);
+        quote! { { let (__i, __t) = __store.#arr.device_table(resolve); __tables.idx.push(__i); __tables.tile.push(__t); } }
+    }).collect();
+    let table_cross: Vec<TokenStream2> = crosses.iter().map(|(h, b)| {
+        let arr = array_ident(h, b);
+        quote! { __tables.cross.push(__store.#arr.device_table(resolve)); }
+    }).collect();
+    // the pack walk: per group the cost sweep's loop, per constraint its
+    // slots, data, the entities' fixed values and reference rotations
+    let mut walks: Vec<TokenStream2> = Vec::new();
+    for (key, g) in groups {
+        let entries: Vec<TokenStream2> = constraints.iter().zip(&ids).filter(|(c, _)| c.group_key == *key).map(|(c, id)| {
+            let cid = c.cid;
+            let (av, ahb, bv, bhb, block) = (format_ident!("{}", c.a.var), format_ident!("{}", c.a.hb), format_ident!("{}", c.b.var), format_ident!("{}", c.b.hb), &c.block);
+            let data: Vec<syn::Expr> = c.data.iter().map(|d| syn::parse_str(d).expect("a data leaf is an expression")).collect();
+            let fixed = |side: &DevSide, e: usize, s: TokenStream2| -> TokenStream2 {
+                let n = side.params.len();
+                let vals: Vec<syn::Expr> = side.params.iter().map(|p| syn::parse_str(p).expect("a parameter symbol is an expression")).collect();
+                let ks: Vec<usize> = (0..n).collect();
+                quote! { { let __f = &mut __pack.fixed[#e]; #( __f[#s * #n + #ks] = (#vals) as #scalar; )* } }
+            };
+            let (ea, eb) = (id.ea, id.eb);
+            let fa = fixed(&c.a, ea, quote! { __sa });
+            let fb = fixed(&c.b, eb, quote! { __sb });
+            let rots: Vec<TokenStream2> = c.rots.iter().zip(&id.rots).map(|((side, path, _), &r)| {
+                let (var, s) = if *side == 0 { (format_ident!("{}", c.a.var), quote! { __sa }) } else { (format_ident!("{}", c.b.var), quote! { __sb }) };
+                let field: syn::Expr = syn::parse_str(&format!("{}.{}", var, path)).expect("a rotation field path");
+                quote! {
+                    {
+                        let __m = &#field.ref_rotation;
+                        let __r = &mut __pack.refr[#r];
+                        for __i in 0..3usize {
+                            __r[#s * 9 + __i * 3] = __m[__i].x as f64;
+                            __r[#s * 9 + __i * 3 + 1] = __m[__i].y as f64;
+                            __r[#s * 9 + __i * 3 + 2] = __m[__i].z as f64;
+                        }
+                    }
+                }
+            }).collect();
+            quote! {
+                {
+                    let __sa = #av.#ahb.slot() as usize;
+                    let __sb = #bv.#bhb.slot() as usize;
+                    __pack.inst[#cid].extend_from_slice(&[__sa as u32, __sb as u32, __frine.#block.slot()]);
+                    __pack.data[#cid].extend_from_slice(&[#( (#data) as #scalar ),*]);
+                    #fa
+                    #fb
+                    #(#rots)*
+                }
+            }
+        }).collect();
+        if entries.is_empty() {
+            continue;
+        }
+        let (rc, resolve, root_var) = (&g.rc_ident, &g.resolve_stmts, &g.root_var_ident);
+        walks.push(quote! {
+            for __frine in self.#rc.iter() {
+                #(#resolve)*
+                #[allow(unused_variables)]
+                let #root_var = &*self;
+                #(#entries)*
+            }
+        });
+    }
+    // the launches
+    let launches: Vec<TokenStream2> = constraints.iter().zip(&ids).map(|(c, id)| {
+        let cid = c.cid;
+        let (gh, cost) = (format_ident!("__dk{}_gh", cid), format_ident!("__dk{}_cost", cid));
+        let (ea, eb, x) = (id.ea, id.eb, id.x);
+        let rot_args: Vec<TokenStream2> = id.rots.iter().map(|&r| quote! {
+            ::arael::__gpu::lease_arg::<#scalar>(&bufs.rot[#r]), ::arael::__gpu::lease_arg::<f64>(&bufs.rotw[#r]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.drot[#r]),
+        }).collect();
+        quote! {
+            let __n = bufs.count[#cid];
+            if __n > 0 {
+                let __cubes = CubeCount::Static(__n.div_ceil(256), 1, 1);
+                let __dim = CubeDim::new_1d(256);
+                if assemble {
+                    unsafe {
+                        #gh::launch_unchecked(
+                            client, __cubes, __dim,
+                            ::arael::__gpu::lease_arg::<u32>(&bufs.inst[#cid]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.data[#cid]),
+                            ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#ea]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#eb]),
+                            ::arael::__gpu::lease_arg::<u32>(&bufs.idx[#ea]), ::arael::__gpu::lease_arg::<u32>(&bufs.tile[#ea]),
+                            ::arael::__gpu::lease_arg::<u32>(&bufs.idx[#eb]), ::arael::__gpu::lease_arg::<u32>(&bufs.tile[#eb]),
+                            ::arael::__gpu::lease_arg::<u32>(&bufs.cross[#x]),
+                            #(#rot_args)*
+                            ::arael::__gpu::handle_arg(targets.h, targets.nh), ::arael::__gpu::handle_arg(targets.g, targets.ng), ::arael::__gpu::handle_arg(targets.cost, 1),
+                            __n,
+                        )
+                    };
+                } else {
+                    unsafe {
+                        #cost::launch_unchecked(
+                            client, __cubes, __dim,
+                            ::arael::__gpu::lease_arg::<u32>(&bufs.inst[#cid]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.data[#cid]),
+                            ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#ea]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#eb]),
+                            #(#rot_args)*
+                            ::arael::__gpu::handle_arg(targets.cost, 1),
+                            __n,
+                        )
+                    };
+                }
+            }
+        }
+    }).collect();
+    let module = format_ident!("__arael_device_{}", root_name);
+    let n_constraints = constraints.len();
+    quote! {
+        ::arael::__gpu_items! {
+            #[doc(hidden)]
+            #[allow(non_snake_case, unused, clippy::all)]
+            mod #module {
+                use ::arael::__gpu::cubecl;
+                use cubecl::prelude::*;
+                use ::arael::__gpu::assembly::{self_rank1, cross_rank1, cost_add};
+                #(#kernels)*
+            }
+
+            impl ::arael::__gpu::DeviceRoot<#scalar> for #root_name {
+                fn device_shape(&self) -> ::arael::__gpu::DeviceShape {
+                    ::arael::__gpu::DeviceShape {
+                        entities: vec![#(#entity_n),*],
+                        rotations: vec![#(#rot_shape),*],
+                        crosses: #n_cross,
+                        constraints: vec![#(#cshape),*],
+                    }
+                }
+
+                fn device_tables(&self, resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize)) -> ::arael::__gpu::DeviceTables {
+                    let mut __store = #store_ty::default();
+                    self.__build_blocks(&mut __store);
+                    let mut __tables = ::arael::__gpu::DeviceTables::default();
+                    #(#table_entity)*
+                    #(#table_cross)*
+                    __tables
+                }
+
+                #[allow(unused_variables, clippy::all)]
+                fn device_pack(&self, __pack: &mut ::arael::__gpu::DevicePack<#scalar>) {
+                    use arael::utils::{Float as _, SelectIndex as _};
+                    use arael::store::Leaves as _;
+                    let _ = #n_constraints;
+                    #(#walks)*
+                }
+
+                #[allow(unused_variables, clippy::all)]
+                fn device_launch(&self, client: &::arael::__gpu::cubecl::prelude::Client, bufs: &::arael::__gpu::DeviceBuffers, targets: &::arael::__gpu::DeviceTargets, assemble: bool) {
+                    use ::arael::__gpu::cubecl::prelude::*;
+                    use #module::*;
+                    #(#launches)*
+                }
+            }
+        }
+    }
+}

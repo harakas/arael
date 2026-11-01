@@ -4779,6 +4779,10 @@ pub fn generate_root_methods(
     par: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
+    // The device head (docs/dev/GPU.md, E9 stage 3): the constraints with a
+    // device form, and why the root has no device assembly when one lacks it.
+    let mut device_constraints: Vec<crate::device::DevConstraint> = Vec::new();
+    let mut device_unsupported: Option<String> = None;
     let root_var_name = root_name.to_string().to_lowercase();
     let root_var_ident = syn::Ident::new(&root_var_name, proc_macro2::Span::call_site());
     let cast_type: syn::Type = syn::parse_str(precision)
@@ -6930,6 +6934,8 @@ pub fn generate_root_methods(
         let jac_exprs: Option<Vec<arael_sym::E>> =
             if jacobian && off_guard.is_some() { Some(all_gh_exprs.clone()) } else { None };
         let mut guard_code: Option<(Vec<TokenStream2>, Expr)> = None;
+        // The same guard for the device head: its statements and condition.
+        let mut device_guard: Option<(Vec<arael_sym::cse::Intermediate>, arael_sym::E)> = None;
         let (gh_intermediates, gh_simplified) = match &off_guard {
             Some(q) => {
                 let mut on_side = |n: &arael_sym::E| match n.as_ref() {
@@ -6947,6 +6953,7 @@ pub fn generate_root_methods(
                 let q_simplified = simplified.remove(0);
                 let (pre, rest) = split_before_guard(ints, &q_simplified);
                 guard_code = Some((cse_stmts(&pre, Some(""))?, parse_sym_code(&q_simplified.to_rust(""))?));
+                device_guard = Some((pre, q_simplified));
                 (rest, simplified)
             }
             None => {
@@ -7850,6 +7857,11 @@ pub fn generate_root_methods(
             })
             .transpose()?;
 
+        if device_unsupported.is_none()
+            && (is_remote_block || is_self_block || is_triplet || is_multi_cross || !is_root_level_cross)
+        {
+            device_unsupported = Some(format!("{}: only root-level cross constraints have a device form yet", sc.struct_name));
+        }
         if is_remote_block {
             // Remote block: iterate parent collection -> frines,
             // but write to a block on the referenced struct (e.g. pose.hb_pose)
@@ -8442,6 +8454,60 @@ pub fn generate_root_methods(
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
+            // The device form: the two entities through refs, the holder's
+            // cross tile, the partials A's then B's.
+            if device_unsupported.is_none() {
+                let why = if !cross_prefix.is_empty() {
+                    Some("a cross constraint below the root")
+                } else if parent_cross.is_some() {
+                    Some("a parent-owned cross block")
+                } else if guard_expr.is_some() {
+                    Some("a guard")
+                } else if loss_present {
+                    Some("a loss")
+                } else if arm_writes.is_some() {
+                    Some("a select whose arms write apart")
+                } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
+                    Some("an entity without parameters")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
+                } else {
+                    let var_of = |p: &str| p.split('.').next().unwrap_or_default().to_string();
+                    let hb_of = |t: &str| registry_lookup(t).and_then(|l| l.self_block_field.clone()).unwrap_or_default();
+                    let b_ty = b_type.clone().unwrap_or_default();
+                    let side_a = crate::device::DevSide {
+                        ty: a_type.clone(),
+                        var: var_of(param_strs[0]),
+                        hb: hb_of(&a_type),
+                        params: param_strs[..a_param_count].iter().map(|p| p.to_string()).collect(),
+                    };
+                    let side_b = crate::device::DevSide {
+                        var: var_of(param_strs[a_param_count]),
+                        hb: hb_of(&b_ty),
+                        ty: b_ty,
+                        params: param_strs[a_param_count..a_param_count + b_param_count].iter().map(|p| p.to_string()).collect(),
+                    };
+                    match crate::device::device_constraint(
+                        device_constraints.len(),
+                        group.rc_ident.to_string(),
+                        precision,
+                        side_a,
+                        side_b,
+                        sc.struct_name.clone(),
+                        block_ident.clone(),
+                        residual_exprs.len(),
+                        (&gh_intermediates, &gh_simplified),
+                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
+                        (&cost_intermediates, &cost_simplified),
+                    ) {
+                        Ok(dc) => device_constraints.push(dc),
+                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
+                    }
+                }
+            }
         } else {
             // Nested CrossBlock: add inner loops to the collection group
             let frines_ident = frines_ident.unwrap();
@@ -10315,6 +10381,35 @@ pub fn generate_root_methods(
         lines
     };
 
+    // The device head: emitted when every constraint has a device form.
+    if custom && device_unsupported.is_none() {
+        device_unsupported = Some("an extended root's hook has no device form".to_string());
+    }
+    if uses_coo && device_unsupported.is_none() {
+        device_unsupported = Some("a `coo` constraint has no device form".to_string());
+    }
+    if device_constraints.is_empty() && device_unsupported.is_none() {
+        device_unsupported = Some("the root has no constraints".to_string());
+    }
+    let (device_items, device_why, device_accessor) = match &device_unsupported {
+        Some(why) => (quote! {}, quote! { Some(#why) }, quote! {}),
+        None => {
+            let groups: std::collections::BTreeMap<String, crate::device::DevGroup> = cross_groups
+                .values()
+                .map(|g| (g.rc_ident.to_string(), crate::device::DevGroup {
+                    rc_ident: g.rc_ident.clone(),
+                    resolve_stmts: g.resolve_stmts.clone(),
+                    root_var_ident: g.root_var_ident.clone(),
+                }))
+                .collect();
+            let items = crate::device::device_root(root_name, precision, &store_ty, &device_constraints, &groups, &store_array_ident);
+            (items, quote! { None }, quote! {
+                ::arael::__gpu_items! {
+                    fn device_root(&self) -> Option<&dyn ::arael::__gpu::DeviceRoot<#prec_type>> { Some(self) }
+                }
+            })
+        }
+    };
     tokens.extend(quote! {
 
         #(#summary_docs)*
@@ -10433,8 +10528,17 @@ pub fn generate_root_methods(
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>, _ctx: &mut arael::threads::Context) {
                 arael::model::Model::collect_param_blocks(self, out)
             }
+            fn device_unsupported(&self) -> Option<&'static str> {
+                #device_why
+            }
+            fn update_params(&mut self, params: &[#prec_type]) {
+                arael::model::Model::update_params(self, params);
+                #extended_update_call
+            }
+            #device_accessor
         }
     });
+    tokens.extend(device_items);
 
     // Generate default ExtendedModel impl unless `extended` flag is set
     if !custom {

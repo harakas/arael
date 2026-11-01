@@ -50,6 +50,7 @@
 //! (MODEL.md, "Exporting models to other crates").
 
 mod constraint;
+mod device;
 mod function;
 mod sidecar;
 
