@@ -77,12 +77,10 @@
 //! - **Threads** -- with the `threads` feature the cost and assembly
 //!   sweeps and the linear solve run on as many threads as `num_threads`
 //!   says (see [Threads](#threads))
-//! - **GPU solve** -- with the `gpu-cuda` or `gpu-hip` feature the block
-//!   supernodal factorization and its solve run on the device
-//!   (`SparseFaerOptions::with_gpu`), in f64 or as an f32 factor refined
-//!   against the f64 matrix, and on the Schur route the reduction and the
-//!   back-substitution with them; one set of kernels, written in CubeCL,
-//!   for both vendors
+//! - **GPU solve** -- with the `gpu-cuda` or `gpu-hip` feature the
+//!   assembly, the Schur reduction and the factorization run on an NVIDIA
+//!   or AMD GPU (see
+//!   [docs/SOLVERS.md](https://github.com/harakas/arael/blob/master/docs/SOLVERS.md#gpu))
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Mixed precision** -- an f32 factor under an f64 solve; surgical
@@ -2575,6 +2573,8 @@ pub use arael_faer::pool;
 pub use threads::Context;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
 pub mod covariance;
+#[cfg(feature = "gpu")]
+mod device;
 pub mod rank;
 /// Pinhole camera model (`camera<T>`, `cameraf` / `camerad`) and
 /// geometric utilities.
@@ -2600,6 +2600,30 @@ pub use arael_macros::function;
 pub use arael_macros::export_models;
 #[doc(hidden)]
 pub use arael_macros::__register_model;
+
+/// The device side of a model's generated code (feature `gpu`): arael-gpu,
+/// CubeCL, and the runtime the generated kernels and launches use.
+#[cfg(feature = "gpu")]
+#[doc(hidden)]
+pub mod __gpu {
+    pub use arael_gpu::*;
+    pub use crate::device::*;
+}
+
+/// The device items of a model's generated code: kept when arael has its
+/// `gpu` feature, dropped otherwise, so a model compiles either way.
+#[cfg(feature = "gpu")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __gpu_items {
+    ($($t:tt)*) => { $($t)* };
+}
+#[cfg(not(feature = "gpu"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __gpu_items {
+    ($($t:tt)*) => {};
+}
 
 /// One-stop imports for defining and solving models:
 /// `use arael::prelude::*;`.

@@ -872,11 +872,21 @@ whatever the solver's scalar, factorizes it, solves, refines, and
 recovers the eliminated blocks, and only the step comes back, the one
 time per damped solve the solver waits for the device; from the second
 damped solve of a structure on, its hundreds of kernels are replayed as
-one captured graph. On the
-whole-system route it factorizes and solves, and the refinement runs on
-the CPU. The symbolic analysis and the assembly stay on the CPU, so the
-Hessian's values cross to the device once per damped solve, read in
-place from the solver's own buffer. The kernels are written once in
+one captured graph. On the reduced route the device also assembles:
+`#[arael(root)]` generates, from the same constraint bodies the CPU
+assembly is generated from, kernels that compute the gradient, the
+Hessian's tiles and the trial costs on the device, so the Hessian never
+crosses to it; what crosses per iteration is the parameter vector up and
+the gradient and diagonal down. A root gets these kernels when its every
+constraint has a device form (today: constraints between two entities of
+the root's collections through refs, without a guard, a loss or an
+index `select`, over Euler-angle rotations);
+`LmProblemInternals::device_unsupported` says why a root has none, and
+then the CPU assembles and the Hessian's values are uploaded per damped
+solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
+on the CPU; `SchurPlan::gpu_assembly` reports which ran. On the
+whole-system route the device factorizes and solves, and the refinement
+runs on the CPU. The symbolic analysis stays on the CPU. The kernels are written once in
 CubeCL (the `arael-gpu` crate) for both vendors and compiled for the
 device at first use, which costs a few hundred milliseconds once per
 process. A `GpuDevice` value carries the device state its solves use (a

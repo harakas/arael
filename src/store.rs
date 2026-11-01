@@ -763,6 +763,11 @@ pub enum HessianBinder<'a> {
     Scalar(&'a mut dyn FnMut(u32, u32) -> usize),
 }
 
+/// A value index as the device tables hold it.
+fn device_word(v: usize) -> u32 {
+    u32::try_from(v).expect("a Hessian of more than 2^32 values has no device table")
+}
+
 /// The first live index in `indices` and how many follow it: the block's
 /// span along one side of its tile. `u32::MAX` and 0 when every slot is
 /// fixed. An entity's live parameters serialize as one run, which the
@@ -1120,6 +1125,28 @@ impl<const N: usize, const M: usize, T: crate::utils::Float, P: GradPolicy<T>> S
     /// One entity's span of [`grad`](Self::grad): the stash, and the
     /// remainders when the policy compensates.
     const GSTRIDE: usize = if P::KAHAN { 2 * N } else { N };
+
+    /// The device assembly's table of this array, slot by slot: the
+    /// entities' global parameter indices (`N` a slot, `u32::MAX` for a
+    /// fixed one), and their tiles as `(base, stride, start)` from
+    /// `resolve`, the tiled pattern's resolver (zeros for an entity whose
+    /// every parameter is fixed). Over a slab holding every entity.
+    pub fn device_table(&self, resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize)) -> (std::vec::Vec<u32>, std::vec::Vec<u32>) {
+        assert!(self.map.is_empty(), "a device table is built from a slab holding every entity");
+        let mut idx = std::vec::Vec::with_capacity(N * self.indices.len());
+        let mut tile = std::vec::Vec::with_capacity(3 * self.indices.len());
+        for ix in &self.indices {
+            idx.extend_from_slice(ix);
+            let (start, live) = tile_extent(ix);
+            if live == 0 {
+                tile.extend_from_slice(&[0, 0, 0]);
+            } else {
+                let (base, stride, _) = resolve(start, start);
+                tile.extend_from_slice(&[device_word(base), device_word(stride), start]);
+            }
+        }
+        (idx, tile)
+    }
 
     /// An empty slab.
     pub fn new() -> Self {
@@ -1816,6 +1843,28 @@ impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> C
 
 impl<const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlockArray<NA, NB, P, T> {
     const CHECK_P: () = assert!(P == NA * NB, "CrossBlockArray: P must equal NA*NB");
+
+    /// The device assembly's table of this array, slot by slot: the tile
+    /// as `(base, stride, flip)` from `resolve`, `flip` 1 when the
+    /// b-side's span is the lower-numbered one and lies on the tile's
+    /// rows (zeros when either side is fixed throughout). Over a list
+    /// holding every block.
+    pub fn device_table(&self, resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize)) -> std::vec::Vec<u32> {
+        assert!(self.base == 0, "a device table is built from a list holding every block");
+        let mut tile = std::vec::Vec::with_capacity(3 * self.a.len());
+        for (a, b) in self.a.iter().zip(&self.b) {
+            let (ra, wa) = tile_extent(a);
+            let (rb, wb) = tile_extent(b);
+            if wa == 0 || wb == 0 {
+                tile.extend_from_slice(&[0, 0, 0]);
+                continue;
+            }
+            let flip = rb < ra;
+            let (base, stride, _) = if flip { resolve(rb, ra) } else { resolve(ra, rb) };
+            tile.extend_from_slice(&[device_word(base), device_word(stride), flip as u32]);
+        }
+        tile
+    }
 
     /// An empty list.
     pub fn new() -> Self {
