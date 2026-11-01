@@ -1,5 +1,5 @@
 [workspace]
-members = ["arael-faer", "arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch", "arael-sketch-backend", "arael-sketch-solver", "cargo-arael"]
+members = ["arael-faer", "arael-gpu", "arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch", "arael-sketch-backend", "arael-sketch-solver", "cargo-arael"]
 
 # One version for every crate of the workspace. A `-dev` suffix marks the
 # tree between releases: cargo never picks a pre-release for a plain
@@ -14,6 +14,7 @@ arael-macros = { version = "0.9.3", path = "arael-macros" }
 arael-sym = { version = "0.9.3", path = "arael-sym" }
 arael-sym-macros = { version = "0.9.3", path = "arael-sym-macros" }
 arael-faer = { version = "0.9.3", path = "arael-faer" }
+arael-gpu = { version = "0.9.3", path = "arael-gpu" }
 arael-sketch-solver = { version = "0.9.3", path = "arael-sketch-solver" }
 arael-sketch-backend = { version = "0.9.3", path = "arael-sketch-backend" }
 
@@ -47,11 +48,19 @@ cholmod-gpl = ["cholmod"]
 threads = ["dep:rayon", "faer/rayon", "arael-faer/threads", "arael-macros/threads"]
 # The feature's name through 0.8; the same thing.
 rayon = ["threads"]
+# The supernodal block route's factorization and solve on a GPU through
+# arael-gpu (CubeCL); `gpu-cuda` and `gpu-hip` pick the runtime
+# (`SparseFaerOptions::with_gpu`). Off by default: a heavy dependency, and the
+# CPU routes stay the default.
+gpu = ["dep:arael-gpu"]
+gpu-cuda = ["gpu", "arael-gpu/cuda"]
+gpu-hip = ["gpu", "arael-gpu/hip"]
 
 [dependencies]
 arael-macros = { workspace = true }
 arael-sym = { workspace = true }
 arael-faer = { workspace = true }
+arael-gpu = { workspace = true, optional = true }
 inventory = "0.3"
 rayon = { version = "1.11", optional = true }
 num = "0.4"

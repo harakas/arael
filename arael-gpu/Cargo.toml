@@ -1,0 +1,24 @@
+[package]
+name = "arael-gpu"
+version.workspace = true
+edition = "2024"
+authors = ["Indrek Mandre <indrek@mare.ee>"]
+description = "GPU kernels for arael's sparse solvers through CubeCL: the block supernodal Cholesky and its solve"
+license = "MIT"
+repository = "https://github.com/harakas/arael"
+readme = "README.md"
+keywords = ["sparse", "cholesky", "gpu", "cuda", "cubecl"]
+categories = ["mathematics", "science", "algorithms"]
+
+[features]
+default = []
+# The runtimes. Without one the kernels compile (CubeCL's frontend needs no
+# device) but no client can be made; `arael` reports the backend unavailable.
+cuda = ["cubecl/cuda"]
+hip = ["cubecl/hip"]
+
+[dependencies]
+arael-faer = { workspace = true }
+cubecl = "0.11"
+cubecl-runtime = "0.11"
+bytemuck = "1"
