@@ -870,7 +870,9 @@ matrix. On the reduced (Schur) route the device does the whole damped
 solve: it forms the reduced system from the Hessian's values, in `f64`
 whatever the solver's scalar, factorizes it, solves, refines, and
 recovers the eliminated blocks, and only the step comes back, the one
-time per damped solve the solver waits for the device. On the
+time per damped solve the solver waits for the device; from the second
+damped solve of a structure on, its hundreds of kernels are replayed as
+one captured graph. On the
 whole-system route it factorizes and solves, and the refinement runs on
 the CPU. The symbolic analysis and the assembly stay on the CPU, so the
 Hessian's values cross to the device once per damped solve, read in
