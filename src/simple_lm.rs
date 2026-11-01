@@ -4363,6 +4363,40 @@ impl Default for SchurMethod {
     }
 }
 
+/// A GPU for the supernodal block route's factorization and solve
+/// ([`SparseFaerOptions::with_gpu`]): the runtime and the device index.
+///
+/// ```ignore
+/// SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)))
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuDevice {
+    /// The runtime (feature `gpu-cuda` or `gpu-hip`).
+    pub backend: GpuBackend,
+    /// The device, as the runtime numbers them.
+    pub index: usize,
+}
+
+impl GpuDevice {
+    /// CUDA device `index`.
+    pub fn cuda(index: usize) -> Self {
+        GpuDevice { backend: GpuBackend::Cuda, index }
+    }
+    /// HIP device `index`.
+    pub fn hip(index: usize) -> Self {
+        GpuDevice { backend: GpuBackend::Hip, index }
+    }
+}
+
+/// The GPU runtimes a [`GpuDevice`] can name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuBackend {
+    /// NVIDIA, through the CUDA driver.
+    Cuda,
+    /// AMD, through HIP.
+    Hip,
+}
+
 /// Configuration for the [`SparseFaer`] backend as plain data: which system to
 /// factorize and how. Build one and hand it to [`SolverKind::Sparse`], or turn
 /// it into a solver with [`SparseFaer::from_options`].
@@ -4398,6 +4432,9 @@ pub struct SparseFaerOptions {
     /// Single-precision factor with refinement on the supernodal block route
     /// (see [`Self::with_mixed_precision`]). `None`, off, by default.
     pub mixed_precision: Option<MixedPrecision>,
+    /// The GPU that factorizes and solves the supernodal block route (see
+    /// [`Self::with_gpu`]). `None`, the CPU, by default.
+    pub gpu: Option<GpuDevice>,
     /// Parameter ranges to marginalize, named explicitly rather than left to
     /// the policy to detect.
     pub marginalize: Vec<std::ops::Range<usize>>,
@@ -4425,6 +4462,7 @@ impl SparseFaerOptions {
                 .batch_ratio,
             block_supernodal_memory_lean: false,
             mixed_precision: None,
+            gpu: None,
             marginalize: Vec::new(),
         }
     }
@@ -4605,6 +4643,20 @@ impl SparseFaerOptions {
     /// unless the supernodal route runs at all.
     pub fn with_mixed_precision(mut self, mixed: Option<MixedPrecision>) -> Self {
         self.mixed_precision = mixed;
+        self
+    }
+
+    /// Factorize and solve the supernodal block route on a GPU (features
+    /// `gpu-cuda`, `gpu-hip`). The factor lives on the device, in the
+    /// solver's scalar, or in `f32` under [`Self::with_mixed_precision`]
+    /// with the same refinement against the f64 matrix. The analysis, the
+    /// assembly and the Schur reduction stay on the CPU and the matrix's
+    /// values are uploaded for every factorization. `None` (the default)
+    /// factors on the CPU. Ignored unless the supernodal route runs at all;
+    /// a device whose runtime is not compiled in fails the solve with
+    /// [`SetupError::SolverUnavailable`].
+    pub fn with_gpu(mut self, gpu: Option<GpuDevice>) -> Self {
+        self.gpu = gpu;
         self
     }
 
@@ -4869,6 +4921,10 @@ pub struct SchurPlan {
     /// ([`SparseFaerOptions::with_mixed_precision`]). Only ever true with
     /// [`block_supernodal`](Self::block_supernodal).
     pub f32_factor: bool,
+    /// Whether the factorization and solve ran on a GPU
+    /// ([`SparseFaerOptions::with_gpu`]). Only ever true with
+    /// [`block_supernodal`](Self::block_supernodal).
+    pub gpu_factor: bool,
     /// Refinement steps summed over the solve, when the factor was single
     /// precision; `None` otherwise. Divided by the attempt count, what each
     /// damped solve took on top of its factorization.
@@ -4884,60 +4940,192 @@ pub struct SchurPlan {
 /// the refinement's scratch and counters.
 struct SnNumeric<T> {
     mixed: Option<MixedPrecision>,
+    gpu: Option<GpuDevice>,
     factor: Vec<T>,
     ctx: arael_faer::supernodal::SupernodalContext<T>,
     factor32: Vec<f32>,
     ctx32: arael_faer::supernodal::SupernodalContext<f32>,
-    // Refinement scratch, all f64 whatever T: the right-hand side and the
-    // iterate, the residual (which becomes the correction), the iterate
-    // before the last step so a step that did not help can be undone, and
-    // the threaded residual's partial sums.
+    /// The device factor, when `gpu` is set and the feature is in: built
+    /// for the current symbolic by [`prepare`](Self::prepare).
+    #[cfg(feature = "gpu")]
+    gpu_factor: Option<arael_gpu::GpuFactor>,
+    rf: Refine,
+}
+
+/// The refinement of a solution through a reduced-precision factor against
+/// the f64 matrix: its scratch, all f64 whatever the solver's scalar (the
+/// right-hand side and the iterate, the residual, which becomes the
+/// correction, the iterate before the last step so a step that did not help
+/// can be undone, and the threaded residual's partial sums), and its
+/// counters, summed over the solver's life like cg_iters.
+#[derive(Default)]
+struct Refine {
     b64: Vec<f64>,
     x64: Vec<f64>,
     r: Vec<f64>,
     x_prev: Vec<f64>,
     mv: Vec<f64>,
-    // Summed over the solver's life, like cg_iters: steps taken, and solves
-    // that ended above the tolerance.
     steps: usize,
     shortfalls: usize,
 }
 
-impl<T> SnNumeric<T> {
-    fn new() -> Self {
-        SnNumeric {
-            mixed: None,
-            factor: Vec::new(),
-            ctx: arael_faer::supernodal::SupernodalContext::new(),
-            factor32: Vec::new(),
-            ctx32: arael_faer::supernodal::SupernodalContext::new(),
-            b64: Vec::new(),
-            x64: Vec::new(),
-            r: Vec::new(),
-            x_prev: Vec::new(),
-            mv: Vec::new(),
-            steps: 0,
-            shortfalls: 0,
-        }
-    }
-
-    /// Release every buffer; the counters stay.
+impl Refine {
     fn clear(&mut self) {
-        self.factor = Vec::new();
-        self.factor32 = Vec::new();
         self.b64 = Vec::new();
         self.x64 = Vec::new();
         self.r = Vec::new();
         self.x_prev = Vec::new();
         self.mv = Vec::new();
     }
+
+    /// Refine `x`, the solution of `a x = b` through a reduced-precision
+    /// factor, as [`MixedPrecision`] describes: `correct` solves that factor
+    /// for the correction, in place on an f64 vector. Returns the steps
+    /// taken, the final residual norm, and whether it stayed above the
+    /// tolerance. `lap` accumulates the solve and residual times for the
+    /// verbose log.
+    fn refine<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal>(
+        &mut self,
+        a: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>,
+        b: &[T],
+        x: &mut [T],
+        mp: MixedPrecision,
+        threads: usize,
+        lap: &mut impl FnMut(&mut f64),
+        t_solve: &mut f64,
+        t_residual: &mut f64,
+        mut correct: impl FnMut(&mut [f64]),
+    ) -> (usize, f64, f64, bool) {
+        // The refinement runs in f64 whatever T: the residual accumulated in
+        // f64 from the matrix's entries, the iterate kept in f64 until it is
+        // handed back. For an f64 solver that is the native arithmetic; for
+        // an f32 solver it is what makes the residual see below f32.
+        use arael_faer::schur::SchurReal;
+        let n = x.len();
+        self.r.resize(n, 0.0);
+        self.x_prev.resize(n, 0.0);
+        self.b64.clear();
+        self.b64.extend(b.iter().map(|&v| SchurReal::to_f64(v)));
+        self.x64.clear();
+        self.x64.extend(x.iter().map(|&v| SchurReal::to_f64(v)));
+        let bnorm = norm2_f64(&self.b64);
+        // The step is handed back in T, so no tolerance below a few of its
+        // epsilons buys anything: an f32 solver refines to about 1e-6.
+        let floor = 8.0 * SchurReal::to_f64(<T as num::Float>::epsilon());
+        let tol = mp.tol.max(floor) * bnorm;
+        let mut steps = 0;
+        let mut rnorm = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
+        lap(t_residual);
+        while rnorm > tol && steps < mp.max_refinements {
+            self.x_prev.copy_from_slice(&self.x64);
+            correct(&mut self.r);
+            for (xi, di) in self.x64.iter_mut().zip(&self.r) {
+                *xi += *di;
+            }
+            lap(t_solve);
+            steps += 1;
+            let next = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
+            lap(t_residual);
+            if next >= rnorm {
+                // The factor is too far off for the correction to help: the
+                // iterate before it is the best one.
+                self.x64.copy_from_slice(&self.x_prev);
+                break;
+            }
+            rnorm = next;
+        }
+        for (xi, &v) in x.iter_mut().zip(&self.x64) {
+            *xi = <T as SchurReal>::from_f64(v);
+        }
+        let short = rnorm > tol;
+        self.steps += steps;
+        if short {
+            self.shortfalls += 1;
+        }
+        (steps, rnorm, bnorm, short)
+    }
+}
+
+impl<T> SnNumeric<T> {
+    fn new() -> Self {
+        SnNumeric {
+            mixed: None,
+            gpu: None,
+            factor: Vec::new(),
+            ctx: arael_faer::supernodal::SupernodalContext::new(),
+            factor32: Vec::new(),
+            ctx32: arael_faer::supernodal::SupernodalContext::new(),
+            #[cfg(feature = "gpu")]
+            gpu_factor: None,
+            rf: Refine::default(),
+        }
+    }
+
+    /// Release every buffer, the device factor with them; the counters stay.
+    fn clear(&mut self) {
+        self.factor = Vec::new();
+        self.factor32 = Vec::new();
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_factor = None;
+        }
+        self.rf.clear();
+    }
+
+    /// Whether the factor is on a GPU.
+    fn gpu_active(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_factor.is_some()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    }
+
+    /// Build the device factor for a new symbolic when a GPU is asked for:
+    /// `asym` is the block structure the symbolic analysed. Without the
+    /// `gpu` feature, or with a runtime not compiled in, the solve is
+    /// unavailable.
+    fn prepare(
+        &mut self,
+        sn: &arael_faer::supernodal::SupernodalSymbolic,
+        asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    ) -> Result<(), SetupError> {
+        let Some(dev) = self.gpu else {
+            return Ok(());
+        };
+        #[cfg(feature = "gpu")]
+        {
+            let backend = match dev.backend {
+                GpuBackend::Cuda => arael_gpu::GpuBackend::Cuda,
+                GpuBackend::Hip => arael_gpu::GpuBackend::Hip,
+            };
+            let client = arael_gpu::client(backend, dev.index).map_err(|_| SetupError::SolverUnavailable {
+                solver: "gpu",
+                reason: "the GPU runtime is not compiled in (features gpu-cuda, gpu-hip)",
+            })?;
+            let precision = if self.mixed.is_some() { arael_gpu::GpuPrecision::F32 } else { arael_gpu::GpuPrecision::F64 };
+            self.gpu_factor = Some(arael_gpu::GpuFactor::new(client, precision, sn, asym, &Default::default()));
+            Ok(())
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = (dev, sn, asym);
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "arael built without the `gpu` feature" })
+        }
+    }
 }
 
 impl<T: crate::utils::Float> SnNumeric<T> {
     /// Size the factor for a new symbolic: the scalar in use is allocated,
-    /// the other released.
+    /// the other released; nothing on the host when the factor is on a GPU.
     fn resize(&mut self, count: usize) {
-        if self.mixed.is_some() {
+        if self.gpu.is_some() {
+            self.factor = Vec::new();
+            self.factor32 = Vec::new();
+        } else if self.mixed.is_some() {
             self.factor32.resize(count, 0.0);
             self.factor = Vec::new();
         } else {
@@ -4974,6 +5162,39 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         };
         let (mut t_factor, mut t_solve, mut t_residual) = (0.0, 0.0, 0.0);
+        // The device factor: in the solver's scalar, or in f32 with the
+        // refinement below driving the device solve.
+        #[cfg(feature = "gpu")]
+        if let Some(g) = self.gpu_factor.as_mut() {
+            g.factorize(a.vals())?;
+            lap(&mut t_factor);
+            x.copy_from_slice(b);
+            g.solve(x);
+            lap(&mut t_solve);
+            let refined = match self.mixed {
+                Some(mp) if mp.max_refinements > 0 => {
+                    Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve(r)))
+                }
+                _ => None,
+            };
+            if verbose {
+                match refined {
+                    None => info!("gpu supernodal ({:?}): factor {:.1} ms, solve {:.1} ms", g.precision(), t_factor, t_solve),
+                    Some((steps, rnorm, bnorm, short)) => info!(
+                        "gpu supernodal (f32): {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
+                        steps,
+                        if bnorm > 0.0 { rnorm / bnorm } else { 0.0 },
+                        if short { " -- short of tolerance" } else { "" },
+                        t_factor,
+                        steps + 1,
+                        t_solve,
+                        steps + 1,
+                        t_residual,
+                    ),
+                }
+            }
+            return Ok(());
+        }
         let Some(mp) = self.mixed else {
             supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads)?;
             lap(&mut t_factor);
@@ -4996,52 +5217,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
             return Ok(());
         }
-        // The refinement runs in f64 whatever T: the residual accumulated in
-        // f64 from the matrix's entries, the iterate kept in f64 until it is
-        // handed back. For an f64 solver that is the native arithmetic; for
-        // an f32 solver it is what makes the residual see below f32.
-        use arael_faer::schur::SchurReal;
-        let n = x.len();
-        self.r.resize(n, 0.0);
-        self.x_prev.resize(n, 0.0);
-        self.b64.clear();
-        self.b64.extend(b.iter().map(|&v| SchurReal::to_f64(v)));
-        self.x64.clear();
-        self.x64.extend(x.iter().map(|&v| SchurReal::to_f64(v)));
-        let bnorm = norm2_f64(&self.b64);
-        // The step is handed back in T, so no tolerance below a few of its
-        // epsilons buys anything: an f32 solver refines to about 1e-6.
-        let floor = 8.0 * SchurReal::to_f64(<T as num::Float>::epsilon());
-        let tol = mp.tol.max(floor) * bnorm;
-        let mut steps = 0;
-        let mut rnorm = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
-        lap(&mut t_residual);
-        while rnorm > tol && steps < mp.max_refinements {
-            self.x_prev.copy_from_slice(&self.x64);
-            supernodal_solve_as(sn, &self.factor32, &mut self.r, &mut self.ctx32, threads);
-            for (xi, di) in self.x64.iter_mut().zip(&self.r) {
-                *xi += *di;
-            }
-            lap(&mut t_solve);
-            steps += 1;
-            let next = residual_into(a, &self.x64, &self.b64, &mut self.r, threads, &mut self.mv);
-            lap(&mut t_residual);
-            if next >= rnorm {
-                // The factor is too far off for the correction to help: the
-                // iterate before it is the best one.
-                self.x64.copy_from_slice(&self.x_prev);
-                break;
-            }
-            rnorm = next;
-        }
-        for (xi, &v) in x.iter_mut().zip(&self.x64) {
-            *xi = <T as SchurReal>::from_f64(v);
-        }
-        let short = rnorm > tol;
-        self.steps += steps;
-        if short {
-            self.shortfalls += 1;
-        }
+        let (steps, rnorm, bnorm, short) = self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| {
+            supernodal_solve_as(sn, &self.factor32, r, &mut self.ctx32, threads)
+        });
         if verbose {
             info!(
                 "mixed precision: {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
@@ -5064,8 +5242,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return;
         }
         if let Some(plan) = plan.as_mut() {
-            plan.refinements = Some(self.steps);
-            plan.refinement_shortfalls = Some(self.shortfalls);
+            plan.refinements = Some(self.rf.steps);
+            plan.refinement_shortfalls = Some(self.rf.shortfalls);
         }
     }
 }
@@ -5328,6 +5506,7 @@ impl<T> SparseFaer<T> {
         solver.sn_batch_ratio = opts.block_supernodal_batch;
         solver.sn_memory_lean = opts.block_supernodal_memory_lean;
         solver.sn_num.mixed = opts.mixed_precision;
+        solver.sn_num.gpu = opts.gpu;
         solver.schur_solve = opts.schur_solve;
         solver.marginalize = opts.marginalize.clone();
         solver
@@ -5573,6 +5752,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             envelope: true,
             block_supernodal: false,
             f32_factor: false,
+            gpu_factor: false,
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -5772,6 +5952,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             .map_err(|_| SetupError::SymbolicFactorization { reduced: false })?,
         };
         self.sn_num.resize(sn.factor_val_count());
+        self.sn_num.prepare(&sn, &hsym)?;
         self.sn_active = true;
         self.envelope_active = false;
         self.envelope_sym = None;
@@ -5811,6 +5992,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             envelope: false,
             block_supernodal: true,
             f32_factor: self.sn_num.mixed.is_some(),
+            gpu_factor: self.sn_num.gpu_active(),
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -5961,8 +6143,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.sn_active = false;
         self.plan = None;
         self.cg_iters = 0;
-        self.sn_num.steps = 0;
-        self.sn_num.shortfalls = 0;
+        self.sn_num.rf.steps = 0;
+        self.sn_num.rf.shortfalls = 0;
         // Buffer allocations are kept; they are resized when the next
         // structure is built. The elimination hint and the policy are
         // configuration, not cache, and survive.
@@ -6102,6 +6284,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 envelope: false,
                 block_supernodal: false,
                 f32_factor: false,
+                gpu_factor: false,
                 refinements: None,
                 refinement_shortfalls: None,
             });
@@ -6221,6 +6404,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 envelope: false,
                 block_supernodal: false,
                 f32_factor: false,
+                gpu_factor: false,
                 refinements: None,
                 refinement_shortfalls: None,
             });
@@ -6585,6 +6769,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             envelope: false,
             block_supernodal: false,
             f32_factor: false,
+            gpu_factor: self.sn_num.gpu_active(),
             refinements: None,
             refinement_shortfalls: None,
         });
@@ -6864,6 +7049,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 .map_err(|_| SetupError::SymbolicFactorization { reduced: true })?,
             };
             self.sn_num.resize(sn.factor_val_count());
+            self.sn_num.prepare(&sn, &schur.s)?;
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
@@ -6881,6 +7067,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if let Some(plan) = self.plan.as_mut() {
                 plan.block_supernodal = true;
                 plan.f32_factor = self.sn_num.mixed.is_some();
+                plan.gpu_factor = self.sn_num.gpu_active();
             }
         } else {
             // General sparse route: S flattened to scalar CSC and factorized

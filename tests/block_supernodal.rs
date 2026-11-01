@@ -585,3 +585,61 @@ fn mixed_precision_without_refinement_and_off_the_block_route() {
     assert_eq!(plan.refinements, None);
     assert!(c < 1e-12);
 }
+
+/// The supernodal block route factorized and solved on a GPU (feature
+/// `gpu-cuda`): the f64 optimum on the whole system and on the reduced one,
+/// in f64 and with the f32 device factor refined, the plan saying which.
+#[cfg(feature = "gpu-cuda")]
+#[test]
+fn gpu_factor_reaches_the_f64_optimum() {
+    let mut cpu = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always));
+    let (x_c, c_c) = solve(&mut cpu, 2);
+    assert!(c_c < 1e-12);
+    for (policy, reduced) in [(SchurPolicy::Never, false), (SchurPolicy::Force, true)] {
+        for mixed in [None, Some(MixedPrecision::default())] {
+            let mut g = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+                .with_policy(policy)
+                .with_envelope_schur(EnvelopeMode::Never)
+                .with_block_supernodal(BlockSupernodalMode::Always)
+                .with_mixed_precision(mixed)
+                .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0))));
+            let (x_g, c_g) = solve(&mut g, 2);
+            let plan = g.plan().expect("a plan");
+            assert!(plan.block_supernodal && plan.gpu_factor, "the plan reports the device factor");
+            assert_eq!(plan.reduced, reduced);
+            assert_eq!(plan.f32_factor, mixed.is_some());
+            if mixed.is_some() {
+                assert!(plan.refinements.expect("refinement counted") > 0);
+            } else {
+                assert_eq!(plan.refinements, None);
+            }
+            assert!(c_g < 1e-12, "{} (reduced {}, mixed {})", c_g, reduced, mixed.is_some());
+            for (a, b) in std::iter::zip(&x_c, &x_g) {
+                assert!((a - b).abs() < 1e-9, "the GPU changed the answer: {} vs {}", a, b);
+            }
+        }
+    }
+}
+
+/// Without the `gpu` feature the option is a setup error before anything
+/// runs, like the other compiled-out backends.
+#[cfg(not(feature = "gpu"))]
+#[test]
+fn gpu_option_without_the_feature_is_unavailable() {
+    let cfg = LmConfig { max_iters: 60, ..Default::default() };
+    let mut w = build(0.1, 2);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always)
+        .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0))));
+    let err = lm_solve(&params, &mut solver, &mut w, &cfg).err().expect("unavailable");
+    assert!(
+        matches!(err.kind, arael::simple_lm::SolveFailureKind::Setup(arael::simple_lm::SetupError::SolverUnavailable { solver: "gpu", .. })),
+        "{:?}",
+        err.kind
+    );
+}

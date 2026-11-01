@@ -199,7 +199,8 @@ with `tol` floored at a few `f32` epsilons (about 1e-6) since the step
 is handed back in `f32`. It pays where the factor is large -- bundle adjustment from
 a few hundred cameras up, SLAM maps with landmarks -- and it is a loss
 on pose graphs, whose factors are small and whose refinement converges
-slowly.
+slowly. The factor can also live on a GPU, in either precision -- see
+[GPU](#gpu).
 
 **Manage the parameter vector yourself.** The generated methods own the
 serialize -> solve -> deserialize round trip. Drop to `lm_solve`, the raw
@@ -849,6 +850,34 @@ prices its candidate orderings the same way; the rest is sequential.
 
 Threading has overhead. Whether it helps, and by how much, depends on the model
 and its number of parameters -- measure.
+
+## GPU
+
+With the `gpu-cuda` or `gpu-hip` feature the supernodal block route
+factorizes and solves on a GPU:
+
+```rust,ignore
+SparseFaer::from_options(&SparseFaerOptions::default()
+    .with_gpu(Some(GpuDevice::cuda(0))))                   // the f64 factor on the device
+SparseFaer::from_options(&SparseFaerOptions::default()
+    .with_mixed_precision(Some(MixedPrecision::default()))
+    .with_gpu(Some(GpuDevice::cuda(0))))                   // an f32 factor there, solves refined to f64
+```
+
+The factor lives on the device, in the solver's scalar or in `f32` under
+`with_mixed_precision` with the same refinement against the `f64`
+matrix. The symbolic analysis, the assembly and the Schur reduction stay
+on the CPU; the matrix's values are uploaded for every factorization and
+the right-hand side for every solve. The kernels are written once in
+CubeCL (the `arael-gpu` crate) for both vendors and compiled for the
+device at first use, which costs a few hundred milliseconds once per
+process. `SchurPlan::gpu_factor` reports the route. A device whose
+runtime is not compiled in fails the solve with
+`SetupError::SolverUnavailable`, parameters untouched, like the other
+optional backends. It pays where the factor is large: the reduced system
+of a bundle adjustment from a few hundred cameras up, SLAM maps with
+landmarks. A whole system of tens of thousands of tiny supernodes stays
+faster on the CPU, as do pose graphs.
 
 ## Where the log goes
 
