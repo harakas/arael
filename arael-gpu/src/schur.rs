@@ -730,15 +730,14 @@ impl GpuSchur {
             copy_of[dst as usize] = hsym.val_range(src as usize).start as u32;
         }
         let (mut t_val, mut t_wr, mut t_wc, mut t_a, mut t_b, mut t_aoff, mut t_boff, mut t_copy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut tile_index = std::collections::HashMap::<u32, u32>::new(); // S value offset -> tile index
         for bcol in 0..ssym.nblk_cols() {
             for t in ssym.col_range(bcol) {
+                // a tile's index in these arrays is its block index in S
+                debug_assert_eq!(t, t_val.len());
                 let a = ssym.blk_row(t);
                 let (wr, wc) = ssym.block_dims(t);
                 kw_max = kw_max.max(wr).max(wc);
-                let v = ssym.val_range(t).start as u32;
-                tile_index.insert(v, t_val.len() as u32);
-                t_val.push(v);
+                t_val.push(ssym.val_range(t).start as u32);
                 t_wr.push(wr as u32);
                 t_wc.push(wc as u32);
                 t_a.push(a as u32);
@@ -748,30 +747,41 @@ impl GpuSchur {
                 t_copy.push(copy_of[t]);
             }
         }
-        // the pairs, by tile: every (oa, ob) of one eliminated block with kept(oa) <= kept(ob)
+        // The pairs: every (oa, ob) of one eliminated block with kept(oa) <=
+        // kept(ob), grouped by their tile of S in a counting sort. The tile
+        // (a, b) is found by row in column b, whose rows are ascending.
         let kept_of_obs = sym.obs_kept();
-        let mut pairs: Vec<(u32, u32, u32)> = Vec::with_capacity(sym.pair_count());
+        let tile_of = |a: usize, b: usize| -> u32 {
+            let r = ssym.col_range(b);
+            let (mut lo, mut hi) = (r.start, r.end);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if ssym.blk_row(mid) < a {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            assert!(lo < r.end && ssym.blk_row(lo) == a, "every observer pair has a tile in S");
+            lo as u32
+        };
+        let np = sym.pair_count();
+        let mut pair_tile: Vec<u32> = Vec::with_capacity(np);
+        let mut t_pair_ptr = vec![0u32; nt + 1];
         for slot in 0..ne {
             let (q0, q1) = (e_obs_ptr[slot] as usize, e_obs_ptr[slot + 1] as usize);
             for i in q0..q1 {
                 for j in i..q1 {
-                    let (ka, kb) = (kept_of_obs[i] as usize, kept_of_obs[j] as usize);
-                    let v = sym.s_tile(ka, kb).expect("every observer pair has a tile in S");
-                    pairs.push((tile_index[&v], i as u32, j as u32));
+                    let t = tile_of(kept_of_obs[i] as usize, kept_of_obs[j] as usize);
+                    pair_tile.push(t);
+                    t_pair_ptr[t as usize + 1] += 1;
                 }
             }
         }
-        pairs.sort_unstable_by_key(|p| p.0);
-        let mut t_pair_ptr = vec![0u32; nt + 1];
-        for p in &pairs {
-            t_pair_ptr[p.0 as usize + 1] += 1;
-        }
+        assert_eq!(pair_tile.len(), np, "the reduction counted its pairs");
         for t in 0..nt {
             t_pair_ptr[t + 1] += t_pair_ptr[t];
         }
-        let p_oa: Vec<u32> = pairs.iter().map(|p| p.1).collect();
-        let p_ob: Vec<u32> = pairs.iter().map(|p| p.2).collect();
-        drop(pairs);
         // the kept blocks' observer lists
         let mut k_obs_ptr = vec![0u32; nk + 1];
         for &k in kept_of_obs {
@@ -789,9 +799,9 @@ impl GpuSchur {
         let k_s_off: Vec<u32> = (0..nk).map(|k| spart[k]).collect();
         let k_orig: Vec<u32> = sym.kept.iter().map(|&orig| hpart[orig as usize]).collect();
         let k_w: Vec<u32> = (0..nk).map(|k| spart[k + 1] - spart[k]).collect();
-        // pack
+        // pack, the pairs' observers written in place by their tile
         let mut buf: Vec<u32> = vec![0; SHEADER];
-        let arrays: [(usize, &[u32]); 28] = [
+        let arrays: [(usize, &[u32]); 21] = [
             (SE_DIAG_OFF, &e_diag),
             (SE_W, &e_w),
             (SE_ORIG_OFF, &e_orig),
@@ -813,21 +823,39 @@ impl GpuSchur {
             (ST_B_OFF, &t_boff),
             (ST_COPY_OFF, &t_copy),
             (ST_PAIR_PTR, &t_pair_ptr),
-            (SP_OA, &p_oa),
-            (SP_OB, &p_ob),
-            (SK_OBS_PTR, &k_obs_ptr),
-            (SK_OBS, &k_obs),
-            (SK_S_OFF, &k_s_off),
-            (SK_ORIG_OFF, &k_orig),
-            (SK_W, &k_w),
         ];
+        let tail: [(usize, &[u32]); 5] = [(SK_OBS_PTR, &k_obs_ptr), (SK_OBS, &k_obs), (SK_S_OFF, &k_s_off), (SK_ORIG_OFF, &k_orig), (SK_W, &k_w)];
+        buf.reserve(arrays.iter().chain(&tail).map(|a| a.1.len()).sum::<usize>() + 2 * np + 64);
         for (slot, v) in arrays {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
         }
+        let (at_oa, at_ob) = (buf.len(), buf.len() + np);
+        buf[SP_OA] = at_oa as u32;
+        buf[SP_OB] = at_ob as u32;
+        buf.resize(at_ob + np, 0);
+        let mut next = t_pair_ptr.clone();
+        let mut k = 0usize;
+        for slot in 0..ne {
+            let (q0, q1) = (e_obs_ptr[slot] as usize, e_obs_ptr[slot + 1] as usize);
+            for i in q0..q1 {
+                for j in i..q1 {
+                    let t = pair_tile[k] as usize;
+                    k += 1;
+                    let at = next[t] as usize;
+                    next[t] += 1;
+                    buf[at_oa + at] = i as u32;
+                    buf[at_ob + at] = j as u32;
+                }
+            }
+        }
+        drop(pair_tile);
+        for (slot, v) in tail {
+            buf[slot] = buf.len() as u32;
+            buf.extend_from_slice(v);
+        }
         let plan_len = buf.len();
-        let mut pk = Packer::default();
-        pk.push(&buf);
+        let mut pk = Packer { words: buf };
         let at_on = pk.push(&[1]);
         let plan = pk.upload(ctx);
         let d_on = Packer::view(plan.handle(), at_on);
