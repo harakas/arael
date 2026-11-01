@@ -283,7 +283,9 @@ views are named by their container's nature: `PathPosesDeque`,
   (`gpu-cuda`, `gpu-hip`); without it the solve fails with
   `SolverUnavailable`. On such a solve the observer gets the parameters
   and a driver the vectors only when `LmConfig::device_observer_params`
-  and `device_driver_vectors` ask (docs/SOLVERS.md, GPU):
+  and `device_driver_vectors` ask. Compiled kernels are kept in a disk
+  cache, `ARAEL_KERNEL_CACHE` naming its directory or `off`
+  (docs/SOLVERS.md, GPU):
 
   ```cpp
   // cmake -S cxx -B build -DARAEL_GPU=cuda

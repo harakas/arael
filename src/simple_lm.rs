@@ -4723,6 +4723,10 @@ impl GpuDevice {
             GpuBackend::Hip => arael_gpu::GpuBackend::Hip,
         };
         let c = arael_gpu::GpuContext::new(backend, self.index)?;
+        if arael_gpu::kernel_cache().is_none() {
+            warn!("GPU: CubeCL was configured before arael's first GPU use (another library in the process), \
+                   so its configuration decides the kernel cache, not ARAEL_KERNEL_CACHE");
+        }
         *shared = Some(c.clone());
         Ok(c)
     }

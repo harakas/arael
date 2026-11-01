@@ -906,8 +906,13 @@ on the CPU; `SchurPlan::gpu_assembly` reports which ran. On the
 whole-system route the device factorizes and solves, and the refinement
 runs on the CPU. The symbolic analysis stays on the CPU. The kernels are written once in
 CubeCL (the `arael-gpu` crate) for both vendors and compiled for the
-device at first use, which costs a few hundred milliseconds once per
-process. A `GpuDevice` value carries the device state its solves use (a
+device at first use, which costs about a second. Compiled kernels are
+kept in a disk cache, so only a program's first run on a machine pays
+it. The environment variable
+`ARAEL_KERNEL_CACHE` names its directory, `off` turns it off; unset, it
+is `arael/kernels` in the user's cache directory (`~/.cache/arael/kernels`
+on Linux). An entry belongs to the binary that compiled it, so a rebuilt
+program compiles afresh. A `GpuDevice` value carries the device state its solves use (a
 stream and the device buffers on it, created on first use): solvers built
 from clones of one value share it, so solve after solve reuses the same
 buffers, which grow to the largest problem seen and are kept
