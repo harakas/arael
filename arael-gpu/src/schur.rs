@@ -936,7 +936,7 @@ impl GpuSchur {
         // SAFETY: `hvals` and `rhs` stay borrowed until the read below.
         unsafe { self.upload(hvals, rhs) };
         self.launch_reduce();
-        let flags = ctx.client().read_one(self.out.view(self.status_at + STATUS_BYTES)).expect("read the flags");
+        let flags = crate::read_one(ctx.client(), self.out.view(self.status_at + STATUS_BYTES)).expect("read the flags");
         flight.done();
         let failed = bytemuck::pod_read_unaligned::<u32>(&flags[self.status_at + FLAGS_AT + 4 * F_ELIM..][..4]);
         if failed != 0 { Err(SchurError::NotPositiveDefinite { block: self.elim_blk[failed as usize - 1] as usize }) } else { Ok(()) }
@@ -1061,7 +1061,7 @@ impl GpuSchur {
             self.launch_attempt(factor, max_steps, tol_rel);
         }
         self.replayed = replay;
-        let bytes = c.read_one(self.out.view(self.status_at + STATUS_BYTES)).expect("read the step");
+        let bytes = crate::read_one(c, self.out.view(self.status_at + STATUS_BYTES)).expect("read the step");
         flight.done();
         // the attempt is done: rotating CubeCL's drop queue returns the
         // staging its uploads held to the pinned pool, which otherwise grows
@@ -1070,17 +1070,12 @@ impl GpuSchur {
         if capture {
             // The run above warmed the pools: record the same launches, which
             // do not execute now, for the solves after this one. CubeCL opens
-            // CUDA's capture in global mode, where a sync from any stream of
-            // the process fails while it is open, so the window runs on the
-            // device's thread with nothing else scheduled against it.
+            // CUDA's capture in global mode, where a wait from any thread of
+            // the process fails while it is open: the window runs on the
+            // device's thread with nothing else scheduled against it, and
+            // with no wait of this crate on another thread in flight.
             let this = &*self;
-            let graph = c
-                .exclusive(move || {
-                    c.start_capture().expect("start the attempt's graph capture");
-                    this.launch_attempt(factor, max_steps, tol_rel);
-                    c.stop_capture().expect("capture the attempt's graph")
-                })
-                .expect("run the graph capture exclusively");
+            let graph = crate::capture(c, move || this.launch_attempt(factor, max_steps, tol_rel));
             self.graph = Some(Captured { key, graph });
         }
         let word = |at: usize| bytemuck::pod_read_unaligned::<u32>(&bytes[at..at + 4]);
@@ -1107,8 +1102,8 @@ impl GpuSchur {
     /// The reduced right-hand side and S's values read back (for tests).
     pub fn download(&self) -> (Vec<f64>, Vec<f64>) {
         crate::sync(self.ctx.client());
-        let s = f64::from_bytes(&self.ctx.client().read_one(self.s.view(self.s_len * 8)).expect("read S")).to_vec();
-        let r = f64::from_bytes(&self.ctx.client().read_one(self.rhs_kept.view(self.nks * 8)).expect("read rhs")).to_vec();
+        let s = f64::from_bytes(&crate::read_one(self.ctx.client(), self.s.view(self.s_len * 8)).expect("read S")).to_vec();
+        let r = f64::from_bytes(&crate::read_one(self.ctx.client(), self.rhs_kept.view(self.nks * 8)).expect("read rhs")).to_vec();
         (s, r)
     }
 }
@@ -1286,46 +1281,61 @@ mod tests {
         }
     }
 
-    /// A capture on one context while another context reads on another
-    /// thread: CUDA's global capture mode fails any sync of the process while
-    /// a capture is open, so the capture has to keep the device to itself.
+    /// Busy work for one unit: `n` dependent multiply-adds.
+    #[cube(launch_unchecked)]
+    fn k_spin(out: &mut [f32], n: u32) {
+        let mut x = 0.0f32;
+        let mut i = 0u32;
+        while i < n {
+            x = x * 0.999f32 + 1.0f32;
+            i += 1u32;
+        }
+        out[0] = x;
+    }
+
+    /// A capture right behind another thread's read: CUDA's global capture
+    /// mode fails a wait issued on any thread of the process while a capture
+    /// is open (status 900), and a read's wait is issued on the reading
+    /// thread after CUDA's device thread has moved on. A third context holds
+    /// the device thread so the read and then the capture queue behind it;
+    /// released, the device thread runs the read's copy and goes straight
+    /// into the capture while the reader wakes up to wait. The capture has
+    /// to wait out the read.
     #[test]
-    fn captures_leave_other_contexts_alone() {
-        let (h, dense, rhs, elim) = ba_like(30, 200, 4);
-        let n = h.symbolic().ncols();
-        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let order = nd_block_order(&sym.s);
-        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            let reader = scope.spawn(|| {
-                let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-                let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
-                g.use_graphs(false);
-                let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, &sym.s, &Default::default());
-                let mut solves = 0;
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) || solves < 20 {
-                    let mut d = vec![0.0f64; n];
-                    g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut d).unwrap();
-                    assert!(rel_residual(&dense, n, &d, &rhs) < 1e-8);
-                    solves += 1;
-                }
-                solves
-            });
-            let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-            let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
-            for _ in 0..10 {
-                // a new factor each time: every first solve captures
-                let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, &sym.s, &Default::default());
-                for _ in 0..2 {
-                    let mut d = vec![0.0f64; n];
-                    g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut d).unwrap();
-                    assert!(rel_residual(&dense, n, &d, &rhs) < 1e-8);
-                }
+    fn a_capture_waits_out_reads_on_other_contexts() {
+        let (reading, capturing, holding) = (GpuContext::new(GpuBackend::Cuda, 0).unwrap(), GpuContext::new(GpuBackend::Cuda, 0).unwrap(), GpuContext::new(GpuBackend::Cuda, 0).unwrap());
+        let (a, b) = (reading.lease(4), capturing.lease(4));
+        let spin = |ctx: &GpuContext, out: &Lease, n: u32| unsafe { k_spin::launch_unchecked(ctx.client(), CubeCount::Static(1, 1, 1), CubeDim::new_1d(1), BufferArg::from_raw_parts(out.handle().clone(), 1), n) };
+        // compiled and warmed up, a capture included
+        spin(&reading, &a, 1);
+        crate::read_one(reading.client(), a.view(4)).unwrap();
+        capturing.client().graph_prepare().unwrap();
+        spin(&capturing, &b, 1);
+        crate::sync(capturing.client());
+        drop(crate::capture(capturing.client(), || spin(&capturing, &b, 1)));
+        let ms = std::time::Duration::from_millis;
+        for _ in 0..3 {
+            capturing.client().graph_prepare().unwrap();
+            for _ in 0..300 {
+                spin(&capturing, &b, 1);
             }
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            assert!(reader.join().unwrap() >= 20);
-        });
+            crate::sync(capturing.client());
+            std::thread::scope(|scope| {
+                scope.spawn(|| holding.client().exclusive(|| std::thread::sleep(ms(60))).unwrap());
+                scope.spawn(|| {
+                    std::thread::sleep(ms(20));
+                    spin(&reading, &a, 1000);
+                    crate::read_one(reading.client(), a.view(4)).expect("a read next to a capture");
+                });
+                scope.spawn(|| {
+                    std::thread::sleep(ms(40));
+                    // a long recording: three hundred launches
+                    let graph = crate::capture(capturing.client(), || (0..300).for_each(|_| spin(&capturing, &b, 1)));
+                    unsafe { graph.replay() }.unwrap();
+                    crate::read_one(capturing.client(), b.view(4)).unwrap();
+                });
+            });
+        }
     }
 
     /// Solve after solve on one context, structures going up and down: once

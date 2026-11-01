@@ -156,7 +156,7 @@ impl Drop for InFlight<'_> {
         if !self.done {
             // the wait is what matters; a device error it reports belongs to
             // the failure that is unwinding past here, already on its way out
-            let _ = cubecl::future::block_on(self.client.sync());
+            let _ = crate::try_sync(self.client);
         }
     }
 }

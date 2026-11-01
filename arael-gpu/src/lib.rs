@@ -117,9 +117,43 @@ pub fn client(backend: GpuBackend, index: usize) -> Result<Client, GpuError> {
     }
 }
 
+/// Graph captures against blocking waits, process-wide. CubeCL opens a
+/// capture in the driver's global mode, in which a wait issued on any
+/// thread of the process fails while a capture is open, and a read waits
+/// on the reading thread, not on CubeCL's device thread. Every wait in this
+/// crate holds the lock shared, a capture holds it exclusively.
+static CAPTURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 /// Wait for everything submitted to the client.
 pub fn sync(client: &Client) {
+    let _shared = CAPTURE.read().unwrap_or_else(|e| e.into_inner());
     cubecl::future::block_on(client.sync()).expect("device sync");
+}
+
+/// [`sync`], reporting the device's error instead of panicking.
+pub(crate) fn try_sync(client: &Client) -> Result<(), cubecl_runtime::server::ServerError> {
+    let _shared = CAPTURE.read().unwrap_or_else(|e| e.into_inner());
+    cubecl::future::block_on(client.sync())
+}
+
+/// Read `handle` back, waiting for it (see [`sync`] on why through here).
+pub fn read_one(client: &Client, handle: cubecl::server::Handle) -> Result<cubecl::bytes::Bytes, cubecl_runtime::server::ServerError> {
+    let _shared = CAPTURE.read().unwrap_or_else(|e| e.into_inner());
+    client.read_one(handle)
+}
+
+/// Record the launches `record` issues on `client`'s stream as a graph: on
+/// the device's thread with nothing else scheduled against it, and with no
+/// wait of this crate in flight or starting (see [`CAPTURE`]).
+pub(crate) fn capture<'a>(client: &'a Client, record: impl FnOnce() + Send + 'a) -> cubecl_runtime::client::Graph {
+    let _exclusive = CAPTURE.write().unwrap_or_else(|e| e.into_inner());
+    client
+        .exclusive(move || {
+            client.start_capture().expect("start a graph capture");
+            record();
+            client.stop_capture().expect("capture the graph")
+        })
+        .expect("run the graph capture exclusively")
 }
 
 /// The factor's scalar.

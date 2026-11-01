@@ -8,7 +8,8 @@ Everything runs on a `GpuContext`: a stream of its own and an arena that
 every device buffer is leased from and returned to. Solving problem after
 problem through one context stops creating buffers once the largest has
 been seen (`reserved_bytes`, `buffers_created`); separate contexts run on
-separate streams.
+separate streams, so solves on several threads, a context each, run at
+the same time on the device.
 
 The symbolic analysis stays on the CPU in arael-faer. `GpuSupernodal<F>` is
 built from a `SupernodalSymbolic` and the matrix's block structure once per
@@ -43,7 +44,10 @@ The refinement decides on the device whether the next step is due; the
 steps launched after it has converged do nothing. The first `solve` with a
 factor and a refinement setting runs its kernels and then captures them as
 a graph (CUDA or HIP), and the solves after it replay that graph, one
-launch instead of hundreds (`use_graphs(false)` turns this off). Each
+launch instead of hundreds (`use_graphs(false)` turns this off). A capture
+briefly holds off this crate's reads on every other context of the
+process: the drivers' global capture mode fails any wait issued while a
+capture is open. Each
 structure's integer data goes up in one copy; the matrix values are read
 from the caller's slices in place (`host::write_borrowed`).
 
@@ -75,6 +79,8 @@ cargo build -r -p arael-gpu --features cuda --example repeat_solves
 scripts/gpu_trace.py -- target/release/examples/repeat_solves
 ```
 
+`examples/concurrent_solves.rs` spreads a fixed set of small solves over
+1, 2, 4 and 8 threads, a context each, and prints the solves per second.
 `cargo run -r -p arael-gpu --features cuda --example async_copies` times
 CubeCL's copies: enqueue against completion, several in flight, and an
 upload and a download on two streams.

@@ -251,7 +251,7 @@ impl<F: Real> GpuSupernodal<F> {
         let d_vals = self.vals.handle().clone();
         let fail = self.fail.handle().clone();
         self.factorize_with(&d_vals, vals.len(), false, &fail);
-        let failed = bytemuck::cast_slice::<u8, u32>(&c.read_one(self.fail.view(4)).expect("read the pivot flag"))[0];
+        let failed = bytemuck::cast_slice::<u8, u32>(&crate::read_one(c, self.fail.view(4)).expect("read the pivot flag"))[0];
         flight.done();
         if failed != 0 { Err(SupernodalError::NotPositiveDefinite) } else { Ok(()) }
     }
@@ -343,7 +343,7 @@ impl<F: Real> GpuSupernodal<F> {
         unsafe { self.rhs.write(&ctx, rhs, |v| v.to_f64()) };
         let hx = self.rhs.handle().clone();
         self.solve_device(&hx);
-        let bytes = c.read_one(self.rhs.lease().view(n * 8)).expect("read the solution");
+        let bytes = crate::read_one(c, self.rhs.lease().view(n * 8)).expect("read the solution");
         flight.done();
         for (dst, &v) in rhs.iter_mut().zip(f64::from_bytes(&bytes)) {
             *dst = M::from_f64(v);
@@ -394,7 +394,7 @@ impl<F: Real> GpuSupernodal<F> {
     /// back from the device (for tests and inspection).
     pub fn factor_values(&self) -> Vec<F> {
         sync(self.ctx.client());
-        let bytes = self.ctx.client().read_one(self.factor.view(self.plan.factor_vals * core::mem::size_of::<F>())).expect("read the factor");
+        let bytes = crate::read_one(self.ctx.client(), self.factor.view(self.plan.factor_vals * core::mem::size_of::<F>())).expect("read the factor");
         F::from_bytes(&bytes)[..self.plan.factor_vals].to_vec()
     }
 }
