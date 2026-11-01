@@ -160,6 +160,7 @@ dependencies = [
  "cubecl",
  "cubecl-environment",
  "cubecl-runtime",
+ "etcetera",
 ]
 
 [[package]]

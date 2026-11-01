@@ -29,6 +29,7 @@
 //! ```
 
 pub mod assembly;
+pub mod cache;
 pub mod context;
 pub mod host;
 pub mod kernels;
@@ -42,6 +43,7 @@ pub mod test_util;
 
 use cubecl::prelude::*;
 
+pub use cache::{KernelCache, kernel_cache, set_kernel_cache};
 pub use context::{GpuContext, Lease};
 /// CubeCL, for kernels written against this crate (arael's generated device code).
 pub use cubecl;
@@ -97,6 +99,7 @@ impl std::error::Error for GpuError {}
 /// A client on device `index` of `backend`, on the calling thread's stream
 /// ([`GpuContext::new`] makes one on a stream of its own).
 pub fn client(backend: GpuBackend, index: usize) -> Result<Client, GpuError> {
+    cache::configure();
     match backend {
         GpuBackend::Cuda => {
             #[cfg(feature = "cuda")]

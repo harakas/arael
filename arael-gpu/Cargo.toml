@@ -24,3 +24,5 @@ cubecl-runtime = "0.11"
 # StreamId, to pin a context's client to its own stream.
 cubecl-environment = "0.11"
 bytemuck = "1"
+# The user cache directory, for the kernel cache (as CubeCL finds it).
+etcetera = "0.11"
