@@ -407,6 +407,65 @@ impl<I: Index> SchurSymbolic<I> {
     pub fn kept_of(&self, orig: usize) -> usize {
         self.kept_of[orig].zx()
     }
+
+    // The flat form of the reduction, inner API read by arael-gpu, which
+    // builds its device plan from it: the eliminated blocks, their
+    // observers, and the tiles of S.
+
+    /// Per eliminated block, in `eliminated` order: the H block index of
+    /// its diagonal tile.
+    pub fn elim_diag(&self) -> &[I] {
+        &self.elim_diag
+    }
+    /// Per eliminated block, its scalar width.
+    pub fn elim_w(&self) -> &[I] {
+        &self.elim_w
+    }
+    /// Per eliminated block, where its observers start in the `obs_*`
+    /// arrays; one more entry than blocks.
+    pub fn elim_obs_ptr(&self) -> &[I] {
+        &self.elim_obs_ptr
+    }
+    /// Per observer, whether its coupling tile is stored as (eliminated,
+    /// kept), `we x wo` column-major, rather than (kept, eliminated),
+    /// `wo x we`.
+    pub fn obs_trans(&self) -> &[bool] {
+        &self.obs_trans
+    }
+    /// Per observer, where its coupling tile starts in `h.vals()`.
+    pub fn obs_ca_off(&self) -> &[I] {
+        &self.obs_ca_off
+    }
+    /// Per observer, its block width.
+    pub fn obs_w(&self) -> &[I] {
+        &self.obs_w
+    }
+    /// Per observer, its kept block id.
+    pub fn obs_kept(&self) -> &[I] {
+        &self.obs_kept
+    }
+    /// Per observer, where its span starts in the kept (S) scalar numbering.
+    pub fn obs_kept_off(&self) -> &[I] {
+        &self.obs_kept_off
+    }
+    /// Per observer, where its span starts in the original scalar numbering.
+    pub fn obs_orig_off(&self) -> &[I] {
+        &self.obs_orig_off
+    }
+    /// The kept-kept tiles: block index in H and block index in S, paired.
+    pub fn copy_tiles(&self) -> (&[I], &[I]) {
+        (&self.copy_src, &self.copy_dst)
+    }
+    /// Where the tile `(a, b)` of S starts in its values, for kept ids
+    /// `a <= b`; `None` when S has no such tile.
+    pub fn s_tile(&self, a: usize, b: usize) -> Option<ValueIndex> {
+        let top = self.col_top[b].zx();
+        if a < top || a > b {
+            return None;
+        }
+        let v = self.col_at[self.col_at_ptr[b] + (a - top)];
+        (v != ValueIndex::MAX).then_some(v)
+    }
 }
 
 /// The chunk width [`SchurContext`] starts with, in kept block columns:
