@@ -10406,6 +10406,7 @@ pub fn generate_root_methods(
             (items, quote! { None }, quote! {
                 ::arael::__gpu_items! {
                     fn device_root(&self) -> Option<&dyn ::arael::__gpu::DeviceRoot<#prec_type>> { Some(self) }
+                    fn device_root_mut(&mut self) -> Option<&mut dyn ::arael::__gpu::DeviceRoot<#prec_type>> { Some(self) }
                 }
             })
         }

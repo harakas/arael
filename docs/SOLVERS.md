@@ -872,12 +872,30 @@ whatever the solver's scalar, factorizes it, solves, refines, and
 recovers the eliminated blocks, and only the step comes back, the one
 time per damped solve the solver waits for the device; from the second
 damped solve of a structure on, its hundreds of kernels are replayed as
-one captured graph. On the reduced route the device also assembles:
-`#[arael(root)]` generates, from the same constraint bodies the CPU
-assembly is generated from, kernels that compute the gradient, the
-Hessian's tiles and the trial costs on the device, so the Hessian never
-crosses to it; what crosses per iteration is the parameter vector up and
-the gradient and diagonal down. A root gets these kernels when its every
+one captured graph. On the reduced route the device also assembles and
+keeps the LM loop's vectors: `#[arael(root)]` generates, from the same
+constraint bodies the CPU assembly is generated from, kernels that
+compute the gradient, the Hessian's tiles and the trial costs on the
+device. After the first linearization, which the CPU assembles, the
+parameters, the gradient, the diagonal and the step stay on the device:
+the trial point, the rotations' re-centring after an accepted step, and
+the norms and the predicted reduction the stopping rules and the driver
+read are computed there, and a damped attempt waits once, for a few
+scalars. An attempt, and an accepted step with the linearization after
+it, are each one captured graph. The parameters come back at the end of
+the solve, the reference
+rotations into the model. An observer gets `LmIter::params`, and a lambda
+driver the gradient, the diagonal and the step, only when the config asks
+(`LmConfig::device_observer_params`, `device_driver_vectors`; a read per
+attempt each); otherwise those slices are empty there, and
+`LambdaStep::predicted_reduction` carries what the built-in drivers use:
+
+```rust,ignore
+let cfg = LmConfig::default().with_device_observer_params(true)
+    .with_observer(|it: &LmIter<f64>| { draw(it.params); ControlFlow::Continue(()) });
+```
+
+A root gets these kernels when its every
 constraint has a device form (today: constraints between two entities of
 the root's collections through refs, without a guard, a loss or an
 index `select`, over Euler-angle rotations);

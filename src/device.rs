@@ -11,6 +11,7 @@
 //! buffers, which the device solve reads in place.
 
 use arael_gpu::assembly::{k_euler_advance, k_euler_rotations, k_gather_params};
+use arael_gpu::lm::k_zero_steps;
 use arael_gpu::cubecl::bytes::Bytes;
 use arael_gpu::cubecl::prelude::*;
 use arael_gpu::cubecl::server::Handle;
@@ -105,6 +106,11 @@ pub struct DeviceTargets<'a> {
     pub cost: &'a Handle,
 }
 
+/// A root's constraint kernels launched: the assembly's into the targets,
+/// or with `assemble` false the cost's alone. A plain function, so the
+/// launches can be recorded into a graph on the device's thread.
+pub type DeviceLauncher = fn(&Client, &DeviceBuffers, &DeviceTargets, bool);
+
 /// What `#[arael(root)]` generates for a root the device assembly covers.
 pub trait DeviceRoot<T> {
     /// The root's layout.
@@ -115,9 +121,12 @@ pub trait DeviceRoot<T> {
     /// Read the instances and the entities' fixed values and reference
     /// rotations from the model, whose working copies are current.
     fn device_pack(&self, pack: &mut DevicePack<T>);
-    /// Launch the constraint kernels: the assembly's into the targets, or
-    /// with `assemble` false the cost's alone.
-    fn device_launch(&self, client: &Client, bufs: &DeviceBuffers, targets: &DeviceTargets, assemble: bool);
+    /// The launches of the constraint kernels ([`DeviceLauncher`]).
+    fn device_launcher(&self) -> DeviceLauncher;
+    /// Set the reference rotations of the model's optimized rotations from
+    /// `refs`, keyed by a rotation's first parameter index (row-major), and
+    /// zero their steps: a device solve's re-centring handed back.
+    fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>);
 }
 
 /// A root laid out on a device: its tables, instances and entity data
@@ -128,10 +137,15 @@ pub struct DeviceAssembly<T> {
     ctx: GpuContext,
     bufs: DeviceBuffers,
     shape: DeviceShape,
+    /// Per rotation field, per slot: the global index of the rotation's
+    /// first parameter, [`FIXED`](arael_gpu::assembly::FIXED) when fixed.
+    rot_index: Vec<Vec<u32>>,
+    launch: DeviceLauncher,
+    generation: u64,
     /// The parameter vector, in f64 whatever `T`.
     x: Upload<f64>,
     cost: Lease,
-    _t: core::marker::PhantomData<T>,
+    _t: core::marker::PhantomData<fn() -> T>,
 }
 
 /// Lease a buffer for `v` and write it, handing CubeCL the vector (no wait).
@@ -143,12 +157,38 @@ fn upload<E: arael_gpu::bytemuck::Pod + CubeElement>(ctx: &GpuContext, v: Vec<E>
     lease
 }
 
-/// [`upload`] of model scalars, in the device scalar of the same width.
-fn upload_scalars<T: crate::utils::Float>(ctx: &GpuContext, v: Vec<T>) -> Lease {
+/// Write each of `vs` into its lease in `leases`: in place where the lease
+/// holds it, so the device memory (which a captured graph records) stays
+/// the same, into a new lease otherwise. Whether any lease is new.
+fn rewrite<E: arael_gpu::bytemuck::Pod + CubeElement>(ctx: &GpuContext, leases: &mut Vec<Lease>, vs: Vec<Vec<E>>) -> bool {
+    let mut moved = leases.len() != vs.len();
+    if moved {
+        leases.clear();
+    }
+    for (k, v) in vs.into_iter().enumerate() {
+        if k < leases.len() && leases[k].capacity() >= v.len().max(1) * core::mem::size_of::<E>() {
+            if !v.is_empty() {
+                ctx.client().write(leases[k].handle(), Bytes::from_elems(v));
+            }
+        } else {
+            let lease = upload(ctx, v);
+            if k < leases.len() {
+                leases[k] = lease;
+            } else {
+                leases.push(lease);
+            }
+            moved = true;
+        }
+    }
+    moved
+}
+
+/// [`rewrite`] of model scalars, in the device scalar of the same width.
+fn rewrite_scalars<T: crate::utils::Float>(ctx: &GpuContext, leases: &mut Vec<Lease>, vs: Vec<Vec<T>>) -> bool {
     if wide::<T>() {
-        upload(ctx, v.into_iter().map(|x| x.to_f64().unwrap()).collect::<Vec<f64>>())
+        rewrite(ctx, leases, vs.into_iter().map(|v| v.into_iter().map(|x| x.to_f64().unwrap()).collect::<Vec<f64>>()).collect())
     } else {
-        upload(ctx, v.into_iter().map(|x| x.to_f32().unwrap()).collect::<Vec<f32>>())
+        rewrite(ctx, leases, vs.into_iter().map(|v| v.into_iter().map(|x| x.to_f32().unwrap()).collect::<Vec<f32>>()).collect())
     }
 }
 
@@ -184,38 +224,73 @@ impl<T: crate::utils::Float + 'static> DeviceAssembly<T> {
         let shape = root.device_shape();
         let tables = root.device_tables(resolve);
         let slots: Vec<usize> = shape.entities.iter().zip(&tables.idx).map(|(&n, ix)| ix.len() / n.max(1)).collect();
-        let mut pack = DevicePack::<T>::new(&shape, &slots);
-        root.device_pack(&mut pack);
-        let count: Vec<u32> = shape.constraints.iter().zip(&pack.inst).map(|(&(w, _), inst)| (inst.len() / w.max(1)) as u32).collect();
         let ts = core::mem::size_of::<T>();
         let at: Vec<Lease> = shape.rotations.iter().map(|&(e, off)| upload(ctx, (0..slots[e]).map(|s| (s * shape.entities[e] + off) as u32).collect::<Vec<u32>>())).collect();
+        let rot_index = shape.rotations.iter().map(|&(e, off)| (0..slots[e]).map(|s| tables.idx[e][s * shape.entities[e] + off]).collect()).collect();
         let rot_lease = |per: usize, size: usize| -> Vec<Lease> { shape.rotations.iter().map(|&(e, _)| ctx.lease((slots[e] * per).max(1) * size)).collect() };
         let bufs = DeviceBuffers {
             idx: tables.idx.into_iter().map(|v| upload(ctx, v)).collect(),
             tile: tables.tile.into_iter().map(|v| upload(ctx, v)).collect(),
-            fixed: pack.fixed.into_iter().map(|v| upload_scalars(ctx, v)).collect(),
+            fixed: Vec::new(),
             ev: shape.entities.iter().zip(&slots).map(|(&n, &s)| ctx.lease((n * s).max(1) * ts)).collect(),
-            refr: pack.refr.into_iter().map(|v| upload(ctx, v)).collect(),
+            refr: Vec::new(),
             at,
             rot: rot_lease(9, ts),
             rotw: rot_lease(9, 8),
             drot: rot_lease(27, ts),
             cross: tables.cross.into_iter().map(|v| upload(ctx, v)).collect(),
-            inst: pack.inst.into_iter().map(|v| upload(ctx, v)).collect(),
-            data: pack.data.into_iter().map(|v| upload_scalars(ctx, v)).collect(),
-            count,
+            inst: Vec::new(),
+            data: Vec::new(),
+            count: Vec::new(),
             slots,
         };
-        DeviceAssembly { ctx: ctx.clone(), bufs, shape, x: Upload::default(), cost: ctx.lease(8), _t: core::marker::PhantomData }
+        let launch = root.device_launcher();
+        let mut asm = DeviceAssembly { ctx: ctx.clone(), bufs, shape, rot_index, launch, generation: 0, x: Upload::default(), cost: ctx.lease(8), _t: core::marker::PhantomData };
+        asm.refresh(root);
+        asm
+    }
+
+    /// Read the model's data again: the constraint instances and their
+    /// data, the entities' fixed values and the reference rotations, which
+    /// a solve may have been handed changed (the structure is the same).
+    /// The data lands in the buffers it was in, so graphs recorded against
+    /// them stay valid; where it does not fit, the
+    /// [`generation`](Self::generation) moves on. The model's working
+    /// copies must be current.
+    pub fn refresh(&mut self, root: &dyn DeviceRoot<T>) {
+        let ctx = &self.ctx;
+        let mut pack = DevicePack::<T>::new(&self.shape, &self.bufs.slots);
+        root.device_pack(&mut pack);
+        let b = &mut self.bufs;
+        b.count = self.shape.constraints.iter().zip(&pack.inst).map(|(&(w, _), inst)| (inst.len() / w.max(1)) as u32).collect();
+        let mut moved = rewrite_scalars(ctx, &mut b.fixed, pack.fixed);
+        moved |= rewrite(ctx, &mut b.refr, pack.refr);
+        moved |= rewrite(ctx, &mut b.inst, pack.inst);
+        moved |= rewrite_scalars(ctx, &mut b.data, pack.data);
+        if moved {
+            self.generation += 1;
+        }
+    }
+
+    /// Changes whenever a buffer the launches read is replaced by another:
+    /// a graph of them replays only under the generation it was captured in.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The parameter values of every entity and the rotations at `x`.
     fn prepare(&mut self, x: &[T]) {
-        let c = self.ctx.client();
         // SAFETY: the conversion to f64 lands in the upload's own buffer,
         // which the caller's read of the cost (every public entry makes
         // one before returning) waits past.
         unsafe { self.x.write(&self.ctx, x, |v| v.to_f64().unwrap()) };
+        let xh = self.x.handle().clone();
+        self.gather(&xh, x.len());
+    }
+
+    /// [`prepare`](Self::prepare) from `n` f64 parameters on the device.
+    fn gather(&self, x: &Handle, nx: usize) {
+        let c = self.ctx.client();
         let d256 = CubeDim::new_1d(256);
         for (e, &n) in self.shape.entities.iter().enumerate() {
             let len = n * self.bufs.slots[e];
@@ -223,7 +298,7 @@ impl<T: crate::utils::Float + 'static> DeviceAssembly<T> {
                 continue;
             }
             let b = &self.bufs;
-            let args = (arr(self.x.handle(), x.len()), arr(b.idx[e].handle(), len), arr(b.fixed[e].handle(), len), arr(b.ev[e].handle(), len));
+            let args = (arr(x, nx), arr(b.idx[e].handle(), len), arr(b.fixed[e].handle(), len), arr(b.ev[e].handle(), len));
             unsafe {
                 if wide::<T>() {
                     k_gather_params::launch_unchecked::<f64>(c, cubes(len), d256, args.0, args.1, args.2, args.3, len as u32)
@@ -269,29 +344,78 @@ impl<T: crate::utils::Float + 'static> DeviceAssembly<T> {
     /// The gradient and the pattern's tile values at `x`, into `g` (`ng`
     /// f64) and `h` (`nh` f64) on the device; returns the cost, the one
     /// value read back. Both targets are on the assembly's context.
-    pub fn assemble(&mut self, root: &dyn DeviceRoot<T>, x: &[T], g: &Handle, ng: usize, h: &Handle, nh: usize) -> f64 {
+    pub fn assemble(&mut self, x: &[T], g: &Handle, ng: usize, h: &Handle, nh: usize) -> f64 {
         self.prepare(x);
-        self.zero(g, ng);
-        self.zero(h, nh);
-        self.zero(self.cost.handle(), 1);
-        let targets = DeviceTargets { g, ng, h, nh, cost: self.cost.handle() };
-        root.device_launch(self.ctx.client(), &self.bufs, &targets, true);
+        let cost = self.cost.handle().clone();
+        self.launch(&DeviceTargets { g, ng, h, nh, cost: &cost }, true);
         self.read_cost()
     }
 
-    /// The cost at `x`.
-    pub fn cost(&mut self, root: &dyn DeviceRoot<T>, x: &[T]) -> f64 {
-        self.prepare(x);
-        self.zero(self.cost.handle(), 1);
-        let none = self.cost.handle();
-        let targets = DeviceTargets { g: none, ng: 0, h: none, nh: 0, cost: self.cost.handle() };
-        root.device_launch(self.ctx.client(), &self.bufs, &targets, false);
-        self.read_cost()
+    /// [`assemble`](Self::assemble) at the `nx` f64 parameters `x` on the
+    /// device, the cost into `targets.cost`, nothing read back.
+    pub fn assemble_at(&self, x: &Handle, nx: usize, targets: &DeviceTargets) {
+        self.gather(x, nx);
+        self.launch(targets, true);
+    }
+
+    /// The cost at the `nx` f64 parameters `x` on the device, into `cost`
+    /// (one f64), nothing read back.
+    pub fn cost_at(&self, x: &Handle, nx: usize, cost: &Handle) {
+        self.gather(x, nx);
+        self.launch(&DeviceTargets { g: cost, ng: 0, h: cost, nh: 0, cost }, false);
+    }
+
+    /// The constraint kernels into `targets`, zeroed first.
+    fn launch(&self, targets: &DeviceTargets, assemble: bool) {
+        if assemble {
+            self.zero(targets.g, targets.ng);
+            self.zero(targets.h, targets.nh);
+        }
+        self.zero(targets.cost, 1);
+        (self.launch)(self.ctx.client(), &self.bufs, targets, assemble);
+    }
+
+    /// The rotation steps of the `nx` f64 parameters `x` on the device
+    /// zeroed, as re-centring after [`advance`](Self::advance) leaves them.
+    pub fn zero_steps(&self, x: &Handle, nx: usize) {
+        let c = self.ctx.client();
+        for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
+            let s = self.bufs.slots[e];
+            if s == 0 {
+                continue;
+            }
+            let b = &self.bufs;
+            let n = self.shape.entities[e] * s;
+            unsafe { k_zero_steps::launch_unchecked(c, cubes(s), CubeDim::new_1d(256), arr(x, nx), arr(b.idx[e].handle(), n), arr(b.at[r].handle(), s), s as u32) };
+        }
+    }
+
+    /// Write the device's reference rotations into the model's optimized
+    /// rotations ([`DeviceRoot::device_restore`]), one read.
+    pub fn restore(&self, root: &mut dyn DeviceRoot<T>) {
+        let views: Vec<Handle> = self.shape.rotations.iter().zip(&self.bufs.refr).map(|(&(e, _), l)| l.view(9 * self.bufs.slots[e].max(1) * 8)).collect();
+        let back = arael_gpu::read(self.ctx.client(), views).expect("read the reference rotations");
+        let refr: Vec<&[f64]> = back.iter().map(|b| f64::from_bytes(b)).collect();
+        let mut at = std::collections::HashMap::new();
+        for (r, ix) in self.rot_index.iter().enumerate() {
+            for (s, &g) in ix.iter().enumerate() {
+                if g != arael_gpu::assembly::FIXED {
+                    at.insert(g, (r, s));
+                }
+            }
+        }
+        let mut found = std::collections::HashSet::new();
+        root.device_restore(&mut |g| {
+            let &(r, s) = at.get(&g)?;
+            found.insert(g);
+            Some(refr[r][9 * s..9 * s + 9].try_into().unwrap())
+        });
+        assert_eq!(found.len(), at.len(), "the model's walk reaches every rotation the device re-centred");
     }
 
     /// The reference rotations moved by the steps of the last `x` (an
     /// accepted step's), as the model's `advance_params` moves its own.
-    pub fn advance(&mut self) {
+    pub fn advance(&self) {
         let c = self.ctx.client();
         for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
             let s = self.bufs.slots[e];
@@ -356,7 +480,7 @@ where
     let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
     let mut dev = DeviceAssembly::<T>::new(gpu, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize));
     let (g, h) = (gpu.lease(n * 8), gpu.lease(nv.max(1) * 8));
-    let device_cost = dev.assemble(root, x, g.handle(), n, h.handle(), nv);
+    let device_cost = dev.assemble(x, g.handle(), n, h.handle(), nv);
     let gd = f64::from_bytes(&arael_gpu::read_one(gpu.client(), g.view(n * 8)).expect("read the gradient")).to_vec();
     let hd = f64::from_bytes(&arael_gpu::read_one(gpu.client(), h.view(nv * 8)).expect("read the Hessian")).to_vec();
     let err = |dev: &[f64], cpu: &[T]| -> f64 {

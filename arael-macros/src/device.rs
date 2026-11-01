@@ -185,8 +185,15 @@ pub(crate) fn device_constraint(
             let r = match rots.iter().position(|(sd, p, _)| *sd == side && *p == path) {
                 Some(r) => r,
                 None => {
-                    // the rotation's step: its entity's `<var>.<path>.delta.x` slot
+                    // the device composes an Euler-angle step with its reference
                     let sd = if side == 0 { &a } else { &b };
+                    let euler = crate::registry_lookup(&sd.ty).is_some_and(|l| {
+                        l.universal_euler_angle_fields.contains(&path) || l.mixed_euler_angle_fields.iter().any(|(f, _)| *f == path)
+                    });
+                    if !euler {
+                        return Err(format!("the rotation `{}.{}` is not an EulerAngleParam", sd.var, path));
+                    }
+                    // the rotation's step: its entity's `<var>.<path>.delta.x` slot
                     let step = format!("{}.{}.delta.x", sd.var, path);
                     let off = sd.params.iter().position(|p| *p == step)
                         .ok_or_else(|| format!("the rotation `{}.{}` has no step among its entity's parameters", sd.var, path))?;
@@ -472,6 +479,11 @@ pub(crate) fn device_root(
                 use cubecl::prelude::*;
                 use ::arael::__gpu::assembly::{self_rank1, cross_rank1, cost_add};
                 #(#kernels)*
+
+                #[allow(unused_variables, clippy::all)]
+                pub fn __device_launch(client: &Client, bufs: &::arael::__gpu::DeviceBuffers, targets: &::arael::__gpu::DeviceTargets, assemble: bool) {
+                    #(#launches)*
+                }
             }
 
             impl ::arael::__gpu::DeviceRoot<#scalar> for #root_name {
@@ -501,11 +513,12 @@ pub(crate) fn device_root(
                     #(#walks)*
                 }
 
-                #[allow(unused_variables, clippy::all)]
-                fn device_launch(&self, client: &::arael::__gpu::cubecl::prelude::Client, bufs: &::arael::__gpu::DeviceBuffers, targets: &::arael::__gpu::DeviceTargets, assemble: bool) {
-                    use ::arael::__gpu::cubecl::prelude::*;
-                    use #module::*;
-                    #(#launches)*
+                fn device_launcher(&self) -> ::arael::__gpu::DeviceLauncher {
+                    #module::__device_launch
+                }
+
+                fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+                    arael::model::Model::set_references(self, refs);
                 }
             }
         }

@@ -263,6 +263,13 @@ pub trait Model {
     /// nesting depth are advanced.
     fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
+    /// Set the reference rotation of each optimized `EulerAngleParam` (and
+    /// `MixedEulerAngleParam`) that `refs` knows, keyed by the rotation's
+    /// first parameter index (row-major), and zero its delta: the device
+    /// solve's re-centring handed back in place of `advance_params`.
+    /// Recurses like `advance_params`.
+    #[doc(hidden)]
+    fn set_references(&mut self, _refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {}
 }
 
 /// The [`collect_param_blocks`](Model::collect_param_blocks) of a parameter
@@ -861,6 +868,19 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
             params[i] = F::zero(); params[i + 1] = F::zero(); params[i + 2] = F::zero();
         }
     }
+
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+        if self.index != u32::MAX && let Some(m) = refs(self.index) {
+            self.ref_rotation = matrix_from_rows(m);
+            self.delta = vect3::<T>::default();
+        }
+    }
+}
+
+/// A 3x3 matrix from its row-major f64 entries.
+fn matrix_from_rows<T: crate::utils::Float>(m: [f64; 9]) -> matrix3<T> {
+    let c = |k: usize| T::from(m[k]).unwrap();
+    matrix3 { rows: [vect3::new(c(0), c(1), c(2)), vect3::new(c(3), c(4), c(5)), vect3::new(c(6), c(7), c(8))] }
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,6 +1099,13 @@ impl<T: crate::utils::Float, H: crate::utils::Wide<T>> Model for MixedEulerAngle
             let i = self.index as usize;
             self.advance();
             params[i] = F::zero(); params[i + 1] = F::zero(); params[i + 2] = F::zero();
+        }
+    }
+
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+        if self.index != u32::MAX && let Some(m) = refs(self.index) {
+            self.ref_rotation = matrix_from_rows(m);
+            self.delta = vect3::<H>::default();
         }
     }
 }
@@ -1369,6 +1396,9 @@ macro_rules! impl_model_collection {
             fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
                 for item in self.$iter_mut() { item.advance_params(params); }
             }
+            fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+                for item in self.$iter_mut() { item.set_references(refs); }
+            }
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 for item in self.iter() { item.collect_param_blocks(out); }
             }
@@ -1403,6 +1433,9 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
         for item in self.iter_mut() { item.advance_params(params); }
     }
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+        for item in self.iter_mut() { item.set_references(refs); }
+    }
     fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         for item in self.iter() { item.collect_param_blocks(out); }
     }
@@ -1429,6 +1462,9 @@ impl<T: Model> Model for Option<T> {
     }
     fn advance_params<F: crate::utils::Float>(&mut self, params: &mut [F]) {
         if let Some(inner) = self { inner.advance_params(params); }
+    }
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+        if let Some(inner) = self { inner.set_references(refs); }
     }
     fn serialize_size(&self) -> u32 {
         if let Some(inner) = self { inner.serialize_size() } else { 0 }

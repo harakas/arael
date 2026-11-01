@@ -588,6 +588,14 @@ pub struct RefineStats {
     pub short: bool,
 }
 
+/// A solve [`GpuSchur::enqueue`] left in flight: what its
+/// [`finish`](GpuSchur::finish) needs.
+struct Pending {
+    capture: Option<GraphKey>,
+    max_steps: usize,
+    tol_rel: f64,
+}
+
 /// Why a [`GpuSchur::solve`] failed; the caller raises the damping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuSchurError {
@@ -647,7 +655,7 @@ pub struct GpuSchur {
 /// the factor whose kernels it recorded, the refinement's launches and
 /// tolerance, and the buffers the uploads land in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct GraphKey {
+pub struct GraphKey {
     factor: u64,
     max_steps: usize,
     tol_bits: u64,
@@ -1040,9 +1048,9 @@ impl GpuSchur {
         self.run(factor, refine, delta, &mut |this| unsafe { this.upload(hvals, rhs) })
     }
 
-    /// The buffer of `len` f64 that [`solve_resident`](Self::solve_resident)
-    /// reads the Hessian's tile values from, for a device assembly to
-    /// write; the same buffer until a longer one is asked for.
+    /// The buffer of `len` f64 that [`launch`](Self::launch) reads the
+    /// Hessian's tile values from, for a device assembly to write; the same
+    /// buffer until a longer one is asked for.
     pub fn h_target(&mut self, len: usize) -> Handle {
         let ctx = self.ctx.clone();
         self.h_len = len;
@@ -1056,23 +1064,45 @@ impl GpuSchur {
         f64::from_bytes(&bytes)[..self.h_len].to_vec()
     }
 
-    /// The buffer of the gradient (`n` f64) that
-    /// [`solve_resident`](Self::solve_resident) reads.
+    /// The buffer of the gradient (`n` f64) that [`launch`](Self::launch)
+    /// reads.
     pub fn rhs_target(&mut self) -> Handle {
         let ctx = self.ctx.clone();
         self.rhs.reserve(&ctx, self.n).view(self.n.max(1) * 8)
     }
 
-    /// [`solve`](Self::solve) from the Hessian's values and the gradient
-    /// already on the device, in the buffers of [`h_target`](Self::h_target)
-    /// and [`rhs_target`](Self::rhs_target), the Hessian damped.
-    pub fn solve_resident<M: arael_faer::schur::SchurReal + 'static>(
-        &mut self,
-        factor: &mut GpuFactor,
-        refine: Option<(usize, f64)>,
-        delta: &mut [M],
-    ) -> Result<RefineStats, GpuSchurError> {
-        self.run(factor, refine, delta, &mut |_| {})
+    /// The launches of [`solve`](Self::solve) and nothing else, from the
+    /// damped Hessian's values and the gradient already on the device (in
+    /// [`h_target`](Self::h_target) and [`rhs_target`](Self::rhs_target)):
+    /// the step lands in [`step_view`](Self::step_view), the solve's status
+    /// in [`status_view`](Self::status_view), for the caller to read with
+    /// its own results and hand to [`outcome`](Self::outcome). Kernels only,
+    /// so a caller can capture them in a graph of its own (keyed by
+    /// [`graph_key`](Self::graph_key)).
+    pub fn launch(&self, factor: &mut GpuFactor, refine: Option<(usize, f64)>) {
+        assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
+        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
+        self.launch_attempt(factor, max_steps, tol_rel);
+    }
+
+    /// What a captured [`launch`](Self::launch) depends on beyond the
+    /// reduction's own buffers: the factor, the refinement, and the buffers
+    /// of the Hessian and the gradient. A graph replays only under its key.
+    pub fn graph_key(&self, factor: &GpuFactor, refine: Option<(usize, f64)>) -> GraphKey {
+        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
+        GraphKey {
+            factor: factor.id(),
+            max_steps,
+            tol_bits: tol_rel.to_bits(),
+            h: self.h.lease().id(),
+            h_len: self.h_len,
+            rhs: self.rhs.lease().id(),
+        }
+    }
+
+    /// Whether solves capture and replay graphs ([`use_graphs`](Self::use_graphs)).
+    pub fn graphs(&self) -> bool {
+        self.graphs
     }
 
     /// One damped solve after `upload` has put the inputs in place.
@@ -1084,18 +1114,28 @@ impl GpuSchur {
         upload: &mut dyn FnMut(&mut Self),
     ) -> Result<RefineStats, GpuSchurError> {
         assert_eq!(delta.len(), self.n);
+        let ctx = self.ctx.clone();
+        let c = ctx.client();
+        let flight = crate::host::InFlight::new(c);
+        let pending = self.enqueue(factor, refine, upload);
+        let bytes = crate::read_one(c, self.out.view(self.status_at + STATUS_BYTES)).expect("read the step");
+        flight.done();
+        self.finish(factor, &pending);
+        let stats = self.outcome(&bytes[self.status_at..], refine)?;
+        for (d, &v) in delta.iter_mut().zip(f64::from_bytes(&bytes[..self.n * 8])) {
+            *d = M::from_f64(v);
+        }
+        Ok(stats)
+    }
+
+    /// The uploads and the attempt's launches, replayed when a graph of
+    /// them is captured, without waiting.
+    fn enqueue(&mut self, factor: &mut GpuFactor, refine: Option<(usize, f64)>, upload: &mut dyn FnMut(&mut Self)) -> Pending {
         assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
         let ctx = self.ctx.clone();
         let c = ctx.client();
         let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
-        let key = GraphKey {
-            factor: factor.id(),
-            max_steps,
-            tol_bits: tol_rel.to_bits(),
-            h: self.h.lease().id(),
-            h_len: self.h_len,
-            rhs: self.rhs.lease().id(),
-        };
+        let key = self.graph_key(factor, refine);
         let replay = self.graphs && self.graph.as_ref().is_some_and(|g| g.key == key);
         let capture = self.graphs && !replay;
         if capture {
@@ -1103,7 +1143,6 @@ impl GpuSchur {
             // before the run that warms the pools up for the recording
             c.graph_prepare().expect("prepare the attempt's graph capture");
         }
-        let flight = crate::host::InFlight::new(c);
         upload(self);
         if replay {
             // SAFETY: the graph's buffers are this reduction's leases, the
@@ -1116,26 +1155,49 @@ impl GpuSchur {
             self.launch_attempt(factor, max_steps, tol_rel);
         }
         self.replayed = replay;
-        let bytes = crate::read_one(c, self.out.view(self.status_at + STATUS_BYTES)).expect("read the step");
-        flight.done();
-        // the attempt is done: rotating CubeCL's drop queue returns the
-        // staging its uploads held to the pinned pool, which otherwise grows
-        // (the read above has waited, so the rotation's fence wait is free)
+        Pending { capture: capture.then_some(key), max_steps, tol_rel }
+    }
+
+    /// The step of the last solve, `n` f64 on the device.
+    pub fn step_view(&self) -> Handle {
+        self.out.view(self.n.max(1) * 8)
+    }
+
+    /// The last solve's status (the pivot flags and the refinement's
+    /// state), to read and hand to [`outcome`](Self::outcome).
+    pub fn status_view(&self) -> Handle {
+        let end = self.out.capacity() - (self.status_at + STATUS_BYTES);
+        self.out.handle().clone().offset_start(self.status_at as u64).offset_end(end as u64)
+    }
+
+    /// After the read of an [`enqueue`](Self::enqueue)d solve: the graph its
+    /// run warmed up captured, and CubeCL's queue flushed (its rotation
+    /// returns the staging uploads held to the pinned pool, which otherwise
+    /// grows; the read has waited, so the rotation's fence wait is free).
+    fn finish(&mut self, factor: &mut GpuFactor, pending: &Pending) {
+        let ctx = self.ctx.clone();
+        let c = ctx.client();
         c.flush().expect("device flush");
-        if capture {
-            // The run above warmed the pools: record the same launches, which
-            // do not execute now, for the solves after this one. CubeCL opens
+        if let Some(key) = pending.capture {
+            // The run warmed the pools: record the same launches, which do
+            // not execute now, for the solves after this one. CubeCL opens
             // CUDA's capture in global mode, where a wait from any thread of
             // the process fails while it is open: the window runs on the
             // device's thread with nothing else scheduled against it, and
             // with no wait of this crate on another thread in flight.
+            let (max_steps, tol_rel) = (pending.max_steps, pending.tol_rel);
             let this = &*self;
             let graph = crate::capture(c, move || this.launch_attempt(factor, max_steps, tol_rel));
             self.graph = Some(Captured { key, graph });
         }
-        let word = |at: usize| bytemuck::pod_read_unaligned::<u32>(&bytes[at..at + 4]);
-        let real = |at: usize| bytemuck::pod_read_unaligned::<f64>(&bytes[at..at + 8]);
-        let flag = |f: usize| word(self.status_at + FLAGS_AT + 4 * f);
+    }
+
+    /// The outcome of a solve with refinement `refine` from its status bytes
+    /// (as read from [`status_view`](Self::status_view)).
+    pub fn outcome(&self, status: &[u8], refine: Option<(usize, f64)>) -> Result<RefineStats, GpuSchurError> {
+        let word = |at: usize| bytemuck::pod_read_unaligned::<u32>(&status[at..at + 4]);
+        let real = |at: usize| bytemuck::pod_read_unaligned::<f64>(&status[at..at + 8]);
+        let flag = |f: usize| word(FLAGS_AT + 4 * f);
         let elim = flag(F_ELIM);
         if elim != 0 {
             return Err(GpuSchurError::Eliminated { block: self.elim_blk[elim as usize - 1] as usize });
@@ -1143,12 +1205,9 @@ impl GpuSchur {
         if flag(F_FACTOR) != 0 {
             return Err(GpuSchurError::Reduced);
         }
-        for (d, &v) in delta.iter_mut().zip(f64::from_bytes(&bytes[..self.n * 8])) {
-            *d = M::from_f64(v);
-        }
         let mut stats = RefineStats::default();
-        if max_steps > 0 {
-            let st = |i: usize| real(self.status_at + 8 * i);
+        if refine.is_some_and(|r| r.0 > 0) {
+            let st = |i: usize| real(8 * i);
             stats = RefineStats { steps: flag(F_STEPS) as usize, rnorm: st(ST_RNORM), bnorm: st(ST_BNORM), short: st(ST_RNORM) > st(ST_TOL) };
         }
         Ok(stats)

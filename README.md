@@ -49,7 +49,7 @@ Instead of constructing a graph, you build a hierarchical data structure from pl
 - **Precomputed rotations** -- every rotation param caches its rotation matrix and the matrix's Jacobian once per linearization; constraints that differentiate through a rotation read them as constants instead of rebuilding them per observation
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
 - **Threads** -- with the `threads` feature the cost and assembly sweeps and the linear solve run on as many threads as `num_threads` says ([docs/SOLVERS.md](docs/SOLVERS.md#threads))
-- **GPU solve** -- with the `gpu-cuda` or `gpu-hip` feature the assembly, the Schur reduction and the factorization run on an NVIDIA or AMD GPU ([docs/SOLVERS.md](docs/SOLVERS.md#gpu))
+- **GPU solve** -- with the `gpu-cuda` or `gpu-hip` feature the assembly, the Schur reduction, the factorization and the LM loop run on an NVIDIA or AMD GPU ([docs/SOLVERS.md](docs/SOLVERS.md#gpu))
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Mixed precision** -- an f32 factor under an f64 solve; surgical wide computation in an f32 model with `with_wide`, in f64 or in `df32` (two f32s) where there is no f64; mixed parameter types that keep their state wide
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization

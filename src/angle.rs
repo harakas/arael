@@ -127,6 +127,10 @@ where
         Model::advance_params(&mut self.angle, params);
     }
 
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+        Model::set_references(&mut self.angle, refs);
+    }
+
     fn serialize_size(&self) -> u32 {
         Model::serialize_size(&self.angle)
     }

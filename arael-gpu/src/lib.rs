@@ -32,6 +32,7 @@ pub mod assembly;
 pub mod context;
 pub mod host;
 pub mod kernels;
+pub mod lm;
 pub mod plan;
 pub mod schur;
 pub mod supernodal;
@@ -44,10 +45,12 @@ use cubecl::prelude::*;
 pub use context::{GpuContext, Lease};
 /// CubeCL, for kernels written against this crate (arael's generated device code).
 pub use cubecl;
+/// A captured launch sequence ([`capture`]), replayed with `unsafe { graph.replay() }`.
+pub use cubecl_runtime::client::Graph;
 /// bytemuck, whose `Pod` bounds this crate's uploads take.
 pub use bytemuck;
 pub use plan::GpuSupernodalParams;
-pub use schur::{GpuSchur, GpuSchurError, RefineStats};
+pub use schur::{GpuSchur, GpuSchurError, GraphKey, RefineStats};
 pub use supernodal::GpuSupernodal;
 
 use arael_faer::schur::SchurReal;
@@ -153,10 +156,13 @@ pub fn read_one(client: &Client, handle: cubecl::server::Handle) -> Result<cubec
     client.read_one(handle)
 }
 
-/// Record the launches `record` issues on `client`'s stream as a graph: on
-/// the device's thread with nothing else scheduled against it, and with no
-/// wait of this crate in flight or starting (see [`CAPTURE`]).
-pub(crate) fn capture<'a>(client: &'a Client, record: impl FnOnce() + Send + 'a) -> cubecl_runtime::client::Graph {
+/// Record the launches `record` issues on `client`'s stream as a graph,
+/// without running them: on the device's thread with nothing else
+/// scheduled against it, and with no wait of this crate in flight or
+/// starting (see [`CAPTURE`]). `record` issues kernel launches only, on
+/// buffers that outlive the graph; a run of the same launches before it
+/// (after `client.graph_prepare()`) warms the pools the graph records.
+pub fn capture<'a>(client: &'a Client, record: impl FnOnce() + Send + 'a) -> Graph {
     let _exclusive = CAPTURE.write().unwrap_or_else(|e| e.into_inner());
     client
         .exclusive(move || {

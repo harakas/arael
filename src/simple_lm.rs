@@ -41,6 +41,8 @@ use arael_faer::{value_index, SparseIndex, ValueIndex};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "gpu")]
+use arael_gpu::cubecl::CubeElement as _;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
@@ -200,6 +202,16 @@ pub struct LmConfig<T: Float> {
     /// Called once per damped attempt with an [`LmIter`]; can stop the
     /// solve (see [`LmObserver`]). `None` costs nothing.
     pub observer: Option<Box<dyn LmObserver<T>>>,
+    /// On a solve whose vectors stay on the GPU (the reduced GPU route with
+    /// the device assembly), read the parameters back after every accepted
+    /// step for the observer. Off, [`LmIter::params`] is empty there. Other
+    /// solves always pass the parameters.
+    pub device_observer_params: bool,
+    /// On a solve whose vectors stay on the GPU, read the gradient, the
+    /// Hessian diagonal and the step back for the lambda driver. Off, the
+    /// vectors of [`LambdaState`] and [`LambdaStep`] are empty there; the
+    /// built-in drivers need only [`LambdaStep::predicted_reduction`].
+    pub device_driver_vectors: bool,
 }
 
 impl<T: Float> Default for LmConfig<T> {
@@ -234,6 +246,8 @@ impl<T: Float + std::fmt::Debug> std::fmt::Debug for LmConfig<T> {
             .field("assembly_threads", &self.assembly_threads)
             .field("verbose", &self.verbose)
             .field("gather_timing", &self.gather_timing)
+            .field("device_observer_params", &self.device_observer_params)
+            .field("device_driver_vectors", &self.device_driver_vectors)
             .finish_non_exhaustive()
     }
 }
@@ -269,6 +283,8 @@ impl<T: Float> LmConfig<T> {
             driver: Box::new(DefaultLambdaDriver::default()),
             observer: None,
             gather_timing: false,
+            device_observer_params: false,
+            device_driver_vectors: false,
         }
     }
 
@@ -395,6 +411,16 @@ impl<T: Float> LmConfig<T> {
     /// Toggle phase timing collection ([`gather_timing`](Self::gather_timing)).
     pub fn with_gather_timing(mut self, on: bool) -> Self {
         self.gather_timing = on;
+        self
+    }
+    /// Set [`device_observer_params`](Self::device_observer_params).
+    pub fn with_device_observer_params(mut self, on: bool) -> Self {
+        self.device_observer_params = on;
+        self
+    }
+    /// Set [`device_driver_vectors`](Self::device_driver_vectors).
+    pub fn with_device_driver_vectors(mut self, on: bool) -> Self {
+        self.device_driver_vectors = on;
         self
     }
     /// Ask for the parameter covariance at the solution
@@ -1159,14 +1185,21 @@ pub trait LmProblemInternals<T>: LmProblem<T> {
         None
     }
 
+    /// [`device_root`](Self::device_root), to write a device solve's
+    /// reference rotations back.
+    #[cfg(feature = "gpu")]
+    fn device_root_mut(&mut self) -> Option<&mut dyn crate::device::DeviceRoot<T>> {
+        None
+    }
+
     /// Why the root has no device assembly; `None` when it has one.
     fn device_unsupported(&self) -> Option<&'static str> {
         Some("the problem is not an #[arael(root)] model")
     }
 
     /// Bring the working copies to `params`, as the start of every cost or
-    /// assembly does: what [`advance`](LmProblem::advance) folds in, when the
-    /// last cost was the solver's own ([`LmSolver::trial_cost`]).
+    /// assembly does: what a device assembly reads the model's data from
+    /// when it is refreshed between solves.
     fn update_params(&mut self, params: &[T]) {
         let _ = self.calc_cost(params);
     }
@@ -2015,19 +2048,6 @@ pub trait LmSolver<T: Float> {
         delta: &mut [T],
     ) -> bool;
 
-    /// The cost at `params` when the solver evaluates it itself (a device
-    /// assembly), leaving the problem's working copies where they were;
-    /// `None` to have the loop ask the problem.
-    fn trial_cost(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T]) -> Option<T> {
-        let _ = (problem, params);
-        None
-    }
-
-    /// An accepted step was folded into the problem's reference state
-    /// ([`LmProblem::advance`]), the last [`trial_cost`](Self::trial_cost)
-    /// having been at that step: the solver's own copy of the state follows.
-    fn advanced(&mut self) {}
-
     /// Count non-finite (NaN / inf) entries in the matrix. Used by the
     /// main loop for diagnostic output when Cholesky rejects a solve.
     /// No default -- every solver must scan its own storage so the
@@ -2086,6 +2106,64 @@ pub trait LmSolver<T: Float> {
     fn solve_analysis(&self) -> Option<crate::covariance::SolveAnalysis> {
         None
     }
+
+    /// The solver's device loop, when it can keep the loop's vectors on a
+    /// GPU from the current linearization on; `None` (the default) keeps
+    /// them on the host.
+    #[doc(hidden)]
+    fn resident(&mut self) -> Option<&mut dyn ResidentLoop<T>> {
+        None
+    }
+}
+
+/// The LM loop's work on a device, for a solver whose linearizations,
+/// damped solves and trial costs all run there: the parameters, the
+/// gradient, the diagonal and the steps stay on the device, and an attempt
+/// reads back only the scalars the loop decides on.
+#[doc(hidden)]
+pub trait ResidentLoop<T> {
+    /// Take the loop over at `x`, whose linearization the host has checked;
+    /// `floor` is [`LmConfig::min_diagonal`].
+    fn start(&mut self, x: &[T], floor: Option<T>);
+    /// Linearize at the device's parameters, without waiting: the
+    /// linearization's checks come with the next attempt.
+    fn linearize(&mut self);
+    /// One damped attempt at `lambda`: the step, the trial point and its
+    /// cost, read back in one wait with the last linearization's checks.
+    fn attempt(&mut self, lambda: T) -> ResidentAttempt;
+    /// The last attempt's trial point becomes the parameters, re-centred.
+    fn accept(&mut self);
+    /// The parameters, read back.
+    fn params(&mut self, x: &mut [T]);
+    /// The gradient, the undamped diagonal and the last step, read back.
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]);
+    /// The non-finite entries of the gradient, the diagonal, the
+    /// parameters and H.
+    fn nonfinite(&mut self) -> [usize; 4];
+    /// End the solve: the parameters read back into `x`, the reference
+    /// rotations into the model.
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]);
+}
+
+/// What a [`ResidentLoop::attempt`] read back.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct ResidentAttempt {
+    /// The damped system was positive definite.
+    pub solved: bool,
+    /// The cost at the trial point.
+    pub new_cost: f64,
+    /// The squared norms of the step and of the trial point.
+    pub step2: f64,
+    pub try2: f64,
+    /// [`LambdaStep::predicted_reduction`].
+    pub predicted: f64,
+    /// The linearization's checks: the gradient's largest magnitude, the
+    /// largest `|g_i| / sqrt(H_ii)` over `H_ii > 0`, the first bad diagonal
+    /// entry.
+    pub grad_max: f64,
+    pub grad_scaled: f64,
+    pub fault: Option<(usize, DiagonalFault)>,
 }
 
 /// Dense Cholesky solver (nalgebra).
@@ -2304,7 +2382,9 @@ fn lambda_after_accept<T: Float>(lambda: T, down: T, floor: T) -> T {
 
 /// The solve state a [`LambdaDriver`] sees at solve start and on
 /// factorization failures: everything the loop has in hand at the
-/// current linearization point.
+/// current linearization point. On a solve whose vectors stay on the GPU
+/// the vectors here and in [`LambdaStep`] are empty, unless
+/// [`LmConfig::device_driver_vectors`] is set.
 pub struct LambdaState<'a, T> {
     /// Cost (sum of squared residuals) at the linearization point.
     pub cost: T,
@@ -2328,6 +2408,19 @@ pub struct LambdaStep<'a, T> {
     pub diagonal: &'a [T],
     /// The attempted step vector (`x_new = x - delta`).
     pub delta: &'a [T],
+    /// The step's predicted cost reduction when the solve computed it (a
+    /// solve on the GPU does); see
+    /// [`predicted_reduction`](Self::predicted_reduction).
+    pub predicted: Option<T>,
+}
+
+impl<T: Float> LambdaStep<'_, T> {
+    /// The cost reduction the damped linear model predicts for the step,
+    /// `(delta . grad + lambda delta . D delta) / 2` with `D` the diagonal:
+    /// [`predicted`](Self::predicted) when set, otherwise from the vectors.
+    pub fn predicted_reduction(&self) -> T {
+        self.predicted.unwrap_or_else(|| model_predicted_reduction(self.delta, self.grad, self.diagonal, self.lambda))
+    }
 }
 
 /// Damping-schedule strategy for the LM loop ("lambda driver").
@@ -2419,6 +2512,8 @@ pub struct LmIter<'a, T> {
     pub accepted_total: usize,
     /// The current best parameters: after the step when `accepted`
     /// (re-centered by `advance`), the last accepted state otherwise.
+    /// Empty on a solve whose vectors stay on the GPU, unless
+    /// [`LmConfig::device_observer_params`] is set.
     pub params: &'a [T],
 }
 
@@ -2579,7 +2674,7 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
     }
     fn accepted(&mut self, step: &LambdaStep<T>) -> Option<T> {
         self.nu = T::from(2.0).unwrap();
-        let predicted = model_predicted_reduction(step.delta, step.grad, step.diagonal, step.lambda);
+        let predicted = step.predicted_reduction();
         // Guard degenerate model predictions (zero or negative predicted
         // reduction on an ACCEPTED step is numerical noise near the
         // optimum): treat as a perfectly modeled step.
@@ -2698,6 +2793,34 @@ pub fn lm_solve_with_context<T: Float, S: LmSolver<T>>(
     solver.reset();
     let mut matrix = solver.new_matrix(x0.len());
     lm_solve_on(x0, solver, &mut matrix, problem, config, ctx, None)
+}
+
+/// `v`, or nothing when `hide`.
+fn shown<T>(v: &[T], hide: bool) -> &[T] {
+    if hide { &[] } else { v }
+}
+
+/// Log the bad Hessian diagonal entry of parameter `param` (its value when
+/// the host has it), which ends the solve.
+fn report_diagonal_fault(param: usize, value: Option<f64>, fault: DiagonalFault, iter: usize) {
+    let why = match fault {
+        DiagonalFault::Nan => "not a number -- the assembly is poisoned (a residual or a derivative went NaN)",
+        DiagonalFault::Negative => "negative -- J^T J's diagonal is a sum of squares, so the assembly is poisoned",
+        DiagonalFault::Zero => "zero -- no active constraint curvature reaches it (set LmConfig::min_diagonal to damp through it)",
+    };
+    let value = value.map_or(String::new(), |v| format!(" ({v})"));
+    error!("arael::lm_solve: parameter {param} has a bad Hessian diagonal{value} at iteration {iter}: {why} -- terminating solve");
+}
+
+/// The gradient test: the Jacobi-scaled gradient's largest entry `gmax` at
+/// or below `gtol`.
+fn gradient_flat<T: Float>(gmax: T, gtol: T, verbose: bool) -> bool {
+    let flat = gmax <= gtol;
+    if flat && verbose {
+        info!("LM terminated: gradient flat (scaled max|g| = {} <= {})",
+            G(gmax.to_f64().unwrap()), G(gtol.to_f64().unwrap()));
+    }
+    flat
 }
 
 /// The solve loop proper, on caller-owned matrix storage and WITHOUT the
@@ -2855,6 +2978,18 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         _ => false,
     };
 
+    // From the first linearization on, a solver that can keeps the loop's
+    // vectors on its device ([`ResidentLoop`]): `cur_x` is then read back
+    // at the end (and for an observer that asks), and a device
+    // linearization's checks come with its first attempt's read, made at
+    // iteration `lin_iter`.
+    let mut resident = false;
+    let mut lin_pending = false;
+    let mut lin_iter = 0usize;
+    // What the driver and the observer see of the vectors on such a solve.
+    let hide_vectors = |resident: bool| resident && !config.device_driver_vectors;
+    let hide_params = |resident: bool| resident && !config.device_observer_params;
+
     while iter < config.max_iters && !done {
         // Budget check BEFORE the assembly, so a spent budget does not buy one
         // more Hessian. Skipped while `first`, because the first assembly is
@@ -2866,18 +3001,27 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
 
         let t_asm = gather.then(Instant::now);
-        let computed_cost = match solver.compute(problem, &cur_x, &mut grad, matrix, ctx) {
-            Ok(c) => c,
-            Err(e) => {
-                // The linear system could not be built or factored, so no
-                // step is possible. On the first assembly nothing was
-                // evaluated and there is no partial state.
-                failure = Some(SolveFailureKind::Setup(e));
-                if first {
-                    start_cost = T::nan();
-                    end_cost = T::nan();
+        let computed_cost = if resident {
+            // In place on the device, no wait. Only the first
+            // linearization's cost is used, and that one is the host's.
+            solver.resident().expect("a resident solver keeps its loop").linearize();
+            lin_pending = true;
+            lin_iter = iter;
+            T::nan()
+        } else {
+            match solver.compute(problem, &cur_x, &mut grad, matrix, ctx) {
+                Ok(c) => c,
+                Err(e) => {
+                    // The linear system could not be built or factored, so no
+                    // step is possible. On the first assembly nothing was
+                    // evaluated and there is no partial state.
+                    failure = Some(SolveFailureKind::Setup(e));
+                    if first {
+                        start_cost = T::nan();
+                        end_cost = T::nan();
+                    }
+                    break;
                 }
-                break;
             }
         };
         // Kept for this linearization's first LmStep. A retry does not
@@ -2938,8 +3082,9 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
 
         // Constant across every retry at this linearization point, so it is
-        // computed once here rather than per attempt.
-        let grad_max = if gather {
+        // computed once here rather than per attempt (a pending device
+        // linearization's comes with its first attempt).
+        let mut grad_max = if gather && !lin_pending {
             grad.iter()
                 .fold(T::zero(), |m, g| m.max(g.abs()))
                 .to_f64()
@@ -2948,92 +3093,91 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             0.0
         };
 
-        solver.extract_diagonal(matrix, &mut diagonal);
+        // The linearization's checks, on the host's vectors; a pending device
+        // linearization makes the same checks with its first attempt.
+        if !lin_pending {
+            solver.extract_diagonal(matrix, &mut diagonal);
 
-        // What the damping is applied at. Multiplicative damping cannot rescue a
-        // ZERO diagonal ((1 + lambda) * 0 stays 0), so a parameter that no active
-        // constraint reaches makes the matrix singular and no step can ever be
-        // accepted. config.min_diagonal floors the damping scale so it can:
-        // the damped diagonal becomes lambda * min_diagonal, the factorization
-        // succeeds, and the parameter does not move -- its gradient is zero too.
-        //
-        // A NEGATIVE or NaN diagonal is never rescued, floor or no floor. The
-        // Gauss-Newton diagonal is a sum of squares; either value means the
-        // assembly is poisoned, and flooring it would hide the bug.
-        //
-        // This is a runtime value condition (a guard or a saturated robustifier
-        // can produce it from data), so it terminates the solve loudly rather than
-        // panicking. Structural degeneracy -- a missing diagonal ENTRY -- panics at
-        // CSC build time instead.
-        for (i, d) in diagonal.iter().enumerate() {
-            let fatal = match floor {
-                // Zero is fine with a floor; the damping carries it. NaN fails
-                // `>=` and a negative fails it too, so both are still caught.
-                Some(_) => !(*d >= T::zero()),
-                None => !(*d > T::zero()),
-            };
-            if fatal {
-                // NaN first: every comparison against it is false, so a `d < 0`
-                // test would let it fall through and be reported as a zero -- and
-                // then advise min_diagonal, which floors a zero and does nothing
-                // for a NaN.
-                let (fault, why) = if d.is_nan() {
-                    (DiagonalFault::Nan,
-                     "not a number -- the assembly is poisoned (a residual or a derivative went NaN)")
-                } else if *d < T::zero() {
-                    (DiagonalFault::Negative,
-                     "negative -- J^T J's diagonal is a sum of squares, so the assembly is poisoned")
-                } else {
-                    (DiagonalFault::Zero,
-                     "zero -- no active constraint curvature reaches it (set LmConfig::min_diagonal to damp through it)")
+            // What the damping is applied at. Multiplicative damping cannot rescue a
+            // ZERO diagonal ((1 + lambda) * 0 stays 0), so a parameter that no active
+            // constraint reaches makes the matrix singular and no step can ever be
+            // accepted. config.min_diagonal floors the damping scale so it can:
+            // the damped diagonal becomes lambda * min_diagonal, the factorization
+            // succeeds, and the parameter does not move -- its gradient is zero too.
+            //
+            // A NEGATIVE or NaN diagonal is never rescued, floor or no floor. The
+            // Gauss-Newton diagonal is a sum of squares; either value means the
+            // assembly is poisoned, and flooring it would hide the bug.
+            //
+            // This is a runtime value condition (a guard or a saturated robustifier
+            // can produce it from data), so it terminates the solve loudly rather than
+            // panicking. Structural degeneracy -- a missing diagonal ENTRY -- panics at
+            // CSC build time instead.
+            let mut bad = None;
+            for (i, d) in diagonal.iter().enumerate() {
+                let fatal = match floor {
+                    // Zero is fine with a floor; the damping carries it. NaN fails
+                    // `>=` and a negative fails it too, so both are still caught.
+                    Some(_) => !(*d >= T::zero()),
+                    None => !(*d > T::zero()),
                 };
-                error!("arael::lm_solve: parameter {} has a bad Hessian diagonal ({:?}) \
-                        at iteration {}: {} -- terminating solve",
-                    i, d.to_f64(), iter, why);
-                if let Some(s) = solve_start { timing.total = s.elapsed(); }
-                let partial = LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
-                    accepted_iterations: accepted,
-                    status: LmStatus::Aborted, final_lambda: lambda,
-                    timing: gather.then_some(timing), solver: solver.report(),
-                    threads: report_threads(threads_asked, ctx.sweeps()),
-                    covariance: cov_placeholder(config) };
-                return Err(SolveFailure {
-                    kind: SolveFailureKind::DegenerateDiagonal { param: i, fault },
-                    partial: Some(Box::new(partial)),
-                });
+                if fatal {
+                    // NaN first: every comparison against it is false, so a `d < 0`
+                    // test would let it fall through and be reported as a zero -- and
+                    // then advise min_diagonal, which floors a zero and does nothing
+                    // for a NaN.
+                    let fault = if d.is_nan() {
+                        DiagonalFault::Nan
+                    } else if *d < T::zero() {
+                        DiagonalFault::Negative
+                    } else {
+                        DiagonalFault::Zero
+                    };
+                    bad = Some((i, fault));
+                    break;
+                }
+                if let Some(m) = floor {
+                    damp[i] = d.max(m);
+                }
             }
-            if let Some(m) = floor {
-                damp[i] = d.max(m);
+            if let Some((param, fault)) = bad {
+                report_diagonal_fault(param, diagonal[param].to_f64(), fault, iter);
+                failure = Some(SolveFailureKind::DegenerateDiagonal { param, fault });
+                break;
+            }
+
+            // Gradient test: the only criterion here that asks whether this is a
+            // stationary point, rather than whether the cost has stopped moving. The
+            // gradient is Jacobi-scaled -- each component divided by the square root
+            // of its Hessian diagonal (the column norm of J) -- so the tolerance is
+            // invariant to how the parameters are scaled and transfers across
+            // problems. A zero diagonal is an unreached parameter, whose gradient is
+            // zero too, so it contributes nothing.
+            if let Some(gtol) = config.gradient_tolerance
+                && iter >= config.min_iters
+            {
+                let gmax = grad.iter().zip(diagonal.iter()).fold(T::zero(), |m, (g, d)| {
+                    if *d > T::zero() { m.max(g.abs() / d.sqrt()) } else { m }
+                });
+                if gradient_flat(gmax, gtol, config.verbose) {
+                    status = LmStatus::GradientTolerance;
+                    break;
+                }
             }
         }
 
-        // Gradient test: the only criterion here that asks whether this is a
-        // stationary point, rather than whether the cost has stopped moving. The
-        // gradient is Jacobi-scaled -- each component divided by the square root
-        // of its Hessian diagonal (the column norm of J) -- so the tolerance is
-        // invariant to how the parameters are scaled and transfers across
-        // problems. A zero diagonal is an unreached parameter, whose gradient is
-        // zero too, so it contributes nothing.
-        if let Some(gtol) = config.gradient_tolerance
-            && iter >= config.min_iters
-        {
-            let gmax = grad.iter().zip(diagonal.iter()).fold(T::zero(), |m, (g, d)| {
-                if *d > T::zero() { m.max(g.abs() / d.sqrt()) } else { m }
-            });
-            if gmax <= gtol {
-                if config.verbose {
-                    info!("LM terminated: gradient flat (scaled max|g| = {} <= {})",
-                        G(gmax.to_f64().unwrap()), G(gtol.to_f64().unwrap()));
-                }
-                status = LmStatus::GradientTolerance;
-                break;
-            }
+        // The handover: from this linearization on, a solver that can keeps
+        // the loop on its device.
+        if !resident && let Some(r) = solver.resident() {
+            r.start(&cur_x, floor);
+            resident = true;
         }
 
         if !started {
             started = true;
+            let hide = hide_vectors(resident);
             lambda = driver.start(config, &LambdaState {
-                cost: end_cost, grad: &grad, diagonal: &diagonal,
+                cost: end_cost, grad: shown(&grad, hide), diagonal: shown(&diagonal, hide),
             });
         }
 
@@ -3058,10 +3202,21 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             let t_step = gather.then(Instant::now);
 
             let t_ls = gather.then(Instant::now);
-            // Both are shared refs, so with no floor the same slice serves for both.
-            let scale: &[T] = if floor.is_some() { &damp } else { &diagonal };
-            let solved =
-                solver.solve_damped(n, matrix, &diagonal, scale, lambda, &grad, &mut delta);
+            // On the device the attempt is the damped solve, the trial point
+            // and its cost, read back with the pending checks in one wait.
+            let dev = if resident {
+                Some(solver.resident().expect("a resident solver keeps its loop").attempt(lambda))
+            } else {
+                None
+            };
+            let solved = match dev {
+                Some(a) => a.solved,
+                None => {
+                    // Both are shared refs, so with no floor the same slice serves for both.
+                    let scale: &[T] = if floor.is_some() { &damp } else { &diagonal };
+                    solver.solve_damped(n, matrix, &diagonal, scale, lambda, &grad, &mut delta)
+                }
+            };
             let mut ls_dt = Duration::ZERO;
             if let Some(t) = t_ls {
                 let dt = t.elapsed();
@@ -3072,17 +3227,56 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 timing.linear_solve_count += 1;
                 ls_dt = dt;
             }
+            if let Some(a) = dev {
+                // A device linearization's checks, as the host makes them
+                // ahead of its first attempt, which they discard when they
+                // stop the solve.
+                if lin_pending {
+                    lin_pending = false;
+                    grad_max = a.grad_max;
+                    if let Some((param, fault)) = a.fault {
+                        iter -= 1;
+                        let value = match fault {
+                            DiagonalFault::Nan => Some(f64::NAN),
+                            DiagonalFault::Zero => Some(0.0),
+                            DiagonalFault::Negative => None,
+                        };
+                        report_diagonal_fault(param, value, fault, iter);
+                        failure = Some(SolveFailureKind::DegenerateDiagonal { param, fault });
+                        done = true;
+                        break;
+                    }
+                    if let Some(gtol) = config.gradient_tolerance
+                        && lin_iter >= config.min_iters
+                        && gradient_flat(T::from(a.grad_scaled).unwrap(), gtol, config.verbose)
+                    {
+                        iter -= 1;
+                        status = LmStatus::GradientTolerance;
+                        done = true;
+                        break;
+                    }
+                }
+                if config.device_driver_vectors {
+                    solver.resident().expect("a resident solver keeps its loop").vectors(&mut grad, &mut diagonal, &mut delta);
+                }
+            }
+            let (hide_v, hide_x) = (hide_vectors(resident), hide_params(resident));
             if !solved {
                 let next_lambda = driver.factorization_failed(lambda, &LambdaState {
-                    cost: end_cost, grad: &grad, diagonal: &diagonal,
+                    cost: end_cost, grad: shown(&grad, hide_v), diagonal: shown(&diagonal, hide_v),
                 });
                 if config.verbose {
                     let step_us = timer.map_or(0, |t| t.elapsed().as_micros());
                     timer = Some(Instant::now());
-                    let n_nan_g = grad.iter().filter(|v| !v.is_finite()).count();
-                    let n_nan_d = diagonal.iter().filter(|v| !v.is_finite()).count();
-                    let n_nan_x = cur_x.iter().filter(|v| !v.is_finite()).count();
-                    let n_nan_m = solver.matrix_nonfinite_count(matrix);
+                    let [n_nan_g, n_nan_d, n_nan_x, n_nan_m] = match resident {
+                        true => solver.resident().expect("a resident solver keeps its loop").nonfinite(),
+                        false => [
+                            grad.iter().filter(|v| !v.is_finite()).count(),
+                            diagonal.iter().filter(|v| !v.is_finite()).count(),
+                            cur_x.iter().filter(|v| !v.is_finite()).count(),
+                            solver.matrix_nonfinite_count(matrix),
+                        ],
+                    };
                     // Non-positive diagonals are ruled out by the explicit
                     // check before the inner loop, so a failure here is
                     // off-diagonal indefiniteness or tiny-lambda rounding.
@@ -3123,7 +3317,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     && obs.on_iteration(&LmIter {
                         iter, inner, accepted: false, factorization_failed: true,
                         cost: end_cost, new_cost: T::nan(), lambda,
-                        accepted_total: accepted, params: &cur_x,
+                        accepted_total: accepted, params: shown(&cur_x, hide_x),
                     }).is_break()
                 {
                     status = LmStatus::ObserverTerminated;
@@ -3143,26 +3337,26 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 continue;
             }
 
-            for i in 0..n {
-                try_x[i] = cur_x[i] - delta[i];
-            }
-
-            let t_cost = gather.then(Instant::now);
-            // A solver that evaluates the cost itself (the device assembly)
-            // leaves the problem's working copies where they were.
-            let solver_cost = solver.trial_cost(problem, &try_x);
-            let new_cost = match solver_cost {
-                Some(c) => c,
-                None => problem.calc_cost_with_context(&try_x, ctx),
-            };
             let mut cost_dt = Duration::ZERO;
-            if let Some(t) = t_cost {
-                let dt = t.elapsed();
-                if timing.cost_eval_count == 0 { timing.first_cost_eval = dt; }
-                timing.cost_eval += dt;
-                timing.cost_eval_count += 1;
-                cost_dt = dt;
-            }
+            let new_cost = match dev {
+                // the device's attempt evaluated it
+                Some(a) => T::from(a.new_cost).unwrap(),
+                None => {
+                    for i in 0..n {
+                        try_x[i] = cur_x[i] - delta[i];
+                    }
+                    let t_cost = gather.then(Instant::now);
+                    let c = problem.calc_cost_with_context(&try_x, ctx);
+                    if let Some(t) = t_cost {
+                        let dt = t.elapsed();
+                        if timing.cost_eval_count == 0 { timing.first_cost_eval = dt; }
+                        timing.cost_eval += dt;
+                        timing.cost_eval_count += 1;
+                        cost_dt = dt;
+                    }
+                    c
+                }
+            };
 
             if config.verbose {
                 let step_us = timer.map_or(0, |t| t.elapsed().as_micros());
@@ -3179,16 +3373,18 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 && (end_cost - new_cost).abs() < sixteen * T::epsilon() * end_cost.abs();
 
             // Wanted by both outcomes below, and by the parameter-tolerance test.
-            let step_norm = if gather {
-                delta
+            let step_norm = match dev {
+                _ if !gather => 0.0,
+                Some(a) => a.step2.sqrt(),
+                None => delta
                     .iter()
                     .fold(T::zero(), |a, e| a + *e * *e)
                     .sqrt()
                     .to_f64()
-                    .unwrap_or(f64::NAN)
-            } else {
-                0.0
+                    .unwrap_or(f64::NAN),
             };
+            // The step's predicted reduction, when the device has it.
+            let predicted = dev.map(|a| T::from(a.predicted).unwrap());
 
             if new_cost.is_finite() && new_cost < end_cost {
                 accepted += 1;
@@ -3198,9 +3394,12 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 let step_lambda = lambda;
                 let next_lambda = driver.accepted(&LambdaStep {
                     lambda, cost: end_cost, new_cost,
-                    grad: &grad, diagonal: &diagonal, delta: &delta,
+                    grad: shown(&grad, hide_v), diagonal: shown(&diagonal, hide_v), delta: shown(&delta, hide_v),
+                    predicted,
                 });
-                cur_x.copy_from_slice(&try_x);
+                if dev.is_none() {
+                    cur_x.copy_from_slice(&try_x);
+                }
 
                 // Step test, measured on the step just taken and the parameters
                 // it produced -- BEFORE advance() re-centers them, because
@@ -3211,19 +3410,25 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                         let norm = |v: &[T]| {
                             v.iter().fold(T::zero(), |a, e| a + *e * *e).sqrt()
                         };
-                        norm(&delta) <= ptol * (norm(&cur_x) + ptol)
+                        let (step, x) = match dev {
+                            Some(a) => (T::from(a.step2.sqrt()).unwrap(), T::from(a.try2.sqrt()).unwrap()),
+                            None => (norm(&delta), norm(&cur_x)),
+                        };
+                        step <= ptol * (x + ptol)
                     }
                     _ => false,
                 };
 
                 let t_adv = gather.then(Instant::now);
-                // advance folds in what the last cost left in the working
-                // copies; the solver's own cost left them elsewhere
-                if solver_cost.is_some() {
-                    problem.update_params(&cur_x);
+                if resident {
+                    let r = solver.resident().expect("a resident solver keeps its loop");
+                    r.accept();
+                    if config.device_observer_params && observer.is_some() {
+                        r.params(&mut cur_x);
+                    }
+                } else {
+                    problem.advance(&mut cur_x);
                 }
-                problem.advance(&mut cur_x);
-                solver.advanced();
                 let mut adv_dt = Duration::ZERO;
                 if let Some(t) = t_adv {
                     let dt = t.elapsed();
@@ -3260,7 +3465,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     && obs.on_iteration(&LmIter {
                         iter, inner, accepted: true, factorization_failed: false,
                         cost: end_cost, new_cost, lambda,
-                        accepted_total: accepted, params: &cur_x,
+                        accepted_total: accepted, params: shown(&cur_x, hide_x),
                     }).is_break()
                 {
                     end_cost = new_cost;
@@ -3316,7 +3521,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 if let Some(rtol) = config.predicted_reduction_tolerance
                     && iter >= config.min_iters
                 {
-                    let predicted = model_predicted_reduction(&delta, &grad, &diagonal, step_lambda);
+                    let predicted = predicted.unwrap_or_else(|| model_predicted_reduction(&delta, &grad, &diagonal, step_lambda));
                     if predicted <= rtol * end_cost {
                         end_cost = new_cost;
                         if config.verbose {
@@ -3387,7 +3592,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 && obs.on_iteration(&LmIter {
                     iter, inner, accepted: false, factorization_failed: false,
                     cost: end_cost, new_cost, lambda,
-                    accepted_total: accepted, params: &cur_x,
+                    accepted_total: accepted, params: shown(&cur_x, hide_x),
                 }).is_break()
             {
                 status = LmStatus::ObserverTerminated;
@@ -3403,7 +3608,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
 
             match driver.rejected(&LambdaStep {
                 lambda, cost: end_cost, new_cost,
-                grad: &grad, diagonal: &diagonal, delta: &delta,
+                grad: shown(&grad, hide_v), diagonal: shown(&diagonal, hide_v), delta: shown(&delta, hide_v),
+                predicted,
             }) {
                 Some(next) => lambda = next,
                 None => {
@@ -3435,6 +3641,10 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         }
     }
 
+    // The device's parameters and reference rotations come home.
+    if resident {
+        solver.resident().expect("a resident solver keeps its loop").finish(problem, &mut cur_x);
+    }
     if let Some(s) = solve_start { timing.total = s.elapsed(); }
     let result = LmResult {
         x: cur_x,
@@ -5108,25 +5318,35 @@ fn device_precision<T>(mixed: bool) -> arael_gpu::GpuPrecision {
     if mixed || core::mem::size_of::<T>() == 4 { arael_gpu::GpuPrecision::F32 } else { arael_gpu::GpuPrecision::F64 }
 }
 
-/// The device assembly of the reduced GPU route: what `compute`, the
-/// damping and the trial costs run on the device.
+/// The device assembly of the reduced GPU route and the LM loop's vectors
+/// beside it: from a solve's first linearization on, the device
+/// linearizes, damps, solves and evaluates the trial costs, and keeps the
+/// parameters ([`ResidentLoop`]).
 #[cfg(feature = "gpu")]
 struct DeviceRoute<T> {
+    /// An attempt's launches (damping, solve, trial point, trial cost) and
+    /// an accept's with the linearization after it, captured as graphs,
+    /// with what they were captured against; first, so they are dropped
+    /// before the buffers they record.
+    attempt_graph: Option<((arael_gpu::GraphKey, u64), arael_gpu::Graph)>,
+    step_graph: Option<((arael_gpu::GraphKey, u64, u64), arael_gpu::Graph)>,
     asm: crate::device::DeviceAssembly<T>,
-    /// The diagonal's positions in H's values (u32), its undamped values
-    /// as the last assembly left them and the damping scale (f64), on the
-    /// device; the undamped diagonal on the host too.
-    pos: arael_gpu::Lease,
-    diag: arael_gpu::Lease,
-    damp: arael_gpu::host::Upload<f64>,
+    vec: arael_gpu::lm::LmVectors,
+    /// The undamped diagonal of the last compute that read it back.
     diag_host: std::vec::Vec<T>,
     /// H's tile values.
     nh: usize,
-    /// The device holds the last compute's H and gradient (a structure's
-    /// first compute assembles on the CPU).
+    /// The device holds H and the gradient at the loop's parameters (a
+    /// structure's first compute assembles on the CPU).
     live: bool,
-    /// The device's parameter values are the last trial's.
-    trial: bool,
+    /// The model's data on the device predates this solve: the solve's
+    /// first compute reads it again.
+    stale: bool,
+    /// [`LmConfig::min_diagonal`].
+    floor: Option<f64>,
+    /// An accepted trial point waits to become the parameters: the next
+    /// linearization, or the end of the solve, takes it.
+    accept_due: bool,
 }
 
 #[cfg(feature = "gpu")]
@@ -5141,18 +5361,17 @@ impl<T: crate::utils::Float + 'static> SnNumeric<T> {
         let mut resolver = arael_faer::bsc::PositionResolver::new(hsym);
         let asm = crate::device::DeviceAssembly::new(&ctx, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize));
         let n = bdiag_pos.len();
-        let pos: std::vec::Vec<u32> = bdiag_pos.to_vec();
-        let pos_lease = ctx.lease(n.max(1) * 4);
-        ctx.client().write(pos_lease.handle(), arael_gpu::cubecl::bytes::Bytes::from_elems(pos));
         self.gpu_route = Some(DeviceRoute {
+            attempt_graph: None,
+            step_graph: None,
             asm,
-            pos: pos_lease,
-            diag: ctx.lease(n.max(1) * 8),
-            damp: Default::default(),
+            vec: arael_gpu::lm::LmVectors::new(&ctx, bdiag_pos),
             diag_host: vec![T::zero(); n],
             nh: hsym.val_count(),
             live: false,
-            trial: false,
+            stale: false,
+            floor: None,
+            accept_due: false,
         });
     }
 
@@ -5162,28 +5381,21 @@ impl<T: crate::utils::Float + 'static> SnNumeric<T> {
     }
 
     /// Assemble at `params` on the device into the reduction's buffers;
-    /// the gradient and the undamped diagonal come back to the host.
-    fn route_compute(&mut self, root: &dyn crate::device::DeviceRoot<T>, params: &[T], grad: &mut [T]) -> T {
-        use arael_gpu::cubecl::prelude::*;
+    /// the gradient and the undamped diagonal come back to the host. The
+    /// first compute of a solve reads the model's data again.
+    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> T {
         let gs = self.gpu_schur.as_mut().expect("a device route has its reduction");
         let r = self.gpu_route.as_mut().expect("a device route");
+        if r.stale {
+            problem.update_params(params);
+            r.asm.refresh(problem.device_root().expect("a device route's problem has a device root"));
+            r.stale = false;
+        }
         let n = grad.len();
         let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
-        let cost = r.asm.assemble(root, params, &g, n, &h, r.nh);
-        let c = r.asm.context().client();
-        let arr = |hd: &arael_gpu::cubecl::server::Handle, len: usize| unsafe { BufferArg::from_raw_parts(hd.clone(), len.max(1)) };
-        unsafe {
-            arael_gpu::assembly::k_gather_diag::launch_unchecked(
-                c,
-                CubeCount::Static((n as u32).div_ceil(256).max(1), 1, 1),
-                CubeDim::new_1d(256),
-                arr(&h, r.nh),
-                arr(r.pos.handle(), n),
-                arr(r.diag.handle(), n),
-                n as u32,
-            )
-        };
-        let back = arael_gpu::read(c, vec![g, r.diag.view(n * 8)]).expect("read the gradient and the diagonal");
+        let cost = r.asm.assemble(params, &g, n, &h, r.nh);
+        r.vec.gather_diag(&h, r.nh);
+        let back = arael_gpu::read(r.asm.context().client(), vec![g, r.vec.diag()]).expect("read the gradient and the diagonal");
         for (d, &v) in grad.iter_mut().zip(f64::from_bytes(&back[0])) {
             *d = T::from(v).unwrap();
         }
@@ -5191,55 +5403,80 @@ impl<T: crate::utils::Float + 'static> SnNumeric<T> {
             *d = T::from(v).unwrap();
         }
         r.live = true;
-        r.trial = false;
         T::from(cost).unwrap()
     }
 
-    /// H's diagonal damped on the device, `diag + lambda damp`, from the
-    /// undamped diagonal the last assembly left there.
-    fn route_damp(&mut self, damp: &[T], lambda: T) {
-        use arael_gpu::cubecl::prelude::*;
+    /// The pending accept, when there is one, and the linearization at the
+    /// parameters after it (the assembly and the pass over the diagonal and
+    /// the gradient), without waiting. An accept with its linearization is
+    /// one captured graph (graphs on).
+    fn route_linearize(&mut self) {
         let gs = self.gpu_schur.as_mut().expect("a device route has its reduction");
+        let gf = self.gpu_factor.as_ref().expect("a device route has its factor");
         let r = self.gpu_route.as_mut().expect("a device route");
-        let n = damp.len();
-        let h = gs.h_target(r.nh);
-        let ctx = r.asm.context().clone();
-        // SAFETY: the conversion lands in the upload's own buffer, which the
-        // solve's read that follows waits past.
-        unsafe { r.damp.write(&ctx, damp, |v| v.to_f64().unwrap()) };
-        let arr = |hd: &arael_gpu::cubecl::server::Handle, len: usize| unsafe { BufferArg::from_raw_parts(hd.clone(), len.max(1)) };
-        unsafe {
-            arael_gpu::assembly::k_damp::launch_unchecked(
-                ctx.client(),
-                CubeCount::Static((n as u32).div_ceil(256).max(1), 1, 1),
-                CubeDim::new_1d(256),
-                arr(&h, r.nh),
-                arr(r.pos.handle(), n),
-                arr(r.diag.handle(), n),
-                arr(r.damp.handle(), n),
-                lambda.to_f64().unwrap(),
-                n as u32,
-            )
+        let accept = std::mem::take(&mut r.accept_due);
+        let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
+        let key = (gs.graph_key(gf, None), r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
+        let (asm, vec, nh, floor) = (&r.asm, &r.vec, r.nh, r.floor);
+        let launches = move || {
+            if accept {
+                route_accept(asm, vec);
+            }
+            let n = vec.len();
+            asm.assemble_at(&vec.x(), n, &crate::device::DeviceTargets { g: &g, ng: n, h: &h, nh, cost: &vec.slot(arael_gpu::lm::S_COST_X) });
+            vec.linearized(&g, &h, nh, floor);
         };
+        if accept {
+            run_graph(asm.context().client(), gs.graphs(), &mut r.step_graph, key, launches);
+        } else {
+            launches();
+        }
+        r.live = true;
     }
 
-    /// The cost at `params` on the device, when there is a route.
-    fn route_trial_cost(&mut self, root: &dyn crate::device::DeviceRoot<T>, params: &[T]) -> Option<T> {
-        let r = self.gpu_route.as_mut()?;
-        let c = r.asm.cost(root, params);
-        r.trial = true;
-        Some(T::from(c).unwrap())
-    }
-
-    /// The device's reference rotations moved by the accepted trial's steps.
-    fn route_advanced(&mut self) {
-        if let Some(r) = self.gpu_route.as_mut()
-            && r.trial
-        {
-            r.asm.advance();
-            r.trial = false;
+    /// The pending accept applied, without waiting.
+    fn route_settle(&mut self) {
+        let r = self.gpu_route.as_mut().expect("a device route");
+        if std::mem::take(&mut r.accept_due) {
+            route_accept(&r.asm, &r.vec);
         }
     }
+}
+
+/// An accepted trial point becomes the parameters: the reference rotations
+/// moved by its steps (the last gather was the trial point's), the point
+/// copied, its rotation steps zeroed.
+#[cfg(feature = "gpu")]
+fn route_accept<T: crate::utils::Float + 'static>(asm: &crate::device::DeviceAssembly<T>, vec: &arael_gpu::lm::LmVectors) {
+    asm.advance();
+    vec.accept();
+    asm.zero_steps(&vec.x(), vec.len());
+}
+
+/// Run `launches` (kernel launches only) as the graph `slot` holds when it
+/// was captured under `key`; otherwise, with `graphs` on, run them once to
+/// warm the pools and capture them into `slot`; without graphs, run them.
+#[cfg(feature = "gpu")]
+fn run_graph<K: PartialEq>(client: &arael_gpu::cubecl::prelude::Client, graphs: bool, slot: &mut Option<(K, arael_gpu::Graph)>, key: K, mut launches: impl FnMut() + Send) {
+    if !graphs {
+        launches();
+        return;
+    }
+    if let Some((k, graph)) = slot.as_ref()
+        && *k == key
+    {
+        // SAFETY: the graph records the route's buffers, the reduction's and
+        // the factor's (both in the key), all alive while the route is; the
+        // client is pinned to the stream it was captured on, which orders the
+        // writes before and the read after it.
+        unsafe { graph.replay() }.expect("replay a captured graph");
+        return;
+    }
+    *slot = None;
+    client.graph_prepare().expect("prepare a graph capture");
+    launches();
+    let graph = arael_gpu::capture(client, move || launches());
+    *slot = Some((key, graph));
 }
 
 /// The refinement of a solution through a reduced-precision factor against
@@ -6469,40 +6706,43 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     /// wait for the device. `false` when an eliminated block or S is not
     /// positive definite.
     #[cfg(feature = "gpu")]
-    fn solve_reduced_gpu(&mut self, h: Option<&arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>, grad: &[T], delta: &mut [T]) -> bool {
+    fn solve_reduced_gpu(&mut self, h: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>, grad: &[T], delta: &mut [T]) -> bool {
         let clock = self.verbose.then(Instant::now);
-        let mixed = self.sn_num.mixed;
+        let refine = self.gpu_refine();
         let gs = self.sn_num.gpu_schur.as_mut().expect("the device reduction is built with the Schur symbolic");
         let gf = self.sn_num.gpu_factor.as_mut().expect("the device factor is built with the supernodal symbolic");
-        let precision = gf.precision();
+        let solved = gs.solve(gf, h.vals(), grad, refine, delta);
+        self.note_gpu_solve(solved.ok(), clock, "reduce + factor + solve + back-substitution");
+        solved.is_ok()
+    }
+
+    /// The device solve's refinement, `(max_steps, tolerance)` under mixed
+    /// precision.
+    #[cfg(feature = "gpu")]
+    fn gpu_refine(&self) -> Option<(usize, f64)> {
         // The step is handed back in T, so no tolerance below a few of its
         // epsilons buys anything, as in the CPU refinement.
         let floor = 8.0 * arael_faer::schur::SchurReal::to_f64(<T as num::Float>::epsilon());
-        let refine = mixed.map(|mp| (mp.max_refinements, mp.tol.max(floor)));
-        // H and the gradient uploaded, or already on the device (`None`)
-        if h.is_none()
-            && let Some(plan) = self.plan.as_mut()
-        {
-            plan.gpu_assembly = true;
-        }
-        let solved = match h {
-            Some(h) => gs.solve(gf, h.vals(), grad, refine, delta),
-            None => gs.solve_resident(gf, refine, delta),
-        };
-        let stats = match solved {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
+        self.sn_num.mixed.map(|mp| (mp.max_refinements, mp.tol.max(floor)))
+    }
+
+    /// A device solve's refinement counted and, verbose, reported (`what`
+    /// it did, timed from `clock`); `None` for a failed one.
+    #[cfg(feature = "gpu")]
+    fn note_gpu_solve(&mut self, stats: Option<arael_gpu::RefineStats>, clock: Option<Instant>, what: &str) {
+        let Some(stats) = stats else { return };
         self.sn_num.rf.steps += stats.steps;
         if stats.short {
             self.sn_num.rf.shortfalls += 1;
         }
         if let Some(t) = clock {
+            let precision = self.sn_num.gpu_factor.as_ref().expect("a device solve has its factor").precision();
             info!(
-                "gpu schur ({:?}): reduce + factor + solve + back-substitution {:.1} ms{}",
+                "gpu schur ({:?}): {} {:.1} ms{}",
                 precision,
+                what,
                 t.elapsed().as_secs_f64() * 1e3,
-                if mixed.is_some() {
+                if self.sn_num.mixed.is_some() {
                     format!(
                         ", {} refinement steps, relative residual {:.1e}{}",
                         stats.steps,
@@ -6515,7 +6755,121 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             );
         }
         self.sn_num.report_into(&mut self.plan);
-        true
+    }
+}
+
+/// The LM loop on the device: the reduced GPU route with the device
+/// assembly. The parameters and the trial point stay there, f64 whatever
+/// `T`, and each attempt makes one wait for its status and scalars.
+#[cfg(feature = "gpu")]
+impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> ResidentLoop<T> for SparseFaer<T> {
+    fn start(&mut self, x: &[T], floor: Option<T>) {
+        let r = self.sn_num.gpu_route.as_mut().expect("a resident solve has its device route");
+        r.floor = floor.map(arael_faer::schur::SchurReal::to_f64);
+        r.accept_due = false;
+        r.vec.write_x(x.iter().map(|&v| arael_faer::schur::SchurReal::to_f64(v)).collect());
+        if r.live {
+            // this linearization was assembled there: its diagonal pass only
+            let gs = self.sn_num.gpu_schur.as_mut().expect("a device route has its reduction");
+            let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
+            r.vec.linearized(&g, &h, r.nh, r.floor);
+        } else {
+            self.sn_num.route_linearize();
+        }
+        if let Some(plan) = self.plan.as_mut() {
+            plan.gpu_assembly = true;
+        }
+    }
+
+    fn linearize(&mut self) {
+        self.sn_num.route_linearize();
+    }
+
+    fn attempt(&mut self, lambda: T) -> ResidentAttempt {
+        use arael_gpu::lm::{DiagFault, S_COST_TRY, Scalars};
+        let clock = self.verbose.then(Instant::now);
+        let refine = self.gpu_refine();
+        let sn = &mut self.sn_num;
+        let gs = sn.gpu_schur.as_mut().expect("a device route has its reduction");
+        let gf = sn.gpu_factor.as_mut().expect("a device route has its factor");
+        let r = sn.gpu_route.as_mut().expect("a resident solve has its device route");
+        let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
+        let key = (gs.graph_key(gf, refine), r.asm.generation());
+        let graphs = gs.graphs();
+        r.vec.set_lambda(arael_faer::schur::SchurReal::to_f64(lambda));
+        {
+            let (asm, vec, nh, solver) = (&r.asm, &r.vec, r.nh, &*gs);
+            let launches = move || {
+                vec.damp(&h, nh);
+                solver.launch(gf, refine);
+                vec.step(&solver.step_view(), &g);
+                asm.cost_at(&vec.x_try(), vec.len(), &vec.slot(S_COST_TRY));
+            };
+            run_graph(asm.context().client(), graphs, &mut r.attempt_graph, key, launches);
+        }
+        let c = r.asm.context().client();
+        let back = arael_gpu::read(c, vec![gs.status_view(), r.vec.scalars()]).expect("read the attempt");
+        // the queue's rotation returns the staging of the lambda's write
+        c.flush().expect("device flush");
+        let solved = gs.outcome(&back[0], refine);
+        let s = Scalars::decode(&back[1]);
+        self.note_gpu_solve(solved.ok(), clock, "damp + reduce + factor + solve + back-substitution + trial cost");
+        ResidentAttempt {
+            solved: solved.is_ok(),
+            new_cost: s.cost_try,
+            step2: s.step2,
+            try2: s.try2,
+            predicted: s.predicted,
+            grad_max: s.grad_max,
+            grad_scaled: s.grad_scaled,
+            fault: s.fault.map(|(i, f)| {
+                (i, match f {
+                    DiagFault::Nan => DiagonalFault::Nan,
+                    DiagFault::Negative => DiagonalFault::Negative,
+                    DiagFault::Zero => DiagonalFault::Zero,
+                })
+            }),
+        }
+    }
+
+    fn accept(&mut self) {
+        // applied with the next linearization, in its graph
+        self.sn_num.gpu_route.as_mut().expect("a resident solve has its device route").accept_due = true;
+    }
+
+    fn params(&mut self, x: &mut [T]) {
+        self.sn_num.route_settle();
+        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
+        let back = arael_gpu::read_one(r.asm.context().client(), r.vec.x()).expect("read the parameters");
+        for (d, &v) in x.iter_mut().zip(f64::from_bytes(&back)) {
+            *d = T::from(v).unwrap();
+        }
+    }
+
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) {
+        let gs = self.sn_num.gpu_schur.as_mut().expect("a device route has its reduction");
+        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
+        let back = arael_gpu::read(r.asm.context().client(), vec![gs.rhs_target(), r.vec.diag(), gs.step_view()]).expect("read the vectors");
+        for (out, b) in [grad, diagonal, step].into_iter().zip(&back) {
+            for (d, &v) in out.iter_mut().zip(f64::from_bytes(b)) {
+                *d = T::from(v).unwrap();
+            }
+        }
+    }
+
+    fn nonfinite(&mut self) -> [usize; 4] {
+        let gs = self.sn_num.gpu_schur.as_mut().expect("a device route has its reduction");
+        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
+        let h = gs.h_target(r.nh);
+        let back = arael_gpu::read(r.asm.context().client(), vec![gs.rhs_target(), r.vec.diag(), r.vec.x(), h]).expect("read the vectors");
+        let count = |b: &[u8]| f64::from_bytes(b).iter().filter(|v| !v.is_finite()).count();
+        [count(&back[0]), count(&back[1]), count(&back[2]), count(&back[3])]
+    }
+
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) {
+        self.params(x);
+        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
+        r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root"));
     }
 }
 
@@ -6525,14 +6879,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     type Matrix = FaerMatrix<T>;
 
     #[cfg(feature = "gpu")]
-    fn trial_cost(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T]) -> Option<T> {
-        let root = problem.device_root()?;
-        self.sn_num.route_trial_cost(root, params)
-    }
-
-    #[cfg(feature = "gpu")]
-    fn advanced(&mut self) {
-        self.sn_num.route_advanced();
+    fn resident(&mut self) -> Option<&mut dyn ResidentLoop<T>> {
+        if self.sn_num.gpu_route.is_some() { Some(self) } else { None }
     }
 
     fn matrix_nonfinite_count(&self, matrix: &FaerMatrix<T>) -> usize {
@@ -6573,6 +6921,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.verbose = config.verbose;
         // The clock is only read when the caller asked for timing.
         self.measure = config.gather_timing;
+        // A solve starts here: the model a session hands it may have other
+        // data than the device holds from the last one.
+        #[cfg(feature = "gpu")]
+        if let Some(r) = self.sn_num.gpu_route.as_mut() {
+            r.stale = true;
+        }
         // The reduction's own threads: 1 without the rayon feature.
         self.ctx.set_threads(crate::threads::pool_size(config.num_threads));
         // Before the first compute, so size_llt_buffers sizes the scratch for
@@ -6620,11 +6974,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route: H and the gradient assembled where they are
         // factorized.
         #[cfg(feature = "gpu")]
-        if self.positions.is_some()
-            && self.sn_num.gpu_route.is_some()
-            && let Some(root) = problem.device_root()
-        {
-            let cost = self.sn_num.route_compute(root, params, grad);
+        if self.positions.is_some() && self.sn_num.gpu_route.is_some() {
+            let cost = self.sn_num.route_compute(problem, params, grad);
             if let Some(t) = t_a {
                 self.assembly_time = t.elapsed();
             }
@@ -7648,10 +7999,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
         // The device route: H is on the device, damped there.
         #[cfg(feature = "gpu")]
-        if self.sn_num.route_live() {
-            self.sn_num.route_damp(damp, lambda);
-            return self.solve_reduced_gpu(None, grad, delta);
-        }
+        // H is on the device: the loop runs its attempts there (ResidentLoop)
+        assert!(!self.sn_num.route_live(), "a damped solve on the host with H on the device");
         // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
         let h = matrix.h.as_mut().expect("compute before solve_damped");
         {
@@ -7690,7 +8039,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // GPU, the step recovered there. Only for the factorizing method.
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() {
-            return self.solve_reduced_gpu(Some(h), grad, delta);
+            return self.solve_reduced_gpu(h, grad, delta);
         }
 
         // Implicit route: no reduction at all. Only the reduced rhs and S's
@@ -8836,6 +9185,7 @@ mod tests {
             LambdaStep {
                 lambda, cost, new_cost,
                 grad: &c.grad, diagonal: &c.diagonal, delta: &c.delta,
+                predicted: None,
             }
         }
         // Two consecutive rejections: x2 then x4.
@@ -8864,6 +9214,27 @@ mod tests {
         // Give up above the ceiling.
         let c = ctx(1e10);
         assert_eq!(a.rejected(&mk(&c, 1e10, 10.0, 11.0)), None);
+    }
+
+    /// A step that carries its predicted reduction (a device solve's,
+    /// without the vectors) drives Nielsen as the vectors would.
+    #[test]
+    fn nielsen_takes_a_given_predicted_reduction() {
+        let cfg = LmConfig::<f64> { initial_lambda: 1e-2, lambda_floor: 1e-6, ..Default::default() };
+        let state = LambdaState { cost: 10.0, grad: &[], diagonal: &[] };
+        // delta = [1], diagonal = [1], grad = [2 - lambda]: a predicted reduction of 1
+        let (grad, diagonal, delta) = ([2.0f64 - 8e-2], [1.0f64], [1.0f64]);
+        let from_vectors = LambdaStep { lambda: 8e-2, cost: 10.0, new_cost: 9.5, grad: &grad, diagonal: &diagonal, delta: &delta, predicted: None };
+        let given = LambdaStep { grad: &[], diagonal: &[], delta: &[], predicted: Some(1.0), ..from_vectors };
+        assert!((from_vectors.predicted_reduction() - 1.0).abs() < 1e-15);
+        assert_eq!(given.predicted_reduction(), 1.0);
+        let (mut a, mut b) = (NielsenLambdaDriver::<f64>::default(), NielsenLambdaDriver::<f64>::default());
+        a.start(&cfg, &state);
+        b.start(&cfg, &state);
+        assert_eq!(a.accepted(&from_vectors), b.accepted(&given));
+        // a different reduction gives a different lambda: the given one is used
+        let other = LambdaStep { predicted: Some(4.0), ..given };
+        assert_ne!(b.accepted(&other), a.accepted(&from_vectors));
     }
 
     #[test]

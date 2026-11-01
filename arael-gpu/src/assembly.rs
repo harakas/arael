@@ -180,16 +180,6 @@ pub fn k_euler_advance<F: Float>(refr: &mut [f64], ev: &[F], at: &[u32], n: u32)
     }
 }
 
-/// The damped diagonal written into H's values: `h[pos[i]] = diag[i] +
-/// lambda damp[i]`, one unit per scalar.
-#[cube(launch_unchecked)]
-pub fn k_damp(h: &mut [f64], pos: &[u32], diag: &[f64], damp: &[f64], lambda: f64, n: u32) {
-    let i = ABSOLUTE_POS;
-    if i < n as usize {
-        h[pos[i] as usize] = diag[i] + lambda * damp[i];
-    }
-}
-
 /// H's diagonal gathered: `out[i] = h[pos[i]]`, one unit per scalar.
 #[cube(launch_unchecked)]
 pub fn k_gather_diag(h: &[f64], pos: &[u32], out: &mut [f64], n: u32) {

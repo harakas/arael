@@ -2276,6 +2276,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut compute_stmts: Vec<TokenStream2> = Vec::new();
     let mut release_blocks_stmts: Vec<TokenStream2> = Vec::new();
     let mut advance_stmts: Vec<TokenStream2> = Vec::new();
+    let mut set_references_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_count_terms: Vec<TokenStream2> = Vec::new();
     let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_symbols_stmts: Vec<TokenStream2> = Vec::new();
@@ -2417,6 +2418,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 });
                 advance_stmts.push(quote! {
                     arael::model::Model::advance_params(&mut self.#ident, params);
+                });
+                set_references_stmts.push(quote! {
+                    arael::model::Model::set_references(&mut self.#ident, refs);
                 });
                 serialize_size_stmts.push(quote! {
                     arael::model::Model::serialize_size(&self.#ident)
@@ -2562,6 +2566,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn advance_params<F: arael::utils::Float>(&mut self, params: &mut [F]) {
                 #(#advance_stmts)*
                 #comp_advance
+            }
+            fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {
+                let _ = &refs;
+                #(#set_references_stmts)*
             }
             const PARAM_COUNT: u32 = 0 #(+ #param_count_terms)*;
             fn serialize_size(&self) -> u32 {
