@@ -93,6 +93,21 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
     Some(mp)
 }
 
+/// ARAEL_GPU puts the supernodal block route's factorization and solve on a
+/// GPU: `cuda`, `hip`, or either with a device index (`cuda:1`). With
+/// ARAEL_F32_FACTOR the factor is f32 there, refined the same way. The
+/// binary needs arael's `gpu-cuda` or `gpu-hip` feature.
+pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
+    let v = std::env::var("ARAEL_GPU").ok()?;
+    let (name, index) = v.split_once(':').unwrap_or((v.as_str(), "0"));
+    let index: usize = index.parse().unwrap_or_else(|_| panic!("ARAEL_GPU={}: expected cuda[:index] or hip[:index]", v));
+    match name {
+        "cuda" => Some(arael::simple_lm::GpuDevice::cuda(index)),
+        "hip" => Some(arael::simple_lm::GpuDevice::hip(index)),
+        _ => panic!("ARAEL_GPU={}: expected cuda[:index] or hip[:index]", v),
+    }
+}
+
 /// ARAEL_LAMBDA0 overrides the model's damping, for experiments.
 pub fn lambda0<M: Model>(input: &M::Input) -> f64 {
     std::env::var("ARAEL_LAMBDA0")
