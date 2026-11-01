@@ -4,23 +4,6 @@ error: `P` is a model type, but field `ps` of `Holder` holds it inside unrecogni
 17 | struct P {
    |        ^
 
-error[E0425]: cannot find type `P` in this scope
-  --> tests/constraint_attr_errors/alias_container_late.rs:10:14
-   |
-10 |     ps: RVec<P>,
-   |              ^ not found in this scope
-   |
-help: you might be missing a type parameter
-   |
- 9 | struct Holder<P> {
-   |              +++
-
-error[E0425]: cannot find type `P` in this scope
-  --> tests/constraint_attr_errors/alias_container_late.rs:10:14
-   |
-10 |     ps: RVec<P>,
-   |              ^ not found in this scope
-
 warning: unused imports: `Param` and `SelfBlock`
  --> tests/constraint_attr_errors/alias_container_late.rs:5:20
   |

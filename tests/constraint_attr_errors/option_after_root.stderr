@@ -3,37 +3,3 @@ error: `P` is reachable from root `W` but defined after it -- the root's expansi
    |
 32 | struct P {
    |        ^
-
-error[E0425]: cannot find type `P` in this scope
-  --> tests/constraint_attr_errors/option_after_root.rs:25:19
-   |
-15 | struct M {
-   | -------- similarly named struct `M` defined here
-...
-25 |     maybe: Option<P>,
-   |                   ^
-   |
-help: a struct with a similar name exists
-   |
-25 -     maybe: Option<P>,
-25 +     maybe: Option<M>,
-   |
-help: you might be missing a type parameter
-   |
-23 | struct W<P> {
-   |         +++
-
-error[E0425]: cannot find type `P` in this scope
-  --> tests/constraint_attr_errors/option_after_root.rs:25:19
-   |
-15 | struct M {
-   | -------- similarly named struct `M` defined here
-...
-25 |     maybe: Option<P>,
-   |                   ^
-   |
-help: a struct with a similar name exists
-   |
-25 -     maybe: Option<P>,
-25 +     maybe: Option<M>,
-   |

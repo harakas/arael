@@ -33,8 +33,6 @@ use std::fmt;
 use std::num::FpCategory;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign};
 
-use num::Float as _;
-
 /// A two-float scalar: `hi + lo`, with `|lo| <= ulp(hi) / 2`.
 #[derive(Clone, Copy, Default, PartialEq)]
 pub struct df32 {

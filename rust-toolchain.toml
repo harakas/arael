@@ -4,4 +4,4 @@
 # stderr verbatim, and diagnostic wording changes between releases. When
 # bumping: update the pin, run TRYBUILD=overwrite cargo test, and commit the
 # regenerated .stderr files together with this file.
-channel = "1.94.0"
+channel = "1.99.1"

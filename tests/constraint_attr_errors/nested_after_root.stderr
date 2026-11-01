@@ -4,25 +4,6 @@ error: `P` is reachable from root `W` but defined after it -- the root's expansi
 24 | struct P {
    |        ^
 
-error[E0425]: cannot find type `P` in this scope
-  --> tests/constraint_attr_errors/nested_after_root.rs:11:26
-   |
-11 |     items: std::vec::Vec<P>,
-   |                          ^
-...
-16 | struct W {
-   | -------- similarly named struct `W` defined here
-   |
-help: a struct with a similar name exists
-   |
-11 -     items: std::vec::Vec<P>,
-11 +     items: std::vec::Vec<W>,
-   |
-help: you might be missing a type parameter
-   |
-10 | struct Group<P> {
-   |             +++
-
 warning: unused imports: `Param` and `SelfBlock`
  --> tests/constraint_attr_errors/nested_after_root.rs:6:20
   |
