@@ -41,6 +41,7 @@ The first GPU solve of a process includes compiling the kernels;
 | `--repeat N` | solve N times from the initial state |
 | `--compare` | add a CPU run and print the relative difference of the final costs |
 | `--threads N` | CPU threads for the assembly and the linear solve |
+| `--timing` | print each solve's phases: analysis, assembly, linear solve (on the GPU route an attempt's whole device work), cost, advance |
 
 `VERBOSE=1` prints the solver's iteration lines. The exit code is 0 when
 every solve converged.

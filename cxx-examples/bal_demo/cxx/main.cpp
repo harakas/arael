@@ -7,13 +7,14 @@
 //
 //   ./bal_demo [path/to/problem.txt] [--gpu cuda|hip] [--device N]
 //              [--f32-factor] [--no-gpu-assembly] [--repeat N]
-//              [--compare] [--threads N]
+//              [--compare] [--threads N] [--timing]
 //
 // Every run solves the reduced (Schur) system with the block supernodal
 // Cholesky, the route the GPU runs, so a CPU and a GPU run compute the
 // same thing. --repeat solves the problem N times from its initial state
 // (the device state and the compiled kernels carry over); --compare adds
-// a CPU run and prints the relative difference of the final costs.
+// a CPU run and prints the relative difference of the final costs;
+// --timing prints each solve's phases.
 // VERBOSE=1 prints the solver's iteration lines. The exit code is 0 on a
 // converged solve, 1 otherwise.
 #include <scene.hpp>
@@ -120,6 +121,8 @@ struct Run {
     double start = 0.0, end = 0.0, ms = 0.0;
     uint32_t iters = 0, accepted = 0;
     bool reduced = false, gpu_factor = false, gpu_assembly = false, f32_factor = false;
+    bool has_timing = false;
+    LmTiming timing{};
 };
 
 static Run solve(const Bal& b, const LmConfig& cfg, const SparseOptions& so) {
@@ -141,6 +144,8 @@ static Run solve(const Bal& b, const LmConfig& cfg, const SparseOptions& so) {
     run.end = v.end_cost;
     run.iters = v.iterations;
     run.accepted = v.accepted_iterations;
+    run.has_timing = v.has_timing;
+    run.timing = v.timing;
     if (v.plan().has_value()) {
         SchurPlan p = v.plan().value();
         run.reduced = p.reduced;
@@ -163,13 +168,25 @@ static void report(const char* label, const Run& r, size_t n_obs) {
                 r.gpu_factor ? ", GPU factor" : "",
                 r.gpu_assembly ? ", GPU assembly and loop" : "",
                 r.f32_factor ? ", f32 factor" : "");
+    if (r.has_timing) {
+        const LmTiming& t = r.timing;
+        auto ms = [](double s) { return s * 1e3; };
+        double ls_rest = t.linear_solve_count > 1 ? (t.linear_solve - t.first_linear_solve) / (t.linear_solve_count - 1) : 0.0;
+        double asm_rest = t.assembly_count > 1 ? (t.assembly - t.first_assembly) / (t.assembly_count - 1) : 0.0;
+        std::printf("      total %.1f ms: analysis %.1f, assembly first %.1f then %.2f x %u, linear solve first %.1f then %.2f x %u, "
+                    "cost %.1f (%u), advance %.1f (%u), other %.1f\n",
+                    ms(t.total), ms(t.analysis), ms(t.first_assembly), ms(asm_rest), t.assembly_count - 1,
+                    ms(t.first_linear_solve), ms(ls_rest), t.linear_solve_count - 1, ms(t.cost_eval), t.cost_eval_count,
+                    ms(t.advance), t.advance_count,
+                    ms(t.total - t.analysis - t.assembly - t.linear_solve - t.cost_eval - t.advance));
+    }
 }
 
 int main(int argc, char** argv) {
     const char* path = BAL_DEFAULT_DATASET;
     GpuBackend gpu = GpuBackend::None;
     uint32_t device = 0, repeat = 1, threads = 0;
-    bool f32_factor = false, gpu_assembly = true, compare = false;
+    bool f32_factor = false, gpu_assembly = true, compare = false, timing = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -199,6 +216,8 @@ int main(int argc, char** argv) {
             repeat = uint32_t(std::atoi(next()));
         } else if (a == "--compare") {
             compare = true;
+        } else if (a == "--timing") {
+            timing = true;
         } else if (a == "--threads") {
             threads = uint32_t(std::atoi(next()));
         } else if (a.rfind("--", 0) == 0) {
@@ -220,6 +239,7 @@ int main(int argc, char** argv) {
     cfg.rel_precision = 1e-5;
     cfg.patience = 1;
     cfg.verbose = std::getenv("VERBOSE") != nullptr;
+    cfg.gather_timing = timing;
     if (threads > 0) {
         cfg.num_threads = threads;
     }
