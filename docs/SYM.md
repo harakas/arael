@@ -8,7 +8,7 @@ See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough
 
 ## Scope and limitations
 
-`arael-sym` is focused on what's needed for nonlinear optimization: scalar expressions, differentiation, and code generation. Compared to a full CAS like Python's SymPy, it does **not** support:
+`arael-sym` is focused on what's needed for nonlinear optimization: scalar expressions, differentiation, and code generation. Compared to a full CAS like Python's SymPy, it does not support:
 
 - Symbolic integration
 - Equation solving (solve for x)
@@ -366,7 +366,7 @@ You don't need `use arael::matrix::matrix2sym;` -- the macro matches `matrix2sym
 
 ## Output Formatting / Code Generation
 
-Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context; an `atan2` or `powf` whose first argument is a constant is then written as a call, `arael::utils::atan2(1.0, x)`, since rustc cannot call a method on an unsuffixed literal. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
+Any `E` renders four ways: `Display` for human reading, `to_latex()` for typeset output, `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes), and `to_cubecl` for GPU kernels ([below](#code-for-gpu-kernels-cubecl)). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context; an `atan2` or `powf` whose first argument is a constant is then written as a call, `arael::utils::atan2(1.0, x)`, since rustc cannot call a method on an unsuffixed literal. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
 
 ```rust
 sym! {
@@ -387,6 +387,82 @@ Display:  (-x + 1)^2 + 100 * (-x^2 + y)^2
 LaTeX:    \left(-x + 1\right)^{2} + 100 \cdot \left(-x^{2} + y\right)^{2}
 Rust f64: (-x + 1.0_f64).powi(2) + 100.0_f64 * (-x.powi(2) + y).powi(2)
 ```
+
+### Code for GPU kernels (CubeCL)
+
+[CubeCL](https://github.com/tracel-ai/cubecl) is a Rust crate for GPU kernels: a function marked `#[cube]` is compiled, at its first launch, for CUDA, HIP or another of CubeCL's runtimes, and its body may use only the part of Rust CubeCL understands. `to_cubecl("f32")` / `to_cubecl("f64")` prints an expression as Rust that such a body accepts, as `to_rust` prints it for ordinary Rust; arael's device assembly generates its kernels this way. The scalar is concrete (every literal suffixed and rounded to it), functions are called as `f64::sin(x)`, whole powers up to 8 are products, and `with_wide` blocks compute in `f64` and cast back. Symbols print by their own names; `to_cubecl_with(scalar, map)` prints each as `map(name)` instead, the value the kernel reads it from.
+
+A kernel body is usually several outputs sharing work, so the usual path is CSE first. `cubecl_body` runs `cse_scoped_wide` and prints the statements and then one expression per output, for the caller to place in its `#[cube]` function:
+
+```rust
+use arael_sym::{cubecl_body, sqrt, symbols};
+let (x, y) = symbols!(x, y);
+// a range residual and its two partials share the square root and its reciprocal
+let r = sqrt(x.clone() * x.clone() + y.clone() * y.clone()) - 1.0;
+let body = cubecl_body(&[r.clone(), r.diff("x"), r.diff("y")], "f32").unwrap();
+assert_eq!(body.stmts, "let __x0 = f32::sqrt(((x * x) + (y * y)));\nlet __x1 = (1.0f32 / __x0);\n");
+assert_eq!(body.outputs, ["(__x0 - 1.0f32)", "(x * __x1)", "(y * __x1)"]);
+```
+
+In a kernel that reads `x` and `y` from slices and writes the three values, that becomes:
+
+```rust,ignore
+#[cube(launch)]
+fn range(xs: &[f32], ys: &[f32], out: &mut [f32]) {
+    let i = ABSOLUTE_POS;
+    let x = xs[i];
+    let y = ys[i];
+    let __x0 = f32::sqrt(((x * x) + (y * y)));   // body.stmts
+    let __x1 = (1.0f32 / __x0);
+    out[3 * i] = (__x0 - 1.0f32);                 // body.outputs
+    out[3 * i + 1] = (x * __x1);
+    out[3 * i + 2] = (y * __x1);
+}
+```
+
+`Intermediate::to_cubecl` prints one statement of a CSE result the caller ran itself (`cse_scoped_wide`; plain `cse`'s list is not taken).
+
+Branches: a `branch` printed directly is CubeCL's `select`, which evaluates both sides and returns the taken one: a NaN or an infinity on the other side does not reach the result, but its work is done.
+
+```rust
+use arael_sym::{branch, sqrt, symbols};
+let (x,) = symbols!(x);
+// sqrt(x) is computed for a negative x too (NaN), and discarded
+let e = branch(x.clone(), sqrt(x), 0.0);
+assert_eq!(e.to_cubecl("f32").unwrap(), "select(x >= 0.0f32, f32::sqrt(x), 0.0f32)");
+```
+
+After CSE every branch is an `if` that runs only the taken side, as `to_rust`'s does, the names it binds declared before it:
+
+```rust
+use arael_sym::{branch, cubecl_body, sqrt, symbols};
+let (x,) = symbols!(x);
+let body = cubecl_body(&[branch(x.clone(), sqrt(x), 0.0)], "f32").unwrap();
+assert_eq!(body.stmts, "let mut __m0 = 0.0f32;\nif x >= 0.0f32 {\n__m0 = f32::sqrt(x);\n} else {\n__m0 = 0.0f32;\n}\n");
+assert_eq!(body.outputs, ["__m0"]);
+```
+
+Outputs under one condition share one `if`, and work only the taken side needs is computed inside it -- a guarded residual and its derivative:
+
+```rust
+use arael_sym::{branch, cubecl_body, sqrt, symbols};
+let (q, x, y) = symbols!(q, x, y);
+let r = branch(q, sqrt(x) * y, 0.0);
+let body = cubecl_body(&[r.clone(), r.diff("x")], "f64").unwrap();
+assert_eq!(body.outputs, ["__m0", "__m1"]);
+// let mut __m0 = 0.0f64;
+// let mut __m1 = 0.0f64;
+// if q >= 0.0f64 {
+// let __x2 = f64::sqrt(x);
+// __m0 = (y * __x2);
+// __m1 = ((0.5f64 * y) / __x2);
+// } else {
+// __m0 = 0.0f64;
+// __m1 = 0.0f64;
+// }
+```
+
+`clamp` and `heaviside` are `select`s too. What has no CubeCL form is an error naming it: a `select` on an index, an external function (`#[arael::function]`, `fast_atan` and the other numeric helpers of `arael::utils`), and a wide scalar other than `f64`.
 
 ## Common Subexpression Elimination
 
@@ -674,7 +750,7 @@ The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`, and 0 for NaN (inter
 
 ### `branch(q, a, b)`
 
-Selects between two subexpressions on the sign of a third: `branch(q, a, b) = q >= 0 ? a : b`, with the same `>= 0` / NaN sense as `heaviside` (a NaN condition selects `b`). It compiles to `if q >= 0.0 { a } else { b }` and interprets the same way, so **only the taken side is evaluated** -- the untaken arm may be undefined (a division by zero, a `ln` of a negative) without poisoning the result. Differentiation selects the taken side's derivative: `d/dvar branch(q, a, b) = branch(q, d a/dvar, d b/dvar)`. The switch `q` contributes nothing (the jump at `q = 0` is dropped, as with `heaviside`), so `branch` gives a piecewise residual the correct one-sided gradient with no spurious boundary term. Use it for asymmetric penalties, one-sided barriers, or guarding an inner computation valid on only one side of a condition. A branch whose two sides simplify to the same expression is that expression: the derivative of a guarded residual with respect to a parameter it does not touch, `branch(q, 0, 0)`, simplifies to `0`.
+Selects between two subexpressions on the sign of a third: `branch(q, a, b) = q >= 0 ? a : b`, with the same `>= 0` / NaN sense as `heaviside` (a NaN condition selects `b`). It compiles to `if q >= 0.0 { a } else { b }` and interprets the same way, so only the taken side is evaluated -- the untaken arm may be undefined (a division by zero, a `ln` of a negative) without poisoning the result. Differentiation selects the taken side's derivative: `d/dvar branch(q, a, b) = branch(q, d a/dvar, d b/dvar)`. The switch `q` contributes nothing (the jump at `q = 0` is dropped, as with `heaviside`), so `branch` gives a piecewise residual the correct one-sided gradient with no spurious boundary term. Use it for asymmetric penalties, one-sided barriers, or guarding an inner computation valid on only one side of a condition. A branch whose two sides simplify to the same expression is that expression: the derivative of a guarded residual with respect to a parameter it does not touch, `branch(q, 0, 0)`, simplifies to `0`.
 
 ### `multibranch(q0, a0, q1, a1, ..., default)`
 
@@ -686,7 +762,7 @@ The piecewise function of one variable, written as one reads its definition: `a0
 
 ### `select(i, a0, a1, ...)`, `select_or(i, a0, ..., default)`
 
-An N-way switch on an integer index: `select(i, a0, a1, ...)` is `a0` for `i = 0`, `a1` for `i = 1`, and so on. Any other value takes the default when there is one (`select_or`, default last) and otherwise panics in generated code and errors in `eval`. The index must be an integer value: integer and `bool` fields convert exactly, a float index that is NaN or has a fraction panics rather than silently taking arm 0. It compiles to a `match`, so **only the taken arm is evaluated**, and differentiation selects the taken arm's derivative, the index contributing nothing, as with `branch`. In Rust the constructor is `select(index, arms, default)` with `arms: Vec<E>` and `default: Option<E>`; the parser accepts both spellings above. Use it where a body has to pick one of several formulas at runtime, such as a robust loss chosen per solve (`loss_select`). `cse_scoped` (see Common Subexpression Elimination above) keeps each arm's work inside the arm. A `select_or` whose arms and default all simplify to the same expression is that expression; a `select` without a default keeps the switch, since an index past its arms must still panic.
+An N-way switch on an integer index: `select(i, a0, a1, ...)` is `a0` for `i = 0`, `a1` for `i = 1`, and so on. Any other value takes the default when there is one (`select_or`, default last) and otherwise panics in generated code and errors in `eval`. The index must be an integer value: integer and `bool` fields convert exactly, a float index that is NaN or has a fraction panics rather than silently taking arm 0. It compiles to a `match`, so only the taken arm is evaluated, and differentiation selects the taken arm's derivative, the index contributing nothing, as with `branch`. In Rust the constructor is `select(index, arms, default)` with `arms: Vec<E>` and `default: Option<E>`; the parser accepts both spellings above. Use it where a body has to pick one of several formulas at runtime, such as a robust loss chosen per solve (`loss_select`). `cse_scoped` (see Common Subexpression Elimination above) keeps each arm's work inside the arm. A `select_or` whose arms and default all simplify to the same expression is that expression; a `select` without a default keeps the switch, since an index past its arms must still panic.
 
 `select_value(index, arms, default)` is `select` over values made of scalars: vectors, matrices, quaternions, and tuples or arrays of those (the `Select` trait). Each scalar component is its own `select` on `index`, and `cse_scoped` emits the selects on one index as one `match`. `IntoSelect` converts a number to `E` and leaves the sym types as they are, element by element through tuples and arrays.
 

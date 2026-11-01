@@ -388,6 +388,7 @@ mod parse;
 mod error;
 pub mod geo;
 pub mod cse;
+pub mod cubecl;
 mod select_value;
 
 pub use error::SymError;
@@ -2558,6 +2559,7 @@ pub use linalg::{SymVec, SymMat, jacobian};
 pub use parse::{parse, parse_with_functions, ParseError};
 pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym, transform3sym, vectsym, matrixsym};
 pub use cse::{cse, cse_scoped, cse_scoped_wide};
+pub use cubecl::{CubeclBody, CubeclError, cubecl_body, cubecl_body_with};
 pub use select_value::{select_value, IntoSelect, Select};
 pub use arael_sym_macros::sym;
 
