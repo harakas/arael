@@ -3003,7 +3003,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         let t_asm = gather.then(Instant::now);
         let computed_cost = if resident {
             // In place on the device, no wait. Only the first
-            // linearization's cost is used, and that one is the host's.
+            // linearization's cost is used, and that one comes from
+            // `compute`.
             solver.resident().expect("a resident solver keeps its loop").linearize();
             lin_pending = true;
             lin_iter = iter;
@@ -7940,26 +7941,45 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route forms S on the device and never reads a host copy.
         self.s = if self.sn_num.gpu_reduces() { None } else { s };
         self.schur = Some(schur);
+        #[cfg(feature = "gpu")]
+        let t_reduction = lap(vb);
 
         // First numeric fill. Everything above it in this call was analysis.
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        let t_a = self.measure.then(Instant::now);
-        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
-        if let Some(t) = t_a {
-            self.assembly_time = t.elapsed();
-        }
-        // The device assembly, laid out now that the working copies are
-        // current: the next compute runs on the device.
+        // With a device assembly the device makes it: the model's working
+        // copies brought to `params` (which its layout reads), the layout,
+        // then the assembly there; the host H stays unfilled.
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() && self.sn_num.gpu_assembly {
             match problem.device_root() {
-                Some(root) => self.sn_num.build_route(root, h.symbolic(), &self.bdiag_pos),
+                Some(_) => {
+                    problem.update_params(params);
+                    let root = problem.device_root().expect("a device root");
+                    self.sn_num.build_route(root, h.symbolic(), &self.bdiag_pos);
+                    let t_layout = lap(vb);
+                    let t_a = self.measure.then(Instant::now);
+                    let cost = self.sn_num.route_compute(problem, params, grad);
+                    if let Some(t) = t_a {
+                        self.assembly_time = t.elapsed();
+                    }
+                    if vb {
+                        info!("gpu: the reduction's plan {:.1} ms, the device assembly's layout {:.1} ms, its first assembly {:.1} ms", t_reduction, t_layout, lap(true));
+                    }
+                    matrix.h = Some(h);
+                    self.positions = Some(Arc::new(positions));
+                    return Ok(cost);
+                }
                 None => {
                     if vb {
                         info!("gpu assembly: on the CPU -- {}", problem.device_unsupported().unwrap_or("no device form"));
                     }
                 }
             }
+        }
+        let t_a = self.measure.then(Instant::now);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
+        if let Some(t) = t_a {
+            self.assembly_time = t.elapsed();
         }
         matrix.h = Some(h);
         self.positions = Some(Arc::new(positions));

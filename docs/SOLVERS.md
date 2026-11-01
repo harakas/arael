@@ -876,8 +876,8 @@ one captured graph. On the reduced route the device also assembles and
 keeps the LM loop's vectors: `#[arael(root)]` generates, from the same
 constraint bodies the CPU assembly is generated from, kernels that
 compute the gradient, the Hessian's tiles and the trial costs on the
-device. After the first linearization, which the CPU assembles, the
-parameters, the gradient, the diagonal and the step stay on the device:
+device. The CPU analyses the structure; from the first linearization on,
+the parameters, the gradient, the diagonal and the step stay on the device:
 the trial point, the rotations' re-centring after an accepted step, and
 the norms and the predicted reduction the stopping rules and the driver
 read are computed there, and a damped attempt waits once, for a few

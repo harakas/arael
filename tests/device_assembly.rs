@@ -602,3 +602,28 @@ fn a_shared_device_is_one_state_per_process() {
     assert!(GpuDevice::shared(GpuBackend::Cuda, 0).reserved_bytes() > 0);
     assert_eq!(GpuDevice::cuda(0).reserved_bytes(), 0);
 }
+
+/// With a device assembly the first linearization is assembled on the
+/// device too (the CPU only brings the model's working copies to the
+/// start, which the layout reads), and the solve still lands on the CPU
+/// route's optimum.
+#[test]
+fn the_first_linearization_is_assembled_on_the_device() {
+    use arael::simple_lm::{LmConfig, SparseFaer};
+    let lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let sink = lines.clone();
+    arael::log::set_sink(move |_, m| sink.lock().unwrap().push(m.to_string()));
+    let run = |gpu: bool, verbose: bool| {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let cfg = LmConfig::<f64> { max_iters: 50, verbose, ..Default::default() };
+        s.solve_with(&mut SparseFaer::<f64>::from_options(&options(gpu, true)), &cfg).unwrap()
+    };
+    let device = run(true, true);
+    arael::log::reset_sink();
+    let cpu = run(false, false);
+    let lines = lines.lock().unwrap();
+    assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{lines:#?}");
+    assert!((device.start_cost - cpu.start_cost).abs() <= 1e-12 * cpu.start_cost);
+    assert!((device.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost);
+}
