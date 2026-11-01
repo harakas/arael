@@ -15,6 +15,9 @@ cholmod = ["arael/cholmod", "eigen"]
 # WARNING: cholmod-gpl links CHOLMOD's GPL-licensed Supernodal module; the
 # resulting binary is subject to the GPL.
 cholmod-gpl = ["arael/cholmod-gpl", "cholmod"]
+# The GPU routes (ARAEL_GPU=cuda|hip[:index]).
+gpu-cuda = ["arael/gpu-cuda"]
+gpu-hip = ["arael/gpu-hip"]
 
 [dependencies]
 arael = { path = "../..", features = ["threads"] }

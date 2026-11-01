@@ -3,6 +3,11 @@ name = "plane-bench"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# The GPU routes (ARAEL_GPU=cuda|hip[:index]).
+gpu-cuda = ["arael/gpu-cuda"]
+gpu-hip = ["arael/gpu-hip"]
+
 [dependencies]
 arael = { path = "../..", features = ["threads"] }
 bench-harness = { path = "../harness", features = ["factrs"] }

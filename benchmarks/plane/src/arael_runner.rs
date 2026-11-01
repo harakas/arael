@@ -366,7 +366,8 @@ impl bench_harness::arael::Model for World {
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean())
-        .with_mixed_precision(bench_harness::arael::mixed_precision())), m, cfg, ctx)
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
+        .with_gpu(bench_harness::arael::gpu())), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -392,7 +393,8 @@ pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean())
-        .with_mixed_precision(bench_harness::arael::mixed_precision())),
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
+        .with_gpu(bench_harness::arael::gpu())),
         &mut world,
         &cfg,
     )
@@ -412,7 +414,8 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean())
-        .with_mixed_precision(bench_harness::arael::mixed_precision())),
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
+        .with_gpu(bench_harness::arael::gpu())),
         &mut world,
         &cfg,
     )
@@ -452,7 +455,8 @@ impl bench_harness::arael::Model for WorldF {
             .with_block_supernodal(block_supernodal())
             .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean())
-        .with_mixed_precision(bench_harness::arael::mixed_precision())), m, cfg, ctx)
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
+        .with_gpu(bench_harness::arael::gpu())), m, cfg, ctx)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;

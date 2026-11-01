@@ -212,7 +212,8 @@ pub fn solve_f64<P: arael::simple_lm::LmProblemInternals<f64>>(
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean())
-        .with_mixed_precision(bench_harness::arael::mixed_precision()));
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
+        .with_gpu(bench_harness::arael::gpu()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 
@@ -228,7 +229,8 @@ pub fn solve_f32<P: arael::simple_lm::LmProblemInternals<f32>>(
         .with_block_supernodal(block_supernodal())
         .with_block_supernodal_batching(block_supernodal_batch())
         .with_block_supernodal_memory_lean(block_supernodal_lean())
-        .with_mixed_precision(bench_harness::arael::mixed_precision()));
+        .with_mixed_precision(bench_harness::arael::mixed_precision())
+        .with_gpu(bench_harness::arael::gpu()));
     arael::simple_lm::lm_solve_with_context(params, &mut solver, p, cfg, ctx)
 }
 
