@@ -327,6 +327,7 @@ dependencies = [
  "arael-faer",
  "bytemuck",
  "cubecl",
+ "cubecl-environment",
  "cubecl-runtime",
 ]
 

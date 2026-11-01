@@ -4,6 +4,10 @@
 //! Loops with a run-time trip count are written unrolled where the loads
 //! matter: LLVM's NVPTX path leaves them rolled, and each iteration then
 //! waits for its own load.
+//!
+//! The solve's kernels take a `gate`: they do nothing unless `gate[0]` is
+//! nonzero, so a refinement can stop on the device and the steps launched
+//! after it cost only their launches.
 
 // Cube code, not Rust: the casts fix the types the `#[cube]` macro sees,
 // the DSL has no `div_ceil` or `partial_cmp`, and a kernel's parameters are
@@ -18,7 +22,7 @@
 
 use cubecl::prelude::*;
 
-use crate::plan::{GROUP, H_CMAP, H_DIMS, H_PAIR_KW_PTR, H_PR_CMAP, H_PR_D, H_PR_R0, H_PR_RMAP, H_PR_S, H_RMAP, H_ROW_SC, H_ROW_SC_OFF, H_SC_START, H_SUP_BEGIN, H_VAL_PTR, NB, TB, TC, TK, TR, XR_CH};
+use crate::plan::{GROUP, H_BLK_WIDTH, H_CMAP, H_DIMS, H_ORDER, H_PAIR_KW_PTR, H_PART, H_PR_CMAP, H_PR_D, H_PR_R0, H_PR_RMAP, H_PR_S, H_RMAP, H_ROW_SC, H_ROW_SC_OFF, H_SC_START, H_SUP_BEGIN, H_VAL_PTR, NB, TB, TC, TK, TR, XR_CH};
 
 #[cube(launch_unchecked)]
 pub fn k_zero<F: Float>(buf: &mut [F], n: u32) {
@@ -654,12 +658,16 @@ pub fn k_syrk<F: Float>(panels: &[u32], npanels: u32, j: u32, plan: &[u32], fact
 /// final y from its target's x, atomically. `x` and `xa` are the same buffer.
 #[cube(launch_unchecked)]
 pub fn k_fwd_gather<F: Float + CubePrimitive<Scalar: AtomicNumeric>>(
+    gate: &[u32],
     items: &[u32],
     plan: &[u32],
     factor: &[F],
     x: &[F],
     xa: &mut [Atomic<F>],
-    ) {
+) {
+    if gate[0] == 0u32 {
+        terminate!();
+    }
     let o_dims = plan[H_DIMS] as usize;
     let o_val_ptr = plan[H_VAL_PTR] as usize;
     let o_sup_begin = plan[H_SUP_BEGIN] as usize;
@@ -783,7 +791,10 @@ pub fn load_tile32<F: Float>(factor: &[F], panel: usize, h: usize, j0: usize, nb
 /// plane on shared data, the rows below updated by all units with the full
 /// block's 32 loads issued before its FMAs. `max_q`: the widest supernode.
 #[cube(launch_unchecked)]
-pub fn k_fwd_trsv<F: Float>(list: &[u32], plan: &[u32], factor: &[F], x: &mut [F], #[comptime] max_q: usize) {
+pub fn k_fwd_trsv<F: Float>(gate: &[u32], list: &[u32], plan: &[u32], factor: &[F], x: &mut [F], #[comptime] max_q: usize) {
+    if gate[0] == 0u32 {
+        terminate!();
+    }
     let o_dims = plan[H_DIMS] as usize;
     let o_val_ptr = plan[H_VAL_PTR] as usize;
     let o_sup_begin = plan[H_SUP_BEGIN] as usize;
@@ -861,7 +872,10 @@ pub fn k_fwd_trsv<F: Float>(list: &[u32], plan: &[u32], factor: &[F], x: &mut [F
 /// XR_CH at a time, a plane per column with the lanes over the rows. `lu`:
 /// loads in flight per lane iteration.
 #[cube(launch_unchecked)]
-pub fn k_bwd_gemv<F: Float + CubePrimitive<Scalar: PlaneNumeric>>(items: &[u32], plan: &[u32], factor: &[F], x: &mut [F], #[comptime] lu: usize) {
+pub fn k_bwd_gemv<F: Float + CubePrimitive<Scalar: PlaneNumeric>>(gate: &[u32], items: &[u32], plan: &[u32], factor: &[F], x: &mut [F], #[comptime] lu: usize) {
+    if gate[0] == 0u32 {
+        terminate!();
+    }
     let o_dims = plan[H_DIMS] as usize;
     let o_val_ptr = plan[H_VAL_PTR] as usize;
     let o_sup_begin = plan[H_SUP_BEGIN] as usize;
@@ -915,13 +929,17 @@ pub fn k_bwd_gemv<F: Float + CubePrimitive<Scalar: PlaneNumeric>>(items: &[u32],
 /// the first plane on shared data.
 #[cube(launch_unchecked)]
 pub fn k_bwd_trsv<F: Float + CubePrimitive<Scalar: PlaneNumeric>>(
+    gate: &[u32],
     list: &[u32],
     plan: &[u32],
     factor: &[F],
     x: &mut [F],
-        #[comptime] max_q: usize,
+    #[comptime] max_q: usize,
     #[comptime] lu: usize,
 ) {
+    if gate[0] == 0u32 {
+        terminate!();
+    }
     let o_dims = plan[H_DIMS] as usize;
     let o_val_ptr = plan[H_VAL_PTR] as usize;
     let o_sup_begin = plan[H_SUP_BEGIN] as usize;
@@ -985,5 +1003,78 @@ pub fn k_bwd_trsv<F: Float + CubePrimitive<Scalar: PlaneNumeric>>(
     while c1 < q {
         x[col0 + c1] = xs[c1];
         c1 += nt;
+    }
+}
+
+/// The seed from values of another scalar (S formed in f64 on the device,
+/// the factor in f32): as `k_seed`, the values cast as they land.
+#[cube(launch_unchecked)]
+pub fn k_seed_from<M: Float, F: Float>(tiles: &[u32], vals: &[M], factor: &mut [F], ntiles: u32) {
+    let t = ABSOLUTE_POS;
+    if t < ntiles as usize {
+        let dst = tiles[6 * t] as usize;
+        let stride = tiles[6 * t + 1] as usize;
+        let trans = tiles[6 * t + 2];
+        let off = tiles[6 * t + 3] as usize;
+        let wr = tiles[6 * t + 4] as usize;
+        let wc = tiles[6 * t + 5] as usize;
+        if trans == 0u32 {
+            for c in 0..wc {
+                for r in 0..wr {
+                    factor[dst + c * stride + r] = F::cast_from(vals[off + c * wr + r]);
+                }
+            }
+        } else {
+            for c in 0..wr {
+                for r in 0..wc {
+                    factor[dst + c * stride + r] = F::cast_from(vals[off + c + r * wr]);
+                }
+            }
+        }
+    }
+}
+
+/// The right-hand side into the factor's ordering and scalar: one unit per
+/// permuted block.
+#[cube(launch_unchecked)]
+pub fn k_perm_in<F: Float>(gate: &[u32], plan: &[u32], x: &[f64], xb: &mut [F], nb: u32) {
+    if gate[0] == 0u32 {
+        terminate!();
+    }
+    let o_order = plan[H_ORDER] as usize;
+    let o_blk_width = plan[H_BLK_WIDTH] as usize;
+    let o_sc_start = plan[H_SC_START] as usize;
+    let o_part = plan[H_PART] as usize;
+    let k = ABSOLUTE_POS;
+    if k < nb as usize {
+        let old = plan[o_order + k] as usize;
+        let w = plan[o_blk_width + k] as usize;
+        let dst = plan[o_sc_start + k] as usize;
+        let src = plan[o_part + old] as usize;
+        for i in 0..w {
+            xb[dst + i] = F::cast_from(x[src + i]);
+        }
+    }
+}
+
+/// The solution back into the matrix's ordering, in f64.
+#[cube(launch_unchecked)]
+pub fn k_perm_out<F: Float>(gate: &[u32], plan: &[u32], xb: &[F], x: &mut [f64], nb: u32) {
+    if gate[0] == 0u32 {
+        terminate!();
+    }
+    let o_order = plan[H_ORDER] as usize;
+    let o_blk_width = plan[H_BLK_WIDTH] as usize;
+    let o_sc_start = plan[H_SC_START] as usize;
+    let o_part = plan[H_PART] as usize;
+    let k = ABSOLUTE_POS;
+    if k < nb as usize {
+        let old = plan[o_order + k] as usize;
+        let w = plan[o_blk_width + k] as usize;
+        let src = plan[o_sc_start + k] as usize;
+        let dst = plan[o_part + old] as usize;
+        for i in 0..w {
+            x[dst + i] = f64::cast_from(xb[src + i]);
+        }
     }
 }

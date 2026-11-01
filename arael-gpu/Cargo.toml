@@ -21,4 +21,6 @@ hip = ["cubecl/hip"]
 arael-faer = { workspace = true }
 cubecl = "0.11"
 cubecl-runtime = "0.11"
+# StreamId, to pin a context's client to its own stream.
+cubecl-environment = "0.11"
 bytemuck = "1"

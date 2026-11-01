@@ -9,26 +9,40 @@
 //! solves against the factor, in `f64` or in `f32` (for refinement against
 //! the f64 matrix, which arael's solver drives).
 //!
+//! [`GpuSchur`] forms the reduced system of a Schur-complement route on the
+//! device from the Hessian's values, and runs the solve, the refinement and
+//! the back-substitution there against a [`GpuFactor`].
+//!
+//! Both run on a [`GpuContext`]: a stream of its own and an arena their
+//! buffers are leased from and returned to, so solving problem after problem
+//! through one context stops allocating once the largest has been seen.
+//!
 //! Features `cuda` and `hip` select the runtimes; without one the kernels
-//! compile but no [`client`] can be made.
+//! compile but no context can be made.
 //!
 //! ```ignore
-//! use arael_gpu::{GpuBackend, GpuFactor, GpuPrecision, client};
-//! let client = client(GpuBackend::Cuda, 0)?;
-//! let mut g = GpuFactor::new(client, GpuPrecision::F32, &sn, a.symbolic(), &Default::default());
+//! use arael_gpu::{GpuBackend, GpuContext, GpuFactor, GpuPrecision};
+//! let ctx = GpuContext::new(GpuBackend::Cuda, 0)?;
+//! let mut g = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, a.symbolic(), &Default::default());
 //! g.factorize(a.vals())?;
 //! g.solve(&mut rhs);
 //! ```
 
+pub mod context;
+pub mod host;
 pub mod kernels;
 pub mod plan;
+pub mod schur;
 pub mod supernodal;
-#[cfg(test)]
-pub(crate) mod test_util;
+/// Synthetic block systems for the tests and the examples (not API).
+#[doc(hidden)]
+pub mod test_util;
 
 use cubecl::prelude::*;
 
+pub use context::{GpuContext, Lease};
 pub use plan::GpuSupernodalParams;
+pub use schur::{GpuSchur, GpuSchurError, RefineStats};
 pub use supernodal::GpuSupernodal;
 
 use arael_faer::schur::SchurReal;
@@ -72,7 +86,8 @@ impl core::fmt::Display for GpuError {
 
 impl std::error::Error for GpuError {}
 
-/// A client on device `index` of `backend`.
+/// A client on device `index` of `backend`, on the calling thread's stream
+/// ([`GpuContext::new`] makes one on a stream of its own).
 pub fn client(backend: GpuBackend, index: usize) -> Result<Client, GpuError> {
     match backend {
         GpuBackend::Cuda => {
@@ -124,15 +139,15 @@ pub enum GpuFactor {
 impl GpuFactor {
     /// As [`GpuSupernodal::new`], in `precision`.
     pub fn new(
-        client: Client,
+        ctx: &GpuContext,
         precision: GpuPrecision,
         sn: &SupernodalSymbolic,
         asym: &arael_faer::bsc::SymbolicSparseBlockColMat<plan::SparseIndex>,
         params: &GpuSupernodalParams,
     ) -> Self {
         match precision {
-            GpuPrecision::F32 => GpuFactor::F32(GpuSupernodal::new(client, sn, asym, params)),
-            GpuPrecision::F64 => GpuFactor::F64(GpuSupernodal::new(client, sn, asym, params)),
+            GpuPrecision::F32 => GpuFactor::F32(GpuSupernodal::new(ctx, sn, asym, params)),
+            GpuPrecision::F64 => GpuFactor::F64(GpuSupernodal::new(ctx, sn, asym, params)),
         }
     }
 
@@ -145,7 +160,7 @@ impl GpuFactor {
     }
 
     /// As [`GpuSupernodal::solve`].
-    pub fn solve<M: SchurReal>(&mut self, rhs: &mut [M]) {
+    pub fn solve<M: SchurReal + 'static>(&mut self, rhs: &mut [M]) {
         match self {
             GpuFactor::F32(g) => g.solve(rhs),
             GpuFactor::F64(g) => g.solve(rhs),
@@ -157,6 +172,15 @@ impl GpuFactor {
         match self {
             GpuFactor::F32(_) => GpuPrecision::F32,
             GpuFactor::F64(_) => GpuPrecision::F64,
+        }
+    }
+
+    /// The context the factor runs on; a [`GpuSchur`] feeding it shares it,
+    /// so the two stay on one stream.
+    pub fn context(&self) -> &GpuContext {
+        match self {
+            GpuFactor::F32(g) => g.context(),
+            GpuFactor::F64(g) => g.context(),
         }
     }
 }

@@ -51,8 +51,13 @@ pub const H_CMAP: usize = 11;
 pub const H_PAIR_KW_PTR: usize = 12;
 pub const H_ROW_SC: usize = 13;
 pub const H_ROW_SC_OFF: usize = 14;
+/// The permutation, for the device-side solve: the block elimination order,
+/// the permuted block widths, and the matrix's scalar partition.
+pub const H_ORDER: usize = 15;
+pub const H_BLK_WIDTH: usize = 16;
+pub const H_PART: usize = 17;
 /// Words of the header.
-pub const HEADER: usize = 16;
+pub const HEADER: usize = 32;
 
 /// How the work is cut. The defaults are the measured ones (docs/dev/GPU.md, E3).
 #[derive(Clone, Copy, Debug)]
@@ -289,7 +294,10 @@ impl Plan {
         let pr_d: Vec<u32> = self.pairs.iter().map(|x| x.d).collect();
         let pr_r0: Vec<u32> = self.pairs.iter().map(|x| x.r0).collect();
         let pr_s: Vec<u32> = self.pairs.iter().map(|x| x.s).collect();
-        let arrays: [(usize, &[u32]); 15] = [
+        let arrays: [(usize, &[u32]); 18] = [
+            (H_ORDER, &self.order),
+            (H_BLK_WIDTH, &self.blk_width),
+            (H_PART, &self.part),
             (H_DIMS, &self.dims),
             (H_VAL_PTR, &self.val_ptr),
             (H_SUP_BEGIN, &self.sup_begin),
