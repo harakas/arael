@@ -5,7 +5,8 @@
 //! `GpuContext`, so the arena's buffers serve them all; `--context-per-solve`
 //! gives every solve a context of its own instead; `--no-graphs` launches
 //! every attempt's kernels instead of replaying the first one's graph;
-//! `--attempts N` sets the attempts per solve (4).
+//! `--attempts N` sets the attempts per solve (4); `--hip` runs on HIP
+//! device 0 (built with `--features hip`) instead of CUDA.
 //!
 //! Between phases it writes a marker copy of a unique size, so an API trace
 //! can be cut into phases: `scripts/gpu_trace.py` reports allocations,
@@ -34,11 +35,12 @@ fn marker(c: &Client, buf: &Handle, pinned: &Bytes, id: usize) {
 
 fn main() {
     let f64_factor = std::env::args().any(|a| a == "--f64");
+    let backend = if std::env::args().any(|a| a == "--hip") { GpuBackend::Hip } else { GpuBackend::Cuda };
     let per_solve = std::env::args().any(|a| a == "--context-per-solve");
     let graphs = !std::env::args().any(|a| a == "--no-graphs");
     let args: Vec<String> = std::env::args().collect();
     let attempts: usize = args.iter().position(|a| a == "--attempts").map_or(4, |i| args[i + 1].parse().expect("--attempts N"));
-    let shared = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
+    let shared = GpuContext::new(backend, 0).unwrap();
     let c = shared.client().clone();
     let mbuf = c.empty(MARKER + 4096);
     let mut pinned = Bytes::from_bytes_vec(vec![0u8; MARKER + 4096]);
@@ -68,7 +70,7 @@ fn main() {
             let phase = si * 16 + r;
             marker(&c, &mbuf, &pinned, 2 * phase + 1);
             // a fresh solver's device state, leased from the context
-            let ctx = if per_solve { GpuContext::new(GpuBackend::Cuda, 0).unwrap() } else { shared.clone() };
+            let ctx = if per_solve { GpuContext::new(backend, 0).unwrap() } else { shared.clone() };
             let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
             g.use_graphs(graphs);
             let mut f = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());

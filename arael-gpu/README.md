@@ -40,6 +40,15 @@ let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Def
 let stats = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
 ```
 
+`assembly` holds what every model's device assembly shares: the
+entities' parameter values gathered from the parameter vector, their
+Euler-angle rotations and derivatives, a residual row's rank-one writes
+into an entity's tile and a cross tile of the Hessian and into the
+gradient, and the cost's reduction. arael's `#[arael(root)]` generates a
+model's constraint kernels over them, from the same bodies its CPU
+assembly is generated from, and `GpuSchur::solve_resident` then solves
+from the Hessian and gradient they left on the device.
+
 The refinement decides on the device whether the next step is due; the
 steps launched after it has converged do nothing. The first `solve` with a
 factor and a refinement setting runs its kernels and then captures them as

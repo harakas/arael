@@ -28,6 +28,7 @@
 //! g.solve(&mut rhs);
 //! ```
 
+pub mod assembly;
 pub mod context;
 pub mod host;
 pub mod kernels;
@@ -41,6 +42,10 @@ pub mod test_util;
 use cubecl::prelude::*;
 
 pub use context::{GpuContext, Lease};
+/// CubeCL, for kernels written against this crate (arael's generated device code).
+pub use cubecl;
+/// bytemuck, whose `Pod` bounds this crate's uploads take.
+pub use bytemuck;
 pub use plan::GpuSupernodalParams;
 pub use schur::{GpuSchur, GpuSchurError, RefineStats};
 pub use supernodal::GpuSupernodal;
@@ -134,6 +139,12 @@ pub fn sync(client: &Client) {
 pub(crate) fn try_sync(client: &Client) -> Result<(), cubecl_runtime::server::ServerError> {
     let _shared = CAPTURE.read().unwrap_or_else(|e| e.into_inner());
     cubecl::future::block_on(client.sync())
+}
+
+/// Read `handles` back in one wait (see [`sync`] on why through here).
+pub fn read(client: &Client, handles: Vec<cubecl::server::Handle>) -> Result<Vec<cubecl::bytes::Bytes>, cubecl_runtime::server::ServerError> {
+    let _shared = CAPTURE.read().unwrap_or_else(|e| e.into_inner());
+    client.read(handles)
 }
 
 /// Read `handle` back, waiting for it (see [`sync`] on why through here).

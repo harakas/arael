@@ -864,6 +864,11 @@ impl GpuSchur {
         }
     }
 
+    /// The context the reduction runs on.
+    pub fn context(&self) -> &GpuContext {
+        &self.ctx
+    }
+
     /// The reduced system's scalar dimension.
     pub fn kept_size(&self) -> usize {
         self.nks
@@ -1024,21 +1029,72 @@ impl GpuSchur {
         refine: Option<(usize, f64)>,
         delta: &mut [M],
     ) -> Result<RefineStats, GpuSchurError> {
-        assert_eq!(delta.len(), self.n);
         assert_eq!(rhs.len(), self.n);
+        // the buffers the uploads land in are fixed first: a graph replays
+        // against the addresses it was captured with
+        let ctx = self.ctx.clone();
+        self.h.reserve(&ctx, hvals.len());
+        self.rhs.reserve(&ctx, rhs.len());
+        self.h_len = hvals.len();
+        // SAFETY: `hvals` and `rhs` stay borrowed until `run`'s read.
+        self.run(factor, refine, delta, &mut |this| unsafe { this.upload(hvals, rhs) })
+    }
+
+    /// The buffer of `len` f64 that [`solve_resident`](Self::solve_resident)
+    /// reads the Hessian's tile values from, for a device assembly to
+    /// write; the same buffer until a longer one is asked for.
+    pub fn h_target(&mut self, len: usize) -> Handle {
+        let ctx = self.ctx.clone();
+        self.h_len = len;
+        self.h.reserve(&ctx, len).view(len.max(1) * 8)
+    }
+
+    /// The Hessian's tile values as the last upload or device assembly
+    /// left them, read back (for diagnostics).
+    pub fn h_values(&self) -> Vec<f64> {
+        let bytes = crate::read_one(self.ctx.client(), self.h.lease().view(self.h_len.max(1) * 8)).expect("read the Hessian");
+        f64::from_bytes(&bytes)[..self.h_len].to_vec()
+    }
+
+    /// The buffer of the gradient (`n` f64) that
+    /// [`solve_resident`](Self::solve_resident) reads.
+    pub fn rhs_target(&mut self) -> Handle {
+        let ctx = self.ctx.clone();
+        self.rhs.reserve(&ctx, self.n).view(self.n.max(1) * 8)
+    }
+
+    /// [`solve`](Self::solve) from the Hessian's values and the gradient
+    /// already on the device, in the buffers of [`h_target`](Self::h_target)
+    /// and [`rhs_target`](Self::rhs_target), the Hessian damped.
+    pub fn solve_resident<M: arael_faer::schur::SchurReal + 'static>(
+        &mut self,
+        factor: &mut GpuFactor,
+        refine: Option<(usize, f64)>,
+        delta: &mut [M],
+    ) -> Result<RefineStats, GpuSchurError> {
+        self.run(factor, refine, delta, &mut |_| {})
+    }
+
+    /// One damped solve after `upload` has put the inputs in place.
+    fn run<M: arael_faer::schur::SchurReal + 'static>(
+        &mut self,
+        factor: &mut GpuFactor,
+        refine: Option<(usize, f64)>,
+        delta: &mut [M],
+        upload: &mut dyn FnMut(&mut Self),
+    ) -> Result<RefineStats, GpuSchurError> {
+        assert_eq!(delta.len(), self.n);
         assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
         let ctx = self.ctx.clone();
         let c = ctx.client();
         let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
-        // the buffers the uploads land in are fixed first: a graph replays
-        // against the addresses it was captured with
         let key = GraphKey {
             factor: factor.id(),
             max_steps,
             tol_bits: tol_rel.to_bits(),
-            h: self.h.reserve(&ctx, hvals.len()).id(),
-            h_len: hvals.len(),
-            rhs: self.rhs.reserve(&ctx, rhs.len()).id(),
+            h: self.h.lease().id(),
+            h_len: self.h_len,
+            rhs: self.rhs.lease().id(),
         };
         let replay = self.graphs && self.graph.as_ref().is_some_and(|g| g.key == key);
         let capture = self.graphs && !replay;
@@ -1048,8 +1104,7 @@ impl GpuSchur {
             c.graph_prepare().expect("prepare the attempt's graph capture");
         }
         let flight = crate::host::InFlight::new(c);
-        // SAFETY: `hvals` and `rhs` stay borrowed until the read below.
-        unsafe { self.upload(hvals, rhs) };
+        upload(self);
         if replay {
             // SAFETY: the graph's buffers are this reduction's leases, the
             // factor's (its id is in the key) and the uploads' (theirs too),
