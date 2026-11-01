@@ -588,3 +588,17 @@ fn a_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
     assert_eq!((device.1, device.2), (host.1, host.2));
     assert_close(&device.3, &host.3, 1e-12, "the partial state");
 }
+
+/// `GpuDevice::shared` hands every caller the same device state: a later
+/// call finds the buffers a solve through an earlier one left, a separately
+/// created device has none.
+#[test]
+fn a_shared_device_is_one_state_per_process() {
+    use arael::simple_lm::{GpuBackend, GpuDevice, LmConfig, SparseFaer};
+    let (cameras, points, observations) = consistent_scene::<f64>();
+    let mut s = Scene { cameras, points, observations };
+    let opts = options(true, true).with_gpu(Some(GpuDevice::shared(GpuBackend::Cuda, 0)));
+    s.solve_with(&mut SparseFaer::<f64>::from_options(&opts), &LmConfig::<f64>::default()).unwrap();
+    assert!(GpuDevice::shared(GpuBackend::Cuda, 0).reserved_bytes() > 0);
+    assert_eq!(GpuDevice::cuda(0).reserved_bytes(), 0);
+}

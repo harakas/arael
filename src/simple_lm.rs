@@ -4665,6 +4665,26 @@ impl GpuDevice {
     pub fn hip(index: usize) -> Self {
         Self::new(GpuBackend::Hip, index)
     }
+    /// The process's shared state of device `index` of `backend`: every
+    /// call returns a clone of one value, so the solves of callers that
+    /// cannot keep a value (the C, C++ and Python interfaces) share its
+    /// stream and buffers.
+    ///
+    /// ```ignore
+    /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::shared(GpuBackend::Cuda, 0)));
+    /// // ... a solve through `opts`; a later call finds the buffers it left
+    /// assert!(GpuDevice::shared(GpuBackend::Cuda, 0).reserved_bytes() > 0);
+    /// ```
+    pub fn shared(backend: GpuBackend, index: usize) -> Self {
+        static DEVICES: std::sync::Mutex<std::vec::Vec<GpuDevice>> = std::sync::Mutex::new(std::vec::Vec::new());
+        let mut devices = DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(d) = devices.iter().find(|d| d.backend == backend && d.index == index) {
+            return d.clone();
+        }
+        let d = Self::new(backend, index);
+        devices.push(d.clone());
+        d
+    }
 
     /// Bytes of device memory the state holds; 0 before its first solve.
     pub fn reserved_bytes(&self) -> usize {
