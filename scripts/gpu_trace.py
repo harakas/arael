@@ -39,6 +39,7 @@ CATEGORIES = {
     "pinned alloc": ("cuMemAllocHost_v2", "cuMemHostAlloc", "cuMemHostRegister_v2", "cudaMallocHost", "cudaHostAlloc"),
     "pinned free": ("cuMemFreeHost", "cuMemHostUnregister", "cudaFreeHost"),
     "module load": ("cuModuleLoadData", "cuModuleLoadDataEx", "cuLibraryLoadData"),
+    "graph inst": ("cuGraphInstantiate", "cuGraphInstantiate_v2", "cuGraphInstantiateWithFlags", "cuGraphInstantiateWithParams"),
 }
 
 
@@ -90,7 +91,7 @@ def report(db_path):
                 break
         return lo
 
-    cols = ["launch", "sync", "h2d", "h2d MB", "d2h", "d2h MB", "dev alloc", "dev free", "pinned alloc", "pinned free", "module load"]
+    cols = ["launch", "sync", "h2d", "h2d MB", "d2h", "d2h MB", "dev alloc", "dev free", "pinned alloc", "pinned free", "module load", "graph inst"]
     counts = [dict.fromkeys(cols, 0) for _ in bounds]
     for t, name in api:
         cat = which.get(name)

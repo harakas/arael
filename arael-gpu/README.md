@@ -40,9 +40,12 @@ let stats = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
 ```
 
 The refinement decides on the device whether the next step is due; the
-steps launched after it has converged do nothing. Each structure's integer
-data goes up in one copy; the matrix values are read from the caller's
-slices in place (`host::write_borrowed`).
+steps launched after it has converged do nothing. The first `solve` with a
+factor and a refinement setting runs its kernels and then captures them as
+a graph (CUDA or HIP), and the solves after it replay that graph, one
+launch instead of hundreds (`use_graphs(false)` turns this off). Each
+structure's integer data goes up in one copy; the matrix values are read
+from the caller's slices in place (`host::write_borrowed`).
 
 Through arael, the same is `SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)))`
 with arael's `gpu-cuda` (or `gpu-hip`) feature; see docs/SOLVERS.md.
@@ -62,9 +65,10 @@ cargo test -p arael-gpu --features cuda   # the device against arael-faer's CPU 
 ```
 
 `examples/repeat_solves.rs` solves several structures several times the way
-arael does and writes marker copies between phases; `scripts/gpu_trace.py`
+arael does, prints the wall time per attempt (`--no-graphs` for launched
+kernels), and writes marker copies between phases; `scripts/gpu_trace.py`
 traces any command with nsys and counts, per phase, launches, blocking
-syncs, copies, and device and pinned allocations:
+syncs, copies, device and pinned allocations, and graph instantiations:
 
 ```sh
 cargo build -r -p arael-gpu --features cuda --example repeat_solves

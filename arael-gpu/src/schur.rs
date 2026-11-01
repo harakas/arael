@@ -602,6 +602,11 @@ pub enum GpuSchurError {
 /// reduction: the Hessian's values and gradient as uploaded, the block
 /// inverses, W, S and the reduced right-hand side, the solution.
 pub struct GpuSchur {
+    /// The last attempt's launches as a graph, with what it was captured
+    /// against; first, so it is dropped before the buffers it records.
+    graph: Option<Captured>,
+    graphs: bool,
+    replayed: bool,
     ctx: GpuContext,
     plan: Lease,
     plan_len: usize,
@@ -636,6 +641,24 @@ pub struct GpuSchur {
     /// at `status_at` the refinement's state and the flags.
     out: Lease,
     status_at: usize,
+}
+
+/// What a captured attempt depends on beyond the reduction's own buffers:
+/// the factor whose kernels it recorded, the refinement's launches and
+/// tolerance, and the buffers the uploads land in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct GraphKey {
+    factor: u64,
+    max_steps: usize,
+    tol_bits: u64,
+    h: u64,
+    h_len: usize,
+    rhs: u64,
+}
+
+struct Captured {
+    key: GraphKey,
+    graph: cubecl_runtime::client::Graph,
 }
 
 fn round_cap(w: usize) -> usize {
@@ -817,6 +840,9 @@ impl GpuSchur {
             r: empty(nks),
             out: ctx.lease(status_at + STATUS_BYTES),
             status_at,
+            graph: None,
+            graphs: true,
+            replayed: false,
             ctx: ctx.clone(),
             plan,
             plan_len,
@@ -864,34 +890,38 @@ impl GpuSchur {
         self.out.handle().clone().offset_start(self.status_at as u64)
     }
 
-    /// Zero the flags, upload the Hessian's values and the gradient, and
-    /// launch the reduction.
+    /// Upload the Hessian's values and the gradient, in place, without
+    /// waiting.
     ///
     /// # Safety
     ///
     /// As [`Upload::write`]: `hvals` and `rhs` stay borrowed and unchanged
     /// until a blocking read on the context's client has returned.
-    unsafe fn launch_reduce<M: arael_faer::schur::SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) {
+    unsafe fn upload<M: arael_faer::schur::SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) {
         assert_eq!(rhs.len(), self.n);
         let ctx = self.ctx.clone();
-        let c = ctx.client();
-        let arr = |h: &Handle, len: usize| unsafe { BufferArg::from_raw_parts(h.clone(), len.max(1)) };
-        let d256 = CubeDim::new_1d(256);
-        let d32 = CubeDim::new_1d(32);
-        let count = |n: u32| CubeCount::Static(n.max(1), 1, 1);
         unsafe {
-            crate::kernels::k_zero_u32::launch_unchecked(c, count(1), d32, arr(&self.flags(0), N_FLAGS), N_FLAGS as u32);
             self.h.write(&ctx, hvals, |v| v.to_f64());
             self.rhs.write(&ctx, rhs, |v| v.to_f64());
         }
         self.h_len = hvals.len();
-        let (h, r) = (self.h.handle().clone(), self.rhs.handle().clone());
+    }
+
+    /// Zero the flags and launch the reduction, from the uploaded values.
+    fn launch_reduce(&self) {
+        let c = self.ctx.client();
+        let arr = |h: &Handle, len: usize| unsafe { BufferArg::from_raw_parts(h.clone(), len.max(1)) };
+        let d256 = CubeDim::new_1d(256);
+        let d32 = CubeDim::new_1d(32);
+        let count = |n: u32| CubeCount::Static(n.max(1), 1, 1);
+        let (h, r) = (self.h.handle(), self.rhs.handle());
         let plen = self.plan_len;
         unsafe {
-            k_schur_elim::launch_unchecked(c, count(self.ne.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(&h, self.h_len), arr(&r, self.n), arr(self.dinv.handle(), 1), arr(self.z.handle(), 1), arr(&self.flags(F_ELIM), 1), self.ne, self.ew_cap);
-            k_schur_w::launch_unchecked(c, count(self.no.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(&h, self.h_len), arr(self.dinv.handle(), 1), arr(self.w.handle(), 1), self.no);
-            k_schur_tiles::launch_unchecked(c, count(self.nt), d32, arr(self.plan.handle(), plen), arr(&h, self.h_len), arr(self.w.handle(), 1), arr(self.s.handle(), self.s_len), self.acc_cap);
-            k_schur_rhs::launch_unchecked(c, count(self.nk), d32, arr(self.plan.handle(), plen), arr(&h, self.h_len), arr(&r, self.n), arr(self.z.handle(), 1), arr(self.rhs_kept.handle(), self.nks), self.kw_cap);
+            crate::kernels::k_zero_u32::launch_unchecked(c, count(1), d32, arr(&self.flags(0), N_FLAGS), N_FLAGS as u32);
+            k_schur_elim::launch_unchecked(c, count(self.ne.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(r, self.n), arr(self.dinv.handle(), 1), arr(self.z.handle(), 1), arr(&self.flags(F_ELIM), 1), self.ne, self.ew_cap);
+            k_schur_w::launch_unchecked(c, count(self.no.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(self.dinv.handle(), 1), arr(self.w.handle(), 1), self.no);
+            k_schur_tiles::launch_unchecked(c, count(self.nt), d32, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(self.w.handle(), 1), arr(self.s.handle(), self.s_len), self.acc_cap);
+            k_schur_rhs::launch_unchecked(c, count(self.nk), d32, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(r, self.n), arr(self.z.handle(), 1), arr(self.rhs_kept.handle(), self.nks), self.kw_cap);
         }
     }
 
@@ -904,42 +934,38 @@ impl GpuSchur {
         let ctx = self.ctx.clone();
         let flight = crate::host::InFlight::new(ctx.client());
         // SAFETY: `hvals` and `rhs` stay borrowed until the read below.
-        unsafe { self.launch_reduce(hvals, rhs) };
+        unsafe { self.upload(hvals, rhs) };
+        self.launch_reduce();
         let flags = ctx.client().read_one(self.out.view(self.status_at + STATUS_BYTES)).expect("read the flags");
         flight.done();
         let failed = bytemuck::pod_read_unaligned::<u32>(&flags[self.status_at + FLAGS_AT + 4 * F_ELIM..][..4]);
         if failed != 0 { Err(SchurError::NotPositiveDefinite { block: self.elim_blk[failed as usize - 1] as usize }) } else { Ok(()) }
     }
 
-    /// One damped solve, entirely on the device, waiting once: form S and
-    /// the reduced right-hand side from the Hessian's tile values `hvals`
-    /// (in `hsym`'s storage order) and the gradient `rhs`, factorize S with
-    /// `factor`, solve for the kept blocks, refine the solution against S
-    /// when `refine` is `Some((max_steps, tol))` (an f32 factor; `tol`
-    /// relative to the right-hand side, floored by the caller), recover the
-    /// eliminated blocks, and read the full step into `delta` with the
-    /// pivot flags and the refinement's state.
-    ///
-    /// The refinement decides on the device: `max_steps` steps are
-    /// launched, and those after it has converged or stalled do nothing. A
-    /// failed pivot is found with the result, so a failing solve runs to
-    /// the end; `delta` is then left as it was.
-    pub fn solve<M: arael_faer::schur::SchurReal + 'static>(
-        &mut self,
-        factor: &mut GpuFactor,
-        hvals: &[M],
-        rhs: &[M],
-        refine: Option<(usize, f64)>,
-        delta: &mut [M],
-    ) -> Result<RefineStats, GpuSchurError> {
-        assert_eq!(delta.len(), self.n);
-        assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
-        let ctx = self.ctx.clone();
-        let c = ctx.client();
-        let flight = crate::host::InFlight::new(c);
-        // SAFETY: `hvals` and `rhs` stay borrowed until the read below.
-        unsafe { self.launch_reduce(hvals, rhs) };
-        let (h, r_in) = (self.h.handle().clone(), self.rhs.handle().clone());
+    /// Whether [`solve`](Self::solve) captures its launches as a graph and
+    /// replays it (the default): the first solve with a factor and a
+    /// refinement setting runs the kernels and then records them, and the
+    /// solves after it replay the recording, one launch instead of hundreds.
+    pub fn use_graphs(&mut self, on: bool) {
+        self.graphs = on;
+        if !on {
+            self.graph = None;
+        }
+    }
+
+    /// Whether the last [`solve`](Self::solve) replayed a captured graph.
+    pub fn replayed(&self) -> bool {
+        self.replayed
+    }
+
+    /// The launches of one damped solve after the uploads, all of them
+    /// kernels: the reduction, the factorization, the solve, `max_steps`
+    /// refinement steps, the back-substitution. The same sequence every
+    /// time for the same factor and refinement, which is what makes it a
+    /// graph.
+    fn launch_attempt(&self, factor: &mut GpuFactor, max_steps: usize, tol_rel: f64) {
+        self.launch_reduce();
+        let c = self.ctx.client();
         factor.factorize_device(self.s.handle(), self.s_len, &self.flags(F_FACTOR));
         let arr = |h: &Handle, len: usize| unsafe { BufferArg::from_raw_parts(h.clone(), len.max(1)) };
         let d256 = CubeDim::new_1d(256);
@@ -957,8 +983,7 @@ impl GpuSchur {
         };
         copy(&on, self.x_kept.handle(), self.rhs_kept.handle());
         factor.solve_device(self.x_kept.handle());
-        let max_steps = refine.map_or(0, |r| r.0);
-        if let Some((_, tol_rel)) = refine.filter(|_| max_steps > 0) {
+        if max_steps > 0 {
             residual(&on);
             unsafe { k_refine_start::launch_unchecked(c, count(1), d256, arr(self.rhs_kept.handle(), self.nks), arr(self.r.handle(), self.nks), arr(&state, 4), arr(&gate, N_FLAGS), nks, tol_rel) };
             for _ in 0..max_steps {
@@ -972,14 +997,92 @@ impl GpuSchur {
         // the kept blocks into the full vector, then the eliminated ones
         unsafe {
             k_scatter_kept::launch_unchecked(c, count(self.nk.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(self.x_kept.handle(), self.nks), arr(self.out.handle(), self.n), self.nk);
-            k_schur_backsub::launch_unchecked(c, count(self.ne.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(&h, self.h_len), arr(&r_in, self.n), arr(self.dinv.handle(), 1), arr(self.out.handle(), self.n), self.ne, self.ew_cap);
+            k_schur_backsub::launch_unchecked(c, count(self.ne.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(self.h.handle(), self.h_len), arr(self.rhs.handle(), self.n), arr(self.dinv.handle(), 1), arr(self.out.handle(), self.n), self.ne, self.ew_cap);
         }
+    }
+
+    /// One damped solve, entirely on the device, waiting once: form S and
+    /// the reduced right-hand side from the Hessian's tile values `hvals`
+    /// (in `hsym`'s storage order) and the gradient `rhs`, factorize S with
+    /// `factor`, solve for the kept blocks, refine the solution against S
+    /// when `refine` is `Some((max_steps, tol))` (an f32 factor; `tol`
+    /// relative to the right-hand side, floored by the caller), recover the
+    /// eliminated blocks, and read the full step into `delta` with the
+    /// pivot flags and the refinement's state.
+    ///
+    /// The refinement decides on the device: `max_steps` steps are
+    /// launched, and those after it has converged or stalled do nothing. A
+    /// failed pivot is found with the result, so a failing solve runs to
+    /// the end; `delta` is then left as it was. The launches are captured as
+    /// a graph and replayed by the solves after it (see
+    /// [`use_graphs`](Self::use_graphs)).
+    pub fn solve<M: arael_faer::schur::SchurReal + 'static>(
+        &mut self,
+        factor: &mut GpuFactor,
+        hvals: &[M],
+        rhs: &[M],
+        refine: Option<(usize, f64)>,
+        delta: &mut [M],
+    ) -> Result<RefineStats, GpuSchurError> {
+        assert_eq!(delta.len(), self.n);
+        assert_eq!(rhs.len(), self.n);
+        assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
+        let ctx = self.ctx.clone();
+        let c = ctx.client();
+        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
+        // the buffers the uploads land in are fixed first: a graph replays
+        // against the addresses it was captured with
+        let key = GraphKey {
+            factor: factor.id(),
+            max_steps,
+            tol_bits: tol_rel.to_bits(),
+            h: self.h.reserve(&ctx, hvals.len()).id(),
+            h_len: hvals.len(),
+            rhs: self.rhs.reserve(&ctx, rhs.len()).id(),
+        };
+        let replay = self.graphs && self.graph.as_ref().is_some_and(|g| g.key == key);
+        let capture = self.graphs && !replay;
+        if capture {
+            self.graph = None;
+            // before the run that warms the pools up for the recording
+            c.graph_prepare().expect("prepare the attempt's graph capture");
+        }
+        let flight = crate::host::InFlight::new(c);
+        // SAFETY: `hvals` and `rhs` stay borrowed until the read below.
+        unsafe { self.upload(hvals, rhs) };
+        if replay {
+            // SAFETY: the graph's buffers are this reduction's leases, the
+            // factor's (its id is in the key) and the uploads' (theirs too),
+            // all alive; the context's client is pinned to the stream the
+            // graph was captured on, which orders the uploads before and the
+            // read after it.
+            unsafe { self.graph.as_ref().unwrap().graph.replay() }.expect("replay the attempt's graph");
+        } else {
+            self.launch_attempt(factor, max_steps, tol_rel);
+        }
+        self.replayed = replay;
         let bytes = c.read_one(self.out.view(self.status_at + STATUS_BYTES)).expect("read the step");
         flight.done();
         // the attempt is done: rotating CubeCL's drop queue returns the
         // staging its uploads held to the pinned pool, which otherwise grows
         // (the read above has waited, so the rotation's fence wait is free)
         c.flush().expect("device flush");
+        if capture {
+            // The run above warmed the pools: record the same launches, which
+            // do not execute now, for the solves after this one. CubeCL opens
+            // CUDA's capture in global mode, where a sync from any stream of
+            // the process fails while it is open, so the window runs on the
+            // device's thread with nothing else scheduled against it.
+            let this = &*self;
+            let graph = c
+                .exclusive(move || {
+                    c.start_capture().expect("start the attempt's graph capture");
+                    this.launch_attempt(factor, max_steps, tol_rel);
+                    c.stop_capture().expect("capture the attempt's graph")
+                })
+                .expect("run the graph capture exclusively");
+            self.graph = Some(Captured { key, graph });
+        }
         let word = |at: usize| bytemuck::pod_read_unaligned::<u32>(&bytes[at..at + 4]);
         let real = |at: usize| bytemuck::pod_read_unaligned::<f64>(&bytes[at..at + 8]);
         let flag = |f: usize| word(self.status_at + FLAGS_AT + 4 * f);
@@ -1122,6 +1225,107 @@ mod tests {
         assert!(stalled.rnorm <= reached.rnorm, "{stalled:?} against {reached:?}");
         let res0 = rel_residual(&dense, n, &delta0, &rhs);
         assert!(res0 < 1e-8, "residual {res0} after the undone step");
+    }
+
+    /// The second solve with a factor and a refinement setting replays the
+    /// graph the first captured, against new values, and lands where the
+    /// launched kernels land; a new factor or another refinement setting is
+    /// captured anew.
+    #[test]
+    fn replayed_solves_match_launched_ones() {
+        let (h, dense, rhs, elim) = ba_like(40, 300, 9);
+        let n = h.symbolic().ncols();
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let order = nd_block_order(&sym.s);
+        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
+        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
+        // another damping: the replay must see the values written before it
+        let hs = h.symbolic().clone();
+        let mut h2 = h.clone();
+        for blk in 0..hs.nblk_cols() {
+            let t = hs.col_range(blk).find(|&b| hs.blk_row(b) == blk).unwrap();
+            let (w, _) = hs.block_dims(t);
+            let base = hs.val_range(t).start;
+            for i in 0..w {
+                h2.vals_mut()[base + i * w + i] *= 1.5;
+            }
+        }
+        let mut dense2 = dense.clone();
+        for i in 0..n {
+            dense2[i + i * n] *= 1.5;
+        }
+        for precision in [GpuPrecision::F64, GpuPrecision::F32] {
+            let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
+            let mut launched = GpuSchur::new(&ctx, &sym, h.symbolic());
+            launched.use_graphs(false);
+            let mut fl = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
+            let mut f = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            for (round, (hm, dm)) in [(&h, &dense), (&h2, &dense2), (&h, &dense)].into_iter().enumerate() {
+                let (mut a, mut b) = (vec![0.0f64; n], vec![0.0f64; n]);
+                let sa = launched.solve(&mut fl, hm.vals(), &rhs, refine, &mut a).unwrap();
+                let sb = g.solve(&mut f, hm.vals(), &rhs, refine, &mut b).unwrap();
+                assert!(!launched.replayed());
+                assert_eq!(g.replayed(), round > 0, "{precision:?} round {round}");
+                assert_eq!(sa.steps, sb.steps);
+                let res = rel_residual(dm, n, &b, &rhs);
+                assert!(res < 1e-8, "{precision:?} round {round}: residual {res}");
+                let dx = a.iter().zip(&b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs())) / a.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+                assert!(dx < 1e-12, "{precision:?} round {round}: replay against launches {dx}");
+            }
+            // another factor of the same structure, then another refinement setting
+            let mut f2 = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            let mut d = vec![0.0f64; n];
+            g.solve(&mut f2, h.vals(), &rhs, refine, &mut d).unwrap();
+            assert!(!g.replayed());
+            g.solve(&mut f2, h.vals(), &rhs, Some((2, 1e-10)), &mut d).unwrap();
+            assert!(!g.replayed());
+            g.solve(&mut f2, h.vals(), &rhs, Some((2, 1e-10)), &mut d).unwrap();
+            assert!(g.replayed());
+            assert!(rel_residual(&dense, n, &d, &rhs) < 1e-8);
+        }
+    }
+
+    /// A capture on one context while another context reads on another
+    /// thread: CUDA's global capture mode fails any sync of the process while
+    /// a capture is open, so the capture has to keep the device to itself.
+    #[test]
+    fn captures_leave_other_contexts_alone() {
+        let (h, dense, rhs, elim) = ba_like(30, 200, 4);
+        let n = h.symbolic().ncols();
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let order = nd_block_order(&sym.s);
+        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
+                let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
+                g.use_graphs(false);
+                let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, &sym.s, &Default::default());
+                let mut solves = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) || solves < 20 {
+                    let mut d = vec![0.0f64; n];
+                    g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut d).unwrap();
+                    assert!(rel_residual(&dense, n, &d, &rhs) < 1e-8);
+                    solves += 1;
+                }
+                solves
+            });
+            let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
+            let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
+            for _ in 0..10 {
+                // a new factor each time: every first solve captures
+                let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, &sym.s, &Default::default());
+                for _ in 0..2 {
+                    let mut d = vec![0.0f64; n];
+                    g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut d).unwrap();
+                    assert!(rel_residual(&dense, n, &d, &rhs) < 1e-8);
+                }
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(reader.join().unwrap() >= 20);
+        });
     }
 
     /// Solve after solve on one context, structures going up and down: once

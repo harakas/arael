@@ -74,8 +74,12 @@ pub struct GpuSupernodal<F: Real> {
     qq: usize,
     max_q: usize,
     lu: usize,
+    id: u64,
     _f: core::marker::PhantomData<F>,
 }
+
+/// The next factor id.
+static NEXT_FACTOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 /// Arrays packed into one buffer, each starting on a 256-byte boundary.
 #[derive(Default)]
@@ -202,6 +206,7 @@ impl<F: Real> GpuSupernodal<F> {
             // few sizes rather than per problem
             max_q: (max_q.max(1) as usize).div_ceil(256) * 256,
             lu,
+            id: NEXT_FACTOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
             _f: core::marker::PhantomData,
         }
     }
@@ -214,6 +219,13 @@ impl<F: Real> GpuSupernodal<F> {
     /// The context the factor runs on.
     pub fn context(&self) -> &GpuContext {
         &self.ctx
+    }
+
+    /// The factor's identity, unique in the process. A graph that captured
+    /// this factor's kernels replays them only for the same id (a new factor
+    /// may lease the same buffers with another plan in them).
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Launches per factorization: one per level for the small updates, the

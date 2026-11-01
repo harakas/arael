@@ -93,6 +93,18 @@ impl<F: bytemuck::Pod + 'static> Upload<F> {
         self.lease.as_ref().expect("written before it is read")
     }
 
+    /// Make room for `len` values: the buffer a write of that many lands in,
+    /// fixed before the write (a captured graph checks it).
+    pub fn reserve(&mut self, ctx: &GpuContext, len: usize) -> &Lease {
+        let bytes = len.max(1) * core::mem::size_of::<F>();
+        if self.lease.as_ref().is_none_or(|l| l.capacity() < bytes) {
+            // returned first, so the arena can grow this very buffer
+            self.lease = None;
+            self.lease = Some(ctx.lease(bytes));
+        }
+        self.lease.as_ref().unwrap()
+    }
+
     /// Write `src` converted to `F` by `conv`, without waiting for the copy.
     ///
     /// # Safety
@@ -103,12 +115,7 @@ impl<F: bytemuck::Pod + 'static> Upload<F> {
     /// `src` alive and unchanged and makes no other write through this
     /// `Upload`.
     pub unsafe fn write<M: 'static + Copy>(&mut self, ctx: &GpuContext, src: &[M], conv: impl Fn(M) -> F) {
-        let bytes = src.len().max(1) * core::mem::size_of::<F>();
-        if self.lease.as_ref().is_none_or(|l| l.capacity() < bytes) {
-            // returned first, so the arena can grow this very buffer
-            self.lease = None;
-            self.lease = Some(ctx.lease(bytes));
-        }
+        self.reserve(ctx, src.len());
         let client = ctx.client();
         let dst = self.lease.as_ref().unwrap().handle();
         if core::any::TypeId::of::<M>() == core::any::TypeId::of::<F>() {
@@ -147,7 +154,9 @@ impl<'a> InFlight<'a> {
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         if !self.done {
-            crate::sync(self.client);
+            // the wait is what matters; a device error it reports belongs to
+            // the failure that is unwinding past here, already on its way out
+            let _ = cubecl::future::block_on(self.client.sync());
         }
     }
 }

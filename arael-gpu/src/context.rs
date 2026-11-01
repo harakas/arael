@@ -16,7 +16,7 @@
 //! assert_eq!(ctx.buffers_created(), /* what the largest problem needed */);
 //! ```
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cubecl::prelude::*;
@@ -29,7 +29,12 @@ use crate::{GpuBackend, GpuError};
 struct Buf {
     handle: Handle,
     cap: usize,
+    /// Unique in the process: the same id is the same device memory.
+    id: u64,
 }
+
+/// The next buffer id.
+static NEXT_BUF: AtomicU64 = AtomicU64::new(1);
 
 struct Inner {
     client: Client,
@@ -104,7 +109,7 @@ impl GpuContext {
                 let cap = (need + need / 4).div_ceil(round) * round;
                 self.inner.reserved.fetch_add(cap, Ordering::Relaxed);
                 self.inner.created.fetch_add(1, Ordering::Relaxed);
-                Buf { handle: self.inner.client.empty(cap), cap }
+                Buf { handle: self.inner.client.empty(cap), cap, id: NEXT_BUF.fetch_add(1, Ordering::Relaxed) }
             }
         };
         Lease { buf: Some(buf), home: self.inner.clone() }
@@ -150,6 +155,14 @@ impl Lease {
     /// The buffer's capacity in bytes.
     pub fn capacity(&self) -> usize {
         self.buf.as_ref().unwrap().cap
+    }
+
+    /// The buffer's identity, unique in the process: two leases with one id
+    /// are the same device memory, at different times. A captured graph
+    /// records device addresses, so it checks the ids of what it was
+    /// captured with.
+    pub fn id(&self) -> u64 {
+        self.buf.as_ref().unwrap().id
     }
 
     /// The buffer's first `bytes`: what a read or a copy of the data in use

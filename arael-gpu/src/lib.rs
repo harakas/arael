@@ -183,4 +183,12 @@ impl GpuFactor {
             GpuFactor::F64(g) => g.context(),
         }
     }
+
+    /// As [`GpuSupernodal::id`].
+    pub fn id(&self) -> u64 {
+        match self {
+            GpuFactor::F32(g) => g.id(),
+            GpuFactor::F64(g) => g.id(),
+        }
+    }
 }
