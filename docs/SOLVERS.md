@@ -866,12 +866,24 @@ SparseFaer::from_options(&SparseFaerOptions::default()
 
 The factor lives on the device, in the solver's scalar or in `f32` under
 `with_mixed_precision` with the same refinement against the `f64`
-matrix. The symbolic analysis, the assembly and the Schur reduction stay
-on the CPU; the matrix's values are uploaded for every factorization and
-the right-hand side for every solve. The kernels are written once in
+matrix. On the reduced (Schur) route the device does the whole damped
+solve: it forms the reduced system from the Hessian's values, in `f64`
+whatever the solver's scalar, factorizes it, solves, refines, and
+recovers the eliminated blocks, and only the step comes back, the one
+time per damped solve the solver waits for the device. On the
+whole-system route it factorizes and solves, and the refinement runs on
+the CPU. The symbolic analysis and the assembly stay on the CPU, so the
+Hessian's values cross to the device once per damped solve, read in
+place from the solver's own buffer. The kernels are written once in
 CubeCL (the `arael-gpu` crate) for both vendors and compiled for the
 device at first use, which costs a few hundred milliseconds once per
-process. `SchurPlan::gpu_factor` reports the route. A device whose
+process. A `GpuDevice` value carries the device state its solves use (a
+stream and the device buffers on it, created on first use): solvers built
+from clones of one value share it, so solve after solve reuses the same
+buffers, which grow to the largest problem seen and are kept
+(`GpuDevice::reserved_bytes`, `buffers_created`); separately created
+values have their own streams, and their solves can run at the same
+time. `SchurPlan::gpu_factor` reports the route. A device whose
 runtime is not compiled in fails the solve with
 `SetupError::SolverUnavailable`, parameters untouched, like the other
 optional backends. It pays where the factor is large: the reduced system

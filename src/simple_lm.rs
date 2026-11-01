@@ -4364,27 +4364,92 @@ impl Default for SchurMethod {
 }
 
 /// A GPU for the supernodal block route's factorization and solve
-/// ([`SparseFaerOptions::with_gpu`]): the runtime and the device index.
+/// ([`SparseFaerOptions::with_gpu`]): the runtime, the device index, and the
+/// device state solves through it use, a stream and the device buffers on
+/// it, created on first use.
+///
+/// Clones share that state: solvers built from clones of one value run one
+/// after another on one stream and reuse its buffers, which grow to the
+/// largest problem seen and are kept, so solve after solve stops allocating.
+/// Separately created values have a stream and buffers of their own, and
+/// their solves can run at the same time.
 ///
 /// ```ignore
-/// SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)))
+/// let gpu = GpuDevice::cuda(0);
+/// for problem in problems {
+///     let mut solver = SparseFaer::from_options(&SparseFaerOptions::default().with_gpu(Some(gpu.clone())));
+///     // ... solve; the buffers stay with `gpu`
+/// }
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct GpuDevice {
     /// The runtime (feature `gpu-cuda` or `gpu-hip`).
     pub backend: GpuBackend,
     /// The device, as the runtime numbers them.
     pub index: usize,
+    #[cfg(feature = "gpu")]
+    shared: std::sync::Arc<std::sync::Mutex<Option<arael_gpu::GpuContext>>>,
 }
 
 impl GpuDevice {
+    fn new(backend: GpuBackend, index: usize) -> Self {
+        GpuDevice {
+            backend,
+            index,
+            #[cfg(feature = "gpu")]
+            shared: Default::default(),
+        }
+    }
+
     /// CUDA device `index`.
     pub fn cuda(index: usize) -> Self {
-        GpuDevice { backend: GpuBackend::Cuda, index }
+        Self::new(GpuBackend::Cuda, index)
     }
+
     /// HIP device `index`.
     pub fn hip(index: usize) -> Self {
-        GpuDevice { backend: GpuBackend::Hip, index }
+        Self::new(GpuBackend::Hip, index)
+    }
+
+    /// Bytes of device memory the state holds; 0 before its first solve.
+    pub fn reserved_bytes(&self) -> usize {
+        #[cfg(feature = "gpu")]
+        {
+            self.shared.lock().unwrap().as_ref().map_or(0, |c| c.reserved_bytes())
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            0
+        }
+    }
+
+    /// Device buffers the state has created over its life: constant once
+    /// the largest problem has been seen.
+    pub fn buffers_created(&self) -> usize {
+        #[cfg(feature = "gpu")]
+        {
+            self.shared.lock().unwrap().as_ref().map_or(0, |c| c.buffers_created())
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            0
+        }
+    }
+
+    /// The device state, created on first use.
+    #[cfg(feature = "gpu")]
+    fn context(&self) -> Result<arael_gpu::GpuContext, arael_gpu::GpuError> {
+        let mut shared = self.shared.lock().unwrap();
+        if let Some(c) = shared.as_ref() {
+            return Ok(c.clone());
+        }
+        let backend = match self.backend {
+            GpuBackend::Cuda => arael_gpu::GpuBackend::Cuda,
+            GpuBackend::Hip => arael_gpu::GpuBackend::Hip,
+        };
+        let c = arael_gpu::GpuContext::new(backend, self.index)?;
+        *shared = Some(c.clone());
+        Ok(c)
     }
 }
 
@@ -4649,12 +4714,16 @@ impl SparseFaerOptions {
     /// Factorize and solve the supernodal block route on a GPU (features
     /// `gpu-cuda`, `gpu-hip`). The factor lives on the device, in the
     /// solver's scalar, or in `f32` under [`Self::with_mixed_precision`]
-    /// with the same refinement against the f64 matrix. The analysis, the
-    /// assembly and the Schur reduction stay on the CPU and the matrix's
-    /// values are uploaded for every factorization. `None` (the default)
-    /// factors on the CPU. Ignored unless the supernodal route runs at all;
-    /// a device whose runtime is not compiled in fails the solve with
-    /// [`SetupError::SolverUnavailable`].
+    /// with the same refinement against the f64 matrix. On the reduced
+    /// route the device also forms the reduced system (in f64), refines the
+    /// solution against it and recovers the eliminated blocks; the Hessian's
+    /// values are uploaded for every damped solve. On the whole-system route
+    /// the matrix's values are uploaded and the refinement runs on the CPU.
+    /// The analysis and the assembly stay on the CPU. Solvers given clones
+    /// of one [`GpuDevice`] share its stream and buffers (see there).
+    /// `None` (the default) factors on the CPU. Ignored unless the supernodal route runs at all
+    /// (conjugate gradients stay on the CPU); a device whose runtime is not
+    /// compiled in fails the solve with [`SetupError::SolverUnavailable`].
     pub fn with_gpu(mut self, gpu: Option<GpuDevice>) -> Self {
         self.gpu = gpu;
         self
@@ -4949,7 +5018,19 @@ struct SnNumeric<T> {
     /// for the current symbolic by [`prepare`](Self::prepare).
     #[cfg(feature = "gpu")]
     gpu_factor: Option<arael_gpu::GpuFactor>,
+    /// The device reduction of the reduced route, built with the Schur
+    /// symbolic by [`prepare_schur`](Self::prepare_schur) when the device
+    /// factor is on; it keeps S on the device for the factor.
+    #[cfg(feature = "gpu")]
+    gpu_schur: Option<arael_gpu::GpuSchur>,
     rf: Refine,
+}
+
+/// The device factor's scalar: the solver's own, or `f32` under
+/// [`MixedPrecision`].
+#[cfg(feature = "gpu")]
+fn device_precision<T>(mixed: bool) -> arael_gpu::GpuPrecision {
+    if mixed || core::mem::size_of::<T>() == 4 { arael_gpu::GpuPrecision::F32 } else { arael_gpu::GpuPrecision::F64 }
 }
 
 /// The refinement of a solution through a reduced-precision factor against
@@ -5057,6 +5138,8 @@ impl<T> SnNumeric<T> {
             ctx32: arael_faer::supernodal::SupernodalContext::new(),
             #[cfg(feature = "gpu")]
             gpu_factor: None,
+            #[cfg(feature = "gpu")]
+            gpu_schur: None,
             rf: Refine::default(),
         }
     }
@@ -5068,8 +5151,46 @@ impl<T> SnNumeric<T> {
         #[cfg(feature = "gpu")]
         {
             self.gpu_factor = None;
+            self.gpu_schur = None;
         }
         self.rf.clear();
+    }
+
+    /// Build the device reduction for a new Schur symbolic when the reduced
+    /// system is factorized on the device (`factorized`: the supernodal
+    /// route, not conjugate gradients); `hsym` is the Hessian's block
+    /// structure. It shares the factor's client, so S is formed and consumed
+    /// on one stream. Otherwise any earlier one is released.
+    fn prepare_schur(
+        &mut self,
+        schur: &arael_faer::schur::SchurSymbolic<SparseIndex>,
+        hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+        factorized: bool,
+    ) {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_schur = None;
+            self.gpu_schur = match (factorized, self.gpu_factor.as_ref()) {
+                (true, Some(g)) => Some(arael_gpu::GpuSchur::new(g.context(), schur, hsym)),
+                _ => None,
+            };
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = (schur, hsym, factorized);
+        }
+    }
+
+    /// Whether the reduced system is formed on a GPU.
+    fn gpu_reduces(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_schur.is_some()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
     }
 
     /// Whether the factor is on a GPU.
@@ -5093,21 +5214,21 @@ impl<T> SnNumeric<T> {
         sn: &arael_faer::supernodal::SupernodalSymbolic,
         asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
     ) -> Result<(), SetupError> {
-        let Some(dev) = self.gpu else {
+        let Some(dev) = self.gpu.as_ref() else {
             return Ok(());
         };
         #[cfg(feature = "gpu")]
         {
-            let backend = match dev.backend {
-                GpuBackend::Cuda => arael_gpu::GpuBackend::Cuda,
-                GpuBackend::Hip => arael_gpu::GpuBackend::Hip,
-            };
-            let client = arael_gpu::client(backend, dev.index).map_err(|_| SetupError::SolverUnavailable {
+            let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
                 solver: "gpu",
                 reason: "the GPU runtime is not compiled in (features gpu-cuda, gpu-hip)",
             })?;
-            let precision = if self.mixed.is_some() { arael_gpu::GpuPrecision::F32 } else { arael_gpu::GpuPrecision::F64 };
-            self.gpu_factor = Some(arael_gpu::GpuFactor::new(client, precision, sn, asym, &Default::default()));
+            // the previous structure's buffers go back to the context first,
+            // so the new ones reuse them rather than add to them
+            self.gpu_schur = None;
+            self.gpu_factor = None;
+            let precision = device_precision::<T>(self.mixed.is_some());
+            self.gpu_factor = Some(arael_gpu::GpuFactor::new(&ctx, precision, sn, asym, &Default::default()));
             Ok(())
         }
         #[cfg(not(feature = "gpu"))]
@@ -5506,7 +5627,7 @@ impl<T> SparseFaer<T> {
         solver.sn_batch_ratio = opts.block_supernodal_batch;
         solver.sn_memory_lean = opts.block_supernodal_memory_lean;
         solver.sn_num.mixed = opts.mixed_precision;
-        solver.sn_num.gpu = opts.gpu;
+        solver.sn_num.gpu = opts.gpu.clone();
         solver.schur_solve = opts.schur_solve;
         solver.marginalize = opts.marginalize.clone();
         solver
@@ -6117,6 +6238,56 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let solve = llt.solve_in_place_scratch::<T>(1, self.par);
         self.solve_mem
             .resize(solve.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
+    }
+}
+
+// The device route of the reduced system, beside the trait impl because it
+// is not part of the trait.
+#[cfg(feature = "gpu")]
+impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> SparseFaer<T> {
+    /// The reduced route on the device: S formed from the damped Hessian's
+    /// values, factorized, solved and (under mixed precision) refined there,
+    /// the eliminated blocks recovered there, the step brought back, in one
+    /// wait for the device. `false` when an eliminated block or S is not
+    /// positive definite.
+    #[cfg(feature = "gpu")]
+    fn solve_reduced_gpu(&mut self, h: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>, grad: &[T], delta: &mut [T]) -> bool {
+        let clock = self.verbose.then(Instant::now);
+        let mixed = self.sn_num.mixed;
+        let gs = self.sn_num.gpu_schur.as_mut().expect("the device reduction is built with the Schur symbolic");
+        let gf = self.sn_num.gpu_factor.as_mut().expect("the device factor is built with the supernodal symbolic");
+        let precision = gf.precision();
+        // The step is handed back in T, so no tolerance below a few of its
+        // epsilons buys anything, as in the CPU refinement.
+        let floor = 8.0 * arael_faer::schur::SchurReal::to_f64(<T as num::Float>::epsilon());
+        let refine = mixed.map(|mp| (mp.max_refinements, mp.tol.max(floor)));
+        let stats = match gs.solve(gf, h.vals(), grad, refine, delta) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        self.sn_num.rf.steps += stats.steps;
+        if stats.short {
+            self.sn_num.rf.shortfalls += 1;
+        }
+        if let Some(t) = clock {
+            info!(
+                "gpu schur ({:?}): reduce + factor + solve + back-substitution {:.1} ms{}",
+                precision,
+                t.elapsed().as_secs_f64() * 1e3,
+                if mixed.is_some() {
+                    format!(
+                        ", {} refinement steps, relative residual {:.1e}{}",
+                        stats.steps,
+                        if stats.bnorm > 0.0 { stats.rnorm / stats.bnorm } else { 0.0 },
+                        if stats.short { " -- short of tolerance" } else { "" }
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+        self.sn_num.report_into(&mut self.plan);
+        true
     }
 }
 
@@ -7130,7 +7301,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         self.rhs_kept.resize(nk, T::zero());
         self.x_kept.resize(nk, T::zero());
-        self.s = s;
+        self.sn_num.prepare_schur(&schur, &hsym, self.sn_active && !iterative);
+        // The device route forms S on the device and never reads a host copy.
+        self.s = if self.sn_num.gpu_reduces() { None } else { s };
         self.schur = Some(schur);
 
         // First numeric fill. Everything above it in this call was analysis.
@@ -7228,6 +7401,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
 
         let nk = self.rhs_kept.len();
+
+        // The device route: S formed, factorized, solved and refined on the
+        // GPU, the step recovered there. Only for the factorizing method.
+        #[cfg(feature = "gpu")]
+        if self.sn_num.gpu_reduces() {
+            return self.solve_reduced_gpu(h, grad, delta);
+        }
 
         // Implicit route: no reduction at all. Only the reduced rhs and S's
         // diagonal blocks are built; the operator itself is applied per CG
@@ -8104,6 +8284,18 @@ pub(crate) fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut 
 #[cfg(test)]
 mod tests {
     use super::{ordering_for, ReducedOrdering};
+
+    /// The device factor is in the solver's scalar, or f32 under mixed
+    /// precision: an f32 solver never gets an f64 device factor.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn device_precision_follows_the_solver_scalar() {
+        use arael_gpu::GpuPrecision::{F32, F64};
+        assert_eq!(super::device_precision::<f64>(false), F64);
+        assert_eq!(super::device_precision::<f64>(true), F32);
+        assert_eq!(super::device_precision::<f32>(false), F32);
+        assert_eq!(super::device_precision::<f32>(true), F32);
+    }
 
     /// A failed solve is usually seen through `unwrap`, which formats with
     /// Debug. Derived, that would print the whole parameter vector, megabytes

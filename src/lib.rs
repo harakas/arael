@@ -77,11 +77,12 @@
 //! - **Threads** -- with the `threads` feature the cost and assembly
 //!   sweeps and the linear solve run on as many threads as `num_threads`
 //!   says (see [Threads](#threads))
-//! - **GPU factorization** -- with the `gpu-cuda` or `gpu-hip` feature the
-//!   block supernodal factorization and its solve run on the device
+//! - **GPU solve** -- with the `gpu-cuda` or `gpu-hip` feature the block
+//!   supernodal factorization and its solve run on the device
 //!   (`SparseFaerOptions::with_gpu`), in f64 or as an f32 factor refined
-//!   against the f64 matrix; one set of kernels, written in CubeCL, for
-//!   both vendors
+//!   against the f64 matrix, and on the Schur route the reduction and the
+//!   back-substitution with them; one set of kernels, written in CubeCL,
+//!   for both vendors
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Mixed precision** -- an f32 factor under an f64 solve; surgical

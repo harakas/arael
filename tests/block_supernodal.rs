@@ -623,6 +623,81 @@ fn gpu_factor_reaches_the_f64_optimum() {
     }
 }
 
+/// An f32 solver on the device route: the reduction is formed in f64 from the
+/// f32 Hessian on the device, the factor is f32 there, and the solve lands on
+/// the CPU f32 route's optimum.
+#[cfg(feature = "gpu-cuda")]
+#[test]
+fn gpu_reduced_route_on_an_f32_solver() {
+    let run = |gpu: bool| {
+        let cfg = LmConfig::<f32> { max_iters: 60, ..Default::default() };
+        let mut w = build_f32(0.1, 2);
+        let mut params = Vec::new();
+        RootProblem::serialize(&mut w, &mut params);
+        let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_policy(SchurPolicy::Force)
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_block_supernodal(BlockSupernodalMode::Always)
+            .with_gpu(gpu.then(|| arael::simple_lm::GpuDevice::cuda(0))));
+        let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
+        let plan = solver.plan().expect("a plan");
+        assert!(plan.reduced && plan.block_supernodal);
+        assert_eq!(plan.gpu_factor, gpu);
+        (r.end_cost, r.x)
+    };
+    let (c_cpu, x_cpu) = run(false);
+    let (c_gpu, x_gpu) = run(true);
+    assert!(c_cpu < 1e-6 && c_gpu < 1e-6, "{} {}", c_cpu, c_gpu);
+    for (a, b) in x_cpu.iter().zip(&x_gpu) {
+        assert!((a - b).abs() <= 1e-3 * (1.0 + a.abs()), "the device moved an f32 parameter: {} vs {}", a, b);
+    }
+}
+
+/// Solvers built from clones of one `GpuDevice` share its device state:
+/// after the first solve, solving again (the whole system, then the
+/// reduced route of the same problem, then the whole system again) creates
+/// no device buffer the first solves did not.
+#[cfg(feature = "gpu-cuda")]
+#[test]
+fn gpu_device_clones_share_their_buffers() {
+    let gpu = arael::simple_lm::GpuDevice::cuda(0);
+    assert_eq!(gpu.buffers_created(), 0);
+    let run = |policy: SchurPolicy| {
+        let mut s = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_policy(policy)
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_block_supernodal(BlockSupernodalMode::Always)
+            .with_mixed_precision(Some(MixedPrecision::default()))
+            .with_gpu(Some(gpu.clone())));
+        let (_, c) = solve(&mut s, 2);
+        assert!(c < 1e-12 && s.plan().unwrap().gpu_factor);
+    };
+    run(SchurPolicy::Never);
+    run(SchurPolicy::Force);
+    let created = gpu.buffers_created();
+    assert!(created > 0 && gpu.reserved_bytes() > 0);
+    run(SchurPolicy::Never);
+    run(SchurPolicy::Force);
+    assert_eq!(gpu.buffers_created(), created, "the repeated solves leased every buffer from the shared state");
+    // a separately created device has a state of its own
+    assert_eq!(arael::simple_lm::GpuDevice::cuda(0).buffers_created(), 0);
+}
+
+/// The GPU takes the factorizing route only: with conjugate gradients on the
+/// reduced system the solve stays on the CPU, and the plan says so.
+#[cfg(feature = "gpu-cuda")]
+#[test]
+fn gpu_option_leaves_conjugate_gradients_on_the_cpu() {
+    let mut cg = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Force)
+        .with_iterative_schur(Default::default())
+        .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0))));
+    let (_, c) = solve(&mut cg, 2);
+    let plan = cg.plan().expect("a plan");
+    assert!(plan.reduced && !plan.gpu_factor && plan.cg_iterations.is_some());
+    assert!(c < 1e-8, "{}", c);
+}
+
 /// Without the `gpu` feature the option is a setup error before anything
 /// runs, like the other compiled-out backends.
 #[cfg(not(feature = "gpu"))]
