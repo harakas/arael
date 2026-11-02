@@ -5657,6 +5657,14 @@ impl<T> SnNumeric<T> {
         }
     }
 
+    /// The device reduction with nothing eliminated, for the whole system
+    /// factorized on the GPU (the device factor built for `hsym`).
+    #[cfg(feature = "gpu")]
+    fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) {
+        self.gpu_route = None;
+        self.gpu_schur = self.gpu_factor.as_ref().map(|g| arael_gpu::GpuSchur::whole(g.context(), hsym));
+    }
+
     /// Whether the reduced system is formed on a GPU.
     fn gpu_reduces(&self) -> bool {
         #[cfg(feature = "gpu")]
@@ -6259,6 +6267,67 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         Ok(cost)
     }
 
+    /// A structure's first numeric fill at `params`: into a fresh `h` of
+    /// the structure, which becomes `matrix.h`, and `grad`, returning the
+    /// cost. On the device when it assembles there (the model's working
+    /// copies brought to `params`, which its layout reads; the host H stays
+    /// unfilled), else on the CPU through `positions`, which the solver
+    /// keeps.
+    #[allow(clippy::too_many_arguments)]
+    fn first_fill(
+        &mut self,
+        problem: &mut dyn LmProblemInternals<T>,
+        params: &[T],
+        grad: &mut [T],
+        matrix: &mut FaerMatrix<T>,
+        mut h: arael_faer::bsc::SparseBlockColMat<SparseIndex, T>,
+        positions: PositionStream,
+        ctx: &mut crate::threads::Context,
+        vb: bool,
+    ) -> T {
+        #[cfg(feature = "gpu")]
+        if self.sn_num.gpu_reduces() && self.sn_num.gpu_assembly {
+            match problem.device_root() {
+                Some(_) => {
+                    let clock = vb.then(Instant::now);
+                    problem.update_params(params);
+                    let root = problem.device_root().expect("a device root");
+                    self.sn_num.build_route(root, h.symbolic(), &self.bdiag_pos);
+                    let t_layout = clock.map(|c| c.elapsed());
+                    let t_a = self.measure.then(Instant::now);
+                    let cost = self.sn_num.route_compute(problem, params, grad);
+                    if let Some(t) = t_a {
+                        self.assembly_time = t.elapsed();
+                    }
+                    if let (Some(c), Some(l)) = (clock, t_layout) {
+                        info!(
+                            "gpu: the device assembly's layout {:.1} ms, its first assembly {:.1} ms",
+                            l.as_secs_f64() * 1e3,
+                            (c.elapsed() - l).as_secs_f64() * 1e3
+                        );
+                    }
+                    matrix.h = Some(h);
+                    self.positions = Some(Arc::new(positions));
+                    return cost;
+                }
+                None => {
+                    if vb {
+                        info!("gpu assembly: on the CPU -- {}", problem.device_unsupported().unwrap_or("no device form"));
+                    }
+                }
+            }
+        }
+        let _ = vb;
+        let t_a = self.measure.then(Instant::now);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
+        if let Some(t) = t_a {
+            self.assembly_time = t.elapsed();
+        }
+        matrix.h = Some(h);
+        self.positions = Some(Arc::new(positions));
+        cost
+    }
+
     /// Set up the whole Hessian (no reduction) for the block band Cholesky:
     /// the block form is kept and factored directly, skipping the scalar CSC
     /// and faer's symbolic analysis. Reached from `compute` when
@@ -6553,6 +6622,12 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         };
         self.sn_num.resize(sn.factor_val_count());
         self.sn_num.prepare(&sn, &hsym)?;
+        // On a GPU the whole system takes the device reduction with nothing
+        // eliminated: S is H, and an attempt is the reduced route's (one
+        // wait, a captured graph, the refinement on the device, and the
+        // device assembly with the LM loop there when the model has one).
+        #[cfg(feature = "gpu")]
+        self.sn_num.prepare_whole(&hsym);
         self.sn_active = true;
         self.envelope_active = false;
         self.envelope_sym = None;
@@ -6599,15 +6674,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         });
 
         // First numeric fill. Everything above it was analysis.
-        let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        let t_a = self.measure.then(Instant::now);
-        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
-        if let Some(t) = t_a {
-            self.assembly_time = t.elapsed();
-        }
-        matrix.h = Some(h);
-        self.positions = Some(Arc::new(positions));
-        Ok(cost)
+        let h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        Ok(self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb))
     }
 
     /// Symbolic factorization of the whole system, under the ordering
@@ -7945,47 +8013,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let t_reduction = lap(vb);
 
         // First numeric fill. Everything above it in this call was analysis.
-        let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        // With a device assembly the device makes it: the model's working
-        // copies brought to `params` (which its layout reads), the layout,
-        // then the assembly there; the host H stays unfilled.
         #[cfg(feature = "gpu")]
-        if self.sn_num.gpu_reduces() && self.sn_num.gpu_assembly {
-            match problem.device_root() {
-                Some(_) => {
-                    problem.update_params(params);
-                    let root = problem.device_root().expect("a device root");
-                    self.sn_num.build_route(root, h.symbolic(), &self.bdiag_pos);
-                    let t_layout = lap(vb);
-                    let t_a = self.measure.then(Instant::now);
-                    let cost = self.sn_num.route_compute(problem, params, grad);
-                    if let Some(t) = t_a {
-                        self.assembly_time = t.elapsed();
-                    }
-                    if vb {
-                        info!("gpu: the reduction's plan {:.1} ms, the device assembly's layout {:.1} ms, its first assembly {:.1} ms", t_reduction, t_layout, lap(true));
-                    }
-                    matrix.h = Some(h);
-                    self.positions = Some(Arc::new(positions));
-                    return Ok(cost);
-                }
-                None => {
-                    if vb {
-                        info!("gpu assembly: on the CPU -- {}", problem.device_unsupported().unwrap_or("no device form"));
-                    }
-                }
-            }
+        if vb && self.sn_num.gpu_reduces() {
+            info!("gpu: the reduction's plan {:.1} ms", t_reduction);
         }
-        let t_a = self.measure.then(Instant::now);
-        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
-        if let Some(t) = t_a {
-            self.assembly_time = t.elapsed();
-        }
-        matrix.h = Some(h);
-        self.positions = Some(Arc::new(positions));
-        Ok(cost)
+        let h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        Ok(self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb))
     }
-
 
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
         if let Some(csc) = matrix.csc.as_ref() {
@@ -8059,6 +8093,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Distinguished from the reduced route by the absence of a Schur
         // symbolic (matrix.h is block form only in these cases).
         if self.schur.is_none() {
+            #[cfg(feature = "gpu")]
+            if self.sn_active && self.sn_num.gpu_reduces() {
+                return self.solve_reduced_gpu(h, grad, delta);
+            }
             if self.sn_active {
                 let sn = self.sn_sym.as_ref().unwrap();
                 let threads = self.ctx.threads();
