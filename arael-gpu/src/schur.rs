@@ -606,6 +606,25 @@ pub enum GpuSchurError {
     Reduced,
 }
 
+/// What a plan reads of a reduction: the eliminated blocks and their
+/// observers (in [`SchurSymbolic`]'s layout), the kept blocks, S's
+/// structure, the kept-kept tiles copied from H, the pair count.
+struct Elimination<'a> {
+    elim_diag: &'a [SparseIndex],
+    elim_w: &'a [SparseIndex],
+    elim_obs_ptr: &'a [SparseIndex],
+    obs_w: &'a [SparseIndex],
+    obs_ca_off: &'a [SparseIndex],
+    obs_trans: &'a [bool],
+    obs_orig_off: &'a [SparseIndex],
+    obs_kept: &'a [SparseIndex],
+    kept: std::borrow::Cow<'a, [SparseIndex]>,
+    s: &'a SymbolicSparseBlockColMat<SparseIndex>,
+    copy_src: std::borrow::Cow<'a, [SparseIndex]>,
+    copy_dst: std::borrow::Cow<'a, [SparseIndex]>,
+    pairs: usize,
+}
+
 /// The device plan of a [`SchurSymbolic`], and the device state of one
 /// reduction: the Hessian's values and gradient as uploaded, the block
 /// inverses, W, S and the reduced right-hand side, the solution.
@@ -678,8 +697,57 @@ impl GpuSchur {
     /// block structure `hsym`, and lease the reduction's buffers from `ctx`
     /// (returned on drop). The plan goes up in one copy.
     pub fn new(ctx: &GpuContext, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
-        let ne = sym.elim_diag().len();
-        let no = sym.obs_w().len();
+        let (src, dst) = sym.copy_tiles();
+        Self::build(
+            ctx,
+            &Elimination {
+                elim_diag: sym.elim_diag(),
+                elim_w: sym.elim_w(),
+                elim_obs_ptr: sym.elim_obs_ptr(),
+                obs_w: sym.obs_w(),
+                obs_ca_off: sym.obs_ca_off(),
+                obs_trans: sym.obs_trans(),
+                obs_orig_off: sym.obs_orig_off(),
+                obs_kept: sym.obs_kept(),
+                kept: std::borrow::Cow::Borrowed(&sym.kept),
+                s: &sym.s,
+                copy_src: std::borrow::Cow::Borrowed(src),
+                copy_dst: std::borrow::Cow::Borrowed(dst),
+                pairs: sym.pair_count(),
+            },
+            hsym,
+        )
+    }
+
+    /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
+    /// the whole system's. Built from `hsym` alone, without a
+    /// [`SchurSymbolic`] (whose pair lookup a whole system does not need).
+    pub fn whole(ctx: &GpuContext, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+        let tiles: Vec<SparseIndex> = (0..hsym.nblocks() as SparseIndex).collect();
+        Self::build(
+            ctx,
+            &Elimination {
+                elim_diag: &[],
+                elim_w: &[],
+                elim_obs_ptr: &[0],
+                obs_w: &[],
+                obs_ca_off: &[],
+                obs_trans: &[],
+                obs_orig_off: &[],
+                obs_kept: &[],
+                kept: std::borrow::Cow::Owned((0..hsym.nblk_cols() as SparseIndex).collect()),
+                s: hsym,
+                copy_src: std::borrow::Cow::Borrowed(&tiles),
+                copy_dst: std::borrow::Cow::Borrowed(&tiles),
+                pairs: 0,
+            },
+            hsym,
+        )
+    }
+
+    fn build(ctx: &GpuContext, sym: &Elimination, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+        let ne = sym.elim_diag.len();
+        let no = sym.obs_w.len();
         let nk = sym.kept.len();
         let n = hsym.ncols();
         let nks = sym.s.nrows();
@@ -689,9 +757,9 @@ impl GpuSchur {
         let (mut dinv_len, mut z_len) = (0u32, 0u32);
         let mut ew_max = 1usize;
         for slot in 0..ne {
-            let dblk = sym.elim_diag()[slot] as usize;
+            let dblk = sym.elim_diag[slot] as usize;
             let e = hsym.blk_row(dblk);
-            let we = sym.elim_w()[slot] as usize;
+            let we = sym.elim_w[slot] as usize;
             ew_max = ew_max.max(we);
             e_diag.push(hsym.val_range(dblk).start as u32);
             e_w.push(we as u32);
@@ -702,16 +770,16 @@ impl GpuSchur {
             dinv_len += (we * we) as u32;
             z_len += we as u32;
         }
-        let e_obs_ptr: Vec<u32> = sym.elim_obs_ptr().to_vec();
+        let e_obs_ptr: Vec<u32> = sym.elim_obs_ptr.to_vec();
         // the observers, with their eliminated slot and their W offset
         let mut o_e = vec![0u32; no];
         for slot in 0..ne {
             o_e[e_obs_ptr[slot] as usize..e_obs_ptr[slot + 1] as usize].fill(slot as u32);
         }
-        let o_ca: Vec<u32> = sym.obs_ca_off().to_vec();
-        let o_trans: Vec<u32> = sym.obs_trans().iter().map(|&t| t as u32).collect();
-        let o_w: Vec<u32> = sym.obs_w().to_vec();
-        let o_orig: Vec<u32> = sym.obs_orig_off().to_vec();
+        let o_ca: Vec<u32> = sym.obs_ca_off.to_vec();
+        let o_trans: Vec<u32> = sym.obs_trans.iter().map(|&t| t as u32).collect();
+        let o_w: Vec<u32> = sym.obs_w.to_vec();
+        let o_orig: Vec<u32> = sym.obs_orig_off.to_vec();
         let mut o_woff = Vec::with_capacity(no);
         let mut w_len = 0u32;
         let mut kw_max = 1usize;
@@ -721,11 +789,11 @@ impl GpuSchur {
             kw_max = kw_max.max(o_w[o] as usize);
         }
         // the tiles of S, in storage order, with their kept-kept source
-        let ssym = &sym.s;
+        let ssym = sym.s;
         let spart = ssym.col_part();
         let nt = ssym.nblocks();
         let mut copy_of = vec![NONE; nt];
-        let (csrc, cdst) = sym.copy_tiles();
+        let (csrc, cdst) = (&sym.copy_src[..], &sym.copy_dst[..]);
         for (&src, &dst) in csrc.iter().zip(cdst) {
             copy_of[dst as usize] = hsym.val_range(src as usize).start as u32;
         }
@@ -750,7 +818,7 @@ impl GpuSchur {
         // The pairs: every (oa, ob) of one eliminated block with kept(oa) <=
         // kept(ob), grouped by their tile of S in a counting sort. The tile
         // (a, b) is found by row in column b, whose rows are ascending.
-        let kept_of_obs = sym.obs_kept();
+        let kept_of_obs = sym.obs_kept;
         let tile_of = |a: usize, b: usize| -> u32 {
             let r = ssym.col_range(b);
             let (mut lo, mut hi) = (r.start, r.end);
@@ -765,7 +833,7 @@ impl GpuSchur {
             assert!(lo < r.end && ssym.blk_row(lo) == a, "every observer pair has a tile in S");
             lo as u32
         };
-        let np = sym.pair_count();
+        let np = sym.pairs;
         let mut pair_tile: Vec<u32> = Vec::with_capacity(np);
         let mut t_pair_ptr = vec![0u32; nt + 1];
         for slot in 0..ne {
@@ -1341,6 +1409,30 @@ mod tests {
     /// tolerance, launched steps after that doing nothing; with a tolerance
     /// it cannot reach it stops at the first step that does not reduce the
     /// residual, and undoes that step.
+    /// With nothing eliminated S is H: the reduction solves the whole
+    /// system (the whole-system GPU route), refinement included.
+    #[test]
+    fn nothing_eliminated_solves_the_whole_system() {
+        let (h, dense, rhs, _) = ba_like(30, 200, 5);
+        let n = h.symbolic().ncols();
+        let order = nd_block_order(h.symbolic());
+        let sn = SupernodalSymbolic::new(h.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
+        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
+        let mut g = GpuSchur::whole(&ctx, h.symbolic());
+        for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
+            let mut f = GpuFactor::new(&ctx, precision, &sn, h.symbolic(), &Default::default());
+            for _ in 0..2 {
+                let mut delta = vec![0.0f64; n];
+                let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
+                let res = rel_residual(&dense, n, &delta, &rhs);
+                assert!(res < tol, "{precision:?}: residual {res}");
+                if refine.is_some() {
+                    assert!(stats.steps > 0 && !stats.short, "{stats:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_refinement_stops_on_the_device() {
         let (h, dense, rhs, elim) = ba_like(40, 300, 9);
