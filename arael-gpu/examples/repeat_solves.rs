@@ -65,16 +65,20 @@ fn run<D: Device>(new: impl Fn() -> D) {
         let order = nd_block_order(&sym.s);
         let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
         let n = h.symbolic().ncols();
-        // wall time per attempt, the first of each solve apart (it captures)
-        let (mut first, mut later) = (Vec::new(), Vec::new());
+        // wall time of a solve's setup (the reduction and the factor made)
+        // and per attempt, the first of each solve apart (it captures)
+        let (mut setup, mut first, mut later) = (Vec::new(), Vec::new(), Vec::new());
         for r in 0..solves {
             let phase = si * 16 + r;
             marker(&*shared, &mut mblock, &staged, 2 * phase + 1);
             // a fresh solver's device state, from the device's pool
             let dev = if per_solve { Arc::new(new()) } else { shared.clone() };
+            let t = std::time::Instant::now();
             let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), Wide::F64).unwrap();
             g.use_graphs(graphs);
             let mut f = GpuFactor::new(&dev, precision, &sn, &sym.s, &Default::default(), Wide::F64).unwrap();
+            dev.sync().unwrap();
+            setup.push(t.elapsed().as_secs_f64() * 1e3);
             marker(&*shared, &mut mblock, &staged, 2 * phase + 2);
             let mut delta = vec![0.0f64; n];
             for a in 0..attempts {
@@ -89,11 +93,12 @@ fn run<D: Device>(new: impl Fn() -> D) {
             v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
         };
         println!(
-            "structure {si}: {} scalars, reduced {}, {} supernodes; ms per attempt, median: first {:.2}, later {:.2}; \
+            "structure {si}: {} scalars, reduced {}, {} supernodes; ms, median: setup {:.2}, first attempt {:.2}, later {:.2}; \
              device: {} allocations, {:.1} MB reserved",
             n,
             sym.kept_size(),
             sn.n_supernodes(),
+            median(&mut setup),
             median(&mut first),
             median(&mut later),
             shared.allocations(),
