@@ -7,7 +7,6 @@
 //! expression as Rust that such a body accepts, as [`E::to_rust`] prints it
 //! for ordinary Rust; [`Intermediate::to_cubecl`] prints one statement of a
 //! CSE result, and [`cubecl_body`] runs the CSE and prints in one call.
-//! arael's device assembly generates its kernels' bodies this way.
 //!
 //! ```
 //! use arael_sym::{sin, symbols};
