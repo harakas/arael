@@ -16,8 +16,19 @@ default = []
 # device) but no client can be made; `arael` reports the backend unavailable.
 cuda = ["cubecl/cuda"]
 hip = ["cubecl/hip"]
+# arael's own runtime and C++ kernels on CUDA (docs/dev/NATIVE_GPU_PLAN.md).
+# The driver and NVRTC are loaded at run time, so a build needs no toolkit.
+native-cuda = ["dep:cudarc"]
 
 [dependencies]
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "fallback-dynamic-loading",
+    "cuda-version-from-build-system",
+    "fallback-latest",
+] }
 arael-faer = { workspace = true }
 cubecl = "0.11"
 cubecl-runtime = "0.11"

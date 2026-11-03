@@ -34,6 +34,7 @@ pub mod context;
 pub mod host;
 pub mod kernels;
 pub mod lm;
+pub mod native;
 pub mod plan;
 pub mod schur;
 pub mod supernodal;
@@ -132,8 +133,9 @@ pub fn client(backend: GpuBackend, index: usize) -> Result<Client, GpuError> {
 /// capture in the driver's global mode, in which a wait issued on any
 /// thread of the process fails while a capture is open, and a read waits
 /// on the reading thread, not on CubeCL's device thread. Every wait in this
-/// crate holds the lock shared, a capture holds it exclusively.
-static CAPTURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+/// crate holds the lock shared (the native runtime's driver calls too), a
+/// capture holds it exclusively.
+pub(crate) static CAPTURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Wait for everything submitted to the client.
 pub fn sync(client: &Client) {
