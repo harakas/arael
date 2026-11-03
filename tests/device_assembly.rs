@@ -4,6 +4,7 @@
 //! same pattern.
 #![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 
+use arael::df32;
 use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{GpuDevice, LmProblem, LmProblemInternals, RootProblem};
@@ -66,6 +67,49 @@ pub struct SceneF {
     pub cameras: refs::Vec<Camera<f32>>,
     pub points: refs::Vec<Point<f32>>,
     pub observations: std::vec::Vec<Obs<f32>>,
+}
+
+/// The camera with its rotation's state in df32, for an f32 root with
+/// `wide = df32` (the macro takes one type parameter per entity, so a
+/// concrete copy).
+#[arael::model]
+#[derive(Clone)]
+pub struct CameraW {
+    pub t: Param<vect3<f32>>,
+    pub ea: MixedEulerAngleParam<f32, df32>,
+    pub intr: Param<vect3<f32>>,
+    pub zdrop: f32,
+    pub hb: SelfBlock<CameraW, f32>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
+    let keep = -pc.z - cam.zdrop;
+    let px = -pc.x / pc.z;
+    let py = -pc.y / pc.z;
+    let r2 = px * px + py * py;
+    let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
+    [branch(keep, with_wide(cam.intr.x * d * px - obsw.xy.x), 0.0),
+     branch(keep, with_wide(cam.intr.x * d * py - obsw.xy.y), 0.0)]
+}))]
+#[derive(Clone)]
+pub struct ObsW {
+    #[arael(ref = root.cameras)]
+    pub cam: Ref<CameraW>,
+    #[arael(ref = root.points)]
+    pub pt: Ref<Point<f32>>,
+    pub xy: vect2<f32>,
+    pub hb: CrossBlock<CameraW, Point<f32>, f32>,
+}
+
+#[arael::model]
+#[arael(root, f32, wide = df32)]
+#[derive(Clone)]
+pub struct SceneW {
+    pub cameras: refs::Vec<CameraW>,
+    pub points: refs::Vec<Point<f32>>,
+    pub observations: std::vec::Vec<ObsW>,
 }
 
 /// A point prior: a self-block constraint, which has no device form yet.
@@ -325,6 +369,53 @@ fn a_quaternion_rotation_has_no_device_form() {
     let s = QScene { cameras: refs::Vec::new(), points: refs::Vec::new(), observations: std::vec::Vec::new() };
     let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a quaternion rotation has no device form");
     assert!(why.contains("cam.q") && why.contains("EulerAngleParam"), "{why}");
+}
+
+/// `parts` as a [`SceneW`]: the rotations' state moved into df32.
+fn wide_scene((cams, points, obs): Parts<f32>) -> SceneW {
+    let mut cameras = refs::Vec::new();
+    for c in cams.iter() {
+        let v = c.ea.value;
+        let d = df32::from_f64;
+        cameras.push(CameraW {
+            t: c.t.clone(),
+            ea: MixedEulerAngleParam::new(vect3::new(d(v.x), d(v.y), d(v.z))),
+            intr: c.intr.clone(),
+            zdrop: c.zdrop,
+            hb: SelfBlock::new(),
+        });
+    }
+    let observations = obs
+        .iter()
+        .map(|o| ObsW { cam: cameras.ref_at(o.cam.index() as usize), pt: points.ref_at(o.pt.index() as usize), xy: o.xy, hb: CrossBlock::new() })
+        .collect();
+    SceneW { cameras, points, observations }
+}
+
+/// An f32 root whose rotations keep their state in df32 (`wide = df32`)
+/// solves on the device to the CPU's optimum and leaves the model where the
+/// CPU does: the pack walk reads the df32 steps and reference rotations,
+/// and the device's re-centred rotations come back into them.
+#[test]
+fn a_df32_wide_root_solves_on_the_device_as_on_the_cpu() {
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = wide_scene(consistent_scene::<f32>());
+        assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options(gpu, true));
+        let cfg = arael::simple_lm::LmConfig::<f32> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        let angles: Vec<f64> = s.cameras.iter().flat_map(|c| [c.ea.value.x, c.ea.value.y, c.ea.value.z]).map(|a| a.to_f64()).collect();
+        (r.end_cost, angles)
+    };
+    let (cpu, cpu_angles) = run(None);
+    for d in devices() {
+        let (device, angles) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-4 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&angles, &cpu_angles, 1e-4, &format!("{}: the rotations", label(&d)));
+    }
 }
 
 /// The parameters' values as the model holds them after a solve.

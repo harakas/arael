@@ -62,6 +62,13 @@ pub struct DeviceTables {
     pub cross: Vec<Vec<u32>>,
 }
 
+/// A model's leaf value (`f32`, `f64` or `df32`) as `f64`, for the pack
+/// walk the device head generates: a mixed parameter keeps its step and
+/// its reference rotation in the root's wide scalar.
+pub fn leaf_f64<V: num::ToPrimitive>(v: V) -> f64 {
+    v.to_f64().expect("a model's scalars convert to f64")
+}
+
 /// What a root's pack walk reads from the model: per entity array the
 /// values of its fixed parameters, per rotation field the reference
 /// rotations (row-major, f64), per constraint its instances and their
