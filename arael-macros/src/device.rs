@@ -444,7 +444,7 @@ pub(crate) fn device_root(
                 let n = side.params.len();
                 let vals: Vec<syn::Expr> = side.params.iter().map(|p| syn::parse_str(p).expect("a parameter symbol is an expression")).collect();
                 let ks: Vec<usize> = (0..n).collect();
-                quote! { { let __f = &mut __pack.fixed[#e]; #( __f[#s * #n + #ks] = (#vals) as #scalar; )* } }
+                quote! { { let __f = &mut __pack.fixed[#e]; #( __f[#s * #n + #ks] = ::arael::__gpu::leaf_f64(#vals) as #scalar; )* } }
             };
             let (ea, eb) = (id.ea, id.eb);
             let fa = fixed(&c.a, ea, quote! { __sa });
@@ -457,9 +457,9 @@ pub(crate) fn device_root(
                         let __m = &#field.ref_rotation;
                         let __r = &mut __pack.refr[#r];
                         for __i in 0..3usize {
-                            __r[#s * 9 + __i * 3] = __m[__i].x as f64;
-                            __r[#s * 9 + __i * 3 + 1] = __m[__i].y as f64;
-                            __r[#s * 9 + __i * 3 + 2] = __m[__i].z as f64;
+                            __r[#s * 9 + __i * 3] = ::arael::__gpu::leaf_f64(__m[__i].x);
+                            __r[#s * 9 + __i * 3 + 1] = ::arael::__gpu::leaf_f64(__m[__i].y);
+                            __r[#s * 9 + __i * 3 + 2] = ::arael::__gpu::leaf_f64(__m[__i].z);
                         }
                     }
                 }
