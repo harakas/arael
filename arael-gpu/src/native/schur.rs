@@ -611,19 +611,19 @@ fn defines(p: &SchurPlan) -> String {
     s
 }
 
-#[cfg(all(test, feature = "native-cuda"))]
+#[cfg(all(test, any(feature = "native-cuda", feature = "native-hip")))]
 mod tests {
     use super::*;
     use crate::GpuPrecision;
-    use crate::native::cuda::CudaDevice;
+    use crate::native::TestDevice;
     use crate::test_util::{ba_like, rel_residual};
     use arael_faer::schur::{SchurContext, schur_reduce, schur_symbolic};
     use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_order};
 
     type Matrix = arael_faer::bsc::SparseBlockColMat<SparseIndex, f64>;
 
-    fn device() -> Arc<CudaDevice> {
-        Arc::new(CudaDevice::new(0).unwrap())
+    fn device() -> Arc<TestDevice> {
+        Arc::new(TestDevice::new(0).unwrap())
     }
 
     fn err_max(a: &[f64], b: &[f64]) -> f64 {
@@ -634,7 +634,7 @@ mod tests {
     /// Both wide scalars: the reduction's tests run in each.
     const WIDES: [Wide; 2] = [Wide::F64, Wide::Df32];
 
-    fn factor(dev: &Arc<CudaDevice>, precision: GpuPrecision, sn: &SupernodalSymbolic, s: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> NativeFactor<CudaDevice> {
+    fn factor(dev: &Arc<TestDevice>, precision: GpuPrecision, sn: &SupernodalSymbolic, s: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> NativeFactor<TestDevice> {
         NativeFactor::new(dev, precision, sn, s, &Default::default(), wide).unwrap()
     }
 
@@ -865,7 +865,7 @@ mod tests {
         g.upload(h.vals(), &rhs).unwrap();
         let held: Vec<f64> = h.vals().iter().map(|&v| wide.value(wide.bits(v))).collect();
         assert_eq!(g.h_values().unwrap(), held, "the values as the wide scalar holds them");
-        let read_result = |g: &NativeSchur<CudaDevice>| {
+        let read_result = |g: &NativeSchur<TestDevice>| {
             let mut step = vec![0.0f64; n];
             let mut bytes = vec![0u8; 8 * n];
             let mut status = vec![0u8; STATUS_BYTES];
@@ -981,7 +981,7 @@ mod tests {
     /// The native kernels against the CubeCL ones on the same system: the
     /// reduction (no atomics) bit for bit, the solves equal to rounding (the
     /// factor's updates and the symv add atomically, in no fixed order).
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "native-cuda"))]
     #[test]
     fn native_matches_cubecl() {
         let (h, _, rhs, _, sym, sn) = setup(60, 900, 2);
@@ -1024,7 +1024,7 @@ mod tests {
     /// refinement, the back-substitution and the one read), native against
     /// CubeCL, with and without graphs:
     /// `cargo test -r -p arael-gpu --features cuda,native-cuda -- --ignored --nocapture time_schur`.
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "native-cuda"))]
     #[test]
     #[ignore = "timing"]
     fn time_schur_native_against_cubecl() {

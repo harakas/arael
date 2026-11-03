@@ -3,11 +3,16 @@
 //! and infinity are not assumed away, a compensated sum keeps its error
 //! term, and a product rounded on its own (an `fma(a, b, 0)` pin or
 //! `mul_rn`) is not fused into the add that consumes it. Contraction itself
-//! stays on, as nvcc's default.
-#![cfg(feature = "native-cuda")]
+//! stays on, as NVRTC's and hipRTC's defaults. On CUDA (feature
+//! `native-cuda`), else on HIP (`native-hip`).
+#![cfg(any(feature = "native-cuda", feature = "native-hip"))]
 
-use arael_gpu::native::cuda::CudaDevice;
 use arael_gpu::native::{Arg, Device, Launch};
+
+#[cfg(feature = "native-cuda")]
+type Dev = arael_gpu::native::cuda::CudaDevice;
+#[cfg(all(feature = "native-hip", not(feature = "native-cuda")))]
+type Dev = arael_gpu::native::hip::HipDevice;
 
 const SOURCE: &str = r#"
 KERNEL void default_math(GLOBAL const float* in, GLOBAL float* out) {
@@ -46,8 +51,8 @@ fn two_sum_error(a: f32, b: f32) -> f32 {
 }
 
 #[test]
-fn native_cuda_keeps_default_math() {
-    let dev = CudaDevice::new(0).unwrap();
+fn native_keeps_default_math() {
+    let dev = Dev::new(0).unwrap();
     let kernel = dev.compile(SOURCE, "", "default_math").unwrap();
 
     let (a, b) = (1.0f32, 1e-9f32);
@@ -77,12 +82,12 @@ fn native_cuda_keeps_default_math() {
     assert_eq!(actual[3], two_sum_error(a, b), "two_sum's error term");
     assert_eq!(actual[4], quick_two_sum_error, "quick_two_sum after an fma(x, x, 0) pin");
     assert_eq!(actual[5], quick_two_sum_error, "quick_two_sum with mul_rn and add_rn");
-    assert_ne!(actual[6], quick_two_sum_error, "an unpinned product is contracted, as nvcc's default");
+    assert_ne!(actual[6], quick_two_sum_error, "an unpinned product is contracted, the compilers' default");
 }
 
 #[test]
-fn native_cuda_reports_compile_errors() {
-    let dev = CudaDevice::new(0).unwrap();
+fn native_reports_compile_errors() {
+    let dev = Dev::new(0).unwrap();
     let err = dev.compile("KERNEL void broken(GLOBAL float* x) { x[0] = undefined_name; }", "", "broken");
     let Err(arael_gpu::native::NativeError::Compile { entry, log }) = err else {
         panic!("expected a compile error, got {err:?}");

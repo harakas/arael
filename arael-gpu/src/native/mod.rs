@@ -23,17 +23,30 @@ use arael_faer::schur::SchurReal;
 
 #[cfg(feature = "native-cuda")]
 pub mod cuda;
-#[cfg(feature = "native-cuda")]
+#[cfg(any(feature = "native-cuda", feature = "native-hip"))]
 mod disk;
+#[cfg(feature = "native-hip")]
+pub mod hip;
+#[cfg(feature = "native-hip")]
+mod hip_sys;
 pub mod lm;
 pub mod schur;
 pub mod supernodal;
 
-#[cfg(feature = "native-cuda")]
+#[cfg(any(feature = "native-cuda", feature = "native-hip"))]
 pub use disk::take_cache_failure;
 pub use lm::NativeLmVectors;
 pub use schur::{NativeSchur, NativeSchurError};
 pub use supernodal::{FactorizeError, NativeFactor, NativeSupernodal};
+
+/// The device the native runtime's tests run on: CUDA when its runtime is
+/// built (feature `native-cuda`), else HIP (`native-hip`).
+#[cfg(all(test, feature = "native-cuda"))]
+pub(crate) type TestDevice = cuda::CudaDevice;
+#[cfg(all(test, feature = "native-hip", not(feature = "native-cuda")))]
+pub(crate) type TestDevice = hip::HipDevice;
+#[cfg(all(test, any(feature = "native-cuda", feature = "native-hip")))]
+pub(crate) type TestBlock = <TestDevice as Device>::Block;
 
 /// The header in front of every kernel source: what differs between targets.
 pub const HEADER: &str = include_str!("../../kernels/arael_gpu.h");

@@ -253,34 +253,34 @@ impl<D: Device> NativeLmVectors<D> {
     }
 }
 
-#[cfg(all(test, feature = "native-cuda"))]
+#[cfg(all(test, any(feature = "native-cuda", feature = "native-hip")))]
 mod tests {
     use super::*;
     use crate::lm::{DiagFault, Scalars};
-    use crate::native::cuda::{CudaBlock, CudaDevice};
+    use crate::native::{TestBlock, TestDevice};
 
-    fn device() -> Arc<CudaDevice> {
-        Arc::new(CudaDevice::new(0).unwrap())
+    fn device() -> Arc<TestDevice> {
+        Arc::new(TestDevice::new(0).unwrap())
     }
 
-    fn up<T: bytemuck::Pod>(dev: &CudaDevice, v: &[T]) -> CudaBlock {
+    fn up<T: bytemuck::Pod>(dev: &TestDevice, v: &[T]) -> TestBlock {
         let mut b = dev.alloc(core::mem::size_of_val(v)).unwrap();
         dev.write(&mut b, 0, bytemuck::cast_slice(v)).unwrap();
         b
     }
 
-    fn read(dev: &CudaDevice, at: (&CudaBlock, usize), n: usize) -> Vec<f64> {
+    fn read(dev: &TestDevice, at: (&TestBlock, usize), n: usize) -> Vec<f64> {
         let mut v = vec![0.0f64; n];
         dev.read(at.0, at.1, bytemuck::cast_slice_mut(&mut v)).unwrap();
         v
     }
 
-    fn scalars(dev: &CudaDevice, v: &NativeLmVectors<CudaDevice>) -> Scalars {
+    fn scalars(dev: &TestDevice, v: &NativeLmVectors<TestDevice>) -> Scalars {
         Scalars::from_values(&readw(dev, v.scalars(), N_SCALARS, v.wide()))
     }
 
     /// `v` uploaded in `wide`.
-    fn upw(dev: &CudaDevice, v: &[f64], wide: Wide) -> CudaBlock {
+    fn upw(dev: &TestDevice, v: &[f64], wide: Wide) -> TestBlock {
         let bytes = wide.encode(v);
         let mut b = dev.alloc(bytes.len()).unwrap();
         dev.write(&mut b, 0, &bytes).unwrap();
@@ -288,7 +288,7 @@ mod tests {
     }
 
     /// `n` values of `wide` read back.
-    fn readw(dev: &CudaDevice, at: (&CudaBlock, usize), n: usize, wide: Wide) -> Vec<f64> {
+    fn readw(dev: &TestDevice, at: (&TestBlock, usize), n: usize, wide: Wide) -> Vec<f64> {
         let mut bytes = vec![0u8; 8 * n];
         dev.read(at.0, at.1, &mut bytes).unwrap();
         let mut v = vec![0.0f64; n];
@@ -538,12 +538,12 @@ mod tests {
         g.upload(h.vals(), &rhs).unwrap();
         v.linearized(g.rhs_target(), g.h_target(), None).unwrap();
         let refine = Some((4usize, 1e-10f64));
-        let attempt = |g: &NativeSchur<CudaDevice>, v: &NativeLmVectors<CudaDevice>, f: &NativeFactor<CudaDevice>| {
+        let attempt = |g: &NativeSchur<TestDevice>, v: &NativeLmVectors<TestDevice>, f: &NativeFactor<TestDevice>| {
             v.damp(g.h_target())?;
             g.launch(f, refine)?;
             v.step(g.step_view(), g.rhs_target())
         };
-        let check = |v: &NativeLmVectors<CudaDevice>, lambda: f64| {
+        let check = |v: &NativeLmVectors<TestDevice>, lambda: f64| {
             let s = scalars(&dev, v);
             let step = readw(&dev, g.step_view(), n, wide);
             let mut damped = dense.clone();
@@ -574,7 +574,7 @@ mod tests {
 
     /// The native passes against the CubeCL ones on the same inputs: bit for
     /// bit (no atomics; the reductions add in the same tree).
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "native-cuda"))]
     #[test]
     fn native_matches_cubecl() {
         use cubecl::bytes::Bytes;

@@ -1,14 +1,20 @@
-//! Graph capture and replay on the native CUDA runtime: a capture records
-//! launches without running them, a replay runs them against the blocks'
-//! contents at the time, operations other than launches are refused while a
-//! capture is open, and a capture (thread-local) leaves other threads' work
-//! alone, CubeCL's included.
-#![cfg(feature = "native-cuda")]
+//! Graph capture and replay on the native runtime (CUDA, else HIP): a
+//! capture records launches without running them, a replay runs them against
+//! the blocks' contents at the time, operations other than launches are
+//! refused while a capture is open, and a capture (thread-local) leaves other
+//! threads' work alone, CubeCL's included.
+#![cfg(any(feature = "native-cuda", feature = "native-hip"))]
 
-use arael_gpu::native::cuda::{CudaBlock, CudaDevice, CudaKernel};
+#[cfg(feature = "native-cuda")]
+use arael_gpu::native::cuda::CudaDevice as Dev;
+#[cfg(all(feature = "native-hip", not(feature = "native-cuda")))]
+use arael_gpu::native::hip::HipDevice as Dev;
 use arael_gpu::native::{Arg, Device, Launch, NativeError};
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "native-cuda"))]
 use cubecl::prelude::*;
+
+type Block = <Dev as Device>::Block;
+type Kernel = <Dev as Device>::Kernel;
 
 const SOURCE: &str = r#"
 KERNEL void axpc(GLOBAL const float* RESTRICT x, GLOBAL float* RESTRICT y, float a, u32 n) {
@@ -27,11 +33,11 @@ KERNEL void spin(GLOBAL float* RESTRICT out, u32 n) {
 const N: usize = 1000;
 
 /// `y = a x + 1` over N entries.
-fn axpc(dev: &CudaDevice, k: &CudaKernel, x: &CudaBlock, y: &CudaBlock, a: f32) -> Result<(), NativeError> {
+fn axpc(dev: &Dev, k: &Kernel, x: &Block, y: &Block, a: f32) -> Result<(), NativeError> {
     dev.launch(k, Launch::linear(N as u32, 256), &[Arg::Block(x, 0), Arg::Block(y, 0), Arg::F32(a), Arg::U32(N as u32)])
 }
 
-fn read(dev: &CudaDevice, b: &CudaBlock) -> Vec<f32> {
+fn read(dev: &Dev, b: &Block) -> Vec<f32> {
     let mut v = vec![0f32; N];
     dev.read(b, 0, bytemuck::cast_slice_mut(&mut v)).unwrap();
     v
@@ -39,7 +45,7 @@ fn read(dev: &CudaDevice, b: &CudaBlock) -> Vec<f32> {
 
 #[test]
 fn a_replay_runs_the_recorded_launches_against_the_blocks_contents() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let k = dev.compile(SOURCE, "", "axpc").unwrap();
     let mut x = dev.alloc(4 * N).unwrap();
     let y = dev.alloc(4 * N).unwrap();
@@ -60,7 +66,7 @@ fn a_replay_runs_the_recorded_launches_against_the_blocks_contents() {
 /// replay queued before it.
 #[test]
 fn a_read_of_several_ranges_comes_after_the_queued_work() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let k = dev.compile(SOURCE, "", "axpc").unwrap();
     let mut x = dev.alloc(4 * N).unwrap();
     let y = dev.alloc(4 * N).unwrap();
@@ -82,7 +88,7 @@ fn a_read_of_several_ranges_comes_after_the_queued_work() {
 
 #[test]
 fn only_launches_are_allowed_inside_a_capture() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let k = dev.compile(SOURCE, "", "axpc").unwrap();
     let mut x = dev.alloc(4 * N).unwrap();
     let y = dev.alloc(4 * N).unwrap();
@@ -110,7 +116,7 @@ fn only_launches_are_allowed_inside_a_capture() {
 
 #[test]
 fn a_failed_or_panicking_recording_leaves_the_device_usable() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let k = dev.compile(SOURCE, "", "axpc").unwrap();
     let mut x = dev.alloc(4 * N).unwrap();
     let y = dev.alloc(4 * N).unwrap();
@@ -145,7 +151,7 @@ fn a_failed_or_panicking_recording_leaves_the_device_usable() {
 /// captures and reads). In the driver's global mode the reads would fail.
 #[test]
 fn captures_leave_other_threads_alone() {
-    let (capturing, reading) = (CudaDevice::new(0).unwrap(), CudaDevice::new(0).unwrap());
+    let (capturing, reading) = (Dev::new(0).unwrap(), Dev::new(0).unwrap());
     let (kc, kr) = (capturing.compile(SOURCE, "", "spin").unwrap(), reading.compile(SOURCE, "", "spin").unwrap());
     let (bc, br) = (capturing.alloc(4).unwrap(), reading.alloc(4).unwrap());
     let one = Launch::linear(1, 1);
@@ -169,13 +175,13 @@ fn captures_leave_other_threads_alone() {
                 reading.sync().expect("a wait beside a capture");
             }
         });
-        #[cfg(feature = "cuda")]
+        #[cfg(all(feature = "cuda", feature = "native-cuda"))]
         scope.spawn(|| cubecl_captures_until(deadline));
     });
 }
 
 /// `spin` in CubeCL.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "native-cuda"))]
 #[cubecl::cube(launch_unchecked)]
 fn k_spin(out: &mut [f32], n: u32) {
     let mut x = 0.0f32;
@@ -188,7 +194,7 @@ fn k_spin(out: &mut [f32], n: u32) {
 }
 
 /// CubeCL's global-mode captures and reads on a context of its own, until `deadline`.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "native-cuda"))]
 fn cubecl_captures_until(deadline: std::time::Instant) {
     let ctx = arael_gpu::GpuContext::new(arael_gpu::GpuBackend::Cuda, 0).unwrap();
     let b = ctx.lease(4);

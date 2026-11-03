@@ -201,7 +201,10 @@ DEVICE WidePair wide_sin_cos(df32 x) {
     df32 r = ((((x - df32(p1)) - df32(e1)) - df32(p2)) - df32(e2)) - df32(mul_rn(-1.776356839e-15f, k));
     df32 s = df32_sin_taylor(r);
     df32 c = df32_cos_taylor(r);
-    long long q = ((long long)k % 4 + 4) % 4;
+    // the quadrant, k mod 4: exact for the integer k at any magnitude (an
+    // integer conversion of k overflows past 2^63)
+    float m = fmodf(k, 4.0f);
+    int q = (int)(m < 0.0f ? add_rn(m, 4.0f) : m);
     if (q == 0) return WidePair{s, c};
     if (q == 1) return WidePair{c, -s};
     if (q == 2) return WidePair{-s, -c};

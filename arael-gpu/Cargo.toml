@@ -19,6 +19,9 @@ hip = ["cubecl/hip"]
 # arael's own runtime and C++ kernels on CUDA (docs/dev/NATIVE_GPU_PLAN.md).
 # The driver and NVRTC are loaded at run time, so a build needs no toolkit.
 native-cuda = ["dep:cudarc"]
+# The same on HIP: the HIP runtime and hipRTC through our own bindings
+# (src/native/hip_sys.rs), loaded at run time, so a build needs no ROCm.
+native-hip = ["dep:libloading"]
 
 [dependencies]
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
@@ -29,6 +32,7 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
     "cuda-version-from-build-system",
     "fallback-latest",
 ] }
+libloading = { version = "0.8", optional = true }
 arael-faer = { workspace = true }
 cubecl = "0.11"
 cubecl-runtime = "0.11"

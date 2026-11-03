@@ -564,18 +564,18 @@ fn defines(scalar: &str, lu: usize) -> String {
     s
 }
 
-#[cfg(all(test, feature = "native-cuda"))]
+#[cfg(all(test, any(feature = "native-cuda", feature = "native-hip")))]
 mod tests {
     use super::*;
-    use crate::native::cuda::CudaDevice;
+    use crate::native::TestDevice;
     use crate::test_util::{grid_spd, rel_residual};
     use arael_faer::bsc::SparseBlockColMat;
     use arael_faer::supernodal::{SupernodalContext, SupernodalParams, nd_block_order, supernodal_factorize, supernodal_solve};
 
     type Matrix = SparseBlockColMat<SparseIndex, f64>;
 
-    fn device() -> Arc<CudaDevice> {
-        Arc::new(CudaDevice::new(0).unwrap())
+    fn device() -> Arc<TestDevice> {
+        Arc::new(TestDevice::new(0).unwrap())
     }
 
     fn setup(k: usize) -> (Matrix, Vec<f64>, Vec<f64>, SupernodalSymbolic) {
@@ -766,7 +766,7 @@ mod tests {
     /// The native kernels against the CubeCL ones, factor and solution, in
     /// both scalars: equal to rounding (the tile updates add atomically, in
     /// no fixed order).
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "native-cuda"))]
     #[test]
     fn native_matches_cubecl() {
         fn compare<F: Scalar + crate::Real>(tol: f64) {
@@ -807,7 +807,7 @@ mod tests {
     /// Median wall times of factorize and solve (each with its upload and
     /// its blocking read), native against CubeCL:
     /// `cargo test -r -p arael-gpu --features cuda,native-cuda -- --ignored --nocapture native_against_cubecl`.
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "native-cuda"))]
     #[test]
     #[ignore = "timing"]
     fn time_native_against_cubecl() {
@@ -872,7 +872,7 @@ mod tests {
 
     /// `grid_spd`'s structure at a size whose dense twin would not fit: the
     /// same couplings, values that keep it positive definite.
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "native-cuda"))]
     fn large_grid(k: usize) -> (Matrix, Vec<f64>, SupernodalSymbolic) {
         let widths = [3usize, 6];
         let nblk = k * k;

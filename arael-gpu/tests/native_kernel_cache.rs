@@ -1,16 +1,26 @@
-//! The native runtime's kernel cache (feature `native-cuda`), in a process
-//! of its own: the cache is chosen once per process, at its first GPU use.
-#![cfg(feature = "native-cuda")]
+//! The native runtime's kernel cache (feature `native-cuda` or `native-hip`),
+//! in a process of its own: the cache is chosen once per process, at its
+//! first GPU use.
+#![cfg(any(feature = "native-cuda", feature = "native-hip"))]
 
-use arael_gpu::native::cuda::{CudaDevice, compiles};
+#[cfg(feature = "native-cuda")]
+use arael_gpu::native::cuda::{CudaDevice as Dev, compiles};
+#[cfg(all(feature = "native-hip", not(feature = "native-cuda")))]
+use arael_gpu::native::hip::{HipDevice as Dev, compiles};
 use arael_gpu::native::{Arg, Device, Launch};
+
+/// The cache's directory for the device's target, under `native`.
+#[cfg(feature = "native-cuda")]
+const TARGET: &str = "cuda";
+#[cfg(all(feature = "native-hip", not(feature = "native-cuda")))]
+const TARGET: &str = "hip";
 use arael_gpu::{KernelCache, set_kernel_cache};
 
 const SOURCE: &str = "KERNEL void twice(GLOBAL float* RESTRICT x, u32 n) { u32 i = global_x(); if (i < n) x[i] *= 2.0f; }";
 
 /// The kernel run on a fresh device: compiled, or loaded from the cache.
 fn run_twice(scale: &str) -> Vec<f32> {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let k = dev.compile(SOURCE, scale, "twice").unwrap();
     let host = [1f32, 2.0, 3.0];
     let mut x = dev.alloc(12).unwrap();
@@ -33,7 +43,7 @@ fn a_compiled_kernel_is_found_again_by_the_next_device() {
     let dir = std::env::temp_dir().join(format!("arael-native-cache-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(set_kernel_cache(KernelCache::Dir(dir.clone())));
-    let cached = dir.join("native").join("cuda");
+    let cached = dir.join("native").join(TARGET);
     let start = compiles();
     assert_eq!(run_twice(""), [2.0, 4.0, 6.0]);
     assert_eq!(compiles(), start + 1);
@@ -53,7 +63,7 @@ fn a_compiled_kernel_is_found_again_by_the_next_device() {
     assert_eq!(compiles(), start + 3);
     assert_eq!(run_twice(""), [2.0, 4.0, 6.0]);
     assert_eq!(compiles(), start + 3);
-    // or the key intact and the cubin cut short
+    // or the key intact and the binary cut short
     std::fs::write(&files[0], &good[..good.len() - 100]).unwrap();
     assert_eq!(run_twice(""), [2.0, 4.0, 6.0]);
     assert_eq!(compiles(), start + 4);
