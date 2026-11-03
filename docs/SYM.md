@@ -366,7 +366,7 @@ You don't need `use arael::matrix::matrix2sym;` -- the macro matches `matrix2sym
 
 ## Output Formatting / Code Generation
 
-Any `E` renders four ways: `Display` for human reading, `to_latex()` for typeset output, `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes), and `to_cubecl` for GPU kernels ([below](#code-for-gpu-kernels-cubecl)). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context; an `atan2` or `powf` whose first argument is a constant is then written as a call, `arael::utils::atan2(1.0, x)`, since rustc cannot call a method on an unsuffixed literal. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
+Any `E` renders five ways: `Display` for human reading, `to_latex()` for typeset output, `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls the literals' suffixes), and `to_cpp` and `to_cubecl` for GPU kernels ([below](#code-for-gpu-kernels-c)). A power with a whole exponent is written as `powi`, which compiles to multiplications; any other as `powf`. Passing `""` omits the suffixes and lets literals infer from context; an `atan2` or `powf` whose first argument is a constant is then written as a call, `arael::utils::atan2(1.0, x)`, since rustc cannot call a method on an unsuffixed literal. For code targeting a generic `T: Float` scope -- where an unsuffixed literal cannot infer -- `to_rust_generic()` wraps every literal as `__c(<lit>)` and expects the caller to provide a conversion helper `__c` returning the scalar type.
 
 ```rust
 sym! {
@@ -387,6 +387,21 @@ Display:  (-x + 1)^2 + 100 * (-x^2 + y)^2
 LaTeX:    \left(-x + 1\right)^{2} + 100 \cdot \left(-x^{2} + y\right)^{2}
 Rust f64: (-x + 1.0_f64).powi(2) + 100.0_f64 * (-x.powi(2) + y).powi(2)
 ```
+
+### Code for GPU kernels (C++)
+
+`to_cpp("f32")` / `to_cpp("f64")` prints an expression as C++ for a kernel of arael's own GPU runtime, written in the C++ subset CUDA, HIP and Metal share: `float` or `double`, every literal rounded to it, functions called by their overloaded names (`sin(x)`, `fabs(x)`, `log(x)`), whole powers up to 8 as products, a `branch` as `?:` (only the taken side is evaluated), and `with_wide` blocks computed in `double` and cast back. `to_cpp_with(scalar, map)` prints each symbol as `map(name)`, the value the kernel reads it from, and `cpp_body` runs `cse_scoped_wide` and prints the statements and then one expression per output:
+
+```rust
+use arael_sym::{cpp_body, sqrt, symbols};
+let (x, y) = symbols!(x, y);
+let r = sqrt(x.clone() * x.clone() + y.clone() * y.clone()) - 1.0;
+let body = cpp_body(&[r.clone(), r.diff("x"), r.diff("y")], "f32").unwrap();
+assert_eq!(body.stmts, "const float __x0 = sqrt(((x * x) + (y * y)));\nconst float __x1 = (1.0f / __x0);\n");
+assert_eq!(body.outputs, ["(__x0 - 1.0f)", "(x * __x1)", "(y * __x1)"]);
+```
+
+After CSE every branch is an `if` that runs only the taken side, the names it binds declared before it, as with `cubecl_body` below. What has no C++ form yet is an error naming it: a `select` on an index, an external function (`#[arael::function]`, `fast_atan` and the other numeric helpers of `arael::utils`), and a wide scalar other than `f64`.
 
 ### Code for GPU kernels (CubeCL)
 
