@@ -3,6 +3,12 @@
 //! hand, and a thin runtime per vendor behind [`Device`]. It replaces the
 //! CubeCL route stage by stage (docs/dev/NATIVE_GPU_PLAN.md).
 //!
+//! On a device: [`NativeSupernodal`] (the factorization and its solve),
+//! [`NativeSchur`] (the Schur reduction, the refinement and the
+//! back-substitution around a factor) and [`NativeLmVectors`] (the LM loop's
+//! vector passes). A sequence of launches records as a graph with
+//! [`Device::capture`] and runs again with [`Device::replay`].
+//!
 //! ```ignore
 //! use arael_gpu::native::{cuda::CudaDevice, Arg, Device, Launch};
 //! let dev = CudaDevice::new(0)?;
@@ -13,14 +19,29 @@
 //! dev.read(&x, 0, bytemuck::cast_slice_mut(&mut host))?;
 //! ```
 
+use arael_faer::schur::SchurReal;
+
 #[cfg(feature = "native-cuda")]
 pub mod cuda;
+#[cfg(feature = "native-cuda")]
+mod disk;
+pub mod lm;
+pub mod schur;
 pub mod supernodal;
 
-pub use supernodal::{FactorizeError, NativeSupernodal};
+#[cfg(feature = "native-cuda")]
+pub use disk::take_cache_failure;
+pub use lm::NativeLmVectors;
+pub use schur::{NativeSchur, NativeSchurError};
+pub use supernodal::{FactorizeError, NativeFactor, NativeSupernodal};
 
 /// The header in front of every kernel source: what differs between targets.
 pub const HEADER: &str = include_str!("../../kernels/arael_gpu.h");
+
+/// The kernels a model's device assembly shares (`kernels/assembly.cpp`):
+/// the gather, the rotation caches and the device functions the generated
+/// constraint kernels call. A root's kernels are compiled after it.
+pub const ASSEMBLY: &str = include_str!("../../kernels/assembly.cpp");
 
 /// A scalar the kernels compute in: `f32` or `f64`.
 pub trait Scalar: bytemuck::Pod + Send + Sync + 'static {
@@ -88,6 +109,9 @@ pub enum NativeError {
     /// The problem needs more of a resource than the device has, e.g. shared
     /// memory for a supernode's columns.
     Limit(String),
+    /// An operation a graph capture cannot hold: anything but a launch while
+    /// a capture is open, or a capture inside another.
+    Capture(String),
 }
 
 impl core::fmt::Display for NativeError {
@@ -97,6 +121,7 @@ impl core::fmt::Display for NativeError {
             NativeError::Driver(why) => write!(f, "GPU driver call failed: {why}"),
             NativeError::Compile { entry, log } => write!(f, "kernel `{entry}` did not compile:\n{log}"),
             NativeError::Limit(why) => write!(f, "beyond the GPU's limits: {why}"),
+            NativeError::Capture(why) => write!(f, "not allowed in a graph capture: {why}"),
         }
     }
 }
@@ -146,12 +171,16 @@ impl Launch {
 /// One GPU, a stream of its own, and the kernels compiled for it.
 ///
 /// Every operation is ordered on the stream. [`Device::read`] and
-/// [`Device::sync`] are the only ones that wait for the device.
-pub trait Device {
+/// [`Device::sync`] are the only ones that wait for the device. A device is
+/// shared between threads (solvers hold it in an `Arc`), and what it makes
+/// moves between them.
+pub trait Device: Send + Sync {
     /// Device memory: a run of bytes.
-    type Block;
+    type Block: Send + Sync;
     /// A compiled entry point.
-    type Kernel;
+    type Kernel: Send + Sync;
+    /// A recorded sequence of launches ([`Device::capture`]).
+    type Graph: Send;
 
     /// What this device's kernels are specialised on.
     fn arch(&self) -> &Arch;
@@ -164,6 +193,13 @@ pub trait Device {
 
     /// Copies `dst.len()` bytes of `src` from byte `offset` on, after the work queued before it.
     fn read(&self, src: &Self::Block, offset: usize, dst: &mut [u8]) -> Result<(), NativeError>;
+
+    /// [`read`](Self::read) of several ranges, `(src, offset, dst)` each, waiting once.
+    ///
+    /// ```ignore
+    /// dev.read_many(&mut [(&a, 0, &mut status[..]), (&b, at, &mut scalars[..])])?;
+    /// ```
+    fn read_many(&self, reads: &mut [(&Self::Block, usize, &mut [u8])]) -> Result<(), NativeError>;
 
     /// Entry point `entry` of `source`, compiled with `defines` in front of [`HEADER`].
     /// A source compiles once per device; later calls find it in memory.
@@ -179,4 +215,75 @@ pub trait Device {
 
     /// Waits until everything queued has run.
     fn sync(&self) -> Result<(), NativeError>;
+
+    /// The launches `record` queues, recorded as a graph instead of run.
+    ///
+    /// Only launches may be queued while the capture is open: every other
+    /// operation of the device fails with [`NativeError::Capture`]. The graph
+    /// holds the launches' arguments as they were, block addresses included,
+    /// so the blocks it uses outlive it, and its inputs change by writing
+    /// into those blocks between replays.
+    ///
+    /// ```ignore
+    /// let graph = dev.capture(|| dev.launch(&k, Launch::linear(n, 256), &[Arg::Block(&x, 0)]))?;
+    /// dev.write(&mut x, 0, bytes)?;
+    /// dev.replay(&graph)?;
+    /// ```
+    fn capture(&self, record: impl FnOnce() -> Result<(), NativeError>) -> Result<Self::Graph, NativeError>;
+
+    /// Queues `graph`'s launches, in their recorded order.
+    fn replay(&self, graph: &Self::Graph) -> Result<(), NativeError>;
+}
+
+/// `#define NAME VALUEu` for each pair, for a kernel source's constants.
+pub(crate) fn define_u32s(s: &mut String, consts: &[(&str, usize)]) {
+    use core::fmt::Write as _;
+    for (name, v) in consts {
+        assert!(*v <= u32::MAX as usize, "{name} = {v} is no u32");
+        writeln!(s, "#define {name} {v}u").unwrap();
+    }
+}
+
+/// Whether `M` is `f64` (otherwise it is `f32`, the only other [`SchurReal`]).
+pub(crate) fn is_f64<M: SchurReal + 'static>() -> bool {
+    if core::any::TypeId::of::<M>() == core::any::TypeId::of::<f64>() {
+        return true;
+    }
+    assert_eq!(core::any::TypeId::of::<M>(), core::any::TypeId::of::<f32>(), "SchurReal is f32 or f64");
+    false
+}
+
+/// The bytes of `v`.
+pub(crate) fn scalar_bytes<M: SchurReal>(v: &[M]) -> &[u8] {
+    // SAFETY: SchurReal is sealed to f32 and f64, plain values without padding.
+    unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, core::mem::size_of_val(v)) }
+}
+
+/// The bytes of `v`, writable.
+pub(crate) fn scalar_bytes_mut<M: SchurReal>(v: &mut [M]) -> &mut [u8] {
+    // SAFETY: as scalar_bytes; every bit pattern is a valid f32 or f64.
+    unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, core::mem::size_of_val(v)) }
+}
+
+/// Byte offsets of a block's sections, each on a 256-byte boundary.
+pub(crate) struct Layout {
+    at: usize,
+}
+
+impl Layout {
+    pub fn new() -> Self {
+        Layout { at: 0 }
+    }
+
+    /// The offset of a section of `bytes` (at least one), after the last.
+    pub fn take(&mut self, bytes: usize) -> usize {
+        let start = self.at;
+        self.at = (self.at + bytes.max(1)).next_multiple_of(256);
+        start
+    }
+
+    /// The block's size.
+    pub fn bytes(&self) -> usize {
+        self.at
+    }
 }

@@ -4,7 +4,7 @@
 // constants (ARAEL_WARP, ARAEL_SHARED_BYTES) and the kernel's own (SCALAR,
 // tile sizes). Kernel code uses only the names defined here, the C++ subset
 // of docs/dev/NATIVE_GPU_PLAN.md section 2, and the math functions every
-// target has (sqrt, fma, isnan, min, max).
+// target has (sqrt, fabs, fma, isnan, min, max).
 //
 // Targets: CUDA (NVRTC). HIP and Metal add their branches in their stages.
 

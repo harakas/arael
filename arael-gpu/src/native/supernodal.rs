@@ -2,16 +2,16 @@
 //! solve on a [`Device`]: the kernels of `kernels/supernodal.cpp` launched
 //! over the plan of [`crate::plan`].
 
-use std::any::TypeId;
 use std::fmt::Write as _;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::SupernodalSymbolic;
 
-use super::{Arg, Device, Launch, NativeError, Scalar};
+use super::{Arg, Device, Launch, NativeError, Scalar, is_f64, scalar_bytes, scalar_bytes_mut};
 use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, TB, build_levels};
 use crate::supernodal::Packer;
 
@@ -159,8 +159,12 @@ pub struct NativeSupernodal<F: Scalar, D: Device> {
     /// The right-hand side of [`solve`](Self::solve) in `f64`, when the
     /// caller's is `f32`.
     host_x: Vec<f64>,
+    id: u64,
     _f: PhantomData<F>,
 }
+
+/// The next factor's [`NativeSupernodal::id`].
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
     /// The device plan of `sn`, the analysis of a matrix with the block
@@ -263,6 +267,7 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
             nvals,
             factor_vals: plan.factor_vals,
             host_x: vec![0.0; plan.n],
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             _f: PhantomData,
         })
     }
@@ -270,6 +275,12 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
     /// The scalar dimension of the system.
     pub fn dim(&self) -> usize {
         self.n
+    }
+
+    /// The factor's identity, unique in the process: a graph that recorded
+    /// this factor's launches replays only with it.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// The device the factor runs on.
@@ -296,7 +307,7 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
     /// are cast to `F` as they land in the panels, and a pivot that is not
     /// positive sets the `u32` at `fail` nonzero (the caller zeroes it, and
     /// reads it with its result).
-    pub fn factorize_device(&mut self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), NativeError> {
+    pub fn factorize_device(&self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), NativeError> {
         self.factorize_with(vals, true, fail)
     }
 
@@ -367,13 +378,13 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
     /// (block, byte offset), `f64` in the matrix's ordering, in place,
     /// without waiting: the permutation into the factor's ordering and
     /// scalar and back, and the level-set solve between.
-    pub fn solve_device(&mut self, x: (&D::Block, usize)) -> Result<(), NativeError> {
+    pub fn solve_device(&self, x: (&D::Block, usize)) -> Result<(), NativeError> {
         self.solve_with(x, (&self.ints, self.on))
     }
 
     /// [`solve_device`](Self::solve_device) when the `u32` at `gate` is
     /// nonzero, as the device finds it; otherwise its kernels do nothing.
-    pub fn solve_device_if(&mut self, x: (&D::Block, usize), gate: (&D::Block, usize)) -> Result<(), NativeError> {
+    pub fn solve_device_if(&self, x: (&D::Block, usize), gate: (&D::Block, usize)) -> Result<(), NativeError> {
         self.solve_with(x, gate)
     }
 
@@ -460,6 +471,54 @@ impl<D: Device> NativeFactor<D> {
             NativeFactor::F64(_) => crate::GpuPrecision::F64,
         }
     }
+
+    /// As [`NativeSupernodal::factorize_device`].
+    pub fn factorize_device(&self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), NativeError> {
+        match self {
+            NativeFactor::F32(f) => f.factorize_device(vals, fail),
+            NativeFactor::F64(f) => f.factorize_device(vals, fail),
+        }
+    }
+
+    /// As [`NativeSupernodal::solve_device`].
+    pub fn solve_device(&self, x: (&D::Block, usize)) -> Result<(), NativeError> {
+        match self {
+            NativeFactor::F32(f) => f.solve_device(x),
+            NativeFactor::F64(f) => f.solve_device(x),
+        }
+    }
+
+    /// As [`NativeSupernodal::solve_device_if`].
+    pub fn solve_device_if(&self, x: (&D::Block, usize), gate: (&D::Block, usize)) -> Result<(), NativeError> {
+        match self {
+            NativeFactor::F32(f) => f.solve_device_if(x, gate),
+            NativeFactor::F64(f) => f.solve_device_if(x, gate),
+        }
+    }
+
+    /// As [`NativeSupernodal::id`].
+    pub fn id(&self) -> u64 {
+        match self {
+            NativeFactor::F32(f) => f.id(),
+            NativeFactor::F64(f) => f.id(),
+        }
+    }
+
+    /// As [`NativeSupernodal::device`].
+    pub fn device(&self) -> &Arc<D> {
+        match self {
+            NativeFactor::F32(f) => f.device(),
+            NativeFactor::F64(f) => f.device(),
+        }
+    }
+
+    /// As [`NativeSupernodal::dim`].
+    pub fn dim(&self) -> usize {
+        match self {
+            NativeFactor::F32(f) => f.dim(),
+            NativeFactor::F64(f) => f.dim(),
+        }
+    }
 }
 
 /// The `#define`s of `supernodal.cpp`: the scalar, the lane unroll, the
@@ -498,27 +557,6 @@ fn defines(scalar: &str, lu: usize) -> String {
         writeln!(s, "#define {name} {v}u").unwrap();
     }
     s
-}
-
-/// Whether `M` is `f64` (otherwise it is `f32`, the only other [`SchurReal`]).
-fn is_f64<M: SchurReal + 'static>() -> bool {
-    if TypeId::of::<M>() == TypeId::of::<f64>() {
-        return true;
-    }
-    assert_eq!(TypeId::of::<M>(), TypeId::of::<f32>(), "SchurReal is f32 or f64");
-    false
-}
-
-/// The bytes of `v`.
-fn scalar_bytes<M: SchurReal>(v: &[M]) -> &[u8] {
-    // SAFETY: SchurReal is sealed to f32 and f64, plain values without padding.
-    unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, core::mem::size_of_val(v)) }
-}
-
-/// The bytes of `v`, writable.
-fn scalar_bytes_mut<M: SchurReal>(v: &mut [M]) -> &mut [u8] {
-    // SAFETY: as scalar_bytes; every bit pattern is a valid f32 or f64.
-    unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, core::mem::size_of_val(v)) }
 }
 
 #[cfg(all(test, feature = "native-cuda"))]

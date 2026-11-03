@@ -40,35 +40,35 @@ use crate::GpuFactor;
 const NONE: u32 = u32::MAX;
 
 // The header of the reduction's plan buffer: where each array starts.
-const SE_DIAG_OFF: usize = 0;
-const SE_W: usize = 1;
-const SE_ORIG_OFF: usize = 2;
-const SE_OBS_PTR: usize = 3;
-const SE_DINV_OFF: usize = 4;
-const SE_Z_OFF: usize = 5;
-const SO_CA_OFF: usize = 6;
-const SO_TRANS: usize = 7;
-const SO_W: usize = 8;
-const SO_E: usize = 9;
-const SO_ORIG_OFF: usize = 10;
-const SO_W_OFF: usize = 11;
-const ST_VAL_OFF: usize = 12;
-const ST_WR: usize = 13;
-const ST_WC: usize = 14;
-const ST_A: usize = 15;
-const ST_B: usize = 16;
-const ST_A_OFF: usize = 17;
-const ST_B_OFF: usize = 18;
-const ST_COPY_OFF: usize = 19;
-const ST_PAIR_PTR: usize = 20;
-const SP_OA: usize = 21;
-const SP_OB: usize = 22;
-const SK_OBS_PTR: usize = 23;
-const SK_OBS: usize = 24;
-const SK_S_OFF: usize = 25;
-const SK_ORIG_OFF: usize = 26;
-const SK_W: usize = 27;
-const SHEADER: usize = 32;
+pub(crate) const SE_DIAG_OFF: usize = 0;
+pub(crate) const SE_W: usize = 1;
+pub(crate) const SE_ORIG_OFF: usize = 2;
+pub(crate) const SE_OBS_PTR: usize = 3;
+pub(crate) const SE_DINV_OFF: usize = 4;
+pub(crate) const SE_Z_OFF: usize = 5;
+pub(crate) const SO_CA_OFF: usize = 6;
+pub(crate) const SO_TRANS: usize = 7;
+pub(crate) const SO_W: usize = 8;
+pub(crate) const SO_E: usize = 9;
+pub(crate) const SO_ORIG_OFF: usize = 10;
+pub(crate) const SO_W_OFF: usize = 11;
+pub(crate) const ST_VAL_OFF: usize = 12;
+pub(crate) const ST_WR: usize = 13;
+pub(crate) const ST_WC: usize = 14;
+pub(crate) const ST_A: usize = 15;
+pub(crate) const ST_B: usize = 16;
+pub(crate) const ST_A_OFF: usize = 17;
+pub(crate) const ST_B_OFF: usize = 18;
+pub(crate) const ST_COPY_OFF: usize = 19;
+pub(crate) const ST_PAIR_PTR: usize = 20;
+pub(crate) const SP_OA: usize = 21;
+pub(crate) const SP_OB: usize = 22;
+pub(crate) const SK_OBS_PTR: usize = 23;
+pub(crate) const SK_OBS: usize = 24;
+pub(crate) const SK_S_OFF: usize = 25;
+pub(crate) const SK_ORIG_OFF: usize = 26;
+pub(crate) const SK_W: usize = 27;
+pub(crate) const SHEADER: usize = 32;
 
 // ---------------------------------------------------------------- kernels
 
@@ -465,22 +465,22 @@ pub fn k_copy_f64(gate: &[u32], dst: &mut [f64], src: &[f64], n: u32) {
 
 // The refinement's state on the device: f64 words and u32 flags, read back
 // with the step.
-const ST_BNORM: usize = 0;
-const ST_TOL: usize = 1;
-const ST_RNORM: usize = 2;
+pub(crate) const ST_BNORM: usize = 0;
+pub(crate) const ST_TOL: usize = 1;
+pub(crate) const ST_RNORM: usize = 2;
 /// A refinement step is due; the gate of the step's kernels.
-const F_ACTIVE: usize = 0;
-const F_STEPS: usize = 1;
+pub(crate) const F_ACTIVE: usize = 0;
+pub(crate) const F_STEPS: usize = 1;
 /// The last step did not reduce the residual and is undone.
-const F_REVERT: usize = 2;
+pub(crate) const F_REVERT: usize = 2;
 /// An eliminated block's slot plus one when its diagonal is not definite.
-const F_ELIM: usize = 3;
+pub(crate) const F_ELIM: usize = 3;
 /// Nonzero when S's factorization met a pivot that is not positive.
-const F_FACTOR: usize = 4;
-const N_FLAGS: usize = 8;
+pub(crate) const F_FACTOR: usize = 4;
+pub(crate) const N_FLAGS: usize = 8;
 /// Bytes from the state's start to the flags', and the state's size.
-const FLAGS_AT: usize = 64;
-const STATUS_BYTES: usize = FLAGS_AT + 4 * N_FLAGS;
+pub(crate) const FLAGS_AT: usize = 64;
+pub(crate) const STATUS_BYTES: usize = FLAGS_AT + 4 * N_FLAGS;
 
 /// The sum of squares of `x[0..n]` by one cube of 256 units, returned to
 /// every unit.
@@ -688,18 +688,67 @@ struct Captured {
     graph: cubecl_runtime::client::Graph,
 }
 
+/// Where the status starts in a solve's output, after the step's `n` f64.
+pub(crate) fn status_at(n: usize) -> usize {
+    (n * core::mem::size_of::<f64>()).div_ceil(256) * 256
+}
+
+/// The outcome of a solve with refinement `refine` from its status bytes,
+/// `elim_blk` giving the block of each eliminated slot.
+pub(crate) fn decode_status(status: &[u8], elim_blk: &[u32], refine: Option<(usize, f64)>) -> Result<RefineStats, GpuSchurError> {
+    let word = |at: usize| bytemuck::pod_read_unaligned::<u32>(&status[at..at + 4]);
+    let real = |at: usize| bytemuck::pod_read_unaligned::<f64>(&status[at..at + 8]);
+    let flag = |f: usize| word(FLAGS_AT + 4 * f);
+    let elim = flag(F_ELIM);
+    if elim != 0 {
+        return Err(GpuSchurError::Eliminated { block: elim_blk[elim as usize - 1] as usize });
+    }
+    if flag(F_FACTOR) != 0 {
+        return Err(GpuSchurError::Reduced);
+    }
+    let mut stats = RefineStats::default();
+    if refine.is_some_and(|r| r.0 > 0) {
+        let st = |i: usize| real(8 * i);
+        stats = RefineStats { steps: flag(F_STEPS) as usize, rnorm: st(ST_RNORM), bnorm: st(ST_BNORM), short: st(ST_RNORM) > st(ST_TOL) };
+    }
+    Ok(stats)
+}
+
 fn round_cap(w: usize) -> usize {
     [4usize, 8, 16, 32, 64].into_iter().find(|&c| c >= w).unwrap_or_else(|| panic!("a block of {w} columns is wider than the reduction's kernels take (64)"))
 }
 
-impl GpuSchur {
-    /// Build the device plan of `sym`, the reduction of a matrix with the
-    /// block structure `hsym`, and lease the reduction's buffers from `ctx`
-    /// (returned on drop). The plan goes up in one copy.
-    pub fn new(ctx: &GpuContext, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+/// The host side of a reduction, shared by [`GpuSchur`] and the native
+/// runtime's twin: the plan words the kernels read (the header's offsets
+/// relative to word 0) and the sizes of the reduction's arrays.
+pub(crate) struct SchurPlan {
+    pub words: Vec<u32>,
+    pub ne: u32,
+    pub no: u32,
+    pub nt: u32,
+    pub nk: u32,
+    /// The Hessian's scalar dimension, and the reduced system's.
+    pub n: usize,
+    pub nks: usize,
+    /// Values of S, of the block inverses, of z and of W.
+    pub s_len: usize,
+    pub dinv_len: usize,
+    pub z_len: usize,
+    pub w_len: usize,
+    /// The widest eliminated and kept blocks, rounded up as the kernels take them.
+    pub ew_cap: usize,
+    pub kw_cap: usize,
+    /// Entries of a tile of S per lane.
+    pub acc_cap: usize,
+    /// Per eliminated slot, its block id (for the error).
+    pub elim_blk: Vec<u32>,
+}
+
+impl SchurPlan {
+    /// The plan of `sym`, the reduction of a matrix with the block structure `hsym`.
+    pub fn reduction(sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
         let (src, dst) = sym.copy_tiles();
         Self::build(
-            ctx,
             &Elimination {
                 elim_diag: sym.elim_diag(),
                 elim_w: sym.elim_w(),
@@ -719,13 +768,10 @@ impl GpuSchur {
         )
     }
 
-    /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
-    /// the whole system's. Built from `hsym` alone, without a
-    /// [`SchurSymbolic`] (whose pair lookup a whole system does not need).
-    pub fn whole(ctx: &GpuContext, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+    /// The plan with nothing eliminated: S is H.
+    pub fn whole(hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
         let tiles: Vec<SparseIndex> = (0..hsym.nblocks() as SparseIndex).collect();
         Self::build(
-            ctx,
             &Elimination {
                 elim_diag: &[],
                 elim_w: &[],
@@ -745,7 +791,7 @@ impl GpuSchur {
         )
     }
 
-    fn build(ctx: &GpuContext, sym: &Elimination, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+    fn build(sym: &Elimination, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
         let ne = sym.elim_diag.len();
         let no = sym.obs_w.len();
         let nk = sym.kept.len();
@@ -922,26 +968,61 @@ impl GpuSchur {
             buf[slot] = buf.len() as u32;
             buf.extend_from_slice(v);
         }
-        let plan_len = buf.len();
-        let mut pk = Packer { words: buf };
+        let ew_cap = round_cap(ew_max);
+        let kw_cap = round_cap(kw_max);
+        SchurPlan {
+            words: buf,
+            ne: ne as u32,
+            no: no as u32,
+            nt: nt as u32,
+            nk: nk as u32,
+            n,
+            nks,
+            s_len: ssym.val_count(),
+            dinv_len: dinv_len as usize,
+            z_len: z_len as usize,
+            w_len: w_len as usize,
+            ew_cap,
+            kw_cap,
+            acc_cap: (kw_cap * kw_cap).div_ceil(32),
+            elim_blk,
+        }
+    }
+}
+
+impl GpuSchur {
+    /// Build the device plan of `sym`, the reduction of a matrix with the
+    /// block structure `hsym`, and lease the reduction's buffers from `ctx`
+    /// (returned on drop). The plan goes up in one copy.
+    pub fn new(ctx: &GpuContext, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+        Self::build(ctx, SchurPlan::reduction(sym, hsym))
+    }
+
+    /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
+    /// the whole system's. Built from `hsym` alone, without a
+    /// [`SchurSymbolic`] (whose pair lookup a whole system does not need).
+    pub fn whole(ctx: &GpuContext, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
+        Self::build(ctx, SchurPlan::whole(hsym))
+    }
+
+    fn build(ctx: &GpuContext, p: SchurPlan) -> Self {
+        let plan_len = p.words.len();
+        let mut pk = Packer { words: p.words };
         let at_on = pk.push(&[1]);
         let plan = pk.upload(ctx);
         let d_on = Packer::view(plan.handle(), at_on);
-        let s_len = ssym.val_count();
         let f64s = core::mem::size_of::<f64>();
-        let ew_cap = round_cap(ew_max);
-        let kw_cap = round_cap(kw_max);
         let empty = |n: usize| ctx.lease(n.max(1) * f64s);
-        let status_at = (n * f64s).div_ceil(256) * 256;
+        let status_at = status_at(p.n);
         GpuSchur {
-            dinv: empty(dinv_len as usize),
-            z: empty(z_len as usize),
-            w: empty(w_len as usize),
-            s: empty(s_len),
-            rhs_kept: empty(nks),
-            x_kept: empty(nks),
-            x_prev: empty(nks),
-            r: empty(nks),
+            dinv: empty(p.dinv_len),
+            z: empty(p.z_len),
+            w: empty(p.w_len),
+            s: empty(p.s_len),
+            rhs_kept: empty(p.nks),
+            x_kept: empty(p.nks),
+            x_prev: empty(p.nks),
+            r: empty(p.nks),
             out: ctx.lease(status_at + STATUS_BYTES),
             status_at,
             graph: None,
@@ -951,17 +1032,17 @@ impl GpuSchur {
             plan,
             plan_len,
             d_on,
-            ne: ne as u32,
-            no: no as u32,
-            nt: nt as u32,
-            nk: nk as u32,
-            n,
-            nks,
-            s_len,
-            ew_cap,
-            kw_cap,
-            acc_cap: (kw_cap * kw_cap).div_ceil(32),
-            elim_blk,
+            ne: p.ne,
+            no: p.no,
+            nt: p.nt,
+            nk: p.nk,
+            n: p.n,
+            nks: p.nks,
+            s_len: p.s_len,
+            ew_cap: p.ew_cap,
+            kw_cap: p.kw_cap,
+            acc_cap: p.acc_cap,
+            elim_blk: p.elim_blk,
             h: Upload::default(),
             h_len: 0,
             rhs: Upload::default(),
@@ -1291,22 +1372,7 @@ impl GpuSchur {
     /// The outcome of a solve with refinement `refine` from its status bytes
     /// (as read from [`status_view`](Self::status_view)).
     pub fn outcome(&self, status: &[u8], refine: Option<(usize, f64)>) -> Result<RefineStats, GpuSchurError> {
-        let word = |at: usize| bytemuck::pod_read_unaligned::<u32>(&status[at..at + 4]);
-        let real = |at: usize| bytemuck::pod_read_unaligned::<f64>(&status[at..at + 8]);
-        let flag = |f: usize| word(FLAGS_AT + 4 * f);
-        let elim = flag(F_ELIM);
-        if elim != 0 {
-            return Err(GpuSchurError::Eliminated { block: self.elim_blk[elim as usize - 1] as usize });
-        }
-        if flag(F_FACTOR) != 0 {
-            return Err(GpuSchurError::Reduced);
-        }
-        let mut stats = RefineStats::default();
-        if refine.is_some_and(|r| r.0 > 0) {
-            let st = |i: usize| real(8 * i);
-            stats = RefineStats { steps: flag(F_STEPS) as usize, rnorm: st(ST_RNORM), bnorm: st(ST_BNORM), short: st(ST_RNORM) > st(ST_TOL) };
-        }
-        Ok(stats)
+        decode_status(status, &self.elim_blk, refine)
     }
 
     /// The reduced right-hand side and S's values read back (for tests).

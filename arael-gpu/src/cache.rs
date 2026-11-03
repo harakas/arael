@@ -1,13 +1,15 @@
-//! The kernel cache: CubeCL's compiled kernels kept on disk between
-//! processes, so only a process's first run on a machine compiles them.
+//! The kernel cache: compiled kernels kept on disk between processes, so
+//! only a process's first run on a machine compiles them.
 //!
 //! The location comes from [`set_kernel_cache`] or, without it, from the
 //! environment variable `ARAEL_KERNEL_CACHE`: a directory, `off` to keep
 //! nothing, or unset for the user's cache directory (`~/.cache/arael/kernels`
 //! on Linux, `$XDG_CACHE_HOME` respected). It is fixed at the first GPU use
-//! of the process. The cache is CubeCL's "environment" store, which also
-//! holds its autotune results; an entry belongs to the binary that compiled
-//! it, so a rebuilt program compiles afresh.
+//! of the process. CubeCL's kernels go to its "environment" store there,
+//! which also holds its autotune results; an entry belongs to the binary
+//! that compiled it, so a rebuilt program compiles afresh. The native
+//! runtime's go to `native/<runtime>` there, one file per kernel source,
+//! found again by the source, the target and the compiler's version.
 //!
 //! ```ignore
 //! // ARAEL_KERNEL_CACHE=/var/cache/myapp ./myapp, or in the program:
@@ -54,9 +56,11 @@ impl KernelCache {
 
 /// The cache asked for before the first GPU use.
 static ASKED: Mutex<Option<KernelCache>> = Mutex::new(None);
-/// The cache the process uses, fixed at its first GPU use; `None` when
-/// CubeCL was configured before.
-static CHOSEN: OnceLock<Option<KernelCache>> = OnceLock::new();
+/// The cache the process uses, fixed at its first GPU use.
+static CHOSEN: OnceLock<KernelCache> = OnceLock::new();
+/// The cache CubeCL uses: the chosen one, `None` when CubeCL was
+/// configured before.
+static CUBECL: OnceLock<Option<KernelCache>> = OnceLock::new();
 
 /// Choose the kernel cache for the process, in place of
 /// `ARAEL_KERNEL_CACHE`. Before the first GPU use only: `false` when the
@@ -69,20 +73,25 @@ pub fn set_kernel_cache(cache: KernelCache) -> bool {
     true
 }
 
-/// The kernel cache the process uses, chosen now when the GPU is not in
-/// use yet (see [`set_kernel_cache`]); `None` when CubeCL's configuration
-/// was read before arael's first GPU use (another library in the process
-/// using CubeCL first), which then decides the cache.
+/// The kernel cache CubeCL's kernels go to, chosen now when the GPU is not
+/// in use yet (see [`set_kernel_cache`]); `None` when CubeCL's
+/// configuration was read before arael's first GPU use (another library in
+/// the process using CubeCL first), which then decides the cache.
 pub fn kernel_cache() -> Option<KernelCache> {
     configure().clone()
+}
+
+/// The cache the process uses, chosen now when the GPU is not in use yet.
+pub(crate) fn chosen() -> &'static KernelCache {
+    CHOSEN.get_or_init(|| ASKED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_else(KernelCache::from_env))
 }
 
 /// CubeCL configured with the chosen cache, once, before its first client.
 /// CubeCL's other settings come from its own files and variables as usual
 /// (`cubecl.toml`, `CUBECL_*`).
 pub(crate) fn configure() -> &'static Option<KernelCache> {
-    CHOSEN.get_or_init(|| {
-        let cache = ASKED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_else(KernelCache::from_env);
+    CUBECL.get_or_init(|| {
+        let cache = chosen().clone();
         let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
         match &cache {
             KernelCache::Off => config.compilation.cache = false,
