@@ -55,6 +55,9 @@ rayon = ["threads"]
 gpu = ["dep:arael-gpu"]
 gpu-cuda = ["gpu", "arael-gpu/cuda"]
 gpu-hip = ["gpu", "arael-gpu/hip"]
+# arael's own CUDA runtime and kernels (docs/dev/NATIVE_GPU_PLAN.md), which
+# replace CubeCL stage by stage: `GpuDevice::native_cuda`.
+gpu-native-cuda = ["gpu", "arael-gpu/native-cuda"]
 
 [dependencies]
 arael-macros = { workspace = true }

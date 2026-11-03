@@ -592,6 +592,19 @@ fn mixed_precision_without_refinement_and_off_the_block_route() {
 #[cfg(feature = "gpu-cuda")]
 #[test]
 fn gpu_factor_reaches_the_f64_optimum() {
+    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::cuda(0));
+}
+
+/// As `gpu_factor_reaches_the_f64_optimum`, the factor on arael's own CUDA
+/// runtime (feature `gpu-native-cuda`).
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn native_gpu_factor_reaches_the_f64_optimum() {
+    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_cuda(0));
+}
+
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]
+fn factor_reaches_the_f64_optimum_on(device: fn() -> arael::simple_lm::GpuDevice) {
     let mut cpu = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Never)
         .with_block_supernodal(BlockSupernodalMode::Always));
@@ -604,7 +617,7 @@ fn gpu_factor_reaches_the_f64_optimum() {
                 .with_envelope_schur(EnvelopeMode::Never)
                 .with_block_supernodal(BlockSupernodalMode::Always)
                 .with_mixed_precision(mixed)
-                .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0))));
+                .with_gpu(Some(device())));
             let (x_g, c_g) = solve(&mut g, 2);
             let plan = g.plan().expect("a plan");
             assert!(plan.block_supernodal && plan.gpu_factor, "the plan reports the device factor");
@@ -629,6 +642,19 @@ fn gpu_factor_reaches_the_f64_optimum() {
 #[cfg(feature = "gpu-cuda")]
 #[test]
 fn gpu_reduced_route_on_an_f32_solver() {
+    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::cuda(0));
+}
+
+/// As `gpu_reduced_route_on_an_f32_solver`, the factor on arael's own CUDA
+/// runtime (feature `gpu-native-cuda`); the reduction is formed on the CPU.
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn native_gpu_reduced_route_on_an_f32_solver() {
+    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_cuda(0));
+}
+
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]
+fn reduced_route_on_an_f32_solver_on(device: fn() -> arael::simple_lm::GpuDevice) {
     let run = |gpu: bool| {
         let cfg = LmConfig::<f32> { max_iters: 60, ..Default::default() };
         let mut w = build_f32(0.1, 2);
@@ -638,7 +664,7 @@ fn gpu_reduced_route_on_an_f32_solver() {
             .with_policy(SchurPolicy::Force)
             .with_envelope_schur(EnvelopeMode::Never)
             .with_block_supernodal(BlockSupernodalMode::Always)
-            .with_gpu(gpu.then(|| arael::simple_lm::GpuDevice::cuda(0))));
+            .with_gpu(gpu.then(device)));
         let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
         let plan = solver.plan().expect("a plan");
         assert!(plan.reduced && plan.block_supernodal);

@@ -4643,8 +4643,13 @@ pub struct GpuDevice {
     pub backend: GpuBackend,
     /// The device, as the runtime numbers them.
     pub index: usize,
+    /// Whether solves run on arael's own runtime and kernels
+    /// ([`Self::native_cuda`]) rather than CubeCL's.
+    native: bool,
     #[cfg(feature = "gpu")]
     shared: std::sync::Arc<std::sync::Mutex<Option<arael_gpu::GpuContext>>>,
+    #[cfg(feature = "gpu-native-cuda")]
+    native_shared: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<arael_gpu::native::cuda::CudaDevice>>>>,
 }
 
 impl GpuDevice {
@@ -4652,14 +4657,42 @@ impl GpuDevice {
         GpuDevice {
             backend,
             index,
+            native: false,
             #[cfg(feature = "gpu")]
             shared: Default::default(),
+            #[cfg(feature = "gpu-native-cuda")]
+            native_shared: Default::default(),
         }
     }
 
     /// CUDA device `index`.
     pub fn cuda(index: usize) -> Self {
         Self::new(GpuBackend::Cuda, index)
+    }
+
+    /// CUDA device `index` on arael's own runtime and kernels (feature
+    /// `gpu-native-cuda`), which replace CubeCL's stage by stage. Today the
+    /// supernodal factorization and solve run there; the assembly and the
+    /// Schur reduction stay on the CPU.
+    pub fn native_cuda(index: usize) -> Self {
+        GpuDevice { native: true, ..Self::new(GpuBackend::Cuda, index) }
+    }
+
+    /// Whether solves run on arael's own runtime ([`Self::native_cuda`]).
+    pub fn is_native(&self) -> bool {
+        self.native
+    }
+
+    /// The native device state, created on first use.
+    #[cfg(feature = "gpu-native-cuda")]
+    fn native_device(&self) -> Result<std::sync::Arc<arael_gpu::native::cuda::CudaDevice>, arael_gpu::native::NativeError> {
+        let mut shared = self.native_shared.lock().unwrap();
+        if let Some(d) = shared.as_ref() {
+            return Ok(d.clone());
+        }
+        let d = std::sync::Arc::new(arael_gpu::native::cuda::CudaDevice::new(self.index)?);
+        *shared = Some(d.clone());
+        Ok(d)
     }
 
     /// HIP device `index`.
@@ -5322,6 +5355,11 @@ struct SnNumeric<T> {
     /// for the current symbolic by [`prepare`](Self::prepare).
     #[cfg(feature = "gpu")]
     gpu_factor: Option<arael_gpu::GpuFactor>,
+    /// The device factor on arael's own runtime, when `gpu` is a
+    /// [`GpuDevice::native_cuda`]; built by [`prepare`](Self::prepare) in
+    /// place of `gpu_factor`.
+    #[cfg(feature = "gpu-native-cuda")]
+    native_factor: Option<arael_gpu::native::supernodal::NativeFactor<arael_gpu::native::cuda::CudaDevice>>,
     /// The device reduction of the reduced route, built with the Schur
     /// symbolic by [`prepare_schur`](Self::prepare_schur) when the device
     /// factor is on; it keeps S on the device for the factor.
@@ -5609,6 +5647,8 @@ impl<T> SnNumeric<T> {
             ctx32: arael_faer::supernodal::SupernodalContext::new(),
             #[cfg(feature = "gpu")]
             gpu_factor: None,
+            #[cfg(feature = "gpu-native-cuda")]
+            native_factor: None,
             #[cfg(feature = "gpu")]
             gpu_schur: None,
             #[cfg(feature = "gpu")]
@@ -5627,6 +5667,10 @@ impl<T> SnNumeric<T> {
             self.gpu_factor = None;
             self.gpu_route = None;
             self.gpu_schur = None;
+        }
+        #[cfg(feature = "gpu-native-cuda")]
+        {
+            self.native_factor = None;
         }
         self.rf.clear();
     }
@@ -5679,6 +5723,10 @@ impl<T> SnNumeric<T> {
 
     /// Whether the factor is on a GPU.
     fn gpu_active(&self) -> bool {
+        #[cfg(feature = "gpu-native-cuda")]
+        if self.native_factor.is_some() {
+            return true;
+        }
         #[cfg(feature = "gpu")]
         {
             self.gpu_factor.is_some()
@@ -5701,6 +5749,36 @@ impl<T> SnNumeric<T> {
         let Some(dev) = self.gpu.as_ref() else {
             return Ok(());
         };
+        if dev.is_native() {
+            #[cfg(feature = "gpu-native-cuda")]
+            {
+                // the previous structure's buffers go first, so the device
+                // holds one structure's at a time
+                self.native_factor = None;
+                let precision = device_precision::<T>(self.mixed.is_some());
+                let factor = dev.native_device().and_then(|d| {
+                    arael_gpu::native::supernodal::NativeFactor::new(&d, precision, sn, asym, &Default::default())
+                });
+                return match factor {
+                    Ok(f) => {
+                        self.native_factor = Some(f);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        warn!("GPU: the native CUDA factor could not be set up: {e}");
+                        Err(SetupError::SolverUnavailable {
+                            solver: "gpu",
+                            reason: "the native CUDA device or its factor could not be set up (logged)",
+                        })
+                    }
+                };
+            }
+            #[cfg(not(feature = "gpu-native-cuda"))]
+            return Err(SetupError::SolverUnavailable {
+                solver: "gpu",
+                reason: "the native CUDA runtime is not compiled in (feature gpu-native-cuda)",
+            });
+        }
         #[cfg(feature = "gpu")]
         {
             let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
@@ -5769,37 +5847,88 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         };
         let (mut t_factor, mut t_solve, mut t_residual) = (0.0, 0.0, 0.0);
         // The device factor: in the solver's scalar, or in f32 with the
-        // refinement below driving the device solve.
+        // refinement below driving the device solve. Each runtime factorizes
+        // and hands back its precision and its solve.
         #[cfg(feature = "gpu")]
-        if let Some(g) = self.gpu_factor.as_mut() {
-            g.factorize(a.vals())?;
-            lap(&mut t_factor);
-            x.copy_from_slice(b);
-            g.solve(x);
-            lap(&mut t_solve);
-            let refined = match self.mixed {
-                Some(mp) if mp.max_refinements > 0 => {
-                    Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve(r)))
+        {
+            /// The device factor of either runtime, factorized.
+            enum Device<'a> {
+                #[cfg(feature = "gpu-native-cuda")]
+                Native(&'a mut arael_gpu::native::supernodal::NativeFactor<arael_gpu::native::cuda::CudaDevice>),
+                Cubecl(&'a mut arael_gpu::GpuFactor),
+            }
+            impl Device<'_> {
+                fn runtime(&self) -> &'static str {
+                    match self {
+                        #[cfg(feature = "gpu-native-cuda")]
+                        Device::Native(_) => "native",
+                        Device::Cubecl(_) => "cubecl",
+                    }
                 }
-                _ => None,
-            };
-            if verbose {
-                match refined {
-                    None => info!("gpu supernodal ({:?}): factor {:.1} ms, solve {:.1} ms", g.precision(), t_factor, t_solve),
-                    Some((steps, rnorm, bnorm, short)) => info!(
-                        "gpu supernodal (f32): {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
-                        steps,
-                        if bnorm > 0.0 { rnorm / bnorm } else { 0.0 },
-                        if short { " -- short of tolerance" } else { "" },
-                        t_factor,
-                        steps + 1,
-                        t_solve,
-                        steps + 1,
-                        t_residual,
-                    ),
+                fn precision(&self) -> arael_gpu::GpuPrecision {
+                    match self {
+                        #[cfg(feature = "gpu-native-cuda")]
+                        Device::Native(g) => g.precision(),
+                        Device::Cubecl(g) => g.precision(),
+                    }
+                }
+                fn solve<M: arael_faer::schur::SchurReal + 'static>(&mut self, x: &mut [M]) {
+                    match self {
+                        #[cfg(feature = "gpu-native-cuda")]
+                        Device::Native(g) => g.solve(x).unwrap_or_else(|e| panic!("the native GPU solve failed: {e}")),
+                        Device::Cubecl(g) => g.solve(x),
+                    }
                 }
             }
-            return Ok(());
+            let mut device = None;
+            #[cfg(feature = "gpu-native-cuda")]
+            if let Some(g) = self.native_factor.as_mut() {
+                use arael_gpu::native::supernodal::FactorizeError;
+                match g.factorize(a.vals()) {
+                    Ok(()) => {}
+                    Err(FactorizeError::NotPositiveDefinite) => {
+                        return Err(arael_faer::supernodal::SupernodalError::NotPositiveDefinite);
+                    }
+                    Err(FactorizeError::Device(e)) => panic!("the native GPU factorization failed: {e}"),
+                }
+                device = Some(Device::Native(g));
+            }
+            if device.is_none()
+                && let Some(g) = self.gpu_factor.as_mut()
+            {
+                g.factorize(a.vals())?;
+                device = Some(Device::Cubecl(g));
+            }
+            if let Some(mut g) = device {
+                let (runtime, precision) = (g.runtime(), g.precision());
+                lap(&mut t_factor);
+                x.copy_from_slice(b);
+                g.solve(x);
+                lap(&mut t_solve);
+                let refined = match self.mixed {
+                    Some(mp) if mp.max_refinements > 0 => {
+                        Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve(r)))
+                    }
+                    _ => None,
+                };
+                if verbose {
+                    match refined {
+                        None => info!("gpu supernodal ({runtime}, {:?}): factor {:.1} ms, solve {:.1} ms", precision, t_factor, t_solve),
+                        Some((steps, rnorm, bnorm, short)) => info!(
+                            "gpu supernodal ({runtime}, f32): {} refinement steps, relative residual {:.1e}{}; factor {:.1} ms, {} solves {:.1} ms, {} residuals {:.1} ms",
+                            steps,
+                            if bnorm > 0.0 { rnorm / bnorm } else { 0.0 },
+                            if short { " -- short of tolerance" } else { "" },
+                            t_factor,
+                            steps + 1,
+                            t_solve,
+                            steps + 1,
+                            t_residual,
+                        ),
+                    }
+                }
+                return Ok(());
+            }
         }
         let Some(mp) = self.mixed else {
             supernodal_factorize(sn, a, &mut self.factor, &mut self.ctx, threads)?;
