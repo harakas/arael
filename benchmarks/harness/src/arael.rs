@@ -97,10 +97,11 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
 /// GPU: `cuda`, `hip`, `native-cuda` (arael's own CUDA runtime), or any with
 /// a device index
 /// (`cuda:1`). With ARAEL_F32_FACTOR the factor is f32 there, refined the
-/// same way. The binary needs arael's `gpu-cuda`, `gpu-hip` or
-/// `gpu-native-cuda` feature. Every solver of the process gets a clone of
-/// one device, so they share its stream and buffers as repeated solves in an
-/// application would.
+/// same way. ARAEL_GPU_WIDE=df32 keeps the native runtime's wide values in
+/// df32 (`GpuWide::Df32`), `f64` or unset in f64. The binary needs arael's
+/// `gpu-cuda`, `gpu-hip` or `gpu-native-cuda` feature. Every solver of the
+/// process gets a clone of one device, so they share its stream and buffers
+/// as repeated solves in an application would.
 pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
     static DEVICE: std::sync::OnceLock<Option<arael::simple_lm::GpuDevice>> = std::sync::OnceLock::new();
     DEVICE
@@ -109,12 +110,18 @@ pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
             let (name, index) = v.split_once(':').unwrap_or((v.as_str(), "0"));
             let expected = "expected cuda[:index], hip[:index] or native-cuda[:index]";
             let index: usize = index.parse().unwrap_or_else(|_| panic!("ARAEL_GPU={}: {}", v, expected));
-            match name {
-                "cuda" => Some(arael::simple_lm::GpuDevice::cuda(index)),
-                "hip" => Some(arael::simple_lm::GpuDevice::hip(index)),
-                "native-cuda" => Some(arael::simple_lm::GpuDevice::native_cuda(index)),
+            let device = match name {
+                "cuda" => arael::simple_lm::GpuDevice::cuda(index),
+                "hip" => arael::simple_lm::GpuDevice::hip(index),
+                "native-cuda" => arael::simple_lm::GpuDevice::native_cuda(index),
                 _ => panic!("ARAEL_GPU={}: {}", v, expected),
-            }
+            };
+            let wide = match std::env::var("ARAEL_GPU_WIDE").as_deref() {
+                Err(_) | Ok("f64") => arael::simple_lm::GpuWide::F64,
+                Ok("df32") => arael::simple_lm::GpuWide::Df32,
+                Ok(other) => panic!("ARAEL_GPU_WIDE={other}: expected f64 or df32"),
+            };
+            Some(device.with_wide(wide))
         })
         .clone()
 }
