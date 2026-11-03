@@ -15,7 +15,7 @@ from .arael import math as _m
 from .arael import transform as _tf
 from .arael.solver import (AraelError, BlockSupernodalMode, CovMode,
                            CovOrdering, CovPlan, DiagonalFault, EnvelopeMode,
-                           FaerOrdering, GpuBackend, LmPreset, LmStatus, LmStep,
+                           FaerOrdering, GpuBackend, GpuWide, LmPreset, LmStatus, LmStep,
                            LmTiming, LogLevel, ReducedOrdering, SchurPlan,
                            SchurPolicy, SchurSolve, SolveFailure,
                            SolveFailureKind, StoreFootprint, ThreadReport,

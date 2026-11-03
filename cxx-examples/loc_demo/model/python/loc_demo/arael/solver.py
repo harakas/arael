@@ -246,6 +246,14 @@ class GpuBackend(enum.IntEnum):
     HIP = 2
 
 
+class GpuWide(enum.IntEnum):
+    """What the GPU keeps and sums its wide values in
+    (SparseOptions.gpu_wide): f64, or df32 (two floats, about 48 bits,
+    f32 arithmetic only: for cards whose f64 is slow)."""
+    F64 = 0
+    DF32 = 1
+
+
 class SparseOptions(ctypes.Structure):
     """The sparse backend's options (mirror of arael's
     SparseFaerOptions): whether and when to marginalize, the
@@ -298,6 +306,8 @@ class SparseOptions(ctypes.Structure):
         ("_gpu", ctypes.c_uint32),
         ("gpu_index", ctypes.c_uint32),
         ("gpu_assembly", ctypes.c_bool),
+        # The GPU's wide values (GpuWide).
+        ("_gpu_wide", ctypes.c_uint32),
     ]
 
     schur = _enum_property("_schur", SchurPolicy)
@@ -306,6 +316,7 @@ class SparseOptions(ctypes.Structure):
     schur_solve = _enum_property("_schur_solve", SchurSolve)
     block_supernodal = _enum_property("_block_supernodal", BlockSupernodalMode)
     gpu = _enum_property("_gpu", GpuBackend)
+    gpu_wide = _enum_property("_gpu_wide", GpuWide)
 
 
 class _OptDouble(ctypes.Structure):

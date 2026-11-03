@@ -6,7 +6,7 @@
 // reporting are C++.
 //
 //   ./bal_demo [path/to/problem.txt] [--gpu cuda|hip] [--device N]
-//              [--f32-factor] [--no-gpu-assembly] [--repeat N]
+//              [--f32-factor] [--df32] [--no-gpu-assembly] [--repeat N]
 //              [--compare] [--threads N] [--timing]
 //
 // Every run solves the reduced (Schur) system with the block supernodal
@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
     const char* path = BAL_DEFAULT_DATASET;
     GpuBackend gpu = GpuBackend::None;
     uint32_t device = 0, repeat = 1, threads = 0;
-    bool f32_factor = false, gpu_assembly = true, compare = false, timing = false;
+    bool f32_factor = false, df32 = false, gpu_assembly = true, compare = false, timing = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -210,6 +210,8 @@ int main(int argc, char** argv) {
             device = uint32_t(std::atoi(next()));
         } else if (a == "--f32-factor") {
             f32_factor = true;
+        } else if (a == "--df32") {
+            df32 = true;
         } else if (a == "--no-gpu-assembly") {
             gpu_assembly = false;
         } else if (a == "--repeat") {
@@ -253,6 +255,7 @@ int main(int argc, char** argv) {
     so.gpu = gpu;
     so.gpu_index = device;
     so.gpu_assembly = gpu_assembly;
+    so.gpu_wide = df32 ? GpuWide::Df32 : GpuWide::F64;
     const char* label = gpu == GpuBackend::None ? "cpu" : "gpu";
 
     bool ok = true;

@@ -37,6 +37,7 @@ The first GPU solve of a process includes compiling the kernels;
 | `--gpu cuda`, `--gpu hip` | solve on that GPU (the interface built with `-DARAEL_GPU` of the same name) |
 | `--device N` | the GPU's index (0) |
 | `--f32-factor` | factor in f32 and refine against the f64 matrix |
+| `--df32` | keep the GPU's wide values in df32 (two floats) instead of f64 |
 | `--no-gpu-assembly` | assemble on the CPU, factor on the GPU |
 | `--repeat N` | solve N times from the initial state |
 | `--compare` | add a CPU run and print the relative difference of the final costs |

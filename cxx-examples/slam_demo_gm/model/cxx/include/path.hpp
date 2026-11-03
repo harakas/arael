@@ -63,6 +63,7 @@ using arael::EnvelopeMode;
 using arael::BlockSupernodalMode;
 using arael::SchurSolve;
 using arael::GpuBackend;
+using arael::GpuWide;
 using arael::SparseOptionsT;
 using arael::LogLevel;
 using arael::PanicError;
