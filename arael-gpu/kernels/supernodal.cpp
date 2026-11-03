@@ -2,7 +2,8 @@
 // (docs/dev/GPU.md, E3 and E5 step 7), launched by
 // arael-gpu/src/native/supernodal.rs over the plan of arael-gpu/src/plan.rs.
 //
-// Compiled per SCALAR (float or double) and LU; the tile sizes (NB, TB, TK,
+// Compiled per SCALAR (float or double), the wide scalar W of the vectors
+// it solves (wide.h, in front of this) and LU; the tile sizes (NB, TB, TK,
 // TR, TC, GROUP, XR_CH) and the plan header's slots (H_*) come from plan.rs
 // as #defines, THREADS (the block size of every kernel but k_trsm, which
 // runs TB) from supernodal.rs. One launch per level unless said.
@@ -60,6 +61,12 @@ KERNEL_THREADS(THREADS) void k_seed_f32(GLOBAL const u32* RESTRICT tiles, GLOBAL
 KERNEL_THREADS(THREADS) void k_seed_f64(GLOBAL const u32* RESTRICT tiles, GLOBAL const double* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
     u32 t = global_x();
     if (t < ntiles) seed_tile<double>(tiles, vals, factor, t);
+}
+
+// The seed from values of the route's wide scalar (wide.h): S formed on the device.
+KERNEL_THREADS(THREADS) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBAL const W* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
+    u32 t = global_x();
+    if (t < ntiles) seed_tile<W>(tiles, vals, factor, t);
 }
 
 // The small descendants' updates: one block per (target, TR x TC tile,
@@ -789,7 +796,7 @@ KERNEL_THREADS(THREADS) void k_bwd_trsv(GLOBAL const u32* RESTRICT gate, GLOBAL 
 
 // The right-hand side into the factor's ordering and scalar: one thread per
 // permuted block.
-KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const double* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
+KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const W* RESTRICT x, GLOBAL F* RESTRICT xb, u32 nb) {
     if (gate[0] == 0) return;
     u32 k = global_x();
     if (k < nb) {
@@ -801,8 +808,8 @@ KERNEL_THREADS(THREADS) void k_perm_in(GLOBAL const u32* RESTRICT gate, GLOBAL c
     }
 }
 
-// The solution back into the matrix's ordering, in f64.
-KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL double* RESTRICT x, u32 nb) {
+// The solution back into the matrix's ordering, in the wide scalar.
+KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT xb, GLOBAL W* RESTRICT x, u32 nb) {
     if (gate[0] == 0) return;
     u32 k = global_x();
     if (k < nb) {
@@ -810,6 +817,6 @@ KERNEL_THREADS(THREADS) void k_perm_out(GLOBAL const u32* RESTRICT gate, GLOBAL 
         u32 w = plan[plan[H_BLK_WIDTH] + k];
         u32 src = plan[plan[H_SC_START] + k];
         u32 dst = plan[plan[H_PART] + old];
-        for (u32 i = 0; i < w; i++) x[dst + i] = (double)xb[src + i];
+        for (u32 i = 0; i < w; i++) x[dst + i] = (W)xb[src + i];
     }
 }

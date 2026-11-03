@@ -5,8 +5,8 @@
 //!
 //! ```ignore
 //! let dev = Arc::new(CudaDevice::new(0)?);
-//! let mut g = NativeSchur::new(&dev, &schur_sym, h.symbolic())?;
-//! let mut f = NativeFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default())?;
+//! let mut g = NativeSchur::new(&dev, &schur_sym, h.symbolic(), Wide::Df32)?;
+//! let mut f = NativeFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default(), Wide::Df32)?;
 //! // the full step; Err when an eliminated block or the reduced system is not definite
 //! let stats = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
 //! ```
@@ -17,7 +17,7 @@ use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::{SchurReal, SchurSymbolic};
 
 use super::supernodal::NativeFactor;
-use super::{Arg, Device, Launch, Layout, NativeError, define_u32s, is_f64, scalar_bytes};
+use super::{Arg, Device, Launch, Layout, NativeError, WIDE, Wide, define_u32s};
 use crate::plan::SparseIndex;
 use crate::schur::{self as host, GpuSchurError, RefineStats, SchurPlan};
 use crate::supernodal::Packer;
@@ -124,17 +124,23 @@ struct Sections {
 /// solution. Every device buffer is made in [`new`](Self::new): the plan in
 /// one block, uploaded in one copy, and the rest in a work block.
 pub struct NativeSchur<D: Device> {
+    /// The scalar of H, the gradient, S and the reduction's vectors.
     /// The last attempt's launches as a graph, with what it was captured
     /// against; first, so it is dropped before the blocks it records.
     graph: Option<(GraphKey, D::Graph)>,
     graphs: bool,
     replayed: bool,
     dev: Arc<D>,
+    wide: Wide,
     k: Kernels<D::Kernel>,
     /// The plan words (at 0, as the plan's header offsets require), then a
-    /// word holding 1, at `on`: the gate of kernels that always run.
+    /// word holding 1, at `on`: the gate of kernels that always run; then
+    /// per kept block the tiles of S touching it, `kt_ptr` and `kt` (byte
+    /// offsets), for the residual.
     ints: D::Block,
     on: usize,
+    kt_ptr: usize,
+    kt: usize,
     work: D::Block,
     sec: Sections,
     status_at: usize,
@@ -147,30 +153,34 @@ pub struct NativeSchur<D: Device> {
     nh: usize,
     s_len: usize,
     elim_blk: Vec<u32>,
-    /// The inputs widened to f64, when the caller's are f32.
-    conv: Vec<f64>,
+    /// The inputs encoded in the wide scalar.
+    conv: Vec<u8>,
     /// The step and the status as a solve reads them.
-    host_out: Vec<f64>,
+    host_out: Vec<u8>,
+    step: Vec<f64>,
 }
 
 impl<D: Device> NativeSchur<D> {
     /// The device plan of `sym`, the reduction of a matrix with the block
     /// structure `hsym`, uploaded to `dev`, with the reduction's blocks and
-    /// kernels.
-    pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<Self, NativeError> {
-        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count())
+    /// kernels, in `wide`.
+    pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, NativeError> {
+        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), wide)
     }
 
     /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
     /// the whole system's.
-    pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<Self, NativeError> {
-        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count())
+    pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, NativeError> {
+        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count(), wide)
     }
 
-    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize) -> Result<Self, NativeError> {
-        let defines = defines(&p);
+    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide) -> Result<Self, NativeError> {
+        let defines = format!("{}{}", wide.defines(), defines(&p));
+        let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
         let on = 4 * pk.push(&[1]);
+        let kt_ptr = 4 * pk.push(&kt_ptr_words);
+        let kt = 4 * pk.push(&kt_words);
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
         let status_at = host::status_at(p.n);
@@ -191,7 +201,8 @@ impl<D: Device> NativeSchur<D> {
             bytes: l.bytes(),
         };
         let work = dev.alloc(sec.bytes)?;
-        let c = |entry: &str| dev.compile(SOURCE, &defines, entry);
+        let source = format!("{WIDE}\n{SOURCE}");
+        let c = |entry: &str| dev.compile(&source, &defines, entry);
         let k = Kernels {
             zero_u32: c("k_zero_u32")?,
             elim: c("k_schur_elim")?,
@@ -212,9 +223,12 @@ impl<D: Device> NativeSchur<D> {
             graphs: true,
             replayed: false,
             dev: dev.clone(),
+            wide,
             k,
             ints,
             on,
+            kt_ptr,
+            kt,
             work,
             sec,
             status_at,
@@ -228,7 +242,8 @@ impl<D: Device> NativeSchur<D> {
             s_len: p.s_len,
             elim_blk: p.elim_blk,
             conv: Vec::new(),
-            host_out: vec![0.0; (status_at + STATUS_BYTES) / 8],
+            host_out: vec![0; status_at + STATUS_BYTES],
+            step: vec![0.0; p.n],
         })
     }
 
@@ -253,23 +268,29 @@ impl<D: Device> NativeSchur<D> {
         ((&self.work, self.sec.s), self.s_len)
     }
 
-    /// The reduced right-hand side on the device, [`kept_size`](Self::kept_size) f64.
+    /// The scalar of H, the gradient, S and the reduction's vectors.
+    pub fn wide(&self) -> Wide {
+        self.wide
+    }
+
+    /// The reduced right-hand side on the device, [`kept_size`](Self::kept_size) values.
     pub fn rhs_kept(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.rhs_kept)
     }
 
     /// Where [`launch`](Self::launch) reads the Hessian's tile values: the
-    /// structure's value count of f64, for a device assembly to write.
+    /// structure's value count, in [`wide`](Self::wide), for a device
+    /// assembly to write.
     pub fn h_target(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.h)
     }
 
-    /// Where [`launch`](Self::launch) reads the gradient: [`dim`](Self::dim) f64.
+    /// Where [`launch`](Self::launch) reads the gradient: [`dim`](Self::dim) values.
     pub fn rhs_target(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.rhs)
     }
 
-    /// The step of the last solve: [`dim`](Self::dim) f64.
+    /// The step of the last solve: [`dim`](Self::dim) values.
     pub fn step_view(&self) -> (&D::Block, usize) {
         (&self.work, self.sec.out)
     }
@@ -283,18 +304,21 @@ impl<D: Device> NativeSchur<D> {
     /// The Hessian's tile values as the last upload or device assembly left
     /// them, read back (for diagnostics).
     pub fn h_values(&self) -> Result<Vec<f64>, NativeError> {
-        let mut v = vec![0.0f64; self.nh];
-        self.dev.read(&self.work, self.sec.h, bytemuck::cast_slice_mut(&mut v))?;
-        Ok(v)
+        self.read_values(self.sec.h, self.nh)
     }
 
     /// S's values and the reduced right-hand side read back (for tests).
     pub fn download(&self) -> Result<(Vec<f64>, Vec<f64>), NativeError> {
-        let mut s = vec![0.0f64; self.s_len];
-        let mut r = vec![0.0f64; self.nks];
-        self.dev.read(&self.work, self.sec.s, bytemuck::cast_slice_mut(&mut s))?;
-        self.dev.read(&self.work, self.sec.rhs_kept, bytemuck::cast_slice_mut(&mut r))?;
-        Ok((s, r))
+        Ok((self.read_values(self.sec.s, self.s_len)?, self.read_values(self.sec.rhs_kept, self.nks)?))
+    }
+
+    /// `n` values of the work block from byte `at` on, read back.
+    fn read_values(&self, at: usize, n: usize) -> Result<Vec<f64>, NativeError> {
+        let mut bytes = vec![0u8; 8 * n];
+        self.dev.read(&self.work, at, &mut bytes)?;
+        let mut v = vec![0.0f64; n];
+        self.wide.decode(&bytes, &mut v);
+        Ok(v)
     }
 
     /// Byte offset of flag `f` in the work block.
@@ -304,22 +328,18 @@ impl<D: Device> NativeSchur<D> {
 
     /// Write the Hessian's tile values (`hsym`'s value count) and the
     /// gradient at [`h_target`](Self::h_target) and
-    /// [`rhs_target`](Self::rhs_target), widened to f64, for
+    /// [`rhs_target`](Self::rhs_target), in [`wide`](Self::wide), for
     /// [`launch`](Self::launch) (no wait).
     pub fn upload<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), NativeError> {
         assert_eq!(hvals.len(), self.nh, "the Hessian's values, in the structure the reduction was built for");
         assert_eq!(rhs.len(), self.n);
-        if is_f64::<M>() {
-            self.dev.write(&mut self.work, self.sec.h, scalar_bytes(hvals))?;
-            self.dev.write(&mut self.work, self.sec.rhs, scalar_bytes(rhs))
-        } else {
-            self.conv.clear();
-            self.conv.extend(hvals.iter().map(|v| v.to_f64()));
-            self.dev.write(&mut self.work, self.sec.h, bytemuck::cast_slice(&self.conv))?;
-            self.conv.clear();
-            self.conv.extend(rhs.iter().map(|v| v.to_f64()));
-            self.dev.write(&mut self.work, self.sec.rhs, bytemuck::cast_slice(&self.conv))
-        }
+        let wide = self.wide;
+        self.conv.clear();
+        self.conv.extend(hvals.iter().flat_map(|v| wide.bits(v.to_f64()).to_le_bytes()));
+        self.dev.write(&mut self.work, self.sec.h, &self.conv)?;
+        self.conv.clear();
+        self.conv.extend(rhs.iter().flat_map(|v| wide.bits(v.to_f64()).to_le_bytes()));
+        self.dev.write(&mut self.work, self.sec.rhs, &self.conv)
     }
 
     /// `kernel` over `blocks` blocks of `threads`; nothing when there are no blocks.
@@ -395,13 +415,14 @@ impl<D: Device> NativeSchur<D> {
         // r = b - S x
         let residual = |gate| {
             copy(gate, s.r, s.rhs_kept)?;
-            self.run(&self.k.symv_sub, self.nt, PLANE, &[gate, plan, w(s.s), w(s.x_kept), w(s.r)])
+            let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.ints, self.kt));
+            self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
         };
         copy(on, s.x_kept, s.rhs_kept)?;
         factor.solve_device((&self.work, s.x_kept))?;
         if max_steps > 0 {
             residual(on)?;
-            self.run(&self.k.refine_start, 1, THREADS, &[w(s.rhs_kept), w(s.r), state, flags, Arg::U32(nks), Arg::F64(tol_rel)])?;
+            self.run(&self.k.refine_start, 1, THREADS, &[w(s.rhs_kept), w(s.r), state, flags, Arg::U32(nks), self.wide.arg(tol_rel)])?;
             for _ in 0..max_steps {
                 factor.solve_device_if((&self.work, s.r), (&self.work, self.flag_at(host::F_ACTIVE)))?;
                 self.run(&self.k.refine_apply, per_entry, THREADS, &[flags, w(s.x_kept), w(s.x_prev), w(s.r), Arg::U32(nks)])?;
@@ -441,9 +462,10 @@ impl<D: Device> NativeSchur<D> {
         assert_eq!(delta.len(), self.n);
         self.upload(hvals, rhs)?;
         self.enqueue(factor, refine)?;
-        self.dev.read(&self.work, self.sec.out, bytemuck::cast_slice_mut(&mut self.host_out))?;
-        let stats = self.outcome(bytemuck::cast_slice(&self.host_out[self.status_at / 8..]), refine)?;
-        for (d, &v) in delta.iter_mut().zip(&self.host_out[..self.n]) {
+        self.dev.read(&self.work, self.sec.out, &mut self.host_out)?;
+        let stats = self.outcome(&self.host_out[self.status_at..], refine)?;
+        self.wide.decode(&self.host_out[..8 * self.n], &mut self.step);
+        for (d, &v) in delta.iter_mut().zip(&self.step) {
             *d = M::from_f64(v);
         }
         Ok(stats)
@@ -497,8 +519,45 @@ impl<D: Device> NativeSchur<D> {
     /// The outcome of a solve with refinement `refine` from its status bytes
     /// (as read from [`status_view`](Self::status_view)).
     pub fn outcome(&self, status: &[u8], refine: Option<(usize, f64)>) -> Result<RefineStats, NativeSchurError> {
-        Ok(host::decode_status(status, &self.elim_blk, refine)?)
+        // the state's words as f64, the flags after them as they are
+        let mut f64_status = status[..STATUS_BYTES].to_vec();
+        for c in f64_status[..host::FLAGS_AT].as_chunks_mut::<8>().0 {
+            *c = self.wide.value(u64::from_le_bytes(*c)).to_le_bytes();
+        }
+        Ok(host::decode_status(&f64_status, &self.elim_blk, refine)?)
     }
+}
+
+/// Per kept block, the tiles of S touching it, for `k_symv_sub`: `(ptr, tiles)`
+/// with block k's at `tiles[ptr[k]..ptr[k + 1]]`, each a tile index times 2,
+/// plus 1 when k is the tile's column block and not its row block.
+fn tiles_by_kept_block(p: &SchurPlan) -> (Vec<u32>, Vec<u32>) {
+    let (nt, nk) = (p.nt as usize, p.nk as usize);
+    let array = |slot: usize| &p.words[p.words[slot] as usize..][..nt];
+    let (ta, tb) = (array(host::ST_A), array(host::ST_B));
+    let mut ptr = vec![0u32; nk + 1];
+    for t in 0..nt {
+        ptr[ta[t] as usize + 1] += 1;
+        if ta[t] != tb[t] {
+            ptr[tb[t] as usize + 1] += 1;
+        }
+    }
+    for k in 0..nk {
+        ptr[k + 1] += ptr[k];
+    }
+    let mut fill = ptr.clone();
+    let mut tiles = vec![0u32; ptr[nk] as usize];
+    for t in 0..nt {
+        let a = ta[t] as usize;
+        tiles[fill[a] as usize] = 2 * t as u32;
+        fill[a] += 1;
+        if ta[t] != tb[t] {
+            let b = tb[t] as usize;
+            tiles[fill[b] as usize] = 2 * t as u32 + 1;
+            fill[b] += 1;
+        }
+    }
+    (ptr, tiles)
 }
 
 /// The `#define`s of `schur.cpp`: the block size, the width classes, and
@@ -572,8 +631,11 @@ mod tests {
         a.iter().zip(b).fold(0.0f64, |e, (x, y)| e.max((x - y).abs())) / m
     }
 
-    fn factor(dev: &Arc<CudaDevice>, precision: GpuPrecision, sn: &SupernodalSymbolic, s: &SymbolicSparseBlockColMat<SparseIndex>) -> NativeFactor<CudaDevice> {
-        NativeFactor::new(dev, precision, sn, s, &Default::default()).unwrap()
+    /// Both wide scalars: the reduction's tests run in each.
+    const WIDES: [Wide; 2] = [Wide::F64, Wide::Df32];
+
+    fn factor(dev: &Arc<CudaDevice>, precision: GpuPrecision, sn: &SupernodalSymbolic, s: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> NativeFactor<CudaDevice> {
+        NativeFactor::new(dev, precision, sn, s, &Default::default(), wide).unwrap()
     }
 
     /// A BA-like system, its Schur symbolic and the supernodal analysis of S.
@@ -587,6 +649,12 @@ mod tests {
 
     #[test]
     fn the_reduction_matches_the_cpu() {
+        for wide in WIDES {
+            the_reduction_matches_the_cpu_in(wide);
+        }
+    }
+
+    fn the_reduction_matches_the_cpu_in(wide: Wide) {
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
         let mut s_cpu = sym.alloc_s::<f64>();
@@ -594,7 +662,7 @@ mod tests {
         let mut ctx = SchurContext::new();
         schur_reduce(&sym, &h, &rhs, &mut ctx, &mut s_cpu, &mut rhs_cpu).unwrap();
         let dev = device();
-        let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+        let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
         g.reduce(h.vals(), &rhs).unwrap();
         let (s_gpu, rhs_gpu) = g.download().unwrap();
         assert_eq!(s_gpu.len(), s_cpu.vals().len());
@@ -614,12 +682,18 @@ mod tests {
 
     #[test]
     fn the_reduced_solve_solves_the_whole_system() {
+        for wide in WIDES {
+            the_reduced_solve_solves_the_whole_system_in(wide);
+        }
+    }
+
+    fn the_reduced_solve_solves_the_whole_system_in(wide: Wide) {
         let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
         let n = h.symbolic().ncols();
         let dev = device();
-        let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+        let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
         for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
-            let mut f = factor(&dev, precision, &sn, &sym.s);
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             let mut delta = vec![0.0f64; n];
             let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
             let res = rel_residual(&dense, n, &delta, &rhs);
@@ -640,14 +714,20 @@ mod tests {
     /// system, refinement included.
     #[test]
     fn nothing_eliminated_solves_the_whole_system() {
+        for wide in WIDES {
+            nothing_eliminated_solves_the_whole_system_in(wide);
+        }
+    }
+
+    fn nothing_eliminated_solves_the_whole_system_in(wide: Wide) {
         let (h, dense, rhs, _) = ba_like(30, 200, 5);
         let n = h.symbolic().ncols();
         let order = nd_block_order(h.symbolic());
         let sn = SupernodalSymbolic::new(h.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
         let dev = device();
-        let mut g = NativeSchur::whole(&dev, h.symbolic()).unwrap();
+        let mut g = NativeSchur::whole(&dev, h.symbolic(), wide).unwrap();
         for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
-            let mut f = factor(&dev, precision, &sn, h.symbolic());
+            let mut f = factor(&dev, precision, &sn, h.symbolic(), wide);
             for _ in 0..2 {
                 let mut delta = vec![0.0f64; n];
                 let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
@@ -666,11 +746,17 @@ mod tests {
     /// residual, and undoes that step.
     #[test]
     fn the_refinement_stops_on_the_device() {
+        for wide in WIDES {
+            the_refinement_stops_on_the_device_in(wide);
+        }
+    }
+
+    fn the_refinement_stops_on_the_device_in(wide: Wide) {
         let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
         let n = h.symbolic().ncols();
         let dev = device();
-        let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
-        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s);
+        let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
         let mut delta = vec![0.0f64; n];
         let reached = g.solve(&mut f, h.vals(), &rhs, Some((12, 1e-10)), &mut delta).unwrap();
         assert!(reached.steps > 0 && reached.steps < 12 && !reached.short, "{reached:?}");
@@ -710,6 +796,12 @@ mod tests {
     /// is captured anew.
     #[test]
     fn replayed_solves_match_launched_ones() {
+        for wide in WIDES {
+            replayed_solves_match_launched_ones_in(wide);
+        }
+    }
+
+    fn replayed_solves_match_launched_ones_in(wide: Wide) {
         let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
         let n = h.symbolic().ncols();
         let dev = device();
@@ -717,11 +809,11 @@ mod tests {
         let (h2, dense2) = damped(&h, &dense);
         for precision in [GpuPrecision::F64, GpuPrecision::F32] {
             let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
-            let mut launched = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+            let mut launched = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
             launched.use_graphs(false);
-            let mut fl = factor(&dev, precision, &sn, &sym.s);
-            let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
-            let mut f = factor(&dev, precision, &sn, &sym.s);
+            let mut fl = factor(&dev, precision, &sn, &sym.s, wide);
+            let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             for (round, (hm, dm)) in [(&h, &dense), (&h2, &dense2), (&h, &dense)].into_iter().enumerate() {
                 let (mut a, mut b) = (vec![0.0f64; n], vec![0.0f64; n]);
                 let sa = launched.solve(&mut fl, hm.vals(), &rhs, refine, &mut a).unwrap();
@@ -735,7 +827,7 @@ mod tests {
                 assert!(dx < 1e-12, "{precision:?} round {round}: replay against launches {dx}");
             }
             // another factor of the same structure, then another refinement setting
-            let mut f2 = factor(&dev, precision, &sn, &sym.s);
+            let mut f2 = factor(&dev, precision, &sn, &sym.s, wide);
             let mut d = vec![0.0f64; n];
             g.solve(&mut f2, h.vals(), &rhs, refine, &mut d).unwrap();
             assert!(!g.replayed());
@@ -752,25 +844,34 @@ mod tests {
     /// captures of them replays to the same.
     #[test]
     fn the_launches_alone_match_solve() {
+        for wide in WIDES {
+            the_launches_alone_match_solve_in(wide);
+        }
+    }
+
+    fn the_launches_alone_match_solve_in(wide: Wide) {
         let (h, _, rhs, _, sym, sn) = setup(30, 250, 4);
         let n = h.symbolic().ncols();
         let dev = device();
         let refine = Some((4usize, 1e-10f64));
-        let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+        let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
         g.use_graphs(false);
-        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s);
+        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
         let mut want = vec![0.0f64; n];
         let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut want).unwrap();
         // fresh blocks, the inputs written at the targets
-        let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
-        let f = factor(&dev, GpuPrecision::F32, &sn, &sym.s);
+        let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        let f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
         g.upload(h.vals(), &rhs).unwrap();
-        assert_eq!(g.h_values().unwrap(), h.vals());
+        let held: Vec<f64> = h.vals().iter().map(|&v| wide.value(wide.bits(v))).collect();
+        assert_eq!(g.h_values().unwrap(), held, "the values as the wide scalar holds them");
         let read_result = |g: &NativeSchur<CudaDevice>| {
             let mut step = vec![0.0f64; n];
+            let mut bytes = vec![0u8; 8 * n];
             let mut status = vec![0u8; STATUS_BYTES];
             let (b, at) = g.step_view();
-            dev.read(b, at, bytemuck::cast_slice_mut(&mut step)).unwrap();
+            dev.read(b, at, &mut bytes).unwrap();
+            wide.decode(&bytes, &mut step);
             let (b, at) = g.status_view();
             dev.read(b, at, &mut status).unwrap();
             (step, g.outcome(&status, refine).unwrap())
@@ -793,14 +894,20 @@ mod tests {
     /// blocks are made when the reduction and the factor are.
     #[test]
     fn solves_allocate_nothing() {
+        for wide in WIDES {
+            solves_allocate_nothing_in(wide);
+        }
+    }
+
+    fn solves_allocate_nothing_in(wide: Wide) {
         let dev = device();
         for (np, nl, seed) in [(30, 400, 1u64), (60, 900, 2), (20, 200, 3)] {
             let (h, dense, rhs, _, sym, sn) = setup(np, nl, seed);
             let n = h.symbolic().ncols();
             let before = dev.allocations();
-            let mut g = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+            let mut g = NativeSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
             assert_eq!(dev.allocations() - before, 2, "the plan block and the work block");
-            let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s);
+            let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
             let made = dev.allocations();
             let mut delta = vec![0.0f64; n];
             for _ in 0..3 {
@@ -817,14 +924,20 @@ mod tests {
     /// the same objects starts clean.
     #[test]
     fn bad_pivots_are_reported_with_the_result() {
+        for wide in WIDES {
+            bad_pivots_are_reported_with_the_result_in(wide);
+        }
+    }
+
+    fn bad_pivots_are_reported_with_the_result_in(wide: Wide) {
         let (good, dense, rhs, elim, sym, sn) = setup(10, 30, 2);
         let n = good.symbolic().ncols();
         let asym = good.symbolic().clone();
         let diag0 = |blk: usize| asym.val_range(asym.col_range(blk).find(|&b| asym.blk_row(b) == blk).unwrap()).start;
         let dev = device();
-        let mut g = NativeSchur::new(&dev, &sym, &asym).unwrap();
+        let mut g = NativeSchur::new(&dev, &sym, &asym, wide).unwrap();
         for precision in [GpuPrecision::F64, GpuPrecision::F32] {
-            let mut f = factor(&dev, precision, &sn, &sym.s);
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
             // an eliminated block
             let e = elim[3];
@@ -851,8 +964,14 @@ mod tests {
     /// arrays stay in registers: no kernel uses local memory.
     #[test]
     fn the_kernels_keep_their_arrays_in_registers() {
+        for wide in WIDES {
+            the_kernels_keep_their_arrays_in_registers_in(wide);
+        }
+    }
+
+    fn the_kernels_keep_their_arrays_in_registers_in(wide: Wide) {
         let (h, _, _, _, sym, _) = setup(10, 30, 2);
-        let g = NativeSchur::new(&device(), &sym, h.symbolic()).unwrap();
+        let g = NativeSchur::new(&device(), &sym, h.symbolic(), wide).unwrap();
         let k = &g.k;
         for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub)] {
             assert_eq!(kernel.local_bytes().unwrap(), 0, "k_schur_{name}: {} registers", kernel.registers().unwrap());
@@ -869,7 +988,7 @@ mod tests {
         let n = h.symbolic().ncols();
         let dev = device();
         let ctx = crate::GpuContext::new(crate::GpuBackend::Cuda, 0).unwrap();
-        let mut native = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+        let mut native = NativeSchur::new(&dev, &sym, h.symbolic(), Wide::F64).unwrap();
         let mut cubecl = crate::GpuSchur::new(&ctx, &sym, h.symbolic());
         native.reduce(h.vals(), &rhs).unwrap();
         cubecl.reduce(h.vals(), &rhs).unwrap();
@@ -879,7 +998,7 @@ mod tests {
         assert_eq!(sn_, sc, "S bit for bit");
         assert_eq!(rn, rc, "the reduced right-hand side bit for bit");
         for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-11), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
-            let mut fnat = factor(&dev, precision, &sn, &sym.s);
+            let mut fnat = factor(&dev, precision, &sn, &sym.s, Wide::F64);
             let mut fcub = crate::GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
             for round in 0..2 {
                 let (mut a, mut b) = (vec![0.0f64; n], vec![0.0f64; n]);
@@ -923,9 +1042,9 @@ mod tests {
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
         for (precision, refine) in [(GpuPrecision::F64, None), (GpuPrecision::F32, Some((4usize, 1e-10f64)))] {
             for graphs in [false, true] {
-                let mut native = NativeSchur::new(&dev, &sym, h.symbolic()).unwrap();
+                let mut native = NativeSchur::new(&dev, &sym, h.symbolic(), Wide::F64).unwrap();
                 native.use_graphs(graphs);
-                let mut fnat = factor(&dev, precision, &sn, &sym.s);
+                let mut fnat = factor(&dev, precision, &sn, &sym.s, Wide::F64);
                 let mut cubecl = crate::GpuSchur::new(&ctx, &sym, h.symbolic());
                 cubecl.use_graphs(graphs);
                 let mut fcub = crate::GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());

@@ -1,7 +1,7 @@
 // lm.cpp: the Levenberg-Marquardt loop's vector work on the device, launched
 // by arael-gpu/src/native/lm.rs (the passes of arael-gpu/src/lm.rs).
 //
-// All f64. Every kernel runs THREADS threads per block. The scalars slots
+// In W, the route's wide scalar (wide.h). Every kernel runs THREADS threads per block. The scalars slots
 // (S_*), the partials per block (LIN_PARTIALS, ATTEMPT_PARTIALS), NO_FAULT
 // and FIXED come from lm.rs as #defines. A pass leaves partials per block,
 // which the combine kernels fold, in one block, into the scalars.
@@ -10,7 +10,7 @@
 #define OP_MAX 1
 #define OP_MIN 2
 
-template <int OP> DEVICE double combine(double a, double b) {
+template <int OP> DEVICE W combine(W a, W b) {
     if (OP == OP_SUM) return a + b;
     if (OP == OP_MAX) return b > a ? b : a;
     return b < a ? b : a;
@@ -18,7 +18,7 @@ template <int OP> DEVICE double combine(double a, double b) {
 
 // `v` combined over the block by OP, the result in every thread; `sh` is
 // THREADS words of shared memory.
-template <int OP> DEVICE double block_reduce(double v, SHARED_PTR double* sh) {
+template <int OP> DEVICE W block_reduce(W v, SHARED_PTR W* sh) {
     u32 t = thread_x();
     // a previous call's readers are done with the shared words first
     BARRIER();
@@ -32,7 +32,7 @@ template <int OP> DEVICE double block_reduce(double v, SHARED_PTR double* sh) {
 }
 
 // H's diagonal gathered: out[i] = h[pos[i]], one thread per scalar.
-KERNEL_THREADS(THREADS) void k_gather_diag(GLOBAL const double* RESTRICT h, GLOBAL const u32* RESTRICT pos, GLOBAL double* RESTRICT out, u32 n) {
+KERNEL_THREADS(THREADS) void k_gather_diag(GLOBAL const W* RESTRICT h, GLOBAL const u32* RESTRICT pos, GLOBAL W* RESTRICT out, u32 n) {
     u32 i = global_x();
     if (i < n) out[i] = h[pos[i]];
 }
@@ -42,33 +42,33 @@ KERNEL_THREADS(THREADS) void k_gather_diag(GLOBAL const double* RESTRICT h, GLOB
 // the gradient's largest magnitude, the largest |g| / sqrt(d) over d > 0,
 // and the first faulty entry as 4 i + kind (1 NaN, 2 negative, 3 zero; with
 // a floor a NaN or negative diagonal, without one also a zero).
-KERNEL_THREADS(THREADS) void k_lin_pass(GLOBAL const double* RESTRICT g, GLOBAL const double* RESTRICT h, GLOBAL const u32* RESTRICT pos, GLOBAL double* RESTRICT diag, GLOBAL double* RESTRICT damp, double floor, u32 has_floor, GLOBAL double* RESTRICT partials, u32 n) {
-    SHARED double sh[THREADS];
+KERNEL_THREADS(THREADS) void k_lin_pass(GLOBAL const W* RESTRICT g, GLOBAL const W* RESTRICT h, GLOBAL const u32* RESTRICT pos, GLOBAL W* RESTRICT diag, GLOBAL W* RESTRICT damp, W floor, u32 has_floor, GLOBAL W* RESTRICT partials, u32 n) {
+    SHARED W sh[THREADS];
     u32 i = global_x();
-    double gm = 0.0;
-    double gs = 0.0;
-    double fault = NO_FAULT;
+    W gm = 0.0f;
+    W gs = 0.0f;
+    W fault = NO_FAULT;
     if (i < n) {
-        double d = h[pos[i]];
+        W d = h[pos[i]];
         diag[i] = d;
-        double gi = fabs(g[i]);
+        W gi = fabs(g[i]);
         gm = gi;
-        if (d > 0.0) gs = gi / sqrt(d);
-        bool bad = !(d > 0.0);
+        if (d > 0.0f) gs = gi / sqrt(d);
+        bool bad = !(d > 0.0f);
         if (has_floor != 0) {
-            bad = !(d >= 0.0);
+            bad = !(d >= 0.0f);
             damp[i] = d > floor ? d : floor;
         } else {
             damp[i] = d;
         }
         if (bad) {
-            double kind = 3.0;
-            if (d != d) {
-                kind = 1.0;
-            } else if (d < 0.0) {
-                kind = 2.0;
+            u32 kind = 3;
+            if (isnan(d)) {
+                kind = 1;
+            } else if (d < 0.0f) {
+                kind = 2;
             }
-            fault = 4.0 * (double)i + kind;
+            fault = wide_u32(4u * i + kind);
         }
     }
     gm = block_reduce<OP_MAX>(gm, sh);
@@ -84,7 +84,7 @@ KERNEL_THREADS(THREADS) void k_lin_pass(GLOBAL const double* RESTRICT g, GLOBAL 
 
 // The damped diagonal written into H's values: h[pos[i]] = diag[i] +
 // lambda[0] damp[i], one thread per scalar.
-KERNEL_THREADS(THREADS) void k_damp(GLOBAL double* RESTRICT h, GLOBAL const u32* RESTRICT pos, GLOBAL const double* RESTRICT diag, GLOBAL const double* RESTRICT damp, GLOBAL const double* RESTRICT lambda, u32 n) {
+KERNEL_THREADS(THREADS) void k_damp(GLOBAL W* RESTRICT h, GLOBAL const u32* RESTRICT pos, GLOBAL const W* RESTRICT diag, GLOBAL const W* RESTRICT damp, GLOBAL const W* RESTRICT lambda, u32 n) {
     u32 i = global_x();
     if (i < n) h[pos[i]] = diag[i] + lambda[0] * damp[i];
 }
@@ -92,15 +92,15 @@ KERNEL_THREADS(THREADS) void k_damp(GLOBAL double* RESTRICT h, GLOBAL const u32*
 // One thread per parameter: the trial point x_try = x - delta, and per block
 // the sums of delta^2, x_try^2 and delta (g + lambda[0] d delta) (twice the
 // predicted reduction).
-KERNEL_THREADS(THREADS) void k_attempt_pass(GLOBAL const double* RESTRICT x, GLOBAL const double* RESTRICT delta, GLOBAL const double* RESTRICT g, GLOBAL const double* RESTRICT diag, GLOBAL const double* RESTRICT lambda, GLOBAL double* RESTRICT x_try, GLOBAL double* RESTRICT partials, u32 n) {
-    SHARED double sh[THREADS];
+KERNEL_THREADS(THREADS) void k_attempt_pass(GLOBAL const W* RESTRICT x, GLOBAL const W* RESTRICT delta, GLOBAL const W* RESTRICT g, GLOBAL const W* RESTRICT diag, GLOBAL const W* RESTRICT lambda, GLOBAL W* RESTRICT x_try, GLOBAL W* RESTRICT partials, u32 n) {
+    SHARED W sh[THREADS];
     u32 i = global_x();
-    double s2 = 0.0;
-    double t2 = 0.0;
-    double pr = 0.0;
+    W s2 = 0.0f;
+    W t2 = 0.0f;
+    W pr = 0.0f;
     if (i < n) {
-        double d = delta[i];
-        double t = x[i] - d;
+        W d = delta[i];
+        W t = x[i] - d;
         x_try[i] = t;
         s2 = d * d;
         t2 = t * t;
@@ -119,18 +119,18 @@ KERNEL_THREADS(THREADS) void k_attempt_pass(GLOBAL const double* RESTRICT x, GLO
 
 // Entry k of the partials of `blocks` blocks (PER a block) folded by OP over
 // the threads of one block, the result in every thread.
-template <int OP, u32 PER, u32 K> DEVICE double fold_partials(GLOBAL const double* partials, u32 blocks, SHARED_PTR double* sh) {
-    double acc = OP == OP_MIN ? 1e300 : 0.0;
+template <int OP, u32 PER, u32 K> DEVICE W fold_partials(GLOBAL const W* partials, u32 blocks, SHARED_PTR W* sh) {
+    W acc = OP == OP_MIN ? NO_FAULT : W(0.0f);
     for (u32 c = thread_x(); c < blocks; c += THREADS) acc = combine<OP>(acc, partials[c * PER + K]);
     return block_reduce<OP>(acc, sh);
 }
 
 // k_lin_pass's partials folded into the scalars, one block.
-KERNEL_THREADS(THREADS) void k_combine_lin(GLOBAL const double* RESTRICT partials, u32 blocks, GLOBAL double* RESTRICT out) {
-    SHARED double sh[THREADS];
-    double gm = fold_partials<OP_MAX, LIN_PARTIALS, 0>(partials, blocks, sh);
-    double gs = fold_partials<OP_MAX, LIN_PARTIALS, 1>(partials, blocks, sh);
-    double fault = fold_partials<OP_MIN, LIN_PARTIALS, 2>(partials, blocks, sh);
+KERNEL_THREADS(THREADS) void k_combine_lin(GLOBAL const W* RESTRICT partials, u32 blocks, GLOBAL W* RESTRICT out) {
+    SHARED W sh[THREADS];
+    W gm = fold_partials<OP_MAX, LIN_PARTIALS, 0>(partials, blocks, sh);
+    W gs = fold_partials<OP_MAX, LIN_PARTIALS, 1>(partials, blocks, sh);
+    W fault = fold_partials<OP_MIN, LIN_PARTIALS, 2>(partials, blocks, sh);
     if (thread_x() == 0) {
         out[S_GRAD_MAX] = gm;
         out[S_GRAD_SCALED] = gs;
@@ -140,20 +140,20 @@ KERNEL_THREADS(THREADS) void k_combine_lin(GLOBAL const double* RESTRICT partial
 
 // k_attempt_pass's partials folded into the scalars, one block; the
 // predicted reduction is half its sum.
-KERNEL_THREADS(THREADS) void k_combine_attempt(GLOBAL const double* RESTRICT partials, u32 blocks, GLOBAL double* RESTRICT out) {
-    SHARED double sh[THREADS];
-    double s2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 0>(partials, blocks, sh);
-    double t2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 1>(partials, blocks, sh);
-    double pr = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 2>(partials, blocks, sh);
+KERNEL_THREADS(THREADS) void k_combine_attempt(GLOBAL const W* RESTRICT partials, u32 blocks, GLOBAL W* RESTRICT out) {
+    SHARED W sh[THREADS];
+    W s2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 0>(partials, blocks, sh);
+    W t2 = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 1>(partials, blocks, sh);
+    W pr = fold_partials<OP_SUM, ATTEMPT_PARTIALS, 2>(partials, blocks, sh);
     if (thread_x() == 0) {
         out[S_STEP2] = s2;
         out[S_TRY2] = t2;
-        out[S_PREDICTED] = 0.5 * pr;
+        out[S_PREDICTED] = 0.5f * pr;
     }
 }
 
 // dst = src, n values.
-KERNEL_THREADS(THREADS) void k_copy(GLOBAL double* RESTRICT dst, GLOBAL const double* RESTRICT src, u32 n) {
+KERNEL_THREADS(THREADS) void k_copy(GLOBAL W* RESTRICT dst, GLOBAL const W* RESTRICT src, u32 n) {
     u32 i = global_x();
     if (i < n) dst[i] = src[i];
 }
@@ -161,13 +161,13 @@ KERNEL_THREADS(THREADS) void k_copy(GLOBAL double* RESTRICT dst, GLOBAL const do
 // The rotation steps of x zeroed, one thread per entity: the three global
 // indices at idx[at[e]..], a fixed one left alone; what re-centring does to
 // the parameters after an accepted step.
-KERNEL_THREADS(THREADS) void k_zero_steps(GLOBAL double* RESTRICT x, GLOBAL const u32* RESTRICT idx, GLOBAL const u32* RESTRICT at, u32 n) {
+KERNEL_THREADS(THREADS) void k_zero_steps(GLOBAL W* RESTRICT x, GLOBAL const u32* RESTRICT idx, GLOBAL const u32* RESTRICT at, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
     u32 a = at[e];
 #pragma unroll
     for (u32 k = 0; k < 3; k++) {
         u32 g = idx[a + k];
-        if (g != FIXED) x[g] = 0.0;
+        if (g != FIXED) x[g] = 0.0f;
     }
 }

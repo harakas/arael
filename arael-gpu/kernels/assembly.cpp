@@ -1,16 +1,23 @@
 // The pieces of a device assembly that every model shares: the kernels a
 // constraint kernel reads from (the entities' parameter values and rotation
-// caches) and the device functions it writes with (a residual row's rank-one
-// update of an entity's tile and of a cross tile of the Hessian, its
-// gradient terms, and the cost). The constraint kernels themselves are
-// generated per model by arael's macros and compiled after this source.
+// caches) and the device functions the generated kernels write and sum with.
+// The constraint kernels themselves are generated per model by arael's
+// macros and compiled after this source, with wide.h in front of it.
 //
-// H and the gradient are double whatever the model's scalar F, and every
-// write is an atomic add into buffers zeroed first. An entity's tile holds
-// the upper block triangle, entry (i, j) of the entity's live parameters at
-// base + (g_j - start) * stride + (g_i - start), g the global parameter
-// indices and start the first live one; a cross tile holds the
-// lower-numbered entity's span on its rows.
+// H, the gradient and the cost are in W, the route's wide scalar, and no
+// write is atomic. A constraint's instance kernel writes, per instance, its
+// residual rows and their derivative rows (a record of RECW values of F,
+// row after row: the residual, the A entity's derivatives, the B entity's),
+// and per block of 256 instances its part of the cost. Then one kernel per
+// entity side sums the records of each entity's instances into its tile and
+// gradient, one per cross tile its instances' products, and one block the
+// cost's parts: each output has one writer per launch, and the launches run
+// one after another, so constraints that share an output add into it in turn.
+//
+// An entity's tile holds the upper block triangle, entry (i, j) of the
+// entity's live parameters at base + (g_j - start) * stride + (g_i - start),
+// g the global parameter indices and start the first live one; a cross tile
+// holds the lower-numbered entity's span on its rows.
 //
 // Defines: SCALAR (the model's scalar). Every kernel runs blocks of 256.
 
@@ -19,9 +26,9 @@ typedef SCALAR F;
 // A fixed parameter's global index.
 #define FIXED 0xffffffffu
 
-// An entity's parameter values from x (double) in F, one thread per value:
+// An entity's parameter values from x (W) in F, one thread per value:
 // ev[i] = x[idx[i]], or fixed[i] for a fixed parameter.
-KERNEL_THREADS(256) void k_gather_params(GLOBAL const double* RESTRICT x, GLOBAL const u32* RESTRICT idx,
+KERNEL_THREADS(256) void k_gather_params(GLOBAL const W* RESTRICT x, GLOBAL const u32* RESTRICT idx,
                                          GLOBAL const F* RESTRICT fixed, GLOBAL F* RESTRICT ev, u32 n) {
     u32 i = global_x();
     if (i >= n) return;
@@ -31,8 +38,9 @@ KERNEL_THREADS(256) void k_gather_params(GLOBAL const double* RESTRICT x, GLOBAL
 
 // R(delta) of an Euler-angle step, row-major: roll, pitch, yaw, with
 // R = rot(z) rot(y) rot(x).
-DEVICE void euler_matrix(double dx, double dy, double dz, double* d) {
-    double sx = sin(dx), cx = cos(dx), sy = sin(dy), cy = cos(dy), sz = sin(dz), cz = cos(dz);
+DEVICE void euler_matrix(W dx, W dy, W dz, W* d) {
+    WidePair ex = wide_sin_cos(dx), ey = wide_sin_cos(dy), ez = wide_sin_cos(dz);
+    W sx = ex.s, cx = ex.c, sy = ey.s, cy = ey.c, sz = ez.s, cz = ez.c;
     d[0] = cy * cz;
     d[1] = sx * sy * cz - cx * sz;
     d[2] = cx * sy * cz + sx * sz;
@@ -45,15 +53,17 @@ DEVICE void euler_matrix(double dx, double dy, double dz, double* d) {
 }
 
 // dR/d roll, pitch, yaw of the same step, k-major (27 values).
-DEVICE void euler_derivatives(double dx, double dy, double dz, double* dd) {
-    double sx = sin(dx), cx = cos(dx), sy = sin(dy), cy = cos(dy), sz = sin(dz), cz = cos(dz);
-    dd[0] = 0.0;
+DEVICE void euler_derivatives(W dx, W dy, W dz, W* dd) {
+    WidePair ex = wide_sin_cos(dx), ey = wide_sin_cos(dy), ez = wide_sin_cos(dz);
+    W sx = ex.s, cx = ex.c, sy = ey.s, cy = ey.c, sz = ez.s, cz = ez.c;
+    W zero = 0.0f;
+    dd[0] = zero;
     dd[1] = sx * sz + cz * cx * sy;
     dd[2] = cx * sz - sx * cz * sy;
-    dd[3] = 0.0;
+    dd[3] = zero;
     dd[4] = cx * sy * sz - sx * cz;
     dd[5] = -sx * sy * sz - cz * cx;
-    dd[6] = 0.0;
+    dd[6] = zero;
     dd[7] = cy * cx;
     dd[8] = -sx * cy;
     dd[9] = -sy * cz;
@@ -71,24 +81,24 @@ DEVICE void euler_derivatives(double dx, double dy, double dz, double* dd) {
     dd[21] = cy * cz;
     dd[22] = sx * sy * cz - cx * sz;
     dd[23] = cx * sy * cz + sz * sx;
-    dd[24] = 0.0;
-    dd[25] = 0.0;
-    dd[26] = 0.0;
+    dd[24] = zero;
+    dd[25] = zero;
+    dd[26] = zero;
 }
 
-// The composed rotation R_ref R(delta) of one entity, in double (rot_wide)
-// and F (rot), from its reference rotation refr (row-major, double) and its
-// step (three values of ev at at[e]).
-DEVICE void euler_compose(GLOBAL const double* RESTRICT refr, GLOBAL const F* RESTRICT ev, u32 a, u32 e,
-                          GLOBAL double* RESTRICT rot_wide, GLOBAL F* RESTRICT rot) {
-    double d[9];
-    euler_matrix((double)ev[a], (double)ev[a + 1], (double)ev[a + 2], d);
+// The composed rotation R_ref R(delta) of one entity, in W (rot_wide) and F
+// (rot), from its reference rotation refr (row-major, W) and its step (three
+// values of ev at at[e]).
+DEVICE void euler_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev, u32 a, u32 e,
+                          GLOBAL W* RESTRICT rot_wide, GLOBAL F* RESTRICT rot) {
+    W d[9];
+    euler_matrix((W)ev[a], (W)ev[a + 1], (W)ev[a + 2], d);
     u32 r0 = e * 9;
 #pragma unroll
     for (u32 i = 0; i < 3; i++) {
 #pragma unroll
         for (u32 j = 0; j < 3; j++) {
-            double v = 0.0;
+            W v = 0.0f;
 #pragma unroll
             for (u32 k = 0; k < 3; k++) v += refr[r0 + i * 3 + k] * d[k * 3 + j];
             rot_wide[r0 + i * 3 + j] = v;
@@ -99,8 +109,8 @@ DEVICE void euler_compose(GLOBAL const double* RESTRICT refr, GLOBAL const F* RE
 
 // One Euler-angle rotation per thread, values only: what a cost evaluation
 // reads.
-KERNEL_THREADS(256) void k_euler_values(GLOBAL const double* RESTRICT refr, GLOBAL const F* RESTRICT ev,
-                                        GLOBAL const u32* RESTRICT at, GLOBAL double* RESTRICT rot_wide,
+KERNEL_THREADS(256) void k_euler_values(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                        GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
                                         GLOBAL F* RESTRICT rot, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
@@ -109,15 +119,15 @@ KERNEL_THREADS(256) void k_euler_values(GLOBAL const double* RESTRICT refr, GLOB
 
 // One Euler-angle rotation per thread with its three derivatives
 // R_ref dR(delta)/d delta_k in F (drot, k-major): what a linearization reads.
-KERNEL_THREADS(256) void k_euler_rotations(GLOBAL const double* RESTRICT refr, GLOBAL const F* RESTRICT ev,
-                                           GLOBAL const u32* RESTRICT at, GLOBAL double* RESTRICT rot_wide,
+KERNEL_THREADS(256) void k_euler_rotations(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                           GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
                                            GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
     u32 a = at[e];
     euler_compose(refr, ev, a, e, rot_wide, rot);
-    double dd[27];
-    euler_derivatives((double)ev[a], (double)ev[a + 1], (double)ev[a + 2], dd);
+    W dd[27];
+    euler_derivatives((W)ev[a], (W)ev[a + 1], (W)ev[a + 2], dd);
     u32 r0 = e * 9, q0 = e * 27;
 #pragma unroll
     for (u32 m = 0; m < 3; m++) {
@@ -125,7 +135,7 @@ KERNEL_THREADS(256) void k_euler_rotations(GLOBAL const double* RESTRICT refr, G
         for (u32 i = 0; i < 3; i++) {
 #pragma unroll
             for (u32 j = 0; j < 3; j++) {
-                double v = 0.0;
+                W v = 0.0f;
 #pragma unroll
                 for (u32 k = 0; k < 3; k++) v += refr[r0 + i * 3 + k] * dd[m * 9 + k * 3 + j];
                 drot[q0 + m * 9 + i * 3 + j] = (F)v;
@@ -137,20 +147,20 @@ KERNEL_THREADS(256) void k_euler_rotations(GLOBAL const double* RESTRICT refr, G
 // The reference rotations moved by their steps, one thread per entity:
 // refr = refr R(delta), as EulerAngleParam::advance does after an accepted
 // step.
-KERNEL_THREADS(256) void k_euler_advance(GLOBAL double* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+KERNEL_THREADS(256) void k_euler_advance(GLOBAL W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
                                          GLOBAL const u32* RESTRICT at, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
     u32 a = at[e];
-    double d[9];
-    euler_matrix((double)ev[a], (double)ev[a + 1], (double)ev[a + 2], d);
+    W d[9];
+    euler_matrix((W)ev[a], (W)ev[a + 1], (W)ev[a + 2], d);
     u32 r0 = e * 9;
-    double m[9];
+    W m[9];
 #pragma unroll
     for (u32 i = 0; i < 3; i++) {
 #pragma unroll
         for (u32 j = 0; j < 3; j++) {
-            double v = 0.0;
+            W v = 0.0f;
 #pragma unroll
             for (u32 k = 0; k < 3; k++) v += refr[r0 + i * 3 + k] * d[k * 3 + j];
             m[i * 3 + j] = v;
@@ -160,16 +170,16 @@ KERNEL_THREADS(256) void k_euler_advance(GLOBAL double* RESTRICT refr, GLOBAL co
     for (u32 i = 0; i < 9; i++) refr[r0 + i] = m[i];
 }
 
-// n doubles of x zeroed: an assembly's targets before the atomic adds.
-KERNEL_THREADS(256) void k_zero_f64(GLOBAL double* RESTRICT x, u32 n) {
+// n values of x zeroed: an assembly's targets before the sums add into them.
+KERNEL_THREADS(256) void k_zero_wide(GLOBAL W* RESTRICT x, u32 n) {
     u32 i = global_x();
-    if (i < n) x[i] = 0.0;
+    if (i < n) x[i] = 0.0f;
 }
 
 // The rotation steps of x zeroed, one thread per entity: the three global
 // indices at idx[at[e]..], a fixed one left alone; what re-centring does to
 // the parameters after an accepted step.
-KERNEL_THREADS(256) void k_zero_steps(GLOBAL double* RESTRICT x, GLOBAL const u32* RESTRICT idx,
+KERNEL_THREADS(256) void k_zero_steps(GLOBAL W* RESTRICT x, GLOBAL const u32* RESTRICT idx,
                                       GLOBAL const u32* RESTRICT at, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
@@ -177,74 +187,14 @@ KERNEL_THREADS(256) void k_zero_steps(GLOBAL double* RESTRICT x, GLOBAL const u3
 #pragma unroll
     for (u32 k = 0; k < 3; k++) {
         u32 g = idx[a + k];
-        if (g != FIXED) x[g] = 0.0;
+        if (g != FIXED) x[g] = 0.0f;
     }
 }
 
-// H's diagonal gathered: out[i] = h[pos[i]], one thread per scalar.
-KERNEL_THREADS(256) void k_gather_diag(GLOBAL const double* RESTRICT h, GLOBAL const u32* RESTRICT pos,
-                                       GLOBAL double* RESTRICT out, u32 n) {
-    u32 i = global_x();
-    if (i >= n) return;
-    out[i] = h[pos[i]];
-}
-
-// One residual row's update of an entity's tile and of the gradient:
-// H += s dr dr^T over the upper triangle of the entity's live parameters
-// and g[g_i] += s r dr_i, s being 2 (2w under a loss). idx[at..at + N] are
-// the entity's global parameter indices; its tile is at base with columns
-// stride apart, from parameter start.
-template <u32 N>
-DEVICE void self_rank1(GLOBAL double* h, GLOBAL double* g, GLOBAL const u32* RESTRICT idx, u32 at, u32 base,
-                       u32 stride, u32 start, double s, F r, const F (&dr)[N]) {
-#pragma unroll
-    for (u32 i = 0; i < N; i++) {
-        u32 gi = idx[at + i];
-        if (gi != FIXED) {
-            double di = (double)dr[i];
-            atomic_add(&g[gi], s * (double)r * di);
-            u32 ri = gi - start;
-#pragma unroll
-            for (u32 j = i; j < N; j++) {
-                u32 gj = idx[at + j];
-                if (gj != FIXED) atomic_add(&h[base + (gj - start) * stride + ri], s * di * (double)dr[j]);
-            }
-        }
-    }
-}
-
-// One residual row's update of a cross tile: H += s dra drb^T between the
-// live parameters of entities a (idx_a[at_a..], first live start_a) and b.
-// The tile holds the lower-numbered entity on its rows: flip 0 when that is
-// a, 1 when it is b.
-template <u32 NA, u32 NB>
-DEVICE void cross_rank1(GLOBAL double* h, GLOBAL const u32* RESTRICT idx_a, u32 at_a, u32 start_a,
-                        GLOBAL const u32* RESTRICT idx_b, u32 at_b, u32 start_b, u32 base, u32 stride, u32 flip,
-                        double s, const F (&dra)[NA], const F (&drb)[NB]) {
-#pragma unroll
-    for (u32 i = 0; i < NA; i++) {
-        u32 gi = idx_a[at_a + i];
-        if (gi != FIXED) {
-            double di = s * (double)dra[i];
-            u32 ra = gi - start_a;
-#pragma unroll
-            for (u32 j = 0; j < NB; j++) {
-                u32 gj = idx_b[at_b + j];
-                if (gj != FIXED) {
-                    u32 cb = gj - start_b;
-                    double v = di * (double)drb[j];
-                    atomic_add(flip == 0 ? &h[base + cb * stride + ra] : &h[base + ra * stride + cb], v);
-                }
-            }
-        }
-    }
-}
-
-// The block's sum of its threads' v added to cost[0]: a shared-memory tree
-// over a block of 256 threads, then one atomic add per block. Every thread
-// of the block calls it.
-DEVICE void cost_add(GLOBAL double* cost, double v) {
-    SHARED double sh[256];
+// The block's sum of its threads' v into part[block]: a shared-memory tree
+// over a block of 256 threads. Every thread of the block calls it.
+DEVICE void cost_partial(GLOBAL W* part, W v) {
+    SHARED W sh[256];
     u32 t = thread_x();
     sh[t] = v;
     BARRIER();
@@ -252,9 +202,117 @@ DEVICE void cost_add(GLOBAL double* cost, double v) {
         if (t < half) sh[t] += sh[t + half];
         BARRIER();
     }
-    if (t == 0) atomic_add(cost, sh[0]);
+    if (t == 0) part[block_x()] = sh[0];
+}
+
+// cost[0] += the sum of part[0..m), by one block of 256 threads.
+DEVICE void cost_sum(GLOBAL const W* part, u32 m, GLOBAL W* cost) {
+    SHARED W sh[256];
+    u32 t = thread_x();
+    W acc = 0.0f;
+    for (u32 i = t; i < m; i += 256) acc += part[i];
+    sh[t] = acc;
+    BARRIER();
+    for (u32 half = 128; half > 0; half >>= 1) {
+        if (t < half) sh[t] += sh[t + half];
+        BARRIER();
+    }
+    if (t == 0) cost[0] += sh[0];
+}
+
+// One entity side's sums, one thread per (entity slot, entry) over `slots`
+// slots: an entity of N parameters has N (N + 1) / 2 entries of its tile's
+// upper triangle, then N of the gradient. Entry (i, j) of the tile sums
+// 2 d_i d_j, entry i of the gradient 2 r d_i, over the rows of the slot's
+// instances inst[off[s]..off[s + 1]], its derivatives at OFF in each
+// row of STRIDE values of a record of R rows. idx and tile are the entity
+// array's global indices and tiles.
+template <u32 N, u32 R, u32 STRIDE, u32 OFF>
+DEVICE void reduce_entity(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
+                          GLOBAL const u32* RESTRICT idx, GLOBAL const u32* RESTRICT tile, GLOBAL W* RESTRICT h,
+                          GLOBAL W* RESTRICT g, u32 slots) {
+    const u32 nt = N * (N + 1) / 2;
+    const u32 ne = nt + N;
+    u32 t = global_x();
+    if (t >= slots * ne) return;
+    u32 s = t / ne;
+    u32 e = t - s * ne;
+    // the entry's (i, j), i <= j, row by row of the upper triangle
+    u32 i = 0, j = 0;
+    bool grad = e >= nt;
+    if (grad) {
+        i = e - nt;
+    } else {
+        u32 left = e;
+        while (left >= N - i) {
+            left -= N - i;
+            i++;
+        }
+        j = i + left;
+    }
+    u32 gi = idx[s * N + i];
+    if (gi == FIXED) return;
+    u32 gj = grad ? 0u : idx[s * N + j];
+    if (!grad && gj == FIXED) return;
+    W acc = 0.0f;
+    for (u32 q = off[s]; q < off[s + 1]; q++) {
+        GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
+#pragma unroll
+        for (u32 row = 0; row < R; row++) {
+            GLOBAL const F* rr = r + row * STRIDE;
+            acc = wide_fma(acc, rr[OFF + i], grad ? rr[0] : rr[OFF + j]);
+        }
+    }
+    acc += acc;
+    if (grad) {
+        g[gi] += acc;
+    } else {
+        u32 start = tile[s * 3 + 2];
+        h[tile[s * 3] + (gj - start) * tile[s * 3 + 1] + (gi - start)] += acc;
+    }
+}
+
+// One cross array's sums, one thread per (cross slot, i, j) over `slots`
+// slots: 2 dA_i dB_j summed over the rows of the slot's instances
+// inst[off[x]..off[x + 1]] (one pair of entities, sa and sb, per slot), into
+// the cross tile `tile_x` of the slot, between the live parameters of the
+// entities (global indices idx_a, idx_b; first live ones in tile_a, tile_b).
+template <u32 NA, u32 NB, u32 R, u32 STRIDE>
+DEVICE void reduce_cross(GLOBAL const F* RESTRICT rec, GLOBAL const u32* RESTRICT off, GLOBAL const u32* RESTRICT inst,
+                         GLOBAL const u32* RESTRICT slot_a, GLOBAL const u32* RESTRICT slot_b,
+                         GLOBAL const u32* RESTRICT idx_a, GLOBAL const u32* RESTRICT tile_a,
+                         GLOBAL const u32* RESTRICT idx_b, GLOBAL const u32* RESTRICT tile_b,
+                         GLOBAL const u32* RESTRICT tile_x, GLOBAL W* RESTRICT h, u32 slots) {
+    u32 t = global_x();
+    if (t >= slots * NA * NB) return;
+    u32 x = t / (NA * NB);
+    u32 e = t - x * (NA * NB);
+    u32 i = e / NB;
+    u32 j = e - i * NB;
+    u32 q0 = off[x], q1 = off[x + 1];
+    if (q0 == q1) return;
+    u32 sa = slot_a[inst[q0]], sb = slot_b[inst[q0]];
+    u32 gi = idx_a[sa * NA + i];
+    u32 gj = idx_b[sb * NB + j];
+    if (gi == FIXED || gj == FIXED) return;
+    W acc = 0.0f;
+    for (u32 q = q0; q < q1; q++) {
+        GLOBAL const F* r = rec + inst[q] * (R * STRIDE);
+#pragma unroll
+        for (u32 row = 0; row < R; row++) {
+            GLOBAL const F* rr = r + row * STRIDE;
+            acc = wide_fma(acc, rr[1 + i], rr[1 + NA + j]);
+        }
+    }
+    acc += acc;
+    u32 ra = gi - tile_a[sa * 3 + 2];
+    u32 cb = gj - tile_b[sb * 3 + 2];
+    u32 base = tile_x[x * 3], stride = tile_x[x * 3 + 1], flip = tile_x[x * 3 + 2];
+    h[flip == 0 ? base + cb * stride + ra : base + ra * stride + cb] += acc;
 }
 
 // A column of the layout table: block base plus the byte offset in slot k
-// of L, as T. The generated constraint kernels read every column this way.
+// of L, as T (COL_MUT: writable). The generated constraint kernels read
+// every column this way.
 #define COL(base, T, k) ((GLOBAL const T*)((base) + L[ARAEL_COL_##k]))
+#define COL_MUT(base, T, k) ((GLOBAL T*)((base) + L[ARAEL_COL_##k]))

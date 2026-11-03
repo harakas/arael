@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use super::{Arg, Device, Launch, Layout, NativeError, define_u32s};
+use super::{Arg, Device, Launch, Layout, NativeError, WIDE, Wide, define_u32s};
 use crate::lm::{self as host, ATTEMPT_PARTIALS, LIN_PARTIALS, N_SCALARS};
 
 /// The kernels.
@@ -42,13 +42,14 @@ struct Sections {
     scalars: usize,
 }
 
-/// The Levenberg-Marquardt loop's vectors on a native [`Device`], all f64,
-/// in one block: the parameters `x` and the trial point, H's undamped
+/// The Levenberg-Marquardt loop's vectors on a native [`Device`], in the
+/// route's [`Wide`] scalar, in one block: the parameters `x` and the trial point, H's undamped
 /// diagonal and the damping scale, and the [`Scalars`](crate::lm::Scalars)
 /// the loop decides on. H and the gradient are the caller's (a
 /// [`NativeSchur`](super::NativeSchur)'s targets).
 pub struct NativeLmVectors<D: Device> {
     dev: Arc<D>,
+    wide: Wide,
     k: Kernels<D::Kernel>,
     n: usize,
     block: D::Block,
@@ -62,9 +63,9 @@ fn blocks(n: usize) -> u32 {
 }
 
 impl<D: Device> NativeLmVectors<D> {
-    /// The vectors of `pos.len()` parameters, H's diagonal at `pos` in its
-    /// values.
-    pub fn new(dev: &Arc<D>, pos: &[u32]) -> Result<Self, NativeError> {
+    /// The vectors of `pos.len()` parameters in `wide`, H's diagonal at
+    /// `pos` in its values.
+    pub fn new(dev: &Arc<D>, pos: &[u32], wide: Wide) -> Result<Self, NativeError> {
         let n = pos.len();
         let parts = blocks(n) as usize;
         let mut l = Layout::new();
@@ -83,7 +84,7 @@ impl<D: Device> NativeLmVectors<D> {
         if n > 0 {
             dev.write(&mut block, sec.pos, bytemuck::cast_slice(pos))?;
         }
-        let mut defines = String::new();
+        let mut defines = wide.defines().to_string();
         define_u32s(
             &mut defines,
             &[
@@ -99,8 +100,10 @@ impl<D: Device> NativeLmVectors<D> {
                 ("FIXED", crate::assembly::FIXED as usize),
             ],
         );
-        defines.push_str(&format!("#define NO_FAULT {:e}\n", host::NO_FAULT));
-        let c = |entry: &str| dev.compile(SOURCE, &defines, entry);
+        // above host::FAULT_BELOW in either scalar
+        defines.push_str("#define NO_FAULT ARAEL_WIDE(1e300, 3.0e38f, 0.0f)\n");
+        let source = format!("{WIDE}\n{SOURCE}");
+        let c = |entry: &str| dev.compile(&source, &defines, entry);
         let k = Kernels {
             gather_diag: c("k_gather_diag")?,
             lin_pass: c("k_lin_pass")?,
@@ -111,7 +114,7 @@ impl<D: Device> NativeLmVectors<D> {
             copy: c("k_copy")?,
             zero_steps: c("k_zero_steps")?,
         };
-        Ok(NativeLmVectors { dev: dev.clone(), k, n, block, sec })
+        Ok(NativeLmVectors { dev: dev.clone(), wide, k, n, block, sec })
     }
 
     /// The parameter count.
@@ -124,16 +127,21 @@ impl<D: Device> NativeLmVectors<D> {
         self.n == 0
     }
 
+    /// The scalar the vectors are kept in.
+    pub fn wide(&self) -> Wide {
+        self.wide
+    }
+
     /// Write the parameters (no wait).
     pub fn write_x(&mut self, x: &[f64]) -> Result<(), NativeError> {
         assert_eq!(x.len(), self.n);
         if self.n > 0 {
-            self.dev.write(&mut self.block, self.sec.x, bytemuck::cast_slice(x))?;
+            self.dev.write(&mut self.block, self.sec.x, &self.wide.encode(x))?;
         }
         Ok(())
     }
 
-    /// The parameters on the device (block, byte offset), `len` f64.
+    /// The parameters on the device (block, byte offset), `len` values.
     pub fn x(&self) -> (&D::Block, usize) {
         (&self.block, self.sec.x)
     }
@@ -149,8 +157,8 @@ impl<D: Device> NativeLmVectors<D> {
         (&self.block, self.sec.diag)
     }
 
-    /// The scalars, [`N_SCALARS`] f64, to read and
-    /// [`decode`](crate::lm::Scalars::decode).
+    /// The scalars, [`N_SCALARS`] values, to read and decode with
+    /// [`Wide::decode`] and [`Scalars::from_values`](crate::lm::Scalars::from_values).
     pub fn scalars(&self) -> (&D::Block, usize) {
         (&self.block, self.sec.scalars)
     }
@@ -185,7 +193,7 @@ impl<D: Device> NativeLmVectors<D> {
             self.at(s.pos),
             self.at(s.diag),
             self.at(s.damp),
-            Arg::F64(floor.unwrap_or(0.0)),
+            self.wide.arg(floor.unwrap_or(0.0)),
             Arg::U32(floor.is_some() as u32),
             self.at(s.lin),
             Arg::U32(self.n as u32),
@@ -197,7 +205,7 @@ impl<D: Device> NativeLmVectors<D> {
     /// The damping of the next [`damp`](Self::damp) and
     /// [`step`](Self::step), written to the device (no wait).
     pub fn set_lambda(&mut self, lambda: f64) -> Result<(), NativeError> {
-        self.dev.write(&mut self.block, self.sec.lambda, bytemuck::bytes_of(&lambda))
+        self.dev.write(&mut self.block, self.sec.lambda, &self.wide.bits(lambda).to_le_bytes())
     }
 
     /// H's diagonal damped, `diag + lambda damp`, in its values at `h`.
@@ -268,7 +276,92 @@ mod tests {
     }
 
     fn scalars(dev: &CudaDevice, v: &NativeLmVectors<CudaDevice>) -> Scalars {
-        Scalars::decode(bytemuck::cast_slice(&read(dev, v.scalars(), N_SCALARS)))
+        Scalars::from_values(&readw(dev, v.scalars(), N_SCALARS, v.wide()))
+    }
+
+    /// `v` uploaded in `wide`.
+    fn upw(dev: &CudaDevice, v: &[f64], wide: Wide) -> CudaBlock {
+        let bytes = wide.encode(v);
+        let mut b = dev.alloc(bytes.len()).unwrap();
+        dev.write(&mut b, 0, &bytes).unwrap();
+        b
+    }
+
+    /// `n` values of `wide` read back.
+    fn readw(dev: &CudaDevice, at: (&CudaBlock, usize), n: usize, wide: Wide) -> Vec<f64> {
+        let mut bytes = vec![0u8; 8 * n];
+        dev.read(at.0, at.1, &mut bytes).unwrap();
+        let mut v = vec![0.0f64; n];
+        wide.decode(&bytes, &mut v);
+        v
+    }
+
+    /// The passes in df32 against the host's f64: to df32's precision, the
+    /// maxima and the copies exact.
+    #[test]
+    fn the_passes_match_the_host_in_df32() {
+        let wide = Wide::Df32;
+        let dev = device();
+        let Fixture { n, pos, h, g, x, step } = fixture();
+        // the inputs as df32 holds them
+        let held = |v: &[f64]| v.iter().map(|&a| wide.value(wide.bits(a))).collect::<Vec<f64>>();
+        let (h, g, x, step) = (held(&h), held(&g), held(&x), held(&step));
+        let nh = h.len();
+        let lambda = 0.3;
+        let (hd, gd, sd) = (upw(&dev, &h, wide), upw(&dev, &g, wide), upw(&dev, &step, wide));
+        let mut v = NativeLmVectors::new(&dev, &pos, wide).unwrap();
+        v.write_x(&x).unwrap();
+        v.linearized((&gd, 0), (&hd, 0), None).unwrap();
+        v.set_lambda(lambda).unwrap();
+        v.damp((&hd, 0)).unwrap();
+        v.step((&sd, 0), (&gd, 0)).unwrap();
+        let s = scalars(&dev, &v);
+        let diag: Vec<f64> = pos.iter().map(|&p| h[p as usize]).collect();
+        let gmax = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let gs = g.iter().zip(&diag).fold(0.0f64, |m, (g, d)| m.max(g.abs() / d.sqrt()));
+        let step2: f64 = step.iter().map(|d| d * d).sum();
+        let try2: f64 = x.iter().zip(&step).map(|(x, d)| (x - d) * (x - d)).sum();
+        let pr: f64 = 0.5 * (0..n).map(|i| step[i] * (g[i] + lambda * diag[i] * step[i])).sum::<f64>();
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-300);
+        assert_eq!(s.grad_max, gmax);
+        assert!(rel(s.grad_scaled, gs) < 1e-13, "{} {}", s.grad_scaled, gs);
+        assert_eq!(s.fault, None);
+        assert!(rel(s.step2, step2) < 1e-12, "{} {}", s.step2, step2);
+        assert!(rel(s.try2, try2) < 1e-12, "{} {}", s.try2, try2);
+        assert!(rel(s.predicted, pr) < 1e-12, "{} {}", s.predicted, pr);
+        assert_eq!(readw(&dev, v.diag(), n, wide), diag);
+        let damped = readw(&dev, (&hd, 0), nh, wide);
+        for (i, &p) in pos.iter().enumerate() {
+            assert!(rel(damped[p as usize], diag[i] + lambda * diag[i]) < 1e-13, "entry {i}");
+        }
+        let xt = readw(&dev, v.x_try(), n, wide);
+        for i in 0..n {
+            assert!((xt[i] - (x[i] - step[i])).abs() <= 1e-13 * x[i].abs().max(1.0), "entry {i}");
+        }
+        v.accept().unwrap();
+        assert_eq!(readw(&dev, v.x(), n, wide), xt);
+    }
+
+    /// The fault's code is exact in df32, and its no-fault value reads as none.
+    #[test]
+    fn the_first_faulty_diagonal_entry_is_found_in_df32() {
+        let wide = Wide::Df32;
+        let dev = device();
+        let n = 700usize;
+        let pos: Vec<u32> = (0..n as u32).collect();
+        let gd = upw(&dev, &vec![1.0f64; n], wide);
+        let v = NativeLmVectors::new(&dev, &pos, wide).unwrap();
+        let fault = |h: &[f64]| {
+            let hd = upw(&dev, h, wide);
+            v.linearized((&gd, 0), (&hd, 0), None).unwrap();
+            scalars(&dev, &v).fault
+        };
+        let mut h = vec![1.0f64; n];
+        assert_eq!(fault(&h), None);
+        h[600] = 0.0;
+        assert_eq!(fault(&h), Some((600, DiagFault::Zero)));
+        h[299] = f64::NAN;
+        assert_eq!(fault(&h), Some((299, DiagFault::Nan)));
     }
 
     /// The passes' inputs: past one block, so the partials fold.
@@ -301,7 +394,7 @@ mod tests {
         let nh = h.len();
         let lambda = 0.3;
         let (hd, gd, sd) = (up(&dev, &h), up(&dev, &g), up(&dev, &step));
-        let mut v = NativeLmVectors::new(&dev, &pos).unwrap();
+        let mut v = NativeLmVectors::new(&dev, &pos, Wide::F64).unwrap();
         v.write_x(&x).unwrap();
         v.linearized((&gd, 0), (&hd, 0), None).unwrap();
         v.set_lambda(lambda).unwrap();
@@ -343,7 +436,7 @@ mod tests {
         let n = 700usize;
         let pos: Vec<u32> = (0..n as u32).collect();
         let gd = up(&dev, &vec![1.0f64; n]);
-        let v = NativeLmVectors::new(&dev, &pos).unwrap();
+        let v = NativeLmVectors::new(&dev, &pos, Wide::F64).unwrap();
         let fault = |h: &[f64], floor: Option<f64>| {
             let hd = up(&dev, h);
             v.linearized((&gd, 0), (&hd, 0), floor).unwrap();
@@ -371,7 +464,7 @@ mod tests {
         let pos: Vec<u32> = (0..n as u32).collect();
         let h: Vec<f64> = (0..n).map(|i| if i % 3 == 0 { 1e-9 } else { 2.0 }).collect();
         let (hd, gd) = (up(&dev, &h), up(&dev, &vec![1.0f64; n]));
-        let mut v = NativeLmVectors::new(&dev, &pos).unwrap();
+        let mut v = NativeLmVectors::new(&dev, &pos, Wide::F64).unwrap();
         v.linearized((&gd, 0), (&hd, 0), Some(1e-3)).unwrap();
         v.set_lambda(2.0).unwrap();
         v.damp((&hd, 0)).unwrap();
@@ -388,7 +481,7 @@ mod tests {
         let dev = device();
         let n = 40usize;
         let pos: Vec<u32> = (0..n as u32).collect();
-        let mut v = NativeLmVectors::new(&dev, &pos).unwrap();
+        let mut v = NativeLmVectors::new(&dev, &pos, Wide::F64).unwrap();
         let x: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
         v.write_x(&x).unwrap();
         // two entities of six parameters (rotation first), the second's middle angle fixed
@@ -411,6 +504,12 @@ mod tests {
     /// another lambda, each against the damped system solved on the host.
     #[test]
     fn an_attempt_on_the_device_solves_the_damped_system() {
+        for wide in [Wide::F64, Wide::Df32] {
+            attempt_in(wide);
+        }
+    }
+
+    fn attempt_in(wide: Wide) {
         use crate::GpuPrecision;
         use crate::native::{NativeFactor, NativeSchur};
         use crate::test_util::{ba_like, rel_residual};
@@ -431,9 +530,9 @@ mod tests {
             }
         }
         let dev = device();
-        let mut g = NativeSchur::new(&dev, &sym, &hs).unwrap();
-        let f = NativeFactor::new(&dev, GpuPrecision::F32, &sn, &sym.s, &Default::default()).unwrap();
-        let mut v = NativeLmVectors::new(&dev, &pos).unwrap();
+        let mut g = NativeSchur::new(&dev, &sym, &hs, wide).unwrap();
+        let f = NativeFactor::new(&dev, GpuPrecision::F32, &sn, &sym.s, &Default::default(), wide).unwrap();
+        let mut v = NativeLmVectors::new(&dev, &pos, wide).unwrap();
         let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).cos()).collect();
         v.write_x(&x).unwrap();
         g.upload(h.vals(), &rhs).unwrap();
@@ -446,18 +545,20 @@ mod tests {
         };
         let check = |v: &NativeLmVectors<CudaDevice>, lambda: f64| {
             let s = scalars(&dev, v);
-            let step = read(&dev, g.step_view(), n);
+            let step = readw(&dev, g.step_view(), n, wide);
             let mut damped = dense.clone();
             for i in 0..n {
                 damped[i + i * n] *= 1.0 + lambda;
             }
             let res = rel_residual(&damped, n, &step, &rhs);
-            assert!(res < 1e-8, "lambda {lambda}: residual {res}");
+            assert!(res < 1e-8, "{wide:?}, lambda {lambda}: residual {res}");
             let step2: f64 = step.iter().map(|d| d * d).sum();
-            assert!((s.step2 - step2).abs() <= 1e-13 * step2, "{} {}", s.step2, step2);
-            let xt = read(&dev, v.x_try(), n);
-            assert!((0..n).all(|i| xt[i] == x[i] - step[i]));
-            let gmax = rhs.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            assert!((s.step2 - step2).abs() <= 1e-12 * step2, "{} {}", s.step2, step2);
+            // the parameters and the gradient as the wide scalar holds them
+            let held = |a: f64| wide.value(wide.bits(a));
+            let xt = readw(&dev, v.x_try(), n, wide);
+            assert!((0..n).all(|i| (xt[i] - (held(x[i]) - step[i])).abs() <= 1e-14 * xt[i].abs().max(1.0)));
+            let gmax = rhs.iter().fold(0.0f64, |m, &v| m.max(held(v).abs()));
             assert_eq!(s.grad_max, gmax);
         };
         v.set_lambda(0.5).unwrap();
@@ -504,7 +605,7 @@ mod tests {
             let (cs, ch, cx) = (rc(vc.scalars()), rc(hc.view(nh * 8)), rc(vc.x_try()));
             // native
             let (hd, gd, sd) = (up(&dev, &h), up(&dev, &g), up(&dev, &step));
-            let mut v = NativeLmVectors::new(&dev, &pos).unwrap();
+            let mut v = NativeLmVectors::new(&dev, &pos, Wide::F64).unwrap();
             v.write_x(&x).unwrap();
             v.linearized((&gd, 0), (&hd, 0), floor).unwrap();
             v.set_lambda(lambda).unwrap();

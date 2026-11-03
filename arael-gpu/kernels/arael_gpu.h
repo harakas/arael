@@ -23,8 +23,12 @@ typedef unsigned long long u64;
 
 // An entry point keeps its name, so the runtime finds it in the module.
 // KERNEL_THREADS(n): an entry point launched with at most n threads per block.
+// KERNEL_THREADS_REGS(n): the same, its registers not capped to fit several
+// blocks on a multiprocessor (one block must fit), for a kernel whose
+// per-thread arrays would otherwise spill to local memory.
 #define KERNEL extern "C" __global__
 #define KERNEL_THREADS(n) extern "C" __global__ __launch_bounds__(n)
+#define KERNEL_THREADS_REGS(n) extern "C" __global__ __launch_bounds__(n, 1)
 #define DEVICE __device__ inline
 
 // A pointer parameter through which alone the kernel reaches what it points

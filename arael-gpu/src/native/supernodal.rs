@@ -11,7 +11,7 @@ use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::SchurReal;
 use arael_faer::supernodal::SupernodalSymbolic;
 
-use super::{Arg, Device, Launch, NativeError, Scalar, is_f64, scalar_bytes, scalar_bytes_mut};
+use super::{Arg, Device, Launch, NativeError, Scalar, WIDE, Wide, is_f64, scalar_bytes};
 use crate::plan::{self, GpuSupernodalParams, NB, Plan, SparseIndex, TB, build_levels};
 use crate::supernodal::Packer;
 
@@ -52,6 +52,7 @@ struct Kernels<K> {
     zero_u32: K,
     seed_f32: K,
     seed_f64: K,
+    seed_wide: K,
     tile_update: K,
     big_update: K,
     small_factor: K,
@@ -135,7 +136,7 @@ impl Sections {
 ///
 /// ```ignore
 /// let dev = Arc::new(CudaDevice::new(0)?);
-/// let mut g = NativeSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &Default::default())?;
+/// let mut g = NativeSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &Default::default(), Wide::F64)?;
 /// g.factorize(a.vals())?;          // Err(NotPositiveDefinite) when a pivot is not positive
 /// g.solve(&mut rhs)?;              // rhs becomes x, in the matrix's ordering
 /// ```
@@ -156,9 +157,12 @@ pub struct NativeSupernodal<F: Scalar, D: Device> {
     nb: u32,
     nvals: usize,
     factor_vals: usize,
-    /// The right-hand side of [`solve`](Self::solve) in `f64`, when the
-    /// caller's is `f32`.
+    /// The scalar of the vectors it solves and of the values a device
+    /// factorization reads.
+    wide: Wide,
+    /// The right-hand side of [`solve`](Self::solve) in `f64`, and encoded.
     host_x: Vec<f64>,
+    host_bytes: Vec<u8>,
     id: u64,
     _f: PhantomData<F>,
 }
@@ -169,13 +173,15 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
     /// The device plan of `sn`, the analysis of a matrix with the block
     /// structure `asym`, uploaded to `dev`, with the factor's buffers and
-    /// the kernels. [`NativeError::Limit`] when a supernode needs more shared
-    /// memory than the device gives.
+    /// the kernels; the vectors it solves and the values a device
+    /// factorization reads are in `wide`. [`NativeError::Limit`] when a
+    /// supernode needs more shared memory than the device gives.
     pub fn new(
         dev: &Arc<D>,
         sn: &SupernodalSymbolic,
         asym: &SymbolicSparseBlockColMat<SparseIndex>,
         params: &GpuSupernodalParams,
+        wide: Wide,
     ) -> Result<Self, NativeError> {
         let plan = Plan::new(sn, asym);
         let lw = build_levels(&plan, params);
@@ -232,13 +238,15 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
         let nvals = asym.val_count();
         let sec = Sections::new(plan.factor_vals * fs, plan.n * fs, nvals * 8, plan.n * 8);
         let work = dev.alloc(sec.bytes)?;
-        let defines = defines(F::CPP, lu);
-        let c = |entry: &str| dev.compile(SOURCE, &defines, entry);
+        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu));
+        let source = format!("{WIDE}\n{SOURCE}");
+        let c = |entry: &str| dev.compile(&source, &defines, entry);
         let k = Kernels {
             zero: c("k_zero")?,
             zero_u32: c("k_zero_u32")?,
             seed_f32: c("k_seed_f32")?,
             seed_f64: c("k_seed_f64")?,
+            seed_wide: c("k_seed_wide")?,
             tile_update: c("k_tile_update")?,
             big_update: c("k_big_update")?,
             small_factor: c("k_small_factor")?,
@@ -266,7 +274,9 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
             nb: plan.nb as u32,
             nvals,
             factor_vals: plan.factor_vals,
+            wide,
             host_x: vec![0.0; plan.n],
+            host_bytes: Vec::new(),
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             _f: PhantomData,
         })
@@ -296,29 +306,29 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
         let fail = self.sec.fail;
         self.run(&self.k.zero_u32, 1, 32, 0, &[Arg::Block(&self.work, fail), Arg::U32(1)])?;
         self.dev.write(&mut self.work, self.sec.vals, scalar_bytes(vals))?;
-        self.factorize_with((&self.work, self.sec.vals), is_f64::<M>(), (&self.work, fail))?;
+        let seed = if is_f64::<M>() { &self.k.seed_f64 } else { &self.k.seed_f32 };
+        self.factorize_with((&self.work, self.sec.vals), seed, (&self.work, fail))?;
         let mut flag = [0u32];
         self.dev.read(&self.work, fail, bytemuck::cast_slice_mut(&mut flag))?;
         if flag[0] != 0 { Err(FactorizeError::NotPositiveDefinite) } else { Ok(()) }
     }
 
-    /// [`factorize`](Self::factorize) from `f64` tile values already on the
-    /// device at `vals` (block, byte offset), without waiting: the values
-    /// are cast to `F` as they land in the panels, and a pivot that is not
-    /// positive sets the `u32` at `fail` nonzero (the caller zeroes it, and
-    /// reads it with its result).
+    /// [`factorize`](Self::factorize) from tile values in the wide scalar
+    /// already on the device at `vals` (block, byte offset), without
+    /// waiting: the values are cast to `F` as they land in the panels, and a
+    /// pivot that is not positive sets the `u32` at `fail` nonzero (the
+    /// caller zeroes it, and reads it with its result).
     pub fn factorize_device(&self, vals: (&D::Block, usize), fail: (&D::Block, usize)) -> Result<(), NativeError> {
-        self.factorize_with(vals, true, fail)
+        self.factorize_with(vals, &self.k.seed_wide, fail)
     }
 
-    fn factorize_with(&self, vals: (&D::Block, usize), vals_f64: bool, fail: (&D::Block, usize)) -> Result<(), NativeError> {
+    fn factorize_with(&self, vals: (&D::Block, usize), seed: &D::Kernel, fail: (&D::Block, usize)) -> Result<(), NativeError> {
         let plan = Arg::Block(&self.ints, 0);
         let list = |at: usize| Arg::Block(&self.ints, at);
         let factor = Arg::Block(&self.work, self.sec.factor);
         let fail = Arg::Block(fail.0, fail.1);
         let flen = self.factor_vals as u32;
         self.run(&self.k.zero, flen.div_ceil(THREADS).max(1), THREADS, 0, &[factor, Arg::U32(flen)])?;
-        let seed = if vals_f64 { &self.k.seed_f64 } else { &self.k.seed_f32 };
         let seed_args = [list(self.tiles), Arg::Block(vals.0, vals.1), factor, Arg::U32(self.ntiles)];
         self.run(seed, self.ntiles.div_ceil(THREADS).max(1), THREADS, 0, &seed_args)?;
         for l in &self.levels {
@@ -353,23 +363,17 @@ impl<F: Scalar, D: Device> NativeSupernodal<F, D> {
     pub fn solve<M: SchurReal + 'static>(&mut self, rhs: &mut [M]) -> Result<(), NativeError> {
         assert_eq!(rhs.len(), self.n);
         let at = self.sec.rhs;
-        let same = is_f64::<M>();
-        if same {
-            self.dev.write(&mut self.work, at, scalar_bytes(rhs))?;
-        } else {
-            for (dst, &v) in self.host_x.iter_mut().zip(rhs.iter()) {
-                *dst = v.to_f64();
-            }
-            self.dev.write(&mut self.work, at, bytemuck::cast_slice(&self.host_x))?;
+        for (dst, &v) in self.host_x.iter_mut().zip(rhs.iter()) {
+            *dst = v.to_f64();
         }
+        self.host_bytes.clear();
+        self.wide.encode_into(&self.host_x, &mut self.host_bytes);
+        self.dev.write(&mut self.work, at, &self.host_bytes)?;
         self.solve_with((&self.work, at), (&self.ints, self.on))?;
-        if same {
-            self.dev.read(&self.work, at, scalar_bytes_mut(rhs))?;
-        } else {
-            self.dev.read(&self.work, at, bytemuck::cast_slice_mut(&mut self.host_x))?;
-            for (dst, &v) in rhs.iter_mut().zip(&self.host_x) {
-                *dst = M::from_f64(v);
-            }
+        self.dev.read(&self.work, at, &mut self.host_bytes)?;
+        self.wide.decode(&self.host_bytes, &mut self.host_x);
+        for (dst, &v) in rhs.iter_mut().zip(&self.host_x) {
+            *dst = M::from_f64(v);
         }
         Ok(())
     }
@@ -441,10 +445,11 @@ impl<D: Device> NativeFactor<D> {
         sn: &SupernodalSymbolic,
         asym: &SymbolicSparseBlockColMat<SparseIndex>,
         params: &GpuSupernodalParams,
+        wide: Wide,
     ) -> Result<Self, NativeError> {
         Ok(match precision {
-            crate::GpuPrecision::F32 => NativeFactor::F32(NativeSupernodal::new(dev, sn, asym, params)?),
-            crate::GpuPrecision::F64 => NativeFactor::F64(NativeSupernodal::new(dev, sn, asym, params)?),
+            crate::GpuPrecision::F32 => NativeFactor::F32(NativeSupernodal::new(dev, sn, asym, params, wide)?),
+            crate::GpuPrecision::F64 => NativeFactor::F64(NativeSupernodal::new(dev, sn, asym, params, wide)?),
         })
     }
 
@@ -616,7 +621,7 @@ mod tests {
         supernodal_solve(&sn, &cpu, &mut x_cpu, &mut ctx, 1);
         let dev = device();
         for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
-            let mut g = NativeSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params).unwrap();
+            let mut g = NativeSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             assert!(sn.n_supernodes() > 20, "a tree with levels");
             g.factorize(a.vals()).unwrap();
             let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
@@ -641,7 +646,7 @@ mod tests {
         let n = sn.dim();
         let dev = device();
         for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
-            let mut g = NativeSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params).unwrap();
+            let mut g = NativeSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             g.factorize(a.vals()).unwrap();
             let mut x = rhs.clone();
             g.solve(&mut x).unwrap();
@@ -677,7 +682,7 @@ mod tests {
         a.vals_mut()[base] = -1.0;
         let dev = device();
         for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
-            let mut g = NativeSupernodal::<f64, _>::new(&dev, &sn, &asym, &params).unwrap();
+            let mut g = NativeSupernodal::<f64, _>::new(&dev, &sn, &asym, &params, Wide::F64).unwrap();
             assert!(matches!(g.factorize(a.vals()), Err(FactorizeError::NotPositiveDefinite)));
             // the flag is cleared by the next factorization
             a.vals_mut()[base] = good;
@@ -692,7 +697,7 @@ mod tests {
     fn f32_values_and_rhs_match_their_f64_twins() {
         let (a, _, rhs, sn) = setup(16);
         let dev = device();
-        let mut g = NativeSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &every_kernel_busy()).unwrap();
+        let mut g = NativeSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &every_kernel_busy(), Wide::F64).unwrap();
         let v32: Vec<f32> = a.vals().iter().map(|&v| v as f32).collect();
         let v64: Vec<f64> = v32.iter().map(|&v| v as f64).collect();
         g.factorize(&v64).unwrap();
@@ -717,7 +722,7 @@ mod tests {
         let (a, dense, rhs, sn) = setup(16);
         let n = sn.dim();
         let dev = device();
-        let mut g = NativeSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &Default::default()).unwrap();
+        let mut g = NativeSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &Default::default(), Wide::F64).unwrap();
         g.factorize(a.vals()).unwrap();
         let from_host = widen(&g.factor_values().unwrap());
         let mut x_host = rhs.clone();
@@ -769,7 +774,7 @@ mod tests {
             let dev = device();
             let ctx = crate::GpuContext::new(crate::GpuBackend::Cuda, 0).unwrap();
             for params in [GpuSupernodalParams::default(), every_kernel_busy()] {
-                let mut native = NativeSupernodal::<F, _>::new(&dev, &sn, a.symbolic(), &params).unwrap();
+                let mut native = NativeSupernodal::<F, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
                 let mut cubecl = crate::GpuSupernodal::<F>::new(&ctx, &sn, a.symbolic(), &params);
                 native.factorize(a.vals()).unwrap();
                 cubecl.factorize(a.vals()).unwrap();
@@ -815,7 +820,7 @@ mod tests {
             let dev = device();
             let ctx = crate::GpuContext::new(crate::GpuBackend::Cuda, 0).unwrap();
             let params = GpuSupernodalParams::default();
-            let mut native = NativeSupernodal::<F, _>::new(&dev, sn, a.symbolic(), &params).unwrap();
+            let mut native = NativeSupernodal::<F, _>::new(&dev, sn, a.symbolic(), &params, Wide::F64).unwrap();
             let mut cubecl = crate::GpuSupernodal::<F>::new(&ctx, sn, a.symbolic(), &params);
             let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3;
             let (mut nf, mut ns, mut cf, mut cs) = (vec![], vec![], vec![], vec![]);

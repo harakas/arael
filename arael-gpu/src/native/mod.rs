@@ -38,6 +38,90 @@ pub use supernodal::{FactorizeError, NativeFactor, NativeSupernodal};
 /// The header in front of every kernel source: what differs between targets.
 pub const HEADER: &str = include_str!("../../kernels/arael_gpu.h");
 
+/// The wide scalar `W` (`kernels/wide.h`), in front of a source whose
+/// kernels use it, with [`Wide::defines`] among the defines.
+pub const WIDE: &str = include_str!("../../kernels/wide.h");
+
+/// The wide scalar of a device route: what H, the gradient, the cost, the
+/// Schur reduction and the LM loop's vectors are kept and summed in on the
+/// device. Both forms are 8 bytes; the host reads and writes f64 and
+/// converts at the boundary.
+///
+/// ```
+/// use arael_gpu::native::Wide;
+/// let w = Wide::Df32;
+/// let bytes = w.encode(&[0.1, 1.0 / 3.0]);
+/// let mut back = [0.0; 2];
+/// w.decode(&bytes, &mut back);
+/// assert!((back[0] - 0.1).abs() < 1e-15 && (back[1] - 1.0 / 3.0).abs() < 1e-15);
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Wide {
+    /// `double`.
+    #[default]
+    F64,
+    /// df32: two f32 whose sum is the value, about 48 bits of significand
+    /// and f32's exponent range; f32 arithmetic only, for devices without
+    /// fast f64 (or without f64).
+    Df32,
+}
+
+impl Wide {
+    /// The `#define`s a source including [`WIDE`] is compiled with.
+    pub fn defines(self) -> &'static str {
+        match self {
+            Wide::F64 => "",
+            Wide::Df32 => "#define ARAEL_WIDE_DF32 1\n",
+        }
+    }
+
+    /// `v` as this scalar's 8 bytes, as a little-endian word: a df32 is hi
+    /// in the low half, lo in the high one.
+    pub fn bits(self, v: f64) -> u64 {
+        match self {
+            Wide::F64 => v.to_bits(),
+            Wide::Df32 => {
+                let hi = v as f32;
+                let lo = if hi.is_finite() { (v - hi as f64) as f32 } else { 0.0 };
+                hi.to_bits() as u64 | (lo.to_bits() as u64) << 32
+            }
+        }
+    }
+
+    /// The value of 8 bytes of this scalar, as [`bits`](Self::bits) lays them out.
+    pub fn value(self, bits: u64) -> f64 {
+        match self {
+            Wide::F64 => f64::from_bits(bits),
+            Wide::Df32 => f32::from_bits(bits as u32) as f64 + f32::from_bits((bits >> 32) as u32) as f64,
+        }
+    }
+
+    /// `v` as an array of this scalar.
+    pub fn encode(self, v: &[f64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 * v.len());
+        self.encode_into(v, &mut out);
+        out
+    }
+
+    /// [`encode`](Self::encode) appended to `out`.
+    pub fn encode_into(self, v: &[f64], out: &mut Vec<u8>) {
+        out.extend(v.iter().flat_map(|&x| self.bits(x).to_le_bytes()));
+    }
+
+    /// An array of this scalar into `out`, `bytes.len() / 8` values.
+    pub fn decode(self, bytes: &[u8], out: &mut [f64]) {
+        assert_eq!(bytes.len(), 8 * out.len());
+        for (o, c) in out.iter_mut().zip(bytes.as_chunks::<8>().0) {
+            *o = self.value(u64::from_le_bytes(*c));
+        }
+    }
+
+    /// `v` as a kernel argument of type `W`.
+    pub fn arg<'a, B>(self, v: f64) -> Arg<'a, B> {
+        Arg::Bits(self.bits(v))
+    }
+}
+
 /// The kernels a model's device assembly shares (`kernels/assembly.cpp`):
 /// the gather, the rotation caches and the device functions the generated
 /// constraint kernels call. A root's kernels are compiled after it.
@@ -136,6 +220,8 @@ pub enum Arg<'a, B> {
     I32(i32),
     F32(f32),
     F64(f64),
+    /// Eight bytes as they are, little-endian: a wide scalar's value ([`Wide::arg`]).
+    Bits(u64),
 }
 
 impl<B> Clone for Arg<'_, B> {
@@ -257,12 +343,6 @@ pub(crate) fn is_f64<M: SchurReal + 'static>() -> bool {
 pub(crate) fn scalar_bytes<M: SchurReal>(v: &[M]) -> &[u8] {
     // SAFETY: SchurReal is sealed to f32 and f64, plain values without padding.
     unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, core::mem::size_of_val(v)) }
-}
-
-/// The bytes of `v`, writable.
-pub(crate) fn scalar_bytes_mut<M: SchurReal>(v: &mut [M]) -> &mut [u8] {
-    // SAFETY: as scalar_bytes; every bit pattern is a valid f32 or f64.
-    unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, core::mem::size_of_val(v)) }
 }
 
 /// Byte offsets of a block's sections, each on a 256-byte boundary.

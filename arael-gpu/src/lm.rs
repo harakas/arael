@@ -35,6 +35,9 @@ pub const S_PREDICTED: usize = 7;
 pub const N_SCALARS: usize = 8;
 /// No faulty diagonal entry.
 pub const NO_FAULT: f64 = 1e300;
+/// Fault codes are below this, and every route's no-fault value above it
+/// ([`NO_FAULT`] in f64, 3e38 in df32).
+pub const FAULT_BELOW: f64 = 1e30;
 
 /// Partials per cube of each pass.
 pub const LIN_PARTIALS: usize = 3;
@@ -266,9 +269,15 @@ pub struct Scalars {
 impl Scalars {
     /// Decode the [`N_SCALARS`] f64 at the start of `bytes`.
     pub fn decode(bytes: &[u8]) -> Scalars {
-        let s = |i: usize| bytemuck::pod_read_unaligned::<f64>(&bytes[8 * i..8 * i + 8]);
-        let code = s(S_FAULT);
-        let fault = (code < NO_FAULT).then(|| {
+        let v: Vec<f64> = (0..N_SCALARS).map(|i| bytemuck::pod_read_unaligned::<f64>(&bytes[8 * i..8 * i + 8])).collect();
+        Self::from_values(&v)
+    }
+
+    /// The scalars from their [`N_SCALARS`] values, read back in any wide
+    /// scalar.
+    pub fn from_values(s: &[f64]) -> Scalars {
+        let code = s[S_FAULT];
+        let fault = (code < FAULT_BELOW).then(|| {
             let code = code as u64;
             let kind = match code % 4 {
                 1 => DiagFault::Nan,
@@ -278,14 +287,14 @@ impl Scalars {
             ((code / 4) as usize, kind)
         });
         Scalars {
-            cost_x: s(S_COST_X),
-            cost_try: s(S_COST_TRY),
-            grad_max: s(S_GRAD_MAX),
-            grad_scaled: s(S_GRAD_SCALED),
+            cost_x: s[S_COST_X],
+            cost_try: s[S_COST_TRY],
+            grad_max: s[S_GRAD_MAX],
+            grad_scaled: s[S_GRAD_SCALED],
             fault,
-            step2: s(S_STEP2),
-            try2: s(S_TRY2),
-            predicted: s(S_PREDICTED),
+            step2: s[S_STEP2],
+            try2: s[S_TRY2],
+            predicted: s[S_PREDICTED],
         }
     }
 }

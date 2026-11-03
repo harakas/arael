@@ -432,6 +432,7 @@ impl Device for CudaDevice {
                 Arg::I32(v) => v as u32 as u64,
                 Arg::F32(v) => v.to_bits() as u64,
                 Arg::F64(v) => v.to_bits(),
+                Arg::Bits(v) => v,
             };
         }
         let mut params = [core::ptr::null_mut::<core::ffi::c_void>(); MAX_ARGS];
