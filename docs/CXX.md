@@ -276,7 +276,9 @@ views are named by their container's nature: `PathPosesDeque`,
   `gpu_index` run the block supernodal route on that device, the
   process's shared state of it, so repeated solves reuse its buffers;
   `gpu_assembly` (on by default) also assembles there and keeps the LM
-  loop on the device when the model has a device form. The plan's
+  loop on the device when the model has a device form; `gpu_wide`
+  (`GpuWide` F64 / Df32) keeps the device's wide values in f64 or df32
+  (two floats, for cards whose f64 is slow). The plan's
   `gpu_factor` and `gpu_assembly` report which ran. The interface must
   be built with the runtime: the CMake cache variable `ARAEL_GPU`
   (`cuda` or `hip`) builds the capi crate with the feature of that name

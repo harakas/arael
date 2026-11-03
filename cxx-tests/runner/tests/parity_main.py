@@ -217,6 +217,7 @@ pi("so_bs_lean", 1 if so.block_supernodal_memory_lean else 0)
 pi("so_gpu", int(so.gpu))
 pi("so_gpu_index", so.gpu_index)
 pi("so_gpu_assembly", 1 if so.gpu_assembly else 0)
+pi("so_gpu_wide", int(so.gpu_wide))
 
 # A GPU asked of an interface built without a GPU runtime: the solve fails
 # as an unavailable solver.

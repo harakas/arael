@@ -483,6 +483,8 @@ pub struct CSparseOptions {
     /// On the reduced GPU route, assemble on the device too when the model
     /// has a device form (on by default).
     pub gpu_assembly: bool,
+    /// The GPU's wide values (GpuWide): 0 f64, 1 df32.
+    pub gpu_wide: u32,
 }
 
 impl CSparseOptions {
@@ -543,7 +545,11 @@ impl CSparseOptions {
                 1 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cuda, self.gpu_index as usize)),
                 2 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Hip, self.gpu_index as usize)),
                 t => panic!("unknown gpu tag {t}"),
-            })
+            }.map(|g| g.with_wide(match self.gpu_wide {
+                0 => arael::simple_lm::GpuWide::F64,
+                1 => arael::simple_lm::GpuWide::Df32,
+                t => panic!("unknown gpu_wide tag {t}"),
+            })))
             .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
@@ -616,6 +622,10 @@ pub unsafe extern "C" fn decay_sparse_options(out: *mut CSparseOptions) {
         },
         gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
         gpu_assembly: d.gpu_assembly,
+        gpu_wide: match d.gpu.as_ref().map(|g| g.wide()) {
+            None | Some(arael::simple_lm::GpuWide::F64) => 0,
+            Some(arael::simple_lm::GpuWide::Df32) => 1,
+        },
     };
 }
 
@@ -2621,6 +2631,8 @@ pub struct CSparseOptions {
     /// On the reduced GPU route, assemble on the device too when the model
     /// has a device form (on by default).
     pub gpu_assembly: bool,
+    /// The GPU's wide values (GpuWide): 0 f64, 1 df32.
+    pub gpu_wide: u32,
 }
 
 impl CSparseOptions {
@@ -2681,7 +2693,11 @@ impl CSparseOptions {
                 1 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Cuda, self.gpu_index as usize)),
                 2 => Some(arael::simple_lm::GpuDevice::shared(arael::simple_lm::GpuBackend::Hip, self.gpu_index as usize)),
                 t => panic!("unknown gpu tag {t}"),
-            })
+            }.map(|g| g.with_wide(match self.gpu_wide {
+                0 => arael::simple_lm::GpuWide::F64,
+                1 => arael::simple_lm::GpuWide::Df32,
+                t => panic!("unknown gpu_wide tag {t}"),
+            })))
             .with_gpu_assembly(self.gpu_assembly);
         let cg = arael::simple_lm::CgParams {
             tol: self.cg_tol,
@@ -2754,6 +2770,10 @@ pub unsafe extern "C" fn line_sparse_options(out: *mut CSparseOptions) {
         },
         gpu_index: d.gpu.as_ref().map_or(0, |g| g.index as u32),
         gpu_assembly: d.gpu_assembly,
+        gpu_wide: match d.gpu.as_ref().map(|g| g.wide()) {
+            None | Some(arael::simple_lm::GpuWide::F64) => 0,
+            Some(arael::simple_lm::GpuWide::Df32) => 1,
+        },
     };
 }
 

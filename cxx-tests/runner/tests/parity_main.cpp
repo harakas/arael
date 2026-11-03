@@ -222,6 +222,7 @@ int main() {
     pi("so_gpu", long(so.gpu));
     pi("so_gpu_index", so.gpu_index);
     pi("so_gpu_assembly", so.gpu_assembly ? 1 : 0);
+    pi("so_gpu_wide", long(so.gpu_wide));
 
     // A GPU asked of an interface built without a GPU runtime: the
     // solve fails as an unavailable solver.

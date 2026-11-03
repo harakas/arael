@@ -291,6 +291,14 @@ enum class GpuBackend : uint32_t {
     Hip = 2,
 };
 
+/// What the GPU keeps and sums its wide values in (SparseOptionsT::gpu_wide):
+/// f64, or df32 (two floats, about 48 bits, f32 arithmetic only: for cards
+/// whose f64 is slow).
+enum class GpuWide : uint32_t {
+    F64 = 0,
+    Df32 = 1,
+};
+
 /// The sparse backend's options (mirrors arael's SparseFaerOptions).
 /// The generated SparseOptions fills the Rust defaults at
 /// construction; edit fields and pass to solve_sparse. Layout is part
@@ -346,6 +354,8 @@ struct SparseOptionsT {
     GpuBackend gpu;
     uint32_t gpu_index;
     bool gpu_assembly;
+    /// The GPU's wide values (Rust's GpuDevice::with_wide).
+    GpuWide gpu_wide;
 };
 
 /// Per-phase wall-clock seconds plus call counts, gathered when
