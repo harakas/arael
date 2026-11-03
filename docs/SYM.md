@@ -401,7 +401,19 @@ assert_eq!(body.stmts, "const float __x0 = sqrt(((x * x) + (y * y)));\nconst flo
 assert_eq!(body.outputs, ["(__x0 - 1.0f)", "(x * __x1)", "(y * __x1)"]);
 ```
 
-After CSE every branch is an `if` that runs only the taken side, the names it binds declared before it, as with `cubecl_body` below. What has no C++ form yet is an error naming it: a `select` on an index, an external function (`#[arael::function]`, `fast_atan` and the other numeric helpers of `arael::utils`), and a wide scalar other than `f64`.
+After CSE every branch is an `if` that runs only the taken side, the names it binds declared before it, as with `cubecl_body` below.
+
+`to_cpp_in(scalar, wide, map)` and `cpp_body_in` compute `with_wide` blocks in the C++ type `wide` instead of `double`, whatever the host's wide scalar: arael's kernels name theirs `W`, which is `double` or a two-float type. A literal of such a type prints as `ARAEL_WIDE(d, hi, lo)`, a macro the kernel defines: the value as a double literal, then its two-f32 split.
+
+```rust
+use arael_sym::{symbols, with_wide};
+let (x,) = symbols!(x);
+let e = with_wide(x * 0.1 - 1.0);
+assert_eq!(e.to_cpp_in("f32", "W", &|s| Some(s.to_string())).unwrap(),
+    "((float)((ARAEL_WIDE(0.1, 0.1f, (-1.4901161e-9f)) * ((W)x)) - ARAEL_WIDE(1.0, 1.0f, 0.0f)))");
+```
+
+What has no C++ form yet is an error naming it: a `select` on an index, and an external function (`#[arael::function]`, `fast_atan` and the other numeric helpers of `arael::utils`).
 
 ### Code for GPU kernels (CubeCL)
 

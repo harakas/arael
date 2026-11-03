@@ -22,7 +22,7 @@
 //! | whole powers | `x.powi(3)` | products up to 8, `(x * x * x)`; others `pow` |
 //! | `branch` printed directly | `if` | `?:`: the taken side only |
 //! | `branch` after CSE | `let (a, ..) = if q >= 0.0 { .. } else { .. };` | names declared, then an `if` assigning them |
-//! | `with_wide` | `arael::utils::Wide` and `narrow` | computed in `double`, cast back |
+//! | `with_wide` | `arael::utils::Wide` and `narrow` | computed in `double`, or a type the caller names ([`E::to_cpp_in`]), cast back |
 //!
 //! After CSE ([`cpp_body`]) every branch is an `if` that runs only the taken
 //! side, the names it binds declared before it:
@@ -35,9 +35,24 @@
 //! assert_eq!(body.outputs, ["__m0"]);
 //! ```
 //!
+//! A wide block can be computed in a type the kernel defines instead of
+//! `double` (`to_cpp_in`, `cpp_body_in`): arael's kernels name their wide
+//! scalar `W`, `double` or a two-float type. A literal of such a type prints
+//! as `ARAEL_WIDE(d, hi, lo)`, a macro the kernel defines: the value as a
+//! double literal, then its two-f32 split (`hi` the nearest f32, `lo` the
+//! f32 nearest the rest).
+//!
+//! ```
+//! use arael_sym::{symbols, with_wide};
+//! let (x,) = symbols!(x);
+//! let e = with_wide(x * 0.1 - 1.0);
+//! assert_eq!(e.to_cpp_in("f32", "W", &|s| Some(s.to_string())).unwrap(),
+//!     "((float)((ARAEL_WIDE(0.1, 0.1f, (-1.4901161e-9f)) * ((W)x)) - ARAEL_WIDE(1.0, 1.0f, 0.0f)))");
+//! ```
+//!
 //! What has no C++ form yet is an error naming it: a `select` on an index,
-//! an external function (`#[arael::function]`, `fast_atan` and the other
-//! numeric helpers of `arael::utils`), and a wide scalar other than `f64`.
+//! and an external function (`#[arael::function]`, `fast_atan` and the other
+//! numeric helpers of `arael::utils`).
 
 use crate::cse::{Arm, Intermediate, Switch};
 use crate::{E, Expr, FuncKind};
@@ -55,27 +70,28 @@ impl std::fmt::Display for CppError {
 impl std::error::Error for CppError {}
 
 /// What the printer prints against: the C++ type of the code being printed
-/// (inside a `with_wide` block, `double`), the kernel's own type, and the
-/// symbol map.
+/// (inside a `with_wide` block, the wide type), the kernel's own type, the
+/// wide type, and the symbol map.
 #[derive(Clone, Copy)]
 struct Ctx<'a> {
-    ft: &'static str,
-    base: &'static str,
+    ft: &'a str,
+    base: &'a str,
+    wide: &'a str,
     map: &'a dyn Fn(&str) -> Option<String>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(scalar: &str, map: &'a dyn Fn(&str) -> Option<String>) -> Result<Self, CppError> {
+    fn new(scalar: &str, wide: &'a str, map: &'a dyn Fn(&str) -> Option<String>) -> Result<Self, CppError> {
         let ft = match scalar {
             "f32" => "float",
             "f64" => "double",
             _ => return Err(CppError(format!("a kernel scalar is `f32` or `f64`, not `{scalar}`"))),
         };
-        Ok(Ctx { ft, base: ft, map })
+        Ok(Ctx { ft, base: ft, wide, map })
     }
 
     fn wide(&self) -> Ctx<'a> {
-        Ctx { ft: "double", ..*self }
+        Ctx { ft: self.wide, ..*self }
     }
 }
 
@@ -117,7 +133,13 @@ impl E {
     /// assert_eq!((x * 2.0).to_cpp_with("f64", &read).unwrap(), "(2.0 * v[0])");
     /// ```
     pub fn to_cpp_with(&self, scalar: &str, map: &dyn Fn(&str) -> Option<String>) -> Result<String, CppError> {
-        let ctx = Ctx::new(scalar, map)?;
+        self.to_cpp_in(scalar, "double", map)
+    }
+
+    /// As [`to_cpp_with`](Self::to_cpp_with), wide blocks computed in the
+    /// C++ type `wide` (see the [module](crate::cpp) for its literals).
+    pub fn to_cpp_in(&self, scalar: &str, wide: &str, map: &dyn Fn(&str) -> Option<String>) -> Result<String, CppError> {
+        let ctx = Ctx::new(scalar, wide, map)?;
         let mut buf = String::new();
         write_expr(&mut buf, self, &ctx)?;
         Ok(buf)
@@ -133,7 +155,12 @@ impl Intermediate {
 
     /// As [`to_cpp`](Self::to_cpp), symbols through `map`.
     pub fn to_cpp_with(&self, scalar: &str, map: &dyn Fn(&str) -> Option<String>) -> Result<String, CppError> {
-        let ctx = Ctx::new(scalar, map)?;
+        self.to_cpp_in(scalar, "double", map)
+    }
+
+    /// As [`to_cpp_with`](Self::to_cpp_with), wide blocks in the C++ type `wide`.
+    pub fn to_cpp_in(&self, scalar: &str, wide: &str, map: &dyn Fn(&str) -> Option<String>) -> Result<String, CppError> {
+        let ctx = Ctx::new(scalar, wide, map)?;
         let mut buf = String::new();
         write_stmt(&mut buf, self, &ctx)?;
         Ok(buf)
@@ -165,7 +192,12 @@ pub fn cpp_body(exprs: &[E], scalar: &str) -> Result<CppBody, CppError> {
 
 /// As [`cpp_body`], symbols through `map`.
 pub fn cpp_body_with(exprs: &[E], scalar: &str, map: &dyn Fn(&str) -> Option<String>) -> Result<CppBody, CppError> {
-    let ctx = Ctx::new(scalar, map)?;
+    cpp_body_in(exprs, scalar, "double", map)
+}
+
+/// As [`cpp_body_with`], wide blocks in the C++ type `wide`.
+pub fn cpp_body_in(exprs: &[E], scalar: &str, wide: &str, map: &dyn Fn(&str) -> Option<String>) -> Result<CppBody, CppError> {
+    let ctx = Ctx::new(scalar, wide, map)?;
     let (inters, outs) = crate::cse_scoped_wide(exprs, "f64");
     let mut stmts = String::new();
     for it in &inters {
@@ -183,7 +215,20 @@ pub fn cpp_body_with(exprs: &[E], scalar: &str, map: &dyn Fn(&str) -> Option<Str
 }
 
 /// `v` as a literal of `ft`, rounded to it; a negative one in parentheses.
+/// Of a type other than `float` and `double`, `ARAEL_WIDE(d, hi, lo)`.
 fn literal(buf: &mut String, v: f64, ft: &str) {
+    if ft != "float" && ft != "double" {
+        let hi = v as f32;
+        let lo = if hi.is_finite() { (v - hi as f64) as f32 } else { 0.0 };
+        buf.push_str("ARAEL_WIDE(");
+        literal(buf, v, "double");
+        buf.push_str(", ");
+        literal(buf, hi as f64, "float");
+        buf.push_str(", ");
+        literal(buf, lo as f64, "float");
+        buf.push(')');
+        return;
+    }
     let suffix = if ft == "float" { "f" } else { "" };
     if v.is_nan() {
         buf.push_str(&format!("(0.0{suffix} / 0.0{suffix})"));
@@ -313,10 +358,12 @@ fn write_expr(buf: &mut String, e: &E, ctx: &Ctx) -> Res {
                 // a leaf of the body, in the kernel's scalar, read into a
                 // block of the wide scalar
                 let leaf = Ctx { ft: ctx.base, ..*ctx };
-                if ctx.base == "double" {
+                if ctx.base == ctx.wide {
                     write_expr(buf, &args[0], &leaf)?;
                 } else {
-                    buf.push_str("((double)");
+                    buf.push_str("((");
+                    buf.push_str(ctx.wide);
+                    buf.push(')');
                     write_expr(buf, &args[0], &leaf)?;
                     buf.push(')');
                 }
@@ -445,11 +492,9 @@ fn write_stmt(buf: &mut String, it: &Intermediate, ctx: &Ctx) -> Res {
         Intermediate::Match { switch: Switch::Index(_), .. } => {
             return Err(CppError("a `select` on an index has no C++ form yet".into()));
         }
-        Intermediate::Wide { names, wide_ft, inters, values, .. } => {
-            if wide_ft != "f64" {
-                return Err(CppError(format!("a wide scalar of `{wide_ft}` has no C++ form yet (only f64)")));
-            }
-            // the block's names are unique across the result, so its
+        Intermediate::Wide { names, inters, values, .. } => {
+            // computed in the kernel's wide type whatever the host's (f64 or
+            // df32): the block's names are unique across the result, so its
             // statements need no scope of their own
             let wide = ctx.wide();
             for it in inters {
@@ -530,6 +575,27 @@ mod tests {
         // in a double kernel the block is the identity
         let code64: String = inters.iter().map(|i| i.to_cpp("f64").unwrap()).collect();
         assert!(!code64.contains("(double)") && !code64.contains("(float)"), "{code64}");
+    }
+
+    /// In a named wide type: leaves cast to it, literals as ARAEL_WIDE with
+    /// their split, the values cast back to the kernel's scalar; a host wide
+    /// scalar other than f64 prints the same.
+    #[test]
+    fn a_wide_block_in_a_named_type() {
+        let (x, y) = (symbol("x"), symbol("y"));
+        let outs = [with_wide(x.clone() * y.clone() - 0.1) * 3.0];
+        for host_wide in ["f64", "df32"] {
+            let (inters, _) = cse_scoped_wide(&outs, host_wide);
+            let code: String = inters.iter().map(|i| i.to_cpp_in("f32", "W", &verbatim).unwrap()).collect();
+            assert!(code.contains("((W)x)") && code.contains("((W)y)"), "{code}");
+            assert!(code.contains("ARAEL_WIDE(0.1, 0.1f, (-1.4901161e-9f))"), "{code}");
+            assert!(code.contains("((float)"), "{code}");
+            assert!(!code.contains("double"), "{code}");
+        }
+        // an f64 kernel's leaves are cast too: W is not double there
+        let (inters, _) = cse_scoped_wide(&outs, "f64");
+        let code: String = inters.iter().map(|i| i.to_cpp_in("f64", "W", &verbatim).unwrap()).collect();
+        assert!(code.contains("((W)x)") && code.contains("((double)"), "{code}");
     }
 
     #[test]
