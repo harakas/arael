@@ -1,8 +1,9 @@
-//! The device assembly (feature `gpu-cuda`; `gpu-native-cuda` for arael's
-//! own runtime): a root whose constraints all have a device form assembles
+//! The device assembly (feature `gpu-cuda`; `gpu-native-cuda` or
+//! `gpu-native-hip` for arael's own runtime): a root whose constraints all
+//! have a device form assembles
 //! its gradient, Hessian tiles and cost on the GPU to what the CPU assembly
 //! gives against the same pattern.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 
 use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock};
 use arael::refs::{self, Ref};
@@ -223,23 +224,31 @@ fn consistent_scene<T: Float>() -> Parts<T> {
 }
 
 /// The GPU runtimes compiled in, on device 0: CubeCL's (feature
-/// `gpu-cuda`) and arael's own (feature `gpu-native-cuda`).
+/// `gpu-cuda`) and arael's own (features `gpu-native-cuda`,
+/// `gpu-native-hip`).
 fn devices() -> Vec<GpuDevice> {
     let mut v = Vec::new();
     #[cfg(feature = "gpu-cuda")]
     v.push(GpuDevice::cuda(0));
     #[cfg(feature = "gpu-native-cuda")]
     v.extend([GpuDevice::native_cuda(0), GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
+    #[cfg(feature = "gpu-native-hip")]
+    v.extend([GpuDevice::native_hip(0), GpuDevice::native_hip(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
     v
 }
 
-/// A runtime and its wide scalar, for the messages.
+/// A runtime and its wide scalar, as the verbose log names them.
 fn runtime(d: &GpuDevice) -> &'static str {
     match (d.is_native(), d.wide()) {
         (false, _) => "cubecl",
         (true, arael::simple_lm::GpuWide::F64) => "native",
         (true, arael::simple_lm::GpuWide::Df32) => "native df32",
     }
+}
+
+/// The backend, runtime and wide scalar, for the messages.
+fn label(d: &GpuDevice) -> String {
+    format!("{:?} {}", d.backend, runtime(d))
 }
 
 /// The reduced supernodal route, on `gpu` when it is given.
@@ -276,9 +285,9 @@ fn a_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
     for d in devices() {
         let (_, uploaded, _) = run(Some(&d), false);
         let (_, device, iters) = run(Some(&d), true);
-        assert!(iters > 2, "{}: accepted steps re-centre the rotations: {iters} iterations", runtime(&d));
+        assert!(iters > 2, "{}: accepted steps re-centre the rotations: {iters} iterations", label(&d));
         for c in [uploaded, device] {
-            assert!((c - cpu).abs() <= 1e-9 * cpu, "{}: {c} against the CPU's {cpu}", runtime(&d));
+            assert!((c - cpu).abs() <= 1e-9 * cpu, "{}: {c} against the CPU's {cpu}", label(&d));
         }
     }
 }
@@ -301,7 +310,7 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
     let cpu = run(None);
     for d in devices() {
         let device = run(Some(&d));
-        assert!((device - cpu).abs() <= 1e-4 * cpu, "{}: {device} against the CPU's {cpu}", runtime(&d));
+        assert!((device - cpu).abs() <= 1e-4 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
     }
 }
 
@@ -391,7 +400,7 @@ fn a_device_solve_writes_the_model_back_and_a_warm_one_reads_it_again() {
         (r.end_cost, state(&s))
     };
     for d in devices() {
-        let name = runtime(&d);
+        let name = label(&d);
         let (cameras, points, observations) = consistent_scene::<f64>();
         let mut s = Scene { cameras, points, observations };
         let (cpu_cost, cpu_state) = cpu(&s);
@@ -471,7 +480,7 @@ fn the_device_solve_hands_out_vectors_when_asked() {
     assert!(seen.iter().all(|(_, p)| p.len() == n));
     assert!(driven.iter().skip(1).all(|d| d.0 == n && d.1 == n && d.2 == n && d.3.is_none()));
     for d in devices() {
-        let name = runtime(&d);
+        let name = label(&d);
         for asked in [false, true] {
             let (_, r, seen, driven) = run(Some(&d), asked);
             assert!(r.accepted_iterations > 2);
@@ -527,7 +536,7 @@ fn the_device_predicted_reduction_is_the_host_formula() {
         let pairs = pairs.0.lock().unwrap();
         assert!(pairs.len() > 2);
         for &(device, host) in pairs.iter() {
-            assert!((device - host).abs() <= 1e-12 * host.abs(), "{}: {device} against {host}", runtime(&d));
+            assert!((device - host).abs() <= 1e-12 * host.abs(), "{}: {device} against {host}", label(&d));
         }
     }
 }
@@ -552,7 +561,7 @@ fn the_device_gradient_test_stops_where_the_host_one_does() {
         let host = run(&d, false);
         assert_eq!(host.0, LmStatus::GradientTolerance);
         assert!(host.2 > 2);
-        assert_eq!(run(&d, true), host, "{}", runtime(&d));
+        assert_eq!(run(&d, true), host, "{}", label(&d));
     }
 }
 
@@ -627,7 +636,7 @@ fn a_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
     assert!(matches!(host.0, SolveFailureKind::DegenerateDiagonal { param: 4, fault: DiagonalFault::Zero }), "{:?}", host.0);
     assert_eq!((host.1, host.2), (1, 1));
     for d in devices() {
-        let name = runtime(&d);
+        let name = label(&d);
         let device = run(Some(&d));
         assert_eq!(format!("{:?}", device.0), format!("{:?}", host.0), "{name}");
         assert_eq!((device.1, device.2), (host.1, host.2), "{name}");
@@ -671,25 +680,29 @@ fn the_first_linearization_is_assembled_on_the_device() {
         let device = run(Some(&d), true);
         arael::log::reset_sink();
         let lines = lines.lock().unwrap();
-        let name = runtime(&d);
+        let name = label(&d);
         assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
-        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({name}"))), "{name}: {lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({}", runtime(&d)))), "{name}: {lines:#?}");
         assert!((device.start_cost - cpu.start_cost).abs() <= 1e-12 * cpu.start_cost, "{name}");
         assert!((device.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost, "{name}");
     }
 }
 
-/// A CUDA device of arael's own runtime.
+/// A device of arael's own runtime: CUDA when it is compiled in, else HIP.
 #[cfg(feature = "gpu-native-cuda")]
 fn native() -> std::sync::Arc<arael::__gpu::native::cuda::CudaDevice> {
     std::sync::Arc::new(arael::__gpu::native::cuda::CudaDevice::new(0).unwrap())
+}
+#[cfg(all(feature = "gpu-native-hip", not(feature = "gpu-native-cuda")))]
+fn native() -> std::sync::Arc<arael::__gpu::native::hip::HipDevice> {
+    std::sync::Arc::new(arael::__gpu::native::hip::HipDevice::new(0).unwrap())
 }
 
 /// The native assembly matches the CPU's in both wide scalars: in df32 the
 /// sums keep about 48 bits, against f64's 53. Some cameras see a point
 /// twice, two observations with cross blocks of their own on one tile of H,
 /// which the device sums as one.
-#[cfg(feature = "gpu-native-cuda")]
+#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 #[test]
 fn the_f64_bundle_adjustment_assembles_natively_as_on_the_cpu() {
     use arael::__gpu::native::Wide;
@@ -710,7 +723,7 @@ fn the_f64_bundle_adjustment_assembles_natively_as_on_the_cpu() {
     }
 }
 
-#[cfg(feature = "gpu-native-cuda")]
+#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 #[test]
 fn the_f32_bundle_adjustment_assembles_natively_as_on_the_cpu() {
     use arael::__gpu::native::Wide;
@@ -741,6 +754,6 @@ fn a_gpu_solver_moves_between_threads() {
         s.solve_with(&mut solver, &LmConfig::<f64>::default()).unwrap();
         send(&solver);
         let cost = std::thread::spawn(move || s.solve_with(&mut solver, &LmConfig::<f64>::default()).unwrap().end_cost).join().unwrap();
-        assert!(cost.is_finite(), "{}", runtime(&d));
+        assert!(cost.is_finite(), "{}", label(&d));
     }
 }

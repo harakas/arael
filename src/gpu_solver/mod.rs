@@ -14,7 +14,7 @@ use crate::device::DeviceRoot;
 use crate::simple_lm::{LmProblemInternals, ResidentAttempt};
 
 pub(crate) mod cubecl;
-#[cfg(feature = "gpu-native-cuda")]
+#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 pub(crate) mod native;
 
 /// The GPU side of the supernodal solver, in three layers built one on the

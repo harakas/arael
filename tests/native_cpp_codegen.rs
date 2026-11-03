@@ -1,10 +1,13 @@
 //! Expressions printed by arael-sym's C++ printer (`cpp_body_with`),
-//! compiled by the native CUDA runtime and run on the device, agree with
-//! arael-sym's own evaluation, in double and in float.
-#![cfg(feature = "gpu-native-cuda")]
+//! compiled by the native runtime (CUDA, else HIP) and run on the device,
+//! agree with arael-sym's own evaluation, in double and in float.
+#![cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 
 use arael::sym::*;
-use arael_gpu::native::cuda::CudaDevice;
+#[cfg(feature = "gpu-native-cuda")]
+use arael_gpu::native::cuda::CudaDevice as Dev;
+#[cfg(all(feature = "gpu-native-hip", not(feature = "gpu-native-cuda")))]
+use arael_gpu::native::hip::HipDevice as Dev;
 use arael_gpu::bytemuck;
 use arael_gpu::native::{Arg, Device, Launch};
 use std::collections::HashMap;
@@ -37,7 +40,7 @@ fn exprs() -> Vec<E> {
 }
 
 /// `exprs` evaluated on the device at `points` (x, y), in `scalar`.
-fn on_device<F: bytemuck::Pod + Default>(dev: &CudaDevice, scalar: &str, points: &[(f64, f64)], cast: fn(f64) -> F) -> Vec<Vec<F>> {
+fn on_device<F: bytemuck::Pod + Default>(dev: &Dev, scalar: &str, points: &[(f64, f64)], cast: fn(f64) -> F) -> Vec<Vec<F>> {
     let es = exprs();
     let read = |s: &str| match s {
         "x" => Some("v[0]".to_string()),
@@ -85,7 +88,7 @@ fn expected() -> Vec<Vec<f64>> {
 
 #[test]
 fn printed_cpp_runs_as_evaluated_in_double() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let got = on_device::<f64>(&dev, "double", &points(), |v| v);
     for (p, (row, want)) in got.iter().zip(expected()).enumerate() {
         for (k, (g, w)) in row.iter().zip(&want).enumerate() {
@@ -96,7 +99,7 @@ fn printed_cpp_runs_as_evaluated_in_double() {
 
 #[test]
 fn printed_cpp_runs_as_evaluated_in_float() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let got = on_device::<f32>(&dev, "float", &points(), |v| v as f32);
     for (p, (row, want)) in got.iter().zip(expected()).enumerate() {
         for (k, (g, w)) in row.iter().zip(&want).enumerate() {

@@ -637,7 +637,9 @@ impl num::Float for df32 {
         let r = self.reduce(k, df32::FRAC_PI_2, df32::FRAC_PI_2_P3);
         let s = df32::sin_taylor(r);
         let c = df32::cos_taylor(r);
-        match ((k as i64) % 4 + 4) % 4 {
+        // the quadrant, k mod 4: exact for the integer k at any magnitude
+        let q = k % 4.0;
+        match (if q < 0.0 { q + 4.0 } else { q }) as i32 {
             0 => (s, c),
             1 => (c, -s),
             2 => (-s, -c),
@@ -992,6 +994,15 @@ mod tests {
             check("tanh", big.tanh(), big.to_f64().tanh(), 1e-13);
             check("asinh", big.asinh(), big.to_f64().asinh(), 1e-13);
             check("acosh", (big.abs() + df32::ONE).acosh(), (big.to_f64().abs() + 1.0).acosh(), 1e-13);
+        }
+        // sin odd and cos even at every magnitude, also past 2^63 quarter
+        // turns, where the quadrant is no longer an i64.
+        for x in [0.7, 123.4, 1e10, 1e19, 1e20, 1e30, 3e38] {
+            let d = df32::from_f64(x);
+            let ((s, c), (sn, cn)) = (d.sin_cos(), (-d).sin_cos());
+            let same = |a: df32, b: df32| a == b || (a.is_nan() && b.is_nan());
+            assert!(same(sn, -s), "sin(-{x}) = {sn:?}, sin({x}) = {s:?}");
+            assert!(same(cn, c), "cos(-{x}) = {cn:?}, cos({x}) = {c:?}");
         }
         // The exact points.
         assert_eq!(df32::ZERO.sin_cos(), (df32::ZERO, df32::ONE));

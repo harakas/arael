@@ -1,9 +1,13 @@
-//! The device df32 (`arael-gpu/kernels/wide.h`, feature `gpu-native-cuda`)
-//! against the host's `arael::df32`: the same operations give the same bits.
-#![cfg(feature = "gpu-native-cuda")]
+//! The device df32 (`arael-gpu/kernels/wide.h`, feature `gpu-native-cuda`
+//! or `gpu-native-hip`) against the host's `arael::df32`: the same
+//! operations give the same bits.
+#![cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 
 use arael::__gpu::bytemuck;
-use arael::__gpu::native::cuda::CudaDevice;
+#[cfg(feature = "gpu-native-cuda")]
+use arael::__gpu::native::cuda::CudaDevice as Dev;
+#[cfg(all(feature = "gpu-native-hip", not(feature = "gpu-native-cuda")))]
+use arael::__gpu::native::hip::HipDevice as Dev;
 use arael::__gpu::native::{Arg, Device, Launch, WIDE, Wide};
 use arael::df32;
 
@@ -63,7 +67,7 @@ fn same(a: df32, b: df32) -> bool {
     a.hi.to_bits() == b.hi.to_bits() && a.lo.to_bits() == b.lo.to_bits()
 }
 
-fn up(dev: &CudaDevice, v: &[df32]) -> arael::__gpu::native::cuda::CudaBlock {
+fn up(dev: &Dev, v: &[df32]) -> <Dev as Device>::Block {
     let flat: Vec<f32> = v.iter().flat_map(|x| [x.hi, x.lo]).collect();
     let mut b = dev.alloc(4 * flat.len()).unwrap();
     dev.write(&mut b, 0, bytemuck::cast_slice(&flat)).unwrap();
@@ -72,7 +76,7 @@ fn up(dev: &CudaDevice, v: &[df32]) -> arael::__gpu::native::cuda::CudaBlock {
 
 #[test]
 fn device_df32_matches_the_host_bit_for_bit() {
-    let dev = CudaDevice::new(0).unwrap();
+    let dev = Dev::new(0).unwrap();
     let source = format!("{WIDE}\n{SOURCE}");
     let ops = dev.compile(&source, Wide::Df32.defines(), "k_ops").unwrap();
     let cmp = dev.compile(&source, Wide::Df32.defines(), "k_cmp").unwrap();

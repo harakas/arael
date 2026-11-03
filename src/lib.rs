@@ -2576,7 +2576,7 @@ pub use threads::Context;
 pub mod covariance;
 #[cfg(feature = "gpu")]
 mod device;
-#[cfg(feature = "gpu-native-cuda")]
+#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 mod device_native;
 #[cfg(feature = "gpu")]
 mod gpu_solver;
@@ -2613,7 +2613,7 @@ pub use arael_macros::__register_model;
 pub mod __gpu {
     pub use arael_gpu::*;
     pub use crate::device::*;
-    #[cfg(feature = "gpu-native-cuda")]
+    #[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
     pub use crate::device_native::*;
 }
 

@@ -4642,13 +4642,32 @@ pub struct GpuDevice {
     /// The device, as the runtime numbers them.
     pub index: usize,
     /// Whether solves run on arael's own runtime and kernels
-    /// ([`Self::native_cuda`]) rather than CubeCL's.
+    /// ([`Self::native_cuda`], [`Self::native_hip`]) rather than CubeCL's.
     native: bool,
     wide: GpuWide,
     #[cfg(feature = "gpu")]
     shared: std::sync::Arc<std::sync::Mutex<Option<arael_gpu::GpuContext>>>,
     #[cfg(feature = "gpu-native-cuda")]
-    native_shared: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<arael_gpu::native::cuda::CudaDevice>>>>,
+    native_cuda: NativeSlot<arael_gpu::native::cuda::CudaDevice>,
+    #[cfg(feature = "gpu-native-hip")]
+    native_hip: NativeSlot<arael_gpu::native::hip::HipDevice>,
+}
+
+/// A [`GpuDevice`]'s native device state, shared by its clones, made on
+/// first use.
+#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
+type NativeSlot<D> = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<D>>>>;
+
+/// The device in `slot`, made by `make` on first use.
+#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
+fn native_in<D>(slot: &NativeSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu::native::NativeError>) -> Result<std::sync::Arc<D>, arael_gpu::native::NativeError> {
+    let mut shared = slot.lock().unwrap();
+    if let Some(d) = shared.as_ref() {
+        return Ok(d.clone());
+    }
+    let d = std::sync::Arc::new(make()?);
+    *shared = Some(d.clone());
+    Ok(d)
 }
 
 impl GpuDevice {
@@ -4661,7 +4680,9 @@ impl GpuDevice {
             #[cfg(feature = "gpu")]
             shared: Default::default(),
             #[cfg(feature = "gpu-native-cuda")]
-            native_shared: Default::default(),
+            native_cuda: Default::default(),
+            #[cfg(feature = "gpu-native-hip")]
+            native_hip: Default::default(),
         }
     }
 
@@ -4680,7 +4701,14 @@ impl GpuDevice {
         GpuDevice { native: true, ..Self::new(GpuBackend::Cuda, index) }
     }
 
-    /// Whether solves run on arael's own runtime ([`Self::native_cuda`]).
+    /// HIP device `index` on arael's own runtime and kernels (feature
+    /// `gpu-native-hip`): [`Self::native_cuda`] on AMD.
+    pub fn native_hip(index: usize) -> Self {
+        GpuDevice { native: true, ..Self::new(GpuBackend::Hip, index) }
+    }
+
+    /// Whether solves run on arael's own runtime ([`Self::native_cuda`],
+    /// [`Self::native_hip`]).
     pub fn is_native(&self) -> bool {
         self.native
     }
@@ -4702,17 +4730,6 @@ impl GpuDevice {
         self.wide
     }
 
-    /// The native device state, created on first use.
-    #[cfg(feature = "gpu-native-cuda")]
-    fn native_device(&self) -> Result<std::sync::Arc<arael_gpu::native::cuda::CudaDevice>, arael_gpu::native::NativeError> {
-        let mut shared = self.native_shared.lock().unwrap();
-        if let Some(d) = shared.as_ref() {
-            return Ok(d.clone());
-        }
-        let d = std::sync::Arc::new(arael_gpu::native::cuda::CudaDevice::new(self.index)?);
-        *shared = Some(d.clone());
-        Ok(d)
-    }
 
     /// HIP device `index`.
     pub fn hip(index: usize) -> Self {
@@ -4806,7 +4823,8 @@ pub enum GpuWide {
     /// and f32's exponent range, in f32 arithmetic only. For cards whose f64
     /// is slow (consumer GPUs run it at 1/32 to 1/64 of f32); with an f32
     /// root and the f32 factor ([`MixedPrecision`]) nothing on the device
-    /// runs in f64. arael's own runtime only ([`GpuDevice::native_cuda`]).
+    /// runs in f64. arael's own runtime only ([`GpuDevice::native_cuda`],
+    /// [`GpuDevice::native_hip`]).
     Df32,
 }
 
@@ -5582,39 +5600,54 @@ fn gpu_setup_failed(what: &str, e: arael_gpu::native::NativeError) -> SetupError
     SetupError::SolverUnavailable { solver: "gpu", reason: "the GPU route could not be set up (logged)" }
 }
 
-/// The device factor of `sn` on arael's own CUDA runtime.
-#[cfg(feature = "gpu-native-cuda")]
+/// The device factor of `sn` on arael's own runtime for `dev`'s backend;
+/// [`SetupError::SolverUnavailable`] when that runtime is not compiled in.
+#[cfg(feature = "gpu")]
 fn native_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     dev: &GpuDevice,
     precision: arael_gpu::GpuPrecision,
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
+    #[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
     let wide = match dev.wide() {
         GpuWide::F64 => arael_gpu::native::Wide::F64,
         GpuWide::Df32 => arael_gpu::native::Wide::Df32,
     };
-    let solver = dev.native_device().and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym, wide));
-    report_kernel_cache();
-    Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native CUDA factor", e))?))
+    match dev.backend {
+        #[cfg(feature = "gpu-native-cuda")]
+        GpuBackend::Cuda => {
+            let made = native_in(&dev.native_cuda, || arael_gpu::native::cuda::CudaDevice::new(dev.index));
+            let solver = made.and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym, wide));
+            report_kernel_cache();
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native CUDA factor", e))?))
+        }
+        #[cfg(not(feature = "gpu-native-cuda"))]
+        GpuBackend::Cuda => {
+            let _ = (precision, sn, asym);
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the native CUDA runtime is not compiled in (feature gpu-native-cuda)" })
+        }
+        #[cfg(feature = "gpu-native-hip")]
+        GpuBackend::Hip => {
+            let made = native_in(&dev.native_hip, || arael_gpu::native::hip::HipDevice::new(dev.index));
+            let solver = made.and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym, wide));
+            report_kernel_cache();
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native HIP factor", e))?))
+        }
+        #[cfg(not(feature = "gpu-native-hip"))]
+        GpuBackend::Hip => {
+            let _ = (precision, sn, asym);
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the native HIP runtime is not compiled in (feature gpu-native-hip)" })
+        }
+    }
 }
 
 /// A kernel cache entry the native runtime could not write, logged once.
 fn report_kernel_cache() {
-    #[cfg(feature = "gpu-native-cuda")]
+    #[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
     if let Some(why) = arael_gpu::native::take_cache_failure() {
         warn!("GPU: {why}");
     }
-}
-
-#[cfg(all(feature = "gpu", not(feature = "gpu-native-cuda")))]
-fn native_solver<T>(
-    _: &GpuDevice,
-    _: arael_gpu::GpuPrecision,
-    _: &arael_faer::supernodal::SupernodalSymbolic,
-    _: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
-    Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the native CUDA runtime is not compiled in (feature gpu-native-cuda)" })
 }
 
 impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
@@ -5676,7 +5709,7 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
                 native_solver(dev, precision, sn, asym)?
             } else {
                 if dev.wide() != GpuWide::F64 {
-                    return Err(SetupError::SolverUnavailable { solver: "gpu", reason: "CubeCL's GPU route keeps its wide values in f64 only (GpuWide::Df32 needs GpuDevice::native_cuda)" });
+                    return Err(SetupError::SolverUnavailable { solver: "gpu", reason: "CubeCL's GPU route keeps its wide values in f64 only (GpuWide::Df32 needs GpuDevice::native_cuda or native_hip)" });
                 }
                 let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
                     solver: "gpu",
