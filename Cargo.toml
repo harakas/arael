@@ -48,18 +48,13 @@ cholmod-gpl = ["cholmod"]
 threads = ["dep:rayon", "faer/rayon", "arael-faer/threads", "arael-macros/threads"]
 # The feature's name through 0.8; the same thing.
 rayon = ["threads"]
-# The supernodal block route's factorization and solve on a GPU through
-# arael-gpu (CubeCL); `gpu-cuda` and `gpu-hip` pick the runtime
-# (`SparseFaerOptions::with_gpu`). Off by default: a heavy dependency, and the
-# CPU routes stay the default.
+# The supernodal block route on a GPU through arael-gpu
+# (`SparseFaerOptions::with_gpu`): `gpu-cuda` and `gpu-hip` pick the runtime,
+# whose libraries load at run time. Off by default; the CPU routes stay the
+# default.
 gpu = ["dep:arael-gpu"]
 gpu-cuda = ["gpu", "arael-gpu/cuda"]
 gpu-hip = ["gpu", "arael-gpu/hip"]
-# arael's own runtime and kernels (docs/dev/NATIVE_GPU_PLAN.md), which
-# replace CubeCL stage by stage: `GpuDevice::native_cuda`,
-# `GpuDevice::native_hip`.
-gpu-native-cuda = ["gpu", "arael-gpu/native-cuda"]
-gpu-native-hip = ["gpu", "arael-gpu/native-hip"]
 
 [dependencies]
 arael-macros = { workspace = true }

@@ -586,146 +586,99 @@ fn mixed_precision_without_refinement_and_off_the_block_route() {
     assert!(c < 1e-12);
 }
 
-/// The supernodal block route factorized and solved on a GPU (feature
-/// `gpu-cuda`): the f64 optimum on the whole system and on the reduced one,
-/// in f64 and with the f32 device factor refined, the plan saying which.
-#[cfg(feature = "gpu-cuda")]
+/// The GPUs compiled in (features `gpu-cuda`, `gpu-hip`), device 0, in f64
+/// wide values and, with `df32`, in df32 too.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+fn gpu_devices(df32: bool) -> Vec<arael::simple_lm::GpuDevice> {
+    let mut base = Vec::new();
+    #[cfg(feature = "gpu-cuda")]
+    base.push(arael::simple_lm::GpuDevice::cuda(0));
+    #[cfg(feature = "gpu-hip")]
+    base.push(arael::simple_lm::GpuDevice::hip(0));
+    let wides: &[arael::simple_lm::GpuWide] = if df32 { &[arael::simple_lm::GpuWide::F64, arael::simple_lm::GpuWide::Df32] } else { &[arael::simple_lm::GpuWide::F64] };
+    base.iter().flat_map(|d| wides.iter().map(|&w| d.clone().with_wide(w))).collect()
+}
+
+/// The supernodal block route factorized and solved on a GPU: the f64
+/// optimum on the whole system and on the reduced one, in f64 and with the
+/// f32 device factor refined, the plan saying which, in either wide scalar.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 #[test]
 fn gpu_factor_reaches_the_f64_optimum() {
-    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::cuda(0));
-}
-
-/// As `gpu_factor_reaches_the_f64_optimum`, the factor on arael's own CUDA
-/// runtime (feature `gpu-native-cuda`).
-#[cfg(feature = "gpu-native-cuda")]
-#[test]
-fn native_gpu_factor_reaches_the_f64_optimum() {
-    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_cuda(0));
-}
-
-/// `native_gpu_factor_reaches_the_f64_optimum` on HIP (feature `gpu-native-hip`).
-#[cfg(feature = "gpu-native-hip")]
-#[test]
-fn native_hip_gpu_factor_reaches_the_f64_optimum() {
-    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_hip(0));
-}
-
-/// The same with the reduction, the refinement and the vectors in df32
-/// (`GpuWide::Df32`).
-#[cfg(feature = "gpu-native-cuda")]
-#[test]
-fn native_df32_gpu_factor_reaches_the_f64_optimum() {
-    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32));
-}
-
-/// `native_df32_gpu_factor_reaches_the_f64_optimum` on HIP (feature `gpu-native-hip`).
-#[cfg(feature = "gpu-native-hip")]
-#[test]
-fn native_hip_df32_gpu_factor_reaches_the_f64_optimum() {
-    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_hip(0).with_wide(arael::simple_lm::GpuWide::Df32));
-}
-
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-fn factor_reaches_the_f64_optimum_on(device: fn() -> arael::simple_lm::GpuDevice) {
     let mut cpu = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Never)
         .with_block_supernodal(BlockSupernodalMode::Always));
     let (x_c, c_c) = solve(&mut cpu, 2);
     assert!(c_c < 1e-12);
-    for (policy, reduced) in [(SchurPolicy::Never, false), (SchurPolicy::Force, true)] {
-        for mixed in [None, Some(MixedPrecision::default())] {
-            let mut g = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
-                .with_policy(policy)
-                .with_envelope_schur(EnvelopeMode::Never)
-                .with_block_supernodal(BlockSupernodalMode::Always)
-                .with_mixed_precision(mixed)
-                .with_gpu(Some(device())));
-            let (x_g, c_g) = solve(&mut g, 2);
-            let plan = g.plan().expect("a plan");
-            assert!(plan.block_supernodal && plan.gpu_factor, "the plan reports the device factor");
-            assert_eq!(plan.reduced, reduced);
-            assert_eq!(plan.f32_factor, mixed.is_some());
-            if mixed.is_some() {
-                assert!(plan.refinements.expect("refinement counted") > 0);
-            } else {
-                assert_eq!(plan.refinements, None);
-            }
-            assert!(c_g < 1e-12, "{} (reduced {}, mixed {})", c_g, reduced, mixed.is_some());
-            for (a, b) in std::iter::zip(&x_c, &x_g) {
-                assert!((a - b).abs() < 1e-9, "the GPU changed the answer: {} vs {}", a, b);
+    for device in gpu_devices(true) {
+        for (policy, reduced) in [(SchurPolicy::Never, false), (SchurPolicy::Force, true)] {
+            for mixed in [None, Some(MixedPrecision::default())] {
+                let mut g = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+                    .with_policy(policy)
+                    .with_envelope_schur(EnvelopeMode::Never)
+                    .with_block_supernodal(BlockSupernodalMode::Always)
+                    .with_mixed_precision(mixed)
+                    .with_gpu(Some(device.clone())));
+                let (x_g, c_g) = solve(&mut g, 2);
+                let plan = g.plan().expect("a plan");
+                assert!(plan.block_supernodal && plan.gpu_factor, "the plan reports the device factor");
+                assert_eq!(plan.reduced, reduced);
+                assert_eq!(plan.f32_factor, mixed.is_some());
+                if mixed.is_some() {
+                    assert!(plan.refinements.expect("refinement counted") > 0);
+                } else {
+                    assert_eq!(plan.refinements, None);
+                }
+                assert!(c_g < 1e-12, "{:?}: {} (reduced {}, mixed {})", device.backend, c_g, reduced, mixed.is_some());
+                for (a, b) in std::iter::zip(&x_c, &x_g) {
+                    assert!((a - b).abs() < 1e-9, "{:?}: the GPU changed the answer: {} vs {}", device.backend, a, b);
+                }
             }
         }
     }
 }
 
-/// An f32 solver on the device route: the reduction is formed in f64 from the
-/// f32 Hessian on the device, the factor is f32 there, and the solve lands on
-/// the CPU f32 route's optimum.
-#[cfg(feature = "gpu-cuda")]
+/// An f32 solver on the device route: the reduction is formed in the wide
+/// scalar from the f32 Hessian on the device, the factor is f32 there, and
+/// the solve lands on the CPU f32 route's optimum; in df32 nothing on the
+/// device runs in f64.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 #[test]
 fn gpu_reduced_route_on_an_f32_solver() {
-    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::cuda(0));
+    let run = |gpu: Option<&arael::simple_lm::GpuDevice>| {
+        let cfg = LmConfig::<f32> { max_iters: 60, ..Default::default() };
+        let mut w = build_f32(0.1, 2);
+        let mut params = Vec::new();
+        RootProblem::serialize(&mut w, &mut params);
+        let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_policy(SchurPolicy::Force)
+            .with_envelope_schur(EnvelopeMode::Never)
+            .with_block_supernodal(BlockSupernodalMode::Always)
+            .with_gpu(gpu.cloned()));
+        let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
+        let plan = solver.plan().expect("a plan");
+        assert!(plan.reduced && plan.block_supernodal);
+        assert_eq!(plan.gpu_factor, gpu.is_some());
+        (r.end_cost, r.x)
+    };
+    let (c_cpu, x_cpu) = run(None);
+    for device in gpu_devices(true) {
+        let (c_gpu, x_gpu) = run(Some(&device));
+        assert!(c_cpu < 1e-6 && c_gpu < 1e-6, "{:?}: {} {}", device.backend, c_cpu, c_gpu);
+        for (a, b) in x_cpu.iter().zip(&x_gpu) {
+            assert!((a - b).abs() <= 1e-3 * (1.0 + a.abs()), "{:?}: the device moved an f32 parameter: {} vs {}", device.backend, a, b);
+        }
+    }
 }
 
-/// As `gpu_reduced_route_on_an_f32_solver`, on arael's own CUDA runtime
-/// (feature `gpu-native-cuda`).
-#[cfg(feature = "gpu-native-cuda")]
+/// A device whose runtime is not compiled in is a setup error.
+#[cfg(all(feature = "gpu", not(all(feature = "gpu-cuda", feature = "gpu-hip"))))]
 #[test]
-fn native_gpu_reduced_route_on_an_f32_solver() {
-    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_cuda(0));
-}
-
-/// `native_gpu_reduced_route_on_an_f32_solver` on HIP (feature `gpu-native-hip`).
-#[cfg(feature = "gpu-native-hip")]
-#[test]
-fn native_hip_gpu_reduced_route_on_an_f32_solver() {
-    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_hip(0));
-}
-
-/// The same in df32 (`GpuWide::Df32`): nothing on the device in f64.
-#[cfg(feature = "gpu-native-cuda")]
-#[test]
-fn native_df32_gpu_reduced_route_on_an_f32_solver() {
-    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32));
-}
-
-/// `native_df32_gpu_reduced_route_on_an_f32_solver` on HIP (feature `gpu-native-hip`).
-#[cfg(feature = "gpu-native-hip")]
-#[test]
-fn native_hip_df32_gpu_reduced_route_on_an_f32_solver() {
-    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_hip(0).with_wide(arael::simple_lm::GpuWide::Df32));
-}
-
-/// CubeCL's route keeps its wide values in f64 only: df32 there is a setup
-/// error, not f64 under another name.
-#[cfg(feature = "gpu-cuda")]
-#[test]
-fn df32_on_cubecl_is_unavailable() {
-    let cfg = LmConfig { max_iters: 60, ..Default::default() };
-    let mut w = build(0.1, 2);
-    let mut params = Vec::new();
-    RootProblem::serialize(&mut w, &mut params);
-    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
-        .with_policy(SchurPolicy::Force)
-        .with_envelope_schur(EnvelopeMode::Never)
-        .with_block_supernodal(BlockSupernodalMode::Always)
-        .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0).with_wide(arael::simple_lm::GpuWide::Df32))));
-    let err = lm_solve(&params, &mut solver, &mut w, &cfg).err().expect("unavailable");
-    assert!(
-        matches!(err.kind, arael::simple_lm::SolveFailureKind::Setup(arael::simple_lm::SetupError::SolverUnavailable { solver: "gpu", .. })),
-        "{:?}",
-        err.kind
-    );
-}
-
-/// A native device whose runtime is not compiled in is a setup error.
-#[cfg(all(feature = "gpu", not(all(feature = "gpu-native-cuda", feature = "gpu-native-hip"))))]
-#[test]
-fn a_native_runtime_not_compiled_in_is_unavailable() {
-    #[cfg(not(feature = "gpu-native-hip"))]
-    let device = arael::simple_lm::GpuDevice::native_hip(0);
-    #[cfg(all(feature = "gpu-native-hip", not(feature = "gpu-native-cuda")))]
-    let device = arael::simple_lm::GpuDevice::native_cuda(0);
+fn a_runtime_not_compiled_in_is_unavailable() {
+    #[cfg(not(feature = "gpu-hip"))]
+    let device = arael::simple_lm::GpuDevice::hip(0);
+    #[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
+    let device = arael::simple_lm::GpuDevice::cuda(0);
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
     let mut w = build(0.1, 2);
     let mut params = Vec::new();
@@ -743,95 +696,53 @@ fn a_native_runtime_not_compiled_in_is_unavailable() {
     );
 }
 
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-fn reduced_route_on_an_f32_solver_on(device: fn() -> arael::simple_lm::GpuDevice) {
-    let run = |gpu: bool| {
-        let cfg = LmConfig::<f32> { max_iters: 60, ..Default::default() };
-        let mut w = build_f32(0.1, 2);
-        let mut params = Vec::new();
-        RootProblem::serialize(&mut w, &mut params);
-        let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&arael::simple_lm::SparseFaerOptions::default()
-            .with_policy(SchurPolicy::Force)
-            .with_envelope_schur(EnvelopeMode::Never)
-            .with_block_supernodal(BlockSupernodalMode::Always)
-            .with_gpu(gpu.then(device)));
-        let r = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
-        let plan = solver.plan().expect("a plan");
-        assert!(plan.reduced && plan.block_supernodal);
-        assert_eq!(plan.gpu_factor, gpu);
-        (r.end_cost, r.x)
-    };
-    let (c_cpu, x_cpu) = run(false);
-    let (c_gpu, x_gpu) = run(true);
-    assert!(c_cpu < 1e-6 && c_gpu < 1e-6, "{} {}", c_cpu, c_gpu);
-    for (a, b) in x_cpu.iter().zip(&x_gpu) {
-        assert!((a - b).abs() <= 1e-3 * (1.0 + a.abs()), "the device moved an f32 parameter: {} vs {}", a, b);
-    }
-}
-
 /// Solvers built from clones of one `GpuDevice` share its device state:
-/// after the first solve, solving again (the whole system, then the
+/// after the first solves, solving again (the whole system, then the
 /// reduced route of the same problem, then the whole system again) creates
 /// no device buffer the first solves did not.
-#[cfg(feature = "gpu-cuda")]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 #[test]
 fn gpu_device_clones_share_their_buffers() {
-    let gpu = arael::simple_lm::GpuDevice::cuda(0);
-    assert_eq!(gpu.buffers_created(), 0);
-    let run = |policy: SchurPolicy| {
-        let mut s = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
-            .with_policy(policy)
-            .with_envelope_schur(EnvelopeMode::Never)
-            .with_block_supernodal(BlockSupernodalMode::Always)
-            .with_mixed_precision(Some(MixedPrecision::default()))
-            .with_gpu(Some(gpu.clone())));
-        let (_, c) = solve(&mut s, 2);
-        assert!(c < 1e-12 && s.plan().unwrap().gpu_factor);
-    };
-    run(SchurPolicy::Never);
-    run(SchurPolicy::Force);
-    let created = gpu.buffers_created();
-    assert!(created > 0 && gpu.reserved_bytes() > 0);
-    run(SchurPolicy::Never);
-    run(SchurPolicy::Force);
-    assert_eq!(gpu.buffers_created(), created, "the repeated solves leased every buffer from the shared state");
-    // a separately created device has a state of its own
-    assert_eq!(arael::simple_lm::GpuDevice::cuda(0).buffers_created(), 0);
+    for gpu in gpu_devices(false) {
+        let fresh = || gpu_devices(false).into_iter().find(|d| d.backend == gpu.backend).unwrap();
+        assert_eq!(gpu.buffers_created(), 0);
+        let run = |policy: SchurPolicy| {
+            let mut s = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+                .with_policy(policy)
+                .with_envelope_schur(EnvelopeMode::Never)
+                .with_block_supernodal(BlockSupernodalMode::Always)
+                .with_mixed_precision(Some(MixedPrecision::default()))
+                .with_gpu(Some(gpu.clone())));
+            let (_, c) = solve(&mut s, 2);
+            assert!(c < 1e-12 && s.plan().unwrap().gpu_factor);
+        };
+        run(SchurPolicy::Never);
+        run(SchurPolicy::Force);
+        let created = gpu.buffers_created();
+        assert!(created > 0 && gpu.reserved_bytes() > 0);
+        run(SchurPolicy::Never);
+        run(SchurPolicy::Force);
+        assert_eq!(gpu.buffers_created(), created, "{:?}: the repeated solves took every buffer from the shared state", gpu.backend);
+        // a separately created device has a state of its own
+        assert_eq!(fresh().buffers_created(), 0);
+    }
 }
 
 /// The GPU takes the factorizing route only: with conjugate gradients on the
 /// reduced system the solve stays on the CPU, and the plan says so.
-#[cfg(feature = "gpu-cuda")]
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 #[test]
 fn gpu_option_leaves_conjugate_gradients_on_the_cpu() {
-    conjugate_gradients_stay_on_the_cpu_with(|| arael::simple_lm::GpuDevice::cuda(0));
-}
-
-/// As `gpu_option_leaves_conjugate_gradients_on_the_cpu`, on arael's own
-/// CUDA runtime (feature `gpu-native-cuda`).
-#[cfg(feature = "gpu-native-cuda")]
-#[test]
-fn native_gpu_option_leaves_conjugate_gradients_on_the_cpu() {
-    conjugate_gradients_stay_on_the_cpu_with(|| arael::simple_lm::GpuDevice::native_cuda(0));
-}
-
-/// `native_gpu_option_leaves_conjugate_gradients_on_the_cpu` on HIP (feature `gpu-native-hip`).
-#[cfg(feature = "gpu-native-hip")]
-#[test]
-fn native_hip_gpu_option_leaves_conjugate_gradients_on_the_cpu() {
-    conjugate_gradients_stay_on_the_cpu_with(|| arael::simple_lm::GpuDevice::native_hip(0));
-}
-
-#[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-fn conjugate_gradients_stay_on_the_cpu_with(device: fn() -> arael::simple_lm::GpuDevice) {
-    let mut cg = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
-        .with_policy(SchurPolicy::Force)
-        .with_iterative_schur(Default::default())
-        .with_gpu(Some(device())));
-    let (_, c) = solve(&mut cg, 2);
-    let plan = cg.plan().expect("a plan");
-    assert!(plan.reduced && !plan.gpu_factor && plan.cg_iterations.is_some());
-    assert!(c < 1e-8, "{}", c);
+    for device in gpu_devices(false) {
+        let mut cg = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+            .with_policy(SchurPolicy::Force)
+            .with_iterative_schur(Default::default())
+            .with_gpu(Some(device)));
+        let (_, c) = solve(&mut cg, 2);
+        let plan = cg.plan().expect("a plan");
+        assert!(plan.reduced && !plan.gpu_factor && plan.cg_iterations.is_some());
+        assert!(c < 1e-8, "{}", c);
+    }
 }
 
 /// Without the `gpu` feature the option is a setup error before anything

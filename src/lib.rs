@@ -2576,8 +2576,6 @@ pub use threads::Context;
 pub mod covariance;
 #[cfg(feature = "gpu")]
 mod device;
-#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-mod device_native;
 #[cfg(feature = "gpu")]
 mod gpu_solver;
 pub mod rank;
@@ -2606,15 +2604,13 @@ pub use arael_macros::export_models;
 #[doc(hidden)]
 pub use arael_macros::__register_model;
 
-/// The device side of a model's generated code (feature `gpu`): arael-gpu,
-/// CubeCL, and the runtime the generated kernels and launches use.
+/// The device side of a model's generated code (feature `gpu`): arael-gpu
+/// and the device assembly the generated code implements.
 #[cfg(feature = "gpu")]
 #[doc(hidden)]
 pub mod __gpu {
     pub use arael_gpu::*;
     pub use crate::device::*;
-    #[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-    pub use crate::device_native::*;
 }
 
 /// The device items of a model's generated code: kept when arael has its

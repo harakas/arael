@@ -1,5 +1,4 @@
-//! [`NativeSolver`]: the [`GpuSolver`] on arael's own runtime, for any
-//! [`Device`].
+//! [`DeviceSolver`]: the [`GpuSolver`] on any [`Device`].
 
 use std::sync::Arc;
 
@@ -8,22 +7,22 @@ use arael_faer::schur::{SchurReal, SchurSymbolic};
 use arael_faer::supernodal::{SupernodalError, SupernodalSymbolic};
 use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
-use arael_gpu::native::schur::{GraphKey, STATUS_BYTES};
-use arael_gpu::native::supernodal::FactorizeError;
-use arael_gpu::native::{Device, NativeError, NativeFactor, NativeLmVectors, NativeSchur, NativeSchurError, Wide};
+use arael_gpu::schur::{GraphKey, STATUS_BYTES};
+use arael_gpu::FactorizeError;
+use arael_gpu::{Device, GpuError, GpuFactor, LmVectors, GpuSchur, GpuSchurError, Wide};
 use arael_gpu::{GpuPrecision, RefineStats};
 
 use super::{GpuSolver, narrow, resident_attempt};
 use crate::device::DeviceRoot;
-use crate::device_native::NativeDeviceAssembly;
+use crate::device::DeviceAssembly;
 use crate::simple_lm::{LmProblemInternals, ResidentAttempt};
 
 /// The factor, the reduction and the route on one [`Device`]; the route
 /// first, so its graphs are dropped before the blocks they record.
-pub(crate) struct NativeSolver<T, D: Device> {
+pub(crate) struct DeviceSolver<T, D: Device> {
     route: Option<Route<T, D>>,
-    schur: Option<NativeSchur<D>>,
-    factor: NativeFactor<D>,
+    schur: Option<GpuSchur<D>>,
+    factor: GpuFactor<D>,
     /// The scalar of the reduction, the assembly's sums and the loop's vectors.
     wide: Wide,
 }
@@ -37,8 +36,8 @@ struct Route<T, D: Device> {
     /// before the blocks they record.
     attempt_graph: Option<((GraphKey, u64), D::Graph)>,
     step_graph: Option<((GraphKey, u64, u64), D::Graph)>,
-    asm: NativeDeviceAssembly<T, D>,
-    vec: NativeLmVectors<D>,
+    asm: DeviceAssembly<T, D>,
+    vec: LmVectors<D>,
     /// The undamped diagonal of the last compute that read it back.
     diag_host: Vec<T>,
     /// What the reads land in, then decoded, before they are narrowed to `T`.
@@ -58,11 +57,11 @@ struct Route<T, D: Device> {
 }
 
 /// `r`'s value; a device failure past setup has nowhere to go but a panic.
-fn on_device<V>(r: Result<V, NativeError>, what: &str) -> V {
-    r.unwrap_or_else(|e| panic!("the native GPU {what} failed: {e}"))
+fn on_device<V>(r: Result<V, GpuError>, what: &str) -> V {
+    r.unwrap_or_else(|e| panic!("the GPU {what} failed: {e}"))
 }
 
-impl<T, D: Device> NativeSolver<T, D> {
+impl<T, D: Device> DeviceSolver<T, D> {
     /// The factor of `sn`, the analysis of the block structure `asym`, in
     /// `precision`, on `dev`; the reduction and the route built after it
     /// work in `wide`.
@@ -72,9 +71,9 @@ impl<T, D: Device> NativeSolver<T, D> {
         sn: &SupernodalSymbolic,
         asym: &SymbolicSparseBlockColMat<SparseIndex>,
         wide: Wide,
-    ) -> Result<Self, NativeError> {
-        let factor = NativeFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
-        Ok(NativeSolver { route: None, schur: None, factor, wide })
+    ) -> Result<Self, GpuError> {
+        let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
+        Ok(DeviceSolver { route: None, schur: None, factor, wide })
     }
 }
 
@@ -86,7 +85,7 @@ fn read_values<D: Device>(
     ranges: &[(&D::Block, usize, usize)],
     bytes: &mut Vec<u8>,
     host: &mut Vec<f64>,
-) -> Result<(), NativeError> {
+) -> Result<(), GpuError> {
     let total: usize = ranges.iter().map(|r| r.2).sum();
     bytes.resize(8 * total, 0);
     let mut reads = Vec::with_capacity(ranges.len());
@@ -105,7 +104,7 @@ fn read_values<D: Device>(
 /// An accepted trial point becomes the parameters: the reference rotations
 /// moved by its steps (the last gather was the trial point's), the point
 /// copied, its rotation steps zeroed.
-fn accept_on_device<T: crate::utils::Float, D: Device>(asm: &NativeDeviceAssembly<T, D>, vec: &NativeLmVectors<D>) -> Result<(), NativeError> {
+fn accept_on_device<T: crate::utils::Float, D: Device>(asm: &DeviceAssembly<T, D>, vec: &LmVectors<D>) -> Result<(), GpuError> {
     asm.advance()?;
     vec.accept()?;
     asm.zero_steps(vec.x())
@@ -118,8 +117,8 @@ fn run_graph<D: Device, K: PartialEq>(
     dev: &D,
     slot: &mut Option<(K, D::Graph)>,
     key: K,
-    launches: impl Fn() -> Result<(), NativeError>,
-) -> Result<(), NativeError> {
+    launches: impl Fn() -> Result<(), GpuError>,
+) -> Result<(), GpuError> {
     if let Some((k, graph)) = slot.as_ref()
         && *k == key
     {
@@ -131,7 +130,7 @@ fn run_graph<D: Device, K: PartialEq>(
     Ok(())
 }
 
-impl<T: crate::utils::Float, D: Device> NativeSolver<T, D> {
+impl<T: crate::utils::Float, D: Device> DeviceSolver<T, D> {
     /// The pending accept applied, without waiting.
     fn settle(&mut self) {
         let r = self.route.as_mut().expect("a device route");
@@ -141,11 +140,11 @@ impl<T: crate::utils::Float, D: Device> NativeSolver<T, D> {
     }
 }
 
-impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolver<T, D> {
-    fn runtime(&self) -> &'static str {
+impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolver<T, D> {
+    fn runtime(&self) -> String {
         match self.wide {
-            Wide::F64 => "native",
-            Wide::Df32 => "native df32",
+            Wide::F64 => D::RUNTIME.to_string(),
+            Wide::Df32 => format!("{} df32", D::RUNTIME),
         }
     }
 
@@ -157,7 +156,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         match self.factor.factorize(vals) {
             Ok(()) => Ok(()),
             Err(FactorizeError::NotPositiveDefinite) => Err(SupernodalError::NotPositiveDefinite),
-            Err(FactorizeError::Device(e)) => panic!("the native GPU factorization failed: {e}"),
+            Err(FactorizeError::Device(e)) => panic!("the GPU factorization failed: {e}"),
         }
     }
 
@@ -169,13 +168,13 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         on_device(self.factor.solve(x), "solve")
     }
 
-    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), NativeError> {
+    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError> {
         // the old blocks go first, so the device holds one structure's at a time
         self.drop_reduction();
         let dev = self.factor.device();
         self.schur = Some(match schur {
-            Some(s) => NativeSchur::new(dev, s, hsym, self.wide)?,
-            None => NativeSchur::whole(dev, hsym, self.wide)?,
+            Some(s) => GpuSchur::new(dev, s, hsym, self.wide)?,
+            None => GpuSchur::whole(dev, hsym, self.wide)?,
         });
         Ok(())
     }
@@ -193,8 +192,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         let gs = self.schur.as_mut().expect("the device reduction is built with the Schur symbolic");
         match gs.solve(&mut self.factor, hvals, grad, refine, delta) {
             Ok(stats) => Some(stats),
-            Err(NativeSchurError::Eliminated { .. } | NativeSchurError::Reduced) => None,
-            Err(NativeSchurError::Device(e)) => panic!("the native GPU reduced solve failed: {e}"),
+            Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
+            Err(GpuSchurError::Device(e)) => panic!("the GPU reduced solve failed: {e}"),
         }
     }
 
@@ -203,19 +202,19 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         on_device(gs.h_values(), "read of H").iter().filter(|v| !v.is_finite()).count()
     }
 
-    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), NativeError> {
+    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), GpuError> {
         self.route = None;
         if self.schur.is_none() {
             return Ok(());
         }
         let dev = self.factor.device();
         let mut resolver = PositionResolver::new(hsym);
-        let asm = NativeDeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), self.wide)?;
+        let asm = DeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), self.wide)?;
         self.route = Some(Route {
             attempt_graph: None,
             step_graph: None,
             asm,
-            vec: NativeLmVectors::new(dev, bdiag_pos, self.wide)?,
+            vec: LmVectors::new(dev, bdiag_pos, self.wide)?,
             diag_host: vec![T::zero(); bdiag_pos.len()],
             bytes: Vec::new(),
             host: Vec::new(),
@@ -328,8 +327,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         on_device(asm.device().read_many(&mut [(st.0, st.1, &mut status[..]), (sc.0, sc.1, &mut scalars[..])]), "read of the attempt");
         let solved = match gs.outcome(&status, refine) {
             Ok(stats) => Some(stats),
-            Err(NativeSchurError::Eliminated { .. } | NativeSchurError::Reduced) => None,
-            Err(NativeSchurError::Device(e)) => panic!("the native GPU attempt failed: {e}"),
+            Err(GpuSchurError::Eliminated { .. } | GpuSchurError::Reduced) => None,
+            Err(GpuSchurError::Device(e)) => panic!("the GPU attempt failed: {e}"),
         };
         let mut values = [0.0f64; N_SCALARS];
         self.wide.decode(&scalars, &mut values);

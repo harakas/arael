@@ -1,21 +1,18 @@
 //! The GPU side of the supernodal solver ([`SparseFaer`](crate::simple_lm::SparseFaer)):
-//! [`GpuSolver`], one implementation per runtime: [`cubecl::CubeclSolver`]
-//! on CubeCL's, [`native::NativeSolver`] on arael's own, generic over its
-//! [`Device`](arael_gpu::native::Device)s.
+//! [`GpuSolver`], implemented by [`solver::DeviceSolver`] for every
+//! [`Device`](arael_gpu::Device).
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
 use arael_faer::schur::SchurSymbolic;
 use arael_faer::supernodal::SupernodalError;
 use arael_faer::{SparseIndex, ValueIndex};
-use arael_gpu::native::NativeError;
+use arael_gpu::GpuError;
 use arael_gpu::{GpuPrecision, RefineStats};
 
 use crate::device::DeviceRoot;
 use crate::simple_lm::{LmProblemInternals, ResidentAttempt};
 
-pub(crate) mod cubecl;
-#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-pub(crate) mod native;
+pub(crate) mod solver;
 
 /// The GPU side of the supernodal solver, in three layers built one on the
 /// other:
@@ -33,8 +30,9 @@ pub(crate) mod native;
 /// A device failure past setup panics: the LM loop has no way to report it.
 /// `Send`, so a solver moves between threads as on the CPU.
 pub(crate) trait GpuSolver<T>: Send {
-    /// The runtime, for the verbose log: `cubecl`, `native` or `native df32`.
-    fn runtime(&self) -> &'static str;
+    /// The device's runtime and the wide scalar, for the verbose log:
+    /// `cuda`, `cuda df32`, `hip`, `hip df32`.
+    fn runtime(&self) -> String;
     /// The factor's scalar.
     fn precision(&self) -> GpuPrecision;
 
@@ -50,7 +48,7 @@ pub(crate) trait GpuSolver<T>: Send {
     /// `hsym`, or with `None` the whole system (nothing eliminated), on the
     /// factor's device; the factor is the reduced system's. Replaces any
     /// earlier reduction and route.
-    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), NativeError>;
+    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), GpuError>;
     /// Release the reduction and the route.
     fn drop_reduction(&mut self);
     /// Whether a reduction is built.
@@ -67,7 +65,7 @@ pub(crate) trait GpuSolver<T>: Send {
     /// structure `hsym`, whose scalar diagonal is at `bdiag_pos` in its
     /// values; the model's working copies are current. Nothing without a
     /// reduction.
-    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), NativeError>;
+    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), GpuError>;
     /// Whether the route is built.
     fn has_route(&self) -> bool;
     /// Whether the device holds the last compute's H and gradient.

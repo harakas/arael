@@ -1,9 +1,8 @@
-//! The device assembly (feature `gpu-cuda`; `gpu-native-cuda` or
-//! `gpu-native-hip` for arael's own runtime): a root whose constraints all
-//! have a device form assembles
-//! its gradient, Hessian tiles and cost on the GPU to what the CPU assembly
-//! gives against the same pattern.
-#![cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
+//! The device assembly (feature `gpu-cuda` or `gpu-hip`): a root whose
+//! constraints all have a device form assembles its gradient, Hessian
+//! tiles and cost on the GPU to what the CPU assembly gives against the
+//! same pattern.
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
 
 use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock};
 use arael::refs::{self, Ref};
@@ -139,54 +138,24 @@ fn perturbed<T: Float>(x: &[T]) -> Vec<T> {
     x.iter().enumerate().map(|(i, &v)| v + T::from(1e-3 * ((i % 7) as f64 - 3.0)).unwrap()).collect()
 }
 
-#[cfg(feature = "gpu-cuda")]
-fn gpu() -> arael::__gpu::GpuContext {
-    arael::__gpu::GpuContext::new(arael::__gpu::GpuBackend::Cuda, 0).unwrap()
-}
-
-#[cfg(feature = "gpu-cuda")]
-#[test]
-fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
-    let (cameras, points, observations) = scene::<f64>();
-    let mut s = Scene { cameras, points, observations };
-    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
-    let mut x = Vec::new();
-    s.serialize(&mut x);
-    let x = perturbed(&x);
-    let chk = arael::__gpu::device_check(&mut s, &x, &gpu());
-    assert!(chk.values > 0);
-    assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-12 * chk.cpu_cost, "{chk:?}");
-    assert!(chk.grad_err < 1e-12 && chk.hess_err < 1e-12, "{chk:?}");
-}
-
-#[cfg(feature = "gpu-cuda")]
-#[test]
-fn the_f32_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
-    let (cameras, points, observations) = scene::<f32>();
-    let mut s = SceneF { cameras, points, observations };
-    assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
-    let mut x = Vec::new();
-    s.serialize(&mut x);
-    let x = perturbed(&x);
-    let chk = arael::__gpu::device_check(&mut s, &x, &gpu());
-    // the CPU sums its f32 products in f32, the device in f64
-    assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{chk:?}");
-    assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{chk:?}");
-}
-
 /// A scene whose observations are the projections of true cameras and
 /// points plus half a pixel of noise, the points and translations then
 /// moved off the truth: what a solve starts from.
 fn consistent_scene<T: Float>() -> Parts<T> {
-    let mut rng = Lcg(11);
+    consistent_scene_of(6, 60, 11)
+}
+
+/// [`consistent_scene`] with `nc` cameras and `np` points, from `seed`.
+fn consistent_scene_of<T: Float>(nc: usize, np: usize, seed: u64) -> Parts<T> {
+    let mut rng = Lcg(seed);
     let c = |v: f64| T::from(v).unwrap();
     let mut cams = Vec::new();
-    for k in 0..6 {
+    for k in 0..nc {
         let ea = arael::vect::vect3d::new(0.05 * rng.uniform(), 0.05 * rng.uniform(), 0.2 * rng.uniform());
         let t = arael::vect::vect3d::new(0.5 * rng.uniform(), 0.5 * rng.uniform(), 0.1 * rng.uniform());
         cams.push((ea, t, 500.0 + 10.0 * k as f64, 0.01 * rng.uniform(), 0.001 * rng.uniform()));
     }
-    let pts: Vec<arael::vect::vect3d> = (0..60).map(|_| arael::vect::vect3d::new(2.0 * rng.uniform(), 2.0 * rng.uniform(), -5.0 + rng.uniform())).collect();
+    let pts: Vec<arael::vect::vect3d> = (0..np).map(|_| arael::vect::vect3d::new(2.0 * rng.uniform(), 2.0 * rng.uniform(), -5.0 + rng.uniform())).collect();
     let mut cameras = refs::Vec::new();
     for &(ea, t, f, k1, k2) in &cams {
         let moved = t + arael::vect::vect3d::new(0.01 * rng.uniform(), 0.01 * rng.uniform(), 0.01 * rng.uniform());
@@ -206,7 +175,7 @@ fn consistent_scene<T: Float>() -> Parts<T> {
     let mut observations = std::vec::Vec::new();
     for (pi, p) in pts.iter().enumerate() {
         for j in 0..(3 + pi % 2) {
-            let ci = (pi + 2 * j) % 6;
+            let ci = (pi + 2 * j) % nc;
             let (ea, t, f, k1, k2) = cams[ci];
             let pc = arael::matrix::matrix3d::rotation_from_euler_angles(ea) * *p + t;
             let (px, py) = (-pc.x / pc.z, -pc.y / pc.z);
@@ -223,32 +192,26 @@ fn consistent_scene<T: Float>() -> Parts<T> {
     (cameras, points, observations)
 }
 
-/// The GPU runtimes compiled in, on device 0: CubeCL's (feature
-/// `gpu-cuda`) and arael's own (features `gpu-native-cuda`,
-/// `gpu-native-hip`).
+/// The GPU runtimes compiled in, on device 0, in both wide scalars.
 fn devices() -> Vec<GpuDevice> {
     let mut v = Vec::new();
     #[cfg(feature = "gpu-cuda")]
-    v.push(GpuDevice::cuda(0));
-    #[cfg(feature = "gpu-native-cuda")]
-    v.extend([GpuDevice::native_cuda(0), GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
-    #[cfg(feature = "gpu-native-hip")]
-    v.extend([GpuDevice::native_hip(0), GpuDevice::native_hip(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
+    v.extend([GpuDevice::cuda(0), GpuDevice::cuda(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
+    #[cfg(feature = "gpu-hip")]
+    v.extend([GpuDevice::hip(0), GpuDevice::hip(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
     v
 }
 
-/// A runtime and its wide scalar, as the verbose log names them.
-fn runtime(d: &GpuDevice) -> &'static str {
-    match (d.is_native(), d.wide()) {
-        (false, _) => "cubecl",
-        (true, arael::simple_lm::GpuWide::F64) => "native",
-        (true, arael::simple_lm::GpuWide::Df32) => "native df32",
-    }
-}
-
-/// The backend, runtime and wide scalar, for the messages.
+/// A device's runtime and wide scalar, as the verbose log names them.
 fn label(d: &GpuDevice) -> String {
-    format!("{:?} {}", d.backend, runtime(d))
+    let runtime = match d.backend {
+        arael::simple_lm::GpuBackend::Cuda => "cuda",
+        arael::simple_lm::GpuBackend::Hip => "hip",
+    };
+    match d.wide() {
+        arael::simple_lm::GpuWide::F64 => runtime.to_string(),
+        arael::simple_lm::GpuWide::Df32 => format!("{runtime} df32"),
+    }
 }
 
 /// The reduced supernodal route, on `gpu` when it is given.
@@ -645,18 +608,50 @@ fn a_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
 }
 
 /// `GpuDevice::shared` hands every caller the same device state: a later
-/// call finds the buffers a solve through an earlier one left, a separately
+/// call finds the memory a solve through an earlier one left, a separately
 /// created device has none.
-#[cfg(feature = "gpu-cuda")]
 #[test]
 fn a_shared_device_is_one_state_per_process() {
-    use arael::simple_lm::{GpuBackend, LmConfig, SparseFaer};
+    use arael::simple_lm::{LmConfig, SparseFaer};
+    let backend = devices()[0].backend;
     let (cameras, points, observations) = consistent_scene::<f64>();
     let mut s = Scene { cameras, points, observations };
-    let opts = options(Some(&GpuDevice::shared(GpuBackend::Cuda, 0)), true);
+    let opts = options(Some(&GpuDevice::shared(backend, 0)), true);
     s.solve_with(&mut SparseFaer::<f64>::from_options(&opts), &LmConfig::<f64>::default()).unwrap();
-    assert!(GpuDevice::shared(GpuBackend::Cuda, 0).reserved_bytes() > 0);
-    assert_eq!(GpuDevice::cuda(0).reserved_bytes(), 0);
+    assert!(GpuDevice::shared(backend, 0).reserved_bytes() > 0);
+    assert_eq!(devices()[0].reserved_bytes(), 0);
+}
+
+/// Solve after solve through one device, each with a solver of its own or
+/// through one session, on scenes of other structures a few percent smaller
+/// or larger than the first: the device allocates for the first and reuses
+/// its memory for the rest.
+#[test]
+fn solves_of_slightly_changed_structures_allocate_nothing() {
+    use arael::simple_lm::{LmConfig, LmSession, SparseFaer};
+    let sizes = [(8usize, 80usize, 3u64), (8, 84, 4), (8, 77, 5), (8, 82, 6), (8, 80, 7)];
+    let cfg = LmConfig::<f64> { max_iters: 8, ..Default::default() };
+    for d in devices() {
+        let name = label(&d);
+        let mut made = Vec::new();
+        for &(nc, np, seed) in &sizes {
+            let (cameras, points, observations) = consistent_scene_of::<f64>(nc, np, seed);
+            let mut s = Scene { cameras, points, observations };
+            let mut solver = SparseFaer::<f64>::from_options(&options(Some(&d), true));
+            assert!(s.solve_with(&mut solver, &cfg).unwrap().end_cost.is_finite(), "{name}");
+            made.push(d.buffers_created());
+        }
+        assert!(made[0] > 0 && made.iter().all(|&m| m == made[0]), "{name}: buffers after each solve {made:?}");
+        // a session told of each structural change, its solver kept
+        let mut session = LmSession::new(SparseFaer::<f64>::from_options(&options(Some(&d), true)));
+        for &(nc, np, seed) in &sizes {
+            let (cameras, points, observations) = consistent_scene_of::<f64>(nc, np, seed + 10);
+            let mut s = Scene { cameras, points, observations };
+            session.invalidate();
+            assert!(session.solve(&mut s, &cfg).unwrap().end_cost.is_finite(), "{name}");
+            assert_eq!(d.buffers_created(), made[0], "{name}: a session's solve of another structure");
+        }
+    }
 }
 
 /// With a device assembly the first linearization is assembled on the
@@ -682,30 +677,29 @@ fn the_first_linearization_is_assembled_on_the_device() {
         let lines = lines.lock().unwrap();
         let name = label(&d);
         assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
-        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({}", runtime(&d)))), "{name}: {lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({name},"))), "{name}: {lines:#?}");
         assert!((device.start_cost - cpu.start_cost).abs() <= 1e-12 * cpu.start_cost, "{name}");
         assert!((device.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost, "{name}");
     }
 }
 
-/// A device of arael's own runtime: CUDA when it is compiled in, else HIP.
-#[cfg(feature = "gpu-native-cuda")]
-fn native() -> std::sync::Arc<arael::__gpu::native::cuda::CudaDevice> {
-    std::sync::Arc::new(arael::__gpu::native::cuda::CudaDevice::new(0).unwrap())
+/// A device: CUDA when it is compiled in, else HIP.
+#[cfg(feature = "gpu-cuda")]
+fn device() -> std::sync::Arc<arael::__gpu::cuda::CudaDevice> {
+    std::sync::Arc::new(arael::__gpu::cuda::CudaDevice::new(0).unwrap())
 }
-#[cfg(all(feature = "gpu-native-hip", not(feature = "gpu-native-cuda")))]
-fn native() -> std::sync::Arc<arael::__gpu::native::hip::HipDevice> {
-    std::sync::Arc::new(arael::__gpu::native::hip::HipDevice::new(0).unwrap())
+#[cfg(all(feature = "gpu-hip", not(feature = "gpu-cuda")))]
+fn device() -> std::sync::Arc<arael::__gpu::hip::HipDevice> {
+    std::sync::Arc::new(arael::__gpu::hip::HipDevice::new(0).unwrap())
 }
 
-/// The native assembly matches the CPU's in both wide scalars: in df32 the
+/// The device assembly matches the CPU's in both wide scalars: in df32 the
 /// sums keep about 48 bits, against f64's 53. Some cameras see a point
 /// twice, two observations with cross blocks of their own on one tile of H,
 /// which the device sums as one.
-#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 #[test]
-fn the_f64_bundle_adjustment_assembles_natively_as_on_the_cpu() {
-    use arael::__gpu::native::Wide;
+fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
     let (_, _, observations) = scene::<f64>();
     let pairs: std::collections::HashSet<(u32, u32)> = observations.iter().map(|o| (o.cam.index(), o.pt.index())).collect();
     assert!(pairs.len() < observations.len(), "the scene observes some pair twice");
@@ -716,17 +710,16 @@ fn the_f64_bundle_adjustment_assembles_natively_as_on_the_cpu() {
         let mut x = Vec::new();
         s.serialize(&mut x);
         let x = perturbed(&x);
-        let chk = arael::__gpu::native_device_check(&mut s, &x, &native(), wide);
+        let chk = arael::__gpu::device_check(&mut s, &x, &device(), wide);
         assert!(chk.values > 0);
         assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
     }
 }
 
-#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
 #[test]
-fn the_f32_bundle_adjustment_assembles_natively_as_on_the_cpu() {
-    use arael::__gpu::native::Wide;
+fn the_f32_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
     for wide in [Wide::F64, Wide::Df32] {
         let (cameras, points, observations) = scene::<f32>();
         let mut s = SceneF { cameras, points, observations };
@@ -734,7 +727,7 @@ fn the_f32_bundle_adjustment_assembles_natively_as_on_the_cpu() {
         let mut x = Vec::new();
         s.serialize(&mut x);
         let x = perturbed(&x);
-        let chk = arael::__gpu::native_device_check(&mut s, &x, &native(), wide);
+        let chk = arael::__gpu::device_check(&mut s, &x, &device(), wide);
         // the CPU sums its f32 products in f32, the device in its wide scalar
         assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
         assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");

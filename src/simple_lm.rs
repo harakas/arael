@@ -4617,22 +4617,23 @@ impl Default for SchurMethod {
     }
 }
 
-/// A GPU for the supernodal block route's factorization and solve
-/// ([`SparseFaerOptions::with_gpu`]): the runtime, the device index, and the
-/// device state solves through it use, a stream and the device buffers on
-/// it, created on first use.
+/// A GPU for the supernodal block route ([`SparseFaerOptions::with_gpu`]):
+/// the runtime, the device index, and the device state solves through it
+/// use, a stream and the device memory, created on first use.
 ///
 /// Clones share that state: solvers built from clones of one value run one
-/// after another on one stream and reuse its buffers, which grow to the
-/// largest problem seen and are kept, so solve after solve stops allocating.
-/// Separately created values have a stream and buffers of their own, and
+/// after another on one stream and take their device memory from one pool,
+/// which keeps what a solver gives back and hands it out again, so solve
+/// after solve, of the same structure or of one up to about a quarter
+/// larger, allocates nothing (`buffers_created` stays the same).
+/// Separately created values have a stream and memory of their own, and
 /// their solves can run at the same time.
 ///
 /// ```ignore
 /// let gpu = GpuDevice::cuda(0);
 /// for problem in problems {
 ///     let mut solver = SparseFaer::from_options(&SparseFaerOptions::default().with_gpu(Some(gpu.clone())));
-///     // ... solve; the buffers stay with `gpu`
+///     // ... solve; the device memory stays with `gpu`
 /// }
 /// ```
 #[derive(Clone, Debug)]
@@ -4641,26 +4642,20 @@ pub struct GpuDevice {
     pub backend: GpuBackend,
     /// The device, as the runtime numbers them.
     pub index: usize,
-    /// Whether solves run on arael's own runtime and kernels
-    /// ([`Self::native_cuda`], [`Self::native_hip`]) rather than CubeCL's.
-    native: bool,
     wide: GpuWide,
-    #[cfg(feature = "gpu")]
-    shared: std::sync::Arc<std::sync::Mutex<Option<arael_gpu::GpuContext>>>,
-    #[cfg(feature = "gpu-native-cuda")]
-    native_cuda: NativeSlot<arael_gpu::native::cuda::CudaDevice>,
-    #[cfg(feature = "gpu-native-hip")]
-    native_hip: NativeSlot<arael_gpu::native::hip::HipDevice>,
+    #[cfg(feature = "gpu-cuda")]
+    cuda: DeviceSlot<arael_gpu::cuda::CudaDevice>,
+    #[cfg(feature = "gpu-hip")]
+    hip: DeviceSlot<arael_gpu::hip::HipDevice>,
 }
 
-/// A [`GpuDevice`]'s native device state, shared by its clones, made on
-/// first use.
-#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-type NativeSlot<D> = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<D>>>>;
+/// A [`GpuDevice`]'s device state, shared by its clones, made on first use.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+type DeviceSlot<D> = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<D>>>>;
 
 /// The device in `slot`, made by `make` on first use.
-#[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-fn native_in<D>(slot: &NativeSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu::native::NativeError>) -> Result<std::sync::Arc<D>, arael_gpu::native::NativeError> {
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+fn device_in<D>(slot: &DeviceSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu::GpuError>) -> Result<std::sync::Arc<D>, arael_gpu::GpuError> {
     let mut shared = slot.lock().unwrap();
     if let Some(d) = shared.as_ref() {
         return Ok(d.clone());
@@ -4670,55 +4665,39 @@ fn native_in<D>(slot: &NativeSlot<D>, make: impl FnOnce() -> Result<D, arael_gpu
     Ok(d)
 }
 
+/// What `f` reads of the device in `slot`; 0 before its first use.
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+fn device_stat<D: arael_gpu::Device>(slot: &DeviceSlot<D>, f: impl Fn(&D) -> usize) -> usize {
+    slot.lock().unwrap().as_deref().map_or(0, f)
+}
+
 impl GpuDevice {
     fn new(backend: GpuBackend, index: usize) -> Self {
         GpuDevice {
             backend,
             index,
-            native: false,
             wide: GpuWide::F64,
-            #[cfg(feature = "gpu")]
-            shared: Default::default(),
-            #[cfg(feature = "gpu-native-cuda")]
-            native_cuda: Default::default(),
-            #[cfg(feature = "gpu-native-hip")]
-            native_hip: Default::default(),
+            #[cfg(feature = "gpu-cuda")]
+            cuda: Default::default(),
+            #[cfg(feature = "gpu-hip")]
+            hip: Default::default(),
         }
     }
 
-    /// CUDA device `index`.
+    /// CUDA device `index` (feature `gpu-cuda`).
     pub fn cuda(index: usize) -> Self {
         Self::new(GpuBackend::Cuda, index)
     }
 
-    /// CUDA device `index` on arael's own runtime and kernels (feature
-    /// `gpu-native-cuda`), which replace CubeCL's stage by stage. The same
-    /// work runs there as on [`Self::cuda`]: the factorization, the Schur
-    /// reduction and, for a root with a device form, the assembly and the
-    /// LM loop. Clones share the stream; the device buffers are made per
-    /// sparsity structure rather than kept and reused across structures.
-    pub fn native_cuda(index: usize) -> Self {
-        GpuDevice { native: true, ..Self::new(GpuBackend::Cuda, index) }
+    /// HIP device `index` (feature `gpu-hip`).
+    pub fn hip(index: usize) -> Self {
+        Self::new(GpuBackend::Hip, index)
     }
 
-    /// HIP device `index` on arael's own runtime and kernels (feature
-    /// `gpu-native-hip`): [`Self::native_cuda`] on AMD.
-    pub fn native_hip(index: usize) -> Self {
-        GpuDevice { native: true, ..Self::new(GpuBackend::Hip, index) }
-    }
-
-    /// Whether solves run on arael's own runtime ([`Self::native_cuda`],
-    /// [`Self::native_hip`]).
-    pub fn is_native(&self) -> bool {
-        self.native
-    }
-
-    /// The device with its wide values in `wide`. A device of CubeCL's
-    /// runtime takes [`GpuWide::F64`] only; another fails the solve with
-    /// [`SetupError::SolverUnavailable`].
+    /// The device with its wide values in `wide`.
     ///
     /// ```ignore
-    /// let gpu = GpuDevice::native_cuda(0).with_wide(GpuWide::Df32);
+    /// let gpu = GpuDevice::cuda(0).with_wide(GpuWide::Df32);
     /// ```
     pub fn with_wide(mut self, wide: GpuWide) -> Self {
         self.wide = wide;
@@ -4730,19 +4709,14 @@ impl GpuDevice {
         self.wide
     }
 
-
-    /// HIP device `index`.
-    pub fn hip(index: usize) -> Self {
-        Self::new(GpuBackend::Hip, index)
-    }
     /// The process's shared state of device `index` of `backend`: every
     /// call returns a clone of one value, so the solves of callers that
     /// cannot keep a value (the C, C++ and Python interfaces) share its
-    /// stream and buffers.
+    /// stream and memory.
     ///
     /// ```ignore
     /// let opts = SparseFaerOptions::default().with_gpu(Some(GpuDevice::shared(GpuBackend::Cuda, 0)));
-    /// // ... a solve through `opts`; a later call finds the buffers it left
+    /// // ... a solve through `opts`; a later call finds the memory it left
     /// assert!(GpuDevice::shared(GpuBackend::Cuda, 0).reserved_bytes() > 0);
     /// ```
     pub fn shared(backend: GpuBackend, index: usize) -> Self {
@@ -4756,49 +4730,30 @@ impl GpuDevice {
         d
     }
 
-    /// Bytes of device memory the state holds; 0 before its first solve.
+    /// Bytes of device memory the state holds, in use or free; 0 before
+    /// its first solve.
     pub fn reserved_bytes(&self) -> usize {
-        #[cfg(feature = "gpu")]
-        {
-            self.shared.lock().unwrap().as_ref().map_or(0, |c| c.reserved_bytes())
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            0
+        match self.backend {
+            #[cfg(feature = "gpu-cuda")]
+            GpuBackend::Cuda => device_stat(&self.cuda, arael_gpu::Device::reserved_bytes),
+            #[cfg(feature = "gpu-hip")]
+            GpuBackend::Hip => device_stat(&self.hip, arael_gpu::Device::reserved_bytes),
+            #[allow(unreachable_patterns)]
+            _ => 0,
         }
     }
 
-    /// Device buffers the state has created over its life: constant once
+    /// Device buffers the state has allocated over its life: constant once
     /// the largest problem has been seen.
     pub fn buffers_created(&self) -> usize {
-        #[cfg(feature = "gpu")]
-        {
-            self.shared.lock().unwrap().as_ref().map_or(0, |c| c.buffers_created())
+        match self.backend {
+            #[cfg(feature = "gpu-cuda")]
+            GpuBackend::Cuda => device_stat(&self.cuda, arael_gpu::Device::allocations),
+            #[cfg(feature = "gpu-hip")]
+            GpuBackend::Hip => device_stat(&self.hip, arael_gpu::Device::allocations),
+            #[allow(unreachable_patterns)]
+            _ => 0,
         }
-        #[cfg(not(feature = "gpu"))]
-        {
-            0
-        }
-    }
-
-    /// The device state, created on first use.
-    #[cfg(feature = "gpu")]
-    fn context(&self) -> Result<arael_gpu::GpuContext, arael_gpu::GpuError> {
-        let mut shared = self.shared.lock().unwrap();
-        if let Some(c) = shared.as_ref() {
-            return Ok(c.clone());
-        }
-        let backend = match self.backend {
-            GpuBackend::Cuda => arael_gpu::GpuBackend::Cuda,
-            GpuBackend::Hip => arael_gpu::GpuBackend::Hip,
-        };
-        let c = arael_gpu::GpuContext::new(backend, self.index)?;
-        if arael_gpu::kernel_cache().is_none() {
-            warn!("GPU: CubeCL was configured before arael's first GPU use (another library in the process), \
-                   so its configuration decides the kernel cache, not ARAEL_KERNEL_CACHE");
-        }
-        *shared = Some(c.clone());
-        Ok(c)
     }
 }
 
@@ -4823,8 +4778,7 @@ pub enum GpuWide {
     /// and f32's exponent range, in f32 arithmetic only. For cards whose f64
     /// is slow (consumer GPUs run it at 1/32 to 1/64 of f32); with an f32
     /// root and the f32 factor ([`MixedPrecision`]) nothing on the device
-    /// runs in f64. arael's own runtime only ([`GpuDevice::native_cuda`],
-    /// [`GpuDevice::native_hip`]).
+    /// runs in f64.
     Df32,
 }
 
@@ -5595,57 +5549,57 @@ impl<T> SnNumeric<T> {
 /// [`SetupError::SolverUnavailable`] for a part of the GPU route that could
 /// not be set up, `e` logged.
 #[cfg(feature = "gpu")]
-fn gpu_setup_failed(what: &str, e: arael_gpu::native::NativeError) -> SetupError {
+fn gpu_setup_failed(what: &str, e: arael_gpu::GpuError) -> SetupError {
     warn!("GPU: {what} could not be set up: {e}");
     SetupError::SolverUnavailable { solver: "gpu", reason: "the GPU route could not be set up (logged)" }
 }
 
-/// The device factor of `sn` on arael's own runtime for `dev`'s backend;
+/// The device factor of `sn` on `dev`'s runtime;
 /// [`SetupError::SolverUnavailable`] when that runtime is not compiled in.
 #[cfg(feature = "gpu")]
-fn native_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
+fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     dev: &GpuDevice,
     precision: arael_gpu::GpuPrecision,
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
-    #[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
     let wide = match dev.wide() {
-        GpuWide::F64 => arael_gpu::native::Wide::F64,
-        GpuWide::Df32 => arael_gpu::native::Wide::Df32,
+        GpuWide::F64 => arael_gpu::Wide::F64,
+        GpuWide::Df32 => arael_gpu::Wide::Df32,
     };
     match dev.backend {
-        #[cfg(feature = "gpu-native-cuda")]
+        #[cfg(feature = "gpu-cuda")]
         GpuBackend::Cuda => {
-            let made = native_in(&dev.native_cuda, || arael_gpu::native::cuda::CudaDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym, wide));
+            let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide));
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native CUDA factor", e))?))
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the CUDA factor", e))?))
         }
-        #[cfg(not(feature = "gpu-native-cuda"))]
+        #[cfg(not(feature = "gpu-cuda"))]
         GpuBackend::Cuda => {
             let _ = (precision, sn, asym);
-            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the native CUDA runtime is not compiled in (feature gpu-native-cuda)" })
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the CUDA runtime is not compiled in (feature gpu-cuda)" })
         }
-        #[cfg(feature = "gpu-native-hip")]
+        #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
-            let made = native_in(&dev.native_hip, || arael_gpu::native::hip::HipDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym, wide));
+            let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide));
             report_kernel_cache();
-            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native HIP factor", e))?))
+            Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the HIP factor", e))?))
         }
-        #[cfg(not(feature = "gpu-native-hip"))]
+        #[cfg(not(feature = "gpu-hip"))]
         GpuBackend::Hip => {
             let _ = (precision, sn, asym);
-            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the native HIP runtime is not compiled in (feature gpu-native-hip)" })
+            Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the HIP runtime is not compiled in (feature gpu-hip)" })
         }
     }
 }
 
-/// A kernel cache entry the native runtime could not write, logged once.
+/// A kernel cache entry the runtime could not write, logged once.
 fn report_kernel_cache() {
-    #[cfg(any(feature = "gpu-native-cuda", feature = "gpu-native-hip"))]
-    if let Some(why) = arael_gpu::native::take_cache_failure() {
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+    if let Some(why) = arael_gpu::take_cache_failure() {
         warn!("GPU: {why}");
     }
 }
@@ -5700,24 +5654,11 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
         };
         #[cfg(feature = "gpu")]
         {
-            // the previous structure's buffers go first, so the device holds
-            // one structure's at a time (on CubeCL they go back to the
-            // context, for the new ones to reuse)
+            // the previous structure's blocks go back to the device's pool
+            // first, for the new ones to reuse
             self.gpu_solver = None;
             let precision = device_precision::<T>(self.mixed.is_some());
-            let solver = if dev.is_native() {
-                native_solver(dev, precision, sn, asym)?
-            } else {
-                if dev.wide() != GpuWide::F64 {
-                    return Err(SetupError::SolverUnavailable { solver: "gpu", reason: "CubeCL's GPU route keeps its wide values in f64 only (GpuWide::Df32 needs GpuDevice::native_cuda or native_hip)" });
-                }
-                let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
-                    solver: "gpu",
-                    reason: "the GPU runtime is not compiled in (features gpu-cuda, gpu-hip)",
-                })?;
-                Box::new(crate::gpu_solver::cubecl::CubeclSolver::new(&ctx, precision, sn, asym))
-            };
-            self.gpu_solver = Some(solver);
+            self.gpu_solver = Some(device_solver(dev, precision, sn, asym)?);
             Ok(())
         }
         #[cfg(not(feature = "gpu"))]

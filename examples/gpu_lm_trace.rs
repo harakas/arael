@@ -7,15 +7,13 @@
 //!   cargo build -r --features gpu-cuda --example gpu_lm_trace
 //!   scripts/gpu_trace.py -- target/release/examples/gpu_lm_trace
 //!
-//! `--f32-factor` factors in f32 with refinement. `--native` solves on
-//! arael's own CUDA runtime (feature `gpu-native-cuda`), the markers
-//! written through it too.
+//! `--f32-factor` factors in f32 with refinement. The markers are written
+//! through a CUDA device of their own.
 
 use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{GpuDevice, LmConfig, LmIter, LmProblem, MixedPrecision, SchurPolicy, SparseFaer, SparseFaerOptions};
 use arael::vect::{vect2, vect3, vect3d};
-use arael::__gpu::cubecl::bytes::Bytes;
 
 #[arael::model]
 pub struct Camera {
@@ -103,26 +101,10 @@ fn scene(nc: usize, np: usize) -> Scene {
 /// Writes the marker of an id and waits for it.
 type Mark = std::sync::Arc<dyn Fn(usize) + Send + Sync>;
 
-/// The CubeCL device, and markers written on a context of their own.
-fn cubecl_marks() -> (GpuDevice, Mark) {
-    let marks = arael::__gpu::GpuContext::new(arael::__gpu::GpuBackend::Cuda, 0).expect("a CUDA device");
-    let c = marks.client().clone();
-    let buf = c.empty(MARKER + 4096);
-    let mut pinned = Bytes::from_bytes_vec(vec![0u8; MARKER + 4096]);
-    c.staging(std::iter::once(&mut pinned), false);
-    let pinned = pinned.shared();
-    let mark = move |id: usize| {
-        let _ = &marks;
-        c.write(&buf, pinned.view(0, MARKER + id).unwrap());
-        arael::__gpu::sync(&c);
-    };
-    (GpuDevice::cuda(0), std::sync::Arc::new(mark))
-}
-
-/// The native device, and markers written through a device of its own.
-#[cfg(feature = "gpu-native-cuda")]
-fn native_marks() -> (GpuDevice, Mark) {
-    use arael::__gpu::native::{Device, cuda::CudaDevice};
+/// The device, and markers written through a device of their own.
+#[cfg(feature = "gpu-cuda")]
+fn marks() -> (GpuDevice, Mark) {
+    use arael::__gpu::{Device, cuda::CudaDevice};
     let dev = CudaDevice::new(0).expect("a CUDA device");
     let buf = std::sync::Mutex::new(dev.alloc(MARKER + 4096).unwrap());
     let host = vec![0u8; MARKER + 4096];
@@ -130,19 +112,18 @@ fn native_marks() -> (GpuDevice, Mark) {
         dev.write(&mut buf.lock().unwrap(), 0, &host[..MARKER + id]).unwrap();
         dev.sync().unwrap();
     };
-    (GpuDevice::native_cuda(0), std::sync::Arc::new(mark))
+    (GpuDevice::cuda(0), std::sync::Arc::new(mark))
 }
 
-#[cfg(not(feature = "gpu-native-cuda"))]
-fn native_marks() -> (GpuDevice, Mark) {
-    panic!("--native needs the gpu-native-cuda feature");
+#[cfg(not(feature = "gpu-cuda"))]
+fn marks() -> (GpuDevice, Mark) {
+    panic!("the trace needs the gpu-cuda feature");
 }
 
 fn main() {
     let f32_factor = std::env::args().any(|a| a == "--f32-factor");
-    let native = std::env::args().any(|a| a == "--native");
     let mut s = scene(300, 30000);
-    let (gpu, mark) = if native { native_marks() } else { cubecl_marks() };
+    let (gpu, mark) = marks();
     let opts = SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_mixed_precision(f32_factor.then(MixedPrecision::default))
