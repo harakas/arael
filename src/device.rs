@@ -123,6 +123,11 @@ pub trait DeviceRoot<T> {
     fn device_pack(&self, pack: &mut DevicePack<T>);
     /// The launches of the constraint kernels ([`DeviceLauncher`]).
     fn device_launcher(&self) -> DeviceLauncher;
+    /// The constraint kernels in C++ for arael's own GPU runtime: per
+    /// constraint `c`, `__dk<c>_gh` and `__dk<c>_cost`, compiled after
+    /// `arael-gpu/kernels/assembly.cpp` with the layout table's slots
+    /// (`ARAEL_COL_*`) defined in front.
+    fn device_cpp(&self) -> &'static str;
     /// Set the reference rotations of the model's optimized rotations from
     /// `refs`, keyed by a rotation's first parameter index (row-major), and
     /// zero their steps: a device solve's re-centring handed back.

@@ -41,8 +41,6 @@ use arael_faer::{value_index, SparseIndex, ValueIndex};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "gpu")]
-use arael_gpu::cubecl::CubeElement as _;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
@@ -4671,9 +4669,11 @@ impl GpuDevice {
     }
 
     /// CUDA device `index` on arael's own runtime and kernels (feature
-    /// `gpu-native-cuda`), which replace CubeCL's stage by stage. Today the
-    /// supernodal factorization and solve run there; the assembly and the
-    /// Schur reduction stay on the CPU.
+    /// `gpu-native-cuda`), which replace CubeCL's stage by stage. The same
+    /// work runs there as on [`Self::cuda`]: the factorization, the Schur
+    /// reduction and, for a root with a device form, the assembly and the
+    /// LM loop. Clones share the stream; the device buffers are made per
+    /// sparsity structure rather than kept and reused across structures.
     pub fn native_cuda(index: usize) -> Self {
         GpuDevice { native: true, ..Self::new(GpuBackend::Cuda, index) }
     }
@@ -5351,25 +5351,13 @@ struct SnNumeric<T> {
     ctx: arael_faer::supernodal::SupernodalContext<T>,
     factor32: Vec<f32>,
     ctx32: arael_faer::supernodal::SupernodalContext<f32>,
-    /// The device factor, when `gpu` is set and the feature is in: built
-    /// for the current symbolic by [`prepare`](Self::prepare).
+    /// The device factor, when `gpu` is set and its runtime compiled in,
+    /// built for the current symbolic by [`prepare`](Self::prepare); with
+    /// the reduction beside it ([`prepare_schur`](Self::prepare_schur)),
+    /// which keeps S on the device, and the device assembly feeding that
+    /// when the root has one and `gpu_assembly` is on.
     #[cfg(feature = "gpu")]
-    gpu_factor: Option<arael_gpu::GpuFactor>,
-    /// The device factor on arael's own runtime, when `gpu` is a
-    /// [`GpuDevice::native_cuda`]; built by [`prepare`](Self::prepare) in
-    /// place of `gpu_factor`.
-    #[cfg(feature = "gpu-native-cuda")]
-    native_factor: Option<arael_gpu::native::supernodal::NativeFactor<arael_gpu::native::cuda::CudaDevice>>,
-    /// The device reduction of the reduced route, built with the Schur
-    /// symbolic by [`prepare_schur`](Self::prepare_schur) when the device
-    /// factor is on; it keeps S on the device for the factor.
-    #[cfg(feature = "gpu")]
-    gpu_schur: Option<arael_gpu::GpuSchur>,
-    /// The device assembly feeding `gpu_schur`, built with it when the root
-    /// has one and `gpu_assembly` is on: H and the gradient are then formed
-    /// where they are factorized.
-    #[cfg(feature = "gpu")]
-    gpu_route: Option<DeviceRoute<T>>,
+    gpu_solver: Option<Box<dyn crate::gpu_solver::GpuSolver<T>>>,
     gpu_assembly: bool,
     rf: Refine,
 }
@@ -5379,167 +5367,6 @@ struct SnNumeric<T> {
 #[cfg(feature = "gpu")]
 fn device_precision<T>(mixed: bool) -> arael_gpu::GpuPrecision {
     if mixed || core::mem::size_of::<T>() == 4 { arael_gpu::GpuPrecision::F32 } else { arael_gpu::GpuPrecision::F64 }
-}
-
-/// The device assembly of the reduced GPU route and the LM loop's vectors
-/// beside it: from a solve's first linearization on, the device
-/// linearizes, damps, solves and evaluates the trial costs, and keeps the
-/// parameters ([`ResidentLoop`]).
-#[cfg(feature = "gpu")]
-struct DeviceRoute<T> {
-    /// An attempt's launches (damping, solve, trial point, trial cost) and
-    /// an accept's with the linearization after it, captured as graphs,
-    /// with what they were captured against; first, so they are dropped
-    /// before the buffers they record.
-    attempt_graph: Option<((arael_gpu::GraphKey, u64), arael_gpu::Graph)>,
-    step_graph: Option<((arael_gpu::GraphKey, u64, u64), arael_gpu::Graph)>,
-    asm: crate::device::DeviceAssembly<T>,
-    vec: arael_gpu::lm::LmVectors,
-    /// The undamped diagonal of the last compute that read it back.
-    diag_host: std::vec::Vec<T>,
-    /// H's tile values.
-    nh: usize,
-    /// The device holds H and the gradient at the loop's parameters (a
-    /// structure's first compute assembles on the CPU).
-    live: bool,
-    /// The model's data on the device predates this solve: the solve's
-    /// first compute reads it again.
-    stale: bool,
-    /// [`LmConfig::min_diagonal`].
-    floor: Option<f64>,
-    /// An accepted trial point waits to become the parameters: the next
-    /// linearization, or the end of the solve, takes it.
-    accept_due: bool,
-}
-
-#[cfg(feature = "gpu")]
-impl<T: crate::utils::Float + 'static> SnNumeric<T> {
-    /// Lay `root` out for the device reduction against the pattern `hsym`,
-    /// whose scalar diagonal is at `bdiag_pos`; the model's working copies
-    /// are current. Nothing without a device reduction.
-    fn build_route(&mut self, root: &dyn crate::device::DeviceRoot<T>, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) {
-        self.gpu_route = None;
-        let Some(gs) = self.gpu_schur.as_ref() else { return };
-        let ctx = gs.context().clone();
-        let mut resolver = arael_faer::bsc::PositionResolver::new(hsym);
-        let asm = crate::device::DeviceAssembly::new(&ctx, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize));
-        let n = bdiag_pos.len();
-        self.gpu_route = Some(DeviceRoute {
-            attempt_graph: None,
-            step_graph: None,
-            asm,
-            vec: arael_gpu::lm::LmVectors::new(&ctx, bdiag_pos),
-            diag_host: vec![T::zero(); n],
-            nh: hsym.val_count(),
-            live: false,
-            stale: false,
-            floor: None,
-            accept_due: false,
-        });
-    }
-
-    /// Whether the device holds the last compute's H and gradient.
-    fn route_live(&self) -> bool {
-        self.gpu_route.as_ref().is_some_and(|r| r.live)
-    }
-
-    /// Assemble at `params` on the device into the reduction's buffers;
-    /// the gradient and the undamped diagonal come back to the host. The
-    /// first compute of a solve reads the model's data again.
-    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> T {
-        let gs = self.gpu_schur.as_mut().expect("a device route has its reduction");
-        let r = self.gpu_route.as_mut().expect("a device route");
-        if r.stale {
-            problem.update_params(params);
-            r.asm.refresh(problem.device_root().expect("a device route's problem has a device root"));
-            r.stale = false;
-        }
-        let n = grad.len();
-        let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
-        let cost = r.asm.assemble(params, &g, n, &h, r.nh);
-        r.vec.gather_diag(&h, r.nh);
-        let back = arael_gpu::read(r.asm.context().client(), vec![g, r.vec.diag()]).expect("read the gradient and the diagonal");
-        for (d, &v) in grad.iter_mut().zip(f64::from_bytes(&back[0])) {
-            *d = T::from(v).unwrap();
-        }
-        for (d, &v) in r.diag_host.iter_mut().zip(f64::from_bytes(&back[1])) {
-            *d = T::from(v).unwrap();
-        }
-        r.live = true;
-        T::from(cost).unwrap()
-    }
-
-    /// The pending accept, when there is one, and the linearization at the
-    /// parameters after it (the assembly and the pass over the diagonal and
-    /// the gradient), without waiting. An accept with its linearization is
-    /// one captured graph (graphs on).
-    fn route_linearize(&mut self) {
-        let gs = self.gpu_schur.as_mut().expect("a device route has its reduction");
-        let gf = self.gpu_factor.as_ref().expect("a device route has its factor");
-        let r = self.gpu_route.as_mut().expect("a device route");
-        let accept = std::mem::take(&mut r.accept_due);
-        let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
-        let key = (gs.graph_key(gf, None), r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
-        let (asm, vec, nh, floor) = (&r.asm, &r.vec, r.nh, r.floor);
-        let launches = move || {
-            if accept {
-                route_accept(asm, vec);
-            }
-            let n = vec.len();
-            asm.assemble_at(&vec.x(), n, &crate::device::DeviceTargets { g: &g, ng: n, h: &h, nh, cost: &vec.slot(arael_gpu::lm::S_COST_X) });
-            vec.linearized(&g, &h, nh, floor);
-        };
-        if accept {
-            run_graph(asm.context().client(), gs.graphs(), &mut r.step_graph, key, launches);
-        } else {
-            launches();
-        }
-        r.live = true;
-    }
-
-    /// The pending accept applied, without waiting.
-    fn route_settle(&mut self) {
-        let r = self.gpu_route.as_mut().expect("a device route");
-        if std::mem::take(&mut r.accept_due) {
-            route_accept(&r.asm, &r.vec);
-        }
-    }
-}
-
-/// An accepted trial point becomes the parameters: the reference rotations
-/// moved by its steps (the last gather was the trial point's), the point
-/// copied, its rotation steps zeroed.
-#[cfg(feature = "gpu")]
-fn route_accept<T: crate::utils::Float + 'static>(asm: &crate::device::DeviceAssembly<T>, vec: &arael_gpu::lm::LmVectors) {
-    asm.advance();
-    vec.accept();
-    asm.zero_steps(&vec.x(), vec.len());
-}
-
-/// Run `launches` (kernel launches only) as the graph `slot` holds when it
-/// was captured under `key`; otherwise, with `graphs` on, run them once to
-/// warm the pools and capture them into `slot`; without graphs, run them.
-#[cfg(feature = "gpu")]
-fn run_graph<K: PartialEq>(client: &arael_gpu::cubecl::prelude::Client, graphs: bool, slot: &mut Option<(K, arael_gpu::Graph)>, key: K, mut launches: impl FnMut() + Send) {
-    if !graphs {
-        launches();
-        return;
-    }
-    if let Some((k, graph)) = slot.as_ref()
-        && *k == key
-    {
-        // SAFETY: the graph records the route's buffers, the reduction's and
-        // the factor's (both in the key), all alive while the route is; the
-        // client is pinned to the stream it was captured on, which orders the
-        // writes before and the read after it.
-        unsafe { graph.replay() }.expect("replay a captured graph");
-        return;
-    }
-    *slot = None;
-    client.graph_prepare().expect("prepare a graph capture");
-    launches();
-    let graph = arael_gpu::capture(client, move || launches());
-    *slot = Some((key, graph));
 }
 
 /// The refinement of a solution through a reduced-precision factor against
@@ -5646,13 +5473,7 @@ impl<T> SnNumeric<T> {
             factor32: Vec::new(),
             ctx32: arael_faer::supernodal::SupernodalContext::new(),
             #[cfg(feature = "gpu")]
-            gpu_factor: None,
-            #[cfg(feature = "gpu-native-cuda")]
-            native_factor: None,
-            #[cfg(feature = "gpu")]
-            gpu_schur: None,
-            #[cfg(feature = "gpu")]
-            gpu_route: None,
+            gpu_solver: None,
             gpu_assembly: true,
             rf: Refine::default(),
         }
@@ -5664,56 +5485,16 @@ impl<T> SnNumeric<T> {
         self.factor32 = Vec::new();
         #[cfg(feature = "gpu")]
         {
-            self.gpu_factor = None;
-            self.gpu_route = None;
-            self.gpu_schur = None;
-        }
-        #[cfg(feature = "gpu-native-cuda")]
-        {
-            self.native_factor = None;
+            self.gpu_solver = None;
         }
         self.rf.clear();
-    }
-
-    /// Build the device reduction for a new Schur symbolic when the reduced
-    /// system is factorized on the device (`factorized`: the supernodal
-    /// route, not conjugate gradients); `hsym` is the Hessian's block
-    /// structure. It shares the factor's client, so S is formed and consumed
-    /// on one stream. Otherwise any earlier one is released.
-    fn prepare_schur(
-        &mut self,
-        schur: &arael_faer::schur::SchurSymbolic<SparseIndex>,
-        hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-        factorized: bool,
-    ) {
-        #[cfg(feature = "gpu")]
-        {
-            self.gpu_route = None;
-            self.gpu_schur = None;
-            self.gpu_schur = match (factorized, self.gpu_factor.as_ref()) {
-                (true, Some(g)) => Some(arael_gpu::GpuSchur::new(g.context(), schur, hsym)),
-                _ => None,
-            };
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            let _ = (schur, hsym, factorized);
-        }
-    }
-
-    /// The device reduction with nothing eliminated, for the whole system
-    /// factorized on the GPU (the device factor built for `hsym`).
-    #[cfg(feature = "gpu")]
-    fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) {
-        self.gpu_route = None;
-        self.gpu_schur = self.gpu_factor.as_ref().map(|g| arael_gpu::GpuSchur::whole(g.context(), hsym));
     }
 
     /// Whether the reduced system is formed on a GPU.
     fn gpu_reduces(&self) -> bool {
         #[cfg(feature = "gpu")]
         {
-            self.gpu_schur.is_some()
+            self.gpu_solver.as_ref().is_some_and(|g| g.reduces())
         }
         #[cfg(not(feature = "gpu"))]
         {
@@ -5723,18 +5504,114 @@ impl<T> SnNumeric<T> {
 
     /// Whether the factor is on a GPU.
     fn gpu_active(&self) -> bool {
-        #[cfg(feature = "gpu-native-cuda")]
-        if self.native_factor.is_some() {
-            return true;
-        }
         #[cfg(feature = "gpu")]
         {
-            self.gpu_factor.is_some()
+            self.gpu_solver.is_some()
         }
         #[cfg(not(feature = "gpu"))]
         {
             false
         }
+    }
+
+    /// The device side, which every caller past [`prepare`](Self::prepare)
+    /// with a GPU set finds built.
+    #[cfg(feature = "gpu")]
+    fn gpu_mut(&mut self) -> &mut dyn crate::gpu_solver::GpuSolver<T> {
+        self.gpu_solver.as_deref_mut().expect("the device solver is built with the symbolic")
+    }
+
+    #[cfg(feature = "gpu")]
+    fn gpu_ref(&self) -> &dyn crate::gpu_solver::GpuSolver<T> {
+        self.gpu_solver.as_deref().expect("the device solver is built with the symbolic")
+    }
+
+    /// Whether the device assembly and the LM loop's vectors are built.
+    #[cfg(feature = "gpu")]
+    fn has_route(&self) -> bool {
+        self.gpu_solver.as_ref().is_some_and(|g| g.has_route())
+    }
+
+    /// Whether the device holds the last compute's H and gradient.
+    #[cfg(feature = "gpu")]
+    fn route_live(&self) -> bool {
+        self.gpu_solver.as_ref().is_some_and(|g| g.route_live())
+    }
+}
+
+/// [`SetupError::SolverUnavailable`] for a part of the GPU route that could
+/// not be set up, `e` logged.
+#[cfg(feature = "gpu")]
+fn gpu_setup_failed(what: &str, e: arael_gpu::native::NativeError) -> SetupError {
+    warn!("GPU: {what} could not be set up: {e}");
+    SetupError::SolverUnavailable { solver: "gpu", reason: "the GPU route could not be set up (logged)" }
+}
+
+/// The device factor of `sn` on arael's own CUDA runtime.
+#[cfg(feature = "gpu-native-cuda")]
+fn native_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
+    dev: &GpuDevice,
+    precision: arael_gpu::GpuPrecision,
+    sn: &arael_faer::supernodal::SupernodalSymbolic,
+    asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
+    let solver = dev.native_device().and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym));
+    report_kernel_cache();
+    Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native CUDA factor", e))?))
+}
+
+/// A kernel cache entry the native runtime could not write, logged once.
+fn report_kernel_cache() {
+    #[cfg(feature = "gpu-native-cuda")]
+    if let Some(why) = arael_gpu::native::take_cache_failure() {
+        warn!("GPU: {why}");
+    }
+}
+
+#[cfg(all(feature = "gpu", not(feature = "gpu-native-cuda")))]
+fn native_solver<T>(
+    _: &GpuDevice,
+    _: arael_gpu::GpuPrecision,
+    _: &arael_faer::supernodal::SupernodalSymbolic,
+    _: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
+    Err(SetupError::SolverUnavailable { solver: "gpu", reason: "the native CUDA runtime is not compiled in (feature gpu-native-cuda)" })
+}
+
+impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
+    /// Build the device reduction for a new Schur symbolic when the reduced
+    /// system is factorized on the device (`factorized`: the supernodal
+    /// route, not conjugate gradients); `hsym` is the Hessian's block
+    /// structure. It is on the factor's device and stream, so S is formed
+    /// and consumed there. Otherwise any earlier one is released.
+    fn prepare_schur(
+        &mut self,
+        schur: &arael_faer::schur::SchurSymbolic<SparseIndex>,
+        hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+        factorized: bool,
+    ) -> Result<(), SetupError> {
+        #[cfg(feature = "gpu")]
+        if let Some(g) = self.gpu_solver.as_mut() {
+            if !factorized {
+                g.drop_reduction();
+                return Ok(());
+            }
+            let built = g.prepare_reduction(Some(schur), hsym);
+            report_kernel_cache();
+            return built.map_err(|e| gpu_setup_failed("the device reduction", e));
+        }
+        let _ = (schur, hsym, factorized);
+        Ok(())
+    }
+
+    /// The device reduction with nothing eliminated, for the whole system
+    /// factorized on the GPU (the device factor built for `hsym`).
+    #[cfg(feature = "gpu")]
+    fn prepare_whole(&mut self, hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), SetupError> {
+        let Some(g) = self.gpu_solver.as_mut() else { return Ok(()) };
+        let built = g.prepare_reduction(None, hsym);
+        report_kernel_cache();
+        built.map_err(|e| gpu_setup_failed("the device reduction", e))
     }
 
     /// Build the device factor for a new symbolic when a GPU is asked for:
@@ -5749,49 +5626,23 @@ impl<T> SnNumeric<T> {
         let Some(dev) = self.gpu.as_ref() else {
             return Ok(());
         };
-        if dev.is_native() {
-            #[cfg(feature = "gpu-native-cuda")]
-            {
-                // the previous structure's buffers go first, so the device
-                // holds one structure's at a time
-                self.native_factor = None;
-                let precision = device_precision::<T>(self.mixed.is_some());
-                let factor = dev.native_device().and_then(|d| {
-                    arael_gpu::native::supernodal::NativeFactor::new(&d, precision, sn, asym, &Default::default())
-                });
-                return match factor {
-                    Ok(f) => {
-                        self.native_factor = Some(f);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        warn!("GPU: the native CUDA factor could not be set up: {e}");
-                        Err(SetupError::SolverUnavailable {
-                            solver: "gpu",
-                            reason: "the native CUDA device or its factor could not be set up (logged)",
-                        })
-                    }
-                };
-            }
-            #[cfg(not(feature = "gpu-native-cuda"))]
-            return Err(SetupError::SolverUnavailable {
-                solver: "gpu",
-                reason: "the native CUDA runtime is not compiled in (feature gpu-native-cuda)",
-            });
-        }
         #[cfg(feature = "gpu")]
         {
-            let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
-                solver: "gpu",
-                reason: "the GPU runtime is not compiled in (features gpu-cuda, gpu-hip)",
-            })?;
-            // the previous structure's buffers go back to the context first,
-            // so the new ones reuse them rather than add to them
-            self.gpu_route = None;
-            self.gpu_schur = None;
-            self.gpu_factor = None;
+            // the previous structure's buffers go first, so the device holds
+            // one structure's at a time (on CubeCL they go back to the
+            // context, for the new ones to reuse)
+            self.gpu_solver = None;
             let precision = device_precision::<T>(self.mixed.is_some());
-            self.gpu_factor = Some(arael_gpu::GpuFactor::new(&ctx, precision, sn, asym, &Default::default()));
+            let solver = if dev.is_native() {
+                native_solver(dev, precision, sn, asym)?
+            } else {
+                let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
+                    solver: "gpu",
+                    reason: "the GPU runtime is not compiled in (features gpu-cuda, gpu-hip)",
+                })?;
+                Box::new(crate::gpu_solver::cubecl::CubeclSolver::new(&ctx, precision, sn, asym))
+            };
+            self.gpu_solver = Some(solver);
             Ok(())
         }
         #[cfg(not(feature = "gpu"))]
@@ -5847,59 +5698,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         };
         let (mut t_factor, mut t_solve, mut t_residual) = (0.0, 0.0, 0.0);
         // The device factor: in the solver's scalar, or in f32 with the
-        // refinement below driving the device solve. Each runtime factorizes
-        // and hands back its precision and its solve.
+        // refinement below driving the device solve.
         #[cfg(feature = "gpu")]
         {
-            /// The device factor of either runtime, factorized.
-            enum Device<'a> {
-                #[cfg(feature = "gpu-native-cuda")]
-                Native(&'a mut arael_gpu::native::supernodal::NativeFactor<arael_gpu::native::cuda::CudaDevice>),
-                Cubecl(&'a mut arael_gpu::GpuFactor),
-            }
-            impl Device<'_> {
-                fn runtime(&self) -> &'static str {
-                    match self {
-                        #[cfg(feature = "gpu-native-cuda")]
-                        Device::Native(_) => "native",
-                        Device::Cubecl(_) => "cubecl",
-                    }
-                }
-                fn precision(&self) -> arael_gpu::GpuPrecision {
-                    match self {
-                        #[cfg(feature = "gpu-native-cuda")]
-                        Device::Native(g) => g.precision(),
-                        Device::Cubecl(g) => g.precision(),
-                    }
-                }
-                fn solve<M: arael_faer::schur::SchurReal + 'static>(&mut self, x: &mut [M]) {
-                    match self {
-                        #[cfg(feature = "gpu-native-cuda")]
-                        Device::Native(g) => g.solve(x).unwrap_or_else(|e| panic!("the native GPU solve failed: {e}")),
-                        Device::Cubecl(g) => g.solve(x),
-                    }
-                }
-            }
-            let mut device = None;
-            #[cfg(feature = "gpu-native-cuda")]
-            if let Some(g) = self.native_factor.as_mut() {
-                use arael_gpu::native::supernodal::FactorizeError;
-                match g.factorize(a.vals()) {
-                    Ok(()) => {}
-                    Err(FactorizeError::NotPositiveDefinite) => {
-                        return Err(arael_faer::supernodal::SupernodalError::NotPositiveDefinite);
-                    }
-                    Err(FactorizeError::Device(e)) => panic!("the native GPU factorization failed: {e}"),
-                }
-                device = Some(Device::Native(g));
-            }
-            if device.is_none()
-                && let Some(g) = self.gpu_factor.as_mut()
-            {
+            if let Some(g) = self.gpu_solver.as_deref_mut() {
                 g.factorize(a.vals())?;
-                device = Some(Device::Cubecl(g));
-            }
-            if let Some(mut g) = device {
                 let (runtime, precision) = (g.runtime(), g.precision());
                 lap(&mut t_factor);
                 x.copy_from_slice(b);
@@ -5907,7 +5710,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 lap(&mut t_solve);
                 let refined = match self.mixed {
                     Some(mp) if mp.max_refinements > 0 => {
-                        Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve(r)))
+                        Some(self.rf.refine(a, b, x, mp, threads, &mut lap, &mut t_solve, &mut t_residual, |r| g.solve_f64(r)))
                     }
                     _ => None,
                 };
@@ -6249,7 +6052,7 @@ impl<T> SparseFaer<T> {
     }
 }
 
-impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
+impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> SparseFaer<T> {
 
     /// The marginalize set somebody NAMED: the caller's, or failing that the
     /// model's own `marginalize(..)`. Empty means nobody named one and the
@@ -6401,7 +6204,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     /// cost. On the device when it assembles there (the model's working
     /// copies brought to `params`, which its layout reads; the host H stays
     /// unfilled), else on the CPU through `positions`, which the solver
-    /// keeps.
+    /// keeps. `Err` when the device assembly could not be set up.
     #[allow(clippy::too_many_arguments)]
     fn first_fill(
         &mut self,
@@ -6413,7 +6216,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         positions: PositionStream,
         ctx: &mut crate::threads::Context,
         vb: bool,
-    ) -> T {
+    ) -> Result<T, SetupError> {
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() && self.sn_num.gpu_assembly {
             match problem.device_root() {
@@ -6421,10 +6224,13 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                     let clock = vb.then(Instant::now);
                     problem.update_params(params);
                     let root = problem.device_root().expect("a device root");
-                    self.sn_num.build_route(root, h.symbolic(), &self.bdiag_pos);
+                    let gs = self.sn_num.gpu_mut();
+                    let built = gs.build_route(root, h.symbolic(), &self.bdiag_pos);
+                    report_kernel_cache();
+                    built.map_err(|e| gpu_setup_failed("the device assembly", e))?;
                     let t_layout = clock.map(|c| c.elapsed());
                     let t_a = self.measure.then(Instant::now);
-                    let cost = self.sn_num.route_compute(problem, params, grad);
+                    let cost = gs.route_compute(problem, params, grad);
                     if let Some(t) = t_a {
                         self.assembly_time = t.elapsed();
                     }
@@ -6437,7 +6243,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                     }
                     matrix.h = Some(h);
                     self.positions = Some(Arc::new(positions));
-                    return cost;
+                    return Ok(cost);
                 }
                 None => {
                     if vb {
@@ -6454,7 +6260,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         }
         matrix.h = Some(h);
         self.positions = Some(Arc::new(positions));
-        cost
+        Ok(cost)
     }
 
     /// Set up the whole Hessian (no reduction) for the block band Cholesky:
@@ -6756,7 +6562,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         // wait, a captured graph, the refinement on the device, and the
         // device assembly with the LM loop there when the model has one).
         #[cfg(feature = "gpu")]
-        self.sn_num.prepare_whole(&hsym);
+        self.sn_num.prepare_whole(&hsym)?;
         self.sn_active = true;
         self.envelope_active = false;
         self.envelope_sym = None;
@@ -6804,7 +6610,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
 
         // First numeric fill. Everything above it was analysis.
         let h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        Ok(self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb))
+        self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb)
     }
 
     /// Symbolic factorization of the whole system, under the ordering
@@ -6931,11 +6737,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     fn solve_reduced_gpu(&mut self, h: &arael_faer::bsc::SparseBlockColMat<SparseIndex, T>, grad: &[T], delta: &mut [T]) -> bool {
         let clock = self.verbose.then(Instant::now);
         let refine = self.gpu_refine();
-        let gs = self.sn_num.gpu_schur.as_mut().expect("the device reduction is built with the Schur symbolic");
-        let gf = self.sn_num.gpu_factor.as_mut().expect("the device factor is built with the supernodal symbolic");
-        let solved = gs.solve(gf, h.vals(), grad, refine, delta);
-        self.note_gpu_solve(solved.ok(), clock, "reduce + factor + solve + back-substitution");
-        solved.is_ok()
+        let solved = self.sn_num.gpu_mut().solve_reduced(h.vals(), grad, refine, delta);
+        let ok = solved.is_some();
+        self.note_gpu_solve(solved, clock, "reduce + factor + solve + back-substitution");
+        ok
     }
 
     /// The device solve's refinement, `(max_steps, tolerance)` under mixed
@@ -6958,10 +6763,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             self.sn_num.rf.shortfalls += 1;
         }
         if let Some(t) = clock {
-            let precision = self.sn_num.gpu_factor.as_ref().expect("a device solve has its factor").precision();
+            let gs = self.sn_num.gpu_ref();
             info!(
-                "gpu schur ({:?}): {} {:.1} ms{}",
-                precision,
+                "gpu schur ({}, {:?}): {} {:.1} ms{}",
+                gs.runtime(),
+                gs.precision(),
                 what,
                 t.elapsed().as_secs_f64() * 1e3,
                 if self.sn_num.mixed.is_some() {
@@ -6986,112 +6792,42 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 #[cfg(feature = "gpu")]
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> ResidentLoop<T> for SparseFaer<T> {
     fn start(&mut self, x: &[T], floor: Option<T>) {
-        let r = self.sn_num.gpu_route.as_mut().expect("a resident solve has its device route");
-        r.floor = floor.map(arael_faer::schur::SchurReal::to_f64);
-        r.accept_due = false;
-        r.vec.write_x(x.iter().map(|&v| arael_faer::schur::SchurReal::to_f64(v)).collect());
-        if r.live {
-            // this linearization was assembled there: its diagonal pass only
-            let gs = self.sn_num.gpu_schur.as_mut().expect("a device route has its reduction");
-            let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
-            r.vec.linearized(&g, &h, r.nh, r.floor);
-        } else {
-            self.sn_num.route_linearize();
-        }
+        self.sn_num.gpu_mut().start(x, floor.map(arael_faer::schur::SchurReal::to_f64));
         if let Some(plan) = self.plan.as_mut() {
             plan.gpu_assembly = true;
         }
     }
 
     fn linearize(&mut self) {
-        self.sn_num.route_linearize();
+        self.sn_num.gpu_mut().linearize();
     }
 
     fn attempt(&mut self, lambda: T) -> ResidentAttempt {
-        use arael_gpu::lm::{DiagFault, S_COST_TRY, Scalars};
         let clock = self.verbose.then(Instant::now);
         let refine = self.gpu_refine();
-        let sn = &mut self.sn_num;
-        let gs = sn.gpu_schur.as_mut().expect("a device route has its reduction");
-        let gf = sn.gpu_factor.as_mut().expect("a device route has its factor");
-        let r = sn.gpu_route.as_mut().expect("a resident solve has its device route");
-        let (h, g) = (gs.h_target(r.nh), gs.rhs_target());
-        let key = (gs.graph_key(gf, refine), r.asm.generation());
-        let graphs = gs.graphs();
-        r.vec.set_lambda(arael_faer::schur::SchurReal::to_f64(lambda));
-        {
-            let (asm, vec, nh, solver) = (&r.asm, &r.vec, r.nh, &*gs);
-            let launches = move || {
-                vec.damp(&h, nh);
-                solver.launch(gf, refine);
-                vec.step(&solver.step_view(), &g);
-                asm.cost_at(&vec.x_try(), vec.len(), &vec.slot(S_COST_TRY));
-            };
-            run_graph(asm.context().client(), graphs, &mut r.attempt_graph, key, launches);
-        }
-        let c = r.asm.context().client();
-        let back = arael_gpu::read(c, vec![gs.status_view(), r.vec.scalars()]).expect("read the attempt");
-        // the queue's rotation returns the staging of the lambda's write
-        c.flush().expect("device flush");
-        let solved = gs.outcome(&back[0], refine);
-        let s = Scalars::decode(&back[1]);
-        self.note_gpu_solve(solved.ok(), clock, "damp + reduce + factor + solve + back-substitution + trial cost");
-        ResidentAttempt {
-            solved: solved.is_ok(),
-            new_cost: s.cost_try,
-            step2: s.step2,
-            try2: s.try2,
-            predicted: s.predicted,
-            grad_max: s.grad_max,
-            grad_scaled: s.grad_scaled,
-            fault: s.fault.map(|(i, f)| {
-                (i, match f {
-                    DiagFault::Nan => DiagonalFault::Nan,
-                    DiagFault::Negative => DiagonalFault::Negative,
-                    DiagFault::Zero => DiagonalFault::Zero,
-                })
-            }),
-        }
+        let (stats, attempt) = self.sn_num.gpu_mut().attempt(arael_faer::schur::SchurReal::to_f64(lambda), refine);
+        self.note_gpu_solve(stats, clock, "damp + reduce + factor + solve + back-substitution + trial cost");
+        attempt
     }
 
     fn accept(&mut self) {
-        // applied with the next linearization, in its graph
-        self.sn_num.gpu_route.as_mut().expect("a resident solve has its device route").accept_due = true;
+        self.sn_num.gpu_mut().accept();
     }
 
     fn params(&mut self, x: &mut [T]) {
-        self.sn_num.route_settle();
-        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
-        let back = arael_gpu::read_one(r.asm.context().client(), r.vec.x()).expect("read the parameters");
-        for (d, &v) in x.iter_mut().zip(f64::from_bytes(&back)) {
-            *d = T::from(v).unwrap();
-        }
+        self.sn_num.gpu_mut().params(x);
     }
 
     fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) {
-        let gs = self.sn_num.gpu_schur.as_mut().expect("a device route has its reduction");
-        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
-        let back = arael_gpu::read(r.asm.context().client(), vec![gs.rhs_target(), r.vec.diag(), gs.step_view()]).expect("read the vectors");
-        for (out, b) in [grad, diagonal, step].into_iter().zip(&back) {
-            for (d, &v) in out.iter_mut().zip(f64::from_bytes(b)) {
-                *d = T::from(v).unwrap();
-            }
-        }
+        self.sn_num.gpu_mut().vectors(grad, diagonal, step);
     }
 
     fn nonfinite(&mut self) -> [usize; 4] {
-        let gs = self.sn_num.gpu_schur.as_mut().expect("a device route has its reduction");
-        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
-        let h = gs.h_target(r.nh);
-        let back = arael_gpu::read(r.asm.context().client(), vec![gs.rhs_target(), r.vec.diag(), r.vec.x(), h]).expect("read the vectors");
-        let count = |b: &[u8]| f64::from_bytes(b).iter().filter(|v| !v.is_finite()).count();
-        [count(&back[0]), count(&back[1]), count(&back[2]), count(&back[3])]
+        self.sn_num.gpu_mut().nonfinite()
     }
 
     fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) {
-        self.params(x);
-        let r = self.sn_num.gpu_route.as_ref().expect("a resident solve has its device route");
-        r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root"));
+        self.sn_num.gpu_mut().finish(problem, x);
     }
 }
 
@@ -7102,14 +6838,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     #[cfg(feature = "gpu")]
     fn resident(&mut self) -> Option<&mut dyn ResidentLoop<T>> {
-        if self.sn_num.gpu_route.is_some() { Some(self) } else { None }
+        if self.sn_num.has_route() { Some(self) } else { None }
     }
 
     fn matrix_nonfinite_count(&self, matrix: &FaerMatrix<T>) -> usize {
         // The device route's H is on the device, the host copy stale.
         #[cfg(feature = "gpu")]
         if self.sn_num.route_live() {
-            return self.sn_num.gpu_schur.as_ref().unwrap().h_values().iter().filter(|v| !v.is_finite()).count();
+            return self.sn_num.gpu_ref().h_nonfinite();
         }
         let block = matrix.h.as_ref().map(|h| h.vals().iter().filter(|v| !v.is_finite()).count());
         let scalar = matrix.csc.as_ref().map(|c| c.vals.iter().filter(|v| !v.is_finite()).count());
@@ -7146,8 +6882,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // A solve starts here: the model a session hands it may have other
         // data than the device holds from the last one.
         #[cfg(feature = "gpu")]
-        if let Some(r) = self.sn_num.gpu_route.as_mut() {
-            r.stale = true;
+        if let Some(g) = self.sn_num.gpu_solver.as_mut() {
+            g.mark_stale();
         }
         // The reduction's own threads: 1 without the rayon feature.
         self.ctx.set_threads(crate::threads::pool_size(config.num_threads));
@@ -7196,8 +6932,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route: H and the gradient assembled where they are
         // factorized.
         #[cfg(feature = "gpu")]
-        if self.positions.is_some() && self.sn_num.gpu_route.is_some() {
-            let cost = self.sn_num.route_compute(problem, params, grad);
+        if self.positions.is_some() && self.sn_num.has_route() {
+            let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad);
             if let Some(t) = t_a {
                 self.assembly_time = t.elapsed();
             }
@@ -8134,7 +7870,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         self.rhs_kept.resize(nk, T::zero());
         self.x_kept.resize(nk, T::zero());
-        self.sn_num.prepare_schur(&schur, &hsym, self.sn_active && !iterative);
+        self.sn_num.prepare_schur(&schur, &hsym, self.sn_active && !iterative)?;
         // The device route forms S on the device and never reads a host copy.
         self.s = if self.sn_num.gpu_reduces() { None } else { s };
         self.schur = Some(schur);
@@ -8147,7 +7883,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             info!("gpu: the reduction's plan {:.1} ms", t_reduction);
         }
         let h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        Ok(self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb))
+        self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb)
     }
 
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
@@ -8159,7 +7895,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         #[cfg(feature = "gpu")]
         if self.sn_num.route_live() {
-            diagonal.copy_from_slice(&self.sn_num.gpu_route.as_ref().unwrap().diag_host);
+            self.sn_num.gpu_ref().route_diagonal(diagonal);
             return;
         }
         // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.

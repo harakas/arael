@@ -1,0 +1,358 @@
+//! [`NativeSolver`]: the [`GpuSolver`] on arael's own runtime, for any
+//! [`Device`].
+
+use std::sync::Arc;
+
+use arael_faer::bsc::{PositionResolver, SymbolicSparseBlockColMat};
+use arael_faer::schur::{SchurReal, SchurSymbolic};
+use arael_faer::supernodal::{SupernodalError, SupernodalSymbolic};
+use arael_faer::{SparseIndex, ValueIndex};
+use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
+use arael_gpu::native::schur::{GraphKey, STATUS_BYTES};
+use arael_gpu::native::supernodal::FactorizeError;
+use arael_gpu::native::{Device, NativeError, NativeFactor, NativeLmVectors, NativeSchur, NativeSchurError};
+use arael_gpu::{GpuPrecision, RefineStats};
+
+use super::{GpuSolver, narrow, resident_attempt};
+use crate::device::DeviceRoot;
+use crate::device_native::NativeDeviceAssembly;
+use crate::simple_lm::{LmProblemInternals, ResidentAttempt};
+
+/// The factor, the reduction and the route on one [`Device`]; the route
+/// first, so its graphs are dropped before the blocks they record.
+pub(crate) struct NativeSolver<T, D: Device> {
+    route: Option<Route<T, D>>,
+    schur: Option<NativeSchur<D>>,
+    factor: NativeFactor<D>,
+}
+
+/// The device assembly of the reduced route and the LM loop's vectors
+/// beside it.
+struct Route<T, D: Device> {
+    /// An attempt's launches (damping, solve, trial point, trial cost) and
+    /// an accept's with the linearization after it, captured as graphs,
+    /// with what they were captured against; first, so they are dropped
+    /// before the blocks they record.
+    attempt_graph: Option<((GraphKey, u64), D::Graph)>,
+    step_graph: Option<((GraphKey, u64, u64), D::Graph)>,
+    asm: NativeDeviceAssembly<T, D>,
+    vec: NativeLmVectors<D>,
+    /// The undamped diagonal of the last compute that read it back.
+    diag_host: Vec<T>,
+    /// What the reads land in before they are narrowed to `T`.
+    host: Vec<f64>,
+    /// H's tile values.
+    nh: usize,
+    /// The device holds H and the gradient at the loop's parameters.
+    live: bool,
+    /// The model's data on the device predates this solve.
+    stale: bool,
+    /// [`LmConfig::min_diagonal`](crate::simple_lm::LmConfig::min_diagonal).
+    floor: Option<f64>,
+    /// An accepted trial point waits to become the parameters: the next
+    /// linearization, or the end of the solve, takes it.
+    accept_due: bool,
+}
+
+/// `r`'s value; a device failure past setup has nowhere to go but a panic.
+fn on_device<V>(r: Result<V, NativeError>, what: &str) -> V {
+    r.unwrap_or_else(|e| panic!("the native GPU {what} failed: {e}"))
+}
+
+/// The bytes of `v`.
+fn bytes_mut(v: &mut [f64]) -> &mut [u8] {
+    arael_gpu::bytemuck::cast_slice_mut(v)
+}
+
+impl<T, D: Device> NativeSolver<T, D> {
+    /// The factor of `sn`, the analysis of the block structure `asym`, in
+    /// `precision`, on `dev`.
+    pub fn new(
+        dev: &Arc<D>,
+        precision: GpuPrecision,
+        sn: &SupernodalSymbolic,
+        asym: &SymbolicSparseBlockColMat<SparseIndex>,
+    ) -> Result<Self, NativeError> {
+        Ok(NativeSolver { route: None, schur: None, factor: NativeFactor::new(dev, precision, sn, asym, &Default::default())? })
+    }
+}
+
+/// An accepted trial point becomes the parameters: the reference rotations
+/// moved by its steps (the last gather was the trial point's), the point
+/// copied, its rotation steps zeroed.
+fn accept_on_device<T: crate::utils::Float, D: Device>(asm: &NativeDeviceAssembly<T, D>, vec: &NativeLmVectors<D>) -> Result<(), NativeError> {
+    asm.advance()?;
+    vec.accept()?;
+    asm.zero_steps(vec.x())
+}
+
+/// Run `launches` (kernel launches only) as the graph `slot` holds when it
+/// was captured under `key`; otherwise run them, and record them into
+/// `slot` while they run.
+fn run_graph<D: Device, K: PartialEq>(
+    dev: &D,
+    slot: &mut Option<(K, D::Graph)>,
+    key: K,
+    launches: impl Fn() -> Result<(), NativeError>,
+) -> Result<(), NativeError> {
+    if let Some((k, graph)) = slot.as_ref()
+        && *k == key
+    {
+        return dev.replay(graph);
+    }
+    *slot = None;
+    launches()?;
+    *slot = Some((key, dev.capture(&launches)?));
+    Ok(())
+}
+
+impl<T: crate::utils::Float, D: Device> NativeSolver<T, D> {
+    /// The pending accept applied, without waiting.
+    fn settle(&mut self) {
+        let r = self.route.as_mut().expect("a device route");
+        if std::mem::take(&mut r.accept_due) {
+            on_device(accept_on_device(&r.asm, &r.vec), "accept");
+        }
+    }
+}
+
+impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolver<T, D> {
+    fn runtime(&self) -> &'static str {
+        "native"
+    }
+
+    fn precision(&self) -> GpuPrecision {
+        self.factor.precision()
+    }
+
+    fn factorize(&mut self, vals: &[T]) -> Result<(), SupernodalError> {
+        match self.factor.factorize(vals) {
+            Ok(()) => Ok(()),
+            Err(FactorizeError::NotPositiveDefinite) => Err(SupernodalError::NotPositiveDefinite),
+            Err(FactorizeError::Device(e)) => panic!("the native GPU factorization failed: {e}"),
+        }
+    }
+
+    fn solve(&mut self, x: &mut [T]) {
+        on_device(self.factor.solve(x), "solve")
+    }
+
+    fn solve_f64(&mut self, x: &mut [f64]) {
+        on_device(self.factor.solve(x), "solve")
+    }
+
+    fn prepare_reduction(&mut self, schur: Option<&SchurSymbolic<SparseIndex>>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Result<(), NativeError> {
+        // the old blocks go first, so the device holds one structure's at a time
+        self.drop_reduction();
+        let dev = self.factor.device();
+        self.schur = Some(match schur {
+            Some(s) => NativeSchur::new(dev, s, hsym)?,
+            None => NativeSchur::whole(dev, hsym)?,
+        });
+        Ok(())
+    }
+
+    fn drop_reduction(&mut self) {
+        self.route = None;
+        self.schur = None;
+    }
+
+    fn reduces(&self) -> bool {
+        self.schur.is_some()
+    }
+
+    fn solve_reduced(&mut self, hvals: &[T], grad: &[T], refine: Option<(usize, f64)>, delta: &mut [T]) -> Option<RefineStats> {
+        let gs = self.schur.as_mut().expect("the device reduction is built with the Schur symbolic");
+        match gs.solve(&mut self.factor, hvals, grad, refine, delta) {
+            Ok(stats) => Some(stats),
+            Err(NativeSchurError::Eliminated { .. } | NativeSchurError::Reduced) => None,
+            Err(NativeSchurError::Device(e)) => panic!("the native GPU reduced solve failed: {e}"),
+        }
+    }
+
+    fn h_nonfinite(&self) -> usize {
+        let gs = self.schur.as_ref().expect("a device route has its reduction");
+        on_device(gs.h_values(), "read of H").iter().filter(|v| !v.is_finite()).count()
+    }
+
+    fn build_route(&mut self, root: &dyn DeviceRoot<T>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, bdiag_pos: &[ValueIndex]) -> Result<(), NativeError> {
+        self.route = None;
+        if self.schur.is_none() {
+            return Ok(());
+        }
+        let dev = self.factor.device();
+        let mut resolver = PositionResolver::new(hsym);
+        let asm = NativeDeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize))?;
+        self.route = Some(Route {
+            attempt_graph: None,
+            step_graph: None,
+            asm,
+            vec: NativeLmVectors::new(dev, bdiag_pos)?,
+            diag_host: vec![T::zero(); bdiag_pos.len()],
+            host: Vec::new(),
+            nh: hsym.val_count(),
+            live: false,
+            stale: false,
+            floor: None,
+            accept_due: false,
+        });
+        Ok(())
+    }
+
+    fn has_route(&self) -> bool {
+        self.route.is_some()
+    }
+
+    fn route_live(&self) -> bool {
+        self.route.as_ref().is_some_and(|r| r.live)
+    }
+
+    fn mark_stale(&mut self) {
+        if let Some(r) = self.route.as_mut() {
+            r.stale = true;
+        }
+    }
+
+    fn route_compute(&mut self, problem: &mut dyn LmProblemInternals<T>, params: &[T], grad: &mut [T]) -> T {
+        let gs = self.schur.as_ref().expect("a device route has its reduction");
+        let r = self.route.as_mut().expect("a device route");
+        if r.stale {
+            problem.update_params(params);
+            on_device(r.asm.refresh(problem.device_root().expect("a device route's problem has a device root")), "upload of the model's data");
+            r.stale = false;
+        }
+        let n = grad.len();
+        r.host.clear();
+        r.host.extend(params.iter().map(|&v| SchurReal::to_f64(v)));
+        on_device(r.vec.write_x(&r.host), "upload of the parameters");
+        let (g, h, cost) = (gs.rhs_target(), gs.h_target(), r.vec.slot(S_COST_X));
+        let queued = r.asm.assemble_at(r.vec.x(), g, n, h, r.nh, cost).and_then(|()| r.vec.gather_diag(h));
+        on_device(queued, "assembly");
+        r.host.resize(2 * n + 1, 0.0);
+        let (gh, rest) = r.host.split_at_mut(n);
+        let (dh, ch) = rest.split_at_mut(n);
+        let diag = r.vec.diag();
+        on_device(r.asm.device().read_many(&mut [(g.0, g.1, bytes_mut(gh)), (diag.0, diag.1, bytes_mut(dh)), (cost.0, cost.1, bytes_mut(ch))]), "read of the gradient");
+        narrow(grad, gh);
+        narrow(&mut r.diag_host, dh);
+        r.live = true;
+        T::from(ch[0]).unwrap()
+    }
+
+    fn route_diagonal(&self, diagonal: &mut [T]) {
+        diagonal.copy_from_slice(&self.route.as_ref().expect("a device route").diag_host);
+    }
+
+    fn start(&mut self, x: &[T], floor: Option<f64>) {
+        let r = self.route.as_mut().expect("a resident solve has its device route");
+        r.floor = floor;
+        r.accept_due = false;
+        r.host.clear();
+        r.host.extend(x.iter().map(|&v| SchurReal::to_f64(v)));
+        on_device(r.vec.write_x(&r.host), "upload of the parameters");
+        if r.live {
+            // this linearization was assembled there: its diagonal pass only
+            let gs = self.schur.as_ref().expect("a device route has its reduction");
+            on_device(r.vec.linearized(gs.rhs_target(), gs.h_target(), r.floor), "linearization");
+        } else {
+            self.linearize();
+        }
+    }
+
+    /// The pending accept, when there is one, and the linearization at the
+    /// parameters after it (the assembly and the pass over the diagonal and
+    /// the gradient), without waiting. An accept with its linearization is
+    /// one captured graph.
+    fn linearize(&mut self) {
+        let gs = self.schur.as_ref().expect("a device route has its reduction");
+        let r = self.route.as_mut().expect("a device route");
+        let accept = std::mem::take(&mut r.accept_due);
+        let key = (gs.graph_key(&self.factor, None), r.asm.generation(), r.floor.map_or(u64::MAX, f64::to_bits));
+        let (asm, vec, nh, floor) = (&r.asm, &r.vec, r.nh, r.floor);
+        let (g, h) = (gs.rhs_target(), gs.h_target());
+        let launches = || {
+            if accept {
+                accept_on_device(asm, vec)?;
+            }
+            asm.assemble_at(vec.x(), g, vec.len(), h, nh, vec.slot(S_COST_X))?;
+            vec.linearized(g, h, floor)
+        };
+        let queued = if accept { run_graph(&**asm.device(), &mut r.step_graph, key, launches) } else { launches() };
+        on_device(queued, "linearization");
+        r.live = true;
+    }
+
+    fn attempt(&mut self, lambda: f64, refine: Option<(usize, f64)>) -> (Option<RefineStats>, ResidentAttempt) {
+        let gs = self.schur.as_ref().expect("a device route has its reduction");
+        let gf = &self.factor;
+        let r = self.route.as_mut().expect("a resident solve has its device route");
+        on_device(r.vec.set_lambda(lambda), "upload of the damping");
+        let key = (gs.graph_key(gf, refine), r.asm.generation());
+        let (asm, vec) = (&r.asm, &r.vec);
+        let launches = || {
+            vec.damp(gs.h_target())?;
+            gs.launch(gf, refine)?;
+            vec.step(gs.step_view(), gs.rhs_target())?;
+            asm.cost_at(vec.x_try(), vec.slot(S_COST_TRY))
+        };
+        on_device(run_graph(&**asm.device(), &mut r.attempt_graph, key, launches), "attempt");
+        let (mut status, mut scalars) = ([0u8; STATUS_BYTES], [0u8; 8 * N_SCALARS]);
+        let (st, sc) = (gs.status_view(), vec.scalars());
+        on_device(asm.device().read_many(&mut [(st.0, st.1, &mut status[..]), (sc.0, sc.1, &mut scalars[..])]), "read of the attempt");
+        let solved = match gs.outcome(&status, refine) {
+            Ok(stats) => Some(stats),
+            Err(NativeSchurError::Eliminated { .. } | NativeSchurError::Reduced) => None,
+            Err(NativeSchurError::Device(e)) => panic!("the native GPU attempt failed: {e}"),
+        };
+        (solved, resident_attempt(solved.is_some(), &Scalars::decode(&scalars)))
+    }
+
+    fn accept(&mut self) {
+        // applied with the next linearization, in its graph
+        self.route.as_mut().expect("a resident solve has its device route").accept_due = true;
+    }
+
+    fn params(&mut self, x: &mut [T]) {
+        self.settle();
+        let r = self.route.as_mut().expect("a resident solve has its device route");
+        r.host.resize(x.len(), 0.0);
+        let at = r.vec.x();
+        on_device(r.asm.device().read(at.0, at.1, bytes_mut(&mut r.host)), "read of the parameters");
+        narrow(x, &r.host);
+    }
+
+    fn vectors(&mut self, grad: &mut [T], diagonal: &mut [T], step: &mut [T]) {
+        let gs = self.schur.as_ref().expect("a device route has its reduction");
+        let r = self.route.as_mut().expect("a resident solve has its device route");
+        let n = grad.len();
+        r.host.resize(3 * n, 0.0);
+        let (gh, rest) = r.host.split_at_mut(n);
+        let (dh, sh) = rest.split_at_mut(n);
+        let (g, d, s) = (gs.rhs_target(), r.vec.diag(), gs.step_view());
+        on_device(r.asm.device().read_many(&mut [(g.0, g.1, bytes_mut(gh)), (d.0, d.1, bytes_mut(dh)), (s.0, s.1, bytes_mut(sh))]), "read of the vectors");
+        narrow(grad, gh);
+        narrow(diagonal, dh);
+        narrow(step, sh);
+    }
+
+    fn nonfinite(&mut self) -> [usize; 4] {
+        let gs = self.schur.as_ref().expect("a device route has its reduction");
+        let r = self.route.as_mut().expect("a resident solve has its device route");
+        let n = r.vec.len();
+        r.host.resize(3 * n + r.nh, 0.0);
+        let (gh, rest) = r.host.split_at_mut(n);
+        let (dh, rest) = rest.split_at_mut(n);
+        let (xh, hh) = rest.split_at_mut(n);
+        let (g, d, x, h) = (gs.rhs_target(), r.vec.diag(), r.vec.x(), gs.h_target());
+        let mut reads = [(g.0, g.1, bytes_mut(gh)), (d.0, d.1, bytes_mut(dh)), (x.0, x.1, bytes_mut(xh)), (h.0, h.1, bytes_mut(hh))];
+        on_device(r.asm.device().read_many(&mut reads), "read of the vectors");
+        let count = |v: &[f64]| v.iter().filter(|v| !v.is_finite()).count();
+        [count(gh), count(dh), count(xh), count(hh)]
+    }
+
+    fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) {
+        self.params(x);
+        let r = self.route.as_ref().expect("a resident solve has its device route");
+        on_device(r.asm.restore(problem.device_root_mut().expect("a device route's problem has a device root")), "read of the rotations");
+    }
+}

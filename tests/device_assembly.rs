@@ -1,11 +1,12 @@
-//! The device assembly (feature `gpu-cuda`): a root whose constraints all
-//! have a device form assembles its gradient, Hessian tiles and cost on
-//! the GPU to what the CPU assembly gives against the same pattern.
-#![cfg(feature = "gpu-cuda")]
+//! The device assembly (feature `gpu-cuda`; `gpu-native-cuda` for arael's
+//! own runtime): a root whose constraints all have a device form assembles
+//! its gradient, Hessian tiles and cost on the GPU to what the CPU assembly
+//! gives against the same pattern.
+#![cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]
 
 use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmProblem, LmProblemInternals, RootProblem};
+use arael::simple_lm::{GpuDevice, LmProblem, LmProblemInternals, RootProblem};
 use arael::utils::Float;
 use arael::vect::{vect2, vect3};
 
@@ -137,10 +138,12 @@ fn perturbed<T: Float>(x: &[T]) -> Vec<T> {
     x.iter().enumerate().map(|(i, &v)| v + T::from(1e-3 * ((i % 7) as f64 - 3.0)).unwrap()).collect()
 }
 
+#[cfg(feature = "gpu-cuda")]
 fn gpu() -> arael::__gpu::GpuContext {
     arael::__gpu::GpuContext::new(arael::__gpu::GpuBackend::Cuda, 0).unwrap()
 }
 
+#[cfg(feature = "gpu-cuda")]
 #[test]
 fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
     let (cameras, points, observations) = scene::<f64>();
@@ -155,6 +158,7 @@ fn the_f64_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
     assert!(chk.grad_err < 1e-12 && chk.hess_err < 1e-12, "{chk:?}");
 }
 
+#[cfg(feature = "gpu-cuda")]
 #[test]
 fn the_f32_bundle_adjustment_assembles_on_the_device_as_on_the_cpu() {
     let (cameras, points, observations) = scene::<f32>();
@@ -218,22 +222,39 @@ fn consistent_scene<T: Float>() -> Parts<T> {
     (cameras, points, observations)
 }
 
-fn options(gpu: bool, assembly: bool) -> arael::simple_lm::SparseFaerOptions {
+/// The GPU runtimes compiled in, on device 0: CubeCL's (feature
+/// `gpu-cuda`) and arael's own (feature `gpu-native-cuda`).
+fn devices() -> Vec<GpuDevice> {
+    let mut v = Vec::new();
+    #[cfg(feature = "gpu-cuda")]
+    v.push(GpuDevice::cuda(0));
+    #[cfg(feature = "gpu-native-cuda")]
+    v.push(GpuDevice::native_cuda(0));
+    v
+}
+
+/// A runtime's name, for the messages.
+fn runtime(d: &GpuDevice) -> &'static str {
+    if d.is_native() { "native" } else { "cubecl" }
+}
+
+/// The reduced supernodal route, on `gpu` when it is given.
+fn options(gpu: Option<&GpuDevice>, assembly: bool) -> arael::simple_lm::SparseFaerOptions {
     arael::simple_lm::SparseFaerOptions::default()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_envelope_schur(arael::simple_lm::EnvelopeMode::Never)
         .with_block_supernodal(arael::simple_lm::BlockSupernodalMode::Always)
-        .with_gpu(gpu.then(|| arael::simple_lm::GpuDevice::cuda(0)))
+        .with_gpu(gpu.cloned())
         .with_gpu_assembly(assembly)
 }
 
 /// The LM solve through the device assembly (H, the gradient and the
 /// trial costs on the GPU, the rotations re-centred there after every
 /// accepted step) reaches the CPU route's optimum, as the GPU route with
-/// the assembly on the CPU does.
+/// the assembly on the CPU does, on each runtime.
 #[test]
 fn a_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
-    let run = |gpu: bool, assembly: bool| {
+    let run = |gpu: Option<&GpuDevice>, assembly: bool| {
         let (cameras, points, observations) = consistent_scene::<f64>();
         let mut s = Scene { cameras, points, observations };
         let mut x = Vec::new();
@@ -242,17 +263,19 @@ fn a_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
         let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
         let plan = solver.plan().expect("a plan");
-        assert!(plan.reduced && plan.gpu_factor == gpu);
-        assert_eq!(plan.gpu_assembly, gpu && assembly);
+        assert!(plan.reduced && plan.gpu_factor == gpu.is_some());
+        assert_eq!(plan.gpu_assembly, gpu.is_some() && assembly);
         (r.start_cost, r.end_cost, r.iterations)
     };
-    let (start, cpu, _) = run(false, false);
-    let (_, uploaded, _) = run(true, false);
-    let (_, device, iters) = run(true, true);
+    let (start, cpu, _) = run(None, false);
     assert!(cpu < 0.05 * start, "the scene converges to its noise: {start} to {cpu}");
-    assert!(iters > 2, "accepted steps re-centre the rotations: {iters} iterations");
-    for c in [uploaded, device] {
-        assert!((c - cpu).abs() <= 1e-9 * cpu, "{c} against the CPU's {cpu}");
+    for d in devices() {
+        let (_, uploaded, _) = run(Some(&d), false);
+        let (_, device, iters) = run(Some(&d), true);
+        assert!(iters > 2, "{}: accepted steps re-centre the rotations: {iters} iterations", runtime(&d));
+        for c in [uploaded, device] {
+            assert!((c - cpu).abs() <= 1e-9 * cpu, "{}: {c} against the CPU's {cpu}", runtime(&d));
+        }
     }
 }
 
@@ -260,7 +283,7 @@ fn a_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
 /// route's optimum to its precision.
 #[test]
 fn an_f32_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
-    let run = |gpu: bool| {
+    let run = |gpu: Option<&GpuDevice>| {
         let (cameras, points, observations) = consistent_scene::<f32>();
         let mut s = SceneF { cameras, points, observations };
         let mut x = Vec::new();
@@ -268,11 +291,14 @@ fn an_f32_solve_through_the_device_assembly_reaches_the_cpu_optimum() {
         let mut solver = arael::simple_lm::SparseFaer::<f32>::from_options(&options(gpu, true));
         let cfg = arael::simple_lm::LmConfig::<f32> { max_iters: 50, ..Default::default() };
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu);
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
         r.end_cost
     };
-    let (cpu, device) = (run(false), run(true));
-    assert!((device - cpu).abs() <= 1e-4 * cpu, "{device} against the CPU's {cpu}");
+    let cpu = run(None);
+    for d in devices() {
+        let device = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-4 * cpu, "{}: {device} against the CPU's {cpu}", runtime(&d));
+    }
 }
 
 #[test]
@@ -354,25 +380,28 @@ fn a_device_solve_writes_the_model_back_and_a_warm_one_reads_it_again() {
     let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
     let cpu = |s: &Scene| {
         let mut s = s.clone();
-        let r = s.solve_with(&mut SparseFaer::<f64>::from_options(&options(false, false)), &cfg).unwrap();
+        let r = s.solve_with(&mut SparseFaer::<f64>::from_options(&options(None, false)), &cfg).unwrap();
         (r.end_cost, state(&s))
     };
-    let (cameras, points, observations) = consistent_scene::<f64>();
-    let mut s = Scene { cameras, points, observations };
-    let (cpu_cost, cpu_state) = cpu(&s);
-    let mut session = LmSession::new(SparseFaer::<f64>::from_options(&options(true, true)));
-    let r = session.solve(&mut s, &cfg).unwrap();
-    assert!(session.solver().plan().unwrap().gpu_assembly);
-    assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{} against the CPU's {cpu_cost}", r.end_cost);
-    assert_close(&state(&s), &cpu_state, 1e-7, "the solved model");
-    // other data: an observation, a camera's rotation, a point
-    s.observations[5].xy.x += 3.0;
-    s.cameras[1].ea.value.z += 0.02;
-    s.points[7].pos.value.y -= 0.05;
-    let (cpu_cost, cpu_state) = cpu(&s);
-    let r = session.solve(&mut s, &cfg).unwrap();
-    assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{} against the CPU's {cpu_cost}", r.end_cost);
-    assert_close(&state(&s), &cpu_state, 1e-7, "the warm solve's model");
+    for d in devices() {
+        let name = runtime(&d);
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let (cpu_cost, cpu_state) = cpu(&s);
+        let mut session = LmSession::new(SparseFaer::<f64>::from_options(&options(Some(&d), true)));
+        let r = session.solve(&mut s, &cfg).unwrap();
+        assert!(session.solver().plan().unwrap().gpu_assembly);
+        assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}: {} against the CPU's {cpu_cost}", r.end_cost);
+        assert_close(&state(&s), &cpu_state, 1e-7, &format!("{name}: the solved model"));
+        // other data: an observation, a camera's rotation, a point
+        s.observations[5].xy.x += 3.0;
+        s.cameras[1].ea.value.z += 0.02;
+        s.points[7].pos.value.y -= 0.05;
+        let (cpu_cost, cpu_state) = cpu(&s);
+        let r = session.solve(&mut s, &cfg).unwrap();
+        assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}: {} against the CPU's {cpu_cost}", r.end_cost);
+        assert_close(&state(&s), &cpu_state, 1e-7, &format!("{name}: the warm solve's model"));
+    }
 }
 
 type Seen = std::sync::Arc<std::sync::Mutex<Vec<(bool, Vec<f64>)>>>;
@@ -408,7 +437,7 @@ impl arael::simple_lm::LambdaDriver<f64> for Probe {
 #[test]
 fn the_device_solve_hands_out_vectors_when_asked() {
     use arael::simple_lm::{LmConfig, LmIter, SparseFaer};
-    let run = |gpu: bool, asked: bool| {
+    let run = |gpu: Option<&GpuDevice>, asked: bool| {
         let (cameras, points, observations) = consistent_scene::<f64>();
         let mut s = Scene { cameras, points, observations };
         let mut x = Vec::new();
@@ -431,25 +460,28 @@ fn the_device_solve_hands_out_vectors_when_asked() {
         let driven = driven.lock().unwrap().clone();
         (x.len(), r, seen, driven)
     };
-    let (n, cpu, seen, driven) = run(false, false);
+    let (n, cpu, seen, driven) = run(None, false);
     assert!(seen.iter().all(|(_, p)| p.len() == n));
     assert!(driven.iter().skip(1).all(|d| d.0 == n && d.1 == n && d.2 == n && d.3.is_none()));
-    for asked in [false, true] {
-        let (_, r, seen, driven) = run(true, asked);
-        assert!(r.accepted_iterations > 2);
-        assert!((r.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost);
-        let want = if asked { n } else { 0 };
-        assert!(seen.iter().all(|(_, p)| p.len() == want), "asked {asked}");
-        assert!(driven.iter().all(|d| d.0 == want && d.1 == want));
-        for &(_, _, delta, predicted, reduction) in driven.iter().skip(1) {
-            assert_eq!(delta, want);
-            assert_eq!(predicted, Some(reduction));
-            assert!(reduction > 0.0);
-        }
-        if asked {
-            // the last accepted step's parameters are the result
-            let last = seen.iter().rev().find(|(a, _)| *a).unwrap();
-            assert_close(&last.1, &r.x, 0.0, "the observer's last parameters");
+    for d in devices() {
+        let name = runtime(&d);
+        for asked in [false, true] {
+            let (_, r, seen, driven) = run(Some(&d), asked);
+            assert!(r.accepted_iterations > 2);
+            assert!((r.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost, "{name}");
+            let want = if asked { n } else { 0 };
+            assert!(seen.iter().all(|(_, p)| p.len() == want), "{name}: asked {asked}");
+            assert!(driven.iter().all(|d| d.0 == want && d.1 == want), "{name}");
+            for &(_, _, delta, predicted, reduction) in driven.iter().skip(1) {
+                assert_eq!(delta, want);
+                assert_eq!(predicted, Some(reduction));
+                assert!(reduction > 0.0);
+            }
+            if asked {
+                // the last accepted step's parameters are the result
+                let last = seen.iter().rev().find(|(a, _)| *a).unwrap();
+                assert_close(&last.1, &r.x, 0.0, &format!("{name}: the observer's last parameters"));
+            }
         }
     }
 }
@@ -477,17 +509,19 @@ fn the_device_predicted_reduction_is_the_host_formula() {
             Some(lambda * 10.0)
         }
     }
-    let (cameras, points, observations) = consistent_scene::<f64>();
-    let mut s = Scene { cameras, points, observations };
-    let mut x = Vec::new();
-    s.serialize(&mut x);
-    let pairs = Check(Default::default());
-    let cfg = LmConfig::<f64> { max_iters: 10, ..Default::default() }.with_driver(pairs.clone()).with_device_driver_vectors(true);
-    arael::simple_lm::lm_solve(&x, &mut SparseFaer::<f64>::from_options(&options(true, true)), &mut s, &cfg).unwrap();
-    let pairs = pairs.0.lock().unwrap();
-    assert!(pairs.len() > 2);
-    for &(device, host) in pairs.iter() {
-        assert!((device - host).abs() <= 1e-12 * host.abs(), "{device} against {host}");
+    for d in devices() {
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let pairs = Check(Default::default());
+        let cfg = LmConfig::<f64> { max_iters: 10, ..Default::default() }.with_driver(pairs.clone()).with_device_driver_vectors(true);
+        arael::simple_lm::lm_solve(&x, &mut SparseFaer::<f64>::from_options(&options(Some(&d), true)), &mut s, &cfg).unwrap();
+        let pairs = pairs.0.lock().unwrap();
+        assert!(pairs.len() > 2);
+        for &(device, host) in pairs.iter() {
+            assert!((device - host).abs() <= 1e-12 * host.abs(), "{}: {device} against {host}", runtime(&d));
+        }
     }
 }
 
@@ -496,21 +530,23 @@ fn the_device_predicted_reduction_is_the_host_formula() {
 #[test]
 fn the_device_gradient_test_stops_where_the_host_one_does() {
     use arael::simple_lm::{LmConfig, LmStatus, SparseFaer};
-    let run = |assembly: bool| {
+    let run = |d: &GpuDevice, assembly: bool| {
         let (cameras, points, observations) = consistent_scene::<f64>();
         let mut s = Scene { cameras, points, observations };
         let mut x = Vec::new();
         s.serialize(&mut x);
         let cfg = LmConfig::<f64> { max_iters: 100, gradient_tolerance: Some(1e-3), abs_precision: 0.0, rel_precision: 0.0, ..Default::default() };
-        let mut solver = SparseFaer::<f64>::from_options(&options(true, assembly));
+        let mut solver = SparseFaer::<f64>::from_options(&options(Some(d), assembly));
         let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
         assert_eq!(solver.plan().unwrap().gpu_assembly, assembly);
         (r.status, r.iterations, r.accepted_iterations)
     };
-    let host = run(false);
-    assert_eq!(host.0, LmStatus::GradientTolerance);
-    assert!(host.2 > 2);
-    assert_eq!(run(true), host);
+    for d in devices() {
+        let host = run(&d, false);
+        assert_eq!(host.0, LmStatus::GradientTolerance);
+        assert!(host.2 > 2);
+        assert_eq!(run(&d, true), host, "{}", runtime(&d));
+    }
 }
 
 /// A slider pulled to 1 and, while the slider is below 0.5, a follower
@@ -557,7 +593,7 @@ pub struct Switch {
 #[test]
 fn a_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
     use arael::simple_lm::{DiagonalFault, LmConfig, SolveFailureKind, SparseFaer};
-    let run = |gpu: bool| {
+    let run = |gpu: Option<&GpuDevice>| {
         let mut sliders = refs::Vec::new();
         for _ in 0..2 {
             sliders.push(Slider { s: Param::new(vect2::new(0.0, 0.0)), hb: SelfBlock::new() });
@@ -576,28 +612,32 @@ fn a_bad_diagonal_on_the_device_ends_the_solve_as_on_the_host() {
         s.serialize(&mut x);
         let mut solver = SparseFaer::<f64>::from_options(&options(gpu, true));
         let e = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &LmConfig::<f64>::default()).unwrap_err();
-        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu);
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
         let p = e.partial.expect("a partial state");
         (e.kind, p.iterations, p.accepted_iterations, p.x)
     };
-    let host = run(false);
+    let host = run(None);
     assert!(matches!(host.0, SolveFailureKind::DegenerateDiagonal { param: 4, fault: DiagonalFault::Zero }), "{:?}", host.0);
     assert_eq!((host.1, host.2), (1, 1));
-    let device = run(true);
-    assert_eq!(format!("{:?}", device.0), format!("{:?}", host.0));
-    assert_eq!((device.1, device.2), (host.1, host.2));
-    assert_close(&device.3, &host.3, 1e-12, "the partial state");
+    for d in devices() {
+        let name = runtime(&d);
+        let device = run(Some(&d));
+        assert_eq!(format!("{:?}", device.0), format!("{:?}", host.0), "{name}");
+        assert_eq!((device.1, device.2), (host.1, host.2), "{name}");
+        assert_close(&device.3, &host.3, 1e-12, &format!("{name}: the partial state"));
+    }
 }
 
 /// `GpuDevice::shared` hands every caller the same device state: a later
 /// call finds the buffers a solve through an earlier one left, a separately
 /// created device has none.
+#[cfg(feature = "gpu-cuda")]
 #[test]
 fn a_shared_device_is_one_state_per_process() {
-    use arael::simple_lm::{GpuBackend, GpuDevice, LmConfig, SparseFaer};
+    use arael::simple_lm::{GpuBackend, LmConfig, SparseFaer};
     let (cameras, points, observations) = consistent_scene::<f64>();
     let mut s = Scene { cameras, points, observations };
-    let opts = options(true, true).with_gpu(Some(GpuDevice::shared(GpuBackend::Cuda, 0)));
+    let opts = options(Some(&GpuDevice::shared(GpuBackend::Cuda, 0)), true);
     s.solve_with(&mut SparseFaer::<f64>::from_options(&opts), &LmConfig::<f64>::default()).unwrap();
     assert!(GpuDevice::shared(GpuBackend::Cuda, 0).reserved_bytes() > 0);
     assert_eq!(GpuDevice::cuda(0).reserved_bytes(), 0);
@@ -610,20 +650,77 @@ fn a_shared_device_is_one_state_per_process() {
 #[test]
 fn the_first_linearization_is_assembled_on_the_device() {
     use arael::simple_lm::{LmConfig, SparseFaer};
-    let lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let sink = lines.clone();
-    arael::log::set_sink(move |_, m| sink.lock().unwrap().push(m.to_string()));
-    let run = |gpu: bool, verbose: bool| {
+    let run = |gpu: Option<&GpuDevice>, verbose: bool| {
         let (cameras, points, observations) = consistent_scene::<f64>();
         let mut s = Scene { cameras, points, observations };
         let cfg = LmConfig::<f64> { max_iters: 50, verbose, ..Default::default() };
         s.solve_with(&mut SparseFaer::<f64>::from_options(&options(gpu, true)), &cfg).unwrap()
     };
-    let device = run(true, true);
-    arael::log::reset_sink();
-    let cpu = run(false, false);
-    let lines = lines.lock().unwrap();
-    assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{lines:#?}");
-    assert!((device.start_cost - cpu.start_cost).abs() <= 1e-12 * cpu.start_cost);
-    assert!((device.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost);
+    let cpu = run(None, false);
+    for d in devices() {
+        let lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let sink = lines.clone();
+        arael::log::set_sink(move |_, m| sink.lock().unwrap().push(m.to_string()));
+        let device = run(Some(&d), true);
+        arael::log::reset_sink();
+        let lines = lines.lock().unwrap();
+        let name = runtime(&d);
+        assert!(lines.iter().any(|l| l.starts_with("gpu:") && l.contains("its first assembly")), "{name}: {lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with(&format!("gpu schur ({name}"))), "{name}: {lines:#?}");
+        assert!((device.start_cost - cpu.start_cost).abs() <= 1e-12 * cpu.start_cost, "{name}");
+        assert!((device.end_cost - cpu.end_cost).abs() <= 1e-9 * cpu.end_cost, "{name}");
+    }
+}
+
+/// A CUDA device of arael's own runtime.
+#[cfg(feature = "gpu-native-cuda")]
+fn native() -> std::sync::Arc<arael::__gpu::native::cuda::CudaDevice> {
+    std::sync::Arc::new(arael::__gpu::native::cuda::CudaDevice::new(0).unwrap())
+}
+
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn the_f64_bundle_adjustment_assembles_natively_as_on_the_cpu() {
+    let (cameras, points, observations) = scene::<f64>();
+    let mut s = Scene { cameras, points, observations };
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x = perturbed(&x);
+    let chk = arael::__gpu::native_device_check(&mut s, &x, &native());
+    assert!(chk.values > 0);
+    assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-12 * chk.cpu_cost, "{chk:?}");
+    assert!(chk.grad_err < 1e-12 && chk.hess_err < 1e-12, "{chk:?}");
+}
+
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn the_f32_bundle_adjustment_assembles_natively_as_on_the_cpu() {
+    let (cameras, points, observations) = scene::<f32>();
+    let mut s = SceneF { cameras, points, observations };
+    assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x = perturbed(&x);
+    let chk = arael::__gpu::native_device_check(&mut s, &x, &native());
+    // the CPU sums its f32 products in f32, the device in f64
+    assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{chk:?}");
+    assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{chk:?}");
+}
+
+/// A solver with its GPU state moves to another thread, as a CPU one does,
+/// and solves there.
+#[test]
+fn a_gpu_solver_moves_between_threads() {
+    use arael::simple_lm::{LmConfig, SparseFaer};
+    fn send<S: Send>(_: &S) {}
+    for d in devices() {
+        let mut solver = SparseFaer::<f64>::from_options(&options(Some(&d), true));
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        s.solve_with(&mut solver, &LmConfig::<f64>::default()).unwrap();
+        send(&solver);
+        let cost = std::thread::spawn(move || s.solve_with(&mut solver, &LmConfig::<f64>::default()).unwrap().end_cost).join().unwrap();
+        assert!(cost.is_finite(), "{}", runtime(&d));
+    }
 }

@@ -45,6 +45,11 @@ pub(crate) struct DevConstraint {
     pub rots: Vec<(usize, String, usize)>,
     /// The two kernels, named by `cid`.
     pub kernels: TokenStream2,
+    /// The same two kernels in C++ for arael's own GPU runtime: they read
+    /// every column through the layout table by the constraint's own
+    /// names (`C<cid>_SA`, `C<cid>_EVA`, `C<cid>_ROT<r>`, ...), which the
+    /// root aliases to its numbering ([`device_root`]).
+    pub cpp: String,
     pub cid: usize,
 }
 
@@ -285,7 +290,109 @@ pub(crate) fn device_constraint(
         lets(&cost_syms)
     );
     let kernels: TokenStream2 = format!("{gh_kernel}{cost_kernel}").parse().map_err(|e| format!("the generated device kernels do not parse: {e}"))?;
-    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, kernels, cid })
+    let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &rots, (&gh_syms, &cost_syms), gh, guard, cost)?;
+    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, kernels, cpp, cid })
+}
+
+/// The kernels of [`device_constraint`] in C++ for arael's own GPU runtime
+/// (`arael-gpu/kernels/assembly.cpp` is compiled in front of them): every
+/// column is read through the layout table `L` at the start of the model's
+/// block `B`, by the constraint's own column names.
+#[allow(clippy::too_many_arguments)]
+fn cpp_kernels(
+    cid: usize,
+    ft: &str,
+    (na, nb): (usize, usize),
+    rows: usize,
+    leaf: &std::collections::BTreeMap<String, Leaf>,
+    names: &std::collections::BTreeMap<String, String>,
+    rots: &[(usize, String, usize)],
+    (gh_syms, cost_syms): (&BTreeSet<String>, &BTreeSet<String>),
+    gh: (&[Intermediate], &[E]),
+    guard: Option<(&[Intermediate], &E)>,
+    cost: (&[Intermediate], &[E]),
+) -> Result<String, String> {
+    if na == 0 || nb == 0 {
+        return Err("a device constraint's entities have parameters".into());
+    }
+    // a leaf's type and the read that gives it
+    let read = |l: &Leaf| -> (&'static str, String) {
+        match *l {
+            Leaf::Param(0, p) => ("F", format!("COL(B, F, C{cid}_EVA)[sa * {na}u + {p}u]")),
+            Leaf::Param(_, p) => ("F", format!("COL(B, F, C{cid}_EVB)[sb * {nb}u + {p}u]")),
+            Leaf::Rot(r, kind, off) => {
+                let s = if rots[r].0 == 0 { "sa" } else { "sb" };
+                match kind {
+                    0 => ("F", format!("COL(B, F, C{cid}_ROT{r})[{s} * 9u + {off}u]")),
+                    1 => ("double", format!("COL(B, double, C{cid}_ROTW{r})[{s} * 9u + {off}u]")),
+                    _ => ("F", format!("COL(B, F, C{cid}_DROT{r})[{s} * 27u + {off}u]")),
+                }
+            }
+            Leaf::Data(j) => ("F", format!("COL(B, F, C{cid}_D{j})[o]")),
+        }
+    };
+    let lets = |syms: &BTreeSet<String>| -> String {
+        syms.iter()
+            .map(|s| {
+                let (t, e) = read(&leaf[s]);
+                format!("const {t} {} = {e};\n", names[s])
+            })
+            .collect()
+    };
+    let map = |s: &str| -> Option<String> { names.get(s).cloned() };
+    let stmts = |inters: &[Intermediate]| -> Result<String, String> {
+        inters.iter().map(|i| i.to_cpp_with(ft, &map).map_err(|e| e.0)).collect()
+    };
+    let expr = |e: &E| -> Result<String, String> { e.to_cpp_with(ft, &map).map_err(|e| e.0) };
+    let prologue = format!(
+        "GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\ndouble c = 0.0;\nif (o < n) {{\n\
+         const u32 sa = COL(B, u32, C{cid}_SA)[o];\nconst u32 sb = COL(B, u32, C{cid}_SB)[o];\n"
+    );
+    // the linearization: rows, cost, and the three writes per row
+    let n_partials = na + nb;
+    let mut body = stmts(gh.0)?;
+    for ri in 0..rows {
+        let r = expr(&gh.1[ri * (1 + n_partials)])?;
+        body.push_str(&format!("const F r{ri} = {r};\nc += (double)r{ri} * (double)r{ri};\n"));
+        for p in 0..n_partials {
+            let d = expr(&gh.1[ri * (1 + n_partials) + 1 + p])?;
+            if p < na {
+                body.push_str(&format!("dra[{p}] = {d};\n"));
+            } else {
+                body.push_str(&format!("drb[{}] = {d};\n", p - na));
+            }
+        }
+        body.push_str(&format!(
+            "self_rank1<{na}>(h, g, idx_a, sa * {na}u, ta[0], ta[1], ta[2], 2.0, r{ri}, dra);\n\
+             self_rank1<{nb}>(h, g, idx_b, sb * {nb}u, tb[0], tb[1], tb[2], 2.0, r{ri}, drb);\n\
+             cross_rank1<{na}, {nb}>(h, idx_a, sa * {na}u, ta[2], idx_b, sb * {nb}u, tb[2], tx[0], tx[1], tx[2], 2.0, dra, drb);\n"
+        ));
+    }
+    let arrays = format!("F dra[{na}];\nF drb[{nb}];\n");
+    let gh_code = match guard {
+        Some((pre, q)) => format!("{}if ({} >= 0.0) {{\n{arrays}{body}}}\n", stmts(pre)?, expr(q)?),
+        None => format!("{arrays}{body}"),
+    };
+    let gh_kernel = format!(
+        "KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL const u8* RESTRICT B, GLOBAL double* h, GLOBAL double* g, GLOBAL double* cost, u32 n) {{\n\
+         {prologue}const u32 sx = COL(B, u32, C{cid}_SX)[o];\n\
+         GLOBAL const u32* idx_a = COL(B, u32, C{cid}_IDXA);\nGLOBAL const u32* idx_b = COL(B, u32, C{cid}_IDXB);\n\
+         GLOBAL const u32* ta = COL(B, u32, C{cid}_TILEA) + sa * 3u;\nGLOBAL const u32* tb = COL(B, u32, C{cid}_TILEB) + sb * 3u;\n\
+         GLOBAL const u32* tx = COL(B, u32, C{cid}_TILEX) + sx * 3u;\n{}{gh_code}}}\ncost_add(cost, c);\n}}\n",
+        lets(gh_syms)
+    );
+    // the cost: the rows alone
+    let mut cbody = stmts(cost.0)?;
+    for (ri, r) in cost.1.iter().enumerate() {
+        let r = expr(r)?;
+        cbody.push_str(&format!("const F r{ri} = {r};\nc += (double)r{ri} * (double)r{ri};\n"));
+    }
+    let cost_kernel = format!(
+        "KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL const u8* RESTRICT B, GLOBAL double* cost, u32 n) {{\n\
+         {prologue}{}{cbody}}}\ncost_add(cost, c);\n}}\n",
+        lets(cost_syms)
+    );
+    Ok(format!("{gh_kernel}{cost_kernel}"))
 }
 
 /// The walk of one cross group, as the root's emission hands it over.
@@ -360,6 +467,26 @@ pub(crate) fn device_root(
         quote! { (3usize, #nd) }
     }).collect();
     let kernels: Vec<&TokenStream2> = constraints.iter().map(|c| &c.kernels).collect();
+    // the C++ kernels, each constraint's column names aliased to the
+    // root's numbering, which the host's layout table follows
+    let mut cpp = String::new();
+    for (c, id) in constraints.iter().zip(&ids) {
+        let k = c.cid;
+        let mut alias = |local: &str, root: String| cpp.push_str(&format!("#define ARAEL_COL_C{k}_{local} ARAEL_COL_{root}\n"));
+        alias("EVA", format!("E{}_EV", id.ea));
+        alias("EVB", format!("E{}_EV", id.eb));
+        alias("IDXA", format!("E{}_IDX", id.ea));
+        alias("IDXB", format!("E{}_IDX", id.eb));
+        alias("TILEA", format!("E{}_TILE", id.ea));
+        alias("TILEB", format!("E{}_TILE", id.eb));
+        alias("TILEX", format!("X{}_TILE", id.x));
+        for (lr, &r) in id.rots.iter().enumerate() {
+            alias(&format!("ROT{lr}"), format!("R{r}_ROT"));
+            alias(&format!("ROTW{lr}"), format!("R{r}_ROTW"));
+            alias(&format!("DROT{lr}"), format!("R{r}_DROT"));
+        }
+        cpp.push_str(&c.cpp);
+    }
     // tables: one store built for the model as it is, every slot in it
     let table_entity: Vec<TokenStream2> = entities.iter().map(|(t, hb, _)| {
         let arr = array_ident(t, hb);
@@ -515,6 +642,10 @@ pub(crate) fn device_root(
 
                 fn device_launcher(&self) -> ::arael::__gpu::DeviceLauncher {
                     #module::__device_launch
+                }
+
+                fn device_cpp(&self) -> &'static str {
+                    #cpp
                 }
 
                 fn device_restore(&mut self, refs: &mut dyn FnMut(u32) -> Option<[f64; 9]>) {

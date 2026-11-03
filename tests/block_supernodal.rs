@@ -645,8 +645,8 @@ fn gpu_reduced_route_on_an_f32_solver() {
     reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::cuda(0));
 }
 
-/// As `gpu_reduced_route_on_an_f32_solver`, the factor on arael's own CUDA
-/// runtime (feature `gpu-native-cuda`); the reduction is formed on the CPU.
+/// As `gpu_reduced_route_on_an_f32_solver`, on arael's own CUDA runtime
+/// (feature `gpu-native-cuda`).
 #[cfg(feature = "gpu-native-cuda")]
 #[test]
 fn native_gpu_reduced_route_on_an_f32_solver() {
@@ -714,10 +714,23 @@ fn gpu_device_clones_share_their_buffers() {
 #[cfg(feature = "gpu-cuda")]
 #[test]
 fn gpu_option_leaves_conjugate_gradients_on_the_cpu() {
+    conjugate_gradients_stay_on_the_cpu_with(|| arael::simple_lm::GpuDevice::cuda(0));
+}
+
+/// As `gpu_option_leaves_conjugate_gradients_on_the_cpu`, on arael's own
+/// CUDA runtime (feature `gpu-native-cuda`).
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn native_gpu_option_leaves_conjugate_gradients_on_the_cpu() {
+    conjugate_gradients_stay_on_the_cpu_with(|| arael::simple_lm::GpuDevice::native_cuda(0));
+}
+
+#[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]
+fn conjugate_gradients_stay_on_the_cpu_with(device: fn() -> arael::simple_lm::GpuDevice) {
     let mut cg = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
         .with_policy(SchurPolicy::Force)
         .with_iterative_schur(Default::default())
-        .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0))));
+        .with_gpu(Some(device())));
     let (_, c) = solve(&mut cg, 2);
     let plan = cg.plan().expect("a plan");
     assert!(plan.reduced && !plan.gpu_factor && plan.cg_iterations.is_some());
