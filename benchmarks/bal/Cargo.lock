@@ -164,6 +164,7 @@ dependencies = [
  "cubecl-runtime",
  "cudarc",
  "etcetera",
+ "libloading 0.8.9",
 ]
 
 [[package]]

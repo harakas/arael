@@ -94,12 +94,11 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
 }
 
 /// ARAEL_GPU puts the supernodal block route's factorization and solve on a
-/// GPU: `cuda`, `hip`, `native-cuda` (arael's own CUDA runtime), or any with
-/// a device index
-/// (`cuda:1`). With ARAEL_F32_FACTOR the factor is f32 there, refined the
+/// GPU: `cuda`, `hip`, `native-cuda` and `native-hip` (arael's own runtime
+/// on CUDA and HIP), or any with a device index (`cuda:1`). With ARAEL_F32_FACTOR the factor is f32 there, refined the
 /// same way. ARAEL_GPU_WIDE=df32 keeps the native runtime's wide values in
 /// df32 (`GpuWide::Df32`), `f64` or unset in f64. The binary needs arael's
-/// `gpu-cuda`, `gpu-hip` or `gpu-native-cuda` feature. Every solver of the
+/// `gpu-cuda`, `gpu-hip`, `gpu-native-cuda` or `gpu-native-hip` feature. Every solver of the
 /// process gets a clone of one device, so they share its stream and buffers
 /// as repeated solves in an application would.
 pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
@@ -108,12 +107,13 @@ pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
         .get_or_init(|| {
             let v = std::env::var("ARAEL_GPU").ok()?;
             let (name, index) = v.split_once(':').unwrap_or((v.as_str(), "0"));
-            let expected = "expected cuda[:index], hip[:index] or native-cuda[:index]";
+            let expected = "expected cuda[:index], hip[:index], native-cuda[:index] or native-hip[:index]";
             let index: usize = index.parse().unwrap_or_else(|_| panic!("ARAEL_GPU={}: {}", v, expected));
             let device = match name {
                 "cuda" => arael::simple_lm::GpuDevice::cuda(index),
                 "hip" => arael::simple_lm::GpuDevice::hip(index),
                 "native-cuda" => arael::simple_lm::GpuDevice::native_cuda(index),
+                "native-hip" => arael::simple_lm::GpuDevice::native_hip(index),
                 _ => panic!("ARAEL_GPU={}: {}", v, expected),
             };
             let wide = match std::env::var("ARAEL_GPU_WIDE").as_deref() {
