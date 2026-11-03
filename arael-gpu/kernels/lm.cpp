@@ -1,5 +1,5 @@
 // lm.cpp: the Levenberg-Marquardt loop's vector work on the device, launched
-// by arael-gpu/src/native/lm.rs (the passes of arael-gpu/src/lm.rs).
+// by arael-gpu/src/lm.rs.
 //
 // In W, the route's wide scalar (wide.h). Every kernel runs THREADS threads per block. The scalars slots
 // (S_*), the partials per block (LIN_PARTIALS, ATTEMPT_PARTIALS), NO_FAULT

@@ -63,15 +63,15 @@ pub const HEADER: usize = 32;
 #[derive(Clone, Copy, Debug)]
 pub struct GpuSupernodalParams {
     /// Supernodes narrower than this (scalar columns) are factored by the
-    /// one-cube small kernel; the others by the batched panel steps.
+    /// one-block small kernel; the others by the batched panel steps.
     pub small_q: u32,
     /// A descendant update of at least this many multiply-adds goes through
     /// the GEMM-core kernel; smaller ones through the tile kernel.
     pub big_pair_flops: f64,
-    /// Elements of a target tile per cube of the small-update kernel; a tile
+    /// Elements of a target tile per block of the small-update kernel; a tile
     /// with more is cut into chunks.
     pub elem_cap: usize,
-    /// Multiply-adds per cube of the solve's gather and GEMV kernels.
+    /// Multiply-adds per block of the solve's gather and GEMV kernels.
     pub solve_work: usize,
     /// Loads in flight per iteration of the backward dot products; `None`
     /// picks 8 for f64 and 4 for f32.

@@ -1,28 +1,27 @@
 //! [`Device`] on CUDA: the driver API and NVRTC through cudarc, both loaded
 //! at run time.
 
-use super::disk::DiskCache;
-use super::{Arch, Arg, Device, HEADER, Launch, MAX_ARGS, NativeError};
+use crate::disk::DiskCache;
+use crate::pool::{Pool, capacity};
+use crate::{Arch, Arg, Device, GpuError, HEADER, Launch, MAX_ARGS};
 use cudarc::driver::sys::{self, CUdevice_attribute, CUfunction_attribute};
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, result};
 use cudarc::nvrtc::{self, Ptx};
 use std::collections::HashMap;
-use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLockReadGuard};
+use std::sync::{Arc, Mutex};
 
 /// One CUDA device and a stream of its own.
 pub struct CudaDevice {
-    // The driver objects are released in `drop`, under the capture guard.
-    ctx: ManuallyDrop<Arc<CudaContext>>,
-    stream: ManuallyDrop<Arc<CudaStream>>,
+    ctx: Arc<CudaContext>,
+    stream: Arc<CudaStream>,
     arch: Arch,
     /// Compiled modules by their full source.
-    modules: ManuallyDrop<Mutex<HashMap<String, Arc<CudaModule>>>>,
+    modules: Mutex<HashMap<String, Arc<CudaModule>>>,
     /// A graph capture is open on the stream.
     capturing: AtomicBool,
-    /// Blocks allocated over the device's life.
-    allocations: AtomicUsize,
+    /// The device memory the blocks come from and go back to.
+    pool: Arc<Pool<CudaSlice<u8>>>,
 }
 
 impl core::fmt::Debug for CudaDevice {
@@ -31,69 +30,57 @@ impl core::fmt::Debug for CudaDevice {
     }
 }
 
-impl Drop for CudaDevice {
-    fn drop(&mut self) {
-        let _shared = capture_guard();
-        // SAFETY: each is dropped once, here, and not used after.
-        unsafe {
-            ManuallyDrop::drop(&mut self.modules);
-            ManuallyDrop::drop(&mut self.stream);
-            ManuallyDrop::drop(&mut self.ctx);
-        }
-    }
-}
-
-/// Device memory on a [`CudaDevice`].
+/// Device memory on a [`CudaDevice`], from its pool and back to it on drop.
 pub struct CudaBlock {
-    // Freed in `drop`, under the capture guard.
-    bytes: ManuallyDrop<CudaSlice<u8>>,
+    /// Some until the drop; its own size may exceed `len`.
+    mem: Option<CudaSlice<u8>>,
+    len: usize,
+    pool: Arc<Pool<CudaSlice<u8>>>,
 }
 
 impl CudaBlock {
     /// Its size in bytes.
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.len
     }
 
     /// Whether it holds no bytes.
     pub fn is_empty(&self) -> bool {
-        self.bytes.len() == 0
+        self.len == 0
+    }
+
+    fn mem(&self) -> &CudaSlice<u8> {
+        self.mem.as_ref().expect("a block's memory until its drop")
+    }
+
+    fn mem_mut(&mut self) -> &mut CudaSlice<u8> {
+        self.mem.as_mut().expect("a block's memory until its drop")
     }
 }
 
 impl Drop for CudaBlock {
     fn drop(&mut self) {
-        let _shared = capture_guard();
-        // SAFETY: dropped once, here, and not used after.
-        unsafe { ManuallyDrop::drop(&mut self.bytes) };
+        if let Some(mem) = self.mem.take() {
+            self.pool.give(mem.len(), mem);
+        }
     }
 }
 
-/// A compiled entry point on a [`CudaDevice`].
+/// A compiled entry point on a [`CudaDevice`]; holds its module.
 #[derive(Debug)]
 pub struct CudaKernel {
-    // Holds its module, unloaded in `drop` under the capture guard when this
-    // is the last holder.
-    function: ManuallyDrop<CudaFunction>,
-}
-
-impl Drop for CudaKernel {
-    fn drop(&mut self) {
-        let _shared = capture_guard();
-        // SAFETY: dropped once, here, and not used after.
-        unsafe { ManuallyDrop::drop(&mut self.function) };
-    }
+    function: CudaFunction,
 }
 
 impl CudaKernel {
     /// Local memory per thread, in bytes: per-thread arrays the compiler
     /// could not keep in registers, and spills.
-    pub fn local_bytes(&self) -> Result<usize, NativeError> {
+    pub fn local_bytes(&self) -> Result<usize, GpuError> {
         Ok(self.function.local_size_bytes().map_err(driver)? as usize)
     }
 
     /// Registers per thread.
-    pub fn registers(&self) -> Result<usize, NativeError> {
+    pub fn registers(&self) -> Result<usize, GpuError> {
         Ok(self.function.num_regs().map_err(driver)? as usize)
     }
 }
@@ -113,7 +100,6 @@ unsafe impl Send for CudaGraph {}
 
 impl Drop for CudaGraph {
     fn drop(&mut self) {
-        let _shared = capture_guard();
         if self.ctx.bind_to_thread().is_ok() {
             // SAFETY: the handle came from instantiate and is destroyed once.
             // An error here has nobody to go to: the graph is gone either way.
@@ -131,12 +117,11 @@ struct OpenCapture<'a> {
 }
 
 impl<'a> OpenCapture<'a> {
-    fn begin(dev: &'a CudaDevice) -> Result<Self, NativeError> {
+    fn begin(dev: &'a CudaDevice) -> Result<Self, GpuError> {
         if dev.capturing.swap(true, Ordering::AcqRel) {
-            return Err(NativeError::Capture("a capture is already open on this device".into()));
+            return Err(GpuError::Capture("a capture is already open on this device".into()));
         }
         let mut open = OpenCapture { dev, open: false };
-        let _shared = capture_guard();
         dev.ctx.bind_to_thread().map_err(driver)?;
         // Thread-local: the capture forbids unsafe calls on this thread only,
         // so other threads (and contexts) keep working while it is open.
@@ -148,9 +133,8 @@ impl<'a> OpenCapture<'a> {
     }
 
     /// Ends the capture; its graph, or null when nothing was recorded.
-    fn end(mut self) -> Result<RawGraph, NativeError> {
+    fn end(mut self) -> Result<RawGraph, GpuError> {
         self.open = false;
-        let _shared = capture_guard();
         self.dev.ctx.bind_to_thread().map_err(driver)?;
         // SAFETY: the capture was begun on this stream by `begin`.
         let graph = unsafe { result::stream::end_capture(self.dev.stream.cu_stream()) }.map_err(driver)?;
@@ -161,7 +145,6 @@ impl<'a> OpenCapture<'a> {
 impl Drop for OpenCapture<'_> {
     fn drop(&mut self) {
         if self.open {
-            let _shared = capture_guard();
             if self.dev.ctx.bind_to_thread().is_ok() {
                 // SAFETY: as in `end`; the partial graph is discarded.
                 if let Ok(graph) = unsafe { result::stream::end_capture(self.dev.stream.cu_stream()) } {
@@ -185,35 +168,21 @@ impl Drop for RawGraph {
     }
 }
 
-/// A shared hold of the crate's graph-capture lock ([`crate::CAPTURE`]),
-/// taken around every driver call CUDA refuses while another thread of the
-/// process captures a graph in global mode, as CubeCL's captures do (the
-/// refused call also invalidates that capture): allocations, frees, copies,
-/// waits, module loads, and around our own captures' opening, closing and
-/// instantiation and the replays. Launches into the device's own stream are
-/// allowed and do not take it. Never taken twice on one thread (a waiting
-/// writer would deadlock the second): a recording runs without it. Goes
-/// with CubeCL (NATIVE_GPU_PLAN.md, stage N4).
-fn capture_guard() -> RwLockReadGuard<'static, ()> {
-    crate::CAPTURE.read().unwrap_or_else(|e| e.into_inner())
-}
-
 // `launch` passes scalars in the low bytes of 8-byte slots.
 const _: () = assert!(cfg!(target_endian = "little"), "the CUDA runtime assumes a little-endian host");
 
-fn driver(e: impl core::fmt::Display) -> NativeError {
-    NativeError::Driver(e.to_string())
+fn driver(e: impl core::fmt::Display) -> GpuError {
+    GpuError::Driver(e.to_string())
 }
 
 impl CudaDevice {
-    /// Device `index`. [`NativeError::Unavailable`] when there is no such
+    /// Device `index`. [`GpuError::Unavailable`] when there is no such
     /// device or the CUDA driver is not installed.
-    pub fn new(index: usize) -> Result<Self, NativeError> {
-        let _shared = capture_guard();
+    pub fn new(index: usize) -> Result<Self, GpuError> {
         // cudarc loads the driver library on first use and panics if it is missing.
         let ctx = std::panic::catch_unwind(|| CudaContext::new(index))
-            .map_err(|_| NativeError::Unavailable("the CUDA driver library is not installed".into()))?
-            .map_err(|e| NativeError::Unavailable(format!("CUDA device {index}: {e}")))?;
+            .map_err(|_| GpuError::Unavailable("the CUDA driver library is not installed".into()))?
+            .map_err(|e| GpuError::Unavailable(format!("CUDA device {index}: {e}")))?;
         // Streams are ordered by our own events (GPU.md 7.6), not by events
         // cudarc records on every buffer use.
         unsafe { ctx.disable_event_tracking() };
@@ -229,26 +198,20 @@ impl CudaDevice {
             has_f64: true,
         };
         Ok(CudaDevice {
-            ctx: ManuallyDrop::new(ctx),
-            stream: ManuallyDrop::new(stream),
+            ctx,
+            stream,
             arch,
-            modules: ManuallyDrop::new(Mutex::new(HashMap::new())),
+            modules: Mutex::new(HashMap::new()),
             capturing: AtomicBool::new(false),
-            allocations: AtomicUsize::new(0),
+            pool: Arc::new(Pool::new()),
         })
     }
 
-    /// Blocks allocated over the device's life: constant once a solver's
-    /// buffers exist, which is what the preallocation rule checks.
-    pub fn allocations(&self) -> usize {
-        self.allocations.load(Ordering::Relaxed)
-    }
-
-    /// [`NativeError::Capture`] while a capture is open: `op` would be
+    /// [`GpuError::Capture`] while a capture is open: `op` would be
     /// recorded into it or would break it.
-    fn not_capturing(&self, op: &str) -> Result<(), NativeError> {
+    fn not_capturing(&self, op: &str) -> Result<(), GpuError> {
         if self.capturing.load(Ordering::Acquire) {
-            return Err(NativeError::Capture(format!("{op} while a capture is open on the device")));
+            return Err(GpuError::Capture(format!("{op} while a capture is open on the device")));
         }
         Ok(())
     }
@@ -257,12 +220,12 @@ impl CudaDevice {
     /// else from the disk cache when an earlier process compiled it, else
     /// compiled (`entry` names it in the compiler's messages). A cached
     /// entry the driver does not load is compiled again and written over.
-    fn module(&self, entry: &str, source: String) -> Result<Arc<CudaModule>, NativeError> {
+    fn module(&self, entry: &str, source: String) -> Result<Arc<CudaModule>, GpuError> {
         self.module_in(entry, source, DiskCache::open("cuda").as_ref())
     }
 
     /// [`module`](Self::module) with the disk cache `disk`.
-    fn module_in(&self, entry: &str, source: String, disk: Option<&DiskCache>) -> Result<Arc<CudaModule>, NativeError> {
+    fn module_in(&self, entry: &str, source: String, disk: Option<&DiskCache>) -> Result<Arc<CudaModule>, GpuError> {
         if let Some(module) = self.modules.lock().unwrap().get(&source) {
             return Ok(module.clone());
         }
@@ -284,13 +247,12 @@ impl CudaDevice {
     }
 
     /// What a cubin of `source` compiled with `opts` depends on.
-    fn cache_key(&self, opts: &[String], source: &str) -> Result<String, NativeError> {
+    fn cache_key(&self, opts: &[String], source: &str) -> Result<String, GpuError> {
         Ok(format!("{}\nnvrtc {}\n{source}", opts.join(" "), nvrtc_version()?))
     }
 
     /// A cubin loaded as a module.
-    fn load(&self, cubin: Vec<u8>) -> Result<Arc<CudaModule>, NativeError> {
-        let _shared = capture_guard();
+    fn load(&self, cubin: Vec<u8>) -> Result<Arc<CudaModule>, GpuError> {
         self.ctx.load_module(Ptx::from_binary(cubin)).map_err(driver)
     }
 
@@ -306,10 +268,10 @@ impl CudaDevice {
 }
 
 /// NVRTC's version, `major.minor`.
-fn nvrtc_version() -> Result<String, NativeError> {
+fn nvrtc_version() -> Result<String, GpuError> {
     let (mut major, mut minor) = (0, 0);
     // SAFETY: two out-parameters.
-    unsafe { nvrtc::sys::nvrtcVersion(&mut major, &mut minor) }.result().map_err(|e| NativeError::Unavailable(format!("NVRTC: {e:?}")))?;
+    unsafe { nvrtc::sys::nvrtcVersion(&mut major, &mut minor) }.result().map_err(|e| GpuError::Unavailable(format!("NVRTC: {e:?}")))?;
     Ok(format!("{major}.{minor}"))
 }
 
@@ -323,11 +285,11 @@ pub fn compiles() -> usize {
 }
 
 /// `source` compiled with `opts` by NVRTC to a cubin.
-fn compile_cubin(entry: &str, source: &str, opts: &[String]) -> Result<Vec<u8>, NativeError> {
+fn compile_cubin(entry: &str, source: &str, opts: &[String]) -> Result<Vec<u8>, GpuError> {
     use nvrtc::{result, sys};
     COMPILES.fetch_add(1, Ordering::Relaxed);
-    let failed = |what: &str, e: nvrtc::result::NvrtcError| NativeError::Compile { entry: entry.to_string(), log: format!("{what}: {e:?}") };
-    let src = std::ffi::CString::new(source).map_err(|_| NativeError::Compile { entry: entry.to_string(), log: "a NUL byte in the source".into() })?;
+    let failed = |what: &str, e: nvrtc::result::NvrtcError| GpuError::Compile { entry: entry.to_string(), log: format!("{what}: {e:?}") };
+    let src = std::ffi::CString::new(source).map_err(|_| GpuError::Compile { entry: entry.to_string(), log: "a NUL byte in the source".into() })?;
     let name = std::ffi::CString::new(format!("{entry}.cu")).expect("an entry name without NUL");
     let prog = result::create_program(&src, Some(&name)).map_err(|e| failed("create the program", e))?;
     /// Destroys the program on every way out.
@@ -345,7 +307,7 @@ fn compile_cubin(entry: &str, source: &str, opts: &[String]) -> Result<Vec<u8>, 
         let log = unsafe { result::get_program_log(prog.0) }.map_err(|e| failed("read the compile log", e))?;
         // SAFETY: NVRTC's log is NUL-terminated.
         let log = unsafe { std::ffi::CStr::from_ptr(log.as_ptr()) }.to_string_lossy().into_owned();
-        return Err(NativeError::Compile { entry: entry.to_string(), log: format!("{e:?}\n{log}") });
+        return Err(GpuError::Compile { entry: entry.to_string(), log: format!("{e:?}\n{log}") });
     }
     let mut size = 0usize;
     // SAFETY: a compiled program and an out-parameter.
@@ -360,49 +322,69 @@ impl Device for CudaDevice {
     type Block = CudaBlock;
     type Kernel = CudaKernel;
     type Graph = CudaGraph;
+    const RUNTIME: &'static str = "cuda";
 
     fn arch(&self) -> &Arch {
         &self.arch
     }
 
-    fn alloc(&self, bytes: usize) -> Result<CudaBlock, NativeError> {
-        self.not_capturing("an allocation")?;
-        let _shared = capture_guard();
-        let bytes = ManuallyDrop::new(self.stream.alloc_zeros::<u8>(bytes).map_err(driver)?);
-        self.allocations.fetch_add(1, Ordering::Relaxed);
-        Ok(CudaBlock { bytes })
+    fn allocations(&self) -> usize {
+        self.pool.allocations()
     }
 
-    fn write(&self, dst: &mut CudaBlock, offset: usize, src: &[u8]) -> Result<(), NativeError> {
+    fn reserved_bytes(&self) -> usize {
+        self.pool.reserved_bytes()
+    }
+
+    fn alloc(&self, bytes: usize) -> Result<CudaBlock, GpuError> {
+        self.not_capturing("an allocation")?;
+        let mem = match self.pool.take(bytes) {
+            Some((_, mem)) => mem,
+            None => {
+                let cap = capacity(bytes);
+                // SAFETY: u8 has no invalid values; the bytes asked for are zeroed below.
+                let mem = unsafe { self.stream.alloc::<u8>(cap) }.map_err(driver)?;
+                self.pool.made(cap);
+                mem
+            }
+        };
+        // back to the pool if the zeroing fails
+        let mut block = CudaBlock { mem: Some(mem), len: bytes, pool: self.pool.clone() };
+        if bytes > 0 {
+            self.stream.memset_zeros(&mut block.mem_mut().slice_mut(0..bytes)).map_err(driver)?;
+        }
+        Ok(block)
+    }
+
+    fn write(&self, dst: &mut CudaBlock, offset: usize, src: &[u8]) -> Result<(), GpuError> {
         self.not_capturing("a write")?;
-        let mut view = dst.bytes.slice_mut(offset..offset + src.len());
-        let _shared = capture_guard();
+        assert!(offset + src.len() <= dst.len, "a write past the block's {} bytes", dst.len);
+        let mut view = dst.mem_mut().slice_mut(offset..offset + src.len());
         self.stream.memcpy_htod(src, &mut view).map_err(driver)
     }
 
-    fn read(&self, src: &CudaBlock, offset: usize, dst: &mut [u8]) -> Result<(), NativeError> {
+    fn read(&self, src: &CudaBlock, offset: usize, dst: &mut [u8]) -> Result<(), GpuError> {
         self.not_capturing("a read")?;
-        let view = src.bytes.slice(offset..offset + dst.len());
-        let _shared = capture_guard();
+        assert!(offset + dst.len() <= src.len, "a read past the block's {} bytes", src.len);
+        let view = src.mem().slice(offset..offset + dst.len());
         self.stream.memcpy_dtoh(&view, dst).map_err(driver)?;
         self.stream.synchronize().map_err(driver)
     }
 
-    fn read_many(&self, reads: &mut [(&CudaBlock, usize, &mut [u8])]) -> Result<(), NativeError> {
+    fn read_many(&self, reads: &mut [(&CudaBlock, usize, &mut [u8])]) -> Result<(), GpuError> {
         self.not_capturing("a read")?;
-        let _shared = capture_guard();
         for (src, offset, dst) in reads.iter_mut() {
-            let view = src.bytes.slice(*offset..*offset + dst.len());
+            assert!(*offset + dst.len() <= src.len, "a read past the block's {} bytes", src.len);
+            let view = src.mem().slice(*offset..*offset + dst.len());
             self.stream.memcpy_dtoh(&view, &mut **dst).map_err(driver)?;
         }
         self.stream.synchronize().map_err(driver)
     }
 
-    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<CudaKernel, NativeError> {
+    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<CudaKernel, GpuError> {
         self.not_capturing("a compile")?;
         let full = format!("{}{defines}\n{HEADER}\n{source}", self.arch.defines());
         let module = self.module(entry, full)?;
-        let _shared = capture_guard();
         let function = module.load_function(entry).map_err(driver)?;
         // Launches may take all the shared memory the device allows a block,
         // not only the 48 KB a kernel gets without asking.
@@ -413,10 +395,10 @@ impl Device for CudaDevice {
                 self.arch.shared_bytes as i32 - fixed,
             )
             .map_err(driver)?;
-        Ok(CudaKernel { function: ManuallyDrop::new(function) })
+        Ok(CudaKernel { function })
     }
 
-    fn launch(&self, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), NativeError> {
+    fn launch(&self, kernel: &CudaKernel, launch: Launch, args: &[Arg<'_, CudaBlock>]) -> Result<(), GpuError> {
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         // Each argument's value in a slot of its own, the driver reading as
         // many bytes from the slot as the kernel's parameter has (the low
@@ -425,8 +407,8 @@ impl Device for CudaDevice {
         for (slot, arg) in values.iter_mut().zip(args) {
             *slot = match *arg {
                 Arg::Block(b, offset) => {
-                    assert!(offset <= b.bytes.len(), "argument offset {offset} past the block's {} bytes", b.bytes.len());
-                    b.bytes.device_ptr(&self.stream).0 + offset as u64
+                    assert!(offset <= b.len, "argument offset {offset} past the block's {} bytes", b.len);
+                    b.mem().device_ptr(&self.stream).0 + offset as u64
                 }
                 Arg::U32(v) => v as u64,
                 Arg::I32(v) => v as u32 as u64,
@@ -458,18 +440,14 @@ impl Device for CudaDevice {
         .map_err(driver)
     }
 
-    fn sync(&self) -> Result<(), NativeError> {
+    fn sync(&self) -> Result<(), GpuError> {
         self.not_capturing("a wait")?;
-        let _shared = capture_guard();
         self.stream.synchronize().map_err(driver)
     }
 
-    /// Stream capture in thread-local mode, instantiated and uploaded. The
-    /// capture lock is held shared around the driver calls that open, close
-    /// and instantiate the capture, as around every other non-launch call,
-    /// but not while `record` runs: a thread-local capture forbids nothing on
-    /// other threads, and `record` only launches.
-    fn capture(&self, record: impl FnOnce() -> Result<(), NativeError>) -> Result<CudaGraph, NativeError> {
+    /// Stream capture in thread-local mode, instantiated and uploaded: the
+    /// capture forbids nothing on other threads.
+    fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<CudaGraph, GpuError> {
         let open = OpenCapture::begin(self)?;
         let recorded = record();
         let graph = open.end();
@@ -477,31 +455,23 @@ impl Device for CudaDevice {
         recorded?;
         let graph = graph?;
         if graph.0.is_null() {
-            return Err(NativeError::Capture("the capture recorded nothing".into()));
+            return Err(GpuError::Capture("the capture recorded nothing".into()));
         }
-        // (A `CudaGraph` drops outside the guards below: its drop takes one.)
-        let exec = {
-            let _shared = capture_guard();
-            self.ctx.bind_to_thread().map_err(driver)?;
-            // SAFETY: a valid graph from end_capture; the executable graph is
-            // independent of it.
-            unsafe { result::graph::instantiate(graph.0, sys::CUgraphInstantiate_flags(0)) }.map_err(driver)?
-        };
+        self.ctx.bind_to_thread().map_err(driver)?;
+        // SAFETY: a valid graph from end_capture; the executable graph is
+        // independent of it.
+        let exec = unsafe { result::graph::instantiate(graph.0, sys::CUgraphInstantiate_flags(0)) }.map_err(driver)?;
         drop(graph);
-        let graph = CudaGraph { exec, ctx: (*self.ctx).clone() };
-        {
-            let _shared = capture_guard();
-            // the first replay then pays no setup
-            // SAFETY: the executable graph and the stream are alive.
-            unsafe { result::graph::upload(graph.exec, self.stream.cu_stream()) }.map_err(driver)?;
-        }
+        let graph = CudaGraph { exec, ctx: self.ctx.clone() };
+        // the first replay then pays no setup
+        // SAFETY: the executable graph and the stream are alive.
+        unsafe { result::graph::upload(graph.exec, self.stream.cu_stream()) }.map_err(driver)?;
         Ok(graph)
     }
 
-    fn replay(&self, graph: &CudaGraph) -> Result<(), NativeError> {
+    fn replay(&self, graph: &CudaGraph) -> Result<(), GpuError> {
         self.not_capturing("a replay")?;
         assert!(Arc::ptr_eq(&graph.ctx, &self.ctx), "a graph replays on the context it was captured on");
-        let _shared = capture_guard();
         self.ctx.bind_to_thread().map_err(driver)?;
         // SAFETY: the executable graph is alive; its blocks are the caller's
         // to keep alive (the capture's contract).

@@ -2,9 +2,10 @@
 //! widths, with the reduced system kept on the device for the factorization,
 //! the refinement and the back-substitution.
 //!
-//! Formed in `f64` whatever the matrix's scalar (docs/dev/GPU.md, E2: `f32`
-//! cannot form S, the cancelling sums lose their operands' digits). Per
-//! reduction, from the Hessian's tile values and the gradient:
+//! Formed in the route's wide scalar ([`Wide`]: `f64` or df32) whatever the
+//! matrix's scalar (docs/dev/GPU.md, E2: `f32` cannot form S, the
+//! cancelling sums lose their operands' digits). Per reduction, from the
+//! Hessian's tile values and the gradient:
 //!
 //!   elim      one unit per eliminated block: `D_e^-1` through its Cholesky
 //!             factor, and `z_e = D_e^-1 b_e`
@@ -17,24 +18,19 @@
 //!   backsub   one unit per eliminated block: `x_e = D_e^-1 (b_e - sum_a C_a^T x_a)`
 //!
 //! A block symv over the tiles of S gives the refinement its residual on the
-//! device, and one-cube norm kernels decide there whether the next step is
+//! device, and one-block norm kernels decide there whether the next step is
 //! due, so a solve with an f32 factor waits only for its result either:
 //! [`GpuSchur::solve`] reads the step, the pivot flags and the refinement's
 //! state in one copy.
 
-// Cube code, as kernels.rs says.
-#![allow(clippy::unnecessary_cast, clippy::manual_div_ceil, clippy::neg_cmp_op_on_partial_ord, clippy::assign_op_pattern, clippy::too_many_arguments, clippy::manual_memcpy)]
+use std::sync::Arc;
 
 use arael_faer::bsc::SymbolicSparseBlockColMat;
-use arael_faer::schur::{SchurError, SchurSymbolic};
-use cubecl::prelude::*;
-use cubecl::server::Handle;
+use arael_faer::schur::{SchurReal, SchurSymbolic};
 
-use crate::context::{GpuContext, Lease};
-use crate::host::Upload;
-use crate::supernodal::Packer;
 use crate::plan::SparseIndex;
-use crate::GpuFactor;
+use crate::supernodal::{GpuFactor, Packer};
+use crate::{Arg, Device, GpuError, Launch, Layout, WIDE, Wide, define_u32s};
 
 /// No kept-kept tile behind a tile of S.
 const NONE: u32 = u32::MAX;
@@ -70,399 +66,6 @@ pub(crate) const SK_ORIG_OFF: usize = 26;
 pub(crate) const SK_W: usize = 27;
 pub(crate) const SHEADER: usize = 32;
 
-// ---------------------------------------------------------------- kernels
-
-/// `C[i][k]` of an observer's coupling tile at `ca`, `wo x we`, in either
-/// storage orientation.
-#[cube]
-fn coupling(h: &[f64], ca: usize, trans: u32, wo: usize, we: usize, i: usize, k: usize) -> f64 {
-    let mut v = h[ca + i + k * wo];
-    if trans != 0u32 {
-        v = h[ca + k + i * we];
-    }
-    v
-}
-
-/// Stage 1, one unit per eliminated block: the inverse of its damped
-/// diagonal tile (upper-stored) through the Cholesky factor, column-major
-/// `we x we` into `dinv`, and `z = D^-1 b`. A pivot that is not positive
-/// sets `fail[0]` to the block's slot plus one.
-#[cube(launch_unchecked)]
-pub fn k_schur_elim(plan: &[u32], h: &[f64], rhs: &[f64], dinv: &mut [f64], z: &mut [f64], fail: &mut [u32], ne: u32, #[comptime] ew: usize) {
-    let o_diag = plan[SE_DIAG_OFF] as usize;
-    let o_w = plan[SE_W] as usize;
-    let o_orig = plan[SE_ORIG_OFF] as usize;
-    let o_dinv = plan[SE_DINV_OFF] as usize;
-    let o_z = plan[SE_Z_OFF] as usize;
-    let e = ABSOLUTE_POS;
-    if e < ne as usize {
-        let w = plan[o_w + e] as usize;
-        let diag = plan[o_diag + e] as usize;
-        let orig = plan[o_orig + e] as usize;
-        let doff = plan[o_dinv + e] as usize;
-        let zoff = plan[o_z + e] as usize;
-        // the tile, symmetric from its upper triangle, then its lower factor in place
-        let mut a = Array::<f64>::new(ew * ew);
-        for j in 0..w {
-            for i in 0..w {
-                let mut v = h[diag + i + j * w];
-                if i > j {
-                    v = h[diag + j + i * w];
-                }
-                a[i + j * ew] = v;
-            }
-        }
-        for j in 0..w {
-            let mut d = a[j + j * ew];
-            for k in 0..j {
-                d -= a[j + k * ew] * a[j + k * ew];
-            }
-            if !(d > 0.0f64) {
-                fail[0] = e as u32 + 1u32;
-                d = 1.0f64;
-            }
-            let ljj = f64::sqrt(d);
-            a[j + j * ew] = ljj;
-            let mut i = j + 1usize;
-            while i < w {
-                let mut v = a[i + j * ew];
-                for k in 0..j {
-                    v -= a[i + k * ew] * a[j + k * ew];
-                }
-                a[i + j * ew] = v / ljj;
-                i += 1usize;
-            }
-        }
-        // L^-1 (lower) by forward substitution, column by column
-        let mut li = Array::<f64>::new(ew * ew);
-        for c in 0..w {
-            for r in 0..w {
-                let mut rhs_v = 0.0f64;
-                if r == c {
-                    rhs_v = 1.0f64;
-                }
-                if r >= c {
-                    let mut v = rhs_v;
-                    for k in c..r {
-                        v -= a[r + k * ew] * li[k + c * ew];
-                    }
-                    li[r + c * ew] = v / a[r + r * ew];
-                } else {
-                    li[r + c * ew] = 0.0f64;
-                }
-            }
-        }
-        // D^-1 = L^-T L^-1
-        for j in 0..w {
-            for i in 0..w {
-                let mut v = 0.0f64;
-                for k in 0..w {
-                    v += li[k + i * ew] * li[k + j * ew];
-                }
-                dinv[doff + i + j * w] = v;
-            }
-        }
-        for i in 0..w {
-            let mut v = 0.0f64;
-            for j in 0..w {
-                v += dinv[doff + i + j * w] * rhs[orig + j];
-            }
-            z[zoff + i] = v;
-        }
-    }
-}
-
-/// Stage 2, one unit per observer: `W_o = C_o D_e^-1`, row-major `wo x we`.
-#[cube(launch_unchecked)]
-pub fn k_schur_w(plan: &[u32], h: &[f64], dinv: &[f64], w: &mut [f64], no: u32) {
-    let o_ew = plan[SE_W] as usize;
-    let o_dinv = plan[SE_DINV_OFF] as usize;
-    let o_ca = plan[SO_CA_OFF] as usize;
-    let o_trans = plan[SO_TRANS] as usize;
-    let o_ow = plan[SO_W] as usize;
-    let o_e = plan[SO_E] as usize;
-    let o_woff = plan[SO_W_OFF] as usize;
-    let o = ABSOLUTE_POS;
-    if o < no as usize {
-        let wo = plan[o_ow + o] as usize;
-        let e = plan[o_e + o] as usize;
-        let we = plan[o_ew + e] as usize;
-        let ca = plan[o_ca + o] as usize;
-        let trans = plan[o_trans + o];
-        let doff = plan[o_dinv + e] as usize;
-        let woff = plan[o_woff + o] as usize;
-        for i in 0..wo {
-            for l in 0..we {
-                let mut v = 0.0f64;
-                for k in 0..we {
-                    v += coupling(h, ca, trans, wo, we, i, k) * dinv[doff + k + l * we];
-                }
-                w[woff + i * we + l] = v;
-            }
-        }
-    }
-}
-
-/// Stage 3, one plane of 32 units per tile of S: the kept-kept tile of H
-/// (or nothing) minus `W_oa C_ob^T` over the tile's pairs, unit `lane`
-/// owning the entries `lane, lane + 32, ...` (`acc_cap` of them at most);
-/// a diagonal tile upper-only.
-#[cube(launch_unchecked)]
-pub fn k_schur_tiles(plan: &[u32], h: &[f64], w: &[f64], s: &mut [f64], #[comptime] acc_cap: usize) {
-    let o_ew = plan[SE_W] as usize;
-    let o_ca = plan[SO_CA_OFF] as usize;
-    let o_trans = plan[SO_TRANS] as usize;
-    let o_ow = plan[SO_W] as usize;
-    let o_e = plan[SO_E] as usize;
-    let o_woff = plan[SO_W_OFF] as usize;
-    let o_val = plan[ST_VAL_OFF] as usize;
-    let o_wr = plan[ST_WR] as usize;
-    let o_wc = plan[ST_WC] as usize;
-    let o_a = plan[ST_A] as usize;
-    let o_b = plan[ST_B] as usize;
-    let o_copy = plan[ST_COPY_OFF] as usize;
-    let o_pp = plan[ST_PAIR_PTR] as usize;
-    let o_oa = plan[SP_OA] as usize;
-    let o_ob = plan[SP_OB] as usize;
-    let t = CUBE_POS as usize;
-    let lane = UNIT_POS as usize;
-    let val = plan[o_val + t] as usize;
-    let wr = plan[o_wr + t] as usize;
-    let wc = plan[o_wc + t] as usize;
-    let a = plan[o_a + t];
-    let b = plan[o_b + t];
-    let copy = plan[o_copy + t];
-    let p0 = plan[o_pp + t] as usize;
-    let p1 = plan[o_pp + t + 1] as usize;
-    let mut acc = Array::<f64>::new(acc_cap);
-    #[unroll]
-    for m in 0..acc_cap {
-        acc[m] = 0.0f64;
-    }
-    for p in p0..p1 {
-        let oa = plan[o_oa + p] as usize;
-        let ob = plan[o_ob + p] as usize;
-        let e = plan[o_e + oa] as usize;
-        let we = plan[o_ew + e] as usize;
-        let woff = plan[o_woff + oa] as usize;
-        let cb = plan[o_ca + ob] as usize;
-        let tb = plan[o_trans + ob];
-        let wb = plan[o_ow + ob] as usize;
-        #[unroll]
-        for m in 0..acc_cap {
-            let ent = lane + 32 * m;
-            if ent < wr * wc {
-                let j = ent / wr;
-                let i = ent - j * wr;
-                let mut v = 0.0f64;
-                for k in 0..we {
-                    v += w[woff + i * we + k] * coupling(h, cb, tb, wb, we, j, k);
-                }
-                acc[m] -= v;
-            }
-        }
-    }
-    #[unroll]
-    for m in 0..acc_cap {
-        let ent = lane + 32 * m;
-        if ent < wr * wc {
-            let j = ent / wr;
-            let i = ent - j * wr;
-            let mut v = acc[m];
-            if copy != 4294967295u32 {
-                v += h[copy as usize + i + j * wr];
-            }
-            if a == b && i > j {
-                v = 0.0f64;
-            }
-            s[val + i + j * wr] = v;
-        }
-    }
-}
-
-/// Stage 4, one plane per kept block: `rhs_kept = b_k - sum over the block's
-/// observers of C_o z_e`, the lanes over the observers, a plane sum per row.
-#[cube(launch_unchecked)]
-pub fn k_schur_rhs(plan: &[u32], h: &[f64], rhs: &[f64], z: &[f64], out: &mut [f64], #[comptime] kw_cap: usize) {
-    let o_ew = plan[SE_W] as usize;
-    let o_z = plan[SE_Z_OFF] as usize;
-    let o_ca = plan[SO_CA_OFF] as usize;
-    let o_trans = plan[SO_TRANS] as usize;
-    let o_e = plan[SO_E] as usize;
-    let o_kptr = plan[SK_OBS_PTR] as usize;
-    let o_kobs = plan[SK_OBS] as usize;
-    let o_soff = plan[SK_S_OFF] as usize;
-    let o_korig = plan[SK_ORIG_OFF] as usize;
-    let o_kw = plan[SK_W] as usize;
-    let k = CUBE_POS as usize;
-    let lane = UNIT_POS as usize;
-    let s_off = plan[o_soff + k] as usize;
-    let orig = plan[o_korig + k] as usize;
-    let wk = plan[o_kw + k] as usize;
-    let q0 = plan[o_kptr + k] as usize;
-    let q1 = plan[o_kptr + k + 1] as usize;
-    let mut acc = Array::<f64>::new(kw_cap);
-    for i in 0..kw_cap {
-        acc[i] = 0.0f64;
-    }
-    let mut q = q0 + lane;
-    while q < q1 {
-        let o = plan[o_kobs + q] as usize;
-        let e = plan[o_e + o] as usize;
-        let we = plan[o_ew + e] as usize;
-        let ca = plan[o_ca + o] as usize;
-        let trans = plan[o_trans + o];
-        let zoff = plan[o_z + e] as usize;
-        for i in 0..wk {
-            let mut v = 0.0f64;
-            for kk in 0..we {
-                v += coupling(h, ca, trans, wk, we, i, kk) * z[zoff + kk];
-            }
-            acc[i] += v;
-        }
-        q += 32usize;
-    }
-    for i in 0..wk {
-        let tot = plane_sum(acc[i]);
-        if lane == 0usize {
-            out[s_off + i] = rhs[orig + i] - tot;
-        }
-    }
-}
-
-/// The kept blocks of the reduced solution into the full vector, one unit
-/// per kept block.
-#[cube(launch_unchecked)]
-pub fn k_scatter_kept(plan: &[u32], xk: &[f64], x: &mut [f64], nk: u32) {
-    let o_soff = plan[SK_S_OFF] as usize;
-    let o_korig = plan[SK_ORIG_OFF] as usize;
-    let o_kw = plan[SK_W] as usize;
-    let k = ABSOLUTE_POS;
-    if k < nk as usize {
-        let s_off = plan[o_soff + k] as usize;
-        let orig = plan[o_korig + k] as usize;
-        let wk = plan[o_kw + k] as usize;
-        for i in 0..wk {
-            x[orig + i] = xk[s_off + i];
-        }
-    }
-}
-
-/// Back-substitution, one unit per eliminated block: `x_e = D_e^-1 (b_e -
-/// sum_a C_a^T x_a)` over its observers, the kept slices of `x` in place.
-#[cube(launch_unchecked)]
-pub fn k_schur_backsub(plan: &[u32], h: &[f64], rhs: &[f64], dinv: &[f64], x: &mut [f64], ne: u32, #[comptime] ew: usize) {
-    let o_w = plan[SE_W] as usize;
-    let o_orig = plan[SE_ORIG_OFF] as usize;
-    let o_optr = plan[SE_OBS_PTR] as usize;
-    let o_dinv = plan[SE_DINV_OFF] as usize;
-    let o_ca = plan[SO_CA_OFF] as usize;
-    let o_trans = plan[SO_TRANS] as usize;
-    let o_ow = plan[SO_W] as usize;
-    let o_oorig = plan[SO_ORIG_OFF] as usize;
-    let e = ABSOLUTE_POS;
-    if e < ne as usize {
-        let w = plan[o_w + e] as usize;
-        let orig = plan[o_orig + e] as usize;
-        let doff = plan[o_dinv + e] as usize;
-        let q0 = plan[o_optr + e] as usize;
-        let q1 = plan[o_optr + e + 1] as usize;
-        let mut t = Array::<f64>::new(ew);
-        for i in 0..w {
-            t[i] = rhs[orig + i];
-        }
-        for o in q0..q1 {
-            let wa = plan[o_ow + o] as usize;
-            let ca = plan[o_ca + o] as usize;
-            let trans = plan[o_trans + o];
-            let xo = plan[o_oorig + o] as usize;
-            for kk in 0..w {
-                let mut v = 0.0f64;
-                for i in 0..wa {
-                    v += coupling(h, ca, trans, wa, w, i, kk) * x[xo + i];
-                }
-                t[kk] -= v;
-            }
-        }
-        for i in 0..w {
-            let mut v = 0.0f64;
-            for j in 0..w {
-                v += dinv[doff + i + j * w] * t[j];
-            }
-            x[orig + i] = v;
-        }
-    }
-}
-
-/// `r -= S x` over the tiles of S (upper block storage, diagonal tiles
-/// upper-only), one plane per tile, the lanes over the tile's rows for the
-/// product and over its columns for the transposed one; nothing unless
-/// `gate[0]` is nonzero.
-#[cube(launch_unchecked)]
-pub fn k_symv_sub(gate: &[u32], plan: &[u32], s: &[f64], x: &[f64], r: &mut [Atomic<f64>]) {
-    if gate[0] == 0u32 {
-        terminate!();
-    }
-    let o_val = plan[ST_VAL_OFF] as usize;
-    let o_wr = plan[ST_WR] as usize;
-    let o_wc = plan[ST_WC] as usize;
-    let o_a = plan[ST_A] as usize;
-    let o_b = plan[ST_B] as usize;
-    let o_aoff = plan[ST_A_OFF] as usize;
-    let o_boff = plan[ST_B_OFF] as usize;
-    let t = CUBE_POS as usize;
-    let lane = UNIT_POS as usize;
-    let val = plan[o_val + t] as usize;
-    let wr = plan[o_wr + t] as usize;
-    let wc = plan[o_wc + t] as usize;
-    let a = plan[o_a + t];
-    let b = plan[o_b + t];
-    let a_off = plan[o_aoff + t] as usize;
-    let b_off = plan[o_boff + t] as usize;
-    if a == b {
-        let mut i = lane;
-        while i < wr {
-            let mut acc = 0.0f64;
-            for j in 0..wc {
-                let mut v = s[val + i + j * wr];
-                if i > j {
-                    v = s[val + j + i * wr];
-                }
-                acc += v * x[b_off + j];
-            }
-            r[a_off + i].fetch_add(0.0f64 - acc);
-            i += 32usize;
-        }
-    } else {
-        let mut i = lane;
-        while i < wr {
-            let mut acc = 0.0f64;
-            for j in 0..wc {
-                acc += s[val + i + j * wr] * x[b_off + j];
-            }
-            r[a_off + i].fetch_add(0.0f64 - acc);
-            i += 32usize;
-        }
-        let mut j = lane;
-        while j < wc {
-            let mut acc = 0.0f64;
-            for i2 in 0..wr {
-                acc += s[val + i2 + j * wr] * x[a_off + i2];
-            }
-            r[b_off + j].fetch_add(0.0f64 - acc);
-            j += 32usize;
-        }
-    }
-}
-
-/// `dst = src` when `gate[0]` is nonzero.
-#[cube(launch_unchecked)]
-pub fn k_copy_f64(gate: &[u32], dst: &mut [f64], src: &[f64], n: u32) {
-    if gate[0] != 0u32 && ABSOLUTE_POS < n as usize {
-        dst[ABSOLUTE_POS] = src[ABSOLUTE_POS];
-    }
-}
-
 // The refinement's state on the device: f64 words and u32 flags, read back
 // with the step.
 pub(crate) const ST_BNORM: usize = 0;
@@ -478,105 +81,11 @@ pub(crate) const F_ELIM: usize = 3;
 /// Nonzero when S's factorization met a pivot that is not positive.
 pub(crate) const F_FACTOR: usize = 4;
 pub(crate) const N_FLAGS: usize = 8;
-/// Bytes from the state's start to the flags', and the state's size.
+/// Bytes from the state's start to the flags'.
 pub(crate) const FLAGS_AT: usize = 64;
-pub(crate) const STATUS_BYTES: usize = FLAGS_AT + 4 * N_FLAGS;
-
-/// The sum of squares of `x[0..n]` by one cube of 256 units, returned to
-/// every unit.
-#[cube]
-fn cube_sumsq(x: &[f64], n: usize) -> f64 {
-    let t = UNIT_POS as usize;
-    let mut acc = 0.0f64;
-    let mut i = t;
-    while i < n {
-        acc += x[i] * x[i];
-        i += 256usize;
-    }
-    let mut sh = Shared::<[f64]>::new_slice(256usize);
-    // a previous call's readers are done with the shared words first
-    sync_cube();
-    sh[t] = acc;
-    sync_cube();
-    let mut half = 128usize;
-    while half > 0usize {
-        if t < half {
-            sh[t] += sh[t + half];
-        }
-        sync_cube();
-        half = half / 2usize;
-    }
-    sh[0]
-}
-
-/// The refinement's start, one cube of 256 units, after the first solve's
-/// residual `r` of the right-hand side `b`: the norms, the tolerance
-/// `tol_rel ||b||`, and whether a step is due.
-#[cube(launch_unchecked)]
-pub fn k_refine_start(b: &[f64], r: &[f64], st: &mut [f64], flags: &mut [u32], n: u32, tol_rel: f64) {
-    let bn = f64::sqrt(cube_sumsq(b, n as usize));
-    let rn = f64::sqrt(cube_sumsq(r, n as usize));
-    if UNIT_POS == 0u32 {
-        let tol = tol_rel * bn;
-        st[ST_BNORM] = bn;
-        st[ST_TOL] = tol;
-        st[ST_RNORM] = rn;
-        flags[F_STEPS] = 0u32;
-        flags[F_REVERT] = 0u32;
-        if rn > tol {
-            flags[F_ACTIVE] = 1u32;
-        } else {
-            flags[F_ACTIVE] = 0u32;
-        }
-    }
-}
-
-/// A refinement step's update, one unit per entry, when the step is due:
-/// `x` kept in `x_prev`, the correction `d` added to it.
-#[cube(launch_unchecked)]
-pub fn k_refine_apply(flags: &[u32], x: &mut [f64], x_prev: &mut [f64], d: &[f64], n: u32) {
-    let i = ABSOLUTE_POS;
-    if flags[F_ACTIVE] != 0u32 && i < n as usize {
-        x_prev[i] = x[i];
-        x[i] += d[i];
-    }
-}
-
-/// A due refinement step's judgement, one cube of 256 units, from the
-/// residual `r` of the updated iterate: a step that did not reduce the
-/// residual's norm is to be undone and ends the refinement; otherwise the
-/// norm is kept and the refinement goes on while it is above the tolerance.
-#[cube(launch_unchecked)]
-pub fn k_refine_judge(r: &[f64], st: &mut [f64], flags: &mut [u32], n: u32) {
-    if flags[F_ACTIVE] == 0u32 {
-        terminate!();
-    }
-    let next = f64::sqrt(cube_sumsq(r, n as usize));
-    if UNIT_POS == 0u32 {
-        flags[F_STEPS] += 1u32;
-        if next >= st[ST_RNORM] {
-            // the factor is too far off for the correction to help
-            flags[F_REVERT] = 1u32;
-            flags[F_ACTIVE] = 0u32;
-        } else {
-            st[ST_RNORM] = next;
-            if !(next > st[ST_TOL]) {
-                flags[F_ACTIVE] = 0u32;
-            }
-        }
-    }
-}
-
-/// The iterate before a rejected step back, one unit per entry.
-#[cube(launch_unchecked)]
-pub fn k_refine_revert(flags: &[u32], x: &mut [f64], x_prev: &[f64], n: u32) {
-    let i = ABSOLUTE_POS;
-    if flags[F_REVERT] != 0u32 && i < n as usize {
-        x[i] = x_prev[i];
-    }
-}
-
-// ---------------------------------------------------------------- host
+/// Bytes of a solve's status at [`GpuSchur::status_view`]: the
+/// refinement's state and the flags, for [`GpuSchur::outcome`].
+pub const STATUS_BYTES: usize = FLAGS_AT + 4 * N_FLAGS;
 
 /// What a refined solve took: steps, the final and the right-hand side's
 /// norm, and whether it stayed above the tolerance.
@@ -586,24 +95,6 @@ pub struct RefineStats {
     pub rnorm: f64,
     pub bnorm: f64,
     pub short: bool,
-}
-
-/// A solve [`GpuSchur::enqueue`] left in flight: what its
-/// [`finish`](GpuSchur::finish) needs.
-struct Pending {
-    capture: Option<GraphKey>,
-    max_steps: usize,
-    tol_rel: f64,
-}
-
-/// Why a [`GpuSchur::solve`] failed; the caller raises the damping.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GpuSchurError {
-    /// The diagonal tile of the eliminated block `block` is not positive
-    /// definite.
-    Eliminated { block: usize },
-    /// The reduced system is not positive definite.
-    Reduced,
 }
 
 /// What a plan reads of a reduction: the eliminated blocks and their
@@ -623,69 +114,6 @@ struct Elimination<'a> {
     copy_src: std::borrow::Cow<'a, [SparseIndex]>,
     copy_dst: std::borrow::Cow<'a, [SparseIndex]>,
     pairs: usize,
-}
-
-/// The device plan of a [`SchurSymbolic`], and the device state of one
-/// reduction: the Hessian's values and gradient as uploaded, the block
-/// inverses, W, S and the reduced right-hand side, the solution.
-pub struct GpuSchur {
-    /// The last attempt's launches as a graph, with what it was captured
-    /// against; first, so it is dropped before the buffers it records.
-    graph: Option<Captured>,
-    graphs: bool,
-    replayed: bool,
-    ctx: GpuContext,
-    plan: Lease,
-    plan_len: usize,
-    /// A word holding 1, in the plan's buffer: the gate of kernels that
-    /// always run.
-    d_on: Handle,
-    ne: u32,
-    no: u32,
-    nt: u32,
-    nk: u32,
-    n: usize,
-    nks: usize,
-    s_len: usize,
-    ew_cap: usize,
-    kw_cap: usize,
-    acc_cap: usize,
-    /// per eliminated slot, its block id (for the error)
-    elim_blk: Vec<u32>,
-    /// The Hessian's tile values and the gradient as last uploaded, in f64.
-    h: Upload<f64>,
-    h_len: usize,
-    rhs: Upload<f64>,
-    dinv: Lease,
-    z: Lease,
-    w: Lease,
-    s: Lease,
-    rhs_kept: Lease,
-    x_kept: Lease,
-    x_prev: Lease,
-    r: Lease,
-    /// What a solve reads back, in one copy: the full step (`n` f64), then
-    /// at `status_at` the refinement's state and the flags.
-    out: Lease,
-    status_at: usize,
-}
-
-/// What a captured attempt depends on beyond the reduction's own buffers:
-/// the factor whose kernels it recorded, the refinement's launches and
-/// tolerance, and the buffers the uploads land in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct GraphKey {
-    factor: u64,
-    max_steps: usize,
-    tol_bits: u64,
-    h: u64,
-    h_len: usize,
-    rhs: u64,
-}
-
-struct Captured {
-    key: GraphKey,
-    graph: cubecl_runtime::client::Graph,
 }
 
 /// Where the status starts in a solve's output, after the step's `n` f64.
@@ -718,9 +146,9 @@ fn round_cap(w: usize) -> usize {
     [4usize, 8, 16, 32, 64].into_iter().find(|&c| c >= w).unwrap_or_else(|| panic!("a block of {w} columns is wider than the reduction's kernels take (64)"))
 }
 
-/// The host side of a reduction, shared by [`GpuSchur`] and the native
-/// runtime's twin: the plan words the kernels read (the header's offsets
-/// relative to word 0) and the sizes of the reduction's arrays.
+/// The host side of a reduction: the plan words the kernels read (the
+/// header's offsets relative to word 0) and the sizes of the reduction's
+/// arrays.
 pub(crate) struct SchurPlan {
     pub words: Vec<u32>,
     pub ne: u32,
@@ -990,68 +418,226 @@ impl SchurPlan {
     }
 }
 
-impl GpuSchur {
-    /// Build the device plan of `sym`, the reduction of a matrix with the
-    /// block structure `hsym`, and lease the reduction's buffers from `ctx`
-    /// (returned on drop). The plan goes up in one copy.
-    pub fn new(ctx: &GpuContext, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
-        Self::build(ctx, SchurPlan::reduction(sym, hsym))
+/// The kernels, compiled per block-width class.
+const SOURCE: &str = include_str!("../kernels/schur.cpp");
+
+/// Threads per block of the kernels over entries and blocks.
+const THREADS: u32 = 256;
+/// Threads per block of the kernels over the tiles of S and the kept blocks.
+const PLANE: u32 = 32;
+
+/// Why a [`GpuSchur`] solve failed.
+#[derive(Clone, Debug)]
+pub enum GpuSchurError {
+    /// The diagonal tile of the eliminated block `block` is not positive
+    /// definite; the caller raises the damping.
+    Eliminated { block: usize },
+    /// The reduced system is not positive definite; the caller raises the
+    /// damping.
+    Reduced,
+    Device(GpuError),
+}
+
+impl From<GpuError> for GpuSchurError {
+    fn from(e: GpuError) -> Self {
+        GpuSchurError::Device(e)
+    }
+}
+
+impl core::fmt::Display for GpuSchurError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            GpuSchurError::Eliminated { block } => write!(f, "the diagonal tile of eliminated block {block} is not positive definite"),
+            GpuSchurError::Reduced => write!(f, "the reduced system is not positive definite"),
+            GpuSchurError::Device(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for GpuSchurError {}
+
+/// What a captured attempt depends on beyond the reduction's own blocks:
+/// the factor whose kernels it recorded and the refinement's launches and
+/// tolerance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GraphKey {
+    factor: u64,
+    max_steps: usize,
+    tol_bits: u64,
+}
+
+struct Kernels<K> {
+    zero_u32: K,
+    elim: K,
+    w: K,
+    tiles: K,
+    rhs: K,
+    scatter_kept: K,
+    backsub: K,
+    symv_sub: K,
+    copy: K,
+    refine_start: K,
+    refine_apply: K,
+    refine_judge: K,
+    refine_revert: K,
+}
+
+/// Byte offsets of the work block's sections.
+struct Sections {
+    /// The Hessian's tile values and the gradient, f64.
+    h: usize,
+    rhs: usize,
+    dinv: usize,
+    z: usize,
+    w: usize,
+    s: usize,
+    rhs_kept: usize,
+    x_kept: usize,
+    x_prev: usize,
+    r: usize,
+    /// What a solve reads back, in one copy: the full step (`n` f64), then
+    /// at `status_at` from here the refinement's state and the flags.
+    out: usize,
+    bytes: usize,
+}
+
+/// The device plan of a [`SchurSymbolic`] and the device state of one
+/// reduction on a [`Device`]: the Hessian's values and gradient as
+/// uploaded, the block inverses, W, S and the reduced right-hand side, the
+/// solution. Every device buffer is made in [`new`](Self::new): the plan in
+/// one block, uploaded in one copy, and the rest in a work block.
+pub struct GpuSchur<D: Device> {
+    /// The scalar of H, the gradient, S and the reduction's vectors.
+    /// The last attempt's launches as a graph, with what it was captured
+    /// against; first, so it is dropped before the blocks it records.
+    graph: Option<(GraphKey, D::Graph)>,
+    graphs: bool,
+    replayed: bool,
+    dev: Arc<D>,
+    wide: Wide,
+    k: Kernels<D::Kernel>,
+    /// The plan words (at 0, as the plan's header offsets require), then a
+    /// word holding 1, at `on`: the gate of kernels that always run; then
+    /// per kept block the tiles of S touching it, `kt_ptr` and `kt` (byte
+    /// offsets), for the residual.
+    ints: D::Block,
+    on: usize,
+    kt_ptr: usize,
+    kt: usize,
+    work: D::Block,
+    sec: Sections,
+    status_at: usize,
+    ne: u32,
+    no: u32,
+    nt: u32,
+    nk: u32,
+    n: usize,
+    nks: usize,
+    nh: usize,
+    s_len: usize,
+    elim_blk: Vec<u32>,
+    /// The inputs encoded in the wide scalar.
+    conv: Vec<u8>,
+    /// The step and the status as a solve reads them.
+    host_out: Vec<u8>,
+    step: Vec<f64>,
+}
+
+impl<D: Device> GpuSchur<D> {
+    /// The device plan of `sym`, the reduction of a matrix with the block
+    /// structure `hsym`, uploaded to `dev`, with the reduction's blocks and
+    /// kernels, in `wide`.
+    pub fn new(dev: &Arc<D>, sym: &SchurSymbolic<SparseIndex>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, GpuError> {
+        Self::build(dev, SchurPlan::reduction(sym, hsym), hsym.val_count(), wide)
     }
 
     /// [`new`](Self::new) with nothing eliminated: S is H, and a solve is
-    /// the whole system's. Built from `hsym` alone, without a
-    /// [`SchurSymbolic`] (whose pair lookup a whole system does not need).
-    pub fn whole(ctx: &GpuContext, hsym: &SymbolicSparseBlockColMat<SparseIndex>) -> Self {
-        Self::build(ctx, SchurPlan::whole(hsym))
+    /// the whole system's.
+    pub fn whole(dev: &Arc<D>, hsym: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> Result<Self, GpuError> {
+        Self::build(dev, SchurPlan::whole(hsym), hsym.val_count(), wide)
     }
 
-    fn build(ctx: &GpuContext, p: SchurPlan) -> Self {
-        let plan_len = p.words.len();
+    fn build(dev: &Arc<D>, p: SchurPlan, nh: usize, wide: Wide) -> Result<Self, GpuError> {
+        let defines = format!("{}{}", wide.defines(), defines(&p));
+        let (kt_ptr_words, kt_words) = tiles_by_kept_block(&p);
         let mut pk = Packer { words: p.words };
-        let at_on = pk.push(&[1]);
-        let plan = pk.upload(ctx);
-        let d_on = Packer::view(plan.handle(), at_on);
-        let f64s = core::mem::size_of::<f64>();
-        let empty = |n: usize| ctx.lease(n.max(1) * f64s);
+        let on = 4 * pk.push(&[1]);
+        let kt_ptr = 4 * pk.push(&kt_ptr_words);
+        let kt = 4 * pk.push(&kt_words);
+        let mut ints = dev.alloc(pk.words.len() * 4)?;
+        dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
         let status_at = status_at(p.n);
-        GpuSchur {
-            dinv: empty(p.dinv_len),
-            z: empty(p.z_len),
-            w: empty(p.w_len),
-            s: empty(p.s_len),
-            rhs_kept: empty(p.nks),
-            x_kept: empty(p.nks),
-            x_prev: empty(p.nks),
-            r: empty(p.nks),
-            out: ctx.lease(status_at + STATUS_BYTES),
-            status_at,
+        let f = core::mem::size_of::<f64>();
+        let mut l = Layout::new();
+        let sec = Sections {
+            h: l.take(nh * f),
+            rhs: l.take(p.n * f),
+            dinv: l.take(p.dinv_len * f),
+            z: l.take(p.z_len * f),
+            w: l.take(p.w_len * f),
+            s: l.take(p.s_len * f),
+            rhs_kept: l.take(p.nks * f),
+            x_kept: l.take(p.nks * f),
+            x_prev: l.take(p.nks * f),
+            r: l.take(p.nks * f),
+            out: l.take(status_at + STATUS_BYTES),
+            bytes: l.bytes(),
+        };
+        let work = dev.alloc(sec.bytes)?;
+        let source = format!("{WIDE}\n{SOURCE}");
+        let c = |entry: &str| dev.compile(&source, &defines, entry);
+        let k = Kernels {
+            zero_u32: c("k_zero_u32")?,
+            elim: c("k_schur_elim")?,
+            w: c("k_schur_w")?,
+            tiles: c("k_schur_tiles")?,
+            rhs: c("k_schur_rhs")?,
+            scatter_kept: c("k_scatter_kept")?,
+            backsub: c("k_schur_backsub")?,
+            symv_sub: c("k_symv_sub")?,
+            copy: c("k_copy_f64")?,
+            refine_start: c("k_refine_start")?,
+            refine_apply: c("k_refine_apply")?,
+            refine_judge: c("k_refine_judge")?,
+            refine_revert: c("k_refine_revert")?,
+        };
+        Ok(GpuSchur {
             graph: None,
             graphs: true,
             replayed: false,
-            ctx: ctx.clone(),
-            plan,
-            plan_len,
-            d_on,
+            dev: dev.clone(),
+            wide,
+            k,
+            ints,
+            on,
+            kt_ptr,
+            kt,
+            work,
+            sec,
+            status_at,
             ne: p.ne,
             no: p.no,
             nt: p.nt,
             nk: p.nk,
             n: p.n,
             nks: p.nks,
+            nh,
             s_len: p.s_len,
-            ew_cap: p.ew_cap,
-            kw_cap: p.kw_cap,
-            acc_cap: p.acc_cap,
             elim_blk: p.elim_blk,
-            h: Upload::default(),
-            h_len: 0,
-            rhs: Upload::default(),
-        }
+            conv: Vec::new(),
+            host_out: vec![0; status_at + STATUS_BYTES],
+            step: vec![0.0; p.n],
+        })
     }
 
-    /// The context the reduction runs on.
-    pub fn context(&self) -> &GpuContext {
-        &self.ctx
+    /// The device the reduction runs on; its factor runs there too.
+    pub fn device(&self) -> &Arc<D> {
+        &self.dev
+    }
+
+    /// The Hessian's scalar dimension.
+    pub fn dim(&self) -> usize {
+        self.n
     }
 
     /// The reduced system's scalar dimension.
@@ -1059,221 +645,126 @@ impl GpuSchur {
         self.nks
     }
 
-    /// S's values on the device, in the storage order of the symbolic's `s`,
-    /// as the last reduction left them.
-    pub fn s_values(&self) -> (&Handle, usize) {
-        (self.s.handle(), self.s_len)
+    /// S's values on the device (block, byte offset) and their count, in the
+    /// storage order of the symbolic's `s`, as the last reduction left them.
+    pub fn s_values(&self) -> ((&D::Block, usize), usize) {
+        ((&self.work, self.sec.s), self.s_len)
     }
 
-    /// The reduced right-hand side on the device.
-    pub fn rhs_kept(&self) -> &Handle {
-        self.rhs_kept.handle()
+    /// The scalar of H, the gradient, S and the reduction's vectors.
+    pub fn wide(&self) -> Wide {
+        self.wide
     }
 
-    /// A view of the flags from flag `f` on.
-    fn flags(&self, f: usize) -> Handle {
-        self.out.handle().clone().offset_start((self.status_at + FLAGS_AT + 4 * f) as u64)
+    /// The reduced right-hand side on the device, [`kept_size`](Self::kept_size) values.
+    pub fn rhs_kept(&self) -> (&D::Block, usize) {
+        (&self.work, self.sec.rhs_kept)
     }
 
-    /// A view of the refinement's f64 state.
-    fn state(&self) -> Handle {
-        self.out.handle().clone().offset_start(self.status_at as u64)
+    /// Where [`launch`](Self::launch) reads the Hessian's tile values: the
+    /// structure's value count, in [`wide`](Self::wide), for a device
+    /// assembly to write.
+    pub fn h_target(&self) -> (&D::Block, usize) {
+        (&self.work, self.sec.h)
     }
 
-    /// Upload the Hessian's values and the gradient, in place, without
-    /// waiting.
-    ///
-    /// # Safety
-    ///
-    /// As [`Upload::write`]: `hvals` and `rhs` stay borrowed and unchanged
-    /// until a blocking read on the context's client has returned.
-    unsafe fn upload<M: arael_faer::schur::SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) {
+    /// Where [`launch`](Self::launch) reads the gradient: [`dim`](Self::dim) values.
+    pub fn rhs_target(&self) -> (&D::Block, usize) {
+        (&self.work, self.sec.rhs)
+    }
+
+    /// The step of the last solve: [`dim`](Self::dim) values.
+    pub fn step_view(&self) -> (&D::Block, usize) {
+        (&self.work, self.sec.out)
+    }
+
+    /// The last solve's status ([`STATUS_BYTES`] bytes), to read and hand to
+    /// [`outcome`](Self::outcome).
+    pub fn status_view(&self) -> (&D::Block, usize) {
+        (&self.work, self.sec.out + self.status_at)
+    }
+
+    /// The Hessian's tile values as the last upload or device assembly left
+    /// them, read back (for diagnostics).
+    pub fn h_values(&self) -> Result<Vec<f64>, GpuError> {
+        self.read_values(self.sec.h, self.nh)
+    }
+
+    /// S's values and the reduced right-hand side read back (for tests).
+    pub fn download(&self) -> Result<(Vec<f64>, Vec<f64>), GpuError> {
+        Ok((self.read_values(self.sec.s, self.s_len)?, self.read_values(self.sec.rhs_kept, self.nks)?))
+    }
+
+    /// `n` values of the work block from byte `at` on, read back.
+    fn read_values(&self, at: usize, n: usize) -> Result<Vec<f64>, GpuError> {
+        let mut bytes = vec![0u8; 8 * n];
+        self.dev.read(&self.work, at, &mut bytes)?;
+        let mut v = vec![0.0f64; n];
+        self.wide.decode(&bytes, &mut v);
+        Ok(v)
+    }
+
+    /// Byte offset of flag `f` in the work block.
+    fn flag_at(&self, f: usize) -> usize {
+        self.sec.out + self.status_at + FLAGS_AT + 4 * f
+    }
+
+    /// Write the Hessian's tile values (`hsym`'s value count) and the
+    /// gradient at [`h_target`](Self::h_target) and
+    /// [`rhs_target`](Self::rhs_target), in [`wide`](Self::wide), for
+    /// [`launch`](Self::launch) (no wait).
+    pub fn upload<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), GpuError> {
+        assert_eq!(hvals.len(), self.nh, "the Hessian's values, in the structure the reduction was built for");
         assert_eq!(rhs.len(), self.n);
-        let ctx = self.ctx.clone();
-        unsafe {
-            self.h.write(&ctx, hvals, |v| v.to_f64());
-            self.rhs.write(&ctx, rhs, |v| v.to_f64());
+        let wide = self.wide;
+        self.conv.clear();
+        self.conv.extend(hvals.iter().flat_map(|v| wide.bits(v.to_f64()).to_le_bytes()));
+        self.dev.write(&mut self.work, self.sec.h, &self.conv)?;
+        self.conv.clear();
+        self.conv.extend(rhs.iter().flat_map(|v| wide.bits(v.to_f64()).to_le_bytes()));
+        self.dev.write(&mut self.work, self.sec.rhs, &self.conv)
+    }
+
+    /// `kernel` over `blocks` blocks of `threads`; nothing when there are no blocks.
+    fn run(&self, kernel: &D::Kernel, blocks: u32, threads: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
+        if blocks == 0 {
+            return Ok(());
         }
-        self.h_len = hvals.len();
+        self.dev.launch(kernel, Launch { grid: [blocks, 1, 1], block: [threads, 1, 1], shared_bytes: 0 }, args)
     }
 
     /// Zero the flags and launch the reduction, from the uploaded values.
-    fn launch_reduce(&self) {
-        let c = self.ctx.client();
-        let arr = |h: &Handle, len: usize| unsafe { BufferArg::from_raw_parts(h.clone(), len.max(1)) };
-        let d256 = CubeDim::new_1d(256);
-        let d32 = CubeDim::new_1d(32);
-        let count = |n: u32| CubeCount::Static(n.max(1), 1, 1);
-        let (h, r) = (self.h.handle(), self.rhs.handle());
-        let plen = self.plan_len;
-        unsafe {
-            crate::kernels::k_zero_u32::launch_unchecked(c, count(1), d32, arr(&self.flags(0), N_FLAGS), N_FLAGS as u32);
-            k_schur_elim::launch_unchecked(c, count(self.ne.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(r, self.n), arr(self.dinv.handle(), 1), arr(self.z.handle(), 1), arr(&self.flags(F_ELIM), 1), self.ne, self.ew_cap);
-            k_schur_w::launch_unchecked(c, count(self.no.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(self.dinv.handle(), 1), arr(self.w.handle(), 1), self.no);
-            k_schur_tiles::launch_unchecked(c, count(self.nt), d32, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(self.w.handle(), 1), arr(self.s.handle(), self.s_len), self.acc_cap);
-            k_schur_rhs::launch_unchecked(c, count(self.nk), d32, arr(self.plan.handle(), plen), arr(h, self.h_len), arr(r, self.n), arr(self.z.handle(), 1), arr(self.rhs_kept.handle(), self.nks), self.kw_cap);
-        }
+    fn launch_reduce(&self) -> Result<(), GpuError> {
+        let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
+        let w = |at: usize| Arg::Block(&self.work, at);
+        self.run(&self.k.zero_u32, 1, PLANE, &[w(self.flag_at(0)), Arg::U32(N_FLAGS as u32)])?;
+        let elim = [plan, w(s.h), w(s.rhs), w(s.dinv), w(s.z), w(self.flag_at(F_ELIM)), Arg::U32(self.ne)];
+        self.run(&self.k.elim, self.ne.div_ceil(THREADS), THREADS, &elim)?;
+        self.run(&self.k.w, self.no.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.dinv), w(s.w), Arg::U32(self.no)])?;
+        self.run(&self.k.tiles, self.nt, PLANE, &[plan, w(s.h), w(s.w), w(s.s)])?;
+        self.run(&self.k.rhs, self.nk, PLANE, &[plan, w(s.h), w(s.rhs), w(s.z), w(s.rhs_kept)])
     }
 
     /// Form S and the reduced right-hand side from the damped Hessian's tile
     /// values `hvals` (in `hsym`'s storage order) and the gradient `rhs`, and
-    /// wait for them (for inspection: [`solve`](Self::solve) reduces as its
-    /// first stage). `Err` when an eliminated block's diagonal is not
-    /// positive definite.
-    pub fn reduce<M: arael_faer::schur::SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), SchurError> {
-        let ctx = self.ctx.clone();
-        let flight = crate::host::InFlight::new(ctx.client());
-        // SAFETY: `hvals` and `rhs` stay borrowed until the read below.
-        unsafe { self.upload(hvals, rhs) };
-        self.launch_reduce();
-        let flags = crate::read_one(ctx.client(), self.out.view(self.status_at + STATUS_BYTES)).expect("read the flags");
-        flight.done();
-        let failed = bytemuck::pod_read_unaligned::<u32>(&flags[self.status_at + FLAGS_AT + 4 * F_ELIM..][..4]);
-        if failed != 0 { Err(SchurError::NotPositiveDefinite { block: self.elim_blk[failed as usize - 1] as usize }) } else { Ok(()) }
+    /// wait for the pivot flags (for inspection: [`solve`](Self::solve)
+    /// reduces as its first stage).
+    pub fn reduce<M: SchurReal + 'static>(&mut self, hvals: &[M], rhs: &[M]) -> Result<(), GpuSchurError> {
+        self.upload(hvals, rhs)?;
+        self.launch_reduce()?;
+        let mut failed = [0u32];
+        self.dev.read(&self.work, self.flag_at(F_ELIM), bytemuck::cast_slice_mut(&mut failed))?;
+        if failed[0] != 0 { Err(GpuSchurError::Eliminated { block: self.elim_blk[failed[0] as usize - 1] as usize }) } else { Ok(()) }
     }
 
     /// Whether [`solve`](Self::solve) captures its launches as a graph and
     /// replays it (the default): the first solve with a factor and a
-    /// refinement setting runs the kernels and then records them, and the
-    /// solves after it replay the recording, one launch instead of hundreds.
+    /// refinement setting runs the kernels and records them, and the solves
+    /// after it replay the recording, one launch instead of hundreds.
     pub fn use_graphs(&mut self, on: bool) {
         self.graphs = on;
         if !on {
             self.graph = None;
-        }
-    }
-
-    /// Whether the last [`solve`](Self::solve) replayed a captured graph.
-    pub fn replayed(&self) -> bool {
-        self.replayed
-    }
-
-    /// The launches of one damped solve after the uploads, all of them
-    /// kernels: the reduction, the factorization, the solve, `max_steps`
-    /// refinement steps, the back-substitution. The same sequence every
-    /// time for the same factor and refinement, which is what makes it a
-    /// graph.
-    fn launch_attempt(&self, factor: &mut GpuFactor, max_steps: usize, tol_rel: f64) {
-        self.launch_reduce();
-        let c = self.ctx.client();
-        factor.factorize_device(self.s.handle(), self.s_len, &self.flags(F_FACTOR));
-        let arr = |h: &Handle, len: usize| unsafe { BufferArg::from_raw_parts(h.clone(), len.max(1)) };
-        let d256 = CubeDim::new_1d(256);
-        let d32 = CubeDim::new_1d(32);
-        let count = |n: u32| CubeCount::Static(n.max(1), 1, 1);
-        let plen = self.plan_len;
-        let nks = self.nks as u32;
-        let per_entry = count(nks.div_ceil(256));
-        let (on, gate, state) = (self.d_on.clone(), self.flags(F_ACTIVE), self.state());
-        let copy = |gate: &Handle, dst: &Handle, src: &Handle| unsafe { k_copy_f64::launch_unchecked(c, per_entry.clone(), d256, arr(gate, 1), arr(dst, self.nks), arr(src, self.nks), nks) };
-        // r = b - S x
-        let residual = |gate: &Handle| unsafe {
-            copy(gate, self.r.handle(), self.rhs_kept.handle());
-            k_symv_sub::launch_unchecked(c, count(self.nt), d32, arr(gate, 1), arr(self.plan.handle(), plen), arr(self.s.handle(), self.s_len), arr(self.x_kept.handle(), self.nks), arr(self.r.handle(), self.nks));
-        };
-        copy(&on, self.x_kept.handle(), self.rhs_kept.handle());
-        factor.solve_device(self.x_kept.handle());
-        if max_steps > 0 {
-            residual(&on);
-            unsafe { k_refine_start::launch_unchecked(c, count(1), d256, arr(self.rhs_kept.handle(), self.nks), arr(self.r.handle(), self.nks), arr(&state, 4), arr(&gate, N_FLAGS), nks, tol_rel) };
-            for _ in 0..max_steps {
-                factor.solve_device_if(self.r.handle(), &gate);
-                unsafe { k_refine_apply::launch_unchecked(c, per_entry.clone(), d256, arr(&gate, N_FLAGS), arr(self.x_kept.handle(), self.nks), arr(self.x_prev.handle(), self.nks), arr(self.r.handle(), self.nks), nks) };
-                residual(&gate);
-                unsafe { k_refine_judge::launch_unchecked(c, count(1), d256, arr(self.r.handle(), self.nks), arr(&state, 4), arr(&gate, N_FLAGS), nks) };
-            }
-            unsafe { k_refine_revert::launch_unchecked(c, per_entry.clone(), d256, arr(&gate, N_FLAGS), arr(self.x_kept.handle(), self.nks), arr(self.x_prev.handle(), self.nks), nks) };
-        }
-        // the kept blocks into the full vector, then the eliminated ones
-        unsafe {
-            k_scatter_kept::launch_unchecked(c, count(self.nk.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(self.x_kept.handle(), self.nks), arr(self.out.handle(), self.n), self.nk);
-            k_schur_backsub::launch_unchecked(c, count(self.ne.div_ceil(256)), d256, arr(self.plan.handle(), plen), arr(self.h.handle(), self.h_len), arr(self.rhs.handle(), self.n), arr(self.dinv.handle(), 1), arr(self.out.handle(), self.n), self.ne, self.ew_cap);
-        }
-    }
-
-    /// One damped solve, entirely on the device, waiting once: form S and
-    /// the reduced right-hand side from the Hessian's tile values `hvals`
-    /// (in `hsym`'s storage order) and the gradient `rhs`, factorize S with
-    /// `factor`, solve for the kept blocks, refine the solution against S
-    /// when `refine` is `Some((max_steps, tol))` (an f32 factor; `tol`
-    /// relative to the right-hand side, floored by the caller), recover the
-    /// eliminated blocks, and read the full step into `delta` with the
-    /// pivot flags and the refinement's state.
-    ///
-    /// The refinement decides on the device: `max_steps` steps are
-    /// launched, and those after it has converged or stalled do nothing. A
-    /// failed pivot is found with the result, so a failing solve runs to
-    /// the end; `delta` is then left as it was. The launches are captured as
-    /// a graph and replayed by the solves after it (see
-    /// [`use_graphs`](Self::use_graphs)).
-    pub fn solve<M: arael_faer::schur::SchurReal + 'static>(
-        &mut self,
-        factor: &mut GpuFactor,
-        hvals: &[M],
-        rhs: &[M],
-        refine: Option<(usize, f64)>,
-        delta: &mut [M],
-    ) -> Result<RefineStats, GpuSchurError> {
-        assert_eq!(rhs.len(), self.n);
-        // the buffers the uploads land in are fixed first: a graph replays
-        // against the addresses it was captured with
-        let ctx = self.ctx.clone();
-        self.h.reserve(&ctx, hvals.len());
-        self.rhs.reserve(&ctx, rhs.len());
-        self.h_len = hvals.len();
-        // SAFETY: `hvals` and `rhs` stay borrowed until `run`'s read.
-        self.run(factor, refine, delta, &mut |this| unsafe { this.upload(hvals, rhs) })
-    }
-
-    /// The buffer of `len` f64 that [`launch`](Self::launch) reads the
-    /// Hessian's tile values from, for a device assembly to write; the same
-    /// buffer until a longer one is asked for.
-    pub fn h_target(&mut self, len: usize) -> Handle {
-        let ctx = self.ctx.clone();
-        self.h_len = len;
-        self.h.reserve(&ctx, len).view(len.max(1) * 8)
-    }
-
-    /// The Hessian's tile values as the last upload or device assembly
-    /// left them, read back (for diagnostics).
-    pub fn h_values(&self) -> Vec<f64> {
-        let bytes = crate::read_one(self.ctx.client(), self.h.lease().view(self.h_len.max(1) * 8)).expect("read the Hessian");
-        f64::from_bytes(&bytes)[..self.h_len].to_vec()
-    }
-
-    /// The buffer of the gradient (`n` f64) that [`launch`](Self::launch)
-    /// reads.
-    pub fn rhs_target(&mut self) -> Handle {
-        let ctx = self.ctx.clone();
-        self.rhs.reserve(&ctx, self.n).view(self.n.max(1) * 8)
-    }
-
-    /// The launches of [`solve`](Self::solve) and nothing else, from the
-    /// damped Hessian's values and the gradient already on the device (in
-    /// [`h_target`](Self::h_target) and [`rhs_target`](Self::rhs_target)):
-    /// the step lands in [`step_view`](Self::step_view), the solve's status
-    /// in [`status_view`](Self::status_view), for the caller to read with
-    /// its own results and hand to [`outcome`](Self::outcome). Kernels only,
-    /// so a caller can capture them in a graph of its own (keyed by
-    /// [`graph_key`](Self::graph_key)).
-    pub fn launch(&self, factor: &mut GpuFactor, refine: Option<(usize, f64)>) {
-        assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
-        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
-        self.launch_attempt(factor, max_steps, tol_rel);
-    }
-
-    /// What a captured [`launch`](Self::launch) depends on beyond the
-    /// reduction's own buffers: the factor, the refinement, and the buffers
-    /// of the Hessian and the gradient. A graph replays only under its key.
-    pub fn graph_key(&self, factor: &GpuFactor, refine: Option<(usize, f64)>) -> GraphKey {
-        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
-        GraphKey {
-            factor: factor.id(),
-            max_steps,
-            tol_bits: tol_rel.to_bits(),
-            h: self.h.lease().id(),
-            h_len: self.h_len,
-            rhs: self.rhs.lease().id(),
         }
     }
 
@@ -1282,178 +773,309 @@ impl GpuSchur {
         self.graphs
     }
 
-    /// One damped solve after `upload` has put the inputs in place.
-    fn run<M: arael_faer::schur::SchurReal + 'static>(
+    /// Whether the last [`solve`](Self::solve) replayed a captured graph.
+    pub fn replayed(&self) -> bool {
+        self.replayed
+    }
+
+    /// The launches of one damped solve after the uploads: the reduction,
+    /// the factorization, the solve, `max_steps` refinement steps, the
+    /// back-substitution. The same sequence every time for the same factor
+    /// and refinement, which is what makes it a graph.
+    fn launch_attempt(&self, factor: &GpuFactor<D>, max_steps: usize, tol_rel: f64) -> Result<(), GpuError> {
+        self.launch_reduce()?;
+        let (s, plan) = (&self.sec, Arg::Block(&self.ints, 0));
+        let w = |at: usize| Arg::Block(&self.work, at);
+        factor.factorize_device((&self.work, s.s), (&self.work, self.flag_at(F_FACTOR)))?;
+        let nks = self.nks as u32;
+        let per_entry = nks.div_ceil(THREADS);
+        let on = Arg::Block(&self.ints, self.on);
+        // the flags, and the one that gates a refinement step's kernels
+        let flags = w(self.flag_at(0));
+        let gate = w(self.flag_at(F_ACTIVE));
+        let state = w(s.out + self.status_at);
+        let copy = |gate, dst: usize, src: usize| self.run(&self.k.copy, per_entry, THREADS, &[gate, w(dst), w(src), Arg::U32(nks)]);
+        // r = b - S x
+        let residual = |gate| {
+            copy(gate, s.r, s.rhs_kept)?;
+            let (kt_ptr, kt) = (Arg::Block(&self.ints, self.kt_ptr), Arg::Block(&self.ints, self.kt));
+            self.run(&self.k.symv_sub, self.nk, PLANE, &[gate, plan, kt_ptr, kt, w(s.s), w(s.x_kept), w(s.r)])
+        };
+        copy(on, s.x_kept, s.rhs_kept)?;
+        factor.solve_device((&self.work, s.x_kept))?;
+        if max_steps > 0 {
+            residual(on)?;
+            self.run(&self.k.refine_start, 1, THREADS, &[w(s.rhs_kept), w(s.r), state, flags, Arg::U32(nks), self.wide.arg(tol_rel)])?;
+            for _ in 0..max_steps {
+                factor.solve_device_if((&self.work, s.r), (&self.work, self.flag_at(F_ACTIVE)))?;
+                self.run(&self.k.refine_apply, per_entry, THREADS, &[flags, w(s.x_kept), w(s.x_prev), w(s.r), Arg::U32(nks)])?;
+                residual(gate)?;
+                self.run(&self.k.refine_judge, 1, THREADS, &[w(s.r), state, flags, Arg::U32(nks)])?;
+            }
+            self.run(&self.k.refine_revert, per_entry, THREADS, &[flags, w(s.x_kept), w(s.x_prev), Arg::U32(nks)])?;
+        }
+        // the kept blocks into the full vector, then the eliminated ones
+        self.run(&self.k.scatter_kept, self.nk.div_ceil(THREADS), THREADS, &[plan, w(s.x_kept), w(s.out), Arg::U32(self.nk)])?;
+        self.run(&self.k.backsub, self.ne.div_ceil(THREADS), THREADS, &[plan, w(s.h), w(s.rhs), w(s.dinv), w(s.out), Arg::U32(self.ne)])
+    }
+
+    /// One damped solve, entirely on the device, waiting once: form S and
+    /// the reduced right-hand side from the Hessian's tile values `hvals`
+    /// (in `hsym`'s storage order) and the gradient `rhs`, factorize S with
+    /// `factor`, solve for the kept blocks, refine the solution against S
+    /// when `refine` is `Some((max_steps, tol))` (an f32 factor; `tol`
+    /// relative to the right-hand side), recover the eliminated blocks, and
+    /// read the full step into `delta` with the pivot flags and the
+    /// refinement's state.
+    ///
+    /// The refinement decides on the device: `max_steps` steps are
+    /// launched, and those after it has converged or stalled do nothing. A
+    /// failed pivot is found with the result, so a failing solve runs to the
+    /// end; `delta` is then left as it was. The launches are captured as a
+    /// graph and replayed by the solves after it (see
+    /// [`use_graphs`](Self::use_graphs)).
+    pub fn solve<M: SchurReal + 'static>(
         &mut self,
-        factor: &mut GpuFactor,
+        factor: &mut GpuFactor<D>,
+        hvals: &[M],
+        rhs: &[M],
         refine: Option<(usize, f64)>,
         delta: &mut [M],
-        upload: &mut dyn FnMut(&mut Self),
     ) -> Result<RefineStats, GpuSchurError> {
         assert_eq!(delta.len(), self.n);
-        let ctx = self.ctx.clone();
-        let c = ctx.client();
-        let flight = crate::host::InFlight::new(c);
-        let pending = self.enqueue(factor, refine, upload);
-        let bytes = crate::read_one(c, self.out.view(self.status_at + STATUS_BYTES)).expect("read the step");
-        flight.done();
-        self.finish(factor, &pending);
-        let stats = self.outcome(&bytes[self.status_at..], refine)?;
-        for (d, &v) in delta.iter_mut().zip(f64::from_bytes(&bytes[..self.n * 8])) {
+        self.upload(hvals, rhs)?;
+        self.enqueue(factor, refine)?;
+        self.dev.read(&self.work, self.sec.out, &mut self.host_out)?;
+        let stats = self.outcome(&self.host_out[self.status_at..], refine)?;
+        self.wide.decode(&self.host_out[..8 * self.n], &mut self.step);
+        for (d, &v) in delta.iter_mut().zip(&self.step) {
             *d = M::from_f64(v);
         }
         Ok(stats)
     }
 
-    /// The uploads and the attempt's launches, replayed when a graph of
-    /// them is captured, without waiting.
-    fn enqueue(&mut self, factor: &mut GpuFactor, refine: Option<(usize, f64)>, upload: &mut dyn FnMut(&mut Self)) -> Pending {
-        assert!(self.ctx.same(factor.context()), "the factor runs on the reduction's context, so S never leaves its stream");
-        let ctx = self.ctx.clone();
-        let c = ctx.client();
+    /// The attempt's launches, replayed when a graph of them is captured,
+    /// without waiting; with graphs on and none captured for this factor and
+    /// refinement, the launches are recorded right after they are queued, so
+    /// the recording overlaps their run.
+    fn enqueue(&mut self, factor: &GpuFactor<D>, refine: Option<(usize, f64)>) -> Result<(), GpuError> {
+        assert!(Arc::ptr_eq(&self.dev, factor.device()), "the factor runs on the reduction's device, so S never leaves it");
         let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
         let key = self.graph_key(factor, refine);
-        let replay = self.graphs && self.graph.as_ref().is_some_and(|g| g.key == key);
-        let capture = self.graphs && !replay;
-        if capture {
-            self.graph = None;
-            // before the run that warms the pools up for the recording
-            c.graph_prepare().expect("prepare the attempt's graph capture");
-        }
-        upload(self);
-        if replay {
-            // SAFETY: the graph's buffers are this reduction's leases, the
-            // factor's (its id is in the key) and the uploads' (theirs too),
-            // all alive; the context's client is pinned to the stream the
-            // graph was captured on, which orders the uploads before and the
-            // read after it.
-            unsafe { self.graph.as_ref().unwrap().graph.replay() }.expect("replay the attempt's graph");
-        } else {
-            self.launch_attempt(factor, max_steps, tol_rel);
-        }
+        let replay = self.graphs && self.graph.as_ref().is_some_and(|g| g.0 == key);
         self.replayed = replay;
-        Pending { capture: capture.then_some(key), max_steps, tol_rel }
-    }
-
-    /// The step of the last solve, `n` f64 on the device.
-    pub fn step_view(&self) -> Handle {
-        self.out.view(self.n.max(1) * 8)
-    }
-
-    /// The last solve's status (the pivot flags and the refinement's
-    /// state), to read and hand to [`outcome`](Self::outcome).
-    pub fn status_view(&self) -> Handle {
-        let end = self.out.capacity() - (self.status_at + STATUS_BYTES);
-        self.out.handle().clone().offset_start(self.status_at as u64).offset_end(end as u64)
-    }
-
-    /// After the read of an [`enqueue`](Self::enqueue)d solve: the graph its
-    /// run warmed up captured, and CubeCL's queue flushed (its rotation
-    /// returns the staging uploads held to the pinned pool, which otherwise
-    /// grows; the read has waited, so the rotation's fence wait is free).
-    fn finish(&mut self, factor: &mut GpuFactor, pending: &Pending) {
-        let ctx = self.ctx.clone();
-        let c = ctx.client();
-        c.flush().expect("device flush");
-        if let Some(key) = pending.capture {
-            // The run warmed the pools: record the same launches, which do
-            // not execute now, for the solves after this one. CubeCL opens
-            // CUDA's capture in global mode, where a wait from any thread of
-            // the process fails while it is open: the window runs on the
-            // device's thread with nothing else scheduled against it, and
-            // with no wait of this crate on another thread in flight.
-            let (max_steps, tol_rel) = (pending.max_steps, pending.tol_rel);
-            let this = &*self;
-            let graph = crate::capture(c, move || this.launch_attempt(factor, max_steps, tol_rel));
-            self.graph = Some(Captured { key, graph });
+        if replay {
+            return self.dev.replay(&self.graph.as_ref().unwrap().1);
         }
+        self.launch_attempt(factor, max_steps, tol_rel)?;
+        if self.graphs {
+            self.graph = None;
+            let this = &*self;
+            let graph = self.dev.capture(|| this.launch_attempt(factor, max_steps, tol_rel))?;
+            self.graph = Some((key, graph));
+        }
+        Ok(())
+    }
+
+    /// The launches of [`solve`](Self::solve) and nothing else, from the
+    /// damped Hessian's values and the gradient already on the device (at
+    /// [`h_target`](Self::h_target) and [`rhs_target`](Self::rhs_target)):
+    /// the step lands at [`step_view`](Self::step_view), the status at
+    /// [`status_view`](Self::status_view), for the caller to read with its
+    /// own results and hand to [`outcome`](Self::outcome). Launches only, so
+    /// a caller can capture them in a graph of its own (keyed by
+    /// [`graph_key`](Self::graph_key)).
+    pub fn launch(&self, factor: &GpuFactor<D>, refine: Option<(usize, f64)>) -> Result<(), GpuError> {
+        assert!(Arc::ptr_eq(&self.dev, factor.device()), "the factor runs on the reduction's device, so S never leaves it");
+        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
+        self.launch_attempt(factor, max_steps, tol_rel)
+    }
+
+    /// What a captured [`launch`](Self::launch) depends on beyond the
+    /// reduction's own blocks: the factor and the refinement. A graph
+    /// replays only under its key.
+    pub fn graph_key(&self, factor: &GpuFactor<D>, refine: Option<(usize, f64)>) -> GraphKey {
+        let (max_steps, tol_rel) = refine.filter(|r| r.0 > 0).unwrap_or((0, 0.0));
+        GraphKey { factor: factor.id(), max_steps, tol_bits: tol_rel.to_bits() }
     }
 
     /// The outcome of a solve with refinement `refine` from its status bytes
     /// (as read from [`status_view`](Self::status_view)).
     pub fn outcome(&self, status: &[u8], refine: Option<(usize, f64)>) -> Result<RefineStats, GpuSchurError> {
-        decode_status(status, &self.elim_blk, refine)
-    }
-
-    /// The reduced right-hand side and S's values read back (for tests).
-    pub fn download(&self) -> (Vec<f64>, Vec<f64>) {
-        crate::sync(self.ctx.client());
-        let s = f64::from_bytes(&crate::read_one(self.ctx.client(), self.s.view(self.s_len * 8)).expect("read S")).to_vec();
-        let r = f64::from_bytes(&crate::read_one(self.ctx.client(), self.rhs_kept.view(self.nks * 8)).expect("read rhs")).to_vec();
-        (s, r)
+        // the state's words as f64, the flags after them as they are
+        let mut f64_status = status[..STATUS_BYTES].to_vec();
+        for c in f64_status[..FLAGS_AT].as_chunks_mut::<8>().0 {
+            *c = self.wide.value(u64::from_le_bytes(*c)).to_le_bytes();
+        }
+        Ok(decode_status(&f64_status, &self.elim_blk, refine)?)
     }
 }
 
-impl GpuFactor {
-    /// As [`crate::GpuSupernodal::factorize_device`].
-    pub fn factorize_device(&mut self, vals: &Handle, nvals: usize, fail: &Handle) {
-        match self {
-            GpuFactor::F32(g) => g.factorize_device(vals, nvals, fail),
-            GpuFactor::F64(g) => g.factorize_device(vals, nvals, fail),
+/// Per kept block, the tiles of S touching it, for `k_symv_sub`: `(ptr, tiles)`
+/// with block k's at `tiles[ptr[k]..ptr[k + 1]]`, each a tile index times 2,
+/// plus 1 when k is the tile's column block and not its row block.
+fn tiles_by_kept_block(p: &SchurPlan) -> (Vec<u32>, Vec<u32>) {
+    let (nt, nk) = (p.nt as usize, p.nk as usize);
+    let array = |slot: usize| &p.words[p.words[slot] as usize..][..nt];
+    let (ta, tb) = (array(ST_A), array(ST_B));
+    let mut ptr = vec![0u32; nk + 1];
+    for t in 0..nt {
+        ptr[ta[t] as usize + 1] += 1;
+        if ta[t] != tb[t] {
+            ptr[tb[t] as usize + 1] += 1;
         }
     }
-
-    /// As [`crate::GpuSupernodal::solve_device`].
-    pub fn solve_device(&mut self, x: &Handle) {
-        match self {
-            GpuFactor::F32(g) => g.solve_device(x),
-            GpuFactor::F64(g) => g.solve_device(x),
+    for k in 0..nk {
+        ptr[k + 1] += ptr[k];
+    }
+    let mut fill = ptr.clone();
+    let mut tiles = vec![0u32; ptr[nk] as usize];
+    for t in 0..nt {
+        let a = ta[t] as usize;
+        tiles[fill[a] as usize] = 2 * t as u32;
+        fill[a] += 1;
+        if ta[t] != tb[t] {
+            let b = tb[t] as usize;
+            tiles[fill[b] as usize] = 2 * t as u32 + 1;
+            fill[b] += 1;
         }
     }
-
-    /// As [`crate::GpuSupernodal::solve_device_if`].
-    pub fn solve_device_if(&mut self, x: &Handle, gate: &Handle) {
-        match self {
-            GpuFactor::F32(g) => g.solve_device_if(x, gate),
-            GpuFactor::F64(g) => g.solve_device_if(x, gate),
-        }
-    }
+    (ptr, tiles)
 }
 
+/// The `#define`s of `schur.cpp`: the block size, the width classes, and
+/// the plan header's and the status's slots of [`crate::schur`].
+fn defines(p: &SchurPlan) -> String {
+    let mut s = String::new();
+    define_u32s(
+        &mut s,
+        &[
+            ("THREADS", THREADS as usize),
+            ("EW", p.ew_cap),
+            ("KW", p.kw_cap),
+            ("ACC", p.acc_cap),
+            ("SE_DIAG_OFF", SE_DIAG_OFF),
+            ("SE_W", SE_W),
+            ("SE_ORIG_OFF", SE_ORIG_OFF),
+            ("SE_OBS_PTR", SE_OBS_PTR),
+            ("SE_DINV_OFF", SE_DINV_OFF),
+            ("SE_Z_OFF", SE_Z_OFF),
+            ("SO_CA_OFF", SO_CA_OFF),
+            ("SO_TRANS", SO_TRANS),
+            ("SO_W", SO_W),
+            ("SO_E", SO_E),
+            ("SO_ORIG_OFF", SO_ORIG_OFF),
+            ("SO_W_OFF", SO_W_OFF),
+            ("ST_VAL_OFF", ST_VAL_OFF),
+            ("ST_WR", ST_WR),
+            ("ST_WC", ST_WC),
+            ("ST_A", ST_A),
+            ("ST_B", ST_B),
+            ("ST_A_OFF", ST_A_OFF),
+            ("ST_B_OFF", ST_B_OFF),
+            ("ST_COPY_OFF", ST_COPY_OFF),
+            ("ST_PAIR_PTR", ST_PAIR_PTR),
+            ("SP_OA", SP_OA),
+            ("SP_OB", SP_OB),
+            ("SK_OBS_PTR", SK_OBS_PTR),
+            ("SK_OBS", SK_OBS),
+            ("SK_S_OFF", SK_S_OFF),
+            ("SK_ORIG_OFF", SK_ORIG_OFF),
+            ("SK_W", SK_W),
+            ("R_BNORM", ST_BNORM),
+            ("R_TOL", ST_TOL),
+            ("R_RNORM", ST_RNORM),
+            ("F_ACTIVE", F_ACTIVE),
+            ("F_STEPS", F_STEPS),
+            ("F_REVERT", F_REVERT),
+        ],
+    );
+    s
+}
 
-#[cfg(all(test, feature = "cuda"))]
+#[cfg(all(test, any(feature = "cuda", feature = "hip")))]
 mod tests {
     use super::*;
+    use crate::GpuPrecision;
+    use crate::TestDevice;
     use crate::test_util::{ba_like, rel_residual};
-    use crate::{GpuBackend, GpuContext, GpuPrecision, GpuSupernodal};
     use arael_faer::schur::{SchurContext, schur_reduce, schur_symbolic};
     use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_order};
+
+    type Matrix = arael_faer::bsc::SparseBlockColMat<SparseIndex, f64>;
+
+    fn device() -> Arc<TestDevice> {
+        Arc::new(TestDevice::new(0).unwrap())
+    }
 
     fn err_max(a: &[f64], b: &[f64]) -> f64 {
         let m = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         a.iter().zip(b).fold(0.0f64, |e, (x, y)| e.max((x - y).abs())) / m
     }
 
+    /// Both wide scalars: the reduction's tests run in each.
+    const WIDES: [Wide; 2] = [Wide::F64, Wide::Df32];
+
+    fn factor(dev: &Arc<TestDevice>, precision: GpuPrecision, sn: &SupernodalSymbolic, s: &SymbolicSparseBlockColMat<SparseIndex>, wide: Wide) -> GpuFactor<TestDevice> {
+        GpuFactor::new(dev, precision, sn, s, &Default::default(), wide).unwrap()
+    }
+
+    /// A BA-like system, its Schur symbolic and the supernodal analysis of S.
+    fn setup(np: usize, nl: usize, seed: u64) -> (Matrix, Vec<f64>, Vec<f64>, Vec<usize>, SchurSymbolic<SparseIndex>, SupernodalSymbolic) {
+        let (h, dense, rhs, elim) = ba_like(np, nl, seed);
+        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
+        let order = nd_block_order(&sym.s);
+        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
+        (h, dense, rhs, elim, sym, sn)
+    }
+
     #[test]
     fn the_reduction_matches_the_cpu() {
+        for wide in WIDES {
+            the_reduction_matches_the_cpu_in(wide);
+        }
+    }
+
+    fn the_reduction_matches_the_cpu_in(wide: Wide) {
         let (h, _, rhs, elim) = ba_like(40, 300, 5);
         let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
         let mut s_cpu = sym.alloc_s::<f64>();
         let mut rhs_cpu = vec![0.0f64; sym.kept_size()];
         let mut ctx = SchurContext::new();
         schur_reduce(&sym, &h, &rhs, &mut ctx, &mut s_cpu, &mut rhs_cpu).unwrap();
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
+        let dev = device();
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
         g.reduce(h.vals(), &rhs).unwrap();
-        let (s_gpu, rhs_gpu) = g.download();
+        let (s_gpu, rhs_gpu) = g.download().unwrap();
         assert_eq!(s_gpu.len(), s_cpu.vals().len());
         let es = err_max(&s_gpu, s_cpu.vals());
         let er = err_max(&rhs_gpu, &rhs_cpu);
         assert!(es < 1e-12 && er < 1e-12, "S err/max {es}, rhs err/max {er}");
         assert!(sym.obs_trans().iter().any(|&t| t) && sym.obs_trans().iter().any(|&t| !t), "both tile orientations in the fixture");
+        // the same from f32 inputs, widened on the host
+        let (h32, r32): (Vec<f32>, Vec<f32>) = (h.vals().iter().map(|&v| v as f32).collect(), rhs.iter().map(|&v| v as f32).collect());
+        g.reduce(&h32, &r32).unwrap();
+        let (s32, _) = g.download().unwrap();
+        let h64: Vec<f64> = h32.iter().map(|&v| v as f64).collect();
+        let r64: Vec<f64> = r32.iter().map(|&v| v as f64).collect();
+        g.reduce(&h64, &r64).unwrap();
+        assert_eq!(s32, g.download().unwrap().0, "f32 inputs are their f64 twins");
     }
 
     #[test]
     fn the_reduced_solve_solves_the_whole_system() {
-        let (h, dense, rhs, elim) = ba_like(40, 300, 9);
+        for wide in WIDES {
+            the_reduced_solve_solves_the_whole_system_in(wide);
+        }
+    }
+
+    fn the_reduced_solve_solves_the_whole_system_in(wide: Wide) {
+        let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
         let n = h.symbolic().ncols();
-        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let order = nd_block_order(&sym.s);
-        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
+        let dev = device();
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
         for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
-            let mut f = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             let mut delta = vec![0.0f64; n];
             let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
             let res = rel_residual(&dense, n, &delta, &rhs);
@@ -1468,25 +1090,26 @@ mod tests {
             g.solve(&mut f, h.vals(), &rhs, refine, &mut delta2).unwrap();
             assert!(rel_residual(&dense, n, &delta2, &rhs) < tol);
         }
-        let _ = GpuSupernodal::<f64>::dim;
     }
 
-    /// The refinement decides on the device: it stops once below the
-    /// tolerance, launched steps after that doing nothing; with a tolerance
-    /// it cannot reach it stops at the first step that does not reduce the
-    /// residual, and undoes that step.
     /// With nothing eliminated S is H: the reduction solves the whole
-    /// system (the whole-system GPU route), refinement included.
+    /// system, refinement included.
     #[test]
     fn nothing_eliminated_solves_the_whole_system() {
+        for wide in WIDES {
+            nothing_eliminated_solves_the_whole_system_in(wide);
+        }
+    }
+
+    fn nothing_eliminated_solves_the_whole_system_in(wide: Wide) {
         let (h, dense, rhs, _) = ba_like(30, 200, 5);
         let n = h.symbolic().ncols();
         let order = nd_block_order(h.symbolic());
         let sn = SupernodalSymbolic::new(h.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        let mut g = GpuSchur::whole(&ctx, h.symbolic());
+        let dev = device();
+        let mut g = GpuSchur::whole(&dev, h.symbolic(), wide).unwrap();
         for (precision, refine, tol) in [(GpuPrecision::F64, None, 1e-10), (GpuPrecision::F32, Some((4usize, 1e-10f64)), 1e-8)] {
-            let mut f = GpuFactor::new(&ctx, precision, &sn, h.symbolic(), &Default::default());
+            let mut f = factor(&dev, precision, &sn, h.symbolic(), wide);
             for _ in 0..2 {
                 let mut delta = vec![0.0f64; n];
                 let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap();
@@ -1499,16 +1122,23 @@ mod tests {
         }
     }
 
+    /// The refinement decides on the device: it stops once below the
+    /// tolerance, launched steps after that doing nothing; with a tolerance
+    /// it cannot reach it stops at the first step that does not reduce the
+    /// residual, and undoes that step.
     #[test]
     fn the_refinement_stops_on_the_device() {
-        let (h, dense, rhs, elim) = ba_like(40, 300, 9);
+        for wide in WIDES {
+            the_refinement_stops_on_the_device_in(wide);
+        }
+    }
+
+    fn the_refinement_stops_on_the_device_in(wide: Wide) {
+        let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
         let n = h.symbolic().ncols();
-        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let order = nd_block_order(&sym.s);
-        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
-        let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, &sym.s, &Default::default());
+        let dev = device();
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
         let mut delta = vec![0.0f64; n];
         let reached = g.solve(&mut f, h.vals(), &rhs, Some((12, 1e-10)), &mut delta).unwrap();
         assert!(reached.steps > 0 && reached.steps < 12 && !reached.short, "{reached:?}");
@@ -1522,20 +1152,10 @@ mod tests {
         assert!(res0 < 1e-8, "residual {res0} after the undone step");
     }
 
-    /// The second solve with a factor and a refinement setting replays the
-    /// graph the first captured, against new values, and lands where the
-    /// launched kernels land; a new factor or another refinement setting is
-    /// captured anew.
-    #[test]
-    fn replayed_solves_match_launched_ones() {
-        let (h, dense, rhs, elim) = ba_like(40, 300, 9);
-        let n = h.symbolic().ncols();
-        let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-        let order = nd_block_order(&sym.s);
-        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        // another damping: the replay must see the values written before it
+    /// `h2` and `dense2`: the diagonal of every diagonal tile scaled by 1.5.
+    fn damped(h: &Matrix, dense: &[f64]) -> (Matrix, Vec<f64>) {
         let hs = h.symbolic().clone();
+        let n = hs.ncols();
         let mut h2 = h.clone();
         for blk in 0..hs.nblk_cols() {
             let t = hs.col_range(blk).find(|&b| hs.blk_row(b) == blk).unwrap();
@@ -1545,17 +1165,37 @@ mod tests {
                 h2.vals_mut()[base + i * w + i] *= 1.5;
             }
         }
-        let mut dense2 = dense.clone();
+        let mut dense2 = dense.to_vec();
         for i in 0..n {
             dense2[i + i * n] *= 1.5;
         }
+        (h2, dense2)
+    }
+
+    /// The second solve with a factor and a refinement setting replays the
+    /// graph the first captured, against new values, and lands exactly where
+    /// the launched kernels land; a new factor or another refinement setting
+    /// is captured anew.
+    #[test]
+    fn replayed_solves_match_launched_ones() {
+        for wide in WIDES {
+            replayed_solves_match_launched_ones_in(wide);
+        }
+    }
+
+    fn replayed_solves_match_launched_ones_in(wide: Wide) {
+        let (h, dense, rhs, _, sym, sn) = setup(40, 300, 9);
+        let n = h.symbolic().ncols();
+        let dev = device();
+        // another damping: the replay must see the values written before it
+        let (h2, dense2) = damped(&h, &dense);
         for precision in [GpuPrecision::F64, GpuPrecision::F32] {
             let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
-            let mut launched = GpuSchur::new(&ctx, &sym, h.symbolic());
+            let mut launched = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
             launched.use_graphs(false);
-            let mut fl = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
-            let mut g = GpuSchur::new(&ctx, &sym, h.symbolic());
-            let mut f = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            let mut fl = factor(&dev, precision, &sn, &sym.s, wide);
+            let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             for (round, (hm, dm)) in [(&h, &dense), (&h2, &dense2), (&h, &dense)].into_iter().enumerate() {
                 let (mut a, mut b) = (vec![0.0f64; n], vec![0.0f64; n]);
                 let sa = launched.solve(&mut fl, hm.vals(), &rhs, refine, &mut a).unwrap();
@@ -1569,7 +1209,7 @@ mod tests {
                 assert!(dx < 1e-12, "{precision:?} round {round}: replay against launches {dx}");
             }
             // another factor of the same structure, then another refinement setting
-            let mut f2 = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            let mut f2 = factor(&dev, precision, &sn, &sym.s, wide);
             let mut d = vec![0.0f64; n];
             g.solve(&mut f2, h.vals(), &rhs, refine, &mut d).unwrap();
             assert!(!g.replayed());
@@ -1581,94 +1221,91 @@ mod tests {
         }
     }
 
-    /// Busy work for one unit: `n` dependent multiply-adds.
-    #[cube(launch_unchecked)]
-    fn k_spin(out: &mut [f32], n: u32) {
-        let mut x = 0.0f32;
-        let mut i = 0u32;
-        while i < n {
-            x = x * 0.999f32 + 1.0f32;
-            i += 1u32;
-        }
-        out[0] = x;
-    }
-
-    /// A capture right behind another thread's read: CUDA's global capture
-    /// mode fails a wait issued on any thread of the process while a capture
-    /// is open (status 900), and a read's wait is issued on the reading
-    /// thread after CUDA's device thread has moved on. A third context holds
-    /// the device thread so the read and then the capture queue behind it;
-    /// released, the device thread runs the read's copy and goes straight
-    /// into the capture while the reader wakes up to wait. The capture has
-    /// to wait out the read.
+    /// The launches alone, from values written at the targets, read back
+    /// through the views, give what `solve` gives; and a graph the caller
+    /// captures of them replays to the same.
     #[test]
-    fn a_capture_waits_out_reads_on_other_contexts() {
-        let (reading, capturing, holding) = (GpuContext::new(GpuBackend::Cuda, 0).unwrap(), GpuContext::new(GpuBackend::Cuda, 0).unwrap(), GpuContext::new(GpuBackend::Cuda, 0).unwrap());
-        let (a, b) = (reading.lease(4), capturing.lease(4));
-        let spin = |ctx: &GpuContext, out: &Lease, n: u32| unsafe { k_spin::launch_unchecked(ctx.client(), CubeCount::Static(1, 1, 1), CubeDim::new_1d(1), BufferArg::from_raw_parts(out.handle().clone(), 1), n) };
-        // compiled and warmed up, a capture included
-        spin(&reading, &a, 1);
-        crate::read_one(reading.client(), a.view(4)).unwrap();
-        capturing.client().graph_prepare().unwrap();
-        spin(&capturing, &b, 1);
-        crate::sync(capturing.client());
-        drop(crate::capture(capturing.client(), || spin(&capturing, &b, 1)));
-        let ms = std::time::Duration::from_millis;
-        for _ in 0..3 {
-            capturing.client().graph_prepare().unwrap();
-            for _ in 0..300 {
-                spin(&capturing, &b, 1);
-            }
-            crate::sync(capturing.client());
-            std::thread::scope(|scope| {
-                scope.spawn(|| holding.client().exclusive(|| std::thread::sleep(ms(60))).unwrap());
-                scope.spawn(|| {
-                    std::thread::sleep(ms(20));
-                    spin(&reading, &a, 1000);
-                    crate::read_one(reading.client(), a.view(4)).expect("a read next to a capture");
-                });
-                scope.spawn(|| {
-                    std::thread::sleep(ms(40));
-                    // a long recording: three hundred launches
-                    let graph = crate::capture(capturing.client(), || (0..300).for_each(|_| spin(&capturing, &b, 1)));
-                    unsafe { graph.replay() }.unwrap();
-                    crate::read_one(capturing.client(), b.view(4)).unwrap();
-                });
-            });
+    fn the_launches_alone_match_solve() {
+        for wide in WIDES {
+            the_launches_alone_match_solve_in(wide);
         }
     }
 
-    /// Solve after solve on one context, structures going up and down: once
-    /// the largest has been seen, a new solver's setup leases every buffer
-    /// from the arena and creates none.
+    fn the_launches_alone_match_solve_in(wide: Wide) {
+        let (h, _, rhs, _, sym, sn) = setup(30, 250, 4);
+        let n = h.symbolic().ncols();
+        let dev = device();
+        let refine = Some((4usize, 1e-10f64));
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        g.use_graphs(false);
+        let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+        let mut want = vec![0.0f64; n];
+        let stats = g.solve(&mut f, h.vals(), &rhs, refine, &mut want).unwrap();
+        // fresh blocks, the inputs written at the targets
+        let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+        let f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+        g.upload(h.vals(), &rhs).unwrap();
+        let held: Vec<f64> = h.vals().iter().map(|&v| wide.value(wide.bits(v))).collect();
+        assert_eq!(g.h_values().unwrap(), held, "the values as the wide scalar holds them");
+        let read_result = |g: &GpuSchur<TestDevice>| {
+            let mut step = vec![0.0f64; n];
+            let mut bytes = vec![0u8; 8 * n];
+            let mut status = vec![0u8; STATUS_BYTES];
+            let (b, at) = g.step_view();
+            dev.read(b, at, &mut bytes).unwrap();
+            wide.decode(&bytes, &mut step);
+            let (b, at) = g.status_view();
+            dev.read(b, at, &mut status).unwrap();
+            (step, g.outcome(&status, refine).unwrap())
+        };
+        g.launch(&f, refine).unwrap();
+        let (step, got) = read_result(&g);
+        assert_eq!(got.steps, stats.steps);
+        let dx = err_max(&step, &want);
+        assert!(dx < 1e-12, "launches against solve: {dx}");
+        let graph = dev.capture(|| g.launch(&f, refine)).unwrap();
+        dev.replay(&graph).unwrap();
+        let (step2, got2) = read_result(&g);
+        assert_eq!(got2.steps, stats.steps);
+        assert!(err_max(&step2, &want) < 1e-12);
+        assert_eq!(g.graph_key(&f, refine), g.graph_key(&f, Some((4, 1e-10))));
+        assert_ne!(g.graph_key(&f, refine), g.graph_key(&f, Some((3, 1e-10))));
+    }
+
+    /// Solves, their captures and replays included, allocate nothing: the
+    /// blocks are made when the reduction and the factor are (from the
+    /// device's pool once an earlier structure has filled it).
     #[test]
-    fn repeated_solves_on_one_context_stop_creating_buffers() {
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        let systems: Vec<_> = [(30, 400, 1u64), (60, 900, 2), (20, 200, 3), (60, 900, 4)]
-            .iter()
-            .map(|&(np, nl, seed)| {
-                let (h, dense, rhs, elim) = ba_like(np, nl, seed);
-                let sym = schur_symbolic(h.symbolic(), &elim).unwrap();
-                let order = nd_block_order(&sym.s);
-                let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
-                (h, dense, rhs, sym, sn)
-            })
-            .collect();
-        let mut created_after_largest = None;
-        for round in 0..2 {
-            for (i, (h, dense, rhs, sym, sn)) in systems.iter().enumerate() {
-                let n = h.symbolic().ncols();
-                let mut g = GpuSchur::new(&ctx, sym, h.symbolic());
-                let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, sn, &sym.s, &Default::default());
-                let mut delta = vec![0.0f64; n];
-                g.solve(&mut f, h.vals(), rhs, Some((4, 1e-10)), &mut delta).unwrap();
-                assert!(rel_residual(dense, n, &delta, rhs) < 1e-8);
-                if round == 0 && i == 1 {
-                    created_after_largest = Some(ctx.buffers_created());
-                }
-            }
+    fn solves_allocate_nothing() {
+        for wide in WIDES {
+            solves_allocate_nothing_in(wide);
         }
-        assert_eq!(Some(ctx.buffers_created()), created_after_largest, "no buffer created after the largest structure");
+    }
+
+    fn solves_allocate_nothing_in(wide: Wide) {
+        let dev = device();
+        for (np, nl, seed) in [(30, 400, 1u64), (60, 900, 2), (20, 200, 3)] {
+            let (h, dense, rhs, _, sym, sn) = setup(np, nl, seed);
+            let n = h.symbolic().ncols();
+            let before = dev.allocations();
+            let mut g = GpuSchur::new(&dev, &sym, h.symbolic(), wide).unwrap();
+            let fresh = dev.allocations() - before;
+            // the plan block and the work block
+            if before == 0 {
+                assert_eq!(fresh, 2);
+            } else {
+                assert!(fresh <= 2, "{fresh}");
+            }
+            let mut f = factor(&dev, GpuPrecision::F32, &sn, &sym.s, wide);
+            let made = dev.allocations();
+            let mut delta = vec![0.0f64; n];
+            for _ in 0..3 {
+                g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta).unwrap();
+                assert!(rel_residual(&dense, n, &delta, &rhs) < 1e-8);
+            }
+            assert!(g.replayed());
+            assert_eq!(dev.allocations(), made, "no block made by a solve");
+        }
     }
 
     /// A pivot that fails, in an eliminated block or in S, comes back with
@@ -1676,34 +1313,58 @@ mod tests {
     /// the same objects starts clean.
     #[test]
     fn bad_pivots_are_reported_with_the_result() {
-        let (good, dense, rhs, elim) = ba_like(10, 30, 2);
+        for wide in WIDES {
+            bad_pivots_are_reported_with_the_result_in(wide);
+        }
+    }
+
+    fn bad_pivots_are_reported_with_the_result_in(wide: Wide) {
+        let (good, dense, rhs, elim, sym, sn) = setup(10, 30, 2);
         let n = good.symbolic().ncols();
-        let sym = schur_symbolic(good.symbolic(), &elim).unwrap();
         let asym = good.symbolic().clone();
-        let order = nd_block_order(&sym.s);
-        let sn = SupernodalSymbolic::new(&sym.s, Some(&order), &SupernodalParams::default()).unwrap();
         let diag0 = |blk: usize| asym.val_range(asym.col_range(blk).find(|&b| asym.blk_row(b) == blk).unwrap()).start;
-        let ctx = GpuContext::new(GpuBackend::Cuda, 0).unwrap();
-        let mut g = GpuSchur::new(&ctx, &sym, &asym);
+        let dev = device();
+        let mut g = GpuSchur::new(&dev, &sym, &asym, wide).unwrap();
         for precision in [GpuPrecision::F64, GpuPrecision::F32] {
-            let mut f = GpuFactor::new(&ctx, precision, &sn, &sym.s, &Default::default());
+            let mut f = factor(&dev, precision, &sn, &sym.s, wide);
             let refine = (precision == GpuPrecision::F32).then_some((4, 1e-10));
             // an eliminated block
             let e = elim[3];
             let mut h = good.clone();
             h.vals_mut()[diag0(e)] = -1.0;
-            assert_eq!(g.reduce(h.vals(), &rhs), Err(SchurError::NotPositiveDefinite { block: e }));
+            assert!(matches!(g.reduce(h.vals(), &rhs), Err(GpuSchurError::Eliminated { block }) if block == e));
             let mut delta = vec![7.0f64; n];
-            assert_eq!(g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap_err(), GpuSchurError::Eliminated { block: e });
+            let err = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap_err();
+            assert!(matches!(err, GpuSchurError::Eliminated { block } if block == e), "{err:?}");
             assert!(delta.iter().all(|&v| v == 7.0), "the step is left as it was");
             // a kept block: S(k, k) is H(k, k) less a semidefinite sum
             let k = sym.kept[0] as usize;
             let mut h = good.clone();
             h.vals_mut()[diag0(k)] = -1e8;
-            assert_eq!(g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap_err(), GpuSchurError::Reduced);
+            let err = g.solve(&mut f, h.vals(), &rhs, refine, &mut delta).unwrap_err();
+            assert!(matches!(err, GpuSchurError::Reduced), "{err:?}");
             // and the good matrix again
             g.solve(&mut f, good.vals(), &rhs, refine, &mut delta).unwrap();
             assert!(rel_residual(&dense, n, &delta, &rhs) < 1e-8);
         }
     }
+
+    /// At BA widths (eliminated blocks of 3, kept of 6) the per-thread
+    /// arrays stay in registers: no kernel uses local memory.
+    #[test]
+    fn the_kernels_keep_their_arrays_in_registers() {
+        for wide in WIDES {
+            the_kernels_keep_their_arrays_in_registers_in(wide);
+        }
+    }
+
+    fn the_kernels_keep_their_arrays_in_registers_in(wide: Wide) {
+        let (h, _, _, _, sym, _) = setup(10, 30, 2);
+        let g = GpuSchur::new(&device(), &sym, h.symbolic(), wide).unwrap();
+        let k = &g.k;
+        for (name, kernel) in [("elim", &k.elim), ("tiles", &k.tiles), ("rhs", &k.rhs), ("backsub", &k.backsub)] {
+            assert_eq!(kernel.local_bytes().unwrap(), 0, "k_schur_{name}: {} registers", kernel.registers().unwrap());
+        }
+    }
+
 }

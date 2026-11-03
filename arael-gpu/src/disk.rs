@@ -1,4 +1,4 @@
-//! [`DiskCache`]: a native runtime's compiled kernels kept on disk, in the
+//! [`DiskCache`]: a runtime's compiled kernels kept on disk, in the
 //! process's kernel cache ([`crate::KernelCache`]).
 //!
 //! An entry is one file per kernel source, named by a hash of its key (the
@@ -31,7 +31,7 @@ pub(crate) struct DiskCache {
 /// to report ([`take_cache_failure`]).
 static FAILURE: Mutex<Option<(bool, String)>> = Mutex::new(None);
 
-/// The first failure to write a native kernel cache entry since the last
+/// The first failure to write a kernel cache entry since the last
 /// call, as a message; each process reports one at most.
 pub fn take_cache_failure() -> Option<String> {
     let mut f = FAILURE.lock().unwrap_or_else(|e| e.into_inner());
@@ -60,7 +60,7 @@ impl DiskCache {
     pub fn open(runtime: &str) -> Option<DiskCache> {
         match chosen() {
             KernelCache::Off => None,
-            KernelCache::Dir(dir) => Some(DiskCache { dir: dir.join("native").join(runtime) }),
+            KernelCache::Dir(dir) => Some(DiskCache { dir: dir.join(runtime) }),
         }
     }
 

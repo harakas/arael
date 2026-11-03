@@ -1,13 +1,14 @@
 //! [`Device`] on HIP: the HIP runtime and hipRTC through our own bindings
 //! (`hip_sys`), both loaded at run time.
 
-use super::disk::DiskCache;
-use super::hip_sys::{rt, rtc};
-use super::{Arch, Arg, Device, HEADER, Launch, MAX_ARGS, NativeError};
+use crate::disk::DiskCache;
+use crate::hip_sys::{rt, rtc};
+use crate::pool::{Pool, capacity};
+use crate::{Arch, Arg, Device, GpuError, HEADER, Launch, MAX_ARGS};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The HIP runtime and hipRTC, loaded once per process.
 struct Libs {
@@ -27,7 +28,7 @@ fn load<L>(names: &[&str], open: impl Fn(&str) -> Result<L, libloading::Error>) 
     Err(why.join("; "))
 }
 
-fn libs() -> Result<&'static Libs, NativeError> {
+fn libs() -> Result<&'static Libs, GpuError> {
     static LIBS: OnceLock<Result<Libs, String>> = OnceLock::new();
     LIBS.get_or_init(|| {
         // SAFETY: loading the vendor's libraries runs their initializers, as
@@ -37,26 +38,26 @@ fn libs() -> Result<&'static Libs, NativeError> {
         Ok(Libs { rt, rtc })
     })
     .as_ref()
-    .map_err(|e| NativeError::Unavailable(format!("the HIP runtime or hipRTC is not installed: {e}")))
+    .map_err(|e| GpuError::Unavailable(format!("the HIP runtime or hipRTC is not installed: {e}")))
 }
 
 /// `e` as a result, `what` naming the call.
-fn check(l: &Libs, e: rt::hipError_t, what: &str) -> Result<(), NativeError> {
+fn check(l: &Libs, e: rt::hipError_t, what: &str) -> Result<(), GpuError> {
     if e == rt::hipError_t_hipSuccess {
         return Ok(());
     }
     // SAFETY: the runtime returns a static string for any error code.
     let name = unsafe { CStr::from_ptr(l.rt.hipGetErrorName(e)) }.to_string_lossy();
-    Err(NativeError::Driver(format!("{what}: {name}")))
+    Err(GpuError::Driver(format!("{what}: {name}")))
 }
 
-fn check_rtc(l: &Libs, e: rtc::hiprtcResult, entry: &str, what: &str) -> Result<(), NativeError> {
+fn check_rtc(l: &Libs, e: rtc::hiprtcResult, entry: &str, what: &str) -> Result<(), GpuError> {
     if e == rtc::hiprtcResult_HIPRTC_SUCCESS {
         return Ok(());
     }
     // SAFETY: hipRTC returns a static string for any result code.
     let name = unsafe { CStr::from_ptr(l.rtc.hiprtcGetErrorString(e)) }.to_string_lossy();
-    Err(NativeError::Compile { entry: entry.to_string(), log: format!("{what}: {name}") })
+    Err(GpuError::Compile { entry: entry.to_string(), log: format!("{what}: {name}") })
 }
 
 /// `hipStreamNonBlocking`: the stream does not wait for the legacy default stream.
@@ -73,8 +74,8 @@ pub struct HipDevice {
     modules: Mutex<HashMap<String, Arc<HipModule>>>,
     /// A graph capture is open on the stream.
     capturing: AtomicBool,
-    /// Blocks allocated over the device's life.
-    allocations: AtomicUsize,
+    /// The device memory the blocks come from and go back to.
+    pool: Arc<Pool<HipMem>>,
 }
 
 // SAFETY: the stream is a runtime handle usable from any thread (each call
@@ -90,7 +91,6 @@ impl core::fmt::Debug for HipDevice {
 
 impl Drop for HipDevice {
     fn drop(&mut self) {
-        let _shared = capture_guard();
         // SAFETY: the stream was made in `new` and is destroyed once; an error
         // here has nobody to go to.
         unsafe {
@@ -101,17 +101,35 @@ impl Drop for HipDevice {
     }
 }
 
-/// Device memory on a [`HipDevice`].
-pub struct HipBlock {
+/// Device memory from hipMalloc, freed on drop.
+struct HipMem {
     ptr: *mut c_void,
-    len: usize,
     l: &'static Libs,
     index: i32,
 }
 
 // SAFETY: a device address, valid on any thread of the process.
-unsafe impl Send for HipBlock {}
-unsafe impl Sync for HipBlock {}
+unsafe impl Send for HipMem {}
+unsafe impl Sync for HipMem {}
+
+impl Drop for HipMem {
+    fn drop(&mut self) {
+        // SAFETY: allocated by hipMalloc in `alloc`, freed once.
+        unsafe {
+            let _ = self.l.rt.hipSetDevice(self.index);
+            let _ = self.l.rt.hipFree(self.ptr);
+        }
+    }
+}
+
+/// Device memory on a [`HipDevice`], from its pool and back to it on drop.
+pub struct HipBlock {
+    /// Some until the drop; its own size, `cap`, may exceed `len`.
+    mem: Option<HipMem>,
+    cap: usize,
+    len: usize,
+    pool: Arc<Pool<HipMem>>,
+}
 
 impl HipBlock {
     /// Its size in bytes.
@@ -123,15 +141,16 @@ impl HipBlock {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    fn ptr(&self) -> *mut c_void {
+        self.mem.as_ref().expect("a block's memory until its drop").ptr
+    }
 }
 
 impl Drop for HipBlock {
     fn drop(&mut self) {
-        let _shared = capture_guard();
-        // SAFETY: allocated by hipMalloc in `alloc`, freed once.
-        unsafe {
-            let _ = self.l.rt.hipSetDevice(self.index);
-            let _ = self.l.rt.hipFree(self.ptr);
+        if let Some(mem) = self.mem.take() {
+            self.pool.give(self.cap, mem);
         }
     }
 }
@@ -149,7 +168,6 @@ unsafe impl Sync for HipModule {}
 
 impl Drop for HipModule {
     fn drop(&mut self) {
-        let _shared = capture_guard();
         // SAFETY: loaded by hipModuleLoadData, unloaded once.
         unsafe {
             let _ = self.l.rt.hipSetDevice(self.index);
@@ -175,7 +193,7 @@ impl core::fmt::Debug for HipKernel {
 }
 
 impl HipKernel {
-    fn attribute(&self, attr: rt::hipFunction_attribute, what: &str) -> Result<usize, NativeError> {
+    fn attribute(&self, attr: rt::hipFunction_attribute, what: &str) -> Result<usize, GpuError> {
         let mut v = 0;
         let l = self.module.l;
         // SAFETY: a live function and an out-parameter.
@@ -185,12 +203,12 @@ impl HipKernel {
 
     /// Scratch (private) memory per thread, in bytes: per-thread arrays the
     /// compiler could not keep in registers, and spills.
-    pub fn local_bytes(&self) -> Result<usize, NativeError> {
+    pub fn local_bytes(&self) -> Result<usize, GpuError> {
         self.attribute(rt::hipFunction_attribute_HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, "hipFuncGetAttribute(local size)")
     }
 
     /// Registers per thread.
-    pub fn registers(&self) -> Result<usize, NativeError> {
+    pub fn registers(&self) -> Result<usize, GpuError> {
         self.attribute(rt::hipFunction_attribute_HIP_FUNC_ATTRIBUTE_NUM_REGS, "hipFuncGetAttribute(registers)")
     }
 }
@@ -208,7 +226,6 @@ unsafe impl Send for HipGraph {}
 
 impl Drop for HipGraph {
     fn drop(&mut self) {
-        let _shared = capture_guard();
         // SAFETY: made by hipGraphInstantiate, destroyed once.
         unsafe {
             let _ = self.l.rt.hipSetDevice(self.index);
@@ -225,12 +242,11 @@ struct OpenCapture<'a> {
 }
 
 impl<'a> OpenCapture<'a> {
-    fn begin(dev: &'a HipDevice) -> Result<Self, NativeError> {
+    fn begin(dev: &'a HipDevice) -> Result<Self, GpuError> {
         if dev.capturing.swap(true, Ordering::AcqRel) {
-            return Err(NativeError::Capture("a capture is already open on this device".into()));
+            return Err(GpuError::Capture("a capture is already open on this device".into()));
         }
         let mut open = OpenCapture { dev, open: false };
-        let _shared = capture_guard();
         dev.bind()?;
         // Thread-local: the capture forbids unsafe calls on this thread only.
         // SAFETY: the stream is the device's own and alive.
@@ -241,9 +257,8 @@ impl<'a> OpenCapture<'a> {
     }
 
     /// Ends the capture; its graph, or null when nothing was recorded.
-    fn end(mut self) -> Result<RawGraph, NativeError> {
+    fn end(mut self) -> Result<RawGraph, GpuError> {
         self.open = false;
-        let _shared = capture_guard();
         self.dev.bind()?;
         let mut graph = core::ptr::null_mut();
         // SAFETY: the capture was begun on this stream by `begin`.
@@ -255,7 +270,6 @@ impl<'a> OpenCapture<'a> {
 impl Drop for OpenCapture<'_> {
     fn drop(&mut self) {
         if self.open {
-            let _shared = capture_guard();
             if self.dev.bind().is_ok() {
                 let mut graph = core::ptr::null_mut();
                 // SAFETY: as in `end`; the partial graph is discarded.
@@ -280,13 +294,6 @@ impl Drop for RawGraph {
     }
 }
 
-/// A shared hold of the crate's graph-capture lock ([`crate::CAPTURE`]),
-/// as on CUDA: around every runtime call but launches, while CubeCL is in
-/// the build (NATIVE_GPU_PLAN.md, stage N4).
-fn capture_guard() -> RwLockReadGuard<'static, ()> {
-    crate::CAPTURE.read().unwrap_or_else(|e| e.into_inner())
-}
-
 // `launch` passes scalars in the low bytes of 8-byte slots.
 const _: () = assert!(cfg!(target_endian = "little"), "the HIP runtime assumes a little-endian host");
 
@@ -300,12 +307,12 @@ pub fn compiles() -> usize {
 }
 
 /// A C string of `s`, which holds no NUL.
-fn c_string(s: &str, entry: &str) -> Result<CString, NativeError> {
-    CString::new(s).map_err(|_| NativeError::Compile { entry: entry.to_string(), log: "a NUL byte in the source".into() })
+fn c_string(s: &str, entry: &str) -> Result<CString, GpuError> {
+    CString::new(s).map_err(|_| GpuError::Compile { entry: entry.to_string(), log: "a NUL byte in the source".into() })
 }
 
 /// `source` compiled with `opts` by hipRTC to a code object.
-fn compile_code(l: &Libs, entry: &str, source: &str, opts: &[String]) -> Result<Vec<u8>, NativeError> {
+fn compile_code(l: &Libs, entry: &str, source: &str, opts: &[String]) -> Result<Vec<u8>, GpuError> {
     COMPILES.fetch_add(1, Ordering::Relaxed);
     let src = c_string(source, entry)?;
     let name = c_string(&format!("{entry}.hip"), entry)?;
@@ -337,7 +344,7 @@ fn compile_code(l: &Libs, entry: &str, source: &str, opts: &[String]) -> Result<
         };
         // SAFETY: as in check_rtc.
         let what = unsafe { CStr::from_ptr(l.rtc.hiprtcGetErrorString(compiled)) }.to_string_lossy();
-        return Err(NativeError::Compile { entry: entry.to_string(), log: format!("{what}\n{log}") });
+        return Err(GpuError::Compile { entry: entry.to_string(), log: format!("{what}\n{log}") });
     }
     let mut size = 0usize;
     // SAFETY: a compiled program and an out-parameter.
@@ -349,7 +356,7 @@ fn compile_code(l: &Libs, entry: &str, source: &str, opts: &[String]) -> Result<
 }
 
 /// hipRTC's version, `major.minor`.
-fn hiprtc_version(l: &Libs) -> Result<String, NativeError> {
+fn hiprtc_version(l: &Libs) -> Result<String, GpuError> {
     let (mut major, mut minor) = (0, 0);
     // SAFETY: two out-parameters.
     check_rtc(l, unsafe { l.rtc.hiprtcVersion(&mut major, &mut minor) }, "", "hiprtcVersion")?;
@@ -363,19 +370,18 @@ fn field(chars: &[core::ffi::c_char]) -> String {
 }
 
 impl HipDevice {
-    /// Device `index`. [`NativeError::Unavailable`] when there is no such
+    /// Device `index`. [`GpuError::Unavailable`] when there is no such
     /// device or the HIP runtime or hipRTC is not installed.
-    pub fn new(index: usize) -> Result<Self, NativeError> {
+    pub fn new(index: usize) -> Result<Self, GpuError> {
         let l = libs()?;
-        let _shared = capture_guard();
-        let unavailable = |e: NativeError| NativeError::Unavailable(format!("HIP device {index}: {e}"));
+        let unavailable = |e: GpuError| GpuError::Unavailable(format!("HIP device {index}: {e}"));
         // SAFETY: plain runtime calls with out-parameters.
         unsafe {
             check(l, l.rt.hipInit(0), "hipInit").map_err(unavailable)?;
             let mut count = 0;
             check(l, l.rt.hipGetDeviceCount(&mut count), "hipGetDeviceCount").map_err(unavailable)?;
             if index >= count as usize {
-                return Err(NativeError::Unavailable(format!("HIP device {index}: the system has {count}")));
+                return Err(GpuError::Unavailable(format!("HIP device {index}: the system has {count}")));
             }
             let index = index as i32;
             check(l, l.rt.hipSetDevice(index), "hipSetDevice")?;
@@ -400,27 +406,21 @@ impl HipDevice {
                 arch,
                 modules: Mutex::new(HashMap::new()),
                 capturing: AtomicBool::new(false),
-                allocations: AtomicUsize::new(0),
+                pool: Arc::new(Pool::new()),
             })
         }
     }
 
-    /// Blocks allocated over the device's life: constant once a solver's
-    /// buffers exist, which is what the preallocation rule checks.
-    pub fn allocations(&self) -> usize {
-        self.allocations.load(Ordering::Relaxed)
-    }
-
     /// This thread's current device made this one.
-    fn bind(&self) -> Result<(), NativeError> {
+    fn bind(&self) -> Result<(), GpuError> {
         // SAFETY: a plain runtime call.
         check(self.l, unsafe { self.l.rt.hipSetDevice(self.index) }, "hipSetDevice")
     }
 
-    /// [`NativeError::Capture`] while a capture is open.
-    fn not_capturing(&self, op: &str) -> Result<(), NativeError> {
+    /// [`GpuError::Capture`] while a capture is open.
+    fn not_capturing(&self, op: &str) -> Result<(), GpuError> {
         if self.capturing.load(Ordering::Acquire) {
-            return Err(NativeError::Capture(format!("{op} while a capture is open on the device")));
+            return Err(GpuError::Capture(format!("{op} while a capture is open on the device")));
         }
         Ok(())
     }
@@ -435,12 +435,12 @@ impl HipDevice {
     /// else from the disk cache when an earlier process compiled it, else
     /// compiled. A cached entry the runtime does not load is compiled again
     /// and written over.
-    fn module(&self, entry: &str, source: String) -> Result<Arc<HipModule>, NativeError> {
+    fn module(&self, entry: &str, source: String) -> Result<Arc<HipModule>, GpuError> {
         self.module_in(entry, source, DiskCache::open("hip").as_ref())
     }
 
     /// [`module`](Self::module) with the disk cache `disk`.
-    fn module_in(&self, entry: &str, source: String, disk: Option<&DiskCache>) -> Result<Arc<HipModule>, NativeError> {
+    fn module_in(&self, entry: &str, source: String, disk: Option<&DiskCache>) -> Result<Arc<HipModule>, GpuError> {
         if let Some(module) = self.modules.lock().unwrap().get(&source) {
             return Ok(module.clone());
         }
@@ -462,18 +462,17 @@ impl HipDevice {
     }
 
     /// What a code object of `source` compiled with `opts` depends on.
-    fn cache_key(&self, opts: &[String], source: &str) -> Result<String, NativeError> {
+    fn cache_key(&self, opts: &[String], source: &str) -> Result<String, GpuError> {
         Ok(format!("{}\nhiprtc {}\n{source}", opts.join(" "), hiprtc_version(self.l)?))
     }
 
     /// A code object loaded as a module. The runtime takes the object
     /// without its length, so anything not starting as an ELF file is
     /// refused here rather than read past its end.
-    fn load(&self, code: &[u8]) -> Result<Arc<HipModule>, NativeError> {
+    fn load(&self, code: &[u8]) -> Result<Arc<HipModule>, GpuError> {
         if !code.starts_with(b"\x7fELF") {
-            return Err(NativeError::Driver("hipModuleLoadData: not an ELF code object".into()));
+            return Err(GpuError::Driver("hipModuleLoadData: not an ELF code object".into()));
         }
-        let _shared = capture_guard();
         self.bind()?;
         let mut module = core::ptr::null_mut();
         // SAFETY: `code` is a whole code object, read by the call.
@@ -486,64 +485,72 @@ impl Device for HipDevice {
     type Block = HipBlock;
     type Kernel = HipKernel;
     type Graph = HipGraph;
+    const RUNTIME: &'static str = "hip";
 
     fn arch(&self) -> &Arch {
         &self.arch
     }
 
-    fn alloc(&self, bytes: usize) -> Result<HipBlock, NativeError> {
-        self.not_capturing("an allocation")?;
-        let _shared = capture_guard();
-        self.bind()?;
-        let mut ptr = core::ptr::null_mut();
-        // SAFETY: an out-parameter.
-        check(self.l, unsafe { self.l.rt.hipMalloc(&mut ptr, bytes.max(1)) }, "hipMalloc")?;
-        // SAFETY: the new bytes, zeroed in order on the stream; freed here if
-        // that fails (a block's drop would take the guard held here).
-        let zeroed = check(self.l, unsafe { self.l.rt.hipMemsetAsync(ptr, 0, bytes, self.stream) }, "hipMemsetAsync");
-        if let Err(e) = zeroed {
-            // SAFETY: allocated above, not handed out.
-            let _ = unsafe { self.l.rt.hipFree(ptr) };
-            return Err(e);
-        }
-        self.allocations.fetch_add(1, Ordering::Relaxed);
-        Ok(HipBlock { ptr, len: bytes, l: self.l, index: self.index })
+    fn allocations(&self) -> usize {
+        self.pool.allocations()
     }
 
-    fn write(&self, dst: &mut HipBlock, offset: usize, src: &[u8]) -> Result<(), NativeError> {
+    fn reserved_bytes(&self) -> usize {
+        self.pool.reserved_bytes()
+    }
+
+    fn alloc(&self, bytes: usize) -> Result<HipBlock, GpuError> {
+        self.not_capturing("an allocation")?;
+        self.bind()?;
+        let (cap, mem) = match self.pool.take(bytes) {
+            Some(held) => held,
+            None => {
+                let cap = capacity(bytes);
+                let mut ptr = core::ptr::null_mut();
+                // SAFETY: an out-parameter.
+                check(self.l, unsafe { self.l.rt.hipMalloc(&mut ptr, cap) }, "hipMalloc")?;
+                self.pool.made(cap);
+                (cap, HipMem { ptr, l: self.l, index: self.index })
+            }
+        };
+        // back to the pool if the zeroing fails
+        let block = HipBlock { mem: Some(mem), cap, len: bytes, pool: self.pool.clone() };
+        // SAFETY: the bytes asked for, zeroed in order on the stream.
+        check(self.l, unsafe { self.l.rt.hipMemsetAsync(block.ptr(), 0, bytes, self.stream) }, "hipMemsetAsync")?;
+        Ok(block)
+    }
+
+    fn write(&self, dst: &mut HipBlock, offset: usize, src: &[u8]) -> Result<(), GpuError> {
         self.not_capturing("a write")?;
         assert!(offset + src.len() <= dst.len, "a write past the block's {} bytes", dst.len);
-        let _shared = capture_guard();
         self.bind()?;
         // SAFETY: within the block; HIP copies pageable host memory before
         // the call returns, so `src` may be reused after it.
-        let e = unsafe { self.l.rt.hipMemcpyHtoDAsync(dst.ptr.byte_add(offset), src.as_ptr().cast(), src.len(), self.stream) };
+        let e = unsafe { self.l.rt.hipMemcpyHtoDAsync(dst.ptr().byte_add(offset), src.as_ptr().cast(), src.len(), self.stream) };
         check(self.l, e, "hipMemcpyHtoDAsync")
     }
 
-    fn read(&self, src: &HipBlock, offset: usize, dst: &mut [u8]) -> Result<(), NativeError> {
+    fn read(&self, src: &HipBlock, offset: usize, dst: &mut [u8]) -> Result<(), GpuError> {
         self.read_many(&mut [(src, offset, dst)])
     }
 
-    fn read_many(&self, reads: &mut [(&HipBlock, usize, &mut [u8])]) -> Result<(), NativeError> {
+    fn read_many(&self, reads: &mut [(&HipBlock, usize, &mut [u8])]) -> Result<(), GpuError> {
         self.not_capturing("a read")?;
-        let _shared = capture_guard();
         self.bind()?;
         for (src, offset, dst) in reads.iter_mut() {
             assert!(*offset + dst.len() <= src.len, "a read past the block's {} bytes", src.len);
             // SAFETY: within the block; `dst` is written before the wait returns.
-            let e = unsafe { self.l.rt.hipMemcpyDtoHAsync(dst.as_mut_ptr().cast(), src.ptr.byte_add(*offset), dst.len(), self.stream) };
+            let e = unsafe { self.l.rt.hipMemcpyDtoHAsync(dst.as_mut_ptr().cast(), src.ptr().byte_add(*offset), dst.len(), self.stream) };
             check(self.l, e, "hipMemcpyDtoHAsync")?;
         }
         // SAFETY: the device's stream.
         check(self.l, unsafe { self.l.rt.hipStreamSynchronize(self.stream) }, "hipStreamSynchronize")
     }
 
-    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<HipKernel, NativeError> {
+    fn compile(&self, source: &str, defines: &str, entry: &str) -> Result<HipKernel, GpuError> {
         self.not_capturing("a compile")?;
         let full = format!("{}{defines}\n{HEADER}\n{source}", self.arch.defines());
         let module = self.module(entry, full)?;
-        let _shared = capture_guard();
         self.bind()?;
         let name = c_string(entry, entry)?;
         let mut function = core::ptr::null_mut();
@@ -552,14 +559,14 @@ impl Device for HipDevice {
         Ok(HipKernel { function, module })
     }
 
-    fn launch(&self, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), NativeError> {
+    fn launch(&self, kernel: &HipKernel, launch: Launch, args: &[Arg<'_, HipBlock>]) -> Result<(), GpuError> {
         assert!(args.len() <= MAX_ARGS, "a launch takes at most {MAX_ARGS} arguments");
         let mut values = [0u64; MAX_ARGS];
         for (slot, arg) in values.iter_mut().zip(args) {
             *slot = match *arg {
                 Arg::Block(b, offset) => {
                     assert!(offset <= b.len, "argument offset {offset} past the block's {} bytes", b.len);
-                    b.ptr as u64 + offset as u64
+                    b.ptr() as u64 + offset as u64
                 }
                 Arg::U32(v) => v as u64,
                 Arg::I32(v) => v as u32 as u64,
@@ -583,51 +590,40 @@ impl Device for HipDevice {
         check(self.l, e, "hipModuleLaunchKernel")
     }
 
-    fn sync(&self) -> Result<(), NativeError> {
+    fn sync(&self) -> Result<(), GpuError> {
         self.not_capturing("a wait")?;
-        let _shared = capture_guard();
         self.bind()?;
         // SAFETY: the device's stream.
         check(self.l, unsafe { self.l.rt.hipStreamSynchronize(self.stream) }, "hipStreamSynchronize")
     }
 
     /// Stream capture in thread-local mode, instantiated and uploaded, as on CUDA.
-    fn capture(&self, record: impl FnOnce() -> Result<(), NativeError>) -> Result<HipGraph, NativeError> {
+    fn capture(&self, record: impl FnOnce() -> Result<(), GpuError>) -> Result<HipGraph, GpuError> {
         let open = OpenCapture::begin(self)?;
         let recorded = record();
         let graph = open.end();
         recorded?;
         let graph = graph?;
         if graph.0.is_null() {
-            return Err(NativeError::Capture("the capture recorded nothing".into()));
+            return Err(GpuError::Capture("the capture recorded nothing".into()));
         }
-        // (A `HipGraph` drops outside the guards below: its drop takes one.)
-        let exec = {
-            let _shared = capture_guard();
-            self.bind()?;
-            let mut exec = core::ptr::null_mut();
-            // SAFETY: a valid graph from hipStreamEndCapture; the executable
-            // graph is independent of it.
-            let e = unsafe { self.l.rt.hipGraphInstantiate(&mut exec, graph.0, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
-            check(self.l, e, "hipGraphInstantiate")?;
-            exec
-        };
+        self.bind()?;
+        let mut exec = core::ptr::null_mut();
+        // SAFETY: a valid graph from hipStreamEndCapture; the executable
+        // graph is independent of it.
+        let e = unsafe { self.l.rt.hipGraphInstantiate(&mut exec, graph.0, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
+        check(self.l, e, "hipGraphInstantiate")?;
         drop(graph);
         let graph = HipGraph { exec, l: self.l, index: self.index };
-        {
-            let _shared = capture_guard();
-            self.bind()?;
-            // the first replay then pays no setup
-            // SAFETY: the executable graph and the stream are alive.
-            check(self.l, unsafe { self.l.rt.hipGraphUpload(graph.exec, self.stream) }, "hipGraphUpload")?;
-        }
+        // the first replay then pays no setup
+        // SAFETY: the executable graph and the stream are alive.
+        check(self.l, unsafe { self.l.rt.hipGraphUpload(graph.exec, self.stream) }, "hipGraphUpload")?;
         Ok(graph)
     }
 
-    fn replay(&self, graph: &HipGraph) -> Result<(), NativeError> {
+    fn replay(&self, graph: &HipGraph) -> Result<(), GpuError> {
         self.not_capturing("a replay")?;
         assert_eq!(graph.index, self.index, "a graph replays on the device it was captured on");
-        let _shared = capture_guard();
         self.bind()?;
         // SAFETY: the executable graph is alive; its blocks are the caller's to keep alive.
         check(self.l, unsafe { self.l.rt.hipGraphLaunch(graph.exec, self.stream) }, "hipGraphLaunch")
@@ -650,7 +646,7 @@ mod tests {
         let key = dev.cache_key(&dev.compile_options(), &source).unwrap();
         disk.store(key.as_bytes(), b"not a code object");
         assert_eq!(disk.load(key.as_bytes()).as_deref(), Some(&b"not a code object"[..]));
-        assert!(matches!(dev.load(b"not a code object"), Err(NativeError::Driver(_))));
+        assert!(matches!(dev.load(b"not a code object"), Err(GpuError::Driver(_))));
         dev.module_in("k", source.clone(), Some(&disk)).unwrap();
         let code = disk.load(key.as_bytes()).expect("the entry written over");
         assert!(code.starts_with(b"\x7fELF"));

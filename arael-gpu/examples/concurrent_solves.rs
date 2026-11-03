@@ -1,25 +1,30 @@
 //! Many small solves at once, the way a caller with a thread pool runs
 //! them: a fixed set of solves (small bundle-adjustment structures, a fresh
 //! reduction and factor per solve, several damped attempts each) spread
-//! over N threads, each with a `GpuContext` of its own and so a stream of
-//! its own, against the same set on one thread. Prints the wall time and
-//! the solves per second for each N.
+//! over N threads, each with a device of its own and so a stream of its
+//! own, against the same set on one thread. Prints the wall time and the
+//! solves per second for each N. `--hip` runs on HIP device 0 (built with
+//! `--features hip`) instead of CUDA.
 //!
 //!   cargo run -r -p arael-gpu --features cuda --example concurrent_solves -- \
 //!       [--threads 1,2,4,8] [--solves 48] [--attempts 10] [--no-graphs] [--f64]
 
+// Without a runtime feature there is no device to run on.
+#![cfg_attr(not(any(feature = "cuda", feature = "hip")), allow(dead_code))]
+
+use std::sync::Arc;
 use std::time::Instant;
 
 use arael_faer::schur::schur_symbolic;
 use arael_faer::supernodal::{SupernodalParams, SupernodalSymbolic, nd_block_order};
 use arael_gpu::test_util::{ba_like, rel_residual};
-use arael_gpu::{GpuBackend, GpuContext, GpuFactor, GpuPrecision, GpuSchur};
+use arael_gpu::{Device, GpuFactor, GpuPrecision, GpuSchur, Wide};
 
 fn arg<T: std::str::FromStr>(args: &[String], name: &str) -> Option<T> {
     args.iter().position(|a| a == name).map(|i| args[i + 1].parse().ok().unwrap_or_else(|| panic!("{name}: a value")))
 }
 
-fn main() {
+fn run<D: Device>(new: impl Fn() -> D) {
     let args: Vec<String> = std::env::args().collect();
     let threads: Vec<usize> = arg::<String>(&args, "--threads").map_or(vec![1, 2, 4, 8], |v| v.split(',').map(|t| t.parse().expect("--threads 1,2,4")).collect());
     let total: usize = arg(&args, "--solves").unwrap_or(48);
@@ -42,15 +47,15 @@ fn main() {
         .collect();
     let problems = &problems;
     let max_threads = threads.iter().copied().max().unwrap_or(1);
-    let contexts: Vec<GpuContext> = (0..max_threads).map(|_| GpuContext::new(GpuBackend::Cuda, 0).unwrap()).collect();
+    let devices: Vec<Arc<D>> = (0..max_threads).map(|_| Arc::new(new())).collect();
 
-    // one solve of problem `p` on `ctx`, checked
-    let solve = |ctx: &GpuContext, p: usize| {
+    // one solve of problem `p` on `dev`, checked
+    let solve = |dev: &Arc<D>, p: usize| {
         let (h, dense, rhs, sym, sn) = &problems[p];
         let n = h.symbolic().ncols();
-        let mut g = GpuSchur::new(ctx, sym, h.symbolic());
+        let mut g = GpuSchur::new(dev, sym, h.symbolic(), Wide::F64).unwrap();
         g.use_graphs(graphs);
-        let mut f = GpuFactor::new(ctx, precision, sn, &sym.s, &Default::default());
+        let mut f = GpuFactor::new(dev, precision, sn, &sym.s, &Default::default(), Wide::F64).unwrap();
         let mut delta = vec![0.0f64; n];
         for _ in 0..attempts {
             g.solve(&mut f, h.vals(), rhs, refine, &mut delta).unwrap();
@@ -58,11 +63,11 @@ fn main() {
         let res = rel_residual(dense, n, &delta, rhs);
         assert!(res < 1e-8, "residual {res}");
     };
-    // warm-up: every context compiles nothing new and grows its arena to the
+    // warm-up: every device compiles its kernels and grows its pool to the
     // largest problem before anything is timed
     std::thread::scope(|s| {
-        for ctx in &contexts {
-            s.spawn(|| (0..problems.len()).for_each(|p| solve(ctx, p)));
+        for dev in &devices {
+            s.spawn(|| (0..problems.len()).for_each(|p| solve(dev, p)));
         }
     });
 
@@ -76,16 +81,29 @@ fn main() {
     for &nt in &threads {
         let t = Instant::now();
         std::thread::scope(|s| {
-            for (k, ctx) in contexts.iter().take(nt).enumerate() {
+            for (k, dev) in devices.iter().take(nt).enumerate() {
                 s.spawn(move || {
                     for i in (k..total).step_by(nt) {
-                        solve(ctx, i % problems.len());
+                        solve(dev, i % problems.len());
                     }
                 });
             }
         });
         let ms = t.elapsed().as_secs_f64() * 1e3;
         let base_ms = *base.get_or_insert(ms);
-        println!("{nt} threads, {nt} contexts: {ms:8.1} ms, {:7.1} solves/s, {:.2}x", total as f64 / ms * 1e3, base_ms / ms);
+        println!("{nt} threads, {nt} devices: {ms:8.1} ms, {:7.1} solves/s, {:.2}x", total as f64 / ms * 1e3, base_ms / ms);
     }
+}
+
+fn main() {
+    if std::env::args().any(|a| a == "--hip") {
+        #[cfg(feature = "hip")]
+        return run(|| arael_gpu::hip::HipDevice::new(0).unwrap());
+        #[cfg(not(feature = "hip"))]
+        panic!("--hip needs the hip feature");
+    }
+    #[cfg(feature = "cuda")]
+    run(|| arael_gpu::cuda::CudaDevice::new(0).unwrap());
+    #[cfg(not(feature = "cuda"))]
+    panic!("CUDA needs the cuda feature (or --hip with the hip feature)");
 }

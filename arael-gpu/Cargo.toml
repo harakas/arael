@@ -3,25 +3,22 @@ name = "arael-gpu"
 version.workspace = true
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
-description = "GPU kernels for arael's sparse solvers through CubeCL: the block supernodal Cholesky and its solve"
+description = "arael's GPU runtime and kernels for CUDA and HIP: the block supernodal Cholesky, the Schur reduction and the LM loop's vector passes"
 license = "MIT"
 repository = "https://github.com/harakas/arael"
 readme = "README.md"
-keywords = ["sparse", "cholesky", "gpu", "cuda", "cubecl"]
+keywords = ["sparse", "cholesky", "gpu", "cuda", "hip"]
 categories = ["mathematics", "science", "algorithms"]
 
 [features]
 default = []
-# The runtimes. Without one the kernels compile (CubeCL's frontend needs no
-# device) but no client can be made; `arael` reports the backend unavailable.
-cuda = ["cubecl/cuda"]
-hip = ["cubecl/hip"]
-# arael's own runtime and C++ kernels on CUDA (docs/dev/NATIVE_GPU_PLAN.md).
-# The driver and NVRTC are loaded at run time, so a build needs no toolkit.
-native-cuda = ["dep:cudarc"]
-# The same on HIP: the HIP runtime and hipRTC through our own bindings
-# (src/native/hip_sys.rs), loaded at run time, so a build needs no ROCm.
-native-hip = ["dep:libloading"]
+# The runtimes. Without one there is no device; `arael` reports the backend
+# unavailable. CUDA: the driver and NVRTC, loaded at run time, so a build
+# needs no toolkit.
+cuda = ["dep:cudarc"]
+# HIP: the HIP runtime and hipRTC through our own bindings (src/hip_sys.rs),
+# loaded at run time, so a build needs no ROCm.
+hip = ["dep:libloading"]
 
 [dependencies]
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
@@ -34,10 +31,6 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
 ] }
 libloading = { version = "0.8", optional = true }
 arael-faer = { workspace = true }
-cubecl = "0.11"
-cubecl-runtime = "0.11"
-# StreamId, to pin a context's client to its own stream.
-cubecl-environment = "0.11"
 bytemuck = "1"
-# The user cache directory, for the kernel cache (as CubeCL finds it).
+# The user cache directory, for the kernel cache.
 etcetera = "0.11"

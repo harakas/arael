@@ -1,87 +1,82 @@
 # arael-gpu
 
-GPU kernels for arael's sparse solvers, written once in CubeCL and run on
-CUDA or HIP: the block supernodal Cholesky in arael's panel layout and its
-level-set solve, and the Schur reduction that feeds it.
+arael's GPU runtime and the kernels of its sparse solvers, on CUDA and
+HIP. The kernels are written once in a C++ subset (`kernels/`) and
+compiled at run time for the device at hand: NVRTC on CUDA
+(`cuda::CudaDevice`, feature `cuda`), hipRTC on HIP (`hip::HipDevice`,
+feature `hip`). Both runtimes load the vendor's libraries at run time, so
+a build needs neither the CUDA toolkit nor ROCm.
 
-Everything runs on a `GpuContext`: a stream of its own and an arena that
-every device buffer is leased from and returned to. Solving problem after
-problem through one context stops creating buffers once the largest has
-been seen (`reserved_bytes`, `buffers_created`); separate contexts run on
-separate streams, so solves on several threads, a context each, run at
-the same time on the device.
+On a device:
 
-The symbolic analysis stays on the CPU in arael-faer. `GpuSupernodal<F>` is
-built from a `SupernodalSymbolic` and the matrix's block structure once per
-sparsity structure; it then factorizes any matrix of that structure from
-the matrix's tile values and solves against the factor it keeps on the
-device, in `f64` or in `f32` (which arael refines against the f64 matrix).
+- `GpuSupernodal` (and `GpuFactor`, either scalar behind one type): the
+  block supernodal Cholesky in arael's panel layout and its level-set
+  solve, in `f64` or `f32` (which arael refines against the f64 matrix);
+- `GpuSchur`: the Schur reduction from the Hessian's tile values and the
+  gradient, then the factorization, the solve, the refinement and the
+  back-substitution, waiting for the device once, for the result;
+- `LmVectors`: the LM loop's vector passes (the trial point, the norms,
+  the damping, the predicted reduction).
 
-```rust,ignore
-use arael_gpu::{GpuBackend, GpuContext, GpuFactor, GpuPrecision};
-
-let ctx = GpuContext::new(GpuBackend::Cuda, 0)?;
-let mut g = GpuFactor::new(&ctx, GpuPrecision::F32, &sn, a.symbolic(), &Default::default());
-g.factorize(a.vals())?;      // Err when a diagonal pivot is not positive
-g.solve(&mut rhs);           // rhs becomes x, in the matrix's ordering
-```
-
-`GpuSchur` is built from a `SchurSymbolic` and the Hessian's block structure.
-It forms the reduced system on the device from the Hessian's tile values and
-the gradient, in `f64` (an `f32` reduction loses the cancelling sums'
-digits), and then factorizes it with a `GpuFactor`, solves, refines the
-solution against it when the factor is `f32`, and recovers the eliminated
-blocks, all on the device, waiting for it once, for the result:
+The symbolic analysis stays on the CPU in arael-faer. Each solver object
+is built once per sparsity structure.
 
 ```rust,ignore
-let mut g = GpuSchur::new(&ctx, &schur_sym, h.symbolic());
-let mut f = GpuFactor::new(&ctx, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default());
+use arael_gpu::{cuda::CudaDevice, GpuFactor, GpuPrecision, GpuSchur, Wide};
+
+let dev = Arc::new(CudaDevice::new(0)?);
+let mut g = GpuSchur::new(&dev, &schur_sym, h.symbolic(), Wide::F64)?;
+let mut f = GpuFactor::new(&dev, GpuPrecision::F32, &sn_of_s, &schur_sym.s, &Default::default(), Wide::F64)?;
 // the full step; Err when an eliminated block or the reduced system is not definite
 let stats = g.solve(&mut f, h.vals(), &rhs, Some((4, 1e-10)), &mut delta)?;
 ```
 
-`assembly` holds what every model's device assembly shares: the
-entities' parameter values gathered from the parameter vector, their
-Euler-angle rotations and derivatives, a residual row's rank-one writes
-into an entity's tile and a cross tile of the Hessian and into the
-gradient, and the cost's reduction. arael's `#[arael(root)]` generates a
-model's constraint kernels over them, from the same bodies its CPU
-assembly is generated from, and `GpuSchur::solve_resident` then solves
-from the Hessian and gradient they left on the device.
+`Wide` is the scalar the device keeps and sums H, the gradient, the cost,
+the reduction and the LM vectors in: `f64`, or `df32` (two f32, about 48
+bits, f32 arithmetic only) for cards whose f64 is slow.
+
+Every device has a stream of its own and a pool of device memory: a block
+that is dropped goes back to the pool and is handed out again, and a
+fresh block has room for a quarter more, so solving a structure after a
+slightly larger or smaller one allocates nothing (`Device::allocations`,
+`Device::reserved_bytes`). Separate devices run on separate streams, so
+solves on several threads, a device each, run at the same time.
 
 The refinement decides on the device whether the next step is due; the
 steps launched after it has converged do nothing. The first `solve` with a
 factor and a refinement setting runs its kernels and then captures them as
-a graph (CUDA or HIP), and the solves after it replay that graph, one
-launch instead of hundreds (`use_graphs(false)` turns this off). A capture
-briefly holds off this crate's reads on every other context of the
-process: the drivers' global capture mode fails any wait issued while a
-capture is open. Each
-structure's integer data goes up in one copy; the matrix values are read
-from the caller's slices in place (`host::write_borrowed`).
+a graph, and the solves after it replay that graph, one launch instead of
+hundreds (`use_graphs(false)` turns this off). Captures are thread-local:
+other threads' work goes on while one is open.
+
+Compiled kernels are kept in a disk cache (`KernelCache`,
+`ARAEL_KERNEL_CACHE`), found again by their source, the target and the
+compiler's version.
 
 Through arael, the same is `SparseFaerOptions::default().with_gpu(Some(GpuDevice::cuda(0)))`
 with arael's `gpu-cuda` (or `gpu-hip`) feature; see docs/SOLVERS.md.
 
 ## Features
 
-- `cuda`, `hip`: the runtimes. Without one the kernels compile (CubeCL's
-  frontend needs no device) and `client` reports the backend unavailable.
-  The first build of a runtime fetches CubeCL's LLVM bundle and takes a
-  few minutes.
+- `cuda`, `hip`: the runtimes. Without one there is no device, and arael
+  reports the backend unavailable.
+
+GPUs with 32-lane warps run the kernels: NVIDIA's, and AMD's RDNA. AMD's
+64-lane GPUs (CDNA, GCN) are not supported yet.
 
 ## Testing
 
 ```sh
-cargo test -p arael-gpu                   # the plan: every update element covered once, every solve row and column
-cargo test -p arael-gpu --features cuda   # the device against arael-faer's CPU factorization and Schur reduction, f64 and f32, bad pivots
+cargo test -p arael-gpu --features cuda   # the device against arael-faer's CPU factorization and Schur reduction, f64, f32 and df32, bad pivots, the pool, graph capture
+cargo test -p arael-gpu --features hip    # the same on HIP
 ```
 
 `examples/repeat_solves.rs` solves several structures several times the way
-arael does, prints the wall time per attempt (`--no-graphs` for launched
-kernels), and writes marker copies between phases; `scripts/gpu_trace.py`
-traces any command with nsys and counts, per phase, launches, blocking
-syncs, copies, device and pinned allocations, and graph instantiations:
+arael does, prints the wall time per attempt and the device's allocations
+after each structure (`--no-graphs` for launched kernels, `--hip` for HIP),
+and writes marker copies between phases; `scripts/gpu_trace.py` traces any
+command with nsys and counts, per phase, launches, blocking syncs, copies,
+device and pinned allocations, and graph instantiations:
 
 ```sh
 cargo build -r -p arael-gpu --features cuda --example repeat_solves
@@ -89,16 +84,12 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
 ```
 
 `examples/concurrent_solves.rs` spreads a fixed set of small solves over
-1, 2, 4 and 8 threads, a context each, and prints the solves per second.
-`cargo run -r -p arael-gpu --features cuda --example async_copies` times
-CubeCL's copies: enqueue against completion, several in flight, and an
-upload and a download on two streams.
+1, 2, 4 and 8 threads, a device each, and prints the solves per second.
 
 ## Knobs
 
 `GpuSupernodalParams`: the small-supernode width (96 columns), the
 multiply-adds from which a descendant update takes the GEMM-core kernel
-(2e6), the elements per cube of the small-update kernel (16384), the
-multiply-adds per cube of the solve's gather and GEMV (65536), and the
-loads in flight of the backward dot products (8 in f64, 4 in f32). The
-defaults are the measured ones (docs/dev/GPU.md, E3 and E5 step 7).
+(2e6), the elements per block of the small-update kernel (16384), the
+multiply-adds per block of the solve's gather and GEMV (65536), and the
+loads in flight of the backward dot products (8 in f64, 4 in f32).

@@ -1,6 +1,6 @@
 // schur.cpp: the Schur reduction on the device and the refinement of its
 // reduced solve (docs/dev/GPU.md, E2 and E9), launched by
-// arael-gpu/src/native/schur.rs over the plan of arael-gpu/src/schur.rs.
+// arael-gpu/src/schur.rs over its plan.
 //
 // In W, the route's wide scalar (wide.h). Compiled per EW (the widest eliminated block, rounded up to 4,
 // 8, 16, 32 or 64), KW (the widest kept block, rounded likewise) and ACC

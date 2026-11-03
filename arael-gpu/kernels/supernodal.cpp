@@ -1,6 +1,6 @@
 // supernodal.cpp: the block supernodal Cholesky and its level-set solve
 // (docs/dev/GPU.md, E3 and E5 step 7), launched by
-// arael-gpu/src/native/supernodal.rs over the plan of arael-gpu/src/plan.rs.
+// arael-gpu/src/supernodal.rs over the plan of arael-gpu/src/plan.rs.
 //
 // Compiled per SCALAR (float or double), the wide scalar W of the vectors
 // it solves (wide.h, in front of this) and LU; the tile sizes (NB, TB, TK,

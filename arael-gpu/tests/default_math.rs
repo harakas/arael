@@ -1,18 +1,18 @@
-//! The IEEE 754 arithmetic a native kernel gets by default, which
+//! The IEEE 754 arithmetic a kernel gets by default, which
 //! double-single (df32) arithmetic and the solver's NaN checks rely on: NaN
 //! and infinity are not assumed away, a compensated sum keeps its error
 //! term, and a product rounded on its own (an `fma(a, b, 0)` pin or
 //! `mul_rn`) is not fused into the add that consumes it. Contraction itself
-//! stays on, as NVRTC's and hipRTC's defaults. On CUDA (feature
-//! `native-cuda`), else on HIP (`native-hip`).
-#![cfg(any(feature = "native-cuda", feature = "native-hip"))]
+//! stays on, as NVRTC's and hipRTC's defaults. On CUDA (feature `cuda`),
+//! else on HIP (`hip`).
+#![cfg(any(feature = "cuda", feature = "hip"))]
 
-use arael_gpu::native::{Arg, Device, Launch};
+use arael_gpu::{Arg, Device, Launch};
 
-#[cfg(feature = "native-cuda")]
-type Dev = arael_gpu::native::cuda::CudaDevice;
-#[cfg(all(feature = "native-hip", not(feature = "native-cuda")))]
-type Dev = arael_gpu::native::hip::HipDevice;
+#[cfg(feature = "cuda")]
+type Dev = arael_gpu::cuda::CudaDevice;
+#[cfg(all(feature = "hip", not(feature = "cuda")))]
+type Dev = arael_gpu::hip::HipDevice;
 
 const SOURCE: &str = r#"
 KERNEL void default_math(GLOBAL const float* in, GLOBAL float* out) {
@@ -51,7 +51,7 @@ fn two_sum_error(a: f32, b: f32) -> f32 {
 }
 
 #[test]
-fn native_keeps_default_math() {
+fn kernels_keep_default_math() {
     let dev = Dev::new(0).unwrap();
     let kernel = dev.compile(SOURCE, "", "default_math").unwrap();
 
@@ -86,10 +86,10 @@ fn native_keeps_default_math() {
 }
 
 #[test]
-fn native_reports_compile_errors() {
+fn compile_errors_are_reported() {
     let dev = Dev::new(0).unwrap();
     let err = dev.compile("KERNEL void broken(GLOBAL float* x) { x[0] = undefined_name; }", "", "broken");
-    let Err(arael_gpu::native::NativeError::Compile { entry, log }) = err else {
+    let Err(arael_gpu::GpuError::Compile { entry, log }) = err else {
         panic!("expected a compile error, got {err:?}");
     };
     assert_eq!(entry, "broken");
