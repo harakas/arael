@@ -15,6 +15,8 @@ cholmod-gpl = ["arael/cholmod-gpl"]
 # The GPU factorization of the supernodal block route (ARAEL_GPU=cuda).
 gpu-cuda = ["arael/gpu-cuda"]
 gpu-hip = ["arael/gpu-hip"]
+# arael's own CUDA runtime (ARAEL_GPU=native-cuda).
+gpu-native-cuda = ["arael/gpu-native-cuda"]
 
 [dependencies]
 arael = { path = "../..", features = ["threads"] }

@@ -94,22 +94,26 @@ pub fn mixed_precision() -> Option<arael::simple_lm::MixedPrecision> {
 }
 
 /// ARAEL_GPU puts the supernodal block route's factorization and solve on a
-/// GPU: `cuda`, `hip`, or either with a device index (`cuda:1`). With
-/// ARAEL_F32_FACTOR the factor is f32 there, refined the same way. The
-/// binary needs arael's `gpu-cuda` or `gpu-hip` feature. Every solver of the
-/// process gets a clone of one device, so they share its stream and buffers
-/// as repeated solves in an application would.
+/// GPU: `cuda`, `hip`, `native-cuda` (arael's own CUDA runtime; the assembly
+/// and the reduction stay on the CPU), or any with a device index
+/// (`cuda:1`). With ARAEL_F32_FACTOR the factor is f32 there, refined the
+/// same way. The binary needs arael's `gpu-cuda`, `gpu-hip` or
+/// `gpu-native-cuda` feature. Every solver of the process gets a clone of
+/// one device, so they share its stream and buffers as repeated solves in an
+/// application would.
 pub fn gpu() -> Option<arael::simple_lm::GpuDevice> {
     static DEVICE: std::sync::OnceLock<Option<arael::simple_lm::GpuDevice>> = std::sync::OnceLock::new();
     DEVICE
         .get_or_init(|| {
             let v = std::env::var("ARAEL_GPU").ok()?;
             let (name, index) = v.split_once(':').unwrap_or((v.as_str(), "0"));
-            let index: usize = index.parse().unwrap_or_else(|_| panic!("ARAEL_GPU={}: expected cuda[:index] or hip[:index]", v));
+            let expected = "expected cuda[:index], hip[:index] or native-cuda[:index]";
+            let index: usize = index.parse().unwrap_or_else(|_| panic!("ARAEL_GPU={}: {}", v, expected));
             match name {
                 "cuda" => Some(arael::simple_lm::GpuDevice::cuda(index)),
                 "hip" => Some(arael::simple_lm::GpuDevice::hip(index)),
-                _ => panic!("ARAEL_GPU={}: expected cuda[:index] or hip[:index]", v),
+                "native-cuda" => Some(arael::simple_lm::GpuDevice::native_cuda(index)),
+                _ => panic!("ARAEL_GPU={}: {}", v, expected),
             }
         })
         .clone()

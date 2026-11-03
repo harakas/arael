@@ -162,6 +162,7 @@ dependencies = [
  "cubecl",
  "cubecl-environment",
  "cubecl-runtime",
+ "cudarc",
  "etcetera",
 ]
 
