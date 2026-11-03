@@ -33,7 +33,7 @@ pub(crate) mod native;
 /// A device failure past setup panics: the LM loop has no way to report it.
 /// `Send`, so a solver moves between threads as on the CPU.
 pub(crate) trait GpuSolver<T>: Send {
-    /// The runtime, for the verbose log: `cubecl` or `native`.
+    /// The runtime, for the verbose log: `cubecl`, `native` or `native df32`.
     fn runtime(&self) -> &'static str;
     /// The factor's scalar.
     fn precision(&self) -> GpuPrecision;

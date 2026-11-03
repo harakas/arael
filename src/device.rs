@@ -30,9 +30,22 @@ pub struct DeviceShape {
     pub rotations: Vec<(usize, usize)>,
     /// How many cross arrays the store holds.
     pub crosses: usize,
-    /// Per constraint: the words of one instance (its entities' slots and
-    /// its cross slot) and its data leaves.
-    pub constraints: Vec<(usize, usize)>,
+    pub constraints: Vec<DeviceConstraint>,
+}
+
+/// One constraint of a [`DeviceShape`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceConstraint {
+    /// The words of one instance: its entities' slots and its cross slot.
+    pub words: usize,
+    /// Its data leaves.
+    pub data: usize,
+    /// Its residual rows.
+    pub rows: usize,
+    /// The entity arrays of its two sides, and its cross array.
+    pub a: usize,
+    pub b: usize,
+    pub cross: usize,
 }
 
 /// A root's block store against a tiled pattern, slot by slot: per entity
@@ -267,7 +280,7 @@ impl<T: crate::utils::Float + 'static> DeviceAssembly<T> {
         let mut pack = DevicePack::<T>::new(&self.shape, &self.bufs.slots);
         root.device_pack(&mut pack);
         let b = &mut self.bufs;
-        b.count = self.shape.constraints.iter().zip(&pack.inst).map(|(&(w, _), inst)| (inst.len() / w.max(1)) as u32).collect();
+        b.count = self.shape.constraints.iter().zip(&pack.inst).map(|(c, inst)| (inst.len() / c.words.max(1)) as u32).collect();
         let mut moved = rewrite_scalars(ctx, &mut b.fixed, pack.fixed);
         moved |= rewrite(ctx, &mut b.refr, pack.refr);
         moved |= rewrite(ctx, &mut b.inst, pack.inst);

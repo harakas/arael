@@ -229,13 +229,17 @@ fn devices() -> Vec<GpuDevice> {
     #[cfg(feature = "gpu-cuda")]
     v.push(GpuDevice::cuda(0));
     #[cfg(feature = "gpu-native-cuda")]
-    v.push(GpuDevice::native_cuda(0));
+    v.extend([GpuDevice::native_cuda(0), GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32)]);
     v
 }
 
-/// A runtime's name, for the messages.
+/// A runtime and its wide scalar, for the messages.
 fn runtime(d: &GpuDevice) -> &'static str {
-    if d.is_native() { "native" } else { "cubecl" }
+    match (d.is_native(), d.wide()) {
+        (false, _) => "cubecl",
+        (true, arael::simple_lm::GpuWide::F64) => "native",
+        (true, arael::simple_lm::GpuWide::Df32) => "native df32",
+    }
 }
 
 /// The reduced supernodal route, on `gpu` when it is given.
@@ -365,10 +369,13 @@ fn state(s: &Scene) -> Vec<f64> {
     v
 }
 
+/// `a` within `tol` of `b`, entry by entry, relative to the entry's size
+/// past 1: the scene's focal lengths are near 500, its angles near 0.1.
 fn assert_close(a: &[f64], b: &[f64], tol: f64, what: &str) {
     assert_eq!(a.len(), b.len());
-    let err = a.iter().zip(b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
-    assert!(err <= tol, "{what}: the largest difference is {err}");
+    let rel = |x: f64, y: f64| (x - y).abs() / y.abs().max(1.0);
+    let (err, at) = a.iter().zip(b).enumerate().fold((0.0f64, 0), |m, (k, (&x, &y))| if rel(x, y) > m.0 { (rel(x, y), k) } else { m });
+    assert!(err <= tol, "{what}: the largest difference is {err}, at {at} ({} against {})", a[at], b[at]);
 }
 
 /// The device solve leaves the model where the CPU's does (the reference
@@ -678,34 +685,47 @@ fn native() -> std::sync::Arc<arael::__gpu::native::cuda::CudaDevice> {
     std::sync::Arc::new(arael::__gpu::native::cuda::CudaDevice::new(0).unwrap())
 }
 
+/// The native assembly matches the CPU's in both wide scalars: in df32 the
+/// sums keep about 48 bits, against f64's 53. Some cameras see a point
+/// twice, two observations with cross blocks of their own on one tile of H,
+/// which the device sums as one.
 #[cfg(feature = "gpu-native-cuda")]
 #[test]
 fn the_f64_bundle_adjustment_assembles_natively_as_on_the_cpu() {
-    let (cameras, points, observations) = scene::<f64>();
-    let mut s = Scene { cameras, points, observations };
-    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
-    let mut x = Vec::new();
-    s.serialize(&mut x);
-    let x = perturbed(&x);
-    let chk = arael::__gpu::native_device_check(&mut s, &x, &native());
-    assert!(chk.values > 0);
-    assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-12 * chk.cpu_cost, "{chk:?}");
-    assert!(chk.grad_err < 1e-12 && chk.hess_err < 1e-12, "{chk:?}");
+    use arael::__gpu::native::Wide;
+    let (_, _, observations) = scene::<f64>();
+    let pairs: std::collections::HashSet<(u32, u32)> = observations.iter().map(|o| (o.cam.index(), o.pt.index())).collect();
+    assert!(pairs.len() < observations.len(), "the scene observes some pair twice");
+    for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+        let (cameras, points, observations) = scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x = perturbed(&x);
+        let chk = arael::__gpu::native_device_check(&mut s, &x, &native(), wide);
+        assert!(chk.values > 0);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
 }
 
 #[cfg(feature = "gpu-native-cuda")]
 #[test]
 fn the_f32_bundle_adjustment_assembles_natively_as_on_the_cpu() {
-    let (cameras, points, observations) = scene::<f32>();
-    let mut s = SceneF { cameras, points, observations };
-    assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
-    let mut x = Vec::new();
-    s.serialize(&mut x);
-    let x = perturbed(&x);
-    let chk = arael::__gpu::native_device_check(&mut s, &x, &native());
-    // the CPU sums its f32 products in f32, the device in f64
-    assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{chk:?}");
-    assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{chk:?}");
+    use arael::__gpu::native::Wide;
+    for wide in [Wide::F64, Wide::Df32] {
+        let (cameras, points, observations) = scene::<f32>();
+        let mut s = SceneF { cameras, points, observations };
+        assert_eq!(LmProblemInternals::<f32>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x = perturbed(&x);
+        let chk = arael::__gpu::native_device_check(&mut s, &x, &native(), wide);
+        // the CPU sums its f32 products in f32, the device in its wide scalar
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= 1e-5 * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < 1e-4 && chk.hess_err < 1e-4, "{wide:?}: {chk:?}");
+    }
 }
 
 /// A solver with its GPU state moves to another thread, as a CPU one does,

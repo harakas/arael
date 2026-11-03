@@ -2,7 +2,8 @@
 //! `gpu-native-cuda`): what [`DeviceAssembly`](crate::device::DeviceAssembly)
 //! does, with the root's generated C++ kernels
 //! ([`DeviceRoot::device_cpp`]) and the model's data laid out as columns in
-//! one block of device memory.
+//! one block of device memory, the sums in the route's [`Wide`] scalar and
+//! no atomic writes (`arael-gpu/kernels/assembly.cpp`).
 //!
 //! The block starts with a layout table: the byte offset of every column,
 //! one `u64` each, in the order [`columns`] gives them. The kernels read a
@@ -13,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arael_gpu::native::{Arg, Device, Launch, NativeError};
+use arael_gpu::native::{Arg, Device, Launch, NativeError, WIDE, Wide};
 
 use crate::device::{DevicePack, DeviceRoot, DeviceShape};
 
@@ -32,12 +33,27 @@ struct Column {
     len: usize,
 }
 
-/// The columns of a root, in the layout table's order: per entity array its
-/// global indices, tiles, fixed values and gathered values; per rotation
-/// field its step offsets, reference rotations and composed rotations; per
-/// cross array its tiles; per constraint its slots and data leaves. The
-/// order depends on the shape alone.
-fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize) -> Vec<Column> {
+/// Blocks of [`THREADS`] over `n` instances: the cost's parts.
+fn parts(n: usize) -> usize {
+    n.div_ceil(THREADS as usize).max(1)
+}
+
+/// The values of one instance's record: per row the residual and the two
+/// entities' derivatives.
+fn record_width(shape: &DeviceShape, c: usize) -> usize {
+    let k = shape.constraints[c];
+    k.rows * (1 + shape.entities[k.a] + shape.entities[k.b])
+}
+
+/// The columns of a root, in the layout table's order, and how many of
+/// them the host writes: first those, per entity array its global indices,
+/// tiles and fixed values; per rotation field its step offsets and
+/// reference rotations; per cross array its tiles; per constraint its
+/// slots, data leaves and its instances by entity and by cross slot. Then
+/// the columns the kernels write: per entity array its gathered values, per
+/// rotation field its composed rotations, per constraint its records and
+/// cost parts. The order depends on the shape alone. W values are 8 bytes.
+fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize) -> (Vec<Column>, usize) {
     let col = |name: String, elem: usize, len: usize| Column { name, elem, len };
     let mut v = Vec::new();
     for (e, &n) in shape.entities.iter().enumerate() {
@@ -45,50 +61,71 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
         v.push(col(format!("E{e}_IDX"), 4, n * s));
         v.push(col(format!("E{e}_TILE"), 4, 3 * s));
         v.push(col(format!("E{e}_FIXED"), ts, n * s));
-        v.push(col(format!("E{e}_EV"), ts, n * s));
     }
     for (r, &(e, _)) in shape.rotations.iter().enumerate() {
         let s = slots[e];
         v.push(col(format!("R{r}_AT"), 4, s));
         v.push(col(format!("R{r}_REFR"), 8, 9 * s));
-        v.push(col(format!("R{r}_ROT"), ts, 9 * s));
-        v.push(col(format!("R{r}_ROTW"), 8, 9 * s));
-        v.push(col(format!("R{r}_DROT"), ts, 27 * s));
     }
     for (x, &s) in cross_slots.iter().enumerate() {
         v.push(col(format!("X{x}_TILE"), 4, 3 * s));
     }
-    for (c, &(_, nd)) in shape.constraints.iter().enumerate() {
+    for (c, k) in shape.constraints.iter().enumerate() {
         let n = counts[c];
         for w in ["SA", "SB", "SX"] {
             v.push(col(format!("C{c}_{w}"), 4, n));
         }
-        for j in 0..nd {
+        for j in 0..k.data {
             v.push(col(format!("C{c}_D{j}"), ts, n));
         }
+        v.push(col(format!("C{c}_AOFF"), 4, slots[k.a] + 1));
+        v.push(col(format!("C{c}_AINST"), 4, n));
+        v.push(col(format!("C{c}_BOFF"), 4, slots[k.b] + 1));
+        v.push(col(format!("C{c}_BINST"), 4, n));
+        v.push(col(format!("C{c}_XOFF"), 4, cross_slots[k.cross] + 1));
+        v.push(col(format!("C{c}_XINST"), 4, n));
     }
-    v
+    let host = v.len();
+    for (e, &n) in shape.entities.iter().enumerate() {
+        v.push(col(format!("E{e}_EV"), ts, n * slots[e]));
+    }
+    for (r, &(e, _)) in shape.rotations.iter().enumerate() {
+        let s = slots[e];
+        v.push(col(format!("R{r}_ROT"), ts, 9 * s));
+        v.push(col(format!("R{r}_ROTW"), 8, 9 * s));
+        v.push(col(format!("R{r}_DROT"), ts, 27 * s));
+    }
+    for (c, &n) in counts.iter().enumerate() {
+        v.push(col(format!("C{c}_REC"), ts, n * record_width(shape, c)));
+        v.push(col(format!("C{c}_PART"), 8, parts(n)));
+    }
+    (v, host)
 }
 
 /// Where every column sits in the block: the table first, then each column
-/// on a 256-byte boundary.
+/// on a 256-byte boundary; the host's columns end at `host_bytes`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Layout {
     columns: Vec<Column>,
     offsets: Vec<usize>,
+    host_bytes: usize,
     bytes: usize,
 }
 
 impl Layout {
-    fn new(columns: Vec<Column>) -> Self {
+    fn new((columns, host): (Vec<Column>, usize)) -> Self {
         let align = |b: usize| b.div_ceil(256) * 256;
         let mut at = align(columns.len() * 8);
         let mut offsets = Vec::with_capacity(columns.len());
-        for c in &columns {
+        let mut host_bytes = at;
+        for (k, c) in columns.iter().enumerate() {
             offsets.push(at);
             at += align((c.elem * c.len).max(1));
+            if k + 1 == host {
+                host_bytes = at;
+            }
         }
-        Layout { columns, offsets, bytes: at }
+        Layout { columns, offsets, host_bytes, bytes: at }
     }
 
     /// The `#define`s of the table's slots, for the kernels.
@@ -101,7 +138,20 @@ impl Layout {
     }
 }
 
-/// The kernels of a root, compiled once per device and layout of slots.
+/// A constraint's kernels: the instance kernel (records and cost parts),
+/// the sums of its records per entity side and per cross tile, the sum of
+/// its cost parts, and the cost alone.
+struct ConstraintKernels<K> {
+    gh: K,
+    ra: K,
+    rb: K,
+    rx: K,
+    csum: K,
+    cost: K,
+}
+
+/// The kernels of a root, compiled once per device, wide scalar and layout
+/// of slots.
 struct Kernels<K> {
     gather: K,
     euler_values: K,
@@ -109,8 +159,7 @@ struct Kernels<K> {
     euler_advance: K,
     zero: K,
     zero_steps: K,
-    gh: Vec<K>,
-    cost: Vec<K>,
+    constraints: Vec<ConstraintKernels<K>>,
 }
 
 /// A buffer the assembly writes or reads that is not its own: a block and a
@@ -119,9 +168,11 @@ pub type Target<'a, B> = (&'a B, usize);
 
 /// A root laid out on a [`Device`] in one block, its tables, instances and
 /// entity data uploaded once per structure and refreshed per solve; the
-/// parameter vector, the targets and the cost are the caller's buffers.
+/// parameter vector, the targets and the cost are the caller's buffers, in
+/// the assembly's [`Wide`] scalar.
 pub struct NativeDeviceAssembly<T, D: Device> {
     dev: Arc<D>,
+    wide: Wide,
     shape: DeviceShape,
     slots: Vec<usize>,
     cross_slots: Vec<usize>,
@@ -134,6 +185,10 @@ pub struct NativeDeviceAssembly<T, D: Device> {
     /// Per rotation field, per slot: the global index of the rotation's
     /// first parameter, [`FIXED`] when fixed.
     rot_index: Vec<Vec<u32>>,
+    /// Per cross array, per slot: the first slot on the same tile of H
+    /// (two instances of one pair of entities, each with a cross block of
+    /// its own, share a tile).
+    tile_owner: Vec<Vec<u32>>,
     layout: Layout,
     offset: HashMap<String, usize>,
     block: D::Block,
@@ -146,14 +201,63 @@ fn launch_n(n: usize) -> Launch {
     Launch::linear((n as u32).max(1), THREADS)
 }
 
+/// Entry `j` of every record of `nd` values in `src` into `dst`, as `E`
+/// (the model scalar's bits).
+fn transpose<E: arael_gpu::bytemuck::Pod>(dst: &mut [u8], src: &[u8], j: usize, nd: usize) {
+    let dst: &mut [E] = arael_gpu::bytemuck::cast_slice_mut(dst);
+    let src: &[E] = arael_gpu::bytemuck::cast_slice(src);
+    for (d, rec) in dst.iter_mut().zip(src.chunks_exact(nd)) {
+        *d = rec[j];
+    }
+}
+
+/// Per cross slot of the tables `tiles` (`(base, stride, flip)` each), the
+/// first slot whose tile starts at the same value of H.
+fn tile_owners(tiles: &[u32]) -> Vec<u32> {
+    let n = tiles.len() / 3;
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_unstable_by_key(|&s| (tiles[3 * s as usize], s));
+    let mut owner = vec![0u32; n];
+    let mut first = 0u32;
+    for (k, &s) in order.iter().enumerate() {
+        if k == 0 || tiles[3 * s as usize] != tiles[3 * order[k - 1] as usize] {
+            first = s;
+        }
+        owner[s as usize] = first;
+    }
+    owner
+}
+
+/// The instances, numbered in order, grouped by the slot each refers to:
+/// `(ptr, inst)` with slot `s`'s instances at `inst[ptr[s]..ptr[s + 1]]`,
+/// ascending.
+fn by_slot(of: impl Iterator<Item = u32> + Clone, slots: usize) -> (Vec<u32>, Vec<u32>) {
+    let mut ptr = vec![0u32; slots + 1];
+    for s in of.clone() {
+        ptr[s as usize + 1] += 1;
+    }
+    for s in 0..slots {
+        ptr[s + 1] += ptr[s];
+    }
+    let mut fill = ptr.clone();
+    let mut inst = vec![0u32; ptr[slots] as usize];
+    for (o, s) in of.enumerate() {
+        inst[fill[s as usize] as usize] = o as u32;
+        fill[s as usize] += 1;
+    }
+    (ptr, inst)
+}
+
 impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
     /// Lay `root` out on `dev` against the tiled pattern `resolve`
-    /// describes, and compile its kernels. The model's working copies must
-    /// be current (its fixed values and reference rotations are read).
+    /// describes, its sums in `wide`, and compile its kernels. The model's
+    /// working copies must be current (its fixed values and reference
+    /// rotations are read).
     pub fn new(
         dev: &Arc<D>,
         root: &dyn DeviceRoot<T>,
         resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize),
+        wide: Wide,
     ) -> Result<Self, NativeError> {
         let ts = core::mem::size_of::<T>();
         assert!(ts == 4 || ts == 8, "the device assembly takes an f32 or an f64 model");
@@ -165,28 +269,39 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
             shape.rotations.iter().map(|&(e, off)| (0..slots[e]).map(|s| (s * shape.entities[e] + off) as u32).collect()).collect();
         let rot_index =
             shape.rotations.iter().map(|&(e, off)| (0..slots[e]).map(|s| tables.idx[e][s * shape.entities[e] + off]).collect()).collect();
+        let tile_owner = tables.cross.iter().map(|t| tile_owners(t)).collect();
         let mut pack = DevicePack::<T>::new(&shape, &slots);
         root.device_pack(&mut pack);
         let counts = instance_counts(&shape, &pack);
         let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts));
         let scalar = if ts == 8 { "double" } else { "float" };
-        let defines = format!("#define SCALAR {scalar}\n{}", layout.defines());
-        let source = format!("{}\n{}", arael_gpu::native::ASSEMBLY, root.device_cpp());
+        let defines = format!("{}#define SCALAR {scalar}\n{}", wide.defines(), layout.defines());
+        let source = format!("{WIDE}\n{}\n{}", arael_gpu::native::ASSEMBLY, root.device_cpp());
         let k = |entry: &str| dev.compile(&source, &defines, entry);
+        let constraint = |c: usize| -> Result<ConstraintKernels<D::Kernel>, NativeError> {
+            Ok(ConstraintKernels {
+                gh: k(&format!("__dk{c}_gh"))?,
+                ra: k(&format!("__dk{c}_ra"))?,
+                rb: k(&format!("__dk{c}_rb"))?,
+                rx: k(&format!("__dk{c}_rx"))?,
+                csum: k(&format!("__dk{c}_csum"))?,
+                cost: k(&format!("__dk{c}_cost"))?,
+            })
+        };
         let kernels = Kernels {
             gather: k("k_gather_params")?,
             euler_values: k("k_euler_values")?,
             euler_rotations: k("k_euler_rotations")?,
             euler_advance: k("k_euler_advance")?,
-            zero: k("k_zero_f64")?,
+            zero: k("k_zero_wide")?,
             zero_steps: k("k_zero_steps")?,
-            gh: (0..shape.constraints.len()).map(|c| k(&format!("__dk{c}_gh"))).collect::<Result<_, _>>()?,
-            cost: (0..shape.constraints.len()).map(|c| k(&format!("__dk{c}_cost"))).collect::<Result<_, _>>()?,
+            constraints: (0..shape.constraints.len()).map(constraint).collect::<Result<_, _>>()?,
         };
         let block = dev.alloc(layout.bytes)?;
         let offset = layout.index();
         let mut asm = NativeDeviceAssembly {
             dev: dev.clone(),
+            wide,
             shape,
             slots,
             cross_slots,
@@ -196,6 +311,7 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
             cross: tables.cross,
             at,
             rot_index,
+            tile_owner,
             layout,
             offset,
             block,
@@ -234,57 +350,83 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
         self.write(&pack)
     }
 
-    /// The block's image on the host, written in one copy: the table, the
-    /// structure's tables and the model's data. The columns the kernels
-    /// write (the gathered values and the rotations) are left zero.
+    /// The host's part of the block, written in one copy: the table, the
+    /// structure's tables, the model's data and the instance lists; the
+    /// columns the kernels write after it are not.
     fn write(&mut self, pack: &DevicePack<T>) -> Result<(), NativeError> {
-        let mut image = vec![0u8; self.layout.bytes];
+        use arael_gpu::bytemuck::{cast_slice, cast_slice_mut};
+        // in words, so every column (on a 256-byte boundary) is a typed slice
+        let mut words = vec![0u64; self.layout.host_bytes / 8];
         for (k, &o) in self.layout.offsets.iter().enumerate() {
-            image[8 * k..8 * k + 8].copy_from_slice(&(o as u64).to_le_bytes());
+            words[k] = o as u64;
         }
-        let put = |image: &mut Vec<u8>, name: &str, bytes: &[u8]| {
-            let o = self.offset[name];
-            image[o..o + bytes.len()].copy_from_slice(bytes);
+        let image: &mut [u8] = cast_slice_mut(&mut words);
+        let offset = &self.offset;
+        // the byte range of `len` bytes of column `name`
+        let col = |name: &str, len: usize| -> std::ops::Range<usize> {
+            let o = offset[name];
+            o..o + len
         };
+        let put = |image: &mut [u8], name: &str, bytes: &[u8]| image[col(name, bytes.len())].copy_from_slice(bytes);
         for e in 0..self.shape.entities.len() {
-            put(&mut image, &format!("E{e}_IDX"), u32_bytes(&self.idx[e]));
-            put(&mut image, &format!("E{e}_TILE"), u32_bytes(&self.tile[e]));
-            put(&mut image, &format!("E{e}_FIXED"), scalar_bytes(&pack.fixed[e]));
+            put(image, &format!("E{e}_IDX"), u32_bytes(&self.idx[e]));
+            put(image, &format!("E{e}_TILE"), u32_bytes(&self.tile[e]));
+            put(image, &format!("E{e}_FIXED"), scalar_bytes(&pack.fixed[e]));
         }
         for r in 0..self.shape.rotations.len() {
-            put(&mut image, &format!("R{r}_AT"), u32_bytes(&self.at[r]));
-            put(&mut image, &format!("R{r}_REFR"), f64_bytes(&pack.refr[r]));
+            put(image, &format!("R{r}_AT"), u32_bytes(&self.at[r]));
+            put(image, &format!("R{r}_REFR"), &self.wide.encode(&pack.refr[r]));
         }
         for x in 0..self.cross.len() {
-            put(&mut image, &format!("X{x}_TILE"), u32_bytes(&self.cross[x]));
+            put(image, &format!("X{x}_TILE"), u32_bytes(&self.cross[x]));
         }
-        // the walk's instances and data, one record per instance, into columns
+        // the walk's instances and data, one record per instance, into
+        // columns; the instances grouped by entity and by cross slot
         let ts = core::mem::size_of::<T>();
-        for (c, &(w, nd)) in self.shape.constraints.iter().enumerate() {
+        for (c, k) in self.shape.constraints.iter().enumerate() {
             let n = self.counts[c];
-            assert_eq!(w, 3, "an instance is two entity slots and a cross slot");
-            for (k, name) in ["SA", "SB", "SX"].iter().enumerate() {
-                let o = self.offset[&format!("C{c}_{name}")];
-                for i in 0..n {
-                    image[o + 4 * i..o + 4 * i + 4].copy_from_slice(&pack.inst[c][3 * i + k].to_le_bytes());
+            assert_eq!(k.words, 3, "an instance is two entity slots and a cross slot");
+            let inst = &pack.inst[c];
+            for (w, name) in ["SA", "SB", "SX"].iter().enumerate() {
+                let r = col(&format!("C{c}_{name}"), 4 * n);
+                let dst: &mut [u32] = cast_slice_mut(&mut image[r]);
+                for (d, rec) in dst.iter_mut().zip(inst.chunks_exact(3)) {
+                    *d = rec[w];
                 }
             }
             let data = scalar_bytes(&pack.data[c]);
-            for j in 0..nd {
-                let o = self.offset[&format!("C{c}_D{j}")];
-                for i in 0..n {
-                    let src = (i * nd + j) * ts;
-                    image[o + ts * i..o + ts * i + ts].copy_from_slice(&data[src..src + ts]);
+            for j in 0..k.data {
+                let r = col(&format!("C{c}_D{j}"), ts * n);
+                if ts == 8 {
+                    transpose::<u64>(&mut image[r], data, j, k.data);
+                } else {
+                    transpose::<u32>(&mut image[r], data, j, k.data);
                 }
             }
+            for (side, w, slots) in [("A", 0, self.slots[k.a]), ("B", 1, self.slots[k.b])] {
+                let (ptr, list) = by_slot(inst.chunks_exact(3).map(|rec| rec[w]), slots);
+                put(image, &format!("C{c}_{side}OFF"), cast_slice(&ptr));
+                put(image, &format!("C{c}_{side}INST"), cast_slice(&list));
+            }
+            // every instance in the list of its tile's first slot, so a tile
+            // has one summing thread per entry, the other slots none
+            let owner = &self.tile_owner[k.cross];
+            let (ptr, list) = by_slot(inst.chunks_exact(3).map(|rec| owner[rec[2] as usize]), self.cross_slots[k.cross]);
+            put(image, &format!("C{c}_XOFF"), cast_slice(&ptr));
+            put(image, &format!("C{c}_XINST"), cast_slice(&list));
         }
-        self.dev.write(&mut self.block, 0, &image)
+        self.dev.write(&mut self.block, 0, cast_slice(&words))
     }
 
     /// Changes whenever the block or its offsets change: a graph of the
     /// launches replays only under the generation it was captured in.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The scalar of the sums, the parameters, the targets and the rotations.
+    pub fn wide(&self) -> Wide {
+        self.wide
     }
 
     /// A column of the block as a kernel argument.
@@ -303,8 +445,8 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
         self.run(&self.kernels.zero, n, &[Arg::Block(t.0, t.1), Arg::U32(n as u32)])
     }
 
-    /// The entities' parameter values and the rotations at the `nx` f64
-    /// parameters `x`; with `derivatives`, the rotations' derivatives too.
+    /// The entities' parameter values and the rotations at the parameters
+    /// `x`; with `derivatives`, the rotations' derivatives too.
     fn gather(&self, x: Target<'_, D::Block>, derivatives: bool) -> Result<(), NativeError> {
         for (e, &n) in self.shape.entities.iter().enumerate() {
             let len = n * self.slots[e];
@@ -325,9 +467,9 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
         Ok(())
     }
 
-    /// The gradient (`ng` f64 at `g`), the pattern's tile values (`nh` f64
-    /// at `h`) and the cost (one f64 at `cost`) at the f64 parameters `x`,
-    /// each zeroed first; nothing read back.
+    /// The gradient (`ng` values at `g`), the pattern's tile values (`nh`
+    /// at `h`) and the cost (one value at `cost`) at the parameters `x`,
+    /// each zeroed first, all in [`wide`](Self::wide); nothing read back.
     pub fn assemble_at(
         &self,
         x: Target<'_, D::Block>,
@@ -341,26 +483,41 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
         self.zero(h, nh)?;
         self.zero(cost, 1)?;
         self.gather(x, true)?;
+        let (b, h, g, cost) = (Arg::Block(&self.block, 0), Arg::Block(h.0, h.1), Arg::Block(g.0, g.1), Arg::Block(cost.0, cost.1));
         for (c, &n) in self.counts.iter().enumerate() {
-            let args = [Arg::Block(&self.block, 0), Arg::Block(h.0, h.1), Arg::Block(g.0, g.1), Arg::Block(cost.0, cost.1), Arg::U32(n as u32)];
-            self.run(&self.kernels.gh[c], n, &args)?;
+            if n == 0 {
+                continue;
+            }
+            let (k, shape) = (&self.kernels.constraints[c], self.shape.constraints[c]);
+            let (na, nb) = (self.shape.entities[shape.a], self.shape.entities[shape.b]);
+            let (sa, sb, sx) = (self.slots[shape.a], self.slots[shape.b], self.cross_slots[shape.cross]);
+            self.run(&k.gh, n, &[b, Arg::U32(n as u32)])?;
+            self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, cost, Arg::U32(parts(n) as u32)])?;
+            self.run(&k.ra, sa * (na * (na + 1) / 2 + na), &[b, h, g, Arg::U32(sa as u32)])?;
+            self.run(&k.rb, sb * (nb * (nb + 1) / 2 + nb), &[b, h, g, Arg::U32(sb as u32)])?;
+            self.run(&k.rx, sx * na * nb, &[b, h, Arg::U32(sx as u32)])?;
         }
         Ok(())
     }
 
-    /// The cost (one f64 at `cost`) at the f64 parameters `x`, zeroed
-    /// first; the rotations' derivatives are not computed. Nothing read back.
+    /// The cost (one value at `cost`) at the parameters `x`, zeroed first;
+    /// the rotations' derivatives are not computed. Nothing read back.
     pub fn cost_at(&self, x: Target<'_, D::Block>, cost: Target<'_, D::Block>) -> Result<(), NativeError> {
         self.zero(cost, 1)?;
         self.gather(x, false)?;
+        let (b, cost) = (Arg::Block(&self.block, 0), Arg::Block(cost.0, cost.1));
         for (c, &n) in self.counts.iter().enumerate() {
-            let args = [Arg::Block(&self.block, 0), Arg::Block(cost.0, cost.1), Arg::U32(n as u32)];
-            self.run(&self.kernels.cost[c], n, &args)?;
+            if n == 0 {
+                continue;
+            }
+            let k = &self.kernels.constraints[c];
+            self.run(&k.cost, n, &[b, Arg::U32(n as u32)])?;
+            self.dev.launch(&k.csum, Launch::linear(THREADS, THREADS), &[b, cost, Arg::U32(parts(n) as u32)])?;
         }
         Ok(())
     }
 
-    /// The rotation steps of the f64 parameters `x` zeroed, as re-centring
+    /// The rotation steps of the parameters `x` zeroed, as re-centring
     /// after [`advance`](Self::advance) leaves them.
     pub fn zero_steps(&self, x: Target<'_, D::Block>) -> Result<(), NativeError> {
         for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
@@ -388,8 +545,10 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
     pub fn restore(&self, root: &mut dyn DeviceRoot<T>) -> Result<(), NativeError> {
         let mut refr: Vec<Vec<f64>> = Vec::new();
         for (r, &(e, _)) in self.shape.rotations.iter().enumerate() {
+            let mut bytes = vec![0u8; 8 * 9 * self.slots[e]];
+            self.dev.read(&self.block, self.offset[&format!("R{r}_REFR")], &mut bytes)?;
             let mut v = vec![0f64; 9 * self.slots[e]];
-            self.dev.read(&self.block, self.offset[&format!("R{r}_REFR")], f64_bytes_mut(&mut v))?;
+            self.wide.decode(&bytes, &mut v);
             refr.push(v);
         }
         let mut at = HashMap::new();
@@ -417,10 +576,10 @@ impl<T: crate::utils::Float + 'static, D: Device> NativeDeviceAssembly<T, D> {
 }
 
 /// Assemble `problem` at `x` on the CPU and on `dev` through the native
-/// assembly against one tiled pattern (the reduced route's), and compare
-/// (for tests), as [`device_check`](crate::device::device_check) does for
-/// the CubeCL route.
-pub fn native_device_check<T, D>(problem: &mut dyn crate::simple_lm::LmProblemInternals<T>, x: &[T], dev: &Arc<D>) -> crate::device::DeviceCheck
+/// assembly in `wide` against one tiled pattern (the reduced route's), and
+/// compare (for tests), as [`device_check`](crate::device::device_check)
+/// does for the CubeCL route.
+pub fn native_device_check<T, D>(problem: &mut dyn crate::simple_lm::LmProblemInternals<T>, x: &[T], dev: &Arc<D>, wide: Wide) -> crate::device::DeviceCheck
 where
     T: crate::utils::Float + 'static,
     D: Device,
@@ -443,18 +602,23 @@ where
     let cpu_cost = problem.calc_grad_hessian_sparse_indexed(x, &mut grad, &mut vals, &positions, &mut ctx).to_f64().unwrap();
     let root = problem.device_root().expect("the root has a device assembly");
     let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-    let asm = NativeDeviceAssembly::<T, D>::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize)).expect("lay the root out on the device");
+    let asm = NativeDeviceAssembly::<T, D>::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), wide)
+        .expect("lay the root out on the device");
     // x, the gradient, the values and the cost in one block of the test's own
     let (at_g, at_h) = (n * 8, n * 16);
     let at_cost = at_h + nv * 8;
     let mut work = dev.alloc(at_cost + 8).expect("allocate the targets");
     let x64: Vec<f64> = x.iter().map(|v| v.to_f64().unwrap()).collect();
-    dev.write(&mut work, 0, f64_bytes(&x64)).expect("upload x");
+    dev.write(&mut work, 0, &wide.encode(&x64)).expect("upload x");
     asm.assemble_at((&work, 0), (&work, at_g), n, (&work, at_h), nv, (&work, at_cost)).expect("assemble on the device");
-    let (mut gd, mut hd, mut cost) = (vec![0f64; n], vec![0f64; nv], [0f64]);
-    dev.read(&work, at_g, f64_bytes_mut(&mut gd)).expect("read the gradient");
-    dev.read(&work, at_h, f64_bytes_mut(&mut hd)).expect("read the Hessian");
-    dev.read(&work, at_cost, f64_bytes_mut(&mut cost)).expect("read the cost");
+    let read = |at: usize, len: usize| -> Vec<f64> {
+        let mut bytes = vec![0u8; 8 * len];
+        dev.read(&work, at, &mut bytes).expect("read a target");
+        let mut v = vec![0f64; len];
+        wide.decode(&bytes, &mut v);
+        v
+    };
+    let (gd, hd, cost) = (read(at_g, n), read(at_h, nv), read(at_cost, 1));
     let err = |dev: &[f64], cpu: &[T]| -> f64 {
         let max = cpu.iter().fold(0.0f64, |m, v| m.max(v.to_f64().unwrap().abs()));
         let diff = dev.iter().zip(cpu).fold(0.0f64, |m, (d, c)| m.max((d - c.to_f64().unwrap()).abs()));
@@ -465,19 +629,11 @@ where
 
 /// Instances per constraint, from the pack walk's records.
 fn instance_counts<T>(shape: &DeviceShape, pack: &DevicePack<T>) -> Vec<usize> {
-    shape.constraints.iter().zip(&pack.inst).map(|(&(w, _), inst)| inst.len() / w.max(1)).collect()
+    shape.constraints.iter().zip(&pack.inst).map(|(c, inst)| inst.len() / c.words.max(1)).collect()
 }
 
 fn u32_bytes(v: &[u32]) -> &[u8] {
     arael_gpu::bytemuck::cast_slice(v)
-}
-
-fn f64_bytes(v: &[f64]) -> &[u8] {
-    arael_gpu::bytemuck::cast_slice(v)
-}
-
-fn f64_bytes_mut(v: &mut [f64]) -> &mut [u8] {
-    arael_gpu::bytemuck::cast_slice_mut(v)
 }
 
 /// The bytes of a model scalar slice (`f32` or `f64`).

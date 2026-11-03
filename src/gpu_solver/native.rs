@@ -10,7 +10,7 @@ use arael_faer::{SparseIndex, ValueIndex};
 use arael_gpu::lm::{N_SCALARS, S_COST_TRY, S_COST_X, Scalars};
 use arael_gpu::native::schur::{GraphKey, STATUS_BYTES};
 use arael_gpu::native::supernodal::FactorizeError;
-use arael_gpu::native::{Device, NativeError, NativeFactor, NativeLmVectors, NativeSchur, NativeSchurError};
+use arael_gpu::native::{Device, NativeError, NativeFactor, NativeLmVectors, NativeSchur, NativeSchurError, Wide};
 use arael_gpu::{GpuPrecision, RefineStats};
 
 use super::{GpuSolver, narrow, resident_attempt};
@@ -24,6 +24,8 @@ pub(crate) struct NativeSolver<T, D: Device> {
     route: Option<Route<T, D>>,
     schur: Option<NativeSchur<D>>,
     factor: NativeFactor<D>,
+    /// The scalar of the reduction, the assembly's sums and the loop's vectors.
+    wide: Wide,
 }
 
 /// The device assembly of the reduced route and the LM loop's vectors
@@ -39,7 +41,8 @@ struct Route<T, D: Device> {
     vec: NativeLmVectors<D>,
     /// The undamped diagonal of the last compute that read it back.
     diag_host: Vec<T>,
-    /// What the reads land in before they are narrowed to `T`.
+    /// What the reads land in, then decoded, before they are narrowed to `T`.
+    bytes: Vec<u8>,
     host: Vec<f64>,
     /// H's tile values.
     nh: usize,
@@ -59,22 +62,44 @@ fn on_device<V>(r: Result<V, NativeError>, what: &str) -> V {
     r.unwrap_or_else(|e| panic!("the native GPU {what} failed: {e}"))
 }
 
-/// The bytes of `v`.
-fn bytes_mut(v: &mut [f64]) -> &mut [u8] {
-    arael_gpu::bytemuck::cast_slice_mut(v)
-}
-
 impl<T, D: Device> NativeSolver<T, D> {
     /// The factor of `sn`, the analysis of the block structure `asym`, in
-    /// `precision`, on `dev`.
+    /// `precision`, on `dev`; the reduction and the route built after it
+    /// work in `wide`.
     pub fn new(
         dev: &Arc<D>,
         precision: GpuPrecision,
         sn: &SupernodalSymbolic,
         asym: &SymbolicSparseBlockColMat<SparseIndex>,
+        wide: Wide,
     ) -> Result<Self, NativeError> {
-        Ok(NativeSolver { route: None, schur: None, factor: NativeFactor::new(dev, precision, sn, asym, &Default::default())? })
+        let factor = NativeFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
+        Ok(NativeSolver { route: None, schur: None, factor, wide })
     }
+}
+
+/// The values of `ranges` (block, byte offset, count), read with one wait
+/// into `bytes` and decoded from `wide` into `host`, one range after another.
+fn read_values<D: Device>(
+    dev: &D,
+    wide: Wide,
+    ranges: &[(&D::Block, usize, usize)],
+    bytes: &mut Vec<u8>,
+    host: &mut Vec<f64>,
+) -> Result<(), NativeError> {
+    let total: usize = ranges.iter().map(|r| r.2).sum();
+    bytes.resize(8 * total, 0);
+    let mut reads = Vec::with_capacity(ranges.len());
+    let mut rest = &mut bytes[..];
+    for &(b, at, n) in ranges {
+        let (head, tail) = rest.split_at_mut(8 * n);
+        reads.push((b, at, head));
+        rest = tail;
+    }
+    dev.read_many(&mut reads)?;
+    host.resize(total, 0.0);
+    wide.decode(bytes, host);
+    Ok(())
 }
 
 /// An accepted trial point becomes the parameters: the reference rotations
@@ -118,7 +143,10 @@ impl<T: crate::utils::Float, D: Device> NativeSolver<T, D> {
 
 impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolver<T, D> {
     fn runtime(&self) -> &'static str {
-        "native"
+        match self.wide {
+            Wide::F64 => "native",
+            Wide::Df32 => "native df32",
+        }
     }
 
     fn precision(&self) -> GpuPrecision {
@@ -146,8 +174,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         self.drop_reduction();
         let dev = self.factor.device();
         self.schur = Some(match schur {
-            Some(s) => NativeSchur::new(dev, s, hsym)?,
-            None => NativeSchur::whole(dev, hsym)?,
+            Some(s) => NativeSchur::new(dev, s, hsym, self.wide)?,
+            None => NativeSchur::whole(dev, hsym, self.wide)?,
         });
         Ok(())
     }
@@ -182,13 +210,14 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         }
         let dev = self.factor.device();
         let mut resolver = PositionResolver::new(hsym);
-        let asm = NativeDeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize))?;
+        let asm = NativeDeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), self.wide)?;
         self.route = Some(Route {
             attempt_graph: None,
             step_graph: None,
             asm,
-            vec: NativeLmVectors::new(dev, bdiag_pos)?,
+            vec: NativeLmVectors::new(dev, bdiag_pos, self.wide)?,
             diag_host: vec![T::zero(); bdiag_pos.len()],
+            bytes: Vec::new(),
             host: Vec::new(),
             nh: hsym.val_count(),
             live: false,
@@ -228,15 +257,13 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         let (g, h, cost) = (gs.rhs_target(), gs.h_target(), r.vec.slot(S_COST_X));
         let queued = r.asm.assemble_at(r.vec.x(), g, n, h, r.nh, cost).and_then(|()| r.vec.gather_diag(h));
         on_device(queued, "assembly");
-        r.host.resize(2 * n + 1, 0.0);
-        let (gh, rest) = r.host.split_at_mut(n);
-        let (dh, ch) = rest.split_at_mut(n);
         let diag = r.vec.diag();
-        on_device(r.asm.device().read_many(&mut [(g.0, g.1, bytes_mut(gh)), (diag.0, diag.1, bytes_mut(dh)), (cost.0, cost.1, bytes_mut(ch))]), "read of the gradient");
-        narrow(grad, gh);
-        narrow(&mut r.diag_host, dh);
+        let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (diag.0, diag.1, n), (cost.0, cost.1, 1)], &mut r.bytes, &mut r.host);
+        on_device(read, "read of the gradient");
+        narrow(grad, &r.host[..n]);
+        narrow(&mut r.diag_host, &r.host[n..2 * n]);
         r.live = true;
-        T::from(ch[0]).unwrap()
+        T::from(r.host[2 * n]).unwrap()
     }
 
     fn route_diagonal(&self, diagonal: &mut [T]) {
@@ -304,7 +331,9 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
             Err(NativeSchurError::Eliminated { .. } | NativeSchurError::Reduced) => None,
             Err(NativeSchurError::Device(e)) => panic!("the native GPU attempt failed: {e}"),
         };
-        (solved, resident_attempt(solved.is_some(), &Scalars::decode(&scalars)))
+        let mut values = [0.0f64; N_SCALARS];
+        self.wide.decode(&scalars, &mut values);
+        (solved, resident_attempt(solved.is_some(), &Scalars::from_values(&values)))
     }
 
     fn accept(&mut self) {
@@ -315,9 +344,8 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
     fn params(&mut self, x: &mut [T]) {
         self.settle();
         let r = self.route.as_mut().expect("a resident solve has its device route");
-        r.host.resize(x.len(), 0.0);
         let at = r.vec.x();
-        on_device(r.asm.device().read(at.0, at.1, bytes_mut(&mut r.host)), "read of the parameters");
+        on_device(read_values(&**r.asm.device(), self.wide, &[(at.0, at.1, x.len())], &mut r.bytes, &mut r.host), "read of the parameters");
         narrow(x, &r.host);
     }
 
@@ -325,29 +353,24 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for NativeSolve
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let n = grad.len();
-        r.host.resize(3 * n, 0.0);
-        let (gh, rest) = r.host.split_at_mut(n);
-        let (dh, sh) = rest.split_at_mut(n);
         let (g, d, s) = (gs.rhs_target(), r.vec.diag(), gs.step_view());
-        on_device(r.asm.device().read_many(&mut [(g.0, g.1, bytes_mut(gh)), (d.0, d.1, bytes_mut(dh)), (s.0, s.1, bytes_mut(sh))]), "read of the vectors");
-        narrow(grad, gh);
-        narrow(diagonal, dh);
-        narrow(step, sh);
+        let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (d.0, d.1, n), (s.0, s.1, n)], &mut r.bytes, &mut r.host);
+        on_device(read, "read of the vectors");
+        narrow(grad, &r.host[..n]);
+        narrow(diagonal, &r.host[n..2 * n]);
+        narrow(step, &r.host[2 * n..]);
     }
 
     fn nonfinite(&mut self) -> [usize; 4] {
         let gs = self.schur.as_ref().expect("a device route has its reduction");
         let r = self.route.as_mut().expect("a resident solve has its device route");
         let n = r.vec.len();
-        r.host.resize(3 * n + r.nh, 0.0);
-        let (gh, rest) = r.host.split_at_mut(n);
-        let (dh, rest) = rest.split_at_mut(n);
-        let (xh, hh) = rest.split_at_mut(n);
         let (g, d, x, h) = (gs.rhs_target(), r.vec.diag(), r.vec.x(), gs.h_target());
-        let mut reads = [(g.0, g.1, bytes_mut(gh)), (d.0, d.1, bytes_mut(dh)), (x.0, x.1, bytes_mut(xh)), (h.0, h.1, bytes_mut(hh))];
-        on_device(r.asm.device().read_many(&mut reads), "read of the vectors");
+        let read = read_values(&**r.asm.device(), self.wide, &[(g.0, g.1, n), (d.0, d.1, n), (x.0, x.1, n), (h.0, h.1, r.nh)], &mut r.bytes, &mut r.host);
+        on_device(read, "read of the vectors");
         let count = |v: &[f64]| v.iter().filter(|v| !v.is_finite()).count();
-        [count(gh), count(dh), count(xh), count(hh)]
+        let v = &r.host;
+        [count(&v[..n]), count(&v[n..2 * n]), count(&v[2 * n..3 * n]), count(&v[3 * n..])]
     }
 
     fn finish(&mut self, problem: &mut dyn LmProblemInternals<T>, x: &mut [T]) {

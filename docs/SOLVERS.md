@@ -920,7 +920,19 @@ bodies, compiled for the device by NVRTC at first use (tens of
 milliseconds) and kept in the same disk cache under `native/cuda`, found
 again by their source and the compiler's version, so a rebuilt program
 whose kernels did not change compiles nothing. Its device buffers are
-made per sparsity structure rather than kept across structures.
+made per sparsity structure rather than kept across structures. It sums
+without atomic writes, and `GpuDevice::with_wide(GpuWide::Df32)` keeps
+its wide values (H, the gradient, the cost, the Schur reduction, the
+refinement's residual, the LM loop's vectors, the reference rotations)
+in df32, two f32 whose sum is the value, about 48 bits: with an f32 root
+and the f32 factor nothing on the device then runs in f64, which consumer
+cards run at 1/32 to 1/64 of f32:
+
+```rust,ignore
+SparseFaer::from_options(&SparseFaerOptions::default()
+    .with_mixed_precision(Some(MixedPrecision::default()))
+    .with_gpu(Some(GpuDevice::native_cuda(0).with_wide(GpuWide::Df32))))
+```
 
 A `GpuDevice` value carries the device state its solves use (a
 stream and the device buffers on it, created on first use): solvers built

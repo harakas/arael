@@ -603,6 +603,14 @@ fn native_gpu_factor_reaches_the_f64_optimum() {
     factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_cuda(0));
 }
 
+/// The same with the reduction, the refinement and the vectors in df32
+/// (`GpuWide::Df32`).
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn native_df32_gpu_factor_reaches_the_f64_optimum() {
+    factor_reaches_the_f64_optimum_on(|| arael::simple_lm::GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32));
+}
+
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]
 fn factor_reaches_the_f64_optimum_on(device: fn() -> arael::simple_lm::GpuDevice) {
     let mut cpu = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
@@ -651,6 +659,35 @@ fn gpu_reduced_route_on_an_f32_solver() {
 #[test]
 fn native_gpu_reduced_route_on_an_f32_solver() {
     reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_cuda(0));
+}
+
+/// The same in df32 (`GpuWide::Df32`): nothing on the device in f64.
+#[cfg(feature = "gpu-native-cuda")]
+#[test]
+fn native_df32_gpu_reduced_route_on_an_f32_solver() {
+    reduced_route_on_an_f32_solver_on(|| arael::simple_lm::GpuDevice::native_cuda(0).with_wide(arael::simple_lm::GpuWide::Df32));
+}
+
+/// CubeCL's route keeps its wide values in f64 only: df32 there is a setup
+/// error, not f64 under another name.
+#[cfg(feature = "gpu-cuda")]
+#[test]
+fn df32_on_cubecl_is_unavailable() {
+    let cfg = LmConfig { max_iters: 60, ..Default::default() };
+    let mut w = build(0.1, 2);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let mut solver = SparseFaer::from_options(&arael::simple_lm::SparseFaerOptions::default()
+        .with_policy(SchurPolicy::Force)
+        .with_envelope_schur(EnvelopeMode::Never)
+        .with_block_supernodal(BlockSupernodalMode::Always)
+        .with_gpu(Some(arael::simple_lm::GpuDevice::cuda(0).with_wide(arael::simple_lm::GpuWide::Df32))));
+    let err = lm_solve(&params, &mut solver, &mut w, &cfg).err().expect("unavailable");
+    assert!(
+        matches!(err.kind, arael::simple_lm::SolveFailureKind::Setup(arael::simple_lm::SetupError::SolverUnavailable { solver: "gpu", .. })),
+        "{:?}",
+        err.kind
+    );
 }
 
 #[cfg(any(feature = "gpu-cuda", feature = "gpu-native-cuda"))]

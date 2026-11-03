@@ -4644,6 +4644,7 @@ pub struct GpuDevice {
     /// Whether solves run on arael's own runtime and kernels
     /// ([`Self::native_cuda`]) rather than CubeCL's.
     native: bool,
+    wide: GpuWide,
     #[cfg(feature = "gpu")]
     shared: std::sync::Arc<std::sync::Mutex<Option<arael_gpu::GpuContext>>>,
     #[cfg(feature = "gpu-native-cuda")]
@@ -4656,6 +4657,7 @@ impl GpuDevice {
             backend,
             index,
             native: false,
+            wide: GpuWide::F64,
             #[cfg(feature = "gpu")]
             shared: Default::default(),
             #[cfg(feature = "gpu-native-cuda")]
@@ -4681,6 +4683,23 @@ impl GpuDevice {
     /// Whether solves run on arael's own runtime ([`Self::native_cuda`]).
     pub fn is_native(&self) -> bool {
         self.native
+    }
+
+    /// The device with its wide values in `wide`. A device of CubeCL's
+    /// runtime takes [`GpuWide::F64`] only; another fails the solve with
+    /// [`SetupError::SolverUnavailable`].
+    ///
+    /// ```ignore
+    /// let gpu = GpuDevice::native_cuda(0).with_wide(GpuWide::Df32);
+    /// ```
+    pub fn with_wide(mut self, wide: GpuWide) -> Self {
+        self.wide = wide;
+        self
+    }
+
+    /// The scalar of the device's wide values ([`Self::with_wide`]).
+    pub fn wide(&self) -> GpuWide {
+        self.wide
     }
 
     /// The native device state, created on first use.
@@ -4773,6 +4792,22 @@ pub enum GpuBackend {
     Cuda,
     /// AMD, through HIP.
     Hip,
+}
+
+/// What a [`GpuDevice`] keeps and sums its wide values in: H, the gradient,
+/// the cost, the Schur reduction, the refinement's residual and the LM
+/// loop's vectors ([`GpuDevice::with_wide`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuWide {
+    /// f64.
+    #[default]
+    F64,
+    /// df32: two f32 whose sum is the value, about 48 bits of significand
+    /// and f32's exponent range, in f32 arithmetic only. For cards whose f64
+    /// is slow (consumer GPUs run it at 1/32 to 1/64 of f32); with an f32
+    /// root and the f32 factor ([`MixedPrecision`]) nothing on the device
+    /// runs in f64. arael's own runtime only ([`GpuDevice::native_cuda`]).
+    Df32,
 }
 
 /// Configuration for the [`SparseFaer`] backend as plain data: which system to
@@ -5555,7 +5590,11 @@ fn native_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
     sn: &arael_faer::supernodal::SupernodalSymbolic,
     asym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
 ) -> Result<Box<dyn crate::gpu_solver::GpuSolver<T>>, SetupError> {
-    let solver = dev.native_device().and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym));
+    let wide = match dev.wide() {
+        GpuWide::F64 => arael_gpu::native::Wide::F64,
+        GpuWide::Df32 => arael_gpu::native::Wide::Df32,
+    };
+    let solver = dev.native_device().and_then(|d| crate::gpu_solver::native::NativeSolver::new(&d, precision, sn, asym, wide));
     report_kernel_cache();
     Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the native CUDA factor", e))?))
 }
@@ -5636,6 +5675,9 @@ impl<T: crate::utils::Float + arael_faer::schur::SchurReal> SnNumeric<T> {
             let solver = if dev.is_native() {
                 native_solver(dev, precision, sn, asym)?
             } else {
+                if dev.wide() != GpuWide::F64 {
+                    return Err(SetupError::SolverUnavailable { solver: "gpu", reason: "CubeCL's GPU route keeps its wide values in f64 only (GpuWide::Df32 needs GpuDevice::native_cuda)" });
+                }
                 let ctx = dev.context().map_err(|_| SetupError::SolverUnavailable {
                     solver: "gpu",
                     reason: "the GPU runtime is not compiled in (features gpu-cuda, gpu-hip)",
@@ -6199,12 +6241,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         Ok(cost)
     }
 
-    /// A structure's first numeric fill at `params`: into a fresh `h` of
-    /// the structure, which becomes `matrix.h`, and `grad`, returning the
-    /// cost. On the device when it assembles there (the model's working
-    /// copies brought to `params`, which its layout reads; the host H stays
-    /// unfilled), else on the CPU through `positions`, which the solver
-    /// keeps. `Err` when the device assembly could not be set up.
+    /// A structure's first numeric fill at `params` of the block structure
+    /// `hsym`, into `grad`, returning the cost. On the device when it
+    /// assembles there (the model's working copies brought to `params`,
+    /// which its layout reads; no host H is made, as the loop runs there),
+    /// else on the CPU into a fresh H of the structure, which becomes
+    /// `matrix.h`, through `positions`, which the solver keeps. `Err` when
+    /// the device assembly could not be set up.
     #[allow(clippy::too_many_arguments)]
     fn first_fill(
         &mut self,
@@ -6212,7 +6255,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         params: &[T],
         grad: &mut [T],
         matrix: &mut FaerMatrix<T>,
-        mut h: arael_faer::bsc::SparseBlockColMat<SparseIndex, T>,
+        hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
         positions: PositionStream,
         ctx: &mut crate::threads::Context,
         vb: bool,
@@ -6225,7 +6268,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     problem.update_params(params);
                     let root = problem.device_root().expect("a device root");
                     let gs = self.sn_num.gpu_mut();
-                    let built = gs.build_route(root, h.symbolic(), &self.bdiag_pos);
+                    let built = gs.build_route(root, &hsym, &self.bdiag_pos);
                     report_kernel_cache();
                     built.map_err(|e| gpu_setup_failed("the device assembly", e))?;
                     let t_layout = clock.map(|c| c.elapsed());
@@ -6241,7 +6284,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                             (c.elapsed() - l).as_secs_f64() * 1e3
                         );
                     }
-                    matrix.h = Some(h);
+                    matrix.h = None;
                     self.positions = Some(Arc::new(positions));
                     return Ok(cost);
                 }
@@ -6253,6 +6296,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
         let _ = vb;
+        let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
         let t_a = self.measure.then(Instant::now);
         let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
         if let Some(t) = t_a {
@@ -6609,8 +6653,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         });
 
         // First numeric fill. Everything above it was analysis.
-        let h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb)
+        self.first_fill(problem, params, grad, matrix, hsym, positions, ctx, vb)
     }
 
     /// Symbolic factorization of the whole system, under the ordering
@@ -7882,8 +7925,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if vb && self.sn_num.gpu_reduces() {
             info!("gpu: the reduction's plan {:.1} ms", t_reduction);
         }
-        let h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
-        self.first_fill(problem, params, grad, matrix, h, positions, ctx, vb)
+        self.first_fill(problem, params, grad, matrix, hsym, positions, ctx, vb)
     }
 
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {

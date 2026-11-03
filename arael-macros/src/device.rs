@@ -51,6 +51,8 @@ pub(crate) struct DevConstraint {
     /// root aliases to its numbering ([`device_root`]).
     pub cpp: String,
     pub cid: usize,
+    /// Residual rows.
+    pub rows: usize,
 }
 
 /// A CSE temporary's name: `__x3`, `__w1`, `__m2`.
@@ -291,7 +293,7 @@ pub(crate) fn device_constraint(
     );
     let kernels: TokenStream2 = format!("{gh_kernel}{cost_kernel}").parse().map_err(|e| format!("the generated device kernels do not parse: {e}"))?;
     let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &rots, (&gh_syms, &cost_syms), gh, guard, cost)?;
-    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, kernels, cpp, cid })
+    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, kernels, cpp, cid, rows })
 }
 
 /// The kernels of [`device_constraint`] in C++ for arael's own GPU runtime
@@ -324,7 +326,7 @@ fn cpp_kernels(
                 let s = if rots[r].0 == 0 { "sa" } else { "sb" };
                 match kind {
                     0 => ("F", format!("COL(B, F, C{cid}_ROT{r})[{s} * 9u + {off}u]")),
-                    1 => ("double", format!("COL(B, double, C{cid}_ROTW{r})[{s} * 9u + {off}u]")),
+                    1 => ("W", format!("COL(B, W, C{cid}_ROTW{r})[{s} * 9u + {off}u]")),
                     _ => ("F", format!("COL(B, F, C{cid}_DROT{r})[{s} * 27u + {off}u]")),
                 }
             }
@@ -340,59 +342,72 @@ fn cpp_kernels(
             .collect()
     };
     let map = |s: &str| -> Option<String> { names.get(s).cloned() };
+    // wide blocks in W, the kernel's wide scalar (wide.h)
     let stmts = |inters: &[Intermediate]| -> Result<String, String> {
-        inters.iter().map(|i| i.to_cpp_with(ft, &map).map_err(|e| e.0)).collect()
+        inters.iter().map(|i| i.to_cpp_in(ft, "W", &map).map_err(|e| e.0)).collect()
     };
-    let expr = |e: &E| -> Result<String, String> { e.to_cpp_with(ft, &map).map_err(|e| e.0) };
-    let prologue = format!(
-        "GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\ndouble c = 0.0;\nif (o < n) {{\n\
-         const u32 sa = COL(B, u32, C{cid}_SA)[o];\nconst u32 sb = COL(B, u32, C{cid}_SB)[o];\n"
-    );
-    // the linearization: rows, cost, and the three writes per row
+    let expr = |e: &E| -> Result<String, String> { e.to_cpp_in(ft, "W", &map).map_err(|e| e.0) };
+    let prologue = |b: &str| {
+        format!(
+            "GLOBAL const u64* L = (GLOBAL const u64*)B;\nconst u32 o = global_x();\nW c = 0.0f;\nif (o < n) {{\n\
+             const u32 sa = COL({b}, u32, C{cid}_SA)[o];\nconst u32 sb = COL({b}, u32, C{cid}_SB)[o];\n"
+        )
+    };
+    // the linearization: per instance its record, R rows of the residual
+    // and the two entities' derivatives, zero where the guard drops it
     let n_partials = na + nb;
+    let stride = 1 + n_partials;
+    let recw = rows * stride;
     let mut body = stmts(gh.0)?;
     for ri in 0..rows {
-        let r = expr(&gh.1[ri * (1 + n_partials)])?;
-        body.push_str(&format!("const F r{ri} = {r};\nc += (double)r{ri} * (double)r{ri};\n"));
+        let r = expr(&gh.1[ri * stride])?;
+        body.push_str(&format!("rec[{}] = {r};\n", ri * stride));
         for p in 0..n_partials {
-            let d = expr(&gh.1[ri * (1 + n_partials) + 1 + p])?;
-            if p < na {
-                body.push_str(&format!("dra[{p}] = {d};\n"));
-            } else {
-                body.push_str(&format!("drb[{}] = {d};\n", p - na));
-            }
+            let d = expr(&gh.1[ri * stride + 1 + p])?;
+            body.push_str(&format!("rec[{}] = {d};\n", ri * stride + 1 + p));
         }
-        body.push_str(&format!(
-            "self_rank1<{na}>(h, g, idx_a, sa * {na}u, ta[0], ta[1], ta[2], 2.0, r{ri}, dra);\n\
-             self_rank1<{nb}>(h, g, idx_b, sb * {nb}u, tb[0], tb[1], tb[2], 2.0, r{ri}, drb);\n\
-             cross_rank1<{na}, {nb}>(h, idx_a, sa * {na}u, ta[2], idx_b, sb * {nb}u, tb[2], tx[0], tx[1], tx[2], 2.0, dra, drb);\n"
-        ));
     }
-    let arrays = format!("F dra[{na}];\nF drb[{nb}];\n");
     let gh_code = match guard {
-        Some((pre, q)) => format!("{}if ({} >= 0.0) {{\n{arrays}{body}}}\n", stmts(pre)?, expr(q)?),
-        None => format!("{arrays}{body}"),
+        Some((pre, q)) => format!("{}if ({} >= 0.0f) {{\n{body}}}\n", stmts(pre)?, expr(q)?),
+        None => body,
     };
+    let costs: String = (0..rows).map(|ri| format!("c += (W)rec[{0}] * (W)rec[{0}];\n", ri * stride)).collect();
     let gh_kernel = format!(
-        "KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL const u8* RESTRICT B, GLOBAL double* h, GLOBAL double* g, GLOBAL double* cost, u32 n) {{\n\
-         {prologue}const u32 sx = COL(B, u32, C{cid}_SX)[o];\n\
-         GLOBAL const u32* idx_a = COL(B, u32, C{cid}_IDXA);\nGLOBAL const u32* idx_b = COL(B, u32, C{cid}_IDXB);\n\
-         GLOBAL const u32* ta = COL(B, u32, C{cid}_TILEA) + sa * 3u;\nGLOBAL const u32* tb = COL(B, u32, C{cid}_TILEB) + sb * 3u;\n\
-         GLOBAL const u32* tx = COL(B, u32, C{cid}_TILEX) + sx * 3u;\n{}{gh_code}}}\ncost_add(cost, c);\n}}\n",
+        "KERNEL_THREADS(256) void __dk{cid}_gh(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}\
+         F rec[{recw}];\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) rec[k] = (F)0.0f;\n{gh_code}{costs}\
+         GLOBAL F* out = COL_MUT(B, F, C{cid}_REC) + o * {recw}u;\n#pragma unroll\nfor (u32 k = 0; k < {recw}u; k++) out[k] = rec[k];\n\
+         }}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
+        prologue("B"),
         lets(gh_syms)
+    );
+    // the sums of the records: each entity side, the cross tiles, the cost
+    let reduce = format!(
+        "KERNEL_THREADS(256) void __dk{cid}_ra(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
+         GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
+         reduce_entity<{na}u, {rows}u, {stride}u, 1u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_AOFF), COL(B, u32, C{cid}_AINST), COL(B, u32, C{cid}_IDXA), COL(B, u32, C{cid}_TILEA), h, g, slots);\n}}\n\
+         KERNEL_THREADS(256) void __dk{cid}_rb(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, GLOBAL W* RESTRICT g, u32 slots) {{\n\
+         GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
+         reduce_entity<{nb}u, {rows}u, {stride}u, {}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_BOFF), COL(B, u32, C{cid}_BINST), COL(B, u32, C{cid}_IDXB), COL(B, u32, C{cid}_TILEB), h, g, slots);\n}}\n\
+         KERNEL_THREADS(256) void __dk{cid}_rx(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT h, u32 slots) {{\n\
+         GLOBAL const u64* L = (GLOBAL const u64*)B;\n\
+         reduce_cross<{na}u, {nb}u, {rows}u, {stride}u>(COL(B, F, C{cid}_REC), COL(B, u32, C{cid}_XOFF), COL(B, u32, C{cid}_XINST), COL(B, u32, C{cid}_SA), COL(B, u32, C{cid}_SB), \
+         COL(B, u32, C{cid}_IDXA), COL(B, u32, C{cid}_TILEA), COL(B, u32, C{cid}_IDXB), COL(B, u32, C{cid}_TILEB), COL(B, u32, C{cid}_TILEX), h, slots);\n}}\n\
+         KERNEL_THREADS(256) void __dk{cid}_csum(GLOBAL const u8* RESTRICT B, GLOBAL W* RESTRICT cost, u32 parts) {{\n\
+         GLOBAL const u64* L = (GLOBAL const u64*)B;\ncost_sum(COL(B, W, C{cid}_PART), parts, cost);\n}}\n",
+        1 + na
     );
     // the cost: the rows alone
     let mut cbody = stmts(cost.0)?;
     for (ri, r) in cost.1.iter().enumerate() {
         let r = expr(r)?;
-        cbody.push_str(&format!("const F r{ri} = {r};\nc += (double)r{ri} * (double)r{ri};\n"));
+        cbody.push_str(&format!("const F r{ri} = {r};\nc += (W)r{ri} * (W)r{ri};\n"));
     }
     let cost_kernel = format!(
-        "KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL const u8* RESTRICT B, GLOBAL double* cost, u32 n) {{\n\
-         {prologue}{}{cbody}}}\ncost_add(cost, c);\n}}\n",
+        "KERNEL_THREADS(256) void __dk{cid}_cost(GLOBAL u8* RESTRICT B, u32 n) {{\n{}{}{cbody}}}\ncost_partial(COL_MUT(B, W, C{cid}_PART), c);\n}}\n",
+        prologue("B"),
         lets(cost_syms)
     );
-    Ok(format!("{gh_kernel}{cost_kernel}"))
+    Ok(format!("{gh_kernel}{reduce}{cost_kernel}"))
 }
 
 /// The walk of one cross group, as the root's emission hands it over.
@@ -462,9 +477,9 @@ pub(crate) fn device_root(
     let rot_shape: Vec<TokenStream2> = rotations.iter().map(|(e, _, off)| quote! { (#e, #off) }).collect();
     let entity_n: Vec<usize> = entities.iter().map(|e| e.2).collect();
     let n_cross = crosses.len();
-    let cshape: Vec<TokenStream2> = constraints.iter().map(|c| {
-        let nd = c.data.len();
-        quote! { (3usize, #nd) }
+    let cshape: Vec<TokenStream2> = constraints.iter().zip(&ids).map(|(c, id)| {
+        let (nd, rows, ea, eb, x) = (c.data.len(), c.rows, id.ea, id.eb, id.x);
+        quote! { ::arael::__gpu::DeviceConstraint { words: 3usize, data: #nd, rows: #rows, a: #ea, b: #eb, cross: #x } }
     }).collect();
     let kernels: Vec<&TokenStream2> = constraints.iter().map(|c| &c.kernels).collect();
     // the C++ kernels, each constraint's column names aliased to the
