@@ -1,10 +1,10 @@
-//! The device head of `#[arael(root)]` (docs/dev/GPU.md, E9 stage 3): a
-//! constraint's body as two CubeCL kernels (the assembly's and the
-//! cost's) over its entities' parameter values, rotation caches and data
-//! leaves, the walk that packs a model's instances for them, and the
-//! launches, as an implementation of `arael::__gpu::DeviceRoot`. All of
-//! it is wrapped in `arael::__gpu_items!`, which drops it when arael is
-//! built without its `gpu` feature.
+//! The device head of `#[arael(root)]`: a constraint's body as two C++
+//! kernels (the assembly's and the cost's) over its entities' parameter
+//! values, rotation caches and data leaves, and the walk that packs a
+//! model's instances for them, as an implementation of
+//! `arael::__gpu::DeviceRoot`. All of it is wrapped in
+//! `arael::__gpu_items!`, which drops it when arael is built without its
+//! `gpu` feature.
 //!
 //! Covered for now: root-level cross constraints (two entities with self
 //! blocks reached through refs, the holder's CrossBlock), without a guard,
@@ -43,12 +43,10 @@ pub(crate) struct DevConstraint {
     /// The rotation fields read: (side, field path, the offset of the
     /// rotation's step among that entity's parameters).
     pub rots: Vec<(usize, String, usize)>,
-    /// The two kernels, named by `cid`.
-    pub kernels: TokenStream2,
-    /// The same two kernels in C++ for arael's own GPU runtime: they read
-    /// every column through the layout table by the constraint's own
-    /// names (`C<cid>_SA`, `C<cid>_EVA`, `C<cid>_ROT<r>`, ...), which the
-    /// root aliases to its numbering ([`device_root`]).
+    /// The two kernels in C++, named by `cid`: they read every column
+    /// through the layout table by the constraint's own names (`C<cid>_SA`,
+    /// `C<cid>_EVA`, `C<cid>_ROT<r>`, ...), which the root aliases to its
+    /// numbering ([`device_root`]).
     pub cpp: String,
     pub cid: usize,
     /// Residual rows.
@@ -215,88 +213,12 @@ pub(crate) fn device_constraint(
         };
         leaf.insert(s.clone(), l);
     }
-    let nd = data.len();
-    let leaf_expr = |l: &Leaf| -> String {
-        match *l {
-            Leaf::Param(0, p) => format!("ev_a[__sa * {na}usize + {p}usize]"),
-            Leaf::Param(_, p) => format!("ev_b[__sb * {nb}usize + {p}usize]"),
-            Leaf::Rot(r, kind, off) => {
-                let s = if rots[r].0 == 0 { "__sa" } else { "__sb" };
-                match kind {
-                    0 => format!("rot_{r}[{s} * 9usize + {off}usize]"),
-                    1 => format!("rotw_{r}[{s} * 9usize + {off}usize]"),
-                    _ => format!("drot_{r}[{s} * 27usize + {off}usize]"),
-                }
-            }
-            Leaf::Data(j) => format!("data[__o * {nd}usize + {j}usize]"),
-        }
-    };
     let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
-    let lets = |syms: &BTreeSet<String>| -> String {
-        syms.iter().map(|s| format!("let {} = {};\n", names[s], leaf_expr(&leaf[s]))).collect()
-    };
-    // the leaves by their kernel names; the CSE's temporaries print as they are
-    let map = |s: &str| -> Option<String> { names.get(s).cloned() };
-    let stmts = |inters: &[Intermediate]| -> Result<String, String> {
-        inters.iter().map(|i| i.to_cubecl_with(ft, &map).map_err(|e| e.0)).collect()
-    };
-    let expr = |e: &E| -> Result<String, String> { e.to_cubecl_with(ft, &map).map_err(|e| e.0) };
-    // the rotation buffers each kernel takes
-    let rot_params: String = (0..rots.len()).map(|r| format!("rot_{r}: &[{ft}], rotw_{r}: &[f64], drot_{r}: &[{ft}], ")).collect();
-    let slots = "let __sa = inst[__o * 3usize] as usize;\nlet __sb = inst[__o * 3usize + 1usize] as usize;\n";
-    // the assembly: rows, cost, and the three writes per row
-    let n_partials = na + nb;
-    let mut body = stmts(gh.0)?;
-    for ri in 0..rows {
-        let r = expr(&gh.1[ri * (1 + n_partials)])?;
-        body.push_str(&format!("let __r{ri} = {r};\n__c += f64::cast_from(__r{ri}) * f64::cast_from(__r{ri});\n"));
-        for p in 0..n_partials {
-            let d = expr(&gh.1[ri * (1 + n_partials) + 1 + p])?;
-            if p < na {
-                body.push_str(&format!("__dra[{p}usize] = {d};\n"));
-            } else {
-                body.push_str(&format!("__drb[{}usize] = {d};\n", p - na));
-            }
-        }
-        body.push_str(&format!(
-            "self_rank1::<{ft}>(h, g, idx_a, __sa * {na}usize, tile_a[__sa * 3usize] as usize, tile_a[__sa * 3usize + 1usize] as usize, tile_a[__sa * 3usize + 2usize], 2.0f64, __r{ri}, &__dra, {na}usize);\n\
-             self_rank1::<{ft}>(h, g, idx_b, __sb * {nb}usize, tile_b[__sb * 3usize] as usize, tile_b[__sb * 3usize + 1usize] as usize, tile_b[__sb * 3usize + 2usize], 2.0f64, __r{ri}, &__drb, {nb}usize);\n\
-             cross_rank1::<{ft}>(h, idx_a, __sa * {na}usize, tile_a[__sa * 3usize + 2usize], idx_b, __sb * {nb}usize, tile_b[__sb * 3usize + 2usize], tile_x[__sx * 3usize] as usize, tile_x[__sx * 3usize + 1usize] as usize, tile_x[__sx * 3usize + 2usize], 2.0f64, &__dra, &__drb, {na}usize, {nb}usize);\n"
-        ));
-    }
-    let arrays = format!("let mut __dra = Array::<{ft}>::new({na}usize);\nlet mut __drb = Array::<{ft}>::new({nb}usize);\n");
-    let gh_code = match guard {
-        Some((pre, q)) => format!(
-            "{}if {} >= 0.0{ft} {{\n{arrays}{body}}}\n",
-            stmts(pre)?,
-            expr(q)?
-        ),
-        None => format!("{arrays}{body}"),
-    };
-    let gh_kernel = format!(
-        "#[cube(launch_unchecked)]\n\
-         pub fn __dk{cid}_gh(inst: &[u32], data: &[{ft}], ev_a: &[{ft}], ev_b: &[{ft}], idx_a: &[u32], tile_a: &[u32], idx_b: &[u32], tile_b: &[u32], tile_x: &[u32], {rot_params}h: &mut [Atomic<f64>], g: &mut [Atomic<f64>], cost: &mut [Atomic<f64>], n: u32) {{\n\
-         let __o = ABSOLUTE_POS;\nlet mut __c = 0.0f64;\nif __o < n as usize {{\n{slots}let __sx = inst[__o * 3usize + 2usize] as usize;\n{}{gh_code}}}\ncost_add(cost, __c);\n}}\n",
-        lets(&gh_syms)
-    );
-    // the cost: the rows alone
-    let mut cbody = stmts(cost.0)?;
-    for (ri, r) in cost.1.iter().enumerate() {
-        let r = expr(r)?;
-        cbody.push_str(&format!("let __r{ri} = {r};\n__c += f64::cast_from(__r{ri}) * f64::cast_from(__r{ri});\n"));
-    }
-    let cost_kernel = format!(
-        "#[cube(launch_unchecked)]\n\
-         pub fn __dk{cid}_cost(inst: &[u32], data: &[{ft}], ev_a: &[{ft}], ev_b: &[{ft}], {rot_params}cost: &mut [Atomic<f64>], n: u32) {{\n\
-         let __o = ABSOLUTE_POS;\nlet mut __c = 0.0f64;\nif __o < n as usize {{\n{slots}{}{cbody}}}\ncost_add(cost, __c);\n}}\n",
-        lets(&cost_syms)
-    );
-    let kernels: TokenStream2 = format!("{gh_kernel}{cost_kernel}").parse().map_err(|e| format!("the generated device kernels do not parse: {e}"))?;
     let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &rots, (&gh_syms, &cost_syms), gh, guard, cost)?;
-    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, kernels, cpp, cid, rows })
+    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, cpp, cid, rows })
 }
 
-/// The kernels of [`device_constraint`] in C++ for arael's own GPU runtime
+/// The kernels of [`device_constraint`] in C++
 /// (`arael-gpu/kernels/assembly.cpp` is compiled in front of them): every
 /// column is read through the layout table `L` at the start of the model's
 /// block `B`, by the constraint's own column names.
@@ -481,7 +403,6 @@ pub(crate) fn device_root(
         let (nd, rows, ea, eb, x) = (c.data.len(), c.rows, id.ea, id.eb, id.x);
         quote! { ::arael::__gpu::DeviceConstraint { words: 3usize, data: #nd, rows: #rows, a: #ea, b: #eb, cross: #x } }
     }).collect();
-    let kernels: Vec<&TokenStream2> = constraints.iter().map(|c| &c.kernels).collect();
     // the C++ kernels, each constraint's column names aliased to the
     // root's numbering, which the host's layout table follows
     let mut cpp = String::new();
@@ -568,66 +489,9 @@ pub(crate) fn device_root(
             }
         });
     }
-    // the launches
-    let launches: Vec<TokenStream2> = constraints.iter().zip(&ids).map(|(c, id)| {
-        let cid = c.cid;
-        let (gh, cost) = (format_ident!("__dk{}_gh", cid), format_ident!("__dk{}_cost", cid));
-        let (ea, eb, x) = (id.ea, id.eb, id.x);
-        let rot_args: Vec<TokenStream2> = id.rots.iter().map(|&r| quote! {
-            ::arael::__gpu::lease_arg::<#scalar>(&bufs.rot[#r]), ::arael::__gpu::lease_arg::<f64>(&bufs.rotw[#r]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.drot[#r]),
-        }).collect();
-        quote! {
-            let __n = bufs.count[#cid];
-            if __n > 0 {
-                let __cubes = CubeCount::Static(__n.div_ceil(256), 1, 1);
-                let __dim = CubeDim::new_1d(256);
-                if assemble {
-                    unsafe {
-                        #gh::launch_unchecked(
-                            client, __cubes, __dim,
-                            ::arael::__gpu::lease_arg::<u32>(&bufs.inst[#cid]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.data[#cid]),
-                            ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#ea]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#eb]),
-                            ::arael::__gpu::lease_arg::<u32>(&bufs.idx[#ea]), ::arael::__gpu::lease_arg::<u32>(&bufs.tile[#ea]),
-                            ::arael::__gpu::lease_arg::<u32>(&bufs.idx[#eb]), ::arael::__gpu::lease_arg::<u32>(&bufs.tile[#eb]),
-                            ::arael::__gpu::lease_arg::<u32>(&bufs.cross[#x]),
-                            #(#rot_args)*
-                            ::arael::__gpu::handle_arg(targets.h, targets.nh), ::arael::__gpu::handle_arg(targets.g, targets.ng), ::arael::__gpu::handle_arg(targets.cost, 1),
-                            __n,
-                        )
-                    };
-                } else {
-                    unsafe {
-                        #cost::launch_unchecked(
-                            client, __cubes, __dim,
-                            ::arael::__gpu::lease_arg::<u32>(&bufs.inst[#cid]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.data[#cid]),
-                            ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#ea]), ::arael::__gpu::lease_arg::<#scalar>(&bufs.ev[#eb]),
-                            #(#rot_args)*
-                            ::arael::__gpu::handle_arg(targets.cost, 1),
-                            __n,
-                        )
-                    };
-                }
-            }
-        }
-    }).collect();
-    let module = format_ident!("__arael_device_{}", root_name);
     let n_constraints = constraints.len();
     quote! {
         ::arael::__gpu_items! {
-            #[doc(hidden)]
-            #[allow(non_snake_case, unused, clippy::all)]
-            mod #module {
-                use ::arael::__gpu::cubecl;
-                use cubecl::prelude::*;
-                use ::arael::__gpu::assembly::{self_rank1, cross_rank1, cost_add};
-                #(#kernels)*
-
-                #[allow(unused_variables, clippy::all)]
-                pub fn __device_launch(client: &Client, bufs: &::arael::__gpu::DeviceBuffers, targets: &::arael::__gpu::DeviceTargets, assemble: bool) {
-                    #(#launches)*
-                }
-            }
-
             impl ::arael::__gpu::DeviceRoot<#scalar> for #root_name {
                 fn device_shape(&self) -> ::arael::__gpu::DeviceShape {
                     ::arael::__gpu::DeviceShape {
@@ -653,10 +517,6 @@ pub(crate) fn device_root(
                     use arael::store::Leaves as _;
                     let _ = #n_constraints;
                     #(#walks)*
-                }
-
-                fn device_launcher(&self) -> ::arael::__gpu::DeviceLauncher {
-                    #module::__device_launch
                 }
 
                 fn device_cpp(&self) -> &'static str {
