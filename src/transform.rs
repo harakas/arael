@@ -164,6 +164,15 @@ where
         self.ref_rotation = self.ref_value.rotation_matrix();
     }
 
+    /// The reference in f64: the rotation's unit quaternion (w, x, y, z),
+    /// then the translation; what the device assembly's pack walk reads.
+    #[doc(hidden)]
+    pub fn __reference(&self) -> [f64; 7] {
+        let f = |v: T| v.to_f64().unwrap();
+        let (q, t) = (self.ref_value, self.ref_translation);
+        [f(q.t), f(q.v.x), f(q.v.y), f(q.v.z), f(t.x), f(t.y), f(t.z)]
+    }
+
     /// The hand-written twin of the generated symbolic precompute: the
     /// pose at the current step, and its Jacobian (each half skipped while
     /// that half of the step is frozen -- nothing reads it then).
@@ -318,6 +327,17 @@ where
                 let i = p.index() as usize;
                 ParamType::write_to(&p.value, &mut params[i..i + 3]);
             }
+        }
+    }
+
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<crate::model::Reference>) {
+        let key = [self.w.index(), self.d.index()].into_iter().find(|&i| i != u32::MAX);
+        if let Some(r) = key.and_then(&mut *refs) {
+            (self.ref_value, self.ref_translation) = r.transform();
+            self.refresh();
+            let zero = vect3::new(T::zero(), T::zero(), T::zero());
+            self.w.value = zero;
+            self.d.value = zero;
         }
     }
 }

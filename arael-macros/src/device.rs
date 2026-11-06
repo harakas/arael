@@ -1,7 +1,7 @@
 //! The device head of `#[arael(root)]`: a constraint's body as two C++
 //! kernels (the assembly's and the cost's) over its entities' parameter
-//! values, rotation caches and data leaves, and the walk that packs a
-//! model's instances for them, as an implementation of
+//! values, the caches of their referenced fields and data leaves, and the
+//! walk that packs a model's instances for them, as an implementation of
 //! `arael::__gpu::DeviceRoot`. All of it is wrapped in
 //! `arael::__gpu_items!`, which drops it when arael is built without its
 //! `gpu` feature.
@@ -11,12 +11,13 @@
 //! constraints of one entity reached through a ref (written into its self
 //! block), and the constraints of an entity of a root-level collection on
 //! itself (with a guard over its data fields, applied when packing),
-//! without a loss or an index `select`, over Euler-angle and
-//! `QuaternionParam` rotations, atom caches (an `AngleParam`'s sin and cos,
-//! computed in the kernel from the angle) and `f32` or `f64` roots. A
-//! leaf that follows the parameters and that the device does not compute
-//! (a `UnitVecParam`'s unit vector) leaves the root without a device
-//! route, as does any other constraint.
+//! without a loss or an index `select`; over referenced fields (Euler-angle
+//! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
+//! directions, whose references the device keeps and moves), atom caches
+//! (an `AngleParam`'s sin and cos, computed in the kernel from the angle)
+//! and `f32` or `f64` roots. A leaf that follows the parameters and that
+//! the device does not compute (a `ScaledTransformParam`'s scale) leaves
+//! the root without a device route, as does any other constraint.
 
 use std::collections::BTreeSet;
 
@@ -48,11 +49,11 @@ pub(crate) struct DevConstraint {
     pub block: syn::Ident,
     /// The data leaves, as the Rust expressions the walk reads.
     pub data: Vec<String>,
-    /// The rotation fields read.
-    pub rots: Vec<DevRot>,
+    /// The referenced fields read.
+    pub refs: Vec<DevRef>,
     /// The two kernels in C++, named by `cid`: they read every column
     /// through the layout table by the constraint's own names (`C<cid>_SA`,
-    /// `C<cid>_EVA`, `C<cid>_ROT<r>`, ...), which the root aliases to its
+    /// `C<cid>_EVA`, `C<cid>_VAL<r>`, ...), which the root aliases to its
     /// numbering ([`device_root`]).
     pub cpp: String,
     pub cid: usize,
@@ -63,17 +64,148 @@ pub(crate) struct DevConstraint {
     pub filter: Option<TokenStream2>,
 }
 
-/// A rotation field a device constraint reads.
+/// A referenced parameter field a device constraint reads: a parameter
+/// whose step is measured from a reference that moves to it after every
+/// accepted step.
 #[derive(Clone)]
-pub(crate) struct DevRot {
+pub(crate) struct DevRef {
     /// Its constraint side.
     pub side: usize,
-    /// Its field path in the entity.
+    /// Its field in the entity.
     pub path: String,
     /// The offset of its step among the entity's parameters.
     pub step: usize,
-    /// A `QuaternionParam` (else an Euler-angle parameter).
-    pub quaternion: bool,
+    pub kind: RefKind,
+}
+
+/// The referenced parameter types the device keeps the reference of
+/// (`arael::__gpu::ReferenceKind`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefKind {
+    Euler,
+    Quaternion,
+    Transform,
+    UnitVec,
+}
+
+/// Which column of a referenced field's values a leaf reads.
+#[derive(Clone, Copy)]
+enum RefCol {
+    /// The values in F.
+    Val,
+    /// The values in W.
+    ValW,
+    /// The derivatives by the step, in F.
+    Der,
+}
+
+impl RefKind {
+    /// The kind of the field `field` of the registered type `ty`.
+    fn of(ty: &str, field: &str) -> Option<RefKind> {
+        let l = crate::registry_lookup(ty)?;
+        if l.universal_euler_angle_fields.iter().any(|f| f == field) || l.mixed_euler_angle_fields.iter().any(|(f, _)| f == field) {
+            return Some(RefKind::Euler);
+        }
+        if l.universal_rotvec_fields.iter().any(|f| f == field) {
+            return Some(RefKind::Quaternion);
+        }
+        match l.fields.iter().find(|(f, _)| f == field)? {
+            (_, crate::SymFieldType::Struct(t)) => match t.as_str() {
+                "TransformParam" | "TransformParamF" => Some(RefKind::Transform),
+                "UnitVecParam" | "UnitVecParamF" => Some(RefKind::UnitVec),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The values and the derivatives one entity holds (`ReferenceKind`'s
+    /// `values` and `derivatives`).
+    fn widths(self) -> (usize, usize) {
+        match self {
+            RefKind::Euler | RefKind::Quaternion => (9, 27),
+            RefKind::Transform => (12, 45),
+            RefKind::UnitVec => (3, 6),
+        }
+    }
+
+    /// The parameters of the step after its first, as `<var>.<field>`
+    /// suffixes: (the first's, the others' with their offsets).
+    fn step(self) -> (&'static str, &'static [(&'static str, usize)]) {
+        match self {
+            RefKind::Euler | RefKind::Quaternion => ("delta.x", &[("delta.y", 1), ("delta.z", 2)]),
+            RefKind::Transform => ("w.work().x", &[("w.work().y", 1), ("w.work().z", 2), ("d.work().x", 3), ("d.work().y", 4), ("d.work().z", 5)]),
+            RefKind::UnitVec => ("d.work().x", &[("d.work().y", 1)]),
+        }
+    }
+
+    /// The column and the offset of the cache `tail` reads (what follows
+    /// `<var>.<field>.`), per entity.
+    fn leaf(self, tail: &str) -> Option<(RefCol, usize)> {
+        fn idx(r: &str) -> Option<(usize, &str)> {
+            let r = r.strip_prefix('[')?;
+            let close = r.find(']')?;
+            let i: usize = r[..close].trim().parse().ok()?;
+            (i < 3).then_some((i, &r[close + 1..]))
+        }
+        fn comp(r: &str) -> Option<usize> {
+            match r {
+                ".x" => Some(0),
+                ".y" => Some(1),
+                ".z" => Some(2),
+                _ => None,
+            }
+        }
+        // `<name>[r].c`, `<name>[k][r].c`, `<name>.c`, `<name>[k].c`
+        let mat = |r: &str| idx(r).and_then(|(row, r)| Some(row * 3 + comp(r)?));
+        let dmat = |r: &str| idx(r).and_then(|(k, r)| Some(k * 9 + mat(r)?));
+        let dvec = |r: &str| idx(r).and_then(|(k, r)| Some(k * 3 + comp(r)?));
+        let (name, rest) = tail.split_at(tail.find(['[', '.']).unwrap_or(tail.len()));
+        match (self, name) {
+            (RefKind::Euler | RefKind::Quaternion | RefKind::Transform, "rotation_matrix") => Some((RefCol::Val, mat(rest)?)),
+            (RefKind::Euler, "rotation_matrix_wide") => Some((RefCol::ValW, mat(rest)?)),
+            (RefKind::Euler | RefKind::Quaternion, "rotation_matrix_deriv") => Some((RefCol::Der, dmat(rest)?)),
+            (RefKind::Transform, "translation") => Some((RefCol::Val, 9 + comp(rest)?)),
+            (RefKind::Transform, "rotation_matrix_dw") => Some((RefCol::Der, dmat(rest)?)),
+            (RefKind::Transform, "translation_dd") => Some((RefCol::Der, 27 + dvec(rest)?)),
+            (RefKind::Transform, "translation_dw") => Some((RefCol::Der, 36 + dvec(rest)?)),
+            (RefKind::UnitVec, "unit") => Some((RefCol::Val, comp(rest)?)),
+            (RefKind::UnitVec, "unit_d") => Some((RefCol::Der, dvec(rest)?)),
+            _ => None,
+        }
+    }
+
+    /// The pack walk's write of the reference of `field` into slot `s` of
+    /// `__pack.refr[r]`.
+    fn pack(self, field: &syn::Expr, r: usize, s: &TokenStream2) -> TokenStream2 {
+        let (n, read) = match self {
+            RefKind::Euler => {
+                return quote! {
+                    {
+                        let __m = &#field.ref_rotation;
+                        let __r = &mut __pack.refr[#r];
+                        for __i in 0..3usize {
+                            __r[#s * 9 + __i * 3] = ::arael::__gpu::leaf_f64(__m[__i].x);
+                            __r[#s * 9 + __i * 3 + 1] = ::arael::__gpu::leaf_f64(__m[__i].y);
+                            __r[#s * 9 + __i * 3 + 2] = ::arael::__gpu::leaf_f64(__m[__i].z);
+                        }
+                    }
+                };
+            }
+            RefKind::Quaternion | RefKind::UnitVec => (4usize, quote! { #field.__reference_quaternion() }),
+            RefKind::Transform => (7usize, quote! { #field.__reference() }),
+        };
+        quote! { __pack.refr[#r][#s * #n..#s * #n + #n].copy_from_slice(&#read); }
+    }
+
+    fn ident(self) -> TokenStream2 {
+        match self {
+            RefKind::Euler => quote! { Euler },
+            RefKind::Quaternion => quote! { Quaternion },
+            RefKind::Transform => quote! { Transform },
+            RefKind::UnitVec => quote! { UnitVec },
+        }
+    }
 }
 
 /// A CSE temporary's name: `__x3`, `__w1`, `__m2`.
@@ -115,42 +247,15 @@ fn syms_of_inters(inters: &[Intermediate], out: &mut BTreeSet<String>) {
     }
 }
 
-/// A rotation cache read: `<var>.<path>.rotation_matrix[r].c` (`kind` 0),
-/// `..._wide[r].c` (1) or `..._deriv[k][r].c` (2), as (var, path, kind,
-/// offset within the entity's 9 or 27 values).
-fn rotation_leaf(s: &str) -> Option<(String, String, u8, usize)> {
-    let at = s.find(".rotation_matrix")?;
-    let (head, tail) = (&s[..at], &s[at + ".rotation_matrix".len()..]);
-    let (var, path) = head.split_once('.')?;
-    let (kind, rest) = if let Some(r) = tail.strip_prefix("_wide") {
-        (1u8, r)
-    } else if let Some(r) = tail.strip_prefix("_deriv") {
-        (2u8, r)
-    } else {
-        (0u8, tail)
-    };
-    fn idx(r: &str) -> Option<(usize, &str)> {
-        let r = r.strip_prefix('[')?;
-        let close = r.find(']')?;
-        Some((r[..close].trim().parse().ok()?, &r[close + 1..]))
-    }
-    let (first, rest) = idx(rest)?;
-    let (k, row, rest) = if kind == 2 {
-        let (row, rest) = idx(rest)?;
-        (first, row, rest)
-    } else {
-        (0, first, rest)
-    };
-    let col = match rest {
-        ".x" => 0,
-        ".y" => 1,
-        ".z" => 2,
-        _ => return None,
-    };
-    if row > 2 || k > 2 {
-        return None;
-    }
-    Some((var.to_string(), path.to_string(), kind, k * 9 + row * 3 + col))
+/// The referenced field a leaf reads a cache of: (side, field, kind,
+/// column, offset). `None` for a leaf of no referenced field.
+fn reference_leaf(s: &str, a: &DevSide, b: Option<&DevSide>) -> Option<(usize, String, RefKind, RefCol, usize)> {
+    let (var, rest) = s.split_once('.')?;
+    let (side, sd) = [Some(a), b].into_iter().flatten().enumerate().find(|(_, sd)| sd.var == var)?;
+    let (field, tail) = rest.split_once('.')?;
+    let kind = RefKind::of(&sd.ty, field)?;
+    let (col, off) = kind.leaf(tail)?;
+    Some((side, field.to_string(), kind, col, off))
 }
 
 /// True if `field` of the registered type `ty` is a parameter or a
@@ -166,7 +271,7 @@ fn parameter_field(ty: &str, field: &str) -> bool {
 
 /// Why the device cannot pack `s` as data: it reads a parameter field of
 /// one of the entities, or a component of parameters, other than through
-/// the leaves the device computes (the parameters, the rotations, the atom
+/// the leaves the device computes (the parameters, the referenced fields' caches, the atom
 /// caches), so it would hold the value the solve started from.
 fn parameter_state(s: &str, a: &DevSide, b: Option<&DevSide>) -> Option<String> {
     let (var, rest) = s.split_once('.')?;
@@ -217,7 +322,8 @@ pub(crate) fn guard_on_data(guard: &syn::Expr, var: &str, ty: &str) -> Result<()
 /// What a leaf symbol reads in the kernel.
 enum Leaf {
     Param(usize, usize),
-    Rot(usize, u8, usize),
+    /// A cache of referenced field `r`: its column and offset per entity.
+    Ref(usize, RefCol, usize),
     Data(usize),
     /// An atom cache (`a.rot.sin`), computed from its atom over the
     /// parameters (`sin(a.rot.angle.work())`).
@@ -267,9 +373,9 @@ pub(crate) fn device_constraint(
         syms.append(&mut more);
     }
     let all: BTreeSet<&String> = gh_syms.iter().chain(&cost_syms).collect();
-    // classified, the data leaves and the rotations numbered in order
+    // classified, the data leaves and the referenced fields numbered in order
     let mut data: Vec<String> = Vec::new();
-    let mut rots: Vec<DevRot> = Vec::new();
+    let mut refs: Vec<DevRef> = Vec::new();
     let mut leaf: std::collections::BTreeMap<String, Leaf> = Default::default();
     for s in all {
         let l = if let Some(e) = atom(s) {
@@ -281,37 +387,25 @@ pub(crate) fn device_constraint(
             Leaf::Param(0, p)
         } else if let Some(p) = b.as_ref().and_then(|b| b.params.iter().position(|p| p == s)) {
             Leaf::Param(1, p)
-        } else if let Some((var, path, kind, off)) = rotation_leaf(s) {
-            let side = if var == a.var {
-                0
-            } else if b.as_ref().is_some_and(|b| var == b.var) {
-                1
-            } else {
-                return Err(format!("the rotation `{s}` is not of the constraint's entities"));
-            };
-            let r = match rots.iter().position(|r| r.side == side && r.path == path) {
+        } else if let Some((side, path, kind, col, off)) = reference_leaf(s, &a, b.as_ref()) {
+            let r = match refs.iter().position(|r| r.side == side && r.path == path) {
                 Some(r) => r,
                 None => {
-                    // the device composes an Euler-angle or a rotation-vector
-                    // step with its reference
+                    // the step: its entity's parameters at `<var>.<field>.<first>`
+                    // and after
                     let sd = if side == 0 { &a } else { b.as_ref().expect("side 1 is b's") };
-                    let layout = crate::registry_lookup(&sd.ty);
-                    let euler = layout.as_ref().is_some_and(|l| {
-                        l.universal_euler_angle_fields.contains(&path) || l.mixed_euler_angle_fields.iter().any(|(f, _)| *f == path)
-                    });
-                    let quaternion = layout.as_ref().is_some_and(|l| l.universal_rotvec_fields.contains(&path));
-                    if !euler && !quaternion {
-                        return Err(format!("the rotation `{}.{}` is not an EulerAngleParam or a QuaternionParam", sd.var, path));
+                    let (first, rest) = kind.step();
+                    let name = |suffix: &str| format!("{}.{}.{}", sd.var, path, suffix);
+                    let step = sd.params.iter().position(|p| *p == name(first))
+                        .ok_or_else(|| format!("`{}.{}` has no step among its entity's parameters", sd.var, path))?;
+                    if let Some((p, _)) = rest.iter().find(|(p, k)| sd.params.get(step + k) != Some(&name(p))) {
+                        return Err(format!("`{}.{}`'s step is not in order among its entity's parameters at `{p}`", sd.var, path));
                     }
-                    // the rotation's step: its entity's `<var>.<path>.delta.x` slot
-                    let step = format!("{}.{}.delta.x", sd.var, path);
-                    let step = sd.params.iter().position(|p| *p == step)
-                        .ok_or_else(|| format!("the rotation `{}.{}` has no step among its entity's parameters", sd.var, path))?;
-                    rots.push(DevRot { side, path, step, quaternion });
-                    rots.len() - 1
+                    refs.push(DevRef { side, path, step, kind });
+                    refs.len() - 1
                 }
             };
-            Leaf::Rot(r, kind, off)
+            Leaf::Ref(r, col, off)
         } else {
             if let Some(why) = parameter_state(s, &a, b.as_ref()) {
                 return Err(why);
@@ -322,8 +416,8 @@ pub(crate) fn device_constraint(
         leaf.insert(s.clone(), l);
     }
     let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
-    let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &rots, (&gh_syms, &cost_syms), gh, guard, cost)?;
-    Ok(DevConstraint { group_key, a, b, holder, block, data, rots, cpp, cid, rows, filter: None })
+    let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost)?;
+    Ok(DevConstraint { group_key, a, b, holder, block, data, refs, cpp, cid, rows, filter: None })
 }
 
 /// The kernels of [`device_constraint`] in C++
@@ -338,7 +432,7 @@ fn cpp_kernels(
     rows: usize,
     leaf: &std::collections::BTreeMap<String, Leaf>,
     names: &std::collections::BTreeMap<String, String>,
-    rots: &[DevRot],
+    refs: &[DevRef],
     (gh_syms, cost_syms): (&BTreeSet<String>, &BTreeSet<String>),
     gh: (&[Intermediate], &[E]),
     guard: Option<(&[Intermediate], &E)>,
@@ -354,12 +448,13 @@ fn cpp_kernels(
         Ok(match *l {
             Leaf::Param(0, p) => ("F", format!("COL(B, F, C{cid}_EVA)[sa * {na}u + {p}u]")),
             Leaf::Param(_, p) => ("F", format!("COL(B, F, C{cid}_EVB)[sb * {nb}u + {p}u]")),
-            Leaf::Rot(r, kind, off) => {
-                let s = if rots[r].side == 0 { "sa" } else { "sb" };
-                match kind {
-                    0 => ("F", format!("COL(B, F, C{cid}_ROT{r})[{s} * 9u + {off}u]")),
-                    1 => ("W", format!("COL(B, W, C{cid}_ROTW{r})[{s} * 9u + {off}u]")),
-                    _ => ("F", format!("COL(B, F, C{cid}_DROT{r})[{s} * 27u + {off}u]")),
+            Leaf::Ref(r, col, off) => {
+                let s = if refs[r].side == 0 { "sa" } else { "sb" };
+                let (nv, nd) = refs[r].kind.widths();
+                match col {
+                    RefCol::Val => ("F", format!("COL(B, F, C{cid}_VAL{r})[{s} * {nv}u + {off}u]")),
+                    RefCol::ValW => ("W", format!("COL(B, W, C{cid}_VALW{r})[{s} * {nv}u + {off}u]")),
+                    RefCol::Der => ("F", format!("COL(B, F, C{cid}_DER{r})[{s} * {nd}u + {off}u]")),
                 }
             }
             Leaf::Data(j) => ("F", format!("COL(B, F, C{cid}_D{j})[o]")),
@@ -466,10 +561,10 @@ pub(crate) fn device_root(
     array_ident: &dyn Fn(&str, &str) -> syn::Ident,
 ) -> TokenStream2 {
     let scalar: syn::Type = syn::parse_str(ft).unwrap();
-    // the device's numbering of the entity arrays, rotation fields and
+    // the device's numbering of the entity arrays, referenced fields and
     // cross arrays the constraints read
     let mut entities: Vec<(String, String, usize)> = Vec::new();
-    let mut rotations: Vec<(usize, DevRot)> = Vec::new();
+    let mut references: Vec<(usize, DevRef)> = Vec::new();
     let mut crosses: Vec<(String, String)> = Vec::new();
     let entity_of = |entities: &mut Vec<(String, String, usize)>, s: &DevSide| -> usize {
         match entities.iter().position(|(t, hb, _)| *t == s.ty && *hb == s.hb) {
@@ -484,7 +579,7 @@ pub(crate) fn device_root(
         ea: usize,
         /// Of a constraint of two: the second side's entity array and the cross array.
         pair: Option<(usize, usize)>,
-        rots: Vec<usize>,
+        refs: Vec<usize>,
     }
     let mut ids: Vec<Ids> = Vec::new();
     for c in constraints {
@@ -500,28 +595,27 @@ pub(crate) fn device_root(
             };
             (eb, x)
         });
-        let rots = c
-            .rots
+        let refs = c
+            .refs
             .iter()
-            .map(|rot| {
-                let e = if rot.side == 0 { ea } else { pair.expect("a rotation of side 1 is b's").0 };
-                match rotations.iter().position(|(re, r)| *re == e && r.path == rot.path) {
+            .map(|rf| {
+                let e = if rf.side == 0 { ea } else { pair.expect("a referenced field of side 1 is b's").0 };
+                match references.iter().position(|(re, r)| *re == e && r.path == rf.path) {
                     Some(r) => r,
                     None => {
-                        rotations.push((e, rot.clone()));
-                        rotations.len() - 1
+                        references.push((e, rf.clone()));
+                        references.len() - 1
                     }
                 }
             })
             .collect();
-        ids.push(Ids { ea, pair, rots });
+        ids.push(Ids { ea, pair, refs });
     }
-    let rot_shape: Vec<TokenStream2> = rotations
+    let ref_shape: Vec<TokenStream2> = references
         .iter()
         .map(|(e, r)| {
-            let step = r.step;
-            let kind = if r.quaternion { quote! { Quaternion } } else { quote! { Euler } };
-            quote! { ::arael::__gpu::DeviceRotation { entity: #e, step: #step, kind: ::arael::__gpu::RotationKind::#kind } }
+            let (step, kind) = (r.step, r.kind.ident());
+            quote! { ::arael::__gpu::DeviceReference { entity: #e, step: #step, kind: ::arael::__gpu::ReferenceKind::#kind } }
         })
         .collect();
     let entity_n: Vec<usize> = entities.iter().map(|e| e.2).collect();
@@ -548,10 +642,10 @@ pub(crate) fn device_root(
             alias("TILEB", format!("E{eb}_TILE"));
             alias("TILEX", format!("X{x}_TILE"));
         }
-        for (lr, &r) in id.rots.iter().enumerate() {
-            alias(&format!("ROT{lr}"), format!("R{r}_ROT"));
-            alias(&format!("ROTW{lr}"), format!("R{r}_ROTW"));
-            alias(&format!("DROT{lr}"), format!("R{r}_DROT"));
+        for (lr, &r) in id.refs.iter().enumerate() {
+            alias(&format!("VAL{lr}"), format!("R{r}_VAL"));
+            alias(&format!("VALW{lr}"), format!("R{r}_VALW"));
+            alias(&format!("DER{lr}"), format!("R{r}_DER"));
         }
         cpp.push_str(&c.cpp);
     }
@@ -565,7 +659,7 @@ pub(crate) fn device_root(
         quote! { __tables.cross.push(__store.#arr.device_table(resolve)); }
     }).collect();
     // the pack walk: per group the cost sweep's loop, per constraint its
-    // slots, data, the entities' fixed values and reference rotations
+    // slots, data, the entities' fixed values and references
     let mut walks: Vec<TokenStream2> = Vec::new();
     for (key, g) in groups {
         let entries: Vec<TokenStream2> = constraints.iter().zip(&ids).filter(|(c, _)| c.group_key == *key).map(|(c, id)| {
@@ -591,30 +685,17 @@ pub(crate) fn device_root(
                 }
                 _ => (quote! { __pack.inst[#cid].push(__sa as u32); }, quote! {}),
             };
-            let rots: Vec<TokenStream2> = c.rots.iter().zip(&id.rots).map(|(rot, &r)| {
-                let (var, s) = if rot.side == 0 {
+            let refs: Vec<TokenStream2> = c.refs.iter().zip(&id.refs).map(|(rf, &r)| {
+                let (var, s) = if rf.side == 0 {
                     (format_ident!("{}", c.a.var), quote! { __sa })
                 } else {
-                    (format_ident!("{}", c.b.as_ref().expect("a rotation of side 1 is b's").var), quote! { __sb })
+                    (format_ident!("{}", c.b.as_ref().expect("a referenced field of side 1 is b's").var), quote! { __sb })
                 };
-                let field: syn::Expr = syn::parse_str(&format!("{}.{}", var, rot.path)).expect("a rotation field path");
-                if rot.quaternion {
-                    return quote! {
-                        __pack.refr[#r][#s * 4..#s * 4 + 4].copy_from_slice(&#field.__reference_quaternion());
-                        __pack.packed[#r][#s] = true;
-                    };
-                }
+                let field: syn::Expr = syn::parse_str(&format!("{}.{}", var, rf.path)).expect("a referenced field path");
+                let write = rf.kind.pack(&field, r, &s);
                 quote! {
-                    {
-                        __pack.packed[#r][#s] = true;
-                        let __m = &#field.ref_rotation;
-                        let __r = &mut __pack.refr[#r];
-                        for __i in 0..3usize {
-                            __r[#s * 9 + __i * 3] = ::arael::__gpu::leaf_f64(__m[__i].x);
-                            __r[#s * 9 + __i * 3 + 1] = ::arael::__gpu::leaf_f64(__m[__i].y);
-                            __r[#s * 9 + __i * 3 + 2] = ::arael::__gpu::leaf_f64(__m[__i].z);
-                        }
-                    }
+                    __pack.packed[#r][#s] = true;
+                    #write
                 }
             }).collect();
             let cond = c.filter.clone().unwrap_or_else(|| quote! { true });
@@ -625,7 +706,7 @@ pub(crate) fn device_root(
                     __pack.data[#cid].extend_from_slice(&[#( (#data) as #scalar ),*]);
                     #fa
                     #fb
-                    #(#rots)*
+                    #(#refs)*
                 }
             }
         }).collect();
@@ -649,7 +730,7 @@ pub(crate) fn device_root(
                 fn device_shape(&self) -> ::arael::__gpu::DeviceShape {
                     ::arael::__gpu::DeviceShape {
                         entities: vec![#(#entity_n),*],
-                        rotations: vec![#(#rot_shape),*],
+                        references: vec![#(#ref_shape),*],
                         crosses: #n_cross,
                         constraints: vec![#(#cshape),*],
                     }

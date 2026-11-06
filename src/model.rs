@@ -264,8 +264,9 @@ pub trait Model {
     fn advance_params<F: crate::utils::Float>(&mut self, _params: &mut [F]) {}
 
     /// Set the reference of each optimized `EulerAngleParam`,
-    /// `MixedEulerAngleParam` and `QuaternionParam` that `refs` knows,
-    /// keyed by the rotation's first parameter index, and zero its delta:
+    /// `MixedEulerAngleParam`, `QuaternionParam`, `TransformParam` and
+    /// `UnitVecParam` that `refs` knows, keyed by the first live index of
+    /// its step, and zero its step:
     /// the device solve's re-centring handed back in place of
     /// `advance_params`. Recurses like `advance_params`.
     #[doc(hidden)]
@@ -279,8 +280,12 @@ pub trait Model {
 pub enum Reference {
     /// A rotation matrix, row-major: an Euler-angle parameter's.
     Matrix([f64; 9]),
-    /// A unit quaternion (w, x, y, z): a `QuaternionParam`'s.
+    /// A unit quaternion (w, x, y, z): a `QuaternionParam`'s or a
+    /// `UnitVecParam`'s.
     Quaternion([f64; 4]),
+    /// A `TransformParam`'s rotation as a unit quaternion (w, x, y, z), then
+    /// its translation (x, y, z).
+    Transform([f64; 7]),
 }
 
 impl Reference {
@@ -288,9 +293,35 @@ impl Reference {
     fn matrix<T: crate::utils::Float>(self) -> matrix3<T> {
         match self {
             Reference::Matrix(m) => matrix_from_rows(m),
-            Reference::Quaternion(_) => panic!("an Euler-angle parameter's reference is a matrix"),
+            r => panic!("an Euler-angle parameter's reference is a matrix, not {r:?}"),
         }
     }
+
+    /// The unit quaternion of a `QuaternionParam`'s or a `UnitVecParam`'s
+    /// reference.
+    pub(crate) fn quaternion<T: crate::utils::Float>(self) -> crate::quatern::quatern<T> {
+        match self {
+            Reference::Quaternion(q) => quaternion_of(&q),
+            r => panic!("the reference is a quaternion, not {r:?}"),
+        }
+    }
+
+    /// The rotation and the translation of a `TransformParam`'s reference.
+    pub(crate) fn transform<T: crate::utils::Float>(self) -> (crate::quatern::quatern<T>, vect3<T>) {
+        match self {
+            Reference::Transform(v) => {
+                let c = |k: usize| T::from(v[k]).unwrap();
+                (quaternion_of(&v[..4]), vect3::new(c(4), c(5), c(6)))
+            }
+            r => panic!("a TransformParam's reference is a transform, not {r:?}"),
+        }
+    }
+}
+
+/// The unit quaternion of `(w, x, y, z)`.
+fn quaternion_of<T: crate::utils::Float>(q: &[f64]) -> crate::quatern::quatern<T> {
+    let c = |k: usize| T::from(q[k]).unwrap();
+    crate::quatern::quatern::new(c(0), vect3::new(c(1), c(2), c(3))).unit()
 }
 
 /// The [`collect_param_blocks`](Model::collect_param_blocks) of a parameter
@@ -1365,11 +1396,7 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
 
     fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<Reference>) {
         if self.index != u32::MAX && let Some(r) = refs(self.index) {
-            let Reference::Quaternion([w, x, y, z]) = r else {
-                panic!("a QuaternionParam's reference is a quaternion");
-            };
-            let c = |v: f64| T::from(v).unwrap();
-            self.ref_value = crate::quatern::quatern::new(c(w), vect3::new(c(x), c(y), c(z))).unit();
+            self.ref_value = r.quaternion();
             self.ref_rotation = self.ref_value.rotation_matrix();
             self.delta = vect3::<T>::default();
         }

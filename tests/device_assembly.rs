@@ -1476,27 +1476,226 @@ fn a_guard_reading_a_parameter_has_no_device_form() {
     assert!(why.contains("Guarded") && why.contains("guarded.pos"), "{why}");
 }
 
-/// A direction prior reading a `UnitVecParam`'s unit vector, which the CPU
-/// computes per iteration from the direction's chart and step and the
-/// device does not compute.
+/// A scale prior reading a `ScaledTransformParam`'s scale, which the CPU
+/// computes per iteration from the parameters and the device does not
+/// compute.
 #[arael::model]
-#[arael(constraint(hb, { [heading.dir.unit.z - 0.5] }))]
+#[arael(constraint(hb, { [scaled.s.scale_factor - 2.0] }))]
 #[derive(Clone)]
-pub struct Heading {
-    pub dir: arael::unitvec::UnitVecParam,
-    pub hb: SelfBlock<Heading>,
+pub struct Scaled {
+    pub s: arael::transform::ScaledTransformParam,
+    pub hb: SelfBlock<Scaled>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
-pub struct Headings {
-    pub items: refs::Vec<Heading>,
+pub struct ScaledRoot {
+    pub items: refs::Vec<Scaled>,
 }
 
 #[test]
 fn a_constraint_reading_state_the_device_does_not_compute_has_no_device_form() {
-    let s = Headings { items: refs::Vec::new() };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a read of the unit vector has no device form");
-    assert!(why.contains("Heading") && why.contains("heading.dir"), "{why}");
+    let s = ScaledRoot { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a read of the scale has no device form");
+    assert!(why.contains("Scaled") && why.contains("scaled.s"), "{why}");
+}
+
+/// The plane SLAM model of benchmarks/plane: `TransformParam` poses,
+/// planes of a `UnitVecParam` normal and a distance, odometry and plane
+/// observations.
+#[arael::model]
+#[derive(Clone)]
+pub struct PoseT {
+    pub r2w: arael::transform::TransformParam,
+    pub hb: SelfBlock<PoseT>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct PlaneT {
+    pub n: arael::unitvec::UnitVecParam,
+    pub c: Param<f64>,
+    pub hb: SelfBlock<PlaneT>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let rel = a.r2w.inv() * b.r2w;
+    let dt = rel.translation - odot.measured_translation;
+    let dr = odot.measured_rotation_transposed * rel.rotation_matrix;
+    let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
+    let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
+    let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
+    [dt.x * odot.wt, dt.y * odot.wt, dt.z * odot.wt,
+     (c2.z - c3.y) * 0.5 * odot.wr, (c3.x - c1.z) * 0.5 * odot.wr, (c1.y - c2.x) * 0.5 * odot.wr]
+}, parent = odot))]
+#[derive(Clone)]
+pub struct OdoT {
+    #[arael(ref = root.poses)]
+    pub a: Ref<PoseT>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<PoseT>,
+    pub measured_translation: vect3<f64>,
+    pub measured_rotation_transposed: arael::matrix::matrix3<f64>,
+    pub wt: f64,
+    pub wr: f64,
+    pub hb: CrossBlock<PoseT, PoseT>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let rp = p.r2w.rotation_matrix;
+    let nw = l.n.unit;
+    let nl = rp.transpose() * nw;
+    let cl = l.c + p.r2w.translation * nw;
+    let h = sqrt(nl.x * nl.x + nl.y * nl.y);
+    let mx = nl * obst.measured_normal;
+    let my = (obst.measured_normal.y * nl.x - obst.measured_normal.x * nl.y) / h;
+    let mz = (obst.measured_normal.z * (nl.x * nl.x + nl.y * nl.y)
+        - nl.z * (nl.x * obst.measured_normal.x + nl.y * obst.measured_normal.y)) / h;
+    [atan2(my, mx) * obst.wa, atan2(mz, sqrt(mx * mx + my * my)) * obst.wa, (obst.measured_c - cl) * obst.wd]
+}, parent = obst))]
+#[derive(Clone)]
+pub struct ObsT {
+    #[arael(ref = root.poses)]
+    pub p: Ref<PoseT>,
+    #[arael(ref = root.planes)]
+    pub l: Ref<PlaneT>,
+    pub measured_normal: vect3<f64>,
+    pub measured_c: f64,
+    pub wa: f64,
+    pub wd: f64,
+    pub hb: CrossBlock<PoseT, PlaneT>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct WorldT {
+    pub poses: refs::Vec<PoseT>,
+    pub planes: refs::Vec<PlaneT>,
+    pub odos: std::vec::Vec<OdoT>,
+    pub obs: std::vec::Vec<ObsT>,
+}
+
+/// `n` poses along a curve looking at 8 planes, odometry between
+/// neighbours, each pose observing every plane, the measurements the truth
+/// plus noise, the poses and planes moved off it. Pose 0 is fixed, pose 3
+/// holds its rotation, plane 5 holds its normal.
+fn plane_world(n: usize, seed: u64) -> WorldT {
+    use arael::matrix::matrix3d;
+    use arael::quatern::quatern;
+    use arael::vect::vect3d;
+    let mut rng = Lcg(seed);
+    let truth: Vec<(vect3d, matrix3d)> = (0..n)
+        .map(|k| {
+            let a = 0.3 * k as f64;
+            (vect3d::new(2.0 * a.cos(), 2.0 * a.sin(), 0.2 * a), matrix3d::rotation_from_euler_angles(vect3d::new(0.05 * a.sin(), 0.05 * a.cos(), a)))
+        })
+        .collect();
+    let planes_truth: Vec<(vect3d, f64)> = (0..8)
+        .map(|k| {
+            let a = std::f64::consts::PI * k as f64 / 4.0;
+            let nrm = vect3d::new(a.cos(), a.sin(), 0.3 * (k as f64 - 3.5) / 3.5);
+            (nrm * (1.0 / (nrm * nrm).sqrt()), -6.0 - 0.5 * k as f64)
+        })
+        .collect();
+    let mut poses = refs::Vec::new();
+    for (k, (t, r)) in truth.iter().enumerate() {
+        let off = if k == 0 { 0.0 } else { 1.0 };
+        let dr = matrix3d::rotation_from_euler_angles(vect3d::new(0.02 * rng.uniform(), 0.02 * rng.uniform(), 0.02 * rng.uniform()) * off);
+        let tt = *t + vect3d::new(0.05 * rng.uniform(), 0.05 * rng.uniform(), 0.05 * rng.uniform()) * off;
+        let mut r2w = arael::transform::TransformParam::new(tt, quatern::from_rotation_matrix(*r * dr));
+        if k == 0 {
+            r2w = arael::transform::TransformParam::fixed(tt, quatern::from_rotation_matrix(*r));
+        }
+        if k == 3 {
+            r2w.optimize_rotation = false;
+        }
+        poses.push(PoseT { r2w, hb: SelfBlock::new() });
+    }
+    let mut planes = refs::Vec::new();
+    for (k, (nrm, c)) in planes_truth.iter().enumerate() {
+        let moved = *nrm + vect3d::new(0.02 * rng.uniform(), 0.02 * rng.uniform(), 0.02 * rng.uniform());
+        let n = if k == 5 { arael::unitvec::UnitVecParam::fixed(*nrm) } else { arael::unitvec::UnitVecParam::new(moved) };
+        planes.push(PlaneT { n, c: Param::new(c + 0.05 * rng.uniform()), hb: SelfBlock::new() });
+    }
+    let mut odos = std::vec::Vec::new();
+    for k in 1..n {
+        let ((ta, ra), (tb, rb)) = (truth[k - 1], truth[k]);
+        let noise = matrix3d::rotation_from_euler_angles(vect3d::new(0.002 * rng.uniform(), 0.002 * rng.uniform(), 0.002 * rng.uniform()));
+        odos.push(OdoT {
+            a: poses.ref_at(k - 1),
+            b: poses.ref_at(k),
+            measured_translation: ra.transpose() * (tb - ta) + vect3d::new(0.005 * rng.uniform(), 0.005 * rng.uniform(), 0.005 * rng.uniform()),
+            measured_rotation_transposed: (ra.transpose() * rb * noise).transpose(),
+            wt: 20.0,
+            wr: 50.0,
+            hb: CrossBlock::new(),
+        });
+    }
+    let mut obs = std::vec::Vec::new();
+    for (k, (t, r)) in truth.iter().enumerate() {
+        for (j, (nrm, c)) in planes_truth.iter().enumerate() {
+            let nl = r.transpose() * *nrm + vect3d::new(0.003 * rng.uniform(), 0.003 * rng.uniform(), 0.003 * rng.uniform());
+            obs.push(ObsT {
+                p: poses.ref_at(k),
+                l: planes.ref_at(j),
+                measured_normal: nl * (1.0 / (nl * nl).sqrt()),
+                measured_c: c + *t * *nrm + 0.01 * rng.uniform(),
+                wa: 30.0,
+                wd: 10.0,
+                hb: CrossBlock::new(),
+            });
+        }
+    }
+    WorldT { poses, planes, odos, obs }
+}
+
+/// The plane model assembles on the device as on the CPU, the poses' and
+/// the normals' references kept there, and solves there to the CPU's
+/// optimum, the model where the CPU leaves it.
+#[test]
+fn a_plane_world_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = plane_world(30, 9);
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let state = |s: &WorldT| -> Vec<f64> {
+        let mut v = Vec::new();
+        for p in s.poses.iter() {
+            let (t, q) = (p.r2w.translation, p.r2w.rotation);
+            v.extend([t.x, t.y, t.z, q.t, q.v.x, q.v.y, q.v.z]);
+        }
+        for l in s.planes.iter() {
+            v.extend([l.n.unit.x, l.n.unit.y, l.n.unit.z, l.c.value]);
+        }
+        v
+    };
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = plane_world(30, 9);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        s.deserialize(&r.x);
+        (r.start_cost, r.end_cost, r.iterations, state(&s))
+    };
+    let (start, cpu, iters, cpu_state) = run(None);
+    assert!(cpu < 0.05 * start && iters > 2, "the world converges to its noise: {start} to {cpu} in {iters} iterations");
+    for d in devices() {
+        let (_, device, _, st) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+        assert_close(&st, &cpu_state, 1e-7, &format!("{}: the solved model", label(&d)));
+    }
 }

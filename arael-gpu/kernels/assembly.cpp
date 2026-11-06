@@ -147,9 +147,9 @@ KERNEL_THREADS(256) void k_euler_values(GLOBAL const W* RESTRICT refr, GLOBAL co
 
 // One Euler-angle rotation per thread with its three derivatives
 // R_ref dR(delta)/d delta_k in F (drot, k-major): what a linearization reads.
-KERNEL_THREADS(256) void k_euler_rotations(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
-                                           GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
-                                           GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot, u32 n) {
+KERNEL_THREADS(256) void k_euler_derivatives(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                             GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
+                                             GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
     u32 a = at[e];
@@ -214,19 +214,29 @@ DEVICE void quat_matrix(GLOBAL const W* RESTRICT q, W* m) {
     m[8] = one - two * (x * x + y * y);
 }
 
-// The composed rotation R(q_ref) R(v) of one QuaternionParam entity, in W
-// (rot_wide) and F (rot), from its reference quaternion qref (w, x, y, z)
-// and its rotation-vector step v (three values of ev at a). R(v) is
+// m v, m row-major.
+DEVICE void mat_vec(const W* m, const W* v, W* out) {
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) out[i] = m[i * 3] * v[0] + m[i * 3 + 1] * v[1] + m[i * 3 + 2] * v[2];
+}
+
+// a x b.
+DEVICE void cross3(const W* a, const W* b, W* c) {
+    c[0] = a[1] * b[2] - a[2] * b[1];
+    c[1] = a[2] * b[0] - a[0] * b[2];
+    c[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+// m R(v) in W (wide) and F (val), 9 values each, and with DERIVS
+// m dR(v)/dv_k in F (der, 27 values, k-major). R(v) is
 // matrix3::from_rotation_vector_small: with (x, y, z) = v / 2 and
-// s = 2 / (1 + x^2 + y^2 + z^2), R(v) = I + s A. With DERIVS also
-// R(q_ref) dR(v)/dv_k = R(q_ref) (s dA/dk - k s^2 A) / 2 in F (drot, k-major).
+// s = 2 / (1 + x^2 + y^2 + z^2), R(v) = I + s A and
+// dR/dv_k = (s dA/dk - k s^2 A) / 2.
 template <bool DERIVS>
-DEVICE void quat_compose(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT ev, u32 a, u32 e,
-                         GLOBAL W* RESTRICT rot_wide, GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot) {
-    W m[9];
-    quat_matrix(qref + e * 4, m);
+DEVICE void rotvec_apply(const W* m, W vx, W vy, W vz, GLOBAL W* RESTRICT wide, GLOBAL F* RESTRICT val,
+                         GLOBAL F* RESTRICT der) {
     W half = 0.5f, one = 1.0f, two = 2.0f, zero = 0.0f;
-    W x = (W)ev[a] * half, y = (W)ev[a + 1] * half, z = (W)ev[a + 2] * half;
+    W x = vx * half, y = vy * half, z = vz * half;
     W s = two / (one + x * x + y * y + z * z);
     W A[9] = {-(y * y + z * z), x * y - z, x * z + y,
               x * y + z, -(x * x + z * z), y * z - x,
@@ -237,7 +247,6 @@ DEVICE void quat_compose(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT
     d[0] += one;
     d[4] += one;
     d[8] += one;
-    u32 r0 = e * 9;
 #pragma unroll
     for (u32 i = 0; i < 3; i++) {
 #pragma unroll
@@ -245,8 +254,8 @@ DEVICE void quat_compose(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT
             W v = 0.0f;
 #pragma unroll
             for (u32 k = 0; k < 3; k++) v += m[i * 3 + k] * d[k * 3 + j];
-            rot_wide[r0 + i * 3 + j] = v;
-            rot[r0 + i * 3 + j] = (F)v;
+            wide[i * 3 + j] = v;
+            val[i * 3 + j] = (F)v;
         }
     }
     if (!DERIVS) return;
@@ -257,7 +266,6 @@ DEVICE void quat_compose(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT
                 m2z, m1, x, one, m2z, y, x, y, zero};
     W kv[3] = {x, y, z};
     W sh = s * half, s2h = s * s * half;
-    u32 q0 = e * 27;
 #pragma unroll
     for (u32 c = 0; c < 3; c++) {
         W dd[9];
@@ -270,46 +278,23 @@ DEVICE void quat_compose(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT
                 W v = 0.0f;
 #pragma unroll
                 for (u32 k = 0; k < 3; k++) v += m[i * 3 + k] * dd[k * 3 + j];
-                drot[q0 + c * 9 + i * 3 + j] = (F)v;
+                der[c * 9 + i * 3 + j] = (F)v;
             }
         }
     }
 }
 
-// One QuaternionParam rotation per thread, values only.
-KERNEL_THREADS(256) void k_quat_values(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT ev,
-                                       GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
-                                       GLOBAL F* RESTRICT rot, u32 n) {
-    u32 e = global_x();
-    if (e >= n) return;
-    quat_compose<false>(qref, ev, at[e], e, rot_wide, rot, rot);
-}
-
-// One QuaternionParam rotation per thread with its three derivatives.
-KERNEL_THREADS(256) void k_quat_rotations(GLOBAL const W* RESTRICT qref, GLOBAL const F* RESTRICT ev,
-                                          GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT rot_wide,
-                                          GLOBAL F* RESTRICT rot, GLOBAL F* RESTRICT drot, u32 n) {
-    u32 e = global_x();
-    if (e >= n) return;
-    quat_compose<true>(qref, ev, at[e], e, rot_wide, rot, drot);
-}
-
-// The reference quaternions moved by their steps, one thread per entity:
-// q_ref = unit(q_ref unit(1, v / 2)), as QuaternionParam::advance does
-// after an accepted step.
-KERNEL_THREADS(256) void k_quat_advance(GLOBAL W* RESTRICT qref, GLOBAL const F* RESTRICT ev,
-                                        GLOBAL const u32* RESTRICT at, u32 n) {
-    u32 e = global_x();
-    if (e >= n) return;
-    u32 a = at[e];
+// q = unit(q unit(1, v / 2)): a reference quaternion moved by a
+// rotation-vector step, as QuaternionParam::advance and the components'
+// updates do.
+DEVICE void quat_advance(GLOBAL W* RESTRICT q, W vx, W vy, W vz) {
     W half = 0.5f, one = 1.0f;
-    W sx = (W)ev[a] * half, sy = (W)ev[a + 1] * half, sz = (W)ev[a + 2] * half;
+    W sx = vx * half, sy = vy * half, sz = vz * half;
     W inv = one / sqrt(one + sx * sx + sy * sy + sz * sz);
     W sw = inv;
     sx *= inv;
     sy *= inv;
     sz *= inv;
-    GLOBAL W* q = qref + e * 4;
     W w = q[0], x = q[1], y = q[2], z = q[3];
     W nw = w * sw - (x * sx + y * sy + z * sz);
     W nx = sx * w + x * sw + (y * sz - z * sy);
@@ -322,22 +307,217 @@ KERNEL_THREADS(256) void k_quat_advance(GLOBAL W* RESTRICT qref, GLOBAL const F*
     q[3] = nz * r;
 }
 
+// A QuaternionParam: its reference a unit quaternion (4 values), its step
+// a rotation vector, its values R(q_ref) R(v) (9) and their derivatives
+// (27).
+KERNEL_THREADS(256) void k_quat_values(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                       GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                       GLOBAL F* RESTRICT val, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    W m[9];
+    quat_matrix(refr + e * 4, m);
+    rotvec_apply<false>(m, (W)ev[a], (W)ev[a + 1], (W)ev[a + 2], wide + e * 9, val + e * 9, val);
+}
+
+KERNEL_THREADS(256) void k_quat_derivatives(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                            GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                            GLOBAL F* RESTRICT val, GLOBAL F* RESTRICT der, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    W m[9];
+    quat_matrix(refr + e * 4, m);
+    rotvec_apply<true>(m, (W)ev[a], (W)ev[a + 1], (W)ev[a + 2], wide + e * 9, val + e * 9, der + e * 27);
+}
+
+KERNEL_THREADS(256) void k_quat_advance(GLOBAL W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                        GLOBAL const u32* RESTRICT at, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    quat_advance(refr + e * 4, (W)ev[a], (W)ev[a + 1], (W)ev[a + 2]);
+}
+
+// carry(w, d) = d + (w x d) / 2 + (w x (w x d)) / 6, the translation of a
+// twist step (crate::twist::carry).
+DEVICE void carry3(const W* w, const W* d, W* t) {
+    W half = 0.5f, sixth = (W)1.0f / (W)6.0f;
+    W wd[3], wwd[3];
+    cross3(w, d, wd);
+    cross3(w, wd, wwd);
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) t[i] = d[i] + wd[i] * half + wwd[i] * sixth;
+}
+
+// A TransformParam, as TransformParam::__precompute_symbolic: its reference
+// the rotation's unit quaternion and the translation (7 values), its step
+// w (rotation vector) then d (translation rate); its values the rotation
+// R(q_ref) R(w) and the translation t_ref + R(q_ref) carry(w, d) (12), its
+// derivatives the rotation's by w (27), the translation's by d (9) and by
+// w (9), k-major.
+template <bool DERIVS>
+DEVICE void transform_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev, u32 a, u32 e,
+                              GLOBAL W* RESTRICT wide, GLOBAL F* RESTRICT val, GLOBAL F* RESTRICT der) {
+    GLOBAL const W* r = refr + e * 7;
+    W m[9];
+    quat_matrix(r, m);
+    W w[3] = {(W)ev[a], (W)ev[a + 1], (W)ev[a + 2]};
+    W d[3] = {(W)ev[a + 3], (W)ev[a + 4], (W)ev[a + 5]};
+    GLOBAL W* ow = wide + e * 12;
+    GLOBAL F* ov = val + e * 12;
+    GLOBAL F* od = der + e * 45;
+    rotvec_apply<DERIVS>(m, w[0], w[1], w[2], ow, ov, od);
+    W c[3], mc[3];
+    carry3(w, d, c);
+    mat_vec(m, c, mc);
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) {
+        W t = r[4 + i] + mc[i];
+        ow[9 + i] = t;
+        ov[9 + i] = (F)t;
+    }
+    if (!DERIVS) return;
+    W half = 0.5f, sixth = (W)1.0f / (W)6.0f, zero = 0.0f, one = 1.0f;
+    W wd[3];
+    cross3(w, d, wd);
+#pragma unroll
+    for (u32 k = 0; k < 3; k++) {
+        W ek[3] = {k == 0 ? one : zero, k == 1 ? one : zero, k == 2 ? one : zero};
+        // d(carry)/dd_k = carry(w, e_k)
+        W t[3], mt[3];
+        carry3(w, ek, t);
+        mat_vec(m, t, mt);
+#pragma unroll
+        for (u32 i = 0; i < 3; i++) od[27 + k * 3 + i] = (F)mt[i];
+        // d(carry)/dw_k = (e_k x d) / 2 + (e_k x (w x d) + w x (e_k x d)) / 6
+        W ed[3], ewd[3], wed[3];
+        cross3(ek, d, ed);
+        cross3(ek, wd, ewd);
+        cross3(w, ed, wed);
+#pragma unroll
+        for (u32 i = 0; i < 3; i++) t[i] = ed[i] * half + (ewd[i] + wed[i]) * sixth;
+        mat_vec(m, t, mt);
+#pragma unroll
+        for (u32 i = 0; i < 3; i++) od[36 + k * 3 + i] = (F)mt[i];
+    }
+}
+
+KERNEL_THREADS(256) void k_transform_values(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                            GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                            GLOBAL F* RESTRICT val, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    transform_compose<false>(refr, ev, at[e], e, wide, val, val);
+}
+
+KERNEL_THREADS(256) void k_transform_derivatives(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                                 GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                                 GLOBAL F* RESTRICT val, GLOBAL F* RESTRICT der, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    transform_compose<true>(refr, ev, at[e], e, wide, val, der);
+}
+
+// The reference moved by the step, as TransformParam's update: the
+// translation by R(q_ref) carry(w, d) (the rotation before the move), then
+// the rotation by w.
+KERNEL_THREADS(256) void k_transform_advance(GLOBAL W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                             GLOBAL const u32* RESTRICT at, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    GLOBAL W* r = refr + e * 7;
+    W m[9];
+    quat_matrix(r, m);
+    W w[3] = {(W)ev[a], (W)ev[a + 1], (W)ev[a + 2]};
+    W d[3] = {(W)ev[a + 3], (W)ev[a + 4], (W)ev[a + 5]};
+    W c[3], mc[3];
+    carry3(w, d, c);
+    mat_vec(m, c, mc);
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) r[4 + i] += mc[i];
+    quat_advance(r, w[0], w[1], w[2]);
+}
+
+// A UnitVecParam, as UnitVecParam::__precompute_symbolic: its reference a
+// unit quaternion (4 values), its step d (2), its value the direction
+// R(q_ref) local(d) (3) with local(d) = (1 - u / (2 s2), d.y / s2,
+// -d.x / s2), u = |d|^2 and s2 = 1 + u / 4, its derivatives by d.x and d.y
+// (6).
+template <bool DERIVS>
+DEVICE void unitvec_compose(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev, u32 a, u32 e,
+                            GLOBAL W* RESTRICT wide, GLOBAL F* RESTRICT val, GLOBAL F* RESTRICT der) {
+    W m[9];
+    quat_matrix(refr + e * 4, m);
+    W dx = (W)ev[a], dy = (W)ev[a + 1];
+    W one = 1.0f, two = 2.0f, quarter = 0.25f, half = 0.5f;
+    W u = dx * dx + dy * dy;
+    W s2 = one + u * quarter;
+    W local[3] = {one - u / (two * s2), dy / s2, -dx / s2};
+    W o[3];
+    mat_vec(m, local, o);
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) {
+        wide[e * 3 + i] = o[i];
+        val[e * 3 + i] = (F)o[i];
+    }
+    if (!DERIVS) return;
+    W inv2 = one / (s2 * s2);
+    W lx[3] = {-dx * inv2, -(dx * dy * half) * inv2, -(s2 - dx * dx * half) * inv2};
+    W ly[3] = {-dy * inv2, (s2 - dy * dy * half) * inv2, (dx * dy * half) * inv2};
+    W ox[3], oy[3];
+    mat_vec(m, lx, ox);
+    mat_vec(m, ly, oy);
+#pragma unroll
+    for (u32 i = 0; i < 3; i++) {
+        der[e * 6 + i] = (F)ox[i];
+        der[e * 6 + 3 + i] = (F)oy[i];
+    }
+}
+
+KERNEL_THREADS(256) void k_unitvec_values(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                          GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                          GLOBAL F* RESTRICT val, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    unitvec_compose<false>(refr, ev, at[e], e, wide, val, val);
+}
+
+KERNEL_THREADS(256) void k_unitvec_derivatives(GLOBAL const W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                               GLOBAL const u32* RESTRICT at, GLOBAL W* RESTRICT wide,
+                                               GLOBAL F* RESTRICT val, GLOBAL F* RESTRICT der, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    unitvec_compose<true>(refr, ev, at[e], e, wide, val, der);
+}
+
+// The reference moved by the step, as UnitVecParam's update: q_ref by the
+// rotation vector (0, d.x, d.y).
+KERNEL_THREADS(256) void k_unitvec_advance(GLOBAL W* RESTRICT refr, GLOBAL const F* RESTRICT ev,
+                                           GLOBAL const u32* RESTRICT at, u32 n) {
+    u32 e = global_x();
+    if (e >= n) return;
+    u32 a = at[e];
+    quat_advance(refr + e * 4, (W)0.0f, (W)ev[a], (W)ev[a + 1]);
+}
+
 // n values of x zeroed: an assembly's targets before the sums add into them.
 KERNEL_THREADS(256) void k_zero_wide(GLOBAL W* RESTRICT x, u32 n) {
     u32 i = global_x();
     if (i < n) x[i] = 0.0f;
 }
 
-// The rotation steps of x zeroed, one thread per entity: the three global
-// indices at idx[at[e]..], a fixed one left alone; what re-centring does to
-// the parameters after an accepted step.
+// The steps of x zeroed, one thread per entity: the len global indices at
+// idx[at[e]..], a fixed one left alone; what re-centring does to the
+// parameters after an accepted step.
 KERNEL_THREADS(256) void k_zero_steps(GLOBAL W* RESTRICT x, GLOBAL const u32* RESTRICT idx,
-                                      GLOBAL const u32* RESTRICT at, u32 n) {
+                                      GLOBAL const u32* RESTRICT at, u32 len, u32 n) {
     u32 e = global_x();
     if (e >= n) return;
     u32 a = at[e];
-#pragma unroll
-    for (u32 k = 0; k < 3; k++) {
+    for (u32 k = 0; k < len; k++) {
         u32 g = idx[a + k];
         if (g != FIXED) x[g] = 0.0f;
     }

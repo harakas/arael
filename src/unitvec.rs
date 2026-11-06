@@ -101,6 +101,15 @@ where
         self.rot = self.ref_q.rotation_matrix();
     }
 
+    /// The reference quaternion (w, x, y, z) in f64: what the device
+    /// assembly's pack walk reads.
+    #[doc(hidden)]
+    pub fn __reference_quaternion(&self) -> [f64; 4] {
+        let f = |v: T| v.to_f64().unwrap();
+        let q = self.ref_q;
+        [f(q.t), f(q.v.x), f(q.v.y), f(q.v.z)]
+    }
+
     /// The hand-written twin of the generated symbolic precompute: the
     /// chart embed at the current delta into `unit`, and its Jacobian into
     /// `unit_d` (skipped while the delta has no slot -- nothing reads it
@@ -232,6 +241,14 @@ where
         if self.d.index() != u32::MAX {
             let i = self.d.index() as usize;
             ParamType::write_to(&self.d.value, &mut params[i..i + 2]);
+        }
+    }
+
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<crate::model::Reference>) {
+        if self.d.index() != u32::MAX && let Some(r) = refs(self.d.index()) {
+            self.ref_q = r.quaternion();
+            self.refresh();
+            self.d.value = vect2::new(T::zero(), T::zero());
         }
     }
 }

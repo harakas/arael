@@ -899,9 +899,10 @@ A root gets these kernels when its every
 constraint has a device form (today: constraints of the root's
 collections over one entity or two, reached through refs, and an
 entity's constraints on itself, without a loss or an index `select`,
-over Euler-angle rotations, `QuaternionParam` rotations and
-`AngleParam` headings; a guard only on an entity's constraint on
-itself, reading the entity's data fields);
+over Euler-angle and `QuaternionParam` rotations, `TransformParam`
+poses, `UnitVecParam` directions and `AngleParam` headings; a guard
+only on an entity's constraint on itself, reading the entity's data
+fields);
 `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
