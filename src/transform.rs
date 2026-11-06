@@ -673,6 +673,16 @@ where
         self.ref_rotation = self.ref_value.rotation_matrix();
     }
 
+    /// The pose's reference in f64, as `TransformParam`'s: the rotation's
+    /// unit quaternion (w, x, y, z), then the translation; what the device
+    /// assembly's values walk reads.
+    #[doc(hidden)]
+    pub fn __reference(&self) -> [f64; 7] {
+        let f = |v: T| v.to_f64().unwrap();
+        let (q, t) = (self.ref_value, self.ref_translation);
+        [f(q.t), f(q.v.x), f(q.v.y), f(q.v.z), f(t.x), f(t.y), f(t.z)]
+    }
+
     /// The hand-written twin of the generated symbolic precompute: the
     /// pose caches as in [`TransformParam`], plus the scale.
     #[doc(hidden)]
@@ -821,6 +831,19 @@ where
                 let i = p.index() as usize;
                 ParamType::write_to(&p.value, &mut params[i..i + 3]);
             }
+        }
+    }
+
+    // The pose's reference as TransformParam's; log_s is absolute and
+    // has none.
+    fn set_references(&mut self, refs: &mut dyn FnMut(u32) -> Option<crate::model::Reference>) {
+        let key = [self.w.index(), self.d.index()].into_iter().find(|&i| i != u32::MAX);
+        if let Some(r) = key.and_then(&mut *refs) {
+            (self.ref_value, self.ref_translation) = r.transform();
+            self.refresh();
+            let zero = vect3::new(T::zero(), T::zero(), T::zero());
+            self.w.value = zero;
+            self.d.value = zero;
         }
     }
 }

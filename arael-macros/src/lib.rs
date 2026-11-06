@@ -163,6 +163,9 @@ struct SymLayout {
     /// Declared Jacobian caches, filled by the symbolic precompute and read
     /// by constraint Jacobians in place of the re-derived expression.
     deriv_fields: Vec<(String, String, String)>,
+    /// `#[arael(compute = <expr>)]` fields: data Rust code reassigns on
+    /// every update, which a body reads as a value (the device cannot).
+    compute_fields: Vec<String>,
     /// Atom-cached symbolic fields: `(field, by_param, [(atom_expr, cache_field)])`.
     /// The computed `field` is not stored; instead named sub-expressions of it
     /// (its "atoms", e.g. `sin(angle)`, `cos(angle)`) are precomputed into
@@ -1513,6 +1516,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
     let mut symbolic_fields_reg: Vec<(String, String)> = Vec::new();
     // (deriv field name, of = symbolic field, by = param field)
     let mut deriv_fields_reg: Vec<(String, String, String)> = Vec::new();
+    let mut compute_fields_reg: Vec<String> = Vec::new();
     // (field, wrapper, held) -- unrecognized generic wrappers naming a
     // not-yet-registered type; fires if the type registers later.
     let mut suspect_wrappers_reg: Vec<(String, String, String)> = Vec::new();
@@ -1555,6 +1559,11 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
                     // The field stays an ordinary data field (classified
                     // below); only its body-read meaning changes.
                     symbolic_fields_reg.push((field_name.clone(), expr_tokens.to_string()));
+                }
+                AraelAttr::Compute(_) => {
+                    // An ordinary data field too, reassigned by Rust code
+                    // on every update.
+                    compute_fields_reg.push(field_name.clone());
                 }
                 AraelAttr::Deriv { of, by } => {
                     // A declared Jacobian cache: plain storage to the
@@ -1782,6 +1791,7 @@ fn register_model_layout(input: &syn::DeriveInput, site: Option<(String, u32)>) 
         universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
         symbolic_fields: symbolic_fields_reg,
         deriv_fields: deriv_fields_reg,
+        compute_fields: compute_fields_reg,
         atom_cached_fields: Vec::new(),
         component: is_component,
         constraint_index_field: constraint_index_field_reg,

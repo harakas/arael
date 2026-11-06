@@ -22,14 +22,17 @@
 //! by `sqrt(rho'(s))`, as the CPU's Jacobian rows are. Over referenced fields
 //! (`SimpleEulerAngleParam` angles, computed and never re-centred; Euler-angle
 //! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
-//! directions, whose references the device keeps and moves), atom caches
-//! (an `AngleParam`'s sin and cos, computed in the kernel from the angle)
-//! and `f32` or `f64` roots. Index selects print as C++ `switch`es (an
-//! integer or `bool` index leaf written into its float column, exact for
-//! any arm). A constraint has no device form when its rows write `coo`
-//! pairs, or when it reads a leaf that follows the parameters and that the
-//! device does not compute (a `ScaledTransformParam`'s scale); its root
-//! then assembles on the CPU.
+//! directions, whose references the device keeps and moves; a
+//! `ScaledTransformParam`'s pose as a transform's), caches of `symbolic =`
+//! and `deriv =` fields (an `AngleParam`'s sin and cos, a scale
+//! `exp(log_s)`, a user component's values), computed in the kernel from
+//! their expressions when those read parameters alone, and `f32` or `f64`
+//! roots. Index selects print as C++ `switch`es (an integer or `bool`
+//! index leaf written into its float column, exact for any arm). A
+//! constraint has no device form when its rows write `coo` pairs, or when
+//! it reads a leaf that follows the parameters and that the device does not
+//! compute (a cache over data a component's update moves, a `compute =`
+//! field); its root then assembles on the CPU.
 
 use std::collections::BTreeSet;
 
@@ -146,7 +149,9 @@ impl RefKind {
         }
         match l.fields.iter().find(|(f, _)| f == field)? {
             (_, crate::SymFieldType::Struct(t)) => match t.as_str() {
-                "TransformParam" | "TransformParamF" => Some(RefKind::Transform),
+                // a scaled transform's pose is a transform's, its scale an
+                // absolute parameter the atom caches compute
+                "TransformParam" | "TransformParamF" | "ScaledTransformParam" | "ScaledTransformParamF" => Some(RefKind::Transform),
                 "UnitVecParam" | "UnitVecParamF" => Some(RefKind::UnitVec),
                 _ => None,
             },
@@ -313,15 +318,31 @@ fn parameter_field(ty: &str, field: &str) -> bool {
     })
 }
 
+/// True if `field` of the registered type `ty` is a `compute =` field: data
+/// Rust code reassigns on every update.
+fn compute_field(ty: &str, field: &str) -> bool {
+    crate::registry_lookup(ty).is_some_and(|l| l.compute_fields.iter().any(|f| f == field))
+}
+
 /// Why the device cannot pack `s` as data: it reads a parameter field of
 /// one of the entities, or a component of parameters, other than through
-/// the leaves the device computes (the parameters, the referenced fields' caches, the atom
-/// caches), so it would hold the value the solve started from.
-fn parameter_state(s: &str, sides: &[DevSide]) -> Option<String> {
+/// the leaves the device computes (the parameters, the referenced fields'
+/// caches, the atom caches), or a `compute =` field of an entity or of the
+/// root (`root_var` of type `root_ty`), so it would hold the value the
+/// solve started from.
+fn parameter_state(s: &str, sides: &[DevSide], (root_var, root_ty): (&str, &str)) -> Option<String> {
     let (var, rest) = s.split_once('.')?;
-    let side = sides.iter().find(|sd| sd.var == var)?;
     let field = rest.split(['.', '[']).next()?;
-    parameter_field(&side.ty, field)
+    let side = sides.iter().find(|sd| sd.var == var);
+    let ty = match side {
+        Some(side) => side.ty.as_str(),
+        None if var == root_var => root_ty,
+        None => return None,
+    };
+    if compute_field(ty, field) {
+        return Some(format!("the device reads `{s}`, a `compute =` field Rust code reassigns as the parameters move, without computing it"));
+    }
+    (side.is_some() && parameter_field(ty, field))
         .then(|| format!("the device reads `{s}`, which follows the parameters of `{var}.{field}`, without computing it"))
 }
 
@@ -374,7 +395,7 @@ pub(crate) fn device_constraint(
     cost: (&[Intermediate], &[E]),
     loss: Option<&DevLoss>,
     atoms: &[(String, E)],
-    root_var: &str,
+    (root_var, root_ty): (&str, &str),
 ) -> Result<DevConstraint, String> {
     if ft != "f32" && ft != "f64" {
         return Err(format!("a root of `{ft}` has no device assembly"));
@@ -403,8 +424,14 @@ pub(crate) fn device_constraint(
         syms_of_inters(&l.cost.0, &mut cost_syms);
         syms_of(&l.cost.1, &mut cost_syms);
     }
-    // a kernel computing an atom reads its parameters
-    let atom = |s: &str| atoms.iter().find(|(c, _)| c == s).map(|(_, e)| e);
+    // a kernel computing an atom reads its parameters; a referenced field's
+    // cache (a transform's pose) is the reference kind's, not an atom
+    let atom = |s: &str| {
+        if reference_leaf(s, &sides).is_some() {
+            return None;
+        }
+        atoms.iter().find(|(c, _)| c == s).map(|(_, e)| e)
+    };
     for syms in [&mut gh_syms, &mut cost_syms] {
         let used: Vec<&E> = syms.iter().filter_map(|s| atom(s)).collect();
         let mut more = BTreeSet::new();
@@ -422,7 +449,10 @@ pub(crate) fn device_constraint(
     for s in all {
         let l = if let Some(e) = atom(s) {
             if let Some(d) = e.symbols().into_iter().find(|d| param(d).is_none()) {
-                return Err(format!("the atom cache `{s}` reads `{d}`, not a parameter of the constraint's entities"));
+                return Err(format!(
+                    "the cache `{s}` is computed from `{d}`, not a parameter of the constraint's entities \
+                     (the device computes caches over parameters alone, not data a component's update may move)"
+                ));
             }
             Leaf::Atom(e.clone())
         } else if let Some((side, p)) = param(s) {
@@ -447,7 +477,7 @@ pub(crate) fn device_constraint(
             };
             Leaf::Ref(r, col, off)
         } else {
-            if let Some(why) = parameter_state(s, &sides) {
+            if let Some(why) = parameter_state(s, &sides, (root_var, root_ty)) {
                 return Err(why);
             }
             let (var, path) = s.split_once('.').unwrap_or((s.as_str(), ""));

@@ -3165,10 +3165,16 @@ fn register_bindings_body(
                             wrapped.push(ce);
                         }
                     } else {
+                        // The field's value components and its declared
+                        // derivative caches read as their stored fields;
+                        // each is recorded with its defining expression,
+                        // which the device computes in its kernel when the
+                        // expression reads parameters alone.
                         for (suffix, e) in &comps {
                             let ce = arael_sym::cached(e.clone());
-                            ctx.subs.push((ce.clone(), arael_sym::symbol(
-                                &format!("{}.{}{}", sym_prefix, fname, suffix))));
+                            let cache = format!("{}.{}{}", sym_prefix, fname, suffix);
+                            ctx.atom_caches.push((cache.clone(), e.clone()));
+                            ctx.subs.push((ce.clone(), arael_sym::symbol(&cache)));
                             wrapped.push(ce);
                         }
                         for (dfield, of, by) in &layout.deriv_fields {
@@ -3176,10 +3182,10 @@ fn register_bindings_body(
                             let dvars = dvars_for(by)?;
                             for (k, dvar) in dvars.iter().enumerate() {
                                 for (suffix, e) in &comps {
-                                    ctx.subs.push((
-                                        arael_sym::cached(e.diff(dvar.as_str())),
-                                        arael_sym::symbol(&format!("{}.{}[{}]{}",
-                                            sym_prefix, dfield, k, suffix))));
+                                    let de = e.diff(dvar.as_str());
+                                    let cache = format!("{}.{}[{}]{}", sym_prefix, dfield, k, suffix);
+                                    ctx.atom_caches.push((cache.clone(), de.clone()));
+                                    ctx.subs.push((arael_sym::cached(de), arael_sym::symbol(&cache)));
                                 }
                             }
                         }
@@ -7946,7 +7952,7 @@ pub fn generate_root_methods(
                     (&cost_intermediates, &cost_simplified),
                     device_loss.as_ref(),
                     &atom_caches,
-                    &root_var_name,
+                    (&root_var_name, &root_name.to_string()),
                 )?;
                 dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
                 Ok((dc, key, crate::device::DevGroup { walk: Box::new(walk) }))

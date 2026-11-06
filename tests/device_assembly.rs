@@ -2823,29 +2823,296 @@ fn index_selects_assemble_and_solve_on_the_device_as_on_the_cpu() {
     assembles_and_solves_as_on_the_cpu(sel_world, "index selects");
 }
 
-/// A scale prior reading a `ScaledTransformParam`'s scale, which the CPU
-/// computes per iteration from the parameters and the device does not
-/// compute.
+/// A component whose value follows a reference its `update` moves after
+/// every accepted step (`ref_c`), which the device cannot run: its caches
+/// are computed from data, not from parameters alone.
 #[arael::model]
-#[arael(constraint(hb, { [scaled.s.scale_factor - 2.0] }))]
+#[arael(component)]
 #[derive(Clone)]
-pub struct Scaled {
-    pub s: arael::transform::ScaledTransformParam,
-    pub hb: SelfBlock<Scaled>,
+pub struct Moved {
+    pub ref_c: f64,
+    pub d: Param<f64>,
+    #[arael(symbolic = ref_c + d)]
+    pub c: f64,
+}
+
+impl arael::model::Component for Moved {
+    fn start(&mut self) {
+        self.ref_c = self.c;
+        self.d.value = 0.0;
+    }
+    fn update(&mut self) {
+        self.ref_c += self.d.value;
+        self.d.value = 0.0;
+    }
+    fn finish(&mut self) {
+        self.c = self.ref_c + self.d.value;
+    }
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [movedholder.m.c - 2.0] }))]
+#[derive(Clone)]
+pub struct MovedHolder {
+    pub m: Moved,
+    pub hb: SelfBlock<MovedHolder>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
-pub struct ScaledRoot {
-    pub items: refs::Vec<Scaled>,
+pub struct MovedRoot {
+    pub items: refs::Vec<MovedHolder>,
+}
+
+/// A `compute =` field read by a body: Rust code reassigns it on every
+/// update, which the device cannot run.
+#[arael::model]
+#[arael(constraint(hb, { [computed.c - 1.0] }))]
+#[derive(Clone)]
+pub struct Computed {
+    pub w: Param<f64>,
+    #[arael(compute = w.exp())]
+    pub c: f64,
+    pub hb: SelfBlock<Computed>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct ComputedRoot {
+    pub items: refs::Vec<Computed>,
 }
 
 #[test]
 fn a_constraint_reading_state_the_device_does_not_compute_has_no_device_form() {
-    let s = ScaledRoot { items: refs::Vec::new() };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a read of the scale has no device form");
-    assert!(why.contains("Scaled") && why.contains("scaled.s"), "{why}");
+    let s = MovedRoot { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a cache over moved data has no device form");
+    assert!(why.contains("MovedHolder") && why.contains("m.c") && why.contains("m.ref_c"), "{why}");
+    let s = ComputedRoot { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a `compute =` field has no device form");
+    assert!(why.contains("Computed") && why.contains("computed.c") && why.contains("compute ="), "{why}");
+}
+
+/// A Sim(3) pose (`ScaledTransformParam`): its pose a transform's reference
+/// kind, its scale `exp(log_s)` a cache over an absolute parameter. Three
+/// known points seen from it.
+#[arael::model]
+#[arael(constraint(hb, {
+    let r = simpose.stp.rotation_matrix;
+    let t = simpose.stp.translation;
+    let s = simpose.stp.scale_factor;
+    let p1 = r * simpose.x1 * s + t;
+    let p2 = r * simpose.x2 * s + t;
+    let p3 = r * simpose.x3 * s + t;
+    [p1.x - simpose.m1.x, p1.y - simpose.m1.y, p1.z - simpose.m1.z,
+     p2.x - simpose.m2.x, p2.y - simpose.m2.y, p2.z - simpose.m2.z,
+     p3.x - simpose.m3.x, p3.y - simpose.m3.y, p3.z - simpose.m3.z]
+}))]
+#[derive(Clone)]
+pub struct SimPose {
+    pub stp: arael::transform::ScaledTransformParam<f64>,
+    pub x1: vect3<f64>,
+    pub x2: vect3<f64>,
+    pub x3: vect3<f64>,
+    pub m1: vect3<f64>,
+    pub m2: vect3<f64>,
+    pub m3: vect3<f64>,
+    pub hb: SelfBlock<SimPose>,
+}
+
+/// The relative translation, rotation and log scale between two Sim(3)
+/// poses.
+#[arael::model]
+#[arael(constraint(hb, {
+    let ra = a.stp.rotation_matrix;
+    let dt = ra.transpose() * (b.stp.translation - a.stp.translation) - simlink.dt;
+    let dr = simlink.rmeas_t * (ra.transpose() * b.stp.rotation_matrix);
+    let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
+    let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
+    let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
+    [dt.x, dt.y, dt.z,
+     (c2.z - c3.y) * 0.5, (c3.x - c1.z) * 0.5, (c1.y - c2.x) * 0.5,
+     b.stp.log_s - a.stp.log_s - simlink.dls]
+}))]
+#[derive(Clone)]
+pub struct SimLink {
+    #[arael(ref = root.poses)]
+    pub a: Ref<SimPose>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<SimPose>,
+    pub dt: vect3<f64>,
+    pub rmeas_t: arael::matrix::matrix3<f64>,
+    pub dls: f64,
+    pub hb: CrossBlock<SimPose, SimPose>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct SimWorld {
+    pub poses: refs::Vec<SimPose>,
+    pub links: std::vec::Vec<SimLink>,
+}
+
+/// Six Sim(3) poses along a turning path, each seeing three known points,
+/// links between neighbours and one closing the loop, the measurements the
+/// truth plus noise, the poses moved off it; the first pose fixed.
+fn sim_world() -> SimWorld {
+    use arael::quatern::quaternd;
+    use arael::vect::vect3d;
+    let mut rng = Lcg(51);
+    let truth: Vec<(vect3d, quaternd, f64)> = (0..6)
+        .map(|i| {
+            let th = i as f64 * 0.4;
+            let q = (quaternd::from_axis_angle(vect3d::new(0.0, 0.0, 1.0), th * 0.9) * quaternd::from_axis_angle(vect3d::new(1.0, 0.0, 0.0), 0.15 * th)).unit();
+            (vect3d::new(i as f64 * 1.1, 0.2 * th.sin(), -0.1 * th), q, 1.0 + 0.06 * i as f64)
+        })
+        .collect();
+    let jitter = |rng: &mut Lcg, s: f64| vect3d::new(s * rng.uniform(), s * rng.uniform(), s * rng.uniform());
+    let xs = [vect3d::new(1.0, 0.0, 0.0), vect3d::new(0.0, 1.0, 0.5), vect3d::new(0.3, -0.4, 1.0)];
+    let mut poses = refs::Vec::new();
+    for (k, &(t, q, s)) in truth.iter().enumerate() {
+        let r = q.rotation_matrix();
+        let m: Vec<vect3d> = xs.iter().map(|&x| r * x * s + t + jitter(&mut rng, 0.01)).collect();
+        let stp = if k == 0 {
+            arael::transform::ScaledTransformParam::fixed(t, q, s)
+        } else {
+            let dq = quaternd::from_rotation_vector(jitter(&mut rng, 0.05));
+            arael::transform::ScaledTransformParam::new(t + jitter(&mut rng, 0.05), (q * dq).unit(), s * 1.05)
+        };
+        poses.push(SimPose { stp, x1: xs[0], x2: xs[1], x3: xs[2], m1: m[0], m2: m[1], m3: m[2], hb: SelfBlock::new() });
+    }
+    let mut links = std::vec::Vec::new();
+    for (a, b) in (0..6).map(|a| (a, (a + 1) % 6)) {
+        let ((ta, qa, sa), (tb, qb, sb)) = (truth[a], truth[b]);
+        let ra = qa.rotation_matrix();
+        links.push(SimLink {
+            a: poses.ref_at(a),
+            b: poses.ref_at(b),
+            dt: ra.transpose() * (tb - ta) + jitter(&mut rng, 0.01),
+            rmeas_t: (ra.transpose() * qb.rotation_matrix()).transpose(),
+            dls: sb.ln() - sa.ln() + 0.002 * rng.uniform(),
+            hb: CrossBlock::new(),
+        });
+    }
+    SimWorld { poses, links }
+}
+
+/// A `#[arael(symbolic = exp(w))]` field of an entity: the body reads its
+/// cache, which the device computes from the parameter as it goes (the
+/// stored field follows the parameter between steps).
+#[arael::model]
+#[arael(constraint(hb, { [(curvee.target - curvee.base * curvee.scale) * curvee.isigma] }))]
+#[derive(Clone)]
+pub struct CurveE {
+    pub w: Param<f64>,
+    pub base: f64,
+    pub target: f64,
+    pub isigma: f64,
+    #[arael(symbolic = exp(w))]
+    pub scale: f64,
+    pub hb: SelfBlock<CurveE>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct CurvesE {
+    pub curves: refs::Vec<CurveE>,
+}
+
+fn curves_e() -> CurvesE {
+    let mut curves = refs::Vec::new();
+    for k in 0..6 {
+        let (base, w) = (1.0 + 0.5 * k as f64, 0.3 * k as f64 - 0.7);
+        curves.push(CurveE { w: Param::new(w + 0.3), base, target: base * w.exp(), isigma: 1.5, scale: 0.0, hb: SelfBlock::new() });
+    }
+    CurvesE { curves }
+}
+
+/// A user component over parameters alone: its caches, values and a
+/// declared derivative, computed by the device from the parameters.
+#[arael::model]
+#[arael(component)]
+#[derive(Clone)]
+pub struct Polar {
+    pub r: Param<f64>,
+    pub th: Param<f64>,
+    #[arael(symbolic = r * cos(th))]
+    pub x: f64,
+    #[arael(symbolic = r * sin(th))]
+    pub y: f64,
+    #[arael(deriv = x, by = th)]
+    pub x_th: [f64; 1],
+}
+
+impl arael::model::Component for Polar {}
+
+#[arael::model]
+#[arael(constraint(hb, { [(beacon.polar.x - beacon.mx) * 2.0, (beacon.polar.y - beacon.my) * 2.0, (beacon.polar.r - beacon.mr) * 0.5] }))]
+#[derive(Clone)]
+pub struct Beacon {
+    pub polar: Polar,
+    pub mx: f64,
+    pub my: f64,
+    pub mr: f64,
+    pub hb: SelfBlock<Beacon>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct Beacons {
+    pub beacons: refs::Vec<Beacon>,
+}
+
+fn beacons() -> Beacons {
+    let mut rng = Lcg(52);
+    let mut beacons = refs::Vec::new();
+    for k in 0..6 {
+        let (r, th) = (1.0 + 0.4 * k as f64, 0.5 * k as f64 - 1.0);
+        beacons.push(Beacon {
+            polar: Polar { r: Param::new(r + 0.1), th: Param::new(th - 0.1), x: 0.0, y: 0.0, x_th: [0.0] },
+            mx: r * th.cos() + 0.01 * rng.uniform(),
+            my: r * th.sin() + 0.01 * rng.uniform(),
+            mr: r,
+            hb: SelfBlock::new(),
+        });
+    }
+    Beacons { beacons }
+}
+
+/// `symbolic =` and `deriv =` caches over parameters, on an entity and in a
+/// user component, and the `ScaledTransformParam` (a transform's pose and
+/// a scale cache): the device computes them, assembles as the CPU does and
+/// solves to its optimum.
+#[test]
+fn caches_over_parameters_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(curves_e, "a symbolic field of an entity");
+    assembles_and_solves_as_on_the_cpu(beacons, "a user component");
+    assembles_and_solves_as_on_the_cpu(sim_world, "Sim(3) poses");
+    // the device's re-centred references handed back to the model
+    let solved = |gpu: Option<&GpuDevice>| {
+        let mut s = sim_world();
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        s.deserialize(&r.x);
+        s.poses
+            .iter()
+            .flat_map(|p| {
+                let (t, q) = (p.stp.translation, p.stp.rotation);
+                [t.x, t.y, t.z, q.t, q.v.x, q.v.y, q.v.z, p.stp.scale]
+            })
+            .collect::<Vec<f64>>()
+    };
+    let cpu = solved(None);
+    for d in devices() {
+        assert_close(&solved(Some(&d)), &cpu, 1e-7, &format!("{}: the Sim(3) poses written back", label(&d)));
+    }
 }
 
 /// The plane SLAM model of benchmarks/plane: `TransformParam` poses,
