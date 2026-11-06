@@ -28,14 +28,16 @@
 //! and `deriv =` fields (an `AngleParam`'s sin and cos, a scale
 //! `exp(log_s)`, a user component's values), computed in the kernel from
 //! their expressions when those read parameters alone, and `f32` or `f64`
-//! roots. Index selects print as C++ `switch`es (an integer or `bool`
-//! index leaf written into its float column, exact for any arm); user
-//! functions with a symbolic body inline; `fast_atan` and `fast_atan2`
-//! call their kernel library twins. A constraint has no device form when
-//! its rows write `coo` pairs, when it calls a function whose value is
-//! Rust code, or when it reads a leaf that follows the parameters and that
-//! the device does not compute (a cache over data a component's update
-//! moves, a `compute =` field); its root then assembles on the CPU.
+//! roots. A parameter's stored value (`<field>_value`) is data: a solve
+//! moves the working copy and stores the value when it ends. Index selects
+//! print as C++ `switch`es (an integer or `bool` index leaf written into
+//! its float column, exact for any arm); user functions with a symbolic
+//! body inline; `fast_atan` and `fast_atan2` call their kernel library
+//! twins. A constraint has no device form when its rows write `coo` pairs,
+//! when it calls a function whose value is Rust code, or when it reads a
+//! leaf that follows the parameters and that the device does not compute
+//! (a cache over data a component's update moves, a stored value inside a
+//! component, a `compute =` field); its root then assembles on the CPU.
 
 use std::collections::BTreeSet;
 
@@ -506,8 +508,22 @@ fn parameter_state(s: &str, sides: &[DevSide], (root_var, root_ty): (&str, &str)
     if compute_field(ty, field) {
         return Some(format!("the device reads `{s}`, a `compute =` field Rust code reassigns as the parameters move, without computing it"));
     }
-    (side.is_some() && parameter_field(ty, field))
-        .then(|| format!("the device reads `{s}`, which follows the parameters of `{var}.{field}`, without computing it"))
+    if side.is_none() || !parameter_field(ty, field) {
+        return None;
+    }
+    // a parameter's stored value (`<field>_value` in the body): a solve
+    // moves the working copy and stores the value only when it ends, so it
+    // is data; a component's update may store its parameters' between steps
+    let after = &rest[field.len()..];
+    let stored = after == ".value" || after.starts_with(".value.") || after.starts_with(".value[");
+    let direct = crate::registry_lookup(ty).is_some_and(|l| l.param_fields.iter().any(|f| f == field));
+    if stored && direct {
+        return None;
+    }
+    if after.contains(".value") && !direct {
+        return Some(format!("the device reads `{s}`, a stored value inside the component `{var}.{field}`, whose update may move it between steps, without computing it"));
+    }
+    Some(format!("the device reads `{s}`, which follows the parameters of `{var}.{field}`, without computing it"))
 }
 
 /// The read of an optional sub-struct in a body symbol's path:

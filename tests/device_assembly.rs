@@ -2797,6 +2797,106 @@ fn constraints_on_the_root_itself_assemble_and_solve_on_the_device_as_on_the_cpu
     assembles_and_solves_as_on_the_cpu(|| own_root(false), "the root's own constraints, the guarded one off");
 }
 
+/// A pose pulled toward its measurement and held near where the solve
+/// started through its parameters' stored values (`<param>_value`): a
+/// scalar's, a vector's and a `SimpleEulerAngleParam`'s.
+#[arael::model]
+#[arael(constraint(hb, {
+    let d = driftp.p - driftp.p_value;
+    let e = driftp.ea - driftp.ea_value;
+    [(driftp.s - driftp.s_value) * 0.3, d.x * 0.25, d.y * 0.25, e.x * 0.2, e.y * 0.2, e.z * 0.2]
+}))]
+#[arael(constraint(hb, {
+    [(driftp.s - driftp.ms) * 2.0, (driftp.p.x - driftp.mp.x) * 2.0, (driftp.p.y - driftp.mp.y) * 2.0,
+     (driftp.ea.x + driftp.ea.y - driftp.me) * 2.0, (driftp.ea.z - driftp.me) * 1.5]
+}))]
+#[derive(Clone)]
+pub struct DriftP {
+    pub s: Param<f64>,
+    pub p: Param<vect2<f64>>,
+    pub ea: SimpleEulerAngleParam<f64>,
+    pub ms: f64,
+    pub mp: vect2<f64>,
+    pub me: f64,
+    pub hb: SelfBlock<DriftP>,
+}
+
+/// A root whose own constraint holds its offset near its stored value
+/// while pulling it to a target.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, { [(driftroot.offset - driftroot.offset_value) * 0.2, (driftroot.offset - driftroot.target) * 1.5] }))]
+#[derive(Clone)]
+pub struct DriftRoot {
+    pub poses: refs::Vec<DriftP>,
+    pub offset: Param<f64>,
+    pub target: f64,
+    pub hb: SelfBlock<DriftRoot>,
+}
+
+fn drift_root() -> DriftRoot {
+    let mut rng = Lcg(36);
+    let mut poses = refs::Vec::new();
+    for k in 0..6 {
+        let t = 0.3 * k as f64;
+        poses.push(DriftP {
+            s: Param::new(t),
+            p: Param::new(vect2::new(t, 1.0 - t)),
+            ea: SimpleEulerAngleParam::new(vect3::new(0.1 * t, -0.2 * t, 0.05)),
+            ms: t + 0.4 + 0.1 * rng.uniform(),
+            mp: vect2::new(t - 0.3, 1.2 - t),
+            me: 0.2 + 0.1 * rng.uniform(),
+            hb: SelfBlock::new(),
+        });
+    }
+    DriftRoot { poses, offset: Param::new(0.0), target: 0.8, hb: SelfBlock::new() }
+}
+
+/// The parameters' values as a drift root holds them.
+fn drift_state(s: &DriftRoot) -> Vec<f64> {
+    let mut v = vec![s.offset.value];
+    for p in s.poses.iter() {
+        v.extend([p.s.value, p.p.value.x, p.p.value.y, p.ea.value.x, p.ea.value.y, p.ea.value.z]);
+    }
+    v
+}
+
+/// Reads of the parameters' stored values, an entity's and the root's,
+/// are data the device packs: it assembles as the CPU does at parameters
+/// away from those values and solves to the CPU's optimum.
+#[test]
+fn stored_parameter_values_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assembles_and_solves_as_on_the_cpu(drift_root, "the stored values");
+}
+
+/// A solve writes the optimum into the stored values; the next solve
+/// through the same session holds the parameters near the new ones, on
+/// the device as on the CPU.
+#[test]
+fn a_warm_solve_reads_the_stored_values_the_last_one_wrote() {
+    use arael::simple_lm::{LmConfig, LmSession, SparseFaer};
+    let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
+    let cpu = |s: &DriftRoot| {
+        let mut s = s.clone();
+        let r = s.solve_with(&mut SparseFaer::<f64>::from_options(&whole_options(None)), &cfg).unwrap();
+        (r.end_cost, s)
+    };
+    for d in devices() {
+        let name = label(&d);
+        let mut s = drift_root();
+        let mut session = LmSession::new(SparseFaer::<f64>::from_options(&whole_options(Some(&d))));
+        for solve in ["the first solve", "the warm solve"] {
+            let (cpu_cost, cpu_model) = cpu(&s);
+            let before = drift_state(&s);
+            let r = session.solve(&mut s, &cfg).unwrap();
+            assert!(session.solver().plan().unwrap().gpu_assembly, "{name}: {solve}");
+            assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}: {solve}: {} against the CPU's {cpu_cost}", r.end_cost);
+            assert_close(&drift_state(&s), &drift_state(&cpu_model), 1e-7, &format!("{name}: {solve}'s model"));
+            assert!(drift_state(&s).iter().zip(&before).any(|(a, b)| (a - b).abs() > 1e-3), "{name}: {solve} moves the model");
+        }
+    }
+}
+
 /// A one-coordinate point held near where it was seen, and again under the
 /// loss its `kind` picks of `loss_select`'s six.
 #[arael::model]
@@ -3215,6 +3315,24 @@ pub struct ComputedRoot {
     pub items: refs::Vec<Computed>,
 }
 
+/// A stored parameter value inside a component read by a body: the
+/// component's update stores it between steps (`Moved::update` zeroes
+/// `d.value`), which the device cannot follow.
+#[arael::model]
+#[arael(constraint(hb, { [(storedholder.m.d - storedholder.m.d_value) * 2.0] }))]
+#[derive(Clone)]
+pub struct StoredHolder {
+    pub m: Moved,
+    pub hb: SelfBlock<StoredHolder>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct StoredRoot {
+    pub items: refs::Vec<StoredHolder>,
+}
+
 #[test]
 fn a_constraint_reading_state_the_device_does_not_compute_has_no_device_form() {
     let s = MovedRoot { items: refs::Vec::new() };
@@ -3223,6 +3341,9 @@ fn a_constraint_reading_state_the_device_does_not_compute_has_no_device_form() {
     let s = ComputedRoot { items: refs::Vec::new() };
     let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a `compute =` field has no device form");
     assert!(why.contains("Computed") && why.contains("computed.c") && why.contains("compute ="), "{why}");
+    let s = StoredRoot { items: refs::Vec::new() };
+    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a stored value inside a component has no device form");
+    assert!(why.contains("StoredHolder") && why.contains("storedholder.m.d.value") && why.contains("inside the component"), "{why}");
 }
 
 /// A Sim(3) pose (`ScaledTransformParam`): its pose a transform's reference

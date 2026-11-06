@@ -900,18 +900,21 @@ constraint whose rows write into self blocks and cross blocks has one,
 whatever its form (its entities reached through refs, its parent's refs,
 the parent or an ancestor entity, the root; its cross blocks its own or
 its parent's; the instances held at any depth, in collections or `Option`
-fields, or the root itself for its own constraints), over Euler-angle (simple and re-centred) and `QuaternionParam`
-rotations, `TransformParam` and `ScaledTransformParam` poses,
-`UnitVecParam` directions and `AngleParam` headings, `symbolic =` and
-`deriv =` fields computed from parameters alone (on an entity or in a
-user component), every built-in function of arael-sym, guards included
-(each evaluated once per structure), robust losses, index selects
-(`select`, a `match` on an integer field, in the body or picking the
-loss; where the CPU's select panics the device's values are NaN),
-`#[arael::function]`s with a symbolic body and the `fast_atan` roots. A constraint has none yet when it writes `coo`
-pairs, or reads what Rust code computes: a `compute =` field, a
-component's field computed from data its `update` moves, a
-`#[arael::function]` with a numeric body.
+fields, or the root itself for its own constraints), over Euler-angle
+(simple and re-centred) and `QuaternionParam` rotations, `TransformParam`
+and `ScaledTransformParam` poses, `UnitVecParam` directions and
+`AngleParam` headings, `symbolic =` and `deriv =` fields computed from
+parameters alone (on an entity or in a user component), parameters'
+stored values (`<field>_value`, data a solve does not move), every
+built-in function of arael-sym, guards included (each evaluated once per
+structure), robust losses, index selects (`select`, a `match` on an
+integer field, in the body or picking the loss; where the CPU's select
+panics the device's values are NaN), `#[arael::function]`s with a
+symbolic body and the `fast_atan` roots. A constraint has none yet when
+it writes `coo` pairs, or reads what Rust code computes: a `compute =`
+field, a component's field computed from data its `update` moves (a
+stored value inside a component among them), a `#[arael::function]` with
+a numeric body.
 `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
