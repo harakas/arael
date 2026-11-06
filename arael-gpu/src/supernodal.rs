@@ -124,7 +124,8 @@ struct Level {
     small_threads: u32,
     big: usize,
     n_big: u32,
-    /// Per panel step, the grid sizes of `k_trsm` and `k_syrk`.
+    /// Per panel step, the grid sizes of `k_trsm` and `k_syrk` (the blocked
+    /// `k_syrk`'s where [`wide_syrk_on`], [`plan::wide_syrk`]).
     trsm_grid: Vec<u32>,
     syrk_grid: Vec<u32>,
     all: usize,
@@ -296,7 +297,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 big: 4 * pk.push(&w.big_targets),
                 n_big: w.big_targets.len() as u32,
                 trsm_grid: w.trsm_grid,
-                syrk_grid: w.syrk_grid,
+                syrk_grid: if wide_syrk_on::<D>() { w.syrk_wide_grid } else { w.syrk_grid },
                 all: 4 * pk.push(&w.level_sn),
                 n_all: w.level_sn.len() as u32,
                 trsv_shared: trsv_shared as u32,
@@ -345,7 +346,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let work = dev.alloc(sec.bytes)?;
         // the seed's threads per stored tile: the device's lockstep width
         let seed_lanes = dev.arch().warp;
-        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes));
+        let defines = format!("{}{}", wide.defines(), defines(F::CPP, lu, seed_lanes, wide_syrk_on::<D>()));
         let source = format!("{WIDE}\n{SOURCE}");
         let entries = ["k_zero", "k_zero_u32", "k_seed_f32", "k_seed_f64", "k_seed_wide", "k_pair_update", "k_big_update", "k_small_factor", "k_chain", "k_potf2", "k_trsm", "k_syrk", "k_fwd_gather", "k_fwd_trsv", "k_bwd_gemv", "k_bwd_trsv", "k_fwd_chain", "k_bwd_chain", "k_perm_in", "k_perm_out"];
         let [zero, zero_u32, seed_f32, seed_f64, seed_wide, pair_update, big_update, small_factor, chain, potf2, trsm, syrk, fwd_gather, fwd_trsv, bwd_gemv, bwd_trsv, fwd_chain, bwd_chain, perm_in, perm_out]: [D::Kernel; 20] =
@@ -455,7 +456,11 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 if tg > 0 {
                     self.run(&self.k.trsm, tg, TB as u32, 0, &args)?;
                 }
-                if sg > 0 {
+                if sg > 0 && wide_syrk_on::<D>() {
+                    let (k0, kn, cend) = plan::wide_syrk(step);
+                    let args = [list(l.big), Arg::U32(l.n_big), Arg::U32(k0), Arg::U32(kn), Arg::U32(cend), plan, factor, fail];
+                    self.run(&self.k.syrk, sg, THREADS, 0, &args)?;
+                } else if sg > 0 {
                     self.run(&self.k.syrk, sg, THREADS, 0, &[list(l.big), Arg::U32(l.n_big), j, plan, factor, fail])?;
                 }
             }
@@ -671,9 +676,17 @@ impl<D: Device> GpuFactor<D> {
 
 /// The `#define`s of `supernodal.cpp`: the scalar, the lane unroll, the
 /// block sizes, and the tile sizes and plan header slots of [`crate::plan`].
-fn defines(scalar: &str, lu: usize, seed_lanes: u32) -> String {
+/// Whether `k_syrk` takes the blocked trailing update of
+/// [`plan::wide_syrk`] (`WIDE_SYRK` in supernodal.cpp): everywhere but CUDA,
+/// which keeps one update per panel step until measured there (TODO.md).
+fn wide_syrk_on<D: Device>() -> bool {
+    D::RUNTIME != "cuda"
+}
+
+fn defines(scalar: &str, lu: usize, seed_lanes: u32, blocked_syrk: bool) -> String {
     use plan::*;
-    let mut s = format!("#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n");
+    let blocked = blocked_syrk as u32;
+    let mut s = format!("#define SCALAR {scalar}\n#define LU {lu}u\n#define THREADS {THREADS}u\n#define SEED_LANES {seed_lanes}u\n#define WIDE_SYRK {blocked}u\n");
     let consts = [
         ("NB", NB),
         ("TB", TB),
@@ -900,6 +913,48 @@ mod tests {
     /// The small kernel alone, on supernodes of three steps (the last
     /// narrower than a warp) and of rows past its block's first pass,
     /// matches the CPU's factor in f64 and f32.
+    /// The kernels' WIDE_SYRK is the switch's value (a name in `plan` once
+    /// shadowed the flag and made it nonzero on every device).
+    #[test]
+    fn the_defines_carry_the_blocked_syrk_switch() {
+        assert!(defines("float", 1, 32, false).contains("#define WIDE_SYRK 0u\n"));
+        assert!(defines("float", 1, 32, true).contains("#define WIDE_SYRK 1u\n"));
+    }
+
+    /// Supernodes wider than two NB_WIDE blocks, with rows below them and
+    /// widths no multiple of NB, through the panel steps: the factor of the
+    /// blocked trailing update (`plan::wide_syrk`, where `wide_syrk_on`) is
+    /// the CPU's, in f64, and an f32 factor solves to single precision.
+    #[test]
+    fn wide_supernodes_with_rows_below_factor_as_on_the_cpu() {
+        let (a, dense, rhs) = grid_spd(24, &[3, 6], 11);
+        let order = nd_block_order(a.symbolic());
+        let sp = SupernodalParams { relax: Some(vec![(320, 1.0)]), ..SupernodalParams::default() };
+        let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &sp).unwrap();
+        let wide = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s)).filter(|&(q, h)| q > 2 * plan::NB_WIDE && h > q && q % plan::NB != 0).count();
+        assert!(wide >= 2, "wide supernodes with rows below: {wide}");
+        let mut cpu = vec![0.0f64; sn.factor_val_count()];
+        let mut ctx = SupernodalContext::new();
+        supernodal_factorize(&sn, &a, &mut cpu, &mut ctx, 1).unwrap();
+        let dev = device();
+        for params in [GpuSupernodalParams::default(), panel_steps_only()] {
+            let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+            g.factorize(a.vals()).unwrap();
+            let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
+            assert!(err < 1e-12, "factor err/max {err}");
+            let mut x = rhs.clone();
+            g.solve(&mut x).unwrap();
+            let res = rel_residual(&dense, sn.dim(), &x, &rhs);
+            assert!(res < 1e-10, "residual {res}");
+            let mut g32 = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+            g32.factorize(a.vals()).unwrap();
+            let mut x = rhs.clone();
+            g32.solve(&mut x).unwrap();
+            let res = rel_residual(&dense, sn.dim(), &x, &rhs);
+            assert!(res < 1e-4, "an f32 solve: residual {res}");
+        }
+    }
+
     #[test]
     fn the_small_kernel_factors_wide_and_tall_supernodes() {
         let (a, _) = grid_spd_sparse(48, &[3, 6], 5);

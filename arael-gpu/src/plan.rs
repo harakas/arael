@@ -29,6 +29,25 @@ pub const TB: usize = 64;
 pub const TK: usize = 16;
 /// The panel step: columns factored per round of the three panel kernels.
 pub const NB: usize = 32;
+/// The blocked panel steps' block ([`wide_syrk`]): columns whose trailing
+/// update past the block runs once, at the block's last step.
+pub const NB_WIDE: usize = 128;
+
+/// The blocked `k_syrk` at panel step `step`: the solved columns from `k0`,
+/// `kn` of them at most, update the columns before `cend` (all of them at
+/// `u32::MAX`). A step inside an [`NB_WIDE`] block updates the rest of its
+/// block; the block's last step updates everything past the block with the
+/// block's columns, so the trailing part is read and written once per
+/// block instead of once per step.
+pub fn wide_syrk(step: usize) -> (u32, u32, u32) {
+    let per = NB_WIDE / NB;
+    let block = step / per;
+    if step % per == per - 1 {
+        ((block * NB_WIDE) as u32, NB_WIDE as u32, u32::MAX)
+    } else {
+        ((step * NB) as u32, NB as u32, ((block + 1) * NB_WIDE) as u32)
+    }
+}
 /// Rows of x staged per pass of the backward GEMV.
 pub const XR_CH: usize = 1024;
 
@@ -391,6 +410,8 @@ pub(crate) struct LevelWork {
     /// Per panel step, the trsm and syrk grid sizes, as the kernels count them.
     pub trsm_grid: Vec<u32>,
     pub syrk_grid: Vec<u32>,
+    /// Per panel step, the blocked syrk's grid size ([`wide_syrk`]).
+    pub syrk_wide_grid: Vec<u32>,
 }
 
 /// Words per big update item ([`LevelWork::big_items`]).
@@ -551,9 +572,16 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
     for w in &mut lw {
         let mut j = 0u32;
         while j < w.maxq_big {
-            let (mut tg, mut sg) = (0u32, 0u32);
+            let (k0, kn, cend) = wide_syrk(j as usize / NB);
+            let (mut tg, mut sg, mut wg) = (0u32, 0u32, 0u32);
             for &s in &w.big_targets {
                 let (q, h) = (p.dims[2 * s as usize], p.dims[2 * s as usize + 1]);
+                if k0 < q {
+                    let (k1, c1) = ((k0 + kn).min(q), cend.min(q));
+                    if k1 < c1 {
+                        wg += (h - k1).div_ceil(TB as u32) * (c1 - k1).div_ceil(TB as u32);
+                    }
+                }
                 if j >= q {
                     continue;
                 }
@@ -565,6 +593,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
             }
             w.trsm_grid.push(tg);
             w.syrk_grid.push(sg);
+            w.syrk_wide_grid.push(wg);
             j += NB as u32;
         }
     }

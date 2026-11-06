@@ -667,6 +667,131 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
     }
 }
 
+#if WIDE_SYRK
+// Panel step, part three, blocked (WIDE_SYRK: not on CUDA until measured
+// there, TODO.md; plan::wide_syrk picks k0, kn and cend per step):
+// the update of the trailing lower trapezoid by the solved columns
+// [k0, k1), k1 = min(k0 + kn, q), over rows [k1, h) and columns [k1, c1),
+// c1 = min(cend, q), in TB x TB tiles; tiles above the diagonal are skipped
+// and the straddling tile clipped. The columns stream through shared
+// memory NB at a time into the tile's accumulators, so a tile is read and
+// written once per update: a step inside an NB_WIDE block updates the rest
+// of its block, the block's last step everything past it. A thread takes
+// the rows tx + 16 r and columns ty + 16 c, so a wavefront's reads and
+// writes of the tile cover whole cache lines. The block index walks the
+// panels' tile counts. The block of a panel's tile (0, 0), which alone
+// writes the next diagonal tile (at k1), then factors it (potf2_warp).
+KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 k0, u32 kn, u32 cend, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+    SHARED F sa[NB * TB];
+    SHARED F sb[NB * TB];
+    u32 o_dims = plan[H_DIMS];
+    u32 o_val_ptr = plan[H_VAL_PTR];
+    u32 idx = block_x();
+    u32 p = 0;
+    bool found = false;
+    u32 s = 0;
+    u32 q = 0;
+    u32 h = 0;
+    u32 k1 = 0;
+    u32 c1 = 0;
+    u32 nct = 0;
+    while (p < npanels && !found) {
+        s = panels[p];
+        q = plan[o_dims + 2 * s];
+        h = plan[o_dims + 2 * s + 1];
+        u32 rows = 0;
+        u32 cols = 0;
+        if (k0 < q) {
+            k1 = min(k0 + kn, q);
+            c1 = min(cend, q);
+            if (k1 < c1) {
+                rows = h - k1;
+                cols = c1 - k1;
+            }
+        }
+        nct = (cols + TB - 1) / TB;
+        u32 tiles = ((rows + TB - 1) / TB) * nct;
+        if (idx < tiles) {
+            found = true;
+        } else {
+            idx -= tiles;
+            p += 1;
+        }
+    }
+    if (!found) return;
+    u32 ti = idx / nct;
+    u32 tj = idx - ti * nct;
+    if (ti < tj) return;
+    u32 row0 = k1 + ti * TB;
+    u32 col0 = k1 + tj * TB;
+    u32 nrows = min(h - row0, TB);
+    u32 ncols = min(c1 - col0, TB);
+    u32 panel = plan[o_val_ptr + s];
+    u32 t = thread_x();
+    const u32 nt = THREADS;
+    u32 tx = t % 16;
+    u32 ty = t / 16;
+    F acc[16];
+#pragma unroll
+    for (u32 z = 0; z < 16; z++) acc[z] = F(0);
+    for (u32 kb = k0; kb < k1; kb += NB) {
+        u32 nk = min(k1 - kb, NB);
+        // the previous slab's reads are done
+        BARRIER();
+        for (u32 e = t; e < NB * TB; e += nt) {
+            u32 k = e / TB;
+            u32 i = e - k * TB;
+            F va = F(0);
+            F vb = F(0);
+            if (k < nk && i < nrows) va = factor[panel + (kb + k) * h + row0 + i];
+            if (k < nk && i < ncols) vb = factor[panel + (kb + k) * h + col0 + i];
+            sa[e] = va;
+            sb[e] = vb;
+        }
+        BARRIER();
+        for (u32 kk = 0; kk < nk; kk++) {
+            F a0 = sa[kk * TB + tx];
+            F a1 = sa[kk * TB + tx + 16];
+            F a2 = sa[kk * TB + tx + 32];
+            F a3 = sa[kk * TB + tx + 48];
+            F b0 = sb[kk * TB + ty];
+            F b1 = sb[kk * TB + ty + 16];
+            F b2 = sb[kk * TB + ty + 32];
+            F b3 = sb[kk * TB + ty + 48];
+            acc[0] += a0 * b0;
+            acc[1] += a0 * b1;
+            acc[2] += a0 * b2;
+            acc[3] += a0 * b3;
+            acc[4] += a1 * b0;
+            acc[5] += a1 * b1;
+            acc[6] += a1 * b2;
+            acc[7] += a1 * b3;
+            acc[8] += a2 * b0;
+            acc[9] += a2 * b1;
+            acc[10] += a2 * b2;
+            acc[11] += a2 * b3;
+            acc[12] += a3 * b0;
+            acc[13] += a3 * b1;
+            acc[14] += a3 * b2;
+            acc[15] += a3 * b3;
+        }
+    }
+#pragma unroll
+    for (u32 r = 0; r < 4; r++) {
+#pragma unroll
+        for (u32 c = 0; c < 4; c++) {
+            u32 i = tx + 16 * r;
+            u32 jj = ty + 16 * c;
+            if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * 4 + c];
+        }
+    }
+    if (ti == 0 && tj == 0) {
+        // the block's writes seen by its first warp
+        BARRIER();
+        if (t < NB) potf2_warp(factor, panel + k1 * h + k1, h, min(q - k1, NB), t, fail, s);
+    }
+}
+#else
 // Panel step, part three: the rank-nb update of the trailing lower
 // trapezoid by the step's solved block column, TB x TB tiles; tiles above
 // the diagonal are skipped and the straddling tile clipped. The block index
@@ -777,6 +902,7 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
         if (t < NB) potf2_warp(factor, panel + j1 * h + j1, h, min(q - j1, NB), t, fail, s);
     }
 }
+#endif
 
 // Forward solve, part one: the gather of `n` mid rows from `rows` (their
 // GATHER_ROW fields `stride` apart, plan.rs's LevelWork::g_rows: the
