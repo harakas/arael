@@ -897,11 +897,13 @@ let cfg = LmConfig::default().with_device_observer_params(true)
 
 A root gets these kernels when its every
 constraint has a device form (today: constraints of the root's
-collections over one entity or two, reached through refs, and an
-entity's constraints on itself, without a loss or an index `select`,
-over Euler-angle and `QuaternionParam` rotations, `TransformParam`
-poses, `UnitVecParam` directions and `AngleParam` headings, guards
-included, each evaluated once per structure);
+collections over one entity or two, reached through refs, an entity's
+constraints on itself, and constraints in a collection of an entity of
+the root's collections coupling that entity with a ref (`parent =`),
+without a loss or an index `select`, over Euler-angle (simple and
+re-centred) and `QuaternionParam` rotations, `TransformParam` poses,
+`UnitVecParam` directions and `AngleParam` headings, guards included,
+each evaluated once per structure);
 `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly

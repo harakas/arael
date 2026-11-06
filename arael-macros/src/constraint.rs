@@ -7874,9 +7874,15 @@ pub fn generate_root_methods(
             && root_self_primary.is_none() && parent_self_primary.is_none()
             && matches!(entity_location, EntityLocation::Collection { .. })
             && containing_paths.len() == 1 && containing_paths[0].len() == 1;
+        // a cross constraint in a collection of an entity of a root-level
+        // collection, the entity one of its two sides (`parent = lm`)
+        let nested_at_root = !is_remote_block && !is_self_block && !is_triplet && !is_multi_cross
+            && !is_root_level_cross && parent_cross.is_none() && mixed.is_none()
+            && matches!(entity_location, EntityLocation::Collection { .. });
         if device_unsupported.is_none()
             && !remote_at_root
             && !self_at_root
+            && !nested_at_root
             && (is_remote_block || is_self_block || is_triplet || is_multi_cross || !is_root_level_cross)
         {
             device_unsupported = Some(format!("{}: only root-level cross constraints and root-level constraints of one entity have a device form yet", sc.struct_name));
@@ -8105,11 +8111,9 @@ pub fn generate_root_methods(
                         Ok(mut dc) => {
                             dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
                             device_constraints.push(dc);
-                            device_groups.entry(group_key).or_insert_with(|| crate::device::DevGroup {
-                                rc_ident: frines_ident.clone(),
-                                resolve_stmts: resolve_stmts.clone(),
-                                root_var_ident: root_var_ident.clone(),
-                            });
+                            device_groups
+                                .entry(group_key)
+                                .or_insert_with(|| crate::device::DevGroup::flat(&frines_ident, &resolve_stmts, &root_var_ident));
                         }
                         Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
                     }
@@ -8220,11 +8224,10 @@ pub fn generate_root_methods(
                             Ok(mut dc) => {
                                 dc.filter = filter;
                                 device_constraints.push(dc);
-                                device_groups.entry(group_key).or_insert_with(|| crate::device::DevGroup {
-                                    rc_ident: syn::Ident::new(coll, proc_macro2::Span::call_site()),
-                                    resolve_stmts: vec![quote! { let #self_var = __frine; }],
-                                    root_var_ident: root_var_ident.clone(),
-                                });
+                                let rc = syn::Ident::new(coll, proc_macro2::Span::call_site());
+                                device_groups
+                                    .entry(group_key)
+                                    .or_insert_with(|| crate::device::DevGroup::flat(&rc, &[quote! { let #self_var = __frine; }], &root_var_ident));
                             }
                             Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
                         }
@@ -8644,6 +8647,85 @@ pub fn generate_root_methods(
             let frines_ident = frines_ident.unwrap();
             let parent_ident = parent_ident.unwrap();
             let group_key = coll_ident_str.clone();
+
+            // The device form: the containing entity and the instance's ref,
+            // the instance's cross tile, walked as the cost sweep walks
+            // them (the entity's collection, then its instances).
+            if device_unsupported.is_none() && nested_at_root {
+                let why = if loss_present {
+                    Some("a loss")
+                } else if arm_writes.is_some() {
+                    Some("a select whose arms write apart")
+                } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
+                    Some("an entity without parameters")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
+                } else {
+                    let var_of = |p: &str| p.split('.').next().unwrap_or_default().to_string();
+                    let hb_of = |t: &str| registry_lookup(t).and_then(|l| l.self_block_field.clone()).unwrap_or_default();
+                    let b_ty = b_type.clone().unwrap_or_default();
+                    let side_a = crate::device::DevSide {
+                        ty: a_type.clone(),
+                        var: var_of(param_strs[0]),
+                        hb: hb_of(&a_type),
+                        params: param_strs[..a_param_count].iter().map(|p| p.to_string()).collect(),
+                    };
+                    let side_b = crate::device::DevSide {
+                        var: var_of(param_strs[a_param_count]),
+                        hb: hb_of(&b_ty),
+                        ty: b_ty,
+                        params: param_strs[a_param_count..a_param_count + b_param_count].iter().map(|p| p.to_string()).collect(),
+                    };
+                    let device_key = format!("nested.{}.{}", coll_ident_str, frines_ident);
+                    match crate::device::device_constraint(
+                        device_constraints.len(),
+                        device_key.clone(),
+                        precision,
+                        side_a,
+                        Some(side_b),
+                        sc.struct_name.clone(),
+                        block_ident.clone(),
+                        residual_exprs.len(),
+                        (&gh_intermediates, &gh_simplified),
+                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
+                        (&cost_intermediates, &cost_simplified),
+                        &atom_caches,
+                        &root_var_name,
+                    ) {
+                        Ok(mut dc) => {
+                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
+                            device_constraints.push(dc);
+                            let (coll, frines, parent, resolve, root_var) = (
+                                coll_ident.clone(),
+                                frines_ident.clone(),
+                                parent_ident.clone(),
+                                resolve_stmts.clone(),
+                                root_var_ident.clone(),
+                            );
+                            device_groups.entry(device_key).or_insert_with(|| crate::device::DevGroup {
+                                walk: Box::new(move |body| {
+                                    quote! {
+                                        for __item in self.#coll.iter() {
+                                            #[allow(unused_variables)]
+                                            let #parent = __item;
+                                            for __frine in __item.#frines.iter() {
+                                                #(#resolve)*
+                                                #[allow(unused_variables)]
+                                                let #root_var = &*self;
+                                                #body
+                                            }
+                                        }
+                                    }
+                                }),
+                            });
+                        }
+                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
+                    }
+                }
+            }
 
             let self_var = syn::Ident::new(&a_type.to_lowercase(), proc_macro2::Span::call_site());
             let marker = source_marker(sc);
@@ -10527,11 +10609,7 @@ pub fn generate_root_methods(
         None => {
             let mut groups: std::collections::BTreeMap<String, crate::device::DevGroup> = cross_groups
                 .values()
-                .map(|g| (g.rc_ident.to_string(), crate::device::DevGroup {
-                    rc_ident: g.rc_ident.clone(),
-                    resolve_stmts: g.resolve_stmts.clone(),
-                    root_var_ident: g.root_var_ident.clone(),
-                }))
+                .map(|g| (g.rc_ident.to_string(), crate::device::DevGroup::flat(&g.rc_ident, &g.resolve_stmts, &g.root_var_ident)))
                 .collect();
             groups.append(&mut device_groups);
             let root_str = root_name.to_string();

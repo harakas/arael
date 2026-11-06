@@ -72,6 +72,9 @@ pub enum ReferenceKind {
     Transform,
     /// `UnitVecParam`: a unit quaternion and a 2D tangent step.
     UnitVec,
+    /// `SimpleEulerAngleParam`: no reference, the angles the parameters
+    /// themselves; computed, never re-centred.
+    SimpleEuler,
 }
 
 impl ReferenceKind {
@@ -81,13 +84,19 @@ impl ReferenceKind {
             ReferenceKind::Euler => 9,
             ReferenceKind::Quaternion | ReferenceKind::UnitVec => 4,
             ReferenceKind::Transform => 7,
+            ReferenceKind::SimpleEuler => 0,
         }
+    }
+
+    /// Whether an accepted step moves the reference and zeroes the step.
+    pub fn recentres(self) -> bool {
+        self != ReferenceKind::SimpleEuler
     }
 
     /// The parameters of one step.
     pub fn step_len(self) -> usize {
         match self {
-            ReferenceKind::Euler | ReferenceKind::Quaternion => 3,
+            ReferenceKind::Euler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 3,
             ReferenceKind::Transform => 6,
             ReferenceKind::UnitVec => 2,
         }
@@ -97,7 +106,7 @@ impl ReferenceKind {
     /// a rotation matrix and a translation (12), a direction (3).
     pub fn values(self) -> usize {
         match self {
-            ReferenceKind::Euler | ReferenceKind::Quaternion => 9,
+            ReferenceKind::Euler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 9,
             ReferenceKind::Transform => 12,
             ReferenceKind::UnitVec => 3,
         }
@@ -106,7 +115,7 @@ impl ReferenceKind {
     /// The derivatives of the values by the step a linearization reads.
     pub fn derivatives(self) -> usize {
         match self {
-            ReferenceKind::Euler | ReferenceKind::Quaternion => 27,
+            ReferenceKind::Euler | ReferenceKind::Quaternion | ReferenceKind::SimpleEuler => 27,
             ReferenceKind::Transform => 45,
             ReferenceKind::UnitVec => 6,
         }
@@ -120,6 +129,7 @@ impl ReferenceKind {
             ReferenceKind::Quaternion => "quat",
             ReferenceKind::Transform => "transform",
             ReferenceKind::UnitVec => "unitvec",
+            ReferenceKind::SimpleEuler => "simple_euler",
         }
     }
 
@@ -130,10 +140,12 @@ impl ReferenceKind {
             ReferenceKind::Euler => Reference::Matrix(v.try_into().unwrap()),
             ReferenceKind::Quaternion | ReferenceKind::UnitVec => Reference::Quaternion(v.try_into().unwrap()),
             ReferenceKind::Transform => Reference::Transform(v.try_into().unwrap()),
+            ReferenceKind::SimpleEuler => unreachable!("a SimpleEulerAngleParam has no reference"),
         }
     }
 
-    const ALL: [ReferenceKind; 4] = [ReferenceKind::Euler, ReferenceKind::Quaternion, ReferenceKind::Transform, ReferenceKind::UnitVec];
+    const ALL: [ReferenceKind; 5] =
+        [ReferenceKind::Euler, ReferenceKind::Quaternion, ReferenceKind::Transform, ReferenceKind::UnitVec, ReferenceKind::SimpleEuler];
 }
 
 /// One constraint of a [`DeviceShape`]: of one entity, which it writes into
@@ -460,11 +472,12 @@ struct ConstraintKernels<K> {
 }
 
 /// The kernels of one [`ReferenceKind`]: the values, the values with
-/// their derivatives, and the references moved by their steps.
+/// their derivatives, and, of a kind that re-centres, the references moved
+/// by their steps.
 struct ReferenceKernels<K> {
     values: K,
     derivatives: K,
-    advance: K,
+    advance: Option<K>,
 }
 
 /// The kernels of a root, compiled once per device, wide scalar and layout
@@ -767,7 +780,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         // kernels take them below
         let mut entries: Vec<String> = ["k_gather_params", "k_zero_wide", "k_zero_steps"].map(String::from).to_vec();
         for kind in ReferenceKind::ALL {
-            entries.extend(["values", "derivatives", "advance"].map(|e| format!("k_{}_{e}", kind.kernel_name())));
+            entries.extend(["values", "derivatives"].map(|e| format!("k_{}_{e}", kind.kernel_name())));
+            if kind.recentres() {
+                entries.push(format!("k_{}_advance", kind.kernel_name()));
+            }
         }
         for (c, k) in shape.constraints.iter().enumerate() {
             entries.extend(["gh", "ra", "csum", "cost"].map(|e| format!("__dk{c}_{e}")));
@@ -782,7 +798,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             gather: k(),
             zero: k(),
             zero_steps: k(),
-            references: ReferenceKind::ALL.iter().map(|_| ReferenceKernels { values: k(), derivatives: k(), advance: k() }).collect(),
+            references: ReferenceKind::ALL
+                .iter()
+                .map(|kind| ReferenceKernels { values: k(), derivatives: k(), advance: kind.recentres().then(&mut k) })
+                .collect(),
             constraints: shape
                 .constraints
                 .iter()
@@ -960,7 +979,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// The referenced fields' steps of the parameters `x` zeroed, as
     /// re-centring after [`advance`](Self::advance) leaves them.
     pub fn zero_steps(&self, x: Target<'_, D::Block>) -> Result<(), GpuError> {
-        for (r, rf) in self.shape.references.iter().enumerate() {
+        for (r, rf) in self.shape.references.iter().enumerate().filter(|(_, rf)| rf.kind.recentres()) {
             let (e, s) = (rf.entity, self.slots[rf.entity]);
             let args = [
                 Arg::Block(x.0, x.1),
@@ -978,9 +997,10 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// accepted step's), as the model's `advance_params` moves its own.
     pub fn advance(&self) -> Result<(), GpuError> {
         for (r, rf) in self.shape.references.iter().enumerate() {
+            let Some(advance) = &self.kernels.reference(rf.kind).advance else { continue };
             let (e, s) = (rf.entity, self.slots[rf.entity]);
             let args = [self.col(&format!("R{r}_REFR")), self.col(&format!("E{e}_EV")), self.col(&format!("R{r}_AT")), Arg::U32(s as u32)];
-            self.run(&self.kernels.reference(rf.kind).advance, s, &args)?;
+            self.run(advance, s, &args)?;
         }
         Ok(())
     }
@@ -998,7 +1018,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             refr.push(v);
         }
         let mut at = HashMap::new();
-        for (r, ix) in self.ref_index.iter().enumerate() {
+        for (r, ix) in self.ref_index.iter().enumerate().filter(|(r, _)| self.shape.references[*r].kind.recentres()) {
             for (s, &g) in ix.iter().enumerate() {
                 if g != FIXED {
                     at.insert(g, (r, s));

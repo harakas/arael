@@ -13,10 +13,12 @@
 //! Covered for now: root-level cross constraints (two entities with self
 //! blocks reached through refs, the holder's CrossBlock), root-level
 //! constraints of one entity reached through a ref (written into its self
-//! block), and the constraints of an entity of a root-level collection on
-//! itself, with guards (evaluated once per structure: a guard does not
-//! change during a solve) and without a loss or an index `select`; over
-//! referenced fields (Euler-angle
+//! block), the constraints of an entity of a root-level collection on
+//! itself, and cross constraints in a collection of an entity of a
+//! root-level collection coupling that entity with a ref (`parent =`), with
+//! guards (evaluated once per structure: a guard does not change during a
+//! solve) and without a loss or an index `select`; over referenced fields
+//! (`SimpleEulerAngleParam` angles, computed and never re-centred; Euler-angle
 //! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
 //! directions, whose references the device keeps and moves), atom caches
 //! (an `AngleParam`'s sin and cos, computed in the kernel from the angle)
@@ -96,6 +98,7 @@ pub(crate) enum RefKind {
     Quaternion,
     Transform,
     UnitVec,
+    SimpleEuler,
 }
 
 /// Which column of a referenced field's values a leaf reads.
@@ -119,6 +122,9 @@ impl RefKind {
         if l.universal_rotvec_fields.iter().any(|f| f == field) {
             return Some(RefKind::Quaternion);
         }
+        if l.euler_angle_fields.iter().any(|f| f == field) {
+            return Some(RefKind::SimpleEuler);
+        }
         match l.fields.iter().find(|(f, _)| f == field)? {
             (_, crate::SymFieldType::Struct(t)) => match t.as_str() {
                 "TransformParam" | "TransformParamF" => Some(RefKind::Transform),
@@ -133,7 +139,7 @@ impl RefKind {
     /// `values` and `derivatives`).
     fn widths(self) -> (usize, usize) {
         match self {
-            RefKind::Euler | RefKind::Quaternion => (9, 27),
+            RefKind::Euler | RefKind::Quaternion | RefKind::SimpleEuler => (9, 27),
             RefKind::Transform => (12, 45),
             RefKind::UnitVec => (3, 6),
         }
@@ -146,6 +152,7 @@ impl RefKind {
             RefKind::Euler | RefKind::Quaternion => ("delta.x", &[("delta.y", 1), ("delta.z", 2)]),
             RefKind::Transform => ("w.work().x", &[("w.work().y", 1), ("w.work().z", 2), ("d.work().x", 3), ("d.work().y", 4), ("d.work().z", 5)]),
             RefKind::UnitVec => ("d.work().x", &[("d.work().y", 1)]),
+            RefKind::SimpleEuler => ("work().x", &[("work().y", 1), ("work().z", 2)]),
         }
     }
 
@@ -172,9 +179,9 @@ impl RefKind {
         let dvec = |r: &str| idx(r).and_then(|(k, r)| Some(k * 3 + comp(r)?));
         let (name, rest) = tail.split_at(tail.find(['[', '.']).unwrap_or(tail.len()));
         match (self, name) {
-            (RefKind::Euler | RefKind::Quaternion | RefKind::Transform, "rotation_matrix") => Some((RefCol::Val, mat(rest)?)),
+            (RefKind::Euler | RefKind::Quaternion | RefKind::Transform | RefKind::SimpleEuler, "rotation_matrix") => Some((RefCol::Val, mat(rest)?)),
             (RefKind::Euler, "rotation_matrix_wide") => Some((RefCol::ValW, mat(rest)?)),
-            (RefKind::Euler | RefKind::Quaternion, "rotation_matrix_deriv") => Some((RefCol::Der, dmat(rest)?)),
+            (RefKind::Euler | RefKind::Quaternion | RefKind::SimpleEuler, "rotation_matrix_deriv") => Some((RefCol::Der, dmat(rest)?)),
             (RefKind::Transform, "translation") => Some((RefCol::Val, 9 + comp(rest)?)),
             (RefKind::Transform, "rotation_matrix_dw") => Some((RefCol::Der, dmat(rest)?)),
             (RefKind::Transform, "translation_dd") => Some((RefCol::Der, 27 + dvec(rest)?)),
@@ -185,9 +192,11 @@ impl RefKind {
         }
     }
 
-    /// The values walk's read of the reference of `field`, an `[f64; N]`.
-    fn read(self, field: &TokenStream2) -> TokenStream2 {
-        match self {
+    /// The values walk's read of the reference of `field`, an `[f64; N]`;
+    /// `None` for a kind without a reference.
+    fn read(self, field: &TokenStream2) -> Option<TokenStream2> {
+        Some(match self {
+            RefKind::SimpleEuler => return None,
             RefKind::Euler => quote! {
                 {
                     let __m = &#field.ref_rotation;
@@ -197,7 +206,7 @@ impl RefKind {
             },
             RefKind::Quaternion | RefKind::UnitVec => quote! { #field.__reference_quaternion() },
             RefKind::Transform => quote! { #field.__reference() },
-        }
+        })
     }
 
     fn ident(self) -> TokenStream2 {
@@ -206,6 +215,7 @@ impl RefKind {
             RefKind::Quaternion => quote! { Quaternion },
             RefKind::Transform => quote! { Transform },
             RefKind::UnitVec => quote! { UnitVec },
+            RefKind::SimpleEuler => quote! { SimpleEuler },
         }
     }
 }
@@ -547,11 +557,31 @@ fn cpp_kernels(
     Ok(format!("{gh_kernel}{reduce}{cost_kernel}"))
 }
 
-/// The walk of one constraint group, as the root's emission hands it over.
+/// The walk of one constraint group, as the root's emission hands it over:
+/// the cost sweep's loop around a body, which reads the instance as
+/// `__frine`, its entities and the root by their bindings.
 pub(crate) struct DevGroup {
-    pub rc_ident: syn::Ident,
-    pub resolve_stmts: Vec<TokenStream2>,
-    pub root_var_ident: syn::Ident,
+    pub walk: Box<dyn Fn(&TokenStream2) -> TokenStream2>,
+}
+
+impl DevGroup {
+    /// One loop over the root's collection `rc`, the instance's entities
+    /// bound by `resolve`, the root as `root_var`.
+    pub(crate) fn flat(rc: &syn::Ident, resolve: &[TokenStream2], root_var: &syn::Ident) -> DevGroup {
+        let (rc, resolve, root_var) = (rc.clone(), resolve.to_vec(), root_var.clone());
+        DevGroup {
+            walk: Box::new(move |body| {
+                quote! {
+                    for __frine in self.#rc.iter() {
+                        #(#resolve)*
+                        #[allow(unused_variables)]
+                        let #root_var = &*self;
+                        #body
+                    }
+                }
+            }),
+        }
+    }
 }
 
 /// A data record of the image (an entity table's or the root's): its fields
@@ -818,10 +848,10 @@ pub(crate) fn device_root(
     let values_entities: Vec<TokenStream2> = entities.iter().enumerate().map(|(e, en)| {
         let reads: Vec<syn::Expr> = en.params.iter().map(|p| syn::parse_str(&format!("__ent.{p}")).expect("a parameter path is an expression")).collect();
         let fixed = quote! { __w.fixed(#e, __n, [#( ::arael::__gpu::leaf_f64(#reads) as #scalar ),*]); };
-        let refs: Vec<TokenStream2> = references.iter().enumerate().filter(|(_, (re, _))| *re == e).map(|(r, (_, rf))| {
+        let refs: Vec<TokenStream2> = references.iter().enumerate().filter(|(_, (re, _))| *re == e).filter_map(|(r, (_, rf))| {
             let field: syn::Expr = syn::parse_str(&format!("__ent.{}", rf.path)).expect("a referenced field path");
-            let read = rf.kind.read(&quote! { #field });
-            quote! { __w.reference(#r, __n, #read); }
+            let read = rf.kind.read(&quote! { #field })?;
+            Some(quote! { __w.reference(#r, __n, #read); })
         }).collect();
         let data = (!records[e].fields.is_empty()).then(|| {
             let value = records[e].value(&rec_ident(e), &quote! { __ent }, &scalar);
@@ -883,23 +913,8 @@ pub(crate) fn device_root(
                 }
             }
         }).collect();
-        let (rc, resolve, root_var) = (&g.rc_ident, &g.resolve_stmts, &g.root_var_ident);
-        structure_walks.push(quote! {
-            for __frine in self.#rc.iter() {
-                #(#resolve)*
-                #[allow(unused_variables)]
-                let #root_var = &*self;
-                #(#structure)*
-            }
-        });
-        values_walks.push(quote! {
-            for __frine in self.#rc.iter() {
-                #(#resolve)*
-                #[allow(unused_variables)]
-                let #root_var = &*self;
-                #(#values)*
-            }
-        });
+        structure_walks.push((g.walk)(&quote! { #(#structure)* }));
+        values_walks.push((g.walk)(&quote! { #(#values)* }));
     }
     let n_constraints = constraints.len();
     let fewer: Vec<String> = constraints.iter().map(|c| format!("{}: the model has fewer instances than its structure: it changed without LmSession::invalidate()", c.holder)).collect();

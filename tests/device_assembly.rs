@@ -6,7 +6,7 @@
 
 use arael::df32;
 use arael::angle::AngleParam;
-use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock, VarSelfBlock};
+use arael::model::{CrossBlock, MixedEulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam, VarSelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{GpuDevice, LmProblem, LmProblemInternals, RootProblem};
 use arael::utils::Float;
@@ -1834,5 +1834,252 @@ fn an_image_staged_in_pageable_memory_solves_as_a_pinned_one() {
             assert_close(&state(&s), &cpu_state, 1e-7, &format!("{name}, solve {round}: the solved model"));
             s.observations[5].xy.x += 3.0;
         }
+    }
+}
+
+/// A covariance after a solve that assembled on the device: the solve bound
+/// no positions into H, so the covariance binds them itself, under the
+/// solve's pattern and symbolic analysis (none built again), and matches
+/// the covariance after the CPU's solve.
+#[test]
+fn a_covariance_after_a_device_solve_reuses_its_analysis() {
+    use arael::covariance::CovMode;
+    let run = |gpu: Option<&GpuDevice>| {
+        let (poses, edges, prior) = pose_graph::<f64>(40, 3);
+        let mut s = Graph2D { poses, edges, prior };
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, covariance: Some(CovMode::PerQuery), ..Default::default() };
+        let r = s.solve_with(&mut solver, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        let cov = r.covariance.as_ref().expect("the covariance");
+        assert!(cov.took_block_route());
+        assert_eq!(cov.plan().symbolics_built, 0, "the covariance factors under the solve's analysis");
+        cov.marginal_cov(&s.poses[7]).unwrap()
+    };
+    let cpu = run(None);
+    for d in devices() {
+        let dev = run(Some(&d));
+        let scale = cpu.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let diff = dev.iter().zip(cpu.iter()).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(diff <= 1e-7 * scale, "{}: the marginal covariance differs by {diff} of {scale}", label(&d));
+    }
+}
+
+/// The SLAM model of benchmarks/slam: poses of a position and
+/// `SimpleEulerAngleParam` angles with three constraints on themselves
+/// reading root scalars, landmarks in an arena with a drift prior, bearing
+/// observations nested in their landmark (`parent = lm`, the landmark and
+/// the observing pose), odometry between poses.
+#[arael::model]
+#[arael(constraint(hb_pose, {
+    let raw = spose.pos - spose.gps_pos;
+    let rt = spose.gps_cov_r.transpose() * raw;
+    [rt.x * spose.gps_isigma.x, rt.y * spose.gps_isigma.y, rt.z * spose.gps_isigma.z]
+}))]
+#[arael(constraint(hb_pose, {
+    let pd = spose.pos - spose.prior_pos;
+    let ed = spose.ea - spose.prior_ea;
+    [pd.x * root.drift_pos_isigma, pd.y * root.drift_pos_isigma, pd.z * root.drift_pos_isigma,
+     ed.x * root.drift_ea_isigma, ed.y * root.drift_ea_isigma, ed.z * root.drift_ea_isigma]
+}))]
+#[arael(constraint(hb_pose, {
+    [(spose.ea.x - spose.tilt_roll) * root.tilt_isigma, (spose.ea.y - spose.tilt_pitch) * root.tilt_isigma]
+}))]
+#[derive(Clone)]
+pub struct SPose {
+    pub pos: Param<vect3<f64>>,
+    pub ea: SimpleEulerAngleParam<f64>,
+    pub prior_pos: vect3<f64>,
+    pub prior_ea: vect3<f64>,
+    pub gps_pos: vect3<f64>,
+    pub gps_cov_r: arael::matrix::matrix3<f64>,
+    pub gps_isigma: vect3<f64>,
+    pub tilt_roll: f64,
+    pub tilt_pitch: f64,
+    pub hb_pose: SelfBlock<SPose>,
+}
+
+#[arael::model]
+#[arael(constraint(hb_drift, {
+    let d = slm.pos - slm.prior_pos;
+    [d.x * root.drift_lm_isigma, d.y * root.drift_lm_isigma, d.z * root.drift_lm_isigma]
+}))]
+#[derive(Clone)]
+pub struct SLm {
+    pub pos: Param<vect3<f64>>,
+    pub prior_pos: vect3<f64>,
+    pub frines: std::vec::Vec<SFrine>,
+    pub hb_drift: SelfBlock<SLm>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, parent = lm, {
+    let mr2w = pose.ea.rotation_matrix();
+    let lm_r = mr2w.transpose() * (lm.pos - pose.pos);
+    let r_r = lm_r - sfrine.camera_pos;
+    let r_f = sfrine.mf2r.transpose() * r_r;
+    [atan2(r_f.y, r_f.x) * sfrine.isigma.x * root.frine_isigma_scale,
+     atan2(r_f.z, r_f.x) * sfrine.isigma.y * root.frine_isigma_scale]
+}))]
+#[derive(Clone)]
+pub struct SFrine {
+    #[arael(ref = root.poses)]
+    pub pose: Ref<SPose>,
+    pub mf2r: arael::matrix::matrix3<f64>,
+    pub camera_pos: vect3<f64>,
+    pub isigma: vect2<f64>,
+    pub hb: CrossBlock<SLm, SPose>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let mr2w_prev = prev.ea.rotation_matrix();
+    let pos_diff = mr2w_prev.transpose() * (cur.pos - prev.pos);
+    let pos_err = pos_diff - spair.delta_pos;
+    let pos_w = spair.pos_cov_r.transpose() * pos_err;
+    let mr2w_cur = cur.ea.rotation_matrix();
+    let expected = mr2w_prev * spair.delta_ea.rotation_matrix();
+    let error_rot = expected.transpose() * mr2w_cur;
+    let ea_err = error_rot.get_euler_angles();
+    let ea_w = spair.ea_cov_r.transpose() * ea_err;
+    [pos_w.x * spair.pos_isigma.x, pos_w.y * spair.pos_isigma.y, pos_w.z * spair.pos_isigma.z,
+     ea_w.x * spair.ea_isigma.x, ea_w.y * spair.ea_isigma.y, ea_w.z * spair.ea_isigma.z]
+}))]
+#[derive(Clone)]
+pub struct SPair {
+    #[arael(ref = root.poses)]
+    pub prev: Ref<SPose>,
+    #[arael(ref = root.poses)]
+    pub cur: Ref<SPose>,
+    pub delta_pos: vect3<f64>,
+    pub delta_ea: vect3<f64>,
+    pub pos_cov_r: arael::matrix::matrix3<f64>,
+    pub pos_isigma: vect3<f64>,
+    pub ea_cov_r: arael::matrix::matrix3<f64>,
+    pub ea_isigma: vect3<f64>,
+    pub hb: CrossBlock<SPose, SPose>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct SPath {
+    pub poses: refs::Vec<SPose>,
+    pub landmarks: refs::Arena<SLm>,
+    pub pairs: std::vec::Vec<SPair>,
+    pub drift_pos_isigma: f64,
+    pub drift_ea_isigma: f64,
+    pub drift_lm_isigma: f64,
+    pub tilt_isigma: f64,
+    pub frine_isigma_scale: f64,
+}
+
+/// `n` poses along a winding path and `m` landmarks beside it, each seen
+/// by the poses within four steps of it, the measurements the truth plus
+/// noise, the poses and landmarks moved off it.
+fn slam_path(n: usize, m: usize, seed: u64) -> SPath {
+    use arael::matrix::matrix3d;
+    use arael::quatern::quatern;
+    use arael::vect::vect3d;
+    let mut rng = Lcg(seed);
+    let truth: Vec<(vect3d, vect3d)> = (0..n)
+        .map(|k| {
+            let t = k as f64;
+            (vect3d::new(t, 2.0 * (0.3 * t).sin(), 0.1 * t), vect3d::new(0.02 * t.sin(), 0.03 * t.cos(), 0.3 * (0.3 * t).cos()))
+        })
+        .collect();
+    let lms: Vec<vect3d> = (0..m)
+        .map(|j| vect3d::new(j as f64 * n as f64 / m as f64, if j % 2 == 0 { 5.0 } else { -5.0 }, 1.0 + (j % 3) as f64))
+        .collect();
+    let jitter = |rng: &mut Lcg, s: f64| vect3d::new(s * rng.uniform(), s * rng.uniform(), s * rng.uniform());
+    let mut poses = refs::Vec::new();
+    for (k, &(p, ea)) in truth.iter().enumerate() {
+        let off = if k == 0 { 0.0 } else { 1.0 };
+        let (p0, ea0) = (p + jitter(&mut rng, 0.05 * off), ea + jitter(&mut rng, 0.01 * off));
+        poses.push(SPose {
+            pos: Param::new(p0),
+            ea: SimpleEulerAngleParam::new(ea0),
+            prior_pos: p0,
+            prior_ea: ea0,
+            gps_pos: p + jitter(&mut rng, 0.1),
+            gps_cov_r: matrix3d::identity(),
+            gps_isigma: vect3d::new(2.0, 2.0, 1.0),
+            tilt_roll: ea.x + 0.002 * rng.uniform(),
+            tilt_pitch: ea.y + 0.002 * rng.uniform(),
+            hb_pose: SelfBlock::new(),
+        });
+    }
+    let mut landmarks = refs::Arena::new();
+    for (j, &l) in lms.iter().enumerate() {
+        let mut frines = std::vec::Vec::new();
+        for (k, &(p, ea)) in truth.iter().enumerate() {
+            if (k as f64 - l.x).abs() > 4.0 {
+                continue;
+            }
+            let r = matrix3d::rotation_from_euler_angles(ea).transpose() * (l - p);
+            let d = r * (1.0 / (r * r).sqrt());
+            let noise = matrix3d::rotation_from_euler_angles(jitter(&mut rng, 0.002));
+            frines.push(SFrine {
+                pose: poses.ref_at(k),
+                mf2r: quatern::from_two_vectors(vect3d::new(1.0, 0.0, 0.0), d).rotation_matrix() * noise,
+                camera_pos: vect3d::new(0.0, 0.0, 0.0),
+                isigma: vect2::new(100.0, 100.0),
+                hb: CrossBlock::new(),
+            });
+        }
+        let _ = j;
+        let l0 = l + jitter(&mut rng, 0.1);
+        landmarks.push(SLm { pos: Param::new(l0), prior_pos: l0, frines, hb_drift: SelfBlock::new() });
+    }
+    let mut pairs = std::vec::Vec::new();
+    for k in 1..n {
+        let ((pa, ea), (pb, eb)) = (truth[k - 1], truth[k]);
+        let (ra, rb) = (matrix3d::rotation_from_euler_angles(ea), matrix3d::rotation_from_euler_angles(eb));
+        pairs.push(SPair {
+            prev: poses.ref_at(k - 1),
+            cur: poses.ref_at(k),
+            delta_pos: ra.transpose() * (pb - pa) + jitter(&mut rng, 0.01),
+            delta_ea: (ra.transpose() * rb).get_euler_angles() + jitter(&mut rng, 0.002),
+            pos_cov_r: matrix3d::identity(),
+            pos_isigma: vect3d::new(20.0, 20.0, 20.0),
+            ea_cov_r: matrix3d::identity(),
+            ea_isigma: vect3d::new(50.0, 50.0, 50.0),
+            hb: CrossBlock::new(),
+        });
+    }
+    SPath { poses, landmarks, pairs, drift_pos_isigma: 0.01, drift_ea_isigma: 0.01, drift_lm_isigma: 0.01, tilt_isigma: 10.0, frine_isigma_scale: 1.0 }
+}
+
+/// The SLAM model assembles on the device as on the CPU (nested
+/// observations, simple Euler angles, root scalars) and solves there to
+/// the CPU's optimum.
+#[test]
+fn a_slam_path_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let mut s = slam_path(24, 30, 13);
+    assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+    let mut x = Vec::new();
+    s.serialize(&mut x);
+    let x1 = perturbed(&x);
+    for (wide, tol) in [(Wide::F64, 1e-11), (Wide::Df32, 1e-10)] {
+        let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+        assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{wide:?}: {chk:?}");
+        assert!(chk.grad_err < tol && chk.hess_err < tol, "{wide:?}: {chk:?}");
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = slam_path(24, 30, 13);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        (r.start_cost, r.end_cost)
+    };
+    let (start, cpu) = run(None);
+    assert!(cpu < 0.05 * start, "the path converges to its noise: {start} to {cpu}");
+    for d in devices() {
+        let (_, device) = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
     }
 }
