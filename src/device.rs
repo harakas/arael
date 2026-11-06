@@ -2,15 +2,19 @@
 //! values and the cost computed on a GPU from the model's constraints.
 //!
 //! A root the device head covers gets an implementation of [`DeviceRoot`]
-//! from `#[arael(root)]`: its layout ([`DeviceShape`]), its block tables
-//! against the solver's pattern, a pack walk that reads the constraint
-//! instances and the entities' fixed values and references from
-//! the model, and its constraint kernels in C++ ([`DeviceRoot::device_cpp`]).
+//! from `#[arael(root)]`: its layout ([`DeviceShape`]), a structure walk
+//! (the entities' indices, the guards, the kept instances' slots), a values
+//! walk (the entities' fixed values, references and data, the root's data,
+//! the instances' data), the data records' Rust and C++ mirrors and its
+//! constraint kernels in C++ ([`DeviceRoot::device_cpp`]).
 //! [`DeviceAssembly`] lays a root out on a [`Device`] once per structure and
 //! then assembles at any parameter vector into device blocks, which the
-//! device solve reads in place: the model's data as columns in one block,
-//! the sums in the route's [`Wide`] scalar and no atomic writes
-//! (`arael-gpu/kernels/assembly.cpp`).
+//! device solve reads in place: the model's data as columns and records in
+//! one block, each value stored once in the table it belongs to (the root,
+//! an entity table, an instance table), the sums in the route's [`Wide`]
+//! scalar and no atomic writes (`arael-gpu/kernels/assembly.cpp`). The
+//! structure is uploaded once; a refresh writes and uploads the values only
+//! ([`Staging`]).
 //!
 //! The block starts with a layout table: the byte offset of every column,
 //! one `u64` each, in the order [`columns`] gives them. The kernels read a
@@ -34,6 +38,12 @@ pub struct DeviceShape {
     /// How many cross arrays the store holds.
     pub crosses: usize,
     pub constraints: Vec<DeviceConstraint>,
+    /// Per entity table: the bytes of one entity's data record, a multiple
+    /// of 16, zero for none.
+    pub entity_data: Vec<usize>,
+    /// The bytes of the root's data record, a multiple of 16, zero for
+    /// none.
+    pub root_data: usize,
 }
 
 /// One referenced parameter field of a [`DeviceShape`]: a parameter whose
@@ -102,15 +112,6 @@ impl ReferenceKind {
         }
     }
 
-    /// The identity reference.
-    fn identity(self) -> &'static [f64] {
-        match self {
-            ReferenceKind::Euler => &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            ReferenceKind::Quaternion | ReferenceKind::UnitVec => &[1.0, 0.0, 0.0, 0.0],
-            ReferenceKind::Transform => &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        }
-    }
-
     /// Its kernels' name in `arael-gpu/kernels/assembly.cpp`
     /// (`k_<name>_values`, `_derivatives`, `_advance`).
     fn kernel_name(self) -> &'static str {
@@ -142,7 +143,7 @@ pub struct DeviceConstraint {
     /// The words of one instance: its entities' slots and its cross slot
     /// (3), or its one entity's slot (1).
     pub words: usize,
-    /// Its data leaves.
+    /// Its instance data columns.
     pub data: usize,
     /// Its residual rows.
     pub rows: usize,
@@ -160,50 +161,113 @@ impl DeviceConstraint {
     }
 }
 
-/// A root's block store against a tiled pattern, slot by slot: per entity
-/// array the global parameter indices and the tile `(base, stride,
-/// start)`, per cross array the tile `(base, stride, flip)`.
+/// What a root's structure walk reads from the model, once per structure:
+/// per entity table the parameters' global indices slot by slot (`FIXED`
+/// for a fixed one), per constraint the instances its guard keeps (their
+/// entity slots and cross slot, [`DeviceConstraint::words`] each) and, in
+/// walk order, which instances it keeps.
 #[derive(Clone, Debug, Default)]
-pub struct DeviceTables {
+pub struct DeviceStructure {
     pub idx: Vec<Vec<u32>>,
-    pub tile: Vec<Vec<u32>>,
-    pub cross: Vec<Vec<u32>>,
+    pub rows: Vec<Vec<u32>>,
+    pub keep: Vec<Vec<bool>>,
 }
 
-/// A model's leaf value (`f32`, `f64` or `df32`) as `f64`, for the pack
-/// walk the device head generates: a mixed parameter keeps its step and
-/// its reference rotation in the root's wide scalar.
+impl DeviceStructure {
+    /// Empty, for `shape`.
+    pub fn new(shape: &DeviceShape) -> Self {
+        DeviceStructure {
+            idx: shape.entities.iter().map(|_| Vec::new()).collect(),
+            rows: shape.constraints.iter().map(|_| Vec::new()).collect(),
+            keep: shape.constraints.iter().map(|_| Vec::new()).collect(),
+        }
+    }
+}
+
+/// A model's leaf value (`f32`, `f64` or `df32`) as `f64`, for the walks
+/// the device head generates: a mixed parameter keeps its step and its
+/// reference rotation in the root's wide scalar.
 pub fn leaf_f64<V: num::ToPrimitive>(v: V) -> f64 {
     v.to_f64().expect("a model's scalars convert to f64")
 }
 
-/// What a root's pack walk reads from the model: per entity array the
-/// values of its fixed parameters, per referenced field the references
-/// ([`ReferenceKind::reference_len`] values each, f64) and which slots the
-/// walk wrote them for, per constraint its instances and their data leaves.
-#[derive(Clone, Debug)]
-pub struct DevicePack<T> {
-    pub fixed: Vec<Vec<T>>,
-    pub refr: Vec<Vec<f64>>,
-    /// The slots of a referenced field an instance packed reads, whose
-    /// references are the model's; the others keep the identity, and the
-    /// device leaves the model's alone.
-    pub packed: Vec<Vec<bool>>,
-    pub inst: Vec<Vec<u32>>,
-    pub data: Vec<Vec<T>>,
+/// Where the values walk writes, in the image's staging buffer: the values
+/// columns of a [`DeviceShape`], each at its offset. A write takes a whole
+/// row, checked against its column's extent once.
+pub struct DeviceWriter<'a, T> {
+    bytes: &'a mut [u8],
+    wide: Wide,
+    /// Per entity table: the fixed values' offset, the parameters, the slots.
+    fixed: Vec<(usize, usize, usize)>,
+    /// Per entity table: the data records' offset and record bytes.
+    data: Vec<(usize, usize)>,
+    /// Per referenced field: the references' offset and values per slot.
+    refr: Vec<(usize, usize, usize)>,
+    /// The root's record: offset and bytes.
+    root: (usize, usize),
+    /// Per constraint: its instance columns' offsets and its rows.
+    inst: Vec<(Vec<usize>, usize)>,
+    _t: core::marker::PhantomData<fn(T)>,
 }
 
-impl<T: Copy + Default> DevicePack<T> {
-    /// Empty, for `shape` with `slots[e]` entities in entity array `e`:
-    /// fixed values zero and references the identity until the walk
-    /// writes them.
-    pub fn new(shape: &DeviceShape, slots: &[usize]) -> Self {
-        DevicePack {
-            fixed: shape.entities.iter().zip(slots).map(|(&n, &s)| vec![T::default(); n * s]).collect(),
-            refr: shape.references.iter().map(|r| r.kind.identity().repeat(slots[r.entity])).collect(),
-            packed: shape.references.iter().map(|r| vec![false; slots[r.entity]]).collect(),
-            inst: shape.constraints.iter().map(|_| Vec::new()).collect(),
-            data: shape.constraints.iter().map(|_| Vec::new()).collect(),
+impl<T: crate::utils::Float> DeviceWriter<'_, T> {
+    /// The values `v` from byte `at` on, back to back.
+    #[inline]
+    fn run<V: Copy>(&mut self, at: usize, v: &[V]) {
+        let n = core::mem::size_of_val(v);
+        assert!(at + n <= self.bytes.len(), "a write past the staging buffer's {} bytes", self.bytes.len());
+        // SAFETY: within the buffer (checked above); `V` is a plain value
+        // (a model scalar, a `u64`, a `Pod` record), copied as bytes.
+        unsafe { core::ptr::copy_nonoverlapping(v.as_ptr() as *const u8, self.bytes.as_mut_ptr().add(at), n) }
+    }
+
+    /// The parameters of the entity at `slot` of entity table `e`: their
+    /// values where they are fixed (a live one is read from the parameters).
+    #[inline]
+    pub fn fixed<const N: usize>(&mut self, e: usize, slot: usize, v: [T; N]) {
+        let (at, n, slots) = self.fixed[e];
+        assert!(slot < slots && n == N, "entity table {e}: {N} parameters at slot {slot}, {n} each over {slots} slots");
+        self.run(at + slot * N * core::mem::size_of::<T>(), &v);
+    }
+
+    /// The reference of referenced field `r` of the entity at `slot`, in
+    /// the route's wide scalar.
+    #[inline]
+    pub fn reference<const K: usize>(&mut self, r: usize, slot: usize, v: [f64; K]) {
+        let (at, len, slots) = self.refr[r];
+        assert!(slot < slots && len == K, "referenced field {r}: {K} values at slot {slot}, {len} each over {slots} slots");
+        let wide = self.wide;
+        self.run(at + slot * K * 8, &v.map(|x| wide.bits(x)));
+    }
+
+    /// The data record of the entity at `slot` of entity table `e`.
+    #[inline]
+    pub fn entity_data<R: arael_gpu::bytemuck::Pod>(&mut self, e: usize, slot: usize, rec: R) {
+        let (at, bytes) = self.data[e];
+        let (_, _, slots) = self.fixed[e];
+        assert!(slot < slots && core::mem::size_of::<R>() == bytes, "entity table {e}: a record of {} bytes at slot {slot}, {bytes} over {slots} slots", core::mem::size_of::<R>());
+        self.run(at + slot * bytes, core::slice::from_ref(&rec));
+    }
+
+    /// The root's data record.
+    pub fn root_data<R: arael_gpu::bytemuck::Pod>(&mut self, rec: R) {
+        let (at, bytes) = self.root;
+        assert_eq!(core::mem::size_of::<R>(), bytes, "the root's record");
+        self.run(at, core::slice::from_ref(&rec));
+    }
+
+    /// The instance data of constraint `c` at `row`, one value per column.
+    #[inline]
+    pub fn instance<const N: usize>(&mut self, c: usize, row: usize, v: [T; N]) {
+        let (cols, rows) = &self.inst[c];
+        assert!(row < *rows && cols.len() == N, "constraint {c}: {N} columns at row {row}, {} over {rows} rows", cols.len());
+        let (base, size, len) = (self.bytes.as_mut_ptr(), core::mem::size_of::<T>(), self.bytes.len());
+        for (&at, &x) in cols.iter().zip(&v) {
+            debug_assert!(at + (row + 1) * size <= len);
+            // SAFETY: column `j` holds `rows` values of `T` within the
+            // buffer (the layout's), and `row < rows`.
+            unsafe { (base.add(at + row * size) as *mut T).write_unaligned(x) }
+            let _ = len;
         }
     }
 }
@@ -212,12 +276,17 @@ impl<T: Copy + Default> DevicePack<T> {
 pub trait DeviceRoot<T> {
     /// The root's layout.
     fn device_shape(&self) -> DeviceShape;
-    /// The root's block store, built for the model as it is, against the
-    /// tiled pattern `resolve` describes (as `bind_hessian_positions`).
-    fn device_tables(&self, resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize)) -> DeviceTables;
-    /// Read the instances and the entities' fixed values and reference
-    /// references from the model, whose working copies are current.
-    fn device_pack(&self, pack: &mut DevicePack<T>);
+    /// The structure: every entity table's indices in slot order (the slots
+    /// the block markers hold, which the walk checks), every constraint's
+    /// guards and its kept instances' slots. The model's working copies
+    /// must be current (a guard may read them).
+    fn device_structure(&self, s: &mut DeviceStructure);
+    /// The values: every entity's fixed values, references and data, the
+    /// root's data, every kept instance's data (`keep` from
+    /// [`device_structure`](Self::device_structure), whose walk order this
+    /// walk follows). Panics when the model has other instances than at
+    /// the structure walk.
+    fn device_values(&self, keep: &[Vec<bool>], w: &mut DeviceWriter<'_, T>);
     /// The constraint kernels in C++: per constraint `c`, `__dk<c>_gh` and `__dk<c>_cost`, compiled after
     /// `arael-gpu/kernels/assembly.cpp` with the layout table's slots
     /// (`ARAEL_COL_*`) defined in front.
@@ -265,27 +334,26 @@ fn record_width(shape: &DeviceShape, c: usize) -> usize {
     k.rows * (1 + k.params(shape))
 }
 
-/// The columns of a root, in the layout table's order, and how many of
-/// them the host writes: first those, per entity array its global indices,
-/// tiles and fixed values; per referenced field its step offsets and
-/// references; per cross array its tiles; per constraint its
-/// slots, data leaves and its instances by entity and by cross slot. Then
-/// the columns the kernels write: per entity array its gathered values, per
-/// referenced field its values (in F and W) and derivatives, per constraint its records and
-/// cost parts. The order depends on the shape alone. W values are 8 bytes.
-fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize) -> (Vec<Column>, usize) {
+/// The columns of a root, in the layout table's order, and how many of them
+/// each of its first two ranges ends at. The structure: per entity table
+/// its indices and tiles, per referenced field its step offsets, per cross
+/// array its tiles, per constraint its slots and its instances grouped by
+/// entity and by tile. The values: per entity table its fixed values and
+/// data records, per referenced field its references, the root's record,
+/// per constraint its instance data. Then the columns the kernels write: per
+/// entity table its gathered values, per referenced field its values (in F
+/// and W) and derivatives, per constraint its records and cost parts. The
+/// order depends on the shape alone. W values are 8 bytes.
+fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: &[usize], ts: usize) -> (Vec<Column>, usize, usize) {
     let col = |name: String, elem: usize, len: usize| Column { name, elem, len };
     let mut v = Vec::new();
     for (e, &n) in shape.entities.iter().enumerate() {
         let s = slots[e];
         v.push(col(format!("E{e}_IDX"), 4, n * s));
         v.push(col(format!("E{e}_TILE"), 4, 3 * s));
-        v.push(col(format!("E{e}_FIXED"), ts, n * s));
     }
     for (r, rf) in shape.references.iter().enumerate() {
-        let s = slots[rf.entity];
-        v.push(col(format!("R{r}_AT"), 4, s));
-        v.push(col(format!("R{r}_REFR"), 8, rf.kind.reference_len() * s));
+        v.push(col(format!("R{r}_AT"), 4, slots[rf.entity]));
     }
     for (x, &s) in cross_slots.iter().enumerate() {
         v.push(col(format!("X{x}_TILE"), 4, 3 * s));
@@ -296,9 +364,6 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
         for w in words {
             v.push(col(format!("C{c}_{w}"), 4, n));
         }
-        for j in 0..k.data {
-            v.push(col(format!("C{c}_D{j}"), ts, n));
-        }
         v.push(col(format!("C{c}_AOFF"), 4, slots[k.a] + 1));
         v.push(col(format!("C{c}_AINST"), 4, n));
         if let Some((b, x)) = k.pair {
@@ -308,7 +373,22 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
             v.push(col(format!("C{c}_XINST"), 4, n));
         }
     }
-    let host = v.len();
+    let structure = v.len();
+    for (e, &n) in shape.entities.iter().enumerate() {
+        let s = slots[e];
+        v.push(col(format!("E{e}_FIXED"), ts, n * s));
+        v.push(col(format!("E{e}_DATA"), shape.entity_data[e], s));
+    }
+    for (r, rf) in shape.references.iter().enumerate() {
+        v.push(col(format!("R{r}_REFR"), 8, rf.kind.reference_len() * slots[rf.entity]));
+    }
+    v.push(col("ROOT".to_string(), shape.root_data, 1));
+    for (c, k) in shape.constraints.iter().enumerate() {
+        for j in 0..k.data {
+            v.push(col(format!("C{c}_D{j}"), ts, counts[c]));
+        }
+    }
+    let values = v.len();
     for (e, &n) in shape.entities.iter().enumerate() {
         v.push(col(format!("E{e}_EV"), ts, n * slots[e]));
     }
@@ -322,33 +402,39 @@ fn columns(shape: &DeviceShape, slots: &[usize], cross_slots: &[usize], counts: 
         v.push(col(format!("C{c}_REC"), ts, n * record_width(shape, c)));
         v.push(col(format!("C{c}_PART"), 8, parts(n)));
     }
-    (v, host)
+    (v, structure, values)
 }
 
 /// Where every column sits in the block: the table first, then each column
-/// on a 256-byte boundary; the host's columns end at `host_bytes`.
+/// on a 256-byte boundary. The table and the structure columns end at
+/// `structure_bytes`, the values columns at `host_bytes`: what the host
+/// writes. The kernels write the rest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Layout {
     columns: Vec<Column>,
     offsets: Vec<usize>,
+    structure_bytes: usize,
     host_bytes: usize,
     bytes: usize,
 }
 
 impl Layout {
-    fn new((columns, host): (Vec<Column>, usize)) -> Self {
+    fn new((columns, structure, values): (Vec<Column>, usize, usize)) -> Self {
         let align = |b: usize| b.div_ceil(256) * 256;
         let mut at = align(columns.len() * 8);
         let mut offsets = Vec::with_capacity(columns.len());
-        let mut host_bytes = at;
+        let (mut structure_bytes, mut host_bytes) = (at, at);
         for (k, c) in columns.iter().enumerate() {
             offsets.push(at);
             at += align((c.elem * c.len).max(1));
-            if k + 1 == host {
+            if k < structure {
+                structure_bytes = at;
+            }
+            if k < values {
                 host_bytes = at;
             }
         }
-        Layout { columns, offsets, host_bytes, bytes: at }
+        Layout { columns, offsets, structure_bytes, host_bytes, bytes: at }
     }
 
     /// The `#define`s of the table's slots, for the kernels.
@@ -398,12 +484,57 @@ impl<K> Kernels<K> {
     }
 }
 
+/// Where the host writes the device image before it is copied over.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Staging {
+    /// Pinned (page-locked) memory: a copy from it is asynchronous, so the
+    /// host goes on while it moves.
+    #[default]
+    Pinned,
+    /// Ordinary memory: the runtime stages each copy itself, and the call
+    /// returns once it holds the bytes. For platforms where copies from
+    /// pinned memory are slow.
+    Pageable,
+}
+
+/// The image's host memory of a [`Staging`] kind.
+enum HostBuf<H> {
+    Pinned(H),
+    Pageable(Vec<u8>),
+}
+
+impl<H> HostBuf<H> {
+    /// `bytes` of `staging`'s kind on `dev`.
+    fn new<D: Device<Host = H>>(dev: &D, staging: Staging, bytes: usize) -> Result<Self, GpuError> {
+        Ok(match staging {
+            Staging::Pinned => HostBuf::Pinned(dev.alloc_host(bytes)?),
+            Staging::Pageable => HostBuf::Pageable(vec![0u8; bytes]),
+        })
+    }
+
+    /// Its bytes, to write, once the copies from it have completed.
+    fn bytes_mut<'a, D: Device<Host = H>>(&'a mut self, dev: &D) -> Result<&'a mut [u8], GpuError> {
+        match self {
+            HostBuf::Pinned(h) => dev.host_mut(h),
+            HostBuf::Pageable(v) => Ok(v.as_mut_slice()),
+        }
+    }
+
+    /// Its first `len` bytes into `dst` from byte `offset` on.
+    fn upload<D: Device<Host = H>>(&self, dev: &D, dst: &mut D::Block, offset: usize, len: usize) -> Result<(), GpuError> {
+        match self {
+            HostBuf::Pinned(h) => dev.write_from_host(dst, offset, h, 0..len),
+            HostBuf::Pageable(v) => dev.write(dst, offset, &v[..len]),
+        }
+    }
+}
+
 /// A buffer the assembly writes or reads that is not its own: a block and a
 /// byte offset into it.
 pub type Target<'a, B> = (&'a B, usize);
 
-/// A root laid out on a [`Device`] in one block, its tables, instances and
-/// entity data uploaded once per structure and refreshed per solve; the
+/// A root laid out on a [`Device`] in one block: its structure uploaded
+/// once, its values written into pinned staging and uploaded per solve; the
 /// parameter vector, the targets and the cost are the caller's buffers, in
 /// the assembly's [`Wide`] scalar.
 pub struct DeviceAssembly<T, D: Device> {
@@ -413,23 +544,16 @@ pub struct DeviceAssembly<T, D: Device> {
     slots: Vec<usize>,
     cross_slots: Vec<usize>,
     counts: Vec<usize>,
-    /// The structure's tables, kept for the block image of each refresh.
-    idx: Vec<Vec<u32>>,
-    tile: Vec<Vec<u32>>,
-    cross: Vec<Vec<u32>>,
-    at: Vec<Vec<u32>>,
     /// Per referenced field, per slot: the global index of the step's first
     /// live parameter, [`FIXED`] when the step is fixed.
     ref_index: Vec<Vec<u32>>,
-    /// The last pack's [`DevicePack::packed`].
-    packed: Vec<Vec<bool>>,
-    /// Per cross array, per slot: the first slot on the same tile of H
-    /// (two instances of one pair of entities, each with a cross block of
-    /// its own, share a tile).
-    tile_owner: Vec<Vec<u32>>,
+    /// Per constraint, in walk order: which instances its guard keeps.
+    keep: Vec<Vec<bool>>,
     layout: Layout,
     offset: HashMap<String, usize>,
     block: D::Block,
+    /// The values range of the block on the host: what a refresh rewrites.
+    values: HostBuf<D::Host>,
     kernels: Kernels<D::Kernel>,
     generation: u64,
     _t: core::marker::PhantomData<fn() -> T>,
@@ -439,26 +563,18 @@ fn launch_n(n: usize) -> Launch {
     Launch::linear((n as u32).max(1), THREADS)
 }
 
-/// Entry `j` of every record of `nd` values in `src` into `dst`, as `E`
-/// (the model scalar's bits).
-fn transpose<E: arael_gpu::bytemuck::Pod>(dst: &mut [u8], src: &[u8], j: usize, nd: usize) {
-    let dst: &mut [E] = arael_gpu::bytemuck::cast_slice_mut(dst);
-    let src: &[E] = arael_gpu::bytemuck::cast_slice(src);
-    for (d, rec) in dst.iter_mut().zip(src.chunks_exact(nd)) {
-        *d = rec[j];
-    }
-}
-
 /// Per cross slot of the tables `tiles` (`(base, stride, flip)` each), the
 /// first slot whose tile starts at the same value of H.
 fn tile_owners(tiles: &[u32]) -> Vec<u32> {
     let n = tiles.len() / 3;
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    order.sort_unstable_by_key(|&s| (tiles[3 * s as usize], s));
+    // (base, slot) in one word, so the sort compares plain integers
+    let mut keys: Vec<u64> = (0..n).map(|s| (tiles[3 * s] as u64) << 32 | s as u64).collect();
+    keys.sort_unstable();
     let mut owner = vec![0u32; n];
     let mut first = 0u32;
-    for (k, &s) in order.iter().enumerate() {
-        if k == 0 || tiles[3 * s as usize] != tiles[3 * order[k - 1] as usize] {
+    for (k, &key) in keys.iter().enumerate() {
+        let s = key as u32;
+        if k == 0 || key >> 32 != keys[k - 1] >> 32 {
             first = s;
         }
         owner[s as usize] = first;
@@ -486,46 +602,163 @@ fn by_slot(of: impl Iterator<Item = u32> + Clone, slots: usize) -> (Vec<u32>, Ve
     (ptr, inst)
 }
 
+/// The tiles of the structure `st` against the pattern `resolve` describes:
+/// per entity table `(base, stride, start)` per slot, per cross array
+/// `(base, stride, flip)` per slot its instances name, `flip` 1 when the
+/// second side's span is the lower-numbered one and lies on the tile's
+/// rows. Zeros where a side is fixed throughout.
+fn tiles(
+    shape: &DeviceShape,
+    st: &DeviceStructure,
+    slots: &[usize],
+    cross_slots: &[usize],
+    resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize),
+) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+    use crate::store::{device_word, tile_extent};
+    let extent = |e: usize, s: usize| {
+        let n = shape.entities[e];
+        tile_extent(&st.idx[e][s * n..(s + 1) * n])
+    };
+    let entity = (0..shape.entities.len())
+        .map(|e| {
+            (0..slots[e])
+                .flat_map(|s| {
+                    let (start, live) = extent(e, s);
+                    if live == 0 {
+                        return [0, 0, 0];
+                    }
+                    let (base, stride, _) = resolve(start, start);
+                    [device_word(base), device_word(stride), start]
+                })
+                .collect()
+        })
+        .collect();
+    let mut cross: Vec<Vec<u32>> = cross_slots.iter().map(|&n| vec![0u32; 3 * n]).collect();
+    let mut done: Vec<Vec<bool>> = cross_slots.iter().map(|&n| vec![false; n]).collect();
+    for (c, k) in shape.constraints.iter().enumerate() {
+        let Some((b, x)) = k.pair else { continue };
+        for rec in st.rows[c].as_chunks::<3>().0 {
+            let (sa, sb, sx) = (rec[0] as usize, rec[1] as usize, rec[2] as usize);
+            if done[x][sx] {
+                continue;
+            }
+            done[x][sx] = true;
+            let ((ra, wa), (rb, wb)) = (extent(k.a, sa), extent(b, sb));
+            if wa == 0 || wb == 0 {
+                continue;
+            }
+            let flip = rb < ra;
+            let (base, stride, _) = if flip { resolve(rb, ra) } else { resolve(ra, rb) };
+            cross[x][3 * sx..3 * sx + 3].copy_from_slice(&[device_word(base), device_word(stride), flip as u32]);
+        }
+    }
+    (entity, cross)
+}
+
+/// The block's table and structure columns into `image` (the structure
+/// range): the entity tables' indices and tiles, the referenced fields'
+/// step offsets, the cross tiles, the instances' slots and their groupings
+/// by entity and by tile. Returns per referenced field, per slot, the
+/// step's first live global index (the key of its reference).
+#[allow(clippy::too_many_arguments)]
+fn write_structure(
+    image: &mut [u8],
+    layout: &Layout,
+    offset: &HashMap<String, usize>,
+    shape: &DeviceShape,
+    st: &DeviceStructure,
+    slots: &[usize],
+    cross_slots: &[usize],
+    entity_tiles: &[Vec<u32>],
+    cross_tiles: &[Vec<u32>],
+) -> Vec<Vec<u32>> {
+    use arael_gpu::bytemuck::cast_slice;
+    let put = |image: &mut [u8], name: &str, bytes: &[u8]| {
+        let o = offset[name];
+        image[o..o + bytes.len()].copy_from_slice(bytes);
+    };
+    for (k, &o) in layout.offsets.iter().enumerate() {
+        image[8 * k..8 * k + 8].copy_from_slice(&(o as u64).to_le_bytes());
+    }
+    for (e, (idx, tile)) in st.idx.iter().zip(entity_tiles).enumerate() {
+        put(image, &format!("E{e}_IDX"), cast_slice(idx));
+        put(image, &format!("E{e}_TILE"), cast_slice(tile));
+    }
+    let mut ref_index = Vec::with_capacity(shape.references.len());
+    for (r, rf) in shape.references.iter().enumerate() {
+        let n = shape.entities[rf.entity];
+        let at: Vec<u32> = (0..slots[rf.entity]).map(|s| (s * n + rf.step) as u32).collect();
+        put(image, &format!("R{r}_AT"), cast_slice(&at));
+        // a step's key: its first live parameter (a TransformParam may hold
+        // one half of its step fixed)
+        let idx = &st.idx[rf.entity];
+        ref_index.push(
+            at.iter()
+                .map(|&a| idx[a as usize..a as usize + rf.kind.step_len()].iter().copied().find(|&g| g != FIXED).unwrap_or(FIXED))
+                .collect(),
+        );
+    }
+    let owners: Vec<Vec<u32>> = cross_tiles.iter().map(|t| tile_owners(t)).collect();
+    for (x, t) in cross_tiles.iter().enumerate() {
+        put(image, &format!("X{x}_TILE"), cast_slice(t));
+    }
+    for (c, k) in shape.constraints.iter().enumerate() {
+        let words: &[&str] = if k.pair.is_some() { &["SA", "SB", "SX"] } else { &["SA"] };
+        assert_eq!(k.words, words.len(), "an instance is two entity slots and a cross slot, or one entity slot");
+        let rows = &st.rows[c];
+        for (w, name) in words.iter().enumerate() {
+            let col: Vec<u32> = rows.chunks_exact(k.words).map(|rec| rec[w]).collect();
+            put(image, &format!("C{c}_{name}"), cast_slice(&col));
+        }
+        let mut sides = vec![("A", 0, slots[k.a])];
+        if let Some((b, _)) = k.pair {
+            sides.push(("B", 1, slots[b]));
+        }
+        for (side, w, n) in sides {
+            let (ptr, list) = by_slot(rows.chunks_exact(k.words).map(|rec| rec[w]), n);
+            put(image, &format!("C{c}_{side}OFF"), cast_slice(&ptr));
+            put(image, &format!("C{c}_{side}INST"), cast_slice(&list));
+        }
+        if let Some((_, x)) = k.pair {
+            // every instance in the list of its tile's first slot, so a
+            // tile has one summing thread per entry, the other slots none
+            let owner = &owners[x];
+            let (ptr, list) = by_slot(rows.as_chunks::<3>().0.iter().map(|rec| owner[rec[2] as usize]), cross_slots[x]);
+            put(image, &format!("C{c}_XOFF"), cast_slice(&ptr));
+            put(image, &format!("C{c}_XINST"), cast_slice(&list));
+        }
+    }
+    ref_index
+}
+
 impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
     /// Lay `root` out on `dev` against the tiled pattern `resolve`
-    /// describes, its sums in `wide`, and compile its kernels. The model's
-    /// working copies must be current (its fixed values and references are
-    /// read).
+    /// describes, its sums in `wide`, compile its kernels, and upload its
+    /// structure and values from `staging`. The model's working copies must
+    /// be current (its guards, fixed values and references are read).
     pub fn new(
         dev: &Arc<D>,
         root: &dyn DeviceRoot<T>,
         resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize),
         wide: Wide,
+        staging: Staging,
     ) -> Result<Self, GpuError> {
         let ts = core::mem::size_of::<T>();
         assert!(ts == 4 || ts == 8, "the device assembly takes an f32 or an f64 model");
         let shape = root.device_shape();
-        let tables = root.device_tables(resolve);
-        let slots: Vec<usize> = shape.entities.iter().zip(&tables.idx).map(|(&n, ix)| ix.len() / n.max(1)).collect();
-        let cross_slots: Vec<usize> = tables.cross.iter().map(|c| c.len() / 3).collect();
-        let at: Vec<Vec<u32>> = shape
-            .references
-            .iter()
-            .map(|r| (0..slots[r.entity]).map(|s| (s * shape.entities[r.entity] + r.step) as u32).collect())
-            .collect();
-        // a step's key: its first live parameter (a TransformParam may hold
-        // one half of its step fixed)
-        let ref_index = shape
-            .references
-            .iter()
-            .map(|r| {
-                (0..slots[r.entity])
-                    .map(|s| {
-                        let at = s * shape.entities[r.entity] + r.step;
-                        tables.idx[r.entity][at..at + r.kind.step_len()].iter().copied().find(|&g| g != FIXED).unwrap_or(FIXED)
-                    })
-                    .collect()
-            })
-            .collect();
-        let tile_owner = tables.cross.iter().map(|t| tile_owners(t)).collect();
-        let mut pack = DevicePack::<T>::new(&shape, &slots);
-        root.device_pack(&mut pack);
-        let counts = instance_counts(&shape, &pack);
+        let mut st = DeviceStructure::new(&shape);
+        root.device_structure(&mut st);
+        let slots: Vec<usize> = shape.entities.iter().zip(&st.idx).map(|(&n, ix)| ix.len() / n.max(1)).collect();
+        let counts: Vec<usize> = shape.constraints.iter().zip(&st.rows).map(|(k, r)| r.len() / k.words).collect();
+        let mut cross_slots = vec![0usize; shape.crosses];
+        for (c, k) in shape.constraints.iter().enumerate() {
+            if let Some((_, x)) = k.pair {
+                for rec in st.rows[c].as_chunks::<3>().0 {
+                    cross_slots[x] = cross_slots[x].max(rec[2] as usize + 1);
+                }
+            }
+        }
+        let (entity_tiles, cross_tiles) = tiles(&shape, &st, &slots, &cross_slots, resolve);
         let layout = Layout::new(columns(&shape, &slots, &cross_slots, &counts, ts));
         let scalar = if ts == 8 { "double" } else { "float" };
         let defines = format!("{}#define SCALAR {scalar}\n{}", wide.defines(), layout.defines());
@@ -556,8 +789,14 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
                 .map(|c| ConstraintKernels { gh: k(), ra: k(), csum: k(), cost: k(), pair: c.pair.map(|_| (k(), k())) })
                 .collect(),
         };
-        let block = dev.alloc(layout.bytes)?;
+        let mut block = dev.alloc(layout.bytes)?;
         let offset = layout.index();
+        // the structure: the table and the structure columns, copied once
+        let mut host = HostBuf::new(&**dev, staging, layout.structure_bytes)?;
+        let ref_index = write_structure(host.bytes_mut(&**dev)?, &layout, &offset, &shape, &st, &slots, &cross_slots, &entity_tiles, &cross_tiles);
+        host.upload(&**dev, &mut block, 0, layout.structure_bytes)?;
+        drop(host);
+        let values = HostBuf::new(&**dev, staging, layout.host_bytes - layout.structure_bytes)?;
         let mut asm = DeviceAssembly {
             dev: dev.clone(),
             wide,
@@ -565,125 +804,56 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
             slots,
             cross_slots,
             counts,
-            idx: tables.idx,
-            tile: tables.tile,
-            cross: tables.cross,
-            at,
             ref_index,
-            packed: Vec::new(),
-            tile_owner,
+            keep: st.keep,
             layout,
             offset,
             block,
+            values,
             kernels,
             generation: 0,
             _t: core::marker::PhantomData,
         };
-        asm.write(&pack)?;
+        asm.refresh(root)?;
         Ok(asm)
     }
 
-    /// Read the model's data again: the constraint instances and their
-    /// data, the entities' fixed values and the references, which
-    /// a solve may have been handed changed (the structure is the same).
-    /// The block keeps its place while the layout is the same, so graphs
-    /// recorded against it stay valid; otherwise a new block is laid out
-    /// and the [`generation`](Self::generation) moves on. The model's
-    /// working copies must be current.
+    /// Read the model's values again (the entities' fixed values,
+    /// references and data, the root's data, the instances' data), which a
+    /// solve may have been handed changed, and upload them. The structure,
+    /// the block and its layout stay, so graphs recorded against it stay
+    /// valid. The model's working copies must be current; a model of
+    /// another structure panics (the session's structure is rebuilt by
+    /// `LmSession::invalidate`).
     pub fn refresh(&mut self, root: &dyn DeviceRoot<T>) -> Result<(), GpuError> {
-        let mut pack = DevicePack::<T>::new(&self.shape, &self.slots);
-        root.device_pack(&mut pack);
-        let counts = instance_counts(&self.shape, &pack);
-        if counts != self.counts {
-            // The slots of the table are the same, so the kernels are too;
-            // only the offsets move.
-            let ts = core::mem::size_of::<T>();
-            let layout = Layout::new(columns(&self.shape, &self.slots, &self.cross_slots, &counts, ts));
-            if layout.bytes > self.layout.bytes {
-                self.block = self.dev.alloc(layout.bytes)?;
-            }
-            self.offset = layout.index();
-            self.layout = layout;
-            self.counts = counts;
-            self.generation += 1;
-        }
-        self.write(&pack)
-    }
-
-    /// The host's part of the block, written in one copy: the table, the
-    /// structure's tables, the model's data and the instance lists; the
-    /// columns the kernels write after it are not.
-    fn write(&mut self, pack: &DevicePack<T>) -> Result<(), GpuError> {
-        use arael_gpu::bytemuck::{cast_slice, cast_slice_mut};
-        self.packed.clone_from(&pack.packed);
-        // in words, so every column (on a 256-byte boundary) is a typed slice
-        let mut words = vec![0u64; self.layout.host_bytes / 8];
-        for (k, &o) in self.layout.offsets.iter().enumerate() {
-            words[k] = o as u64;
-        }
-        let image: &mut [u8] = cast_slice_mut(&mut words);
-        let offset = &self.offset;
-        // the byte range of `len` bytes of column `name`
-        let col = |name: &str, len: usize| -> std::ops::Range<usize> {
-            let o = offset[name];
-            o..o + len
+        let base = self.layout.structure_bytes;
+        let at = |name: &str| self.offset[name] - base;
+        let n_ent = self.shape.entities.len();
+        let mut w = DeviceWriter {
+            bytes: self.values.bytes_mut(&*self.dev)?,
+            wide: self.wide,
+            fixed: (0..n_ent).map(|e| (at(&format!("E{e}_FIXED")), self.shape.entities[e], self.slots[e])).collect(),
+            data: (0..n_ent).map(|e| (at(&format!("E{e}_DATA")), self.shape.entity_data[e])).collect(),
+            refr: self
+                .shape
+                .references
+                .iter()
+                .enumerate()
+                .map(|(r, rf)| (at(&format!("R{r}_REFR")), rf.kind.reference_len(), self.slots[rf.entity]))
+                .collect(),
+            root: (at("ROOT"), self.shape.root_data),
+            inst: self
+                .shape
+                .constraints
+                .iter()
+                .enumerate()
+                .map(|(c, k)| ((0..k.data).map(|j| at(&format!("C{c}_D{j}"))).collect(), self.counts[c]))
+                .collect(),
+            _t: core::marker::PhantomData,
         };
-        let put = |image: &mut [u8], name: &str, bytes: &[u8]| image[col(name, bytes.len())].copy_from_slice(bytes);
-        for e in 0..self.shape.entities.len() {
-            put(image, &format!("E{e}_IDX"), u32_bytes(&self.idx[e]));
-            put(image, &format!("E{e}_TILE"), u32_bytes(&self.tile[e]));
-            put(image, &format!("E{e}_FIXED"), scalar_bytes(&pack.fixed[e]));
-        }
-        for r in 0..self.shape.references.len() {
-            put(image, &format!("R{r}_AT"), u32_bytes(&self.at[r]));
-            put(image, &format!("R{r}_REFR"), &self.wide.encode(&pack.refr[r]));
-        }
-        for x in 0..self.cross.len() {
-            put(image, &format!("X{x}_TILE"), u32_bytes(&self.cross[x]));
-        }
-        // the walk's instances and data, one record per instance, into
-        // columns; the instances grouped by entity and by cross slot
-        let ts = core::mem::size_of::<T>();
-        for (c, k) in self.shape.constraints.iter().enumerate() {
-            let n = self.counts[c];
-            let words: &[&str] = if k.pair.is_some() { &["SA", "SB", "SX"] } else { &["SA"] };
-            assert_eq!(k.words, words.len(), "an instance is two entity slots and a cross slot, or one entity slot");
-            let inst = &pack.inst[c];
-            for (w, name) in words.iter().enumerate() {
-                let r = col(&format!("C{c}_{name}"), 4 * n);
-                let dst: &mut [u32] = cast_slice_mut(&mut image[r]);
-                for (d, rec) in dst.iter_mut().zip(inst.chunks_exact(k.words)) {
-                    *d = rec[w];
-                }
-            }
-            let data = scalar_bytes(&pack.data[c]);
-            for j in 0..k.data {
-                let r = col(&format!("C{c}_D{j}"), ts * n);
-                if ts == 8 {
-                    transpose::<u64>(&mut image[r], data, j, k.data);
-                } else {
-                    transpose::<u32>(&mut image[r], data, j, k.data);
-                }
-            }
-            let mut sides = vec![("A", 0, self.slots[k.a])];
-            if let Some((b, _)) = k.pair {
-                sides.push(("B", 1, self.slots[b]));
-            }
-            for (side, w, slots) in sides {
-                let (ptr, list) = by_slot(inst.chunks_exact(k.words).map(|rec| rec[w]), slots);
-                put(image, &format!("C{c}_{side}OFF"), cast_slice(&ptr));
-                put(image, &format!("C{c}_{side}INST"), cast_slice(&list));
-            }
-            if let Some((_, x)) = k.pair {
-                // every instance in the list of its tile's first slot, so a
-                // tile has one summing thread per entry, the other slots none
-                let owner = &self.tile_owner[x];
-                let (ptr, list) = by_slot(inst.as_chunks::<3>().0.iter().map(|rec| owner[rec[2] as usize]), self.cross_slots[x]);
-                put(image, &format!("C{c}_XOFF"), cast_slice(&ptr));
-                put(image, &format!("C{c}_XINST"), cast_slice(&list));
-            }
-        }
-        self.dev.write(&mut self.block, 0, cast_slice(&words))
+        root.device_values(&self.keep, &mut w);
+        let len = self.layout.host_bytes - base;
+        self.values.upload(&*self.dev, &mut self.block, base, len)
     }
 
     /// Changes whenever the block or its offsets change: a graph of the
@@ -830,7 +1000,7 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let mut at = HashMap::new();
         for (r, ix) in self.ref_index.iter().enumerate() {
             for (s, &g) in ix.iter().enumerate() {
-                if g != FIXED && self.packed[r][s] {
+                if g != FIXED {
                     at.insert(g, (r, s));
                 }
             }
@@ -883,7 +1053,7 @@ where
     problem.update_params(x0);
     let root = problem.device_root().expect("the root has a device assembly");
     let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-    let asm = DeviceAssembly::<T, D>::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), wide)
+    let asm = DeviceAssembly::<T, D>::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), wide, Staging::Pinned)
         .expect("lay the root out on the device");
     // x, the gradient, the values and the cost in one block of the test's own
     let (at_g, at_h) = (n * 8, n * 16);
@@ -906,20 +1076,4 @@ where
         if max > 0.0 { diff / max } else { diff }
     };
     DeviceCheck { cpu_cost, device_cost: cost[0], grad_err: err(&gd, &grad), hess_err: err(&hd, &vals), values: nv }
-}
-
-/// Instances per constraint, from the pack walk's records.
-fn instance_counts<T>(shape: &DeviceShape, pack: &DevicePack<T>) -> Vec<usize> {
-    shape.constraints.iter().zip(&pack.inst).map(|(c, inst)| inst.len() / c.words.max(1)).collect()
-}
-
-fn u32_bytes(v: &[u32]) -> &[u8] {
-    arael_gpu::bytemuck::cast_slice(v)
-}
-
-/// The bytes of a model scalar slice (`f32` or `f64`).
-fn scalar_bytes<T: crate::utils::Float>(v: &[T]) -> &[u8] {
-    // SAFETY: the model's scalar is f32 or f64 (asserted in `new`), plain
-    // values without padding.
-    unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, core::mem::size_of_val(v)) }
 }

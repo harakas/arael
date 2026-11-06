@@ -8067,9 +8067,7 @@ pub fn generate_root_methods(
             // referenced entity's parameters, its self block, the root's
             // collection walked as the cost sweep walks it.
             if device_unsupported.is_none() && remote_at_root {
-                let why = if guard_expr.is_some() {
-                    Some("a guard")
-                } else if loss_present {
+                let why = if loss_present {
                     Some("a loss")
                 } else if arm_writes.is_some() {
                     Some("a select whose arms write apart")
@@ -8102,8 +8100,10 @@ pub fn generate_root_methods(
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                         (&cost_intermediates, &cost_simplified),
                         &atom_caches,
+                        &root_var_name,
                     ) {
-                        Ok(dc) => {
+                        Ok(mut dc) => {
+                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
                             device_constraints.push(dc);
                             device_groups.entry(group_key).or_insert_with(|| crate::device::DevGroup {
                                 rc_ident: frines_ident.clone(),
@@ -8189,9 +8189,7 @@ pub fn generate_root_methods(
                 } else if !self_resolve_stmts.is_empty() {
                     Err("data refs".to_string())
                 } else {
-                    guard_expr.as_ref()
-                        .map(|g| crate::device::guard_on_data(g, &self_var_name, &sc.struct_name).map(|()| quote! { #g }))
-                        .transpose()
+                    Ok(guard_expr.as_ref().map(|g| quote! { #g }))
                 };
                 match why {
                     Err(why) => device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name)),
@@ -8217,6 +8215,7 @@ pub fn generate_root_methods(
                             device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                             (&cost_intermediates, &cost_simplified),
                             &atom_caches,
+                            &root_var_name,
                         ) {
                             Ok(mut dc) => {
                                 dc.filter = filter;
@@ -8590,8 +8589,6 @@ pub fn generate_root_methods(
                     Some("a cross constraint below the root")
                 } else if parent_cross.is_some() {
                     Some("a parent-owned cross block")
-                } else if guard_expr.is_some() {
-                    Some("a guard")
                 } else if loss_present {
                     Some("a loss")
                 } else if arm_writes.is_some() {
@@ -8632,8 +8629,12 @@ pub fn generate_root_methods(
                         device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
                         (&cost_intermediates, &cost_simplified),
                         &atom_caches,
+                        &root_var_name,
                     ) {
-                        Ok(dc) => device_constraints.push(dc),
+                        Ok(mut dc) => {
+                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
+                            device_constraints.push(dc);
+                        }
                         Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
                     }
                 }
@@ -10533,7 +10534,22 @@ pub fn generate_root_methods(
                 }))
                 .collect();
             groups.append(&mut device_groups);
-            let items = crate::device::device_root(root_name, precision, &store_ty, &device_constraints, &groups, &store_array_ident);
+            let root_str = root_name.to_string();
+            // every entity of a type in slot order: the order the block
+            // markers are numbered in, over every path to the type
+            let entity_walk = |ty: &str, body: TokenStream2| -> TokenStream2 {
+                let walks: Vec<TokenStream2> = containment_paths(root_fields, &root_str, ty)
+                    .iter()
+                    .filter_map(|path| {
+                        let last = path.len().checked_sub(1)?;
+                        let item = syn::Ident::new(&format!("__seg{}", last), proc_macro2::Span::call_site());
+                        Some(wrap_in_prefix_scoped(path, false, quote! { { let __ent = &*#item; #body } }, None, false))
+                    })
+                    .collect();
+                quote! { #(#walks)* }
+            };
+            let idx_fill = |ty: &str, acc: &TokenStream2, out: &syn::Ident| store_idx_stmts(ty, acc, out).1;
+            let items = crate::device::device_root(root_name, precision, &device_constraints, &groups, &entity_walk, &idx_fill);
             (items, quote! { None }, quote! {
                 ::arael::__gpu_items! {
                     fn device_root(&self) -> Option<&dyn ::arael::__gpu::DeviceRoot<#prec_type>> { Some(self) }

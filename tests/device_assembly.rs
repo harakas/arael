@@ -1452,28 +1452,136 @@ fn a_3d_pose_graph_assembles_and_solves_on_the_device_as_on_the_cpu() {
     }
 }
 
-/// A pose's constraint on itself whose guard reads a parameter: the guard
-/// changes with the solve, so the device cannot apply it when packing.
+/// The 2D pose graph with guards on all three forms: a heading prior on
+/// the pose itself guarded by the pose's own parameter, a position prior
+/// through a ref guarded by the root's data, edges guarded by their own
+/// data. A guard does not change during a solve (docs/MODEL.md), so the
+/// device evaluates each once and gives the instances it drops no row.
 #[arael::model]
-#[arael(constraint(hb, guard = self.pos.value.x > 0.0, { [guarded.pos.x - 1.0] }))]
+#[arael(constraint(hb, guard = self.th.value > 3.063, { [(poseg.th - poseg.heading) * 0.5] }))]
 #[derive(Clone)]
-pub struct Guarded {
-    pub pos: Param<vect3<f64>>,
-    pub hb: SelfBlock<Guarded>,
+pub struct PoseG {
+    pub pos: Param<vect2<f64>>,
+    pub th: Param<f64>,
+    pub heading: f64,
+    pub hb: SelfBlock<PoseG>,
+}
+
+#[arael::model]
+#[arael(constraint(p.hb, guard = root.use_prior, {
+    [p.pos.x - priorg.pos.x, p.pos.y - priorg.pos.y, p.th - priorg.th]
+}))]
+#[derive(Clone)]
+pub struct PriorG {
+    #[arael(ref = root.poses)]
+    pub p: Ref<PoseG>,
+    pub pos: vect2<f64>,
+    pub th: f64,
+}
+
+#[arael::model]
+#[arael(constraint(hb, guard = self.on, {
+    let c = cos(a.th);
+    let s = sin(a.th);
+    let dx = b.pos.x - a.pos.x;
+    let dy = b.pos.y - a.pos.y;
+    [(c * dx + s * dy - edgeg.dx) * edgeg.w,
+     (c * dy - s * dx - edgeg.dy) * edgeg.w,
+     rad_diff(b.th - a.th, edgeg.dth) * edgeg.w * root.edge_scale]
+}))]
+#[derive(Clone)]
+pub struct EdgeG {
+    #[arael(ref = root.poses)]
+    pub a: Ref<PoseG>,
+    #[arael(ref = root.poses)]
+    pub b: Ref<PoseG>,
+    pub dx: f64,
+    pub dy: f64,
+    pub dth: f64,
+    pub w: f64,
+    pub on: bool,
+    pub hb: CrossBlock<PoseG, PoseG>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
-pub struct GuardedRoot {
-    pub items: refs::Vec<Guarded>,
+pub struct GraphG {
+    pub poses: refs::Vec<PoseG>,
+    pub edges: std::vec::Vec<EdgeG>,
+    pub priors: std::vec::Vec<PriorG>,
+    pub use_prior: bool,
+    /// Read by every edge's body: one value in the root's record.
+    pub edge_scale: f64,
 }
 
+/// [`pose_graph`] with guards: the closures every tenth edge off, the
+/// heading prior on the poses whose heading starts above 3.063 (half way
+/// between two of the loop's headings, so no pose crosses it in a solve).
+fn guarded_graph(n: usize, seed: u64, use_prior: bool) -> GraphG {
+    let (poses, edges, prior) = pose_graph::<f64>(n, seed);
+    let mut pg = refs::Vec::new();
+    for p in poses.iter() {
+        pg.push(PoseG { pos: p.pos.clone(), th: p.th.clone(), heading: p.th.value + 0.01, hb: SelfBlock::new() });
+    }
+    let edges = edges
+        .iter()
+        .enumerate()
+        .map(|(k, e)| EdgeG {
+            a: pg.ref_at(e.a.index() as usize),
+            b: pg.ref_at(e.b.index() as usize),
+            dx: e.dx,
+            dy: e.dy,
+            dth: e.dth,
+            w: e.w,
+            on: k % 10 != 3,
+            hb: CrossBlock::new(),
+        })
+        .collect();
+    let priors = prior.iter().map(|q| PriorG { p: pg.ref_at(q.p.index() as usize), pos: q.pos, th: q.th }).collect();
+    GraphG { poses: pg, edges, priors, use_prior, edge_scale: 0.8 }
+}
+
+/// Guards over a parameter, the root's data and an instance's data: the
+/// device keeps the instances the CPU keeps, assembles as the CPU does and
+/// solves to its optimum.
 #[test]
-fn a_guard_reading_a_parameter_has_no_device_form() {
-    let s = GuardedRoot { items: refs::Vec::new() };
-    let why = LmProblemInternals::<f64>::device_unsupported(&s).expect("a guard over a parameter has no device form");
-    assert!(why.contains("Guarded") && why.contains("guarded.pos"), "{why}");
+fn guards_on_every_form_keep_on_the_device_what_they_keep_on_the_cpu() {
+    use arael::__gpu::Wide;
+    let s0 = guarded_graph(40, 3, true);
+    let headed = s0.poses.iter().filter(|p| p.th.value > 3.063).count();
+    assert!(headed > 0 && headed < 40, "some poses have the heading prior: {headed}");
+    assert!(s0.edges.iter().any(|e| !e.on));
+    // the heading in the pose's record, the edge scale once in the root's
+    let shape = arael::__gpu::DeviceRoot::<f64>::device_shape(&s0);
+    assert_eq!((shape.entity_data, shape.root_data), (vec![16], 16));
+    for use_prior in [true, false] {
+        let mut s = guarded_graph(40, 3, use_prior);
+        assert_eq!(LmProblemInternals::<f64>::device_unsupported(&s), None);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let x1 = perturbed(&x);
+        for (wide, tol) in [(Wide::F64, 1e-12), (Wide::Df32, 1e-11)] {
+            let chk = arael::__gpu::device_check(&mut s, &x, &x1, &device(), wide);
+            assert!((chk.device_cost - chk.cpu_cost).abs() <= tol * chk.cpu_cost, "{use_prior} {wide:?}: {chk:?}");
+            assert!(chk.grad_err < tol && chk.hess_err < tol, "{use_prior} {wide:?}: {chk:?}");
+        }
+    }
+    let run = |gpu: Option<&GpuDevice>| {
+        let mut s = guarded_graph(40, 3, true);
+        let mut x = Vec::new();
+        s.serialize(&mut x);
+        let mut solver = arael::simple_lm::SparseFaer::<f64>::from_options(&whole_options(gpu));
+        let cfg = arael::simple_lm::LmConfig::<f64> { max_iters: 50, ..Default::default() };
+        let r = arael::simple_lm::lm_solve(&x, &mut solver, &mut s, &cfg).unwrap();
+        assert_eq!(solver.plan().unwrap().gpu_assembly, gpu.is_some());
+        r.end_cost
+    };
+    let cpu = run(None);
+    for d in devices() {
+        let device = run(Some(&d));
+        assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
+    }
 }
 
 /// A scale prior reading a `ScaledTransformParam`'s scale, which the CPU
@@ -1697,5 +1805,34 @@ fn a_plane_world_assembles_and_solves_on_the_device_as_on_the_cpu() {
         let (_, device, _, st) = run(Some(&d));
         assert!((device - cpu).abs() <= 1e-9 * cpu, "{}: {device} against the CPU's {cpu}", label(&d));
         assert_close(&st, &cpu_state, 1e-7, &format!("{}: the solved model", label(&d)));
+    }
+}
+
+/// The device assembly's image staged in ordinary memory: the copies go
+/// through the runtime's own staging, and a session's solves (the first
+/// image, then values only) reach the CPU's optimum as with pinned memory.
+#[test]
+fn an_image_staged_in_pageable_memory_solves_as_a_pinned_one() {
+    use arael::simple_lm::{GpuStaging, LmConfig, LmSession, SparseFaer};
+    let cfg = LmConfig::<f64> { max_iters: 50, ..Default::default() };
+    let cpu = |s: &Scene| {
+        let mut s = s.clone();
+        let r = s.solve_with(&mut SparseFaer::<f64>::from_options(&options(None, false)), &cfg).unwrap();
+        (r.end_cost, state(&s))
+    };
+    for d in devices() {
+        let d = d.with_staging(GpuStaging::Pageable);
+        let name = label(&d);
+        let (cameras, points, observations) = consistent_scene::<f64>();
+        let mut s = Scene { cameras, points, observations };
+        let mut session = LmSession::new(SparseFaer::<f64>::from_options(&options(Some(&d), true)));
+        for round in 0..2 {
+            let (cpu_cost, cpu_state) = cpu(&s);
+            let r = session.solve(&mut s, &cfg).unwrap();
+            assert!(session.solver().plan().unwrap().gpu_assembly);
+            assert!((r.end_cost - cpu_cost).abs() <= 1e-9 * cpu_cost, "{name}, solve {round}: {} against the CPU's {cpu_cost}", r.end_cost);
+            assert_close(&state(&s), &cpu_state, 1e-7, &format!("{name}, solve {round}: the solved model"));
+            s.observations[5].xy.x += 3.0;
+        }
     }
 }

@@ -25,6 +25,8 @@ pub(crate) struct DeviceSolver<T, D: Device> {
     factor: GpuFactor<D>,
     /// The scalar of the reduction, the assembly's sums and the loop's vectors.
     wide: Wide,
+    /// Where the device assembly's image is written before it is copied.
+    staging: crate::device::Staging,
 }
 
 /// The device assembly of the reduced route and the LM loop's vectors
@@ -64,16 +66,17 @@ fn on_device<V>(r: Result<V, GpuError>, what: &str) -> V {
 impl<T, D: Device> DeviceSolver<T, D> {
     /// The factor of `sn`, the analysis of the block structure `asym`, in
     /// `precision`, on `dev`; the reduction and the route built after it
-    /// work in `wide`.
+    /// work in `wide`, the route's image staged in `staging`.
     pub fn new(
         dev: &Arc<D>,
         precision: GpuPrecision,
         sn: &SupernodalSymbolic,
         asym: &SymbolicSparseBlockColMat<SparseIndex>,
         wide: Wide,
+        staging: crate::device::Staging,
     ) -> Result<Self, GpuError> {
         let factor = GpuFactor::new(dev, precision, sn, asym, &Default::default(), wide)?;
-        Ok(DeviceSolver { route: None, schur: None, factor, wide })
+        Ok(DeviceSolver { route: None, schur: None, factor, wide, staging })
     }
 }
 
@@ -209,7 +212,7 @@ impl<T: crate::utils::Float + SchurReal, D: Device> GpuSolver<T> for DeviceSolve
         }
         let dev = self.factor.device();
         let mut resolver = PositionResolver::new(hsym);
-        let asm = DeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), self.wide)?;
+        let asm = DeviceAssembly::new(dev, root, &mut |i, j| resolver.resolve_tile(i as usize, j as usize), self.wide, self.staging)?;
         self.route = Some(Route {
             attempt_graph: None,
             step_graph: None,

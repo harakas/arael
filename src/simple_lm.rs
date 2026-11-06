@@ -4643,6 +4643,7 @@ pub struct GpuDevice {
     /// The device, as the runtime numbers them.
     pub index: usize,
     wide: GpuWide,
+    staging: GpuStaging,
     #[cfg(feature = "gpu-cuda")]
     cuda: DeviceSlot<arael_gpu::cuda::CudaDevice>,
     #[cfg(feature = "gpu-hip")]
@@ -4677,6 +4678,7 @@ impl GpuDevice {
             backend,
             index,
             wide: GpuWide::F64,
+            staging: GpuStaging::Pinned,
             #[cfg(feature = "gpu-cuda")]
             cuda: Default::default(),
             #[cfg(feature = "gpu-hip")]
@@ -4707,6 +4709,21 @@ impl GpuDevice {
     /// The scalar of the device's wide values ([`Self::with_wide`]).
     pub fn wide(&self) -> GpuWide {
         self.wide
+    }
+
+    /// The device with the device assembly's image staged in `staging`.
+    ///
+    /// ```ignore
+    /// let gpu = GpuDevice::cuda(0).with_staging(GpuStaging::Pageable);
+    /// ```
+    pub fn with_staging(mut self, staging: GpuStaging) -> Self {
+        self.staging = staging;
+        self
+    }
+
+    /// Where the device assembly's image is staged ([`Self::with_staging`]).
+    pub fn staging(&self) -> GpuStaging {
+        self.staging
     }
 
     /// The process's shared state of device `index` of `backend`: every
@@ -4780,6 +4797,20 @@ pub enum GpuWide {
     /// root and the f32 factor ([`MixedPrecision`]) nothing on the device
     /// runs in f64.
     Df32,
+}
+
+/// Where a [`GpuDevice`]'s device assembly writes its image of the model
+/// before copying it to the device ([`GpuDevice::with_staging`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuStaging {
+    /// Pinned (page-locked) host memory: the copies are asynchronous, so
+    /// the host goes on while the image moves.
+    #[default]
+    Pinned,
+    /// Ordinary host memory: the runtime stages each copy itself and the
+    /// call returns once it holds the bytes. For platforms where copies
+    /// from pinned memory are slow.
+    Pageable,
 }
 
 /// Configuration for the [`SparseFaer`] backend as plain data: which system to
@@ -5568,11 +5599,16 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         GpuWide::F64 => arael_gpu::Wide::F64,
         GpuWide::Df32 => arael_gpu::Wide::Df32,
     };
+    #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
+    let staging = match dev.staging() {
+        GpuStaging::Pinned => crate::device::Staging::Pinned,
+        GpuStaging::Pageable => crate::device::Staging::Pageable,
+    };
     match dev.backend {
         #[cfg(feature = "gpu-cuda")]
         GpuBackend::Cuda => {
             let made = device_in(&dev.cuda, || arael_gpu::cuda::CudaDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
             report_kernel_cache();
             Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the CUDA factor", e))?))
         }
@@ -5584,7 +5620,7 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
         #[cfg(feature = "gpu-hip")]
         GpuBackend::Hip => {
             let made = device_in(&dev.hip, || arael_gpu::hip::HipDevice::new(dev.index));
-            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide));
+            let solver = made.and_then(|d| crate::gpu_solver::solver::DeviceSolver::new(&d, precision, sn, asym, wide, staging));
             report_kernel_cache();
             Ok(Box::new(solver.map_err(|e| gpu_setup_failed("the HIP factor", e))?))
         }

@@ -900,9 +900,8 @@ constraint has a device form (today: constraints of the root's
 collections over one entity or two, reached through refs, and an
 entity's constraints on itself, without a loss or an index `select`,
 over Euler-angle and `QuaternionParam` rotations, `TransformParam`
-poses, `UnitVecParam` directions and `AngleParam` headings; a guard
-only on an entity's constraint on itself, reading the entity's data
-fields);
+poses, `UnitVecParam` directions and `AngleParam` headings, guards
+included, each evaluated once per structure);
 `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
@@ -935,6 +934,16 @@ runs in f64, which consumer cards run at 1/32 to 1/64 of f32:
 SparseFaer::from_options(&SparseFaerOptions::default()
     .with_mixed_precision(Some(MixedPrecision::default()))
     .with_gpu(Some(GpuDevice::cuda(0).with_wide(GpuWide::Df32))))
+```
+
+The device assembly writes its image of the model (the structure once,
+the values every solve) into pinned host memory, whose copies to the
+device are asynchronous. Where copies from pinned memory are slow,
+`GpuDevice::with_staging(GpuStaging::Pageable)` writes it into ordinary
+memory instead, which the runtime stages itself:
+
+```rust,ignore
+.with_gpu(Some(GpuDevice::cuda(0).with_staging(GpuStaging::Pageable)))
 ```
 
 A `GpuDevice` value carries the device state its solves use (a stream

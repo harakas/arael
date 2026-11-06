@@ -1,7 +1,11 @@
 //! The device head of `#[arael(root)]`: a constraint's body as two C++
 //! kernels (the assembly's and the cost's) over its entities' parameter
-//! values, the caches of their referenced fields and data leaves, and the
-//! walk that packs a model's instances for them, as an implementation of
+//! values, the caches of their referenced fields and its data leaves, each
+//! leaf read from the table it belongs to (the instance's columns, its
+//! entity's data record, the root's record); the records' Rust and C++
+//! mirrors; and the walks that write a model's structure (once per
+//! structure: the entities' indices, the guards, the kept instances' slots)
+//! and its values (per solve) for them, as an implementation of
 //! `arael::__gpu::DeviceRoot`. All of it is wrapped in
 //! `arael::__gpu_items!`, which drops it when arael is built without its
 //! `gpu` feature.
@@ -10,8 +14,9 @@
 //! blocks reached through refs, the holder's CrossBlock), root-level
 //! constraints of one entity reached through a ref (written into its self
 //! block), and the constraints of an entity of a root-level collection on
-//! itself (with a guard over its data fields, applied when packing),
-//! without a loss or an index `select`; over referenced fields (Euler-angle
+//! itself, with guards (evaluated once per structure: a guard does not
+//! change during a solve) and without a loss or an index `select`; over
+//! referenced fields (Euler-angle
 //! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
 //! directions, whose references the device keeps and moves), atom caches
 //! (an `AngleParam`'s sin and cos, computed in the kernel from the angle)
@@ -47,8 +52,13 @@ pub(crate) struct DevConstraint {
     /// Of a constraint of two, the CrossBlock's holder type and field.
     pub holder: String,
     pub block: syn::Ident,
-    /// The data leaves, as the Rust expressions the walk reads.
-    pub data: Vec<String>,
+    /// The instance data leaves, as the Rust expressions the walk reads.
+    pub inst: Vec<String>,
+    /// Per side, the entity data leaves, as paths in the entity
+    /// (`prior.x`).
+    pub ent: [Vec<String>; 2],
+    /// The root data leaves, as paths in the root.
+    pub root: Vec<String>,
     /// The referenced fields read.
     pub refs: Vec<DevRef>,
     /// The two kernels in C++, named by `cid`: they read every column
@@ -59,8 +69,8 @@ pub(crate) struct DevConstraint {
     pub cid: usize,
     /// Residual rows.
     pub rows: usize,
-    /// The constraint's guard over data alone ([`guard_on_data`]), applied
-    /// when packing: an instance it drops is not packed.
+    /// The constraint's guard, evaluated once per structure by the
+    /// structure walk: an instance it drops gets no row.
     pub filter: Option<TokenStream2>,
 }
 
@@ -175,27 +185,19 @@ impl RefKind {
         }
     }
 
-    /// The pack walk's write of the reference of `field` into slot `s` of
-    /// `__pack.refr[r]`.
-    fn pack(self, field: &syn::Expr, r: usize, s: &TokenStream2) -> TokenStream2 {
-        let (n, read) = match self {
-            RefKind::Euler => {
-                return quote! {
-                    {
-                        let __m = &#field.ref_rotation;
-                        let __r = &mut __pack.refr[#r];
-                        for __i in 0..3usize {
-                            __r[#s * 9 + __i * 3] = ::arael::__gpu::leaf_f64(__m[__i].x);
-                            __r[#s * 9 + __i * 3 + 1] = ::arael::__gpu::leaf_f64(__m[__i].y);
-                            __r[#s * 9 + __i * 3 + 2] = ::arael::__gpu::leaf_f64(__m[__i].z);
-                        }
-                    }
-                };
-            }
-            RefKind::Quaternion | RefKind::UnitVec => (4usize, quote! { #field.__reference_quaternion() }),
-            RefKind::Transform => (7usize, quote! { #field.__reference() }),
-        };
-        quote! { __pack.refr[#r][#s * #n..#s * #n + #n].copy_from_slice(&#read); }
+    /// The values walk's read of the reference of `field`, an `[f64; N]`.
+    fn read(self, field: &TokenStream2) -> TokenStream2 {
+        match self {
+            RefKind::Euler => quote! {
+                {
+                    let __m = &#field.ref_rotation;
+                    let __f = ::arael::__gpu::leaf_f64;
+                    [__f(__m[0].x), __f(__m[0].y), __f(__m[0].z), __f(__m[1].x), __f(__m[1].y), __f(__m[1].z), __f(__m[2].x), __f(__m[2].y), __f(__m[2].z)]
+                }
+            },
+            RefKind::Quaternion | RefKind::UnitVec => quote! { #field.__reference_quaternion() },
+            RefKind::Transform => quote! { #field.__reference() },
+        }
     }
 
     fn ident(self) -> TokenStream2 {
@@ -281,42 +283,18 @@ fn parameter_state(s: &str, a: &DevSide, b: Option<&DevSide>) -> Option<String> 
         .then(|| format!("the device reads `{s}`, which follows the parameters of `{var}.{field}`, without computing it"))
 }
 
-/// Why the device cannot apply `guard` when it packs the instances: the
-/// guard may read the entity bound as `var` (of type `ty`) only through
-/// its data fields, so that it holds through the solve, and nothing else
-/// by name.
-pub(crate) fn guard_on_data(guard: &syn::Expr, var: &str, ty: &str) -> Result<(), String> {
-    use proc_macro2::TokenTree;
-    fn flat(ts: TokenStream2, out: &mut Vec<TokenTree>) {
-        for t in ts {
-            match t {
-                TokenTree::Group(g) => flat(g.stream(), out),
-                t => out.push(t),
-            }
+/// A record field's name for the model path `path`: `prior_rot_t[0].x` is
+/// `prior_rot_t_0_x`. The same in the Rust and the C++ mirrors.
+pub(crate) fn field_name(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else if !out.ends_with('_') {
+            out.push('_');
         }
     }
-    let mut toks = Vec::new();
-    flat(quote! { #guard }, &mut toks);
-    let layout = crate::registry_lookup(ty).ok_or_else(|| format!("`{ty}` has no layout"))?;
-    for (k, t) in toks.iter().enumerate() {
-        let TokenTree::Ident(id) = t else { continue };
-        let after_dot = k > 0 && matches!(&toks[k - 1], TokenTree::Punct(p) if p.as_char() == '.');
-        let name = id.to_string();
-        if after_dot || name == "true" || name == "false" {
-            continue;
-        }
-        if name != var {
-            return Err(format!("a guard reading `{name}`"));
-        }
-        let field = match (toks.get(k + 1), toks.get(k + 2)) {
-            (Some(TokenTree::Punct(p)), Some(TokenTree::Ident(f))) if p.as_char() == '.' => f.to_string(),
-            _ => return Err(format!("a guard reading `{var}` whole")),
-        };
-        if parameter_field(ty, &field) || !layout.fields.iter().any(|(f, _)| *f == field) {
-            return Err(format!("a guard reading `{var}.{field}`, not a data field"));
-        }
-    }
-    Ok(())
+    out.trim_end_matches('_').to_string()
 }
 
 /// What a leaf symbol reads in the kernel.
@@ -324,7 +302,12 @@ enum Leaf {
     Param(usize, usize),
     /// A cache of referenced field `r`: its column and offset per entity.
     Ref(usize, RefCol, usize),
-    Data(usize),
+    /// Instance data column `j`.
+    Inst(usize),
+    /// A field of side `s`'s entity data record.
+    Ent(usize, String),
+    /// A field of the root's data record.
+    Root(String),
     /// An atom cache (`a.rot.sin`), computed from its atom over the
     /// parameters (`sin(a.rot.angle.work())`).
     Atom(E),
@@ -348,6 +331,7 @@ pub(crate) fn device_constraint(
     guard: Option<(&[Intermediate], &E)>,
     cost: (&[Intermediate], &[E]),
     atoms: &[(String, E)],
+    root_var: &str,
 ) -> Result<DevConstraint, String> {
     if ft != "f32" && ft != "f64" {
         return Err(format!("a root of `{ft}` has no device assembly"));
@@ -374,7 +358,9 @@ pub(crate) fn device_constraint(
     }
     let all: BTreeSet<&String> = gh_syms.iter().chain(&cost_syms).collect();
     // classified, the data leaves and the referenced fields numbered in order
-    let mut data: Vec<String> = Vec::new();
+    let mut inst: Vec<String> = Vec::new();
+    let mut ent: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+    let mut root: Vec<String> = Vec::new();
     let mut refs: Vec<DevRef> = Vec::new();
     let mut leaf: std::collections::BTreeMap<String, Leaf> = Default::default();
     for s in all {
@@ -410,14 +396,28 @@ pub(crate) fn device_constraint(
             if let Some(why) = parameter_state(s, &a, b.as_ref()) {
                 return Err(why);
             }
-            data.push(s.clone());
-            Leaf::Data(data.len() - 1)
+            let (var, path) = s.split_once('.').unwrap_or((s.as_str(), ""));
+            let side = [Some(&a), b.as_ref()].into_iter().flatten().position(|sd| sd.var == var);
+            match side {
+                Some(side) if !path.is_empty() => {
+                    ent[side].push(path.to_string());
+                    Leaf::Ent(side, field_name(path))
+                }
+                _ if var == root_var && !path.is_empty() => {
+                    root.push(path.to_string());
+                    Leaf::Root(field_name(path))
+                }
+                _ => {
+                    inst.push(s.clone());
+                    Leaf::Inst(inst.len() - 1)
+                }
+            }
         };
         leaf.insert(s.clone(), l);
     }
     let names: std::collections::BTreeMap<String, String> = leaf.keys().enumerate().map(|(i, s)| (s.clone(), format!("__l{i}"))).collect();
     let cpp = cpp_kernels(cid, ft, (na, nb), rows, &leaf, &names, &refs, (&gh_syms, &cost_syms), gh, guard, cost)?;
-    Ok(DevConstraint { group_key, a, b, holder, block, data, refs, cpp, cid, rows, filter: None })
+    Ok(DevConstraint { group_key, a, b, holder, block, inst, ent, root, refs, cpp, cid, rows, filter: None })
 }
 
 /// The kernels of [`device_constraint`] in C++
@@ -457,7 +457,10 @@ fn cpp_kernels(
                     RefCol::Der => ("F", format!("COL(B, F, C{cid}_DER{r})[{s} * {nd}u + {off}u]")),
                 }
             }
-            Leaf::Data(j) => ("F", format!("COL(B, F, C{cid}_D{j})[o]")),
+            Leaf::Inst(j) => ("F", format!("COL(B, F, C{cid}_D{j})[o]")),
+            Leaf::Ent(0, ref f) => ("F", format!("COL(B, C{cid}_RecA, C{cid}_DATAA)[sa].{f}")),
+            Leaf::Ent(_, ref f) => ("F", format!("COL(B, C{cid}_RecB, C{cid}_DATAB)[sb].{f}")),
+            Leaf::Root(ref f) => ("F", format!("COL(B, RootData, ROOT)[0].{f}")),
             Leaf::Atom(ref e) => ("F", e.to_cpp_in(ft, "W", &map).map_err(|e| e.0)?),
         })
     };
@@ -544,48 +547,155 @@ fn cpp_kernels(
     Ok(format!("{gh_kernel}{reduce}{cost_kernel}"))
 }
 
-/// The walk of one cross group, as the root's emission hands it over.
+/// The walk of one constraint group, as the root's emission hands it over.
 pub(crate) struct DevGroup {
     pub rc_ident: syn::Ident,
     pub resolve_stmts: Vec<TokenStream2>,
     pub root_var_ident: syn::Ident,
 }
 
+/// A data record of the image (an entity table's or the root's): its fields
+/// in order, in F, padded to 16 bytes, as a Rust struct and a C++ struct of
+/// the same layout.
+struct Record {
+    /// (field name, model path)
+    fields: Vec<(String, String)>,
+    pad: usize,
+}
+
+impl Record {
+    fn new(paths: &[String], ft: &str) -> Result<Record, String> {
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for p in paths {
+            let f = field_name(p);
+            match fields.iter().find(|(n, _)| *n == f) {
+                Some((_, q)) if q != p => return Err(format!("the data fields `{q}` and `{p}` take one record field name `{f}`")),
+                Some(_) => {}
+                None => fields.push((f, p.clone())),
+            }
+        }
+        let per16 = if ft == "f64" { 2 } else { 4 };
+        let pad = (per16 - fields.len() % per16) % per16;
+        Ok(Record { fields, pad })
+    }
+
+    fn bytes(&self, ft: &str) -> usize {
+        if self.fields.is_empty() {
+            return 0;
+        }
+        (self.fields.len() + self.pad) * if ft == "f64" { 8 } else { 4 }
+    }
+
+    /// The C++ struct, `name`.
+    fn cpp(&self, name: &str) -> String {
+        if self.fields.is_empty() {
+            return String::new();
+        }
+        let mut s = format!("struct alignas(16) {name} {{");
+        for (f, p) in &self.fields {
+            s.push_str(&format!(" F {f}; /* {p} */"));
+        }
+        if self.pad > 0 {
+            s.push_str(&format!(" F _pad[{}];", self.pad));
+        }
+        s.push_str(" };\n");
+        s
+    }
+
+    /// The Rust struct, `name`, with its `Pod` implementation.
+    fn rust(&self, name: &syn::Ident, scalar: &syn::Type) -> TokenStream2 {
+        if self.fields.is_empty() {
+            return quote! {};
+        }
+        let fs: Vec<syn::Ident> = self.fields.iter().map(|(f, _)| format_ident!("{}", f)).collect();
+        let pad = self.pad;
+        let pad_field = (pad > 0).then(|| quote! { _pad: [#scalar; #pad], });
+        quote! {
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            #[allow(non_camel_case_types)]
+            #[doc(hidden)]
+            pub struct #name { #( #fs: #scalar, )* #pad_field }
+            // SAFETY: `repr(C)` scalars of one type, padded by hand to a
+            // multiple of 16 bytes: no padding bytes, any bit pattern valid.
+            unsafe impl ::arael::__gpu::bytemuck::Zeroable for #name {}
+            unsafe impl ::arael::__gpu::bytemuck::Pod for #name {}
+        }
+    }
+
+    /// The record's value with each field read from `acc.<path>`.
+    fn value(&self, name: &syn::Ident, acc: &TokenStream2, scalar: &syn::Type) -> TokenStream2 {
+        let fs: Vec<syn::Ident> = self.fields.iter().map(|(f, _)| format_ident!("{}", f)).collect();
+        let reads: Vec<syn::Expr> = self
+            .fields
+            .iter()
+            .map(|(_, p)| syn::parse_str(&format!("__acc.{p}")).expect("a data path is an expression"))
+            .collect();
+        let pad = self.pad;
+        let pad_field = (pad > 0).then(|| quote! { _pad: [0.0 as #scalar; #pad], });
+        quote! {
+            {
+                let __acc = #acc;
+                #name { #( #fs: (#reads) as #scalar, )* #pad_field }
+            }
+        }
+    }
+}
+
 /// The device items of a root whose every constraint has a device form.
+/// `entity_walk(type, body)` walks every entity of `type` in slot order,
+/// `body` reading it as `__ent`; `idx_stmts(type, acc, idx)` fills `idx`
+/// with the parameters' global indices of the entity `acc`.
 pub(crate) fn device_root(
     root_name: &syn::Ident,
     ft: &str,
-    store_ty: &syn::Ident,
     constraints: &[DevConstraint],
     groups: &std::collections::BTreeMap<String, DevGroup>,
-    array_ident: &dyn Fn(&str, &str) -> syn::Ident,
+    entity_walk: &dyn Fn(&str, TokenStream2) -> TokenStream2,
+    idx_stmts: &dyn Fn(&str, &TokenStream2, &syn::Ident) -> Vec<TokenStream2>,
 ) -> TokenStream2 {
     let scalar: syn::Type = syn::parse_str(ft).unwrap();
-    // the device's numbering of the entity arrays, referenced fields and
-    // cross arrays the constraints read
-    let mut entities: Vec<(String, String, usize)> = Vec::new();
+    // the device's numbering of the entity tables, referenced fields and
+    // cross arrays the constraints read; per entity table its type, self
+    // block field, parameters (paths in the entity) and data paths
+    struct Entity {
+        ty: String,
+        hb: String,
+        params: Vec<String>,
+        data: Vec<String>,
+    }
+    let mut entities: Vec<Entity> = Vec::new();
     let mut references: Vec<(usize, DevRef)> = Vec::new();
     let mut crosses: Vec<(String, String)> = Vec::new();
-    let entity_of = |entities: &mut Vec<(String, String, usize)>, s: &DevSide| -> usize {
-        match entities.iter().position(|(t, hb, _)| *t == s.ty && *hb == s.hb) {
+    let mut root_data: Vec<String> = Vec::new();
+    let entity_of = |entities: &mut Vec<Entity>, s: &DevSide, data: &[String]| -> usize {
+        let e = match entities.iter().position(|en| en.ty == s.ty && en.hb == s.hb) {
             Some(e) => e,
             None => {
-                entities.push((s.ty.clone(), s.hb.clone(), s.params.len()));
+                let prefix = format!("{}.", s.var);
+                let params = s.params.iter().map(|p| p.strip_prefix(&prefix).expect("a parameter of the side's entity").to_string()).collect();
+                entities.push(Entity { ty: s.ty.clone(), hb: s.hb.clone(), params, data: Vec::new() });
                 entities.len() - 1
             }
+        };
+        for d in data {
+            if !entities[e].data.contains(d) {
+                entities[e].data.push(d.clone());
+            }
         }
+        e
     };
     struct Ids {
         ea: usize,
-        /// Of a constraint of two: the second side's entity array and the cross array.
+        /// Of a constraint of two: the second side's entity table and the cross array.
         pair: Option<(usize, usize)>,
         refs: Vec<usize>,
     }
     let mut ids: Vec<Ids> = Vec::new();
     for c in constraints {
-        let ea = entity_of(&mut entities, &c.a);
+        let ea = entity_of(&mut entities, &c.a, &c.ent[0]);
         let pair = c.b.as_ref().map(|b| {
-            let eb = entity_of(&mut entities, b);
+            let eb = entity_of(&mut entities, b, &c.ent[1]);
             let x = match crosses.iter().position(|(h, bl)| *h == c.holder && c.block == bl) {
                 Some(x) => x,
                 None => {
@@ -609,8 +719,29 @@ pub(crate) fn device_root(
                 }
             })
             .collect();
+        for d in &c.root {
+            if !root_data.contains(d) {
+                root_data.push(d.clone());
+            }
+        }
         ids.push(Ids { ea, pair, refs });
     }
+    // the records and their mirrors
+    let records: Result<Vec<Record>, String> = entities.iter().map(|en| Record::new(&en.data, ft)).collect();
+    let (records, root_record) = match (records, Record::new(&root_data, ft)) {
+        (Ok(r), Ok(rr)) => (r, rr),
+        (Err(e), _) | (_, Err(e)) => {
+            let msg = format!("{root_name}: {e}");
+            return quote! { ::core::compile_error!(#msg); };
+        }
+    };
+    let rec_ident = |e: usize| format_ident!("__{}DevE{}", root_name, e);
+    let root_ident = format_ident!("__{}DevRoot", root_name);
+    let rust_records: Vec<TokenStream2> = records.iter().enumerate().map(|(e, r)| r.rust(&rec_ident(e), &scalar)).collect();
+    let rust_root = root_record.rust(&root_ident, &scalar);
+    let entity_bytes: Vec<usize> = records.iter().map(|r| r.bytes(ft)).collect();
+    let root_bytes = root_record.bytes(ft);
+
     let ref_shape: Vec<TokenStream2> = references
         .iter()
         .map(|(e, r)| {
@@ -618,28 +749,35 @@ pub(crate) fn device_root(
             quote! { ::arael::__gpu::DeviceReference { entity: #e, step: #step, kind: ::arael::__gpu::ReferenceKind::#kind } }
         })
         .collect();
-    let entity_n: Vec<usize> = entities.iter().map(|e| e.2).collect();
+    let entity_n: Vec<usize> = entities.iter().map(|e| e.params.len()).collect();
     let n_cross = crosses.len();
     let cshape: Vec<TokenStream2> = constraints.iter().zip(&ids).map(|(c, id)| {
-        let (nd, rows, ea) = (c.data.len(), c.rows, id.ea);
+        let (nd, rows, ea) = (c.inst.len(), c.rows, id.ea);
         match id.pair {
             Some((eb, x)) => quote! { ::arael::__gpu::DeviceConstraint { words: 3usize, data: #nd, rows: #rows, a: #ea, pair: Some((#eb, #x)) } },
             None => quote! { ::arael::__gpu::DeviceConstraint { words: 1usize, data: #nd, rows: #rows, a: #ea, pair: None } },
         }
     }).collect();
-    // the C++ kernels, each constraint's column names aliased to the
-    // root's numbering, which the host's layout table follows
+    // the C++: the records, then the kernels, each constraint's column and
+    // record names aliased to the root's numbering, which the host's layout
+    // table follows
     let mut cpp = String::new();
+    for (e, r) in records.iter().enumerate() {
+        cpp.push_str(&r.cpp(&format!("E{e}Data")));
+    }
+    cpp.push_str(&root_record.cpp("RootData"));
     for (c, id) in constraints.iter().zip(&ids) {
         let k = c.cid;
         let mut alias = |local: &str, root: String| cpp.push_str(&format!("#define ARAEL_COL_C{k}_{local} ARAEL_COL_{root}\n"));
         alias("EVA", format!("E{}_EV", id.ea));
         alias("IDXA", format!("E{}_IDX", id.ea));
         alias("TILEA", format!("E{}_TILE", id.ea));
+        alias("DATAA", format!("E{}_DATA", id.ea));
         if let Some((eb, x)) = id.pair {
             alias("EVB", format!("E{eb}_EV"));
             alias("IDXB", format!("E{eb}_IDX"));
             alias("TILEB", format!("E{eb}_TILE"));
+            alias("DATAB", format!("E{eb}_DATA"));
             alias("TILEX", format!("X{x}_TILE"));
         }
         for (lr, &r) in id.refs.iter().enumerate() {
@@ -647,85 +785,130 @@ pub(crate) fn device_root(
             alias(&format!("VALW{lr}"), format!("R{r}_VALW"));
             alias(&format!("DER{lr}"), format!("R{r}_DER"));
         }
+        if !c.ent[0].is_empty() {
+            cpp.push_str(&format!("typedef E{}Data C{k}_RecA;\n", id.ea));
+        }
+        if let (Some((eb, _)), false) = (id.pair, c.ent[1].is_empty()) {
+            cpp.push_str(&format!("typedef E{eb}Data C{k}_RecB;\n"));
+        }
         cpp.push_str(&c.cpp);
     }
-    // tables: one store built for the model as it is, every slot in it
-    let table_entity: Vec<TokenStream2> = entities.iter().map(|(t, hb, _)| {
-        let arr = array_ident(t, hb);
-        quote! { { let (__i, __t) = __store.#arr.device_table(resolve); __tables.idx.push(__i); __tables.tile.push(__t); } }
+
+    // the structure walk: per entity table its indices in slot order, per
+    // group the cost sweep's loop, per constraint its guard and its kept
+    // instances' slots
+    let idx_ident = format_ident!("__idx");
+    let structure_entities: Vec<TokenStream2> = entities.iter().enumerate().map(|(e, en)| {
+        let (hb, n, ty) = (format_ident!("{}", en.hb), en.params.len(), &en.ty);
+        let fill = idx_stmts(&en.ty, &quote! { __ent }, &idx_ident);
+        let msg = format!("{ty}: the device numbers the entities in container order, as the block markers are");
+        let body = quote! {
+            assert_eq!(__ent.#hb.slot() as usize, __n, #msg);
+            let mut __idx = [u32::MAX; #n];
+            #(#fill)*
+            __s.idx[#e].extend_from_slice(&__idx);
+            __n += 1;
+        };
+        let walk = entity_walk(&en.ty, body);
+        quote! { { let mut __n = 0usize; #walk } }
     }).collect();
-    let table_cross: Vec<TokenStream2> = crosses.iter().map(|(h, b)| {
-        let arr = array_ident(h, b);
-        quote! { __tables.cross.push(__store.#arr.device_table(resolve)); }
+    // the values walk: per entity table its fixed values, references and
+    // data record; the root's record; per group the cost sweep's loop, per
+    // kept instance its data
+    let values_entities: Vec<TokenStream2> = entities.iter().enumerate().map(|(e, en)| {
+        let reads: Vec<syn::Expr> = en.params.iter().map(|p| syn::parse_str(&format!("__ent.{p}")).expect("a parameter path is an expression")).collect();
+        let fixed = quote! { __w.fixed(#e, __n, [#( ::arael::__gpu::leaf_f64(#reads) as #scalar ),*]); };
+        let refs: Vec<TokenStream2> = references.iter().enumerate().filter(|(_, (re, _))| *re == e).map(|(r, (_, rf))| {
+            let field: syn::Expr = syn::parse_str(&format!("__ent.{}", rf.path)).expect("a referenced field path");
+            let read = rf.kind.read(&quote! { #field });
+            quote! { __w.reference(#r, __n, #read); }
+        }).collect();
+        let data = (!records[e].fields.is_empty()).then(|| {
+            let value = records[e].value(&rec_ident(e), &quote! { __ent }, &scalar);
+            quote! { __w.entity_data(#e, __n, #value); }
+        });
+        let walk = entity_walk(&en.ty, quote! {
+            #fixed
+            #(#refs)*
+            #data
+            __n += 1;
+        });
+        quote! { { let mut __n = 0usize; #walk } }
     }).collect();
-    // the pack walk: per group the cost sweep's loop, per constraint its
-    // slots, data, the entities' fixed values and references
-    let mut walks: Vec<TokenStream2> = Vec::new();
+    let values_root = (!root_record.fields.is_empty()).then(|| {
+        let value = root_record.value(&root_ident, &quote! { self }, &scalar);
+        quote! { __w.root_data(#value); }
+    });
+    let mut structure_walks: Vec<TokenStream2> = Vec::new();
+    let mut values_walks: Vec<TokenStream2> = Vec::new();
     for (key, g) in groups {
-        let entries: Vec<TokenStream2> = constraints.iter().zip(&ids).filter(|(c, _)| c.group_key == *key).map(|(c, id)| {
+        let mine: Vec<(&DevConstraint, &Ids)> = constraints.iter().zip(&ids).filter(|(c, _)| c.group_key == *key).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let structure: Vec<TokenStream2> = mine.iter().map(|(c, _)| {
             let cid = c.cid;
             let (av, ahb) = (format_ident!("{}", c.a.var), format_ident!("{}", c.a.hb));
-            let data: Vec<syn::Expr> = c.data.iter().map(|d| syn::parse_str(d).expect("a data leaf is an expression")).collect();
-            let fixed = |side: &DevSide, e: usize, s: TokenStream2| -> TokenStream2 {
-                let n = side.params.len();
-                let vals: Vec<syn::Expr> = side.params.iter().map(|p| syn::parse_str(p).expect("a parameter symbol is an expression")).collect();
-                let ks: Vec<usize> = (0..n).collect();
-                quote! { { let __f = &mut __pack.fixed[#e]; #( __f[#s * #n + #ks] = ::arael::__gpu::leaf_f64(#vals) as #scalar; )* } }
-            };
-            let fa = fixed(&c.a, id.ea, quote! { __sa });
-            // the instance's slots, and the second side's fixed values
-            let (slots, fb) = match (&c.b, id.pair) {
-                (Some(b), Some((eb, _))) => {
+            let slots = match &c.b {
+                Some(b) => {
                     let (bv, bhb, block) = (format_ident!("{}", b.var), format_ident!("{}", b.hb), &c.block);
-                    let fb = fixed(b, eb, quote! { __sb });
-                    (quote! {
-                        let __sb = #bv.#bhb.slot() as usize;
-                        __pack.inst[#cid].extend_from_slice(&[__sa as u32, __sb as u32, __frine.#block.slot()]);
-                    }, fb)
+                    quote! { [#av.#ahb.slot(), #bv.#bhb.slot(), __frine.#block.slot()] }
                 }
-                _ => (quote! { __pack.inst[#cid].push(__sa as u32); }, quote! {}),
+                None => quote! { [#av.#ahb.slot()] },
             };
-            let refs: Vec<TokenStream2> = c.refs.iter().zip(&id.refs).map(|(rf, &r)| {
-                let (var, s) = if rf.side == 0 {
-                    (format_ident!("{}", c.a.var), quote! { __sa })
-                } else {
-                    (format_ident!("{}", c.b.as_ref().expect("a referenced field of side 1 is b's").var), quote! { __sb })
-                };
-                let field: syn::Expr = syn::parse_str(&format!("{}.{}", var, rf.path)).expect("a referenced field path");
-                let write = rf.kind.pack(&field, r, &s);
-                quote! {
-                    __pack.packed[#r][#s] = true;
-                    #write
-                }
-            }).collect();
             let cond = c.filter.clone().unwrap_or_else(|| quote! { true });
             quote! {
-                if #cond {
-                    let __sa = #av.#ahb.slot() as usize;
-                    #slots
-                    __pack.data[#cid].extend_from_slice(&[#( (#data) as #scalar ),*]);
-                    #fa
-                    #fb
-                    #(#refs)*
+                {
+                    let __k: bool = #cond;
+                    __s.keep[#cid].push(__k);
+                    if __k {
+                        __s.rows[#cid].extend_from_slice(&#slots);
+                    }
                 }
             }
         }).collect();
-        if entries.is_empty() {
-            continue;
-        }
+        let values: Vec<TokenStream2> = mine.iter().map(|(c, _)| {
+            let cid = c.cid;
+            let reads: Vec<syn::Expr> = c.inst.iter().map(|d| syn::parse_str(d).expect("a data leaf is an expression")).collect();
+            let write = (!reads.is_empty()).then(|| quote! { __w.instance(#cid, __row[#cid], [#( (#reads) as #scalar ),*]); });
+            let msg = format!("{}: the model has more instances than its structure: it changed without LmSession::invalidate()", c.holder);
+            quote! {
+                {
+                    let __k = *__keep[#cid].get(__i[#cid]).expect(#msg);
+                    __i[#cid] += 1;
+                    if __k {
+                        #write
+                        __row[#cid] += 1;
+                    }
+                }
+            }
+        }).collect();
         let (rc, resolve, root_var) = (&g.rc_ident, &g.resolve_stmts, &g.root_var_ident);
-        walks.push(quote! {
+        structure_walks.push(quote! {
             for __frine in self.#rc.iter() {
                 #(#resolve)*
                 #[allow(unused_variables)]
                 let #root_var = &*self;
-                #(#entries)*
+                #(#structure)*
+            }
+        });
+        values_walks.push(quote! {
+            for __frine in self.#rc.iter() {
+                #(#resolve)*
+                #[allow(unused_variables)]
+                let #root_var = &*self;
+                #(#values)*
             }
         });
     }
     let n_constraints = constraints.len();
+    let fewer: Vec<String> = constraints.iter().map(|c| format!("{}: the model has fewer instances than its structure: it changed without LmSession::invalidate()", c.holder)).collect();
+    let cids: Vec<usize> = constraints.iter().map(|c| c.cid).collect();
     quote! {
         ::arael::__gpu_items! {
+            #(#rust_records)*
+            #rust_root
+
             impl ::arael::__gpu::DeviceRoot<#scalar> for #root_name {
                 fn device_shape(&self) -> ::arael::__gpu::DeviceShape {
                     ::arael::__gpu::DeviceShape {
@@ -733,24 +916,29 @@ pub(crate) fn device_root(
                         references: vec![#(#ref_shape),*],
                         crosses: #n_cross,
                         constraints: vec![#(#cshape),*],
+                        entity_data: vec![#(#entity_bytes),*],
+                        root_data: #root_bytes,
                     }
                 }
 
-                fn device_tables(&self, resolve: &mut dyn FnMut(u32, u32) -> (usize, usize, usize)) -> ::arael::__gpu::DeviceTables {
-                    let mut __store = #store_ty::default();
-                    self.__build_blocks(&mut __store);
-                    let mut __tables = ::arael::__gpu::DeviceTables::default();
-                    #(#table_entity)*
-                    #(#table_cross)*
-                    __tables
-                }
-
                 #[allow(unused_variables, clippy::all)]
-                fn device_pack(&self, __pack: &mut ::arael::__gpu::DevicePack<#scalar>) {
+                fn device_structure(&self, __s: &mut ::arael::__gpu::DeviceStructure) {
                     use arael::utils::{Float as _, SelectIndex as _};
                     use arael::store::Leaves as _;
-                    let _ = #n_constraints;
-                    #(#walks)*
+                    #(#structure_entities)*
+                    #(#structure_walks)*
+                }
+
+                #[allow(unused_variables, unused_mut, clippy::all)]
+                fn device_values(&self, __keep: &[::std::vec::Vec<bool>], __w: &mut ::arael::__gpu::DeviceWriter<'_, #scalar>) {
+                    use arael::utils::{Float as _, SelectIndex as _};
+                    use arael::store::Leaves as _;
+                    #(#values_entities)*
+                    #values_root
+                    let mut __i = [0usize; #n_constraints];
+                    let mut __row = [0usize; #n_constraints];
+                    #(#values_walks)*
+                    #( assert_eq!(__i[#cids], __keep[#cids].len(), #fewer); )*
                 }
 
                 fn device_cpp(&self) -> &'static str {

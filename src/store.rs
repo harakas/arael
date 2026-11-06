@@ -764,7 +764,7 @@ pub enum HessianBinder<'a> {
 }
 
 /// A value index as the device tables hold it.
-fn device_word(v: usize) -> u32 {
+pub(crate) fn device_word(v: usize) -> u32 {
     u32::try_from(v).expect("a Hessian of more than 2^32 values has no device table")
 }
 
@@ -772,7 +772,7 @@ fn device_word(v: usize) -> u32 {
 /// span along one side of its tile. `u32::MAX` and 0 when every slot is
 /// fixed. An entity's live parameters serialize as one run, which the
 /// tile arithmetic relies on, so a gap is an error here.
-fn tile_extent(indices: &[u32]) -> (u32, usize) {
+pub(crate) fn tile_extent(indices: &[u32]) -> (u32, usize) {
     let (mut first, mut last, mut live, mut ascends) = (u32::MAX, 0u32, 0usize, true);
     for &i in indices {
         if i == u32::MAX { continue; }
