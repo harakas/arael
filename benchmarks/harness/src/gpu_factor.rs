@@ -10,8 +10,10 @@
 //! GPU_SOLVE_WORK and GPU_BLOCKS_PER_SM override the device's
 //! `GpuSupernodalParams`; GPU_CHECK_FACTOR=1 compares the f64 factor with
 //! the CPU's, supernode by supernode, and checks 50 more factorizations;
-//! GPU_LEVELS=1 prints the elimination tree's levels (as the device runs
-//! them, leaves first): supernodes, the widest and the tallest.
+//! GPU_ORDER picks the elimination order, `amd` (the default) or `nd`
+//! (nested dissection); GPU_LEVELS=1 prints the elimination tree's levels (as the device runs
+//! them, leaves first): supernodes, the widest and the tallest, the
+//! descendant pairs and the multiply-adds of the updates and the factor.
 //!
 //! ```ignore
 //! bench_harness::gpu_factor::compare("S of slam 1000", &s, &rhs);
@@ -23,7 +25,9 @@ use std::time::Instant;
 use arael::__gpu::{Device, GpuFactor, GpuPrecision, GpuSupernodalParams, Wide, bytemuck};
 use arael_faer::SparseIndex;
 use arael_faer::bsc::SparseBlockColMat;
-use arael_faer::supernodal::{SupernodalContext, SupernodalParams, SupernodalSymbolic, amd_block_order, supernodal_factorize, supernodal_solve};
+use arael_faer::supernodal::{
+    SupernodalContext, SupernodalParams, SupernodalSymbolic, amd_block_order, nd_block_order, supernodal_factorize, supernodal_solve,
+};
 
 /// The median of `v`, ms.
 fn median(mut v: Vec<f64>) -> f64 {
@@ -161,11 +165,40 @@ fn print_levels(sn: &SupernodalSymbolic) {
             level[p] = level[p].max(level[s] + 1);
         }
     }
+    // the multiply-adds of s's descendant updates: per descendant, its rows
+    // in s's columns (kw) against its rows from there on (m)
+    let update_work = |s: usize| -> (usize, f64) {
+        let cols = sn.supernode_cols(s);
+        let mut work = 0.0;
+        for &d in sn.descendants(s) {
+            let d = d as usize;
+            let (dq, dh) = sn.supernode_dims(d);
+            let (pat, rows) = (sn.supernode_pattern(d), sn.supernode_pattern_rows(d));
+            let e0 = pat.partition_point(|&b| (b as usize) < cols.start);
+            let e1 = pat.partition_point(|&b| (b as usize) < cols.end);
+            let row = |e: usize| if e < rows.len() { rows[e] as f64 } else { dh as f64 };
+            let (kw, m) = (row(e1) - row(e0), dh as f64 - row(e0));
+            work += dq as f64 * (kw * m - kw * (kw - 1.0) / 2.0);
+        }
+        (sn.descendants(s).len(), work)
+    };
     let nl = level.iter().max().map_or(0, |&l| l + 1);
     for l in 0..nl {
-        let dims: Vec<(usize, usize)> = (0..ns).filter(|&s| level[s] == l).map(|s| sn.supernode_dims(s)).collect();
-        let (q, h) = dims.iter().fold((0, 0), |(q, h), &(a, b)| (q.max(a), h.max(b)));
-        println!("  level {l:3}: {:5} supernodes, widest {q:4}, tallest {h:5}", dims.len());
+        let sns: Vec<usize> = (0..ns).filter(|&s| level[s] == l).collect();
+        let (mut q, mut h, mut pairs, mut upd, mut fac) = (0, 0, 0, 0.0, 0.0);
+        for &s in &sns {
+            let (a, b) = sn.supernode_dims(s);
+            let (np, w) = update_work(s);
+            (q, h, pairs, upd) = (q.max(a), h.max(b), pairs + np, upd + w);
+            let (a, b) = (a as f64, b as f64);
+            fac += a * a * a / 6.0 + (b - a) * a * a / 2.0;
+        }
+        println!(
+            "  level {l:3}: {:5} supernodes, widest {q:4}, tallest {h:5}, {pairs:6} descendant pairs, updates {:8.0}k, factor {:8.0}k multiply-adds",
+            sns.len(),
+            upd / 1e3,
+            fac / 1e3
+        );
     }
 }
 
@@ -175,10 +208,15 @@ fn print_levels(sn: &SupernodalSymbolic) {
 pub fn compare(what: &str, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64]) {
     let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
     let threads: usize = std::env::var("BENCH_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-    let order = amd_block_order(a.symbolic());
+    let ordering = std::env::var("GPU_ORDER").unwrap_or_else(|_| "amd".to_string());
+    let order = match ordering.as_str() {
+        "amd" => amd_block_order(a.symbolic()),
+        "nd" => nd_block_order(a.symbolic()),
+        other => panic!("GPU_ORDER={other}: amd or nd"),
+    };
     let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
     println!(
-        "{what}: {} params, {} supernodes, {} factor values; {rounds} rounds, the CPU on {threads} threads",
+        "{what}, {ordering} order: {} params, {} supernodes, {} factor values; {rounds} rounds, the CPU on {threads} threads",
         rhs.len(),
         sn.n_supernodes(),
         sn.factor_val_count()
