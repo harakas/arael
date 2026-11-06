@@ -55,6 +55,53 @@ DEVICE double arael_safe_sqrt(double v) { return v <= 0.0 ? 0.0 : sqrt(v); }
 DEVICE float arael_epsilon_for(float) { return 1.1920928955078125e-7f; }
 DEVICE double arael_epsilon_for(double) { return 2.220446049250313e-16; }
 
+// arael::utils' fast atan (max error < 1e-6 radians), with its folds, its
+// constants and its operations in its order: the argument's magnitude
+// folded below 1, then below tan(pi / 12) by the pi / 6 shift, a rational
+// polynomial there.
+template <typename T>
+DEVICE T arael_fast_atan_t(T v) {
+    const T half_pi = (T)1.5707963267948966;
+    const T sixth_pi = (T)5.235987755982988e-1;
+    const T tan_sixth_pi = (T)5.773502691896257e-1;
+    const T tan_twelfth_pi = (T)2.679491924311227e-1;
+    const T c1 = (T)1.6867629106, c2 = (T)0.4378497304, c3 = (T)1.6867633134;
+    const bool negative = v < (T)0;
+    T x = negative ? -v : v;
+    const bool inverted = x > (T)1;
+    if (inverted) x = (T)1 / x;
+    T y;
+    if (x > tan_twelfth_pi) {
+        x = (x - tan_sixth_pi) / ((T)1 + tan_sixth_pi * x);
+        const T x2 = x * x;
+        y = x * (c1 + x2 * c2) / (c3 + x2);
+        y += sixth_pi;
+    } else {
+        const T x2 = x * x;
+        y = x * (c1 + x2 * c2) / (c3 + x2);
+    }
+    if (inverted) y = half_pi - y;
+    return negative ? -y : y;
+}
+DEVICE float arael_fast_atan(float v) { return arael_fast_atan_t(v); }
+DEVICE double arael_fast_atan(double v) { return arael_fast_atan_t(v); }
+
+// arael::utils' fast atan2 over its fast atan: 0 at the origin, +-pi / 2
+// on the y axis, the quadrant by x's and y's signs.
+template <typename T>
+DEVICE T arael_fast_atan2_t(T y, T x) {
+    const T pi = (T)3.14159265358979323846;
+    if (x > (T)0) return arael_fast_atan_t(y / x);
+    if (x == (T)0) {
+        if (y == (T)0) return (T)0;
+        return copysign((T)0.5 * pi, y);
+    }
+    if (y >= (T)0) return arael_fast_atan_t(y / x) + pi;
+    return arael_fast_atan_t(y / x) - pi;
+}
+DEVICE float arael_fast_atan2(float y, float x) { return arael_fast_atan2_t(y, x); }
+DEVICE double arael_fast_atan2(double y, double x) { return arael_fast_atan2_t(y, x); }
+
 // The arm of n a select's index x picks (arael::utils::SelectIndex): the
 // integer in [0, n) x is, -1 for an integer outside them (the default
 // arm), -2 for a NaN, an infinity or a fraction (where the CPU panics).
