@@ -99,10 +99,16 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
   `wide_pair_flops` (1e5): an update from a descendant at least that wide
   takes it from `wide_pair_flops` on, since it reuses each k slab across
   its tile.
+- `chain_flops_f32` (3e5), `chain_flops_f64` (0, off) and `chain_items`
+  (32): a run of levels without big updates or panel steps, each of at most
+  that many multiply-adds and `chain_items` update pieces and factors, is
+  factored by one block in one launch (the top of a tree, one small level
+  above another). In f64 one block's multiply-add rate is the limit where
+  f64 is slow.
 - `blocks_per_sm` (4): a level whose big updates make fewer blocks than
   this per multiprocessor has its tiles' updates cut across blocks (by
-  rectangles, then along k), the shared tiles subtracted atomically.
-- `elem_cap` (16384): the elements per block of the small-update kernel.
+  rectangles, then along k), the shared tiles subtracted atomically; a
+  level's small updates are cut into pieces of its share of the work.
 - `solve_work` (65536): the multiply-adds per block of the solve's gather
   and GEMV.
 - `lane_unroll`: the loads in flight of the backward dot products (8 in

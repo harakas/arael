@@ -38,6 +38,14 @@ typedef unsigned long long u64;
 #define KERNEL_THREADS_REGS(n) extern "C" __global__ __launch_bounds__(n)
 #endif
 #define DEVICE __device__ inline
+// DEVICE_INLINE: a device function always inlined, for one whose array
+// parameters must stay in registers (a call keeps them in memory) and
+// which has more than one caller, where the compiler may not inline it.
+#if ARAEL_CUDA
+#define DEVICE_INLINE __device__ __forceinline__
+#else
+#define DEVICE_INLINE __device__ inline __attribute__((always_inline))
+#endif
 
 // A pointer parameter through which alone the kernel reaches what it points
 // at; on a const pointer, the values are not written during the launch (the

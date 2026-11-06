@@ -4,7 +4,7 @@
 //
 // Compiled per SCALAR (float or double), the wide scalar W of the vectors
 // it solves (wide.h, in front of this) and LU; the tile sizes (NB, TB, TK,
-// TR, TC, GROUP, XR_CH) and the plan header's slots (H_*) come from plan.rs
+// PAIR_*, XR_CH) and the plan header's slots (H_*) come from plan.rs
 // as #defines, THREADS (the block size of every kernel but k_trsm, which
 // runs TB) from supernodal.rs. One launch per level unless said.
 //
@@ -69,72 +69,67 @@ KERNEL_THREADS(THREADS) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBA
     if (t < ntiles) seed_tile<W>(tiles, vals, factor, t);
 }
 
-// The small descendants' updates: one block per (target, TR x TC tile,
-// chunk), a group of threads per rectangle with the threads over the
-// rectangle's elements (GROUP, or more when the chunk has few rectangles,
-// so the block's threads all work), accumulated in shared memory,
-// subtracted into the panel atomically (a tile may be several chunks). `src` and `dst` are the
-// factor: the descendants are read through `src`, the target written
-// through `dst`.
-KERNEL_THREADS(THREADS) void k_tile_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT rects, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT src, GLOBAL F* RESTRICT dst) {
-    SHARED F u[TR * TC];
-    u32 o_dims = plan[H_DIMS];
-    u32 o_val_ptr = plan[H_VAL_PTR];
-    u32 o_pr_d = plan[H_PR_D];
-    u32 o_pr_r0 = plan[H_PR_R0];
-    u32 item = block_x();
-    u32 s = items[5 * item];
-    u32 row0 = items[5 * item + 1];
-    u32 col0 = items[5 * item + 2];
-    u32 r0 = items[5 * item + 3];
-    u32 r1 = items[5 * item + 4];
-    u32 q = plan[o_dims + 2 * s];
-    u32 h = plan[o_dims + 2 * s + 1];
+// The small descendant updates: one block per piece of `items` (PAIR_ITEM
+// words each, plan.rs's LevelWork::pair_items): rows [i0, i1) of a pair
+// against its columns [j0, j1), element (i, j) the product of the
+// descendant's rows i and j (counted from the pair's first) over its dq
+// columns, the lower part (i >= j) subtracted from the target through the
+// pair's row and column maps, atomically: other pieces and pairs land on
+// the same entries. Both ranges of rows are staged in shared memory PAIR_KC
+// columns at a time, threads below ni loading the rows, the next nj the
+// columns' rows; thread t owns elements t + u THREADS (u < PAIR_EPT) of the
+// piece, row fastest. `src` and `dst` are the factor: the descendant read
+// through `src`, the target written through `dst`.
+KERNEL_THREADS(THREADS) void k_pair_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT src, GLOBAL F* RESTRICT dst) {
+    SHARED F sa[PAIR_KC * PAIR_NI];
+    SHARED F sb[PAIR_KC * PAIR_NJ];
+    SHARED u32 tr[PAIR_NI];
+    SHARED u32 tc[PAIR_NJ];
+    GLOBAL const u32* it = items + PAIR_ITEM * block_x();
     u32 t = thread_x();
-    const u32 nt = THREADS;
-    for (u32 e = t; e < TR * TC; e += nt) u[e] = F(0);
-    BARRIER();
-    // the group size: GROUP, doubled while the chunk's rectangles fill no more
-    // than half the block, so a chunk of few rectangles still uses it all
-    u32 gsz = GROUP;
-    while (2 * gsz * (r1 - r0) <= nt) gsz *= 2;
-    u32 g = t / gsz;
-    u32 lane = t % gsz;
-    u32 ngroups = nt / gsz;
-    for (u32 rr = r0 + g; rr < r1; rr += ngroups) {
-        u32 rb = 4 * rr;
-        u32 pi = rects[rb];
-        u32 geo = rects[rb + 1];
-        u32 dra = rects[rb + 2];
-        u32 dca = rects[rb + 3];
-        u32 i0 = geo & 0xffu;
-        u32 ni = (geo >> 8) & 0xffu;
-        u32 j0 = (geo >> 16) & 0xffu;
-        u32 nj = geo >> 24;
-        u32 d = plan[o_pr_d + pi];
-        u32 pr0 = plan[o_pr_r0 + pi];
-        u32 dq = plan[o_dims + 2 * d];
-        u32 dh = plan[o_dims + 2 * d + 1];
-        u32 dp = plan[o_val_ptr + d] + pr0;
-        for (u32 e2 = lane; e2 < ni * nj; e2 += gsz) {
-            u32 jj = e2 / ni;
-            u32 ii = e2 - jj * ni;
-            F acc = F(0);
-            for (u32 k = 0; k < dq; k++) acc += src[dp + k * dh + dra + ii] * src[dp + k * dh + dca + jj];
-            atomic_add(&u[(j0 + jj) * TR + i0 + ii], acc);
+    u32 base = it[0];
+    u32 dh = it[1];
+    u32 dq = it[2];
+    u32 panel = it[3];
+    u32 hs = it[4];
+    u32 i0 = it[7];
+    u32 j0 = it[9];
+    u32 ni = it[8] - i0;
+    u32 nj = it[10] - j0;
+    if (t < ni) tr[t] = plan[plan[H_RMAP] + it[5] + i0 + t];
+    else if (t < ni + nj) tc[t - ni] = plan[plan[H_CMAP] + it[6] + j0 + t - ni];
+    u32 ii[PAIR_EPT];
+    u32 jj[PAIR_EPT];
+    F acc[PAIR_EPT];
+#pragma unroll
+    for (u32 u = 0; u < PAIR_EPT; u++) {
+        u32 e = t + u * THREADS;
+        jj[u] = e / ni;
+        ii[u] = e - jj[u] * ni;
+        acc[u] = F(0);
+    }
+    for (u32 k0 = 0; k0 < dq; k0 += PAIR_KC) {
+        u32 kc = min(dq - k0, PAIR_KC);
+        // the previous pass's reads done
+        BARRIER();
+        if (t < ni) {
+            for (u32 k = 0; k < kc; k++) sa[k * ni + t] = src[base + (k0 + k) * dh + i0 + t];
+        } else if (t < ni + nj) {
+            for (u32 k = 0; k < kc; k++) sb[k * nj + t - ni] = src[base + (k0 + k) * dh + j0 + t - ni];
+        }
+        BARRIER();
+#pragma unroll
+        for (u32 u = 0; u < PAIR_EPT; u++) {
+            if (jj[u] < nj) {
+                F a = acc[u];
+                for (u32 k = 0; k < kc; k++) a += sa[k * ni + ii[u]] * sb[k * nj + jj[u]];
+                acc[u] = a;
+            }
         }
     }
-    BARRIER();
-    u32 panel = plan[o_val_ptr + s];
-    u32 nrows = min(h - row0, TR);
-    u32 ncols = min(q - col0, TC);
-    for (u32 e3 = t; e3 < TR * TC; e3 += nt) {
-        u32 j = e3 / TR;
-        u32 i = e3 - j * TR;
-        if (i < nrows && j < ncols && row0 + i >= col0 + j) {
-            F v = u[e3];
-            atomic_add(&dst[panel + (col0 + j) * h + row0 + i], F(0) - v);
-        }
+#pragma unroll
+    for (u32 u = 0; u < PAIR_EPT; u++) {
+        if (jj[u] < nj && i0 + ii[u] >= j0 + jj[u]) atomic_add(&dst[panel + tc[jj[u]] * hs + tr[ii[u]]], F(0) - acc[u]);
     }
 }
 
@@ -289,23 +284,24 @@ DEVICE u32 step_width(u32 left) {
 
 // The row's first W columns shifted down one.
 template <u32 W>
-DEVICE void shift_down(F (&a)[NB]) {
+DEVICE_INLINE void shift_down(F (&a)[NB]) {
 #pragma unroll
     for (u32 c = 1; c < W; c++) a[c - 1] = a[c];
 }
 
 // potf2_regs' pivots k while the columns left (nb - k) fit width W.
 template <u32 W, typename Out>
-DEVICE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool& bad, Out& out) {
+DEVICE_INLINE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool& bad, Out& out) {
     for (; k < nb && step_width(nb - k) == W; k++) {
         F d = shfl(a[0], k);
         if (!(d > F(0))) {
             bad = true;
             d = F(1);
         }
-        // one division per pivot: f64 division is slow where f64 is
-        F lkk = sqrt(d);
-        F rk = F(1) / lkk;
+        // one reciprocal square root per pivot (where f64 is slow, its
+        // correctly rounded square root and division take twice as long)
+        F rk = rsqrt(d);
+        F lkk = d * rk;
         if (lane == k) {
             a[0] = lkk;
             dr = rk;
@@ -333,7 +329,7 @@ DEVICE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool& bad, 
 // r >= k); `dr` gets 1 / L[r][r] on the lanes below nb. Returns whether a
 // pivot was not positive; it continues with 1.
 template <typename Out>
-DEVICE bool potf2_regs(F (&a)[NB], u32 lane, u32 nb, F& dr, Out& out) {
+DEVICE_INLINE bool potf2_regs(F (&a)[NB], u32 lane, u32 nb, F& dr, Out& out) {
     bool bad = false;
     u32 k = 0;
     potf2_steps<32>(a, lane, nb, k, dr, bad, out);
@@ -362,7 +358,7 @@ struct ColsOut {
 // The nb x nb lower diagonal tile at `tile` (column stride h) of
 // supernode s factored in place by one warp (potf2_regs). A pivot that is
 // not positive sets fail[0] to s plus one and continues with 1.
-DEVICE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s) {
+DEVICE_INLINE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s) {
     F a[NB];
 #pragma unroll
     for (u32 c = 0; c < NB; c++) a[c] = (lane < nb && c <= lane) ? factor[tile + c * h + lane] : F(0);
@@ -398,7 +394,7 @@ constexpr u32 SMALL_KU = sizeof(F) == 4 ? 8 : 4;
 // small_take's products, the loop over the row's nb columns W wide; L[r][k]
 // comes through a ring of SMALL_KU loads ahead (`lk`, loaded).
 template <u32 W>
-DEVICE void small_take_cols(F (&v)[NB], F (&lk)[SMALL_KU], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
+DEVICE_INLINE void small_take_cols(F (&v)[NB], F (&lk)[SMALL_KU], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
     for (u32 k = 0; k < j; k++) {
         F x = lk[0];
 #pragma unroll
@@ -414,7 +410,7 @@ DEVICE void small_take_cols(F (&v)[NB], F (&lk)[SMALL_KU], GLOBAL const F* facto
 // k_small_factor's row r at the step at column j: its nb values less the
 // earlier columns' products, v[c] = A[r][j + c] - sum over k < j of
 // L[r][k] L[j + c][k], L's diagonal block (column-major, q rows) in `l`.
-DEVICE void small_take(F (&v)[NB], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
+DEVICE_INLINE void small_take(F (&v)[NB], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
 #pragma unroll
     for (u32 c = 0; c < NB; c++) v[c] = c < nb ? factor[panel + (j + c) * h + r] : F(0);
     F lk[SMALL_KU];
@@ -430,7 +426,7 @@ DEVICE void small_take(F (&v)[NB], GLOBAL const F* factor, u32 panel, u32 h, SHA
 
 // small_solve's columns k while the columns left (nb - k) fit width W.
 template <u32 W>
-DEVICE void small_solve_steps(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r, u32& k) {
+DEVICE_INLINE void small_solve_steps(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r, u32& k) {
     for (; k < nb && step_width(nb - k) == W; k++) {
         F x = v[0] * d11[k];
         factor[panel + (j + k) * h + r] = x;
@@ -447,7 +443,7 @@ DEVICE void small_solve_steps(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SH
 // column by column (the tile column-major in `l11`, NB rows, the
 // reciprocals of its diagonal in `d11`) and stored; a row of the diagonal
 // block also into `l`.
-DEVICE void small_solve(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r) {
+DEVICE_INLINE void small_solve(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r) {
     u32 k = 0;
     small_solve_steps<32>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
     small_solve_steps<24>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
@@ -455,8 +451,8 @@ DEVICE void small_solve(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_P
     small_solve_steps<8>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
 }
 
-// A small supernode's Cholesky by one block, one supernode of `list` per
-// block, in NB-column steps; thread r owns the panel's row r, and rows r +
+// A small supernode's Cholesky, supernode s by the block (nt threads,
+// thread t), in NB-column steps; thread r owns the panel's row r, and rows r +
 // nt, r + 2 nt, ... for a block of nt threads (q <= nt: the diagonal
 // block's rows are the first). A step at column j: every row from j on
 // takes its nb values less the earlier columns' products, the diagonal
@@ -466,17 +462,14 @@ DEVICE void small_solve(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_P
 // constant offsets, and its diagonal's reciprocals); the warp
 // holding rows j to j + 31 factors them in registers (potf2_regs), the
 // other rows solve against the step's diagonal tile. A pivot that is not
-// positive sets fail[0] to the supernode plus one and continues with 1.
-KERNEL_THREADS_REGS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
-    DYNAMIC_SHARED(F, l);
+// positive sets fail[0] to the supernode plus one and continues with 1. The
+// caller has the block wait before `l` is used again.
+DEVICE_INLINE void small_factor(u32 s, GLOBAL const u32* plan, GLOBAL F* factor, GLOBAL u32* fail, SHARED_PTR F* l, u32 t, u32 nt) {
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
-    u32 s = list[block_x()];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
     u32 panel = plan[o_val_ptr + s];
-    u32 t = thread_x();
-    u32 nt = block_dim_x();
     u32 lane = t % NB;
     SHARED_PTR F* l11 = l + q * q;
     SHARED_PTR F* d11 = l11 + min(q, NB) * NB;
@@ -510,6 +503,78 @@ KERNEL_THREADS_REGS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list
         if (j + NB < q) BARRIER();
     }
     if (bad) fail[0] = s + 1;
+}
+
+// The small supernodes' factors, one block per supernode of `list`
+// (small_factor).
+KERNEL_THREADS_REGS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+    DYNAMIC_SHARED(F, l);
+    small_factor(list[block_x()], plan, factor, fail, l, thread_x(), block_dim_x());
+}
+
+// k_chain's update piece at `it` (as k_pair_update's) by one warp (lane
+// `lane`): the piece's elements 4 a lane at a time, their products straight
+// from the factor.
+DEVICE void warp_piece(GLOBAL const u32* it, GLOBAL const u32* plan, GLOBAL F* factor, u32 lane) {
+    u32 base = it[0];
+    u32 dh = it[1];
+    u32 dq = it[2];
+    u32 panel = it[3];
+    u32 hs = it[4];
+    u32 rm = plan[H_RMAP] + it[5];
+    u32 cm = plan[H_CMAP] + it[6];
+    u32 i0 = it[7];
+    u32 j0 = it[9];
+    u32 ni = it[8] - i0;
+    u32 n = ni * (it[10] - j0);
+    for (u32 e0 = 0; e0 < n; e0 += 4 * NB) {
+        u32 ii[4];
+        u32 jj[4];
+        F acc[4];
+#pragma unroll
+        for (u32 u = 0; u < 4; u++) {
+            u32 e = min(e0 + lane + u * NB, n - 1);
+            jj[u] = e / ni;
+            ii[u] = e - jj[u] * ni;
+            acc[u] = F(0);
+        }
+        for (u32 k = 0; k < dq; k++) {
+#pragma unroll
+            for (u32 u = 0; u < 4; u++) acc[u] += factor[base + k * dh + i0 + ii[u]] * factor[base + k * dh + j0 + jj[u]];
+        }
+#pragma unroll
+        for (u32 u = 0; u < 4; u++) {
+            if (e0 + lane + u * NB < n && i0 + ii[u] >= j0 + jj[u]) atomic_add(&factor[panel + plan[cm + j0 + jj[u]] * hs + plan[rm + i0 + ii[u]]], F(0) - acc[u]);
+        }
+    }
+}
+
+// A chain of levels factored by one block in one launch: per level
+// (`levels`, 4 words: the word offsets into `plan` of its small update
+// pieces and of its small targets, and their counts), the pieces a warp
+// each, then the targets' factors in turn. For the top of a tree, small
+// levels one above the other, whose launches would cost more than their
+// work. The levels read what the levels before them wrote in the same
+// launch, so `factor` is one plain pointer (not the read-only path); `l`
+// is the factors' dynamic shared memory, for the widest of the chain's
+// targets.
+KERNEL_THREADS_REGS(THREADS) void k_chain(GLOBAL const u32* RESTRICT levels, u32 nlevels, GLOBAL const u32* RESTRICT plan, GLOBAL F* factor, GLOBAL u32* RESTRICT fail) {
+    DYNAMIC_SHARED(F, l);
+    u32 t = thread_x();
+    for (u32 lv = 0; lv < nlevels; lv++) {
+        u32 pieces = levels[4 * lv];
+        u32 npieces = levels[4 * lv + 1];
+        u32 targets = levels[4 * lv + 2];
+        u32 ntargets = levels[4 * lv + 3];
+        for (u32 p = t / NB; p < npieces; p += THREADS / NB) warp_piece(plan + pieces + PAIR_ITEM * p, plan, factor, t % NB);
+        for (u32 g = 0; g < ntargets; g++) {
+            // the updates in; the previous factor's reads of `l` done
+            BARRIER();
+            small_factor(plan[targets + g], plan, factor, fail, l, t, THREADS);
+        }
+        // the level's factors in, read by the next level's updates
+        BARRIER();
+    }
 }
 
 // Panel step, part one, for a level's first step: the NB x NB diagonal

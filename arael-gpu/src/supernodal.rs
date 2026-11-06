@@ -75,9 +75,10 @@ struct Kernels<K> {
     seed_f32: K,
     seed_f64: K,
     seed_wide: K,
-    tile_update: K,
+    pair_update: K,
     big_update: K,
     small_factor: K,
+    chain: K,
     potf2: K,
     trsm: K,
     syrk: K,
@@ -89,12 +90,20 @@ struct Kernels<K> {
     perm_out: K,
 }
 
+/// What the factorization launches, in order: one level's kernels, or a
+/// chain of levels in one `k_chain` launch.
+enum Step {
+    Level(usize),
+    /// The chain's level records (4 words a level, a byte offset into the
+    /// structure block), its levels, and its dynamic shared memory.
+    Chain { records: usize, n: u32, shared: u32 },
+}
+
 /// One level's work lists, as byte offsets into the structure block, and
 /// its launch sizes.
 struct Level {
-    tile_items: usize,
-    tile_rects: usize,
-    n_tile_items: u32,
+    pair_items: usize,
+    n_pair_items: u32,
     big_items: usize,
     big_rects: usize,
     n_big_items: u32,
@@ -175,6 +184,7 @@ pub struct GpuSupernodal<F: Scalar, D: Device> {
     on: usize,
     ntiles: u32,
     levels: Vec<Level>,
+    steps: Vec<Step>,
     work: D::Block,
     sec: Sections,
     n: usize,
@@ -228,6 +238,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let at_tiles = pk.push(&plan.tiles);
         let at_on = pk.push(&[1]);
         let q = |s: &u32| plan.dims[2 * *s as usize] as usize;
+        let chain_flops = if fs == 4 { params.chain_flops_f32 } else { params.chain_flops_f64 };
+        let chains = plan::chains(&lw, chain_flops, params.chain_items);
         let mut levels = Vec::with_capacity(lw.len());
         for w in lw {
             let small_q = w.small_targets.iter().map(q).max().unwrap_or(0);
@@ -241,9 +253,8 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 )));
             }
             levels.push(Level {
-                tile_items: 4 * pk.push(&w.tile_items),
-                tile_rects: 4 * pk.push(&w.tile_rects),
-                n_tile_items: (w.tile_items.len() / 5) as u32,
+                pair_items: 4 * pk.push(&w.pair_items),
+                n_pair_items: (w.pair_items.len() / plan::PAIR_ITEM) as u32,
                 big_items: 4 * pk.push(&w.big_items),
                 big_rects: 4 * pk.push(&w.big_rects),
                 n_big_items: (w.big_items.len() / plan::BIG_ITEM) as u32,
@@ -264,6 +275,20 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
                 n_bg: (w.bg_items.len() / 3) as u32,
             });
         }
+        // the chains' level records, the other levels as they are
+        let mut steps = Vec::new();
+        let mut l = 0;
+        for c in &chains {
+            steps.extend((l..c.start).map(Step::Level));
+            let records: Vec<u32> = levels[c.clone()]
+                .iter()
+                .flat_map(|v: &Level| [v.pair_items as u32 / 4, v.n_pair_items, v.small as u32 / 4, v.n_small])
+                .collect();
+            let shared = levels[c.clone()].iter().map(|v| v.small_shared).max().unwrap_or(0);
+            steps.push(Step::Chain { records: 4 * pk.push(&records), n: c.len() as u32, shared });
+            l = c.end;
+        }
+        steps.extend((l..levels.len()).map(Step::Level));
         let mut ints = dev.alloc(pk.words.len() * 4)?;
         dev.write(&mut ints, 0, bytemuck::cast_slice(&pk.words))?;
         let nvals = asym.val_count();
@@ -278,9 +303,10 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             seed_f32: c("k_seed_f32")?,
             seed_f64: c("k_seed_f64")?,
             seed_wide: c("k_seed_wide")?,
-            tile_update: c("k_tile_update")?,
+            pair_update: c("k_pair_update")?,
             big_update: c("k_big_update")?,
             small_factor: c("k_small_factor")?,
+            chain: c("k_chain")?,
             potf2: c("k_potf2")?,
             trsm: c("k_trsm")?,
             syrk: c("k_syrk")?,
@@ -299,6 +325,7 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             on: 4 * at_on,
             ntiles: (plan.tiles.len() / 6) as u32,
             levels,
+            steps,
             work,
             sec,
             n: plan.n,
@@ -362,10 +389,17 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         self.run(&self.k.zero, flen.div_ceil(THREADS).max(1), THREADS, 0, &[factor, Arg::U32(flen)])?;
         let seed_args = [list(self.tiles), Arg::Block(vals.0, vals.1), factor, Arg::U32(self.ntiles)];
         self.run(seed, self.ntiles.div_ceil(THREADS).max(1), THREADS, 0, &seed_args)?;
-        for l in &self.levels {
-            if l.n_tile_items > 0 {
-                let args = [list(l.tile_items), list(l.tile_rects), plan, factor, factor];
-                self.run(&self.k.tile_update, l.n_tile_items, THREADS, 0, &args)?;
+        for step in &self.steps {
+            let l = match *step {
+                Step::Chain { records, n, shared } => {
+                    self.run(&self.k.chain, 1, THREADS, shared, &[list(records), Arg::U32(n), plan, factor, fail])?;
+                    continue;
+                }
+                Step::Level(i) => &self.levels[i],
+            };
+            if l.n_pair_items > 0 {
+                let args = [list(l.pair_items), plan, factor, factor];
+                self.run(&self.k.pair_update, l.n_pair_items, THREADS, 0, &args)?;
             }
             if l.n_big_items > 0 {
                 let args = [list(l.big_items), list(l.big_rects), plan, factor];
@@ -457,6 +491,18 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let mut v = vec![F::zeroed(); self.factor_vals];
         self.dev.read(&self.work, self.sec.factor, bytemuck::cast_slice_mut(&mut v))?;
         Ok(v)
+    }
+
+    /// The levels the factorization runs in chains.
+    #[cfg(test)]
+    fn chained_levels(&self) -> usize {
+        self.steps.iter().map(|s| if let Step::Chain { n, .. } = s { *n as usize } else { 0 }).sum()
+    }
+
+    /// The levels of one small supernode and no big updates.
+    #[cfg(test)]
+    fn path_levels(&self) -> usize {
+        self.levels.iter().filter(|l| l.n_small == 1 && l.n_big == 0 && l.n_big_items == 0).count()
     }
 
     fn run(&self, kernel: &D::Kernel, blocks: u32, threads: u32, shared_bytes: u32, args: &[Arg<'_, D::Block>]) -> Result<(), GpuError> {
@@ -571,9 +617,11 @@ fn defines(scalar: &str, lu: usize) -> String {
         ("TB", TB),
         ("TK", TK),
         ("BIG_ITEM", plan::BIG_ITEM),
-        ("TR", TR),
-        ("TC", TC),
-        ("GROUP", GROUP),
+        ("PAIR_ITEM", plan::PAIR_ITEM),
+        ("PAIR_NI", PAIR_NI),
+        ("PAIR_NJ", PAIR_NJ),
+        ("PAIR_EPT", PAIR_EPT),
+        ("PAIR_KC", PAIR_KC),
         ("XR_CH", XR_CH),
         ("H_DIMS", H_DIMS),
         ("H_VAL_PTR", H_VAL_PTR),
@@ -629,7 +677,9 @@ mod tests {
             big_pair_flops: 100.0,
             wide_pair_k: u32::MAX,
             wide_pair_flops: f64::INFINITY,
-            elem_cap: 256,
+            chain_flops_f32: 0.0,
+            chain_flops_f64: 0.0,
+            chain_items: 0,
             solve_work: 512,
             lane_unroll: None,
             blocks_per_sm: 4,
@@ -651,6 +701,20 @@ mod tests {
     /// Every supernode the small kernel holds on it, however wide or tall.
     fn small_kernel_only() -> GpuSupernodalParams {
         GpuSupernodalParams { small_q: u32::MAX, small_flops: f64::INFINITY, ..GpuSupernodalParams::default() }
+    }
+
+    /// Every level the chain kernel can take in chains, in either precision:
+    /// every update small, every supernode the small kernel holds, no bound
+    /// on a level's work.
+    fn chains_everywhere() -> GpuSupernodalParams {
+        GpuSupernodalParams {
+            chain_flops_f32: f64::INFINITY,
+            chain_flops_f64: f64::INFINITY,
+            chain_items: u32::MAX,
+            big_pair_flops: f64::INFINITY,
+            wide_pair_flops: f64::INFINITY,
+            ..small_kernel_only()
+        }
     }
 
     /// The widest q the small kernel takes in `F` on `dev`, as `new` caps it.
@@ -692,9 +756,12 @@ mod tests {
         // the cut parameters do cut: some big tile is shared between items
         let lw = plan::build_levels(&Plan::new(&sn, a.symbolic()), &cut_updates(), dev.arch().multiprocessors);
         assert!(lw.iter().any(|w| w.big_items.chunks(plan::BIG_ITEM).any(|it| it[7] == 1)), "a tile cut between items");
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates(), small_kernel_only()] {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates(), small_kernel_only(), chains_everywhere()] {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
             assert!(sn.n_supernodes() > 20, "a tree with levels");
+            if params.chain_flops_f64 == f64::INFINITY {
+                assert!(g.chained_levels() > 0 && g.chained_levels() == g.path_levels(), "the levels of one small supernode in chains");
+            }
             g.factorize(a.vals()).unwrap();
             let err = factor_err(&sn, &g.factor_values().unwrap(), &cpu);
             assert!(err < 1e-12, "factor err/max {err}");
@@ -717,8 +784,11 @@ mod tests {
         let (a, dense, rhs, sn) = setup(24);
         let n = sn.dim();
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates(), small_kernel_only()] {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates(), small_kernel_only(), chains_everywhere()] {
             let mut g = GpuSupernodal::<f32, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+            if params.chain_flops_f32 == f64::INFINITY {
+                assert!(g.chained_levels() > 0 && g.chained_levels() == g.path_levels(), "the levels of one small supernode in chains");
+            }
             g.factorize(a.vals()).unwrap();
             let mut x = rhs.clone();
             g.solve(&mut x).unwrap();
@@ -797,7 +867,15 @@ mod tests {
         fn check<F: Scalar>(dev: &Arc<TestDevice>, sn: &SupernodalSymbolic, a: &Matrix) {
             let g = GpuSupernodal::<F, _>::new(dev, sn, a.symbolic(), &GpuSupernodalParams::default(), Wide::F64).unwrap();
             let k = &g.k;
-            for (name, kernel) in [("small_factor", &k.small_factor), ("potf2", &k.potf2), ("trsm", &k.trsm), ("syrk", &k.syrk)] {
+            let kernels = [
+                ("small_factor", &k.small_factor),
+                ("chain", &k.chain),
+                ("pair_update", &k.pair_update),
+                ("potf2", &k.potf2),
+                ("trsm", &k.trsm),
+                ("syrk", &k.syrk),
+            ];
+            for (name, kernel) in kernels {
                 assert_eq!(kernel.local_bytes().unwrap(), 0, "k_{name} in {}: {} registers", F::CPP, kernel.registers().unwrap());
             }
         }
@@ -820,8 +898,11 @@ mod tests {
         let (q, _) = sn.supernode_dims(sn.n_supernodes() - 1);
         assert!(q > crate::plan::NB, "the root spans more than one panel step: {q} columns");
         let dev = device();
-        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates(), small_kernel_only()] {
+        for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates(), small_kernel_only(), chains_everywhere()] {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, &asym, &params, Wide::F64).unwrap();
+            if params.chain_flops_f64 == f64::INFINITY {
+                assert!(matches!(g.steps.last(), Some(Step::Chain { .. })), "the bad root in a chain");
+            }
             assert!(matches!(g.factorize(a.vals()), Err(FactorizeError::NotPositiveDefinite)));
             // the flag is cleared by the next factorization
             a.vals_mut()[base] = good;
