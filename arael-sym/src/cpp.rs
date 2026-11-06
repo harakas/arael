@@ -60,9 +60,23 @@
 //! assert_eq!(safe_sqrt(a).to_cpp("f32").unwrap(), "arael_safe_sqrt(a)");
 //! ```
 //!
-//! What has no C++ form yet is an error naming it: a `select` on an index,
-//! and the other external functions (`#[arael::function]`, `fast_atan` and
-//! `fast_atan2` of `arael::utils`).
+//! A `select` on an index takes the arm `arael_select_index(index, n)` of
+//! arael's kernel library names: an integer in `0..n`, -1 for an integer
+//! outside the arms (the default arm), -2 for a NaN, an infinity or a
+//! fraction. Where the CPU's select panics (no integer; outside the arms
+//! with no default) the kernel's values turn NaN (`arael_nan_of`). After
+//! CSE a select is a `switch` assigning the names declared before it:
+//!
+//! ```
+//! use arael_sym::{cpp_body, select, symbols};
+//! let (k, x) = symbols!(k, x);
+//! let body = cpp_body(&[select(k, vec![x.clone() * 2.0, x * 3.0], None)], "f64").unwrap();
+//! assert!(body.stmts.contains("switch (arael_select_index(k, 2u))"));
+//! ```
+//!
+//! What has no C++ form yet is an error naming it: the other external
+//! functions (`#[arael::function]`, `fast_atan` and `fast_atan2` of
+//! `arael::utils`).
 
 use crate::cse::{Arm, Intermediate, Switch};
 use crate::{E, Expr, FuncKind};
@@ -357,7 +371,24 @@ fn write_expr(buf: &mut String, e: &E, ctx: &Ctx) -> Res {
             buf.push_str("))");
         }
         Expr::Branch(q, a, b) => ternary_ge0(buf, q, &|s| write_expr(s, a, ctx), &|s| write_expr(s, b, ctx), ctx)?,
-        Expr::Select { .. } => return Err(CppError("a `select` on an index has no C++ form yet".into())),
+        Expr::Select { index, arms, default } => {
+            // the taken arm only: a chain of `?:` on the index's arm
+            let mut sel = String::new();
+            write_select_index(&mut sel, index, arms.len(), ctx)?;
+            buf.push('(');
+            for (k, a) in arms.iter().enumerate() {
+                buf.push_str(&format!("{sel} == {k} ? "));
+                write_expr(buf, a, ctx)?;
+                buf.push_str(" : ");
+            }
+            if let Some(d) = default {
+                buf.push_str(&format!("{sel} == -1 ? "));
+                write_expr(buf, d, ctx)?;
+                buf.push_str(" : ");
+            }
+            write_nan(buf, ctx.ft);
+            buf.push(')');
+        }
         Expr::Func { name, params, kind, args } => {
             if name == "with_wide" && args.len() == 1 {
                 // a scope printed inline: the inside in double over widened
@@ -481,6 +512,33 @@ fn names_zeroed(buf: &mut String, names: &[String], ft: &str) {
     }
 }
 
+/// The arm a select's `index` picks of `n`, as arael's kernel library
+/// computes it: the integer in `0..n` it is, -1 for an integer outside
+/// them, -2 for a NaN, an infinity or a fraction.
+fn write_select_index(buf: &mut String, index: &E, n: usize, ctx: &Ctx) -> Res {
+    buf.push_str("arael_select_index(");
+    write_expr(buf, index, ctx)?;
+    buf.push_str(&format!(", {n}u)"));
+    Ok(())
+}
+
+/// A quiet NaN of the C++ type `ft`.
+fn write_nan(buf: &mut String, ft: &str) {
+    buf.push_str(&format!("arael_nan_of(({ft})0)"));
+}
+
+/// Every name of a select set to NaN: where the CPU's select panics (an
+/// index that is no integer, an integer outside the arms with no default),
+/// the kernel's values turn NaN.
+fn names_nan(buf: &mut String, names: &[String], ft: &str) {
+    for n in names {
+        buf.push_str(n);
+        buf.push_str(" = ");
+        write_nan(buf, ft);
+        buf.push_str(";\n");
+    }
+}
+
 fn write_arm(buf: &mut String, names: &[String], arm: &Arm, ctx: &Ctx) -> Res {
     for it in &arm.inters {
         write_stmt(buf, it, ctx)?;
@@ -520,8 +578,25 @@ fn write_stmt(buf: &mut String, it: &Intermediate, ctx: &Ctx) -> Res {
             write_arm(buf, names, default.as_ref().expect("a fused branch has an else side"), ctx)?;
             buf.push_str("}\n");
         }
-        Intermediate::Match { switch: Switch::Index(_), .. } => {
-            return Err(CppError("a `select` on an index has no C++ form yet".into()));
+        Intermediate::Match { switch: Switch::Index(index), names, arms, default } => {
+            // the names declared before, assigned in the taken arm's case
+            names_zeroed(buf, names, ctx.ft);
+            buf.push_str("switch (");
+            write_select_index(buf, index, arms.len(), ctx)?;
+            buf.push_str(") {\n");
+            for (k, arm) in arms.iter().enumerate() {
+                buf.push_str(&format!("case {k}: {{\n"));
+                write_arm(buf, names, arm, ctx)?;
+                buf.push_str("} break;\n");
+            }
+            buf.push_str("case -1: {\n");
+            match default {
+                Some(arm) => write_arm(buf, names, arm, ctx)?,
+                None => names_nan(buf, names, ctx.ft),
+            }
+            buf.push_str("} break;\ndefault: {\n");
+            names_nan(buf, names, ctx.ft);
+            buf.push_str("} break;\n}\n");
         }
         Intermediate::Wide { names, inters, values, .. } => {
             // computed in the kernel's wide type whatever the host's (f64 or
@@ -655,6 +730,38 @@ mod tests {
         assert_eq!(x.to_cpp_with("f64", &none).unwrap_err().0, "the kernel has no value for `x`");
         assert!(crate::fast_atan(x.clone()).to_cpp("f64").unwrap_err().0.contains("fast_atan"));
         assert!(x.to_cpp("f16").is_err());
+    }
+
+    /// A select on an index printed directly: the taken arm of a `?:`
+    /// chain, the default for an integer outside the arms, NaN where the
+    /// Rust form panics.
+    #[test]
+    fn a_select_prints_as_a_chain_on_its_arm() {
+        let (k, x) = (symbol("k"), symbol("x"));
+        let e = crate::select(k.clone(), vec![x.clone(), x.clone() * 2.0], Some(x.clone() * 3.0));
+        assert_eq!(
+            e.to_cpp("f64").unwrap(),
+            "(arael_select_index(k, 2u) == 0 ? x : arael_select_index(k, 2u) == 1 ? (2.0 * x) : \
+             arael_select_index(k, 2u) == -1 ? (3.0 * x) : arael_nan_of((double)0))"
+        );
+        let e = crate::select(k, vec![x.clone()], None);
+        assert_eq!(e.to_cpp("f32").unwrap(), "(arael_select_index(k, 1u) == 0 ? x : arael_nan_of((float)0))");
+    }
+
+    /// After CSE a select is a `switch` assigning its names in the taken
+    /// arm's case, NaN for an index outside the arms without a default and
+    /// for one that is no integer.
+    #[test]
+    fn a_select_after_cse_is_a_switch() {
+        let (k, x) = (symbol("k"), symbol("x"));
+        let body = cpp_body(&[crate::select(k, vec![crate::sin(x.clone()), x * 2.0], None)], "f32").unwrap();
+        assert_eq!(
+            body.stmts,
+            "float __m0 = 0.0f;\nswitch (arael_select_index(k, 2u)) {\ncase 0: {\n__m0 = sin(x);\n} break;\n\
+             case 1: {\n__m0 = (2.0f * x);\n} break;\ncase -1: {\n__m0 = arael_nan_of((float)0);\n} break;\n\
+             default: {\n__m0 = arael_nan_of((float)0);\n} break;\n}\n"
+        );
+        assert_eq!(body.outputs, ["__m0"]);
     }
 
     /// arael's own external functions print as calls of their kernel

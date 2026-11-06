@@ -413,7 +413,18 @@ assert_eq!(e.to_cpp_in("f32", "W", &|s| Some(s.to_string())).unwrap(),
     "((float)((ARAEL_WIDE(0.1, 0.1f, (-1.4901161e-9f)) * ((W)x)) - ARAEL_WIDE(1.0, 1.0f, 0.0f)))");
 ```
 
-arael's own external functions print as calls of their helpers in arael's kernel library (`EXTERN_CPP`): `rad_diff` as `arael_rad_diff(a, b)`, `rad_sum`, `safe_sqrt` and `epsilon_for` likewise, `exp_m1` as `expm1` and `ln_1p` as `log1p`. What has no C++ form yet is an error naming it: a `select` on an index, and the other external functions (`#[arael::function]`, `fast_atan` and `fast_atan2` of `arael::utils`).
+arael's own external functions print as calls of their helpers in arael's kernel library (`EXTERN_CPP`): `rad_diff` as `arael_rad_diff(a, b)`, `rad_sum`, `safe_sqrt` and `epsilon_for` likewise, `exp_m1` as `expm1` and `ln_1p` as `log1p`.
+
+A `select` on an index takes the arm the library's `arael_select_index(index, n)` names: an integer in `0..n`, -1 for an integer outside the arms (the default arm), -2 for a NaN, an infinity or a fraction. Where the Rust form panics (no integer; an integer outside the arms with no default) the kernel's values are NaN (`arael_nan_of`). Printed directly a select is a `?:` chain over the arms; after CSE it is a `switch` assigning the names declared before it:
+
+```rust
+use arael_sym::{cpp_body, select, symbols};
+let (k, x) = symbols!(k, x);
+let body = cpp_body(&[select(k, vec![x.clone() * 2.0, x * 3.0], None)], "f64").unwrap();
+assert!(body.stmts.contains("switch (arael_select_index(k, 2u))"));
+```
+
+What has no C++ form yet is an error naming it: the other external functions (`#[arael::function]`, `fast_atan` and `fast_atan2` of `arael::utils`).
 
 ### Code for GPU kernels (CubeCL)
 
