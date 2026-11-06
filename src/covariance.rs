@@ -243,7 +243,9 @@ pub struct CovPlan {
 #[derive(Clone)]
 pub struct SolveAnalysis {
     pub(crate) pattern: Arc<arael_faer::bsc::SymbolicSparseBlockColMat<arael_faer::SparseIndex>>,
-    pub(crate) positions: Arc<crate::store::PositionStream>,
+    /// The blocks' positions in the pattern, when the solve bound them (a
+    /// solve assembling on the device does not).
+    pub(crate) positions: Option<Arc<crate::store::PositionStream>>,
     pub(crate) symbolic: Arc<arael_faer::supernodal::SupernodalSymbolic>,
     // Which ordering produced the symbolic's order.
     pub(crate) ordering: CovOrdering,
@@ -944,8 +946,9 @@ fn block_assemble<T: Float, M: Covariance<T> + ?Sized>(
 }
 
 // The block route after a solve, under the solve's analysis of the whole
-// Hessian: no block graph, no binding, no ordering, no symbolic -- only the
-// assembly at the solution and the factorization.
+// Hessian: no block graph, no ordering, no symbolic -- only the assembly at
+// the solution (through the solve's block positions, bound here when the
+// solve assembled on the device) and the factorization.
 fn block_assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
     m: &mut M,
     params: &[T],
@@ -956,8 +959,16 @@ fn block_assemble_after_solve<T: Float, M: Covariance<T> + ?Sized>(
     threads: usize,
 ) -> Result<CovAssembly, CovError> {
     let hsym = (*analysis.pattern).clone();
+    let bound;
+    let positions = match &analysis.positions {
+        Some(p) => &**p,
+        None => {
+            bound = crate::simple_lm::bind_block_positions(m, &hsym, ctx);
+            &bound
+        }
+    };
     let mut vals_t = vec![T::zero(); hsym.val_count()];
-    m.calc_grad_hessian_sparse_indexed(params, grad, &mut vals_t, &analysis.positions, ctx);
+    m.calc_grad_hessian_sparse_indexed(params, grad, &mut vals_t, positions, ctx);
     let vals: Vec<f64> = vals_t.iter().map(|&x| x.to_f64().unwrap_or(f64::NAN)).collect();
     let plan = CovPlan { ordering: analysis.ordering, candidate_flops: None, symbolics_built: 0 };
     block_factorize(n, hsym, vals, analysis.symbolic.clone(), plan, threads)

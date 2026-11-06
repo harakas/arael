@@ -5577,6 +5577,23 @@ impl<T> SnNumeric<T> {
     }
 }
 
+/// The positions of `problem`'s blocks in the block Hessian of structure
+/// `hsym`: the scatter targets its indexed assembly writes through.
+pub(crate) fn bind_block_positions<T: crate::utils::Float, P: LmProblemInternals<T> + ?Sized>(
+    problem: &mut P,
+    hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
+    ctx: &mut crate::threads::Context,
+) -> PositionStream {
+    let mut resolver = arael_faer::bsc::PositionResolver::new(hsym);
+    let mut positions = PositionStream::new();
+    problem.bind_hessian_positions(
+        &mut crate::store::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
+        &mut positions,
+        ctx,
+    );
+    positions
+}
+
 /// [`SetupError::SolverUnavailable`] for a part of the GPU route that could
 /// not be set up, `e` logged.
 #[cfg(feature = "gpu")]
@@ -5932,8 +5949,12 @@ pub struct SparseFaer<T = f64> {
     did_setup: bool,
     // Structure, built on the first compute of a solve and reused for
     // every following iteration and damping retry. Shared, so the
-    // covariance a solve carries can take it (solve_analysis).
+    // covariance a solve carries can take it (solve_analysis). Not built
+    // when the structure assembles on the device.
     positions: Option<Arc<PositionStream>>,
+    // The structure is set up on the device's assembly route.
+    #[cfg(feature = "gpu")]
+    on_device: bool,
     bdiag_pos: Vec<ValueIndex>,
     schur: Option<arael_faer::schur::SchurSymbolic<SparseIndex>>,
     s: Option<arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>,
@@ -6026,6 +6047,8 @@ impl<T> SparseFaer<T> {
             assembly_time: Duration::ZERO,
             did_setup: false,
             positions: None,
+            #[cfg(feature = "gpu")]
+            on_device: false,
             bdiag_pos: Vec::new(),
             schur: None,
             s: None,
@@ -6255,10 +6278,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     /// A structure's first numeric fill at `params` of the block structure
     /// `hsym`, into `grad`, returning the cost. On the device when it
     /// assembles there (the model's working copies brought to `params`,
-    /// which its layout reads; no host H is made, as the loop runs there),
-    /// else on the CPU into a fresh H of the structure, which becomes
-    /// `matrix.h`, through `positions`, which the solver keeps. `Err` when
-    /// the device assembly could not be set up.
+    /// which its layout reads; no host H and no positions into it are made,
+    /// as the loop runs there), else on the CPU into a fresh H of the
+    /// structure, which becomes `matrix.h`, through the blocks' positions in
+    /// it, bound here and kept. `Err` when the device assembly could not be
+    /// set up.
     #[allow(clippy::too_many_arguments)]
     fn first_fill(
         &mut self,
@@ -6267,10 +6291,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         grad: &mut [T],
         matrix: &mut FaerMatrix<T>,
         hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
-        positions: PositionStream,
         ctx: &mut crate::threads::Context,
         vb: bool,
     ) -> Result<T, SetupError> {
+        #[cfg(feature = "gpu")]
+        {
+            self.on_device = false;
+        }
         #[cfg(feature = "gpu")]
         if self.sn_num.gpu_reduces() && self.sn_num.gpu_assembly {
             match problem.device_root() {
@@ -6296,7 +6323,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                         );
                     }
                     matrix.h = None;
-                    self.positions = Some(Arc::new(positions));
+                    self.positions = None;
+                    self.on_device = true;
                     return Ok(cost);
                 }
                 None => {
@@ -6306,7 +6334,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 }
             }
         }
-        let _ = vb;
+        let positions = bind_block_positions(problem, &hsym, ctx);
+        if vb {
+            info!(
+                "assembly: {} tiles and {} scatter positions ({:.1} MB), against {} Hessian values",
+                positions.tiles(),
+                positions.positions().len(),
+                positions.bytes() as f64 / 1e6,
+                hsym.val_count(),
+            );
+        }
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
         let t_a = self.measure.then(Instant::now);
         let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions, ctx);
@@ -6633,16 +6670,6 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.sn_whole = order_kind.map(|k| (Arc::new(hsym.clone()), k));
         self.sn_sym = Some(Arc::new(sn));
 
-        let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-        let mut positions = PositionStream::new();
-        problem.bind_hessian_positions(
-            &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
-                resolver.resolve_tile(i as usize, j as usize)
-            }),
-            &mut positions,
-            ctx,
-        );
-
         self.plan = Some(SchurPlan {
             reduced: false,
             eliminated_blocks: 0,
@@ -6664,7 +6691,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         });
 
         // First numeric fill. Everything above it was analysis.
-        self.first_fill(problem, params, grad, matrix, hsym, positions, ctx, vb)
+        self.first_fill(problem, params, grad, matrix, hsym, ctx, vb)
     }
 
     /// Symbolic factorization of the whole system, under the ordering
@@ -6908,6 +6935,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     fn reset(&mut self) {
         self.positions = None;
+        #[cfg(feature = "gpu")]
+        {
+            self.on_device = false;
+        }
         self.schur = None;
         self.s = None;
         self.llt_symbolic = None;
@@ -6967,7 +6998,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let (pattern, ordering) = self.sn_whole.as_ref()?;
         Some(crate::covariance::SolveAnalysis {
             pattern: pattern.clone(),
-            positions: self.positions.clone()?,
+            positions: self.positions.clone(),
             symbolic: self.sn_sym.clone()?,
             ordering: *ordering,
         })
@@ -6986,7 +7017,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The device route: H and the gradient assembled where they are
         // factorized.
         #[cfg(feature = "gpu")]
-        if self.positions.is_some() && self.sn_num.has_route() {
+        if self.on_device && self.sn_num.has_route() {
             let cost = self.sn_num.gpu_mut().route_compute(problem, params, grad);
             if let Some(t) = t_a {
                 self.assembly_time = t.elapsed();
@@ -7735,26 +7766,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             plan.envelope = self.envelope_active;
         }
 
-        // Reduced route: the block position map (scatter targets into the
-        // block Hessian) is built here, now that the reduction is going ahead.
-        let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
-        let mut positions = PositionStream::new();
-        problem.bind_hessian_positions(
-            &mut crate::store::HessianBinder::Tiled(&mut |i, j| {
-                resolver.resolve_tile(i as usize, j as usize)
-            }),
-            &mut positions,
-            ctx,
-        );
-        if vb {
-            info!(
-                "assembly: {} tiles and {} scatter positions ({:.1} MB), against {} Hessian values",
-                positions.tiles(),
-                positions.positions().len(),
-                positions.bytes() as f64 / 1e6,
-                hsym.val_count(),
-            );
-        }
+        // Reduced route: the block positions (scatter targets into the
+        // block Hessian) are bound by the first fill, where the CPU assembles.
 
         // The implicit route never forms S, so it is not allocated either --
         // that storage is the memory the route exists to avoid.
@@ -7936,7 +7949,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if vb && self.sn_num.gpu_reduces() {
             info!("gpu: the reduction's plan {:.1} ms", t_reduction);
         }
-        self.first_fill(problem, params, grad, matrix, hsym, positions, ctx, vb)
+        self.first_fill(problem, params, grad, matrix, hsym, ctx, vb)
     }
 
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
