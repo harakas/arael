@@ -101,37 +101,40 @@ jobs:
       - name: Check tests and examples build with features
         run: cargo check -p arael --tests --examples --features ${{ matrix.features }}
 
-  # The CUDA backend builds without a GPU and without the CUDA toolkit:
-  # CubeCL loads the driver and NVRTC at run time, and CUDARC_CUDA_VERSION
-  # stands in for nvcc's version. The hosted runners have no GPU, so the
-  # device tests are built here, not run; arael-gpu's tests that need no
-  # device (the plans) run.
+  # The GPU route without a GPU: the CPU device (feature `cpu` of
+  # arael-gpu, `gpu-cpu` of arael) compiles the GPU kernels with the
+  # runner's C++ compiler and runs them on the CPU, so the device tests
+  # run here. ARAEL_DEVICE_CHECK then checks the device assembly of every
+  # root type the suite solves against the CPU's. The CUDA and HIP
+  # runtimes load their libraries at run time, so they build without a
+  # toolkit (CUDARC_CUDA_VERSION stands in for nvcc's version); the hosted
+  # runners have no GPU to run them on.
   gpu:
-    name: arael gpu-cuda (build)
+    name: arael GPU route (CPU device)
     runs-on: ubuntu-latest
     env:
       CUDARC_CUDA_VERSION: "12090"
-      # CubeCL's CUDA runtime links LLVM statically, which makes a debug
-      # test binary about 750 MB: everything is checked, and only the
-      # targets with GPU tests are linked, without debug info.
-      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
         with:
-          key: gpu-cuda
-      - name: Test arael-gpu without a device
-        run: cargo test -p arael-gpu
-      - name: Check everything with the CUDA runtime
+          key: gpu
+      - name: Test arael-gpu on the CPU device
+        run: cargo test -p arael-gpu --features cpu
+      - name: Test arael on the CPU device
+        run: cargo test -p arael --features gpu-cpu,threads
+      - name: Check every root type's device assembly on the CPU device
+        run: ARAEL_DEVICE_CHECK=1 cargo test -p arael --features gpu-cpu,threads
+      - name: Test the imported models on the CPU device
+        run: cd export-tests && cargo test -p export-consumer --features gpu-cpu
+      - name: Check everything with the CUDA and HIP runtimes
         run: |
           cargo check -p arael-gpu --tests --examples --features cuda
+          cargo check -p arael-gpu --tests --examples --features hip
           cargo check -p arael --tests --examples --features gpu-cuda
-      - name: Link the targets with GPU tests
-        run: |
-          cargo test -p arael-gpu --features cuda --lib --no-run
-          cargo test -p arael --features gpu-cuda --lib --test device_assembly --test block_supernodal --no-run
+          cargo check -p arael --tests --examples --features gpu-hip
 
   # The arael crate with no optional features (what docs.rs and plain
   # `cargo add arael` users get).
