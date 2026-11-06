@@ -13,12 +13,11 @@
 // the loops run to EW or KW and skip what is past the block's width, so the
 // arrays stay in registers (arael_gpu.h's rule, from k_trsm).
 
-#if ARAEL_WARP != 32
-#error "schur.cpp: the plane kernels are written for 32-lane warps"
-#endif
-
 // One plane: the threads of the tile, rhs and symv kernels.
 #define PLANE 32u
+#if PLANE != WARP
+#error "schur.cpp: the rhs and symv kernels sum over a plane with warp_sum"
+#endif
 // No kept-kept tile of H behind a tile of S.
 #define NONE 0xffffffffu
 

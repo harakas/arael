@@ -453,3 +453,13 @@
   `#[arael(symbolic = ...)]` caching of N-dimensional values (component
   suffixes are dynamic); component-wise transcendental functions over
   whole vectors (write per component).
+
+- **arael-gpu: kernels at 64 lanes for GCN and CDNA.** The kernels work
+  in 32-lane warps (`WARP` in `kernels/arael_gpu.h`); a 64-lane AMD
+  wavefront runs two of them. Kernels launched with 32 threads per block
+  (`k_potf2`, and `k_schur_tiles`, `k_schur_rhs`, `k_symv_sub` over a
+  32-thread plane) fill half a wavefront there. Widening them means a
+  64-thread plane (schur.rs's ACC, KW * KW / 32, changes with it) and
+  64-row panel steps (NB, whose per-thread arrays of NB values live in
+  registers). Not done: the only 64-lane device at hand is a 6-CU Vega
+  iGPU (gfx90c), and RDNA cards keep the 32-lane kernels in any case.

@@ -953,9 +953,10 @@ version, so only a program's first run on a machine compiles, and a
 rebuilt program whose kernels did not change compiles nothing. The
 environment variable `ARAEL_KERNEL_CACHE` names its directory, `off`
 turns it off; unset, it is `arael/kernels` in the user's cache directory
-(`~/.cache/arael/kernels` on Linux). HIP runs on GPUs with 32-lane
-wavefronts (RDNA, the consumer cards); 64-lane ones (CDNA, GCN) are not
-supported yet.
+(`~/.cache/arael/kernels` on Linux). HIP runs on AMD GPUs with 32-lane
+wavefronts (RDNA) and with 64-lane ones (GCN, CDNA), which run the
+kernels' 32-lane warps two to a wavefront; the kernels are not tuned for
+64-lane GPUs.
 
 `cargo arael kernels` writes the kernels a crate's roots generate, with
 no GPU needed: it builds the crate (by default `--all-targets`; arguments

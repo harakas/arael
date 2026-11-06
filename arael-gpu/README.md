@@ -67,8 +67,10 @@ with arael's `gpu-cuda` (or `gpu-hip`) feature; see docs/SOLVERS.md.
   contraction on and FMA, as on a GPU, and a block's threads run as
   fibers that switch at barriers. Slow: a test target.
 
-GPUs with 32-lane warps run the kernels: NVIDIA's, and AMD's RDNA. AMD's
-64-lane GPUs (CDNA, GCN) are not supported yet.
+The kernels work in warps of 32 lanes: an NVIDIA warp, an AMD RDNA
+wavefront, or half of a 64-lane AMD wavefront (GCN, CDNA). They are not
+tuned for 64-lane GPUs: a kernel launched with 32 threads per block fills
+half a wavefront there.
 
 ## Testing
 

@@ -24,6 +24,15 @@ typedef unsigned int u32;
 typedef int i32;
 typedef unsigned long long u64;
 
+// A warp: the 32 lanes that shfl, shfl_xor, warp_sum and WARP_BARRIER span,
+// threads 32 w to 32 w + 31 of a block. The device runs ARAEL_WARP lanes in
+// lockstep: 32 on NVIDIA and AMD RDNA, 64 on AMD GCN and CDNA, whose
+// wavefront holds two warps.
+#define WARP 32u
+#if ARAEL_WARP % 32 != 0
+#error "arael_gpu.h: the device's lockstep width is not a whole number of 32-lane warps"
+#endif
+
 #if ARAEL_CUDA || ARAEL_HIP
 
 // An entry point keeps its name, so the runtime finds it in the module.
@@ -69,8 +78,9 @@ typedef unsigned long long u64;
     SHARED_PTR T* name = (SHARED_PTR T*)arael_dynamic_shared
 
 // BARRIER: every thread of the block. WARP_BARRIER: every lane of the warp,
-// their shared-memory writes seen by each other (on AMD a wavefront-scope
-// fence around the wave barrier, as HIP's __syncwarp).
+// their shared-memory writes seen by each other (on AMD, whose wavefront
+// runs in lockstep, a wavefront-scope fence around the wave barrier, as
+// HIP's __syncwarp).
 #define BARRIER() __syncthreads()
 #if ARAEL_CUDA
 #define WARP_BARRIER() __syncwarp()
@@ -95,25 +105,26 @@ DEVICE float atomic_add(float* p, float v) { return atomicAdd(p, v); }
 DEVICE double atomic_add(double* p, double v) { return atomicAdd(p, v); }
 DEVICE u32 atomic_add(u32* p, u32 v) { return atomicAdd(p, v); }
 
-// `v` of lane (this lane XOR mask), and `v` of lane `src`. Every lane of
-// the warp calls them.
+// `v` of lane (this lane XOR mask), `mask` below 32, and `v` of lane `src`
+// mod 32, within the warp. Every lane of the warp calls them. (On HIP the
+// width WARP keeps each warp of a 64-lane wavefront to its own lanes.)
 #if ARAEL_CUDA
 DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
 DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
 DEVICE float shfl(float v, u32 src) { return __shfl_sync(0xffffffffu, v, (int)src); }
 DEVICE double shfl(double v, u32 src) { return __shfl_sync(0xffffffffu, v, (int)src); }
 #else
-DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor(v, (int)mask); }
-DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor(v, (int)mask); }
-DEVICE float shfl(float v, u32 src) { return __shfl(v, (int)src); }
-DEVICE double shfl(double v, u32 src) { return __shfl(v, (int)src); }
+DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor(v, (int)mask, (int)WARP); }
+DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor(v, (int)mask, (int)WARP); }
+DEVICE float shfl(float v, u32 src) { return __shfl(v, (int)src, (int)WARP); }
+DEVICE double shfl(double v, u32 src) { return __shfl(v, (int)src, (int)WARP); }
 #endif
 
 // The sum of `v` over the warp, in every lane: a butterfly over lane
 // distances 1, 2, 4, ... Every lane of the warp calls it.
 template <typename T> DEVICE T warp_sum(T v) {
 #pragma unroll
-    for (u32 o = 1; o < ARAEL_WARP; o <<= 1) v += shfl_xor(v, o);
+    for (u32 o = 1; o < WARP; o <<= 1) v += shfl_xor(v, o);
     return v;
 }
 
@@ -187,7 +198,7 @@ DEVICE float shfl(float v, u32 src) { return arael_cpu::exchange(v, src); }
 DEVICE double shfl(double v, u32 src) { return arael_cpu::exchange(v, src); }
 
 template <typename T> DEVICE T warp_sum(T v) {
-    for (u32 o = 1; o < ARAEL_WARP; o <<= 1) v += shfl_xor(v, o);
+    for (u32 o = 1; o < WARP; o <<= 1) v += shfl_xor(v, o);
     return v;
 }
 

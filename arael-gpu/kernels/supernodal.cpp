@@ -12,9 +12,6 @@
 // nonzero, so a refinement can stop on the device and the steps launched
 // after it cost only their launches.
 
-#if ARAEL_WARP != 32
-#error "supernodal.cpp: the trsv and GEMV kernels are written for 32-lane warps"
-#endif
 #if THREADS % 32 != 0 || 1024 % THREADS != 0
 #error "supernodal.cpp: THREADS is a multiple of 32 dividing 1024"
 #endif
@@ -257,7 +254,7 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
     }
 }
 
-#if NB != ARAEL_WARP
+#if NB != WARP
 #error "supernodal.cpp: a panel step's diagonal rows are one warp"
 #endif
 
