@@ -463,3 +463,14 @@
   64-row panel steps (NB, whose per-thread arrays of NB values live in
   registers). Not done: the only 64-lane device at hand is a 6-CU Vega
   iGPU (gfx90c), and RDNA cards keep the 32-lane kernels in any case.
+
+- **arael-gpu: measure the staged Schur kernels on CUDA, then unify.**
+  `SCHUR_STAGED` in `kernels/schur.cpp`: on HIP and the CPU device,
+  `k_schur_w` reads D^-1 and each coupling row once into registers and
+  `k_schur_tiles` stages each pair's W and C blocks in shared memory; CUDA
+  keeps the plain loops. On the gfx90c iGPU (bal-bench Ladybug-372, f64
+  schur) the two kernels went from 43 to 14 ms and from 67 to 38 ms per
+  attempt, the iteration from about 330 to 260 ms (f64 factor) and 190 to
+  140 ms (f32 factor), same results. Not measured on CUDA: run bal-bench on
+  the 4090 with `SCHUR_STAGED` 0 and 1 (the `ARAEL_CUDA` branch of the
+  `#if`), keep one path if they are equivalent.
