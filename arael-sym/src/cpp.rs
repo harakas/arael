@@ -50,9 +50,19 @@
 //!     "((float)((ARAEL_WIDE(0.1, 0.1f, (-1.4901161e-9f)) * ((W)x)) - ARAEL_WIDE(1.0, 1.0f, 0.0f)))");
 //! ```
 //!
+//! arael's own external functions print as calls of their helpers in
+//! arael's kernel library ([`EXTERN_CPP`]):
+//!
+//! ```
+//! use arael_sym::{rad_diff, safe_sqrt, symbols};
+//! let (a, b) = symbols!(a, b);
+//! assert_eq!(rad_diff(a.clone(), b).to_cpp("f64").unwrap(), "arael_rad_diff(a, b)");
+//! assert_eq!(safe_sqrt(a).to_cpp("f32").unwrap(), "arael_safe_sqrt(a)");
+//! ```
+//!
 //! What has no C++ form yet is an error naming it: a `select` on an index,
-//! and an external function (`#[arael::function]`, `fast_atan` and the other
-//! numeric helpers of `arael::utils`).
+//! and the other external functions (`#[arael::function]`, `fast_atan` and
+//! `fast_atan2` of `arael::utils`).
 
 use crate::cse::{Arm, Intermediate, Switch};
 use crate::{E, Expr, FuncKind};
@@ -371,6 +381,9 @@ fn write_expr(buf: &mut String, e: &E, ctx: &Ctx) -> Res {
                 write_expr(buf, &args[0], ctx)?;
             } else if let Some(body) = kind.body() {
                 write_expr(buf, &crate::expand_func(params, body, args), ctx)?;
+            } else if let Some(f) = extern_cpp(kind) {
+                let args: Vec<&E> = args.iter().collect();
+                call(buf, f, &args, ctx)?;
             } else {
                 let what = match kind {
                     FuncKind::Extern { call_path, .. } | FuncKind::ExternNumericDerivs { call_path, .. } => call_path.clone(),
@@ -381,6 +394,24 @@ fn write_expr(buf: &mut String, e: &E, ctx: &Ctx) -> Res {
         }
     }
     Ok(())
+}
+
+/// The C++ helpers of arael's own external functions (`arael::utils`), by
+/// their Rust path: device functions of arael's kernel library, overloaded
+/// for `float` and `double`, computing what the Rust ones do.
+pub const EXTERN_CPP: &[(&str, &str)] = &[
+    ("arael::utils::rad_diff", "arael_rad_diff"),
+    ("arael::utils::rad_sum", "arael_rad_sum"),
+    ("arael::utils::safe_sqrt", "arael_safe_sqrt"),
+    ("arael::utils::epsilon_for", "arael_epsilon_for"),
+    ("arael::utils::exp_m1", "expm1"),
+    ("arael::utils::ln_1p", "log1p"),
+];
+
+/// The C++ function an external function's call prints as.
+fn extern_cpp(kind: &FuncKind) -> Option<&'static str> {
+    let FuncKind::Extern { call_path, .. } = kind else { return None };
+    EXTERN_CPP.iter().find(|(path, _)| path == call_path).map(|&(_, f)| f)
 }
 
 /// `v`, computed in `wide`, as `to`.
@@ -624,5 +655,21 @@ mod tests {
         assert_eq!(x.to_cpp_with("f64", &none).unwrap_err().0, "the kernel has no value for `x`");
         assert!(crate::fast_atan(x.clone()).to_cpp("f64").unwrap_err().0.contains("fast_atan"));
         assert!(x.to_cpp("f16").is_err());
+    }
+
+    /// arael's own external functions print as calls of their kernel
+    /// helpers, and so do their derivatives.
+    #[test]
+    fn arael_externs_print_as_their_helpers() {
+        let (a, b) = (symbol("a"), symbol("b"));
+        assert_eq!(crate::rad_diff(a.clone(), b.clone()).to_cpp("f64").unwrap(), "arael_rad_diff(a, b)");
+        assert_eq!(crate::rad_sum(a.clone(), b.clone()).to_cpp("f32").unwrap(), "arael_rad_sum(a, b)");
+        assert_eq!(crate::safe_sqrt(a.clone()).to_cpp("f32").unwrap(), "arael_safe_sqrt(a)");
+        assert_eq!(crate::exp_m1(a.clone()).to_cpp("f64").unwrap(), "expm1(a)");
+        assert_eq!(crate::ln_1p(a.clone()).to_cpp("f64").unwrap(), "log1p(a)");
+        assert_eq!(crate::epsilon_for(a.clone()).to_cpp("f32").unwrap(), "arael_epsilon_for(a)");
+        let d = crate::safe_sqrt(a.clone()).diff("a").to_cpp("f64").unwrap();
+        assert!(d.contains("arael_epsilon_for(a)"), "{d}");
+        assert_eq!(crate::rad_diff(a.clone(), b).diff("b").to_cpp("f64").unwrap(), "(-1.0)");
     }
 }

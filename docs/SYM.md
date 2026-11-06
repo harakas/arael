@@ -413,7 +413,7 @@ assert_eq!(e.to_cpp_in("f32", "W", &|s| Some(s.to_string())).unwrap(),
     "((float)((ARAEL_WIDE(0.1, 0.1f, (-1.4901161e-9f)) * ((W)x)) - ARAEL_WIDE(1.0, 1.0f, 0.0f)))");
 ```
 
-What has no C++ form yet is an error naming it: a `select` on an index, and an external function (`#[arael::function]`, `fast_atan` and the other numeric helpers of `arael::utils`).
+arael's own external functions print as calls of their helpers in arael's kernel library (`EXTERN_CPP`): `rad_diff` as `arael_rad_diff(a, b)`, `rad_sum`, `safe_sqrt` and `epsilon_for` likewise, `exp_m1` as `expm1` and `ln_1p` as `log1p`. What has no C++ form yet is an error naming it: a `select` on an index, and the other external functions (`#[arael::function]`, `fast_atan` and `fast_atan2` of `arael::utils`).
 
 ### Code for GPU kernels (CubeCL)
 
