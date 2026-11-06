@@ -774,6 +774,18 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
 #pragma unroll
     for (u32 z = 0; z < 16; z++) acc[z] = F(0);
     for (u32 kk = 0; kk < nb; kk++) {
+#if STAGED
+        // rows tx + 16 r and columns ty + 16 c: a wavefront's reads and
+        // writes of the tile cover whole cache lines
+        F a0 = sa[kk * TB + tx];
+        F a1 = sa[kk * TB + tx + 16];
+        F a2 = sa[kk * TB + tx + 32];
+        F a3 = sa[kk * TB + tx + 48];
+        F b0 = sb[kk * TB + ty];
+        F b1 = sb[kk * TB + ty + 16];
+        F b2 = sb[kk * TB + ty + 32];
+        F b3 = sb[kk * TB + ty + 48];
+#else
         F a0 = sa[kk * TB + tx * 4];
         F a1 = sa[kk * TB + tx * 4 + 1];
         F a2 = sa[kk * TB + tx * 4 + 2];
@@ -782,6 +794,7 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
         F b1 = sb[kk * TB + ty * 4 + 1];
         F b2 = sb[kk * TB + ty * 4 + 2];
         F b3 = sb[kk * TB + ty * 4 + 3];
+#endif
         acc[0] += a0 * b0;
         acc[1] += a0 * b1;
         acc[2] += a0 * b2;
@@ -803,8 +816,13 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
     for (u32 r = 0; r < 4; r++) {
 #pragma unroll
         for (u32 c = 0; c < 4; c++) {
+#if STAGED
+            u32 i = tx + 16 * r;
+            u32 jj = ty + 16 * c;
+#else
             u32 i = tx * 4 + r;
             u32 jj = ty * 4 + c;
+#endif
             if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * 4 + c];
         }
     }

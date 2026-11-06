@@ -469,12 +469,15 @@
   `kernels/supernodal.cpp`): on HIP and the CPU device, `k_schur_w` runs a
   thread per row of W with the row of C in registers, `k_schur_tiles` a
   wavefront per tile (`TILE_LANES`, 64 on GCN) with each pair's W and C
-  blocks staged in shared memory, and the factor's seed (`k_seed_*`) a
-  wavefront per stored tile; CUDA keeps the plain loops (a thread per
-  observer, a 32-thread plane per tile, a thread per stored tile). On the
-  gfx90c iGPU (bal-bench Ladybug-372, f64 schur), per attempt: `k_schur_w`
-  43 to 3.0 ms, `k_schur_tiles` 67 to 26.5 ms, `k_seed_wide` 5.6 to 0.9
-  ms; the iteration with the f32 factor 190 to about 110 ms, same results. Two tiles per 64-lane wavefront, a 32-lane warp each, was
+  blocks staged in shared memory, the factor's seed (`k_seed_*`) a
+  wavefront per stored tile, and `k_syrk` gives a thread the rows
+  tx + 16 r of its tile instead of 4 tx + r, so a wavefront's accesses
+  cover whole cache lines; CUDA keeps the plain loops (a thread per
+  observer, a 32-thread plane per tile, a thread per stored tile, 4 tx +
+  r). On the gfx90c iGPU (bal-bench Ladybug-372, f64 schur), per attempt:
+  `k_schur_w` 43 to 3.0 ms, `k_schur_tiles` 67 to 26.5 ms, `k_seed_wide`
+  5.6 to 0.9 ms, `k_syrk` 22.0 to 18.5 ms (f32 factor); one iteration with
+  the f32 factor 204 to 102 ms, same results. Two tiles per 64-lane wavefront, a 32-lane warp each, was
   slower than one (43 against 38 ms then): the tile index differs within
   the wavefront, and the plan reads became vector loads instead of scalar
   ones. Not measured on CUDA: run bal-bench on the 4090 with `staged`
