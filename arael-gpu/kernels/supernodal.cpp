@@ -257,9 +257,10 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
     }
 }
 
-// A small supernode's diagonal Cholesky in shared memory (q * q values of
-// dynamic shared memory) and the triangular solve of its rows below, in
-// place; one block per supernode of `list`. A pivot that is not positive
+// A small supernode's diagonal Cholesky in shared memory (q * q + q values
+// of dynamic shared memory: the factor and its diagonal's reciprocals) and
+// the triangular solve of its rows below, in place; one block per
+// supernode of `list`. A pivot that is not positive
 // sets fail[0] to the supernode plus one and continues with 1.
 KERNEL_THREADS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     DYNAMIC_SHARED(F, l);
@@ -279,6 +280,7 @@ KERNEL_THREADS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLO
         l[e] = v;
     }
     BARRIER();
+    SHARED_PTR F* dinv = l + q * q;
     for (u32 j = 0; j < q; j++) {
         if (t == 0) {
             F d = l[j * q + j];
@@ -286,11 +288,14 @@ KERNEL_THREADS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLO
                 fail[0] = s + 1;
                 d = F(1);
             }
-            l[j * q + j] = sqrt(d);
+            F ljj = sqrt(d);
+            l[j * q + j] = ljj;
+            // one division per column: f64 division is slow where f64 is
+            dinv[j] = F(1) / ljj;
         }
         BARRIER();
-        F ljj = l[j * q + j];
-        for (u32 i = j + 1 + t; i < q; i += nt) l[j * q + i] = l[j * q + i] / ljj;
+        F rj = dinv[j];
+        for (u32 i = j + 1 + t; i < q; i += nt) l[j * q + i] = l[j * q + i] * rj;
         BARRIER();
         u32 w = q - j - 1;
         for (u32 e2 = t; e2 < w * w; e2 += nt) {
@@ -313,63 +318,60 @@ KERNEL_THREADS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLO
         for (u32 c = 0; c < q; c++) {
             F v = factor[panel + c * h + r];
             for (u32 kk = 0; kk < c; kk++) v -= factor[panel + kk * h + r] * l[kk * q + c];
-            factor[panel + c * h + r] = v / l[c * q + c];
+            factor[panel + c * h + r] = v * dinv[c];
         }
     }
 }
 
-// Panel step, part one: the NB x NB diagonal tile at (j, j) of every big
-// panel of the level, one block per panel, row-major l[r * NB + c] in
-// shared memory.
-KERNEL_THREADS(THREADS) void k_potf2(GLOBAL const u32* RESTRICT panels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
-    SHARED F l[NB * NB];
+// The nb x nb lower diagonal tile at `tile` (column stride h) of
+// supernode s factored in place by one warp: lane r holds row r in
+// registers and reads the other rows' entries by shuffles, so no barrier
+// and no shared memory. The loops run to the constant NB (= the warp)
+// and skip what is past nb, so the row stays in registers. A pivot that
+// is not positive sets fail[0] to s plus one and continues with 1.
+DEVICE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s) {
+    F a[NB];
+#pragma unroll
+    for (u32 c = 0; c < NB; c++) a[c] = (lane < nb && c <= lane) ? factor[tile + c * h + lane] : F(0);
+    bool bad = false;
+#pragma unroll
+    for (u32 k = 0; k < NB; k++) {
+        if (k < nb) {
+            F d = shfl(a[k], k);
+            if (!(d > F(0))) {
+                bad = true;
+                d = F(1);
+            }
+            // one division per pivot: f64 division is slow where f64 is
+            F lkk = sqrt(d);
+            F rk = F(1) / lkk;
+            if (lane == k) a[k] = lkk;
+            else if (lane > k) a[k] = a[k] * rk;
+#pragma unroll
+            for (u32 c = k + 1; c < NB; c++) {
+                F lck = shfl(a[k], c);
+                if (c < nb && lane >= c) a[c] -= a[k] * lck;
+            }
+        }
+    }
+#pragma unroll
+    for (u32 c = 0; c < NB; c++) {
+        if (lane < nb && c <= lane) factor[tile + c * h + lane] = a[c];
+    }
+    if (bad && lane == 0) fail[0] = s + 1;
+}
+
+// Panel step, part one, for a level's first step: the NB x NB diagonal
+// tile at (0, 0) of every big panel of the level, one warp per panel. The
+// later steps' diagonal tiles are factored by the step before them, at the
+// end of k_syrk.
+KERNEL_THREADS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 s = panels[block_x()];
     u32 q = plan[o_dims + 2 * s];
     u32 h = plan[o_dims + 2 * s + 1];
-    if (j >= q) return;
-    u32 nb = min(q - j, NB);
-    u32 tile = plan[o_val_ptr + s] + j * h + j;
-    u32 t = thread_x();
-    const u32 nt = THREADS;
-    for (u32 e = t; e < NB * NB; e += nt) {
-        u32 r = e / NB;
-        u32 c = e - r * NB;
-        F v = F(0);
-        if (r < nb && c <= r) v = factor[tile + c * h + r];
-        l[e] = v;
-    }
-    BARRIER();
-    for (u32 k = 0; k < nb; k++) {
-        if (t == 0) {
-            F d = l[k * NB + k];
-            if (!(d > F(0))) {
-                fail[0] = s + 1;
-                d = F(1);
-            }
-            l[k * NB + k] = sqrt(d);
-        }
-        BARRIER();
-        F lkk = l[k * NB + k];
-        for (u32 i = k + 1 + t; i < nb; i += nt) l[i * NB + k] = l[i * NB + k] / lkk;
-        BARRIER();
-        u32 w = nb - k - 1;
-        for (u32 e2 = t; e2 < w * w; e2 += nt) {
-            u32 c = k + 1 + e2 / w;
-            u32 i = k + 1 + e2 % w;
-            if (i >= c) {
-                F d = l[i * NB + k] * l[c * NB + k];
-                l[i * NB + c] -= d;
-            }
-        }
-        BARRIER();
-    }
-    for (u32 e3 = t; e3 < NB * NB; e3 += nt) {
-        u32 r = e3 / NB;
-        u32 c = e3 - r * NB;
-        if (r < nb && c <= r) factor[tile + c * h + r] = l[e3];
-    }
+    potf2_warp(factor, plan[o_val_ptr + s], h, min(q, NB), thread_x(), fail, s);
 }
 
 // Panel step, part two: the rows below the step's diagonal tile,
@@ -378,6 +380,8 @@ KERNEL_THREADS(THREADS) void k_potf2(GLOBAL const u32* RESTRICT panels, u32 j, G
 // row-chunk counts.
 KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
     SHARED F l[NB * NB];
+    // the diagonal's reciprocals: one division per column, not per row
+    SHARED F dinv[NB];
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 idx = block_x();
@@ -413,6 +417,8 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
         l[e] = v;
     }
     BARRIER();
+    if (t < nb) dinv[t] = F(1) / l[t * NB + t];
+    BARRIER();
     u32 i = j + nb + idx * TB + t;
     if (i < h) {
         // The loops run to the constant NB and skip the columns past nb, so
@@ -428,7 +434,7 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
                 F x = v[c];
 #pragma unroll
                 for (u32 k = 0; k < c; k++) x -= v[k] * l[c * NB + k];
-                v[c] = x / l[c * NB + c];
+                v[c] = x * dinv[c];
             }
         }
 #pragma unroll
@@ -441,8 +447,9 @@ KERNEL_THREADS(TB) void k_trsm(GLOBAL const u32* RESTRICT panels, u32 npanels, u
 // Panel step, part three: the rank-nb update of the trailing lower
 // trapezoid by the step's solved block column, TB x TB tiles; tiles above
 // the diagonal are skipped and the straddling tile clipped. The block index
-// walks the panels' tile counts.
-KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor) {
+// walks the panels' tile counts. The block of a panel's tile (0, 0), which
+// alone writes the next step's diagonal tile, then factors it (potf2_warp).
+KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npanels, u32 j, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     SHARED F sa[NB * TB];
     SHARED F sb[NB * TB];
     u32 o_dims = plan[H_DIMS];
@@ -537,6 +544,12 @@ KERNEL_THREADS(THREADS) void k_syrk(GLOBAL const u32* RESTRICT panels, u32 npane
             u32 jj = ty * 4 + c;
             if (i < nrows && jj < ncols && row0 + i >= col0 + jj) factor[panel + (col0 + jj) * h + row0 + i] -= acc[r * 4 + c];
         }
+    }
+    if (ti == 0 && tj == 0) {
+        // the block's writes seen by its first warp
+        BARRIER();
+        u32 j1 = j + nb;
+        if (t < NB) potf2_warp(factor, panel + j1 * h + j1, h, min(q - j1, NB), t, fail, s);
     }
 }
 

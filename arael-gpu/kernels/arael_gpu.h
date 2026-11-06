@@ -84,13 +84,18 @@ DEVICE float atomic_add(float* p, float v) { return atomicAdd(p, v); }
 DEVICE double atomic_add(double* p, double v) { return atomicAdd(p, v); }
 DEVICE u32 atomic_add(u32* p, u32 v) { return atomicAdd(p, v); }
 
-// `v` of lane (this lane XOR mask). Every lane of the warp calls it.
+// `v` of lane (this lane XOR mask), and `v` of lane `src`. Every lane of
+// the warp calls them.
 #if ARAEL_CUDA
 DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
 DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor_sync(0xffffffffu, v, mask); }
+DEVICE float shfl(float v, u32 src) { return __shfl_sync(0xffffffffu, v, (int)src); }
+DEVICE double shfl(double v, u32 src) { return __shfl_sync(0xffffffffu, v, (int)src); }
 #else
 DEVICE float shfl_xor(float v, u32 mask) { return __shfl_xor(v, (int)mask); }
 DEVICE double shfl_xor(double v, u32 mask) { return __shfl_xor(v, (int)mask); }
+DEVICE float shfl(float v, u32 src) { return __shfl(v, (int)src); }
+DEVICE double shfl(double v, u32 src) { return __shfl(v, (int)src); }
 #endif
 
 // The sum of `v` over the warp, in every lane: a butterfly over lane

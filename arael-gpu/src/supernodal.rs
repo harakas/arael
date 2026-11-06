@@ -197,9 +197,18 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         params: &GpuSupernodalParams,
         wide: Wide,
     ) -> Result<Self, GpuError> {
+        let fs = core::mem::size_of::<F>();
+        // a supernode the small kernel's shared memory does not hold takes
+        // the panel steps
+        let limit = dev.arch().shared_bytes as usize;
+        let fits = |q: usize| (q * q + q) * fs <= limit;
+        let mut small_q = params.small_q as usize;
+        while small_q > 1 && !fits(small_q - 1) {
+            small_q -= 1;
+        }
+        let params = &GpuSupernodalParams { small_q: small_q as u32, ..*params };
         let plan = Plan::new(sn, asym);
         let lw = build_levels(&plan, params, dev.arch().multiprocessors);
-        let fs = core::mem::size_of::<F>();
         let lu = params.lane_unroll.unwrap_or(if fs == 4 { 4 } else { 8 });
         assert!(lu >= 2 && lu.is_multiple_of(2), "the lane unroll is even and at least 2");
         let mut pk = Packer::default();
@@ -208,17 +217,12 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
         let at_tiles = pk.push(&plan.tiles);
         let at_on = pk.push(&[1]);
         let q = |s: &u32| plan.dims[2 * *s as usize] as usize;
-        let limit = dev.arch().shared_bytes as usize;
         let mut levels = Vec::with_capacity(lw.len());
         for w in lw {
             let small_q = w.small_targets.iter().map(q).max().unwrap_or(0);
             let max_q = w.level_sn.iter().map(q).max().unwrap_or(0);
-            let (small_shared, trsv_shared) = (small_q * small_q * fs, (1024 + max_q) * fs);
-            if small_shared > limit {
-                return Err(GpuError::Limit(format!(
-                    "the small factor kernel needs {small_shared} bytes of shared memory for a supernode of {small_q} columns, the device gives {limit}; lower small_q"
-                )));
-            }
+            let (small_shared, trsv_shared) = ((small_q * small_q + small_q) * fs, (1024 + max_q) * fs);
+            assert!(small_shared <= limit, "small_q is capped to the shared memory: {small_shared} bytes for {small_q} columns, {limit} given");
             if trsv_shared > limit {
                 return Err(GpuError::Limit(format!(
                     "the solve needs {trsv_shared} bytes of shared memory for a supernode of {max_q} columns, the device gives {limit}"
@@ -357,15 +361,19 @@ impl<F: Scalar, D: Device> GpuSupernodal<F, D> {
             if l.n_small > 0 {
                 self.run(&self.k.small_factor, l.n_small, THREADS, l.small_shared, &[list(l.small), plan, factor, fail])?;
             }
+            // the first step's diagonal tiles; each later one is factored by
+            // the syrk of the step before it
+            if !l.trsm_grid.is_empty() {
+                self.run(&self.k.potf2, l.n_big, NB as u32, 0, &[list(l.big), plan, factor, fail])?;
+            }
             for (step, (&tg, &sg)) in l.trsm_grid.iter().zip(&l.syrk_grid).enumerate() {
                 let j = Arg::U32((step * NB) as u32);
-                self.run(&self.k.potf2, l.n_big, THREADS, 0, &[list(l.big), j, plan, factor, fail])?;
                 let args = [list(l.big), Arg::U32(l.n_big), j, plan, factor];
                 if tg > 0 {
                     self.run(&self.k.trsm, tg, TB as u32, 0, &args)?;
                 }
                 if sg > 0 {
-                    self.run(&self.k.syrk, sg, THREADS, 0, &args)?;
+                    self.run(&self.k.syrk, sg, THREADS, 0, &[list(l.big), Arg::U32(l.n_big), j, plan, factor, fail])?;
                 }
             }
         }
@@ -710,6 +718,23 @@ mod tests {
         }
     }
 
+    /// A supernode too wide for the small kernel's shared memory takes the
+    /// panel steps, whatever `small_q` says.
+    #[test]
+    fn a_supernode_beyond_the_shared_memory_takes_the_panel_steps() {
+        let (a, dense, rhs, sn) = setup(32);
+        let dev = device();
+        let fs = core::mem::size_of::<f64>();
+        let widest = (0..sn.n_supernodes()).map(|s| sn.supernode_dims(s).0).max().unwrap();
+        assert!((widest * widest + widest) * fs > dev.arch().shared_bytes as usize, "a supernode of {widest} columns fits the device");
+        let params = GpuSupernodalParams { small_q: 100_000, small_flops: f64::INFINITY, ..GpuSupernodalParams::default() };
+        let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, a.symbolic(), &params, Wide::F64).unwrap();
+        g.factorize(a.vals()).unwrap();
+        let mut x = rhs.clone();
+        g.solve(&mut x).unwrap();
+        assert!(rel_residual(&dense, sn.dim(), &x, &rhs) < 1e-10);
+    }
+
     #[test]
     fn a_pivot_that_is_not_positive_is_reported() {
         let (mut a, _, _, sn) = setup(10);
@@ -720,6 +745,10 @@ mod tests {
         let base = asym.val_range(b).start;
         let good = a.vals()[base];
         a.vals_mut()[base] = -1.0;
+        // on the panel steps the bad pivot is in a later step's diagonal
+        // tile, which the syrk before it factors
+        let (q, _) = sn.supernode_dims(sn.n_supernodes() - 1);
+        assert!(q > crate::plan::NB, "the root spans more than one panel step: {q} columns");
         let dev = device();
         for params in [GpuSupernodalParams::default(), every_kernel_busy(), panel_steps_only(), cut_updates()] {
             let mut g = GpuSupernodal::<f64, _>::new(&dev, &sn, &asym, &params, Wide::F64).unwrap();
