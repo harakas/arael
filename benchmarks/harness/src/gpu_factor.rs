@@ -2,12 +2,14 @@
 //! the CPU's (features `gpu-cuda`, `gpu-hip`): ms per factorization and per
 //! solve on the device (the matrix uploaded once, timed to the device's
 //! wait), in f64 and with the f32 factor, the solutions checked against
-//! the CPU's. What an Nsight Compute session profiles.
+//! the CPU's. What an Nsight Compute session profiles. A factorization
+//! not positive definite in a precision says so and is timed all the same.
 //!
 //! The environment: ROUNDS (20), BENCH_THREADS (the CPU's threads, 8),
 //! ARAEL_GPU (`cuda` or `hip`); GPU_SMALL_Q, GPU_SMALL_FLOPS,
-//! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS, GPU_ELEM_CAP,
-//! GPU_SOLVE_WORK and GPU_BLOCKS_PER_SM override the device's
+//! GPU_BIG_PAIR_FLOPS, GPU_WIDE_PAIR_K, GPU_WIDE_PAIR_FLOPS,
+//! GPU_CHAIN_FLOPS_F32, GPU_CHAIN_FLOPS_F64, GPU_CHAIN_ITEMS, GPU_SOLVE_WORK
+//! and GPU_BLOCKS_PER_SM override the device's
 //! `GpuSupernodalParams`; GPU_CHECK_FACTOR=1 compares the f64 factor with
 //! the CPU's, supernode by supernode, and checks 50 more factorizations;
 //! GPU_ORDER picks the elimination order, `amd` (the default) or `nd`
@@ -22,7 +24,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arael::__gpu::{Device, GpuFactor, GpuPrecision, GpuSupernodalParams, Wide, bytemuck};
+use arael::__gpu::{Device, FactorizeError, GpuFactor, GpuPrecision, GpuSupernodalParams, Wide, bytemuck};
 use arael_faer::SparseIndex;
 use arael_faer::bsc::SparseBlockColMat;
 use arael_faer::supernodal::{
@@ -71,8 +73,14 @@ fn params() -> GpuSupernodalParams {
     if let Some(v) = var("GPU_WIDE_PAIR_FLOPS") {
         p.wide_pair_flops = v;
     }
-    if let Some(v) = var("GPU_ELEM_CAP") {
-        p.elem_cap = v as usize;
+    if let Some(v) = var("GPU_CHAIN_FLOPS_F32") {
+        p.chain_flops_f32 = v;
+    }
+    if let Some(v) = var("GPU_CHAIN_FLOPS_F64") {
+        p.chain_flops_f64 = v;
+    }
+    if let Some(v) = var("GPU_CHAIN_ITEMS") {
+        p.chain_items = v as u32;
     }
     if let Some(v) = var("GPU_SOLVE_WORK") {
         p.solve_work = v as usize;
@@ -110,8 +118,14 @@ fn run<D: Device>(dev: Arc<D>, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f
     let mut xb = dev.alloc(8 * n).unwrap();
     for precision in [GpuPrecision::F64, GpuPrecision::F32] {
         let mut f = GpuFactor::new(&dev, precision, sn, a.symbolic(), &params(), Wide::F64).unwrap();
-        // through the host API once (compiles the kernels), checked
-        f.factorize(a.vals()).unwrap();
+        // through the host API once (compiles the kernels), checked; a matrix
+        // not positive definite in this precision is reported and still timed:
+        // a bad pivot continues with 1, the kernels are the same
+        match f.factorize(a.vals()) {
+            Ok(()) => {}
+            Err(FactorizeError::NotPositiveDefinite) => println!("{:<4} {precision:?}: not positive definite in this precision", D::RUNTIME),
+            Err(e) => panic!("{precision:?} factorization: {e:?}"),
+        }
         if std::env::var_os("GPU_CHECK_FACTOR").is_some() {
             if let GpuFactor::F64(g) = &f {
                 check_factor(sn, &g.factor_values().unwrap(), cpu_factor);
@@ -155,8 +169,8 @@ fn run<D: Device>(dev: Arc<D>, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f
     }
 }
 
-/// The levels of `sn`'s tree, a supernode one above its highest child.
-fn print_levels(sn: &SupernodalSymbolic) {
+/// Each supernode's level in `sn`'s tree, one above its highest child.
+fn levels_of(sn: &SupernodalSymbolic) -> Vec<usize> {
     let ns = sn.n_supernodes();
     let mut level = vec![0usize; ns];
     for s in 0..ns {
@@ -165,6 +179,13 @@ fn print_levels(sn: &SupernodalSymbolic) {
             level[p] = level[p].max(level[s] + 1);
         }
     }
+    level
+}
+
+/// The levels of `sn`'s tree, a supernode one above its highest child.
+fn print_levels(sn: &SupernodalSymbolic) {
+    let ns = sn.n_supernodes();
+    let level = levels_of(sn);
     // the multiply-adds of s's descendant updates: per descendant, its rows
     // in s's columns (kw) against its rows from there on (m)
     let update_work = |s: usize| -> (usize, f64) {
@@ -183,16 +204,22 @@ fn print_levels(sn: &SupernodalSymbolic) {
         (sn.descendants(s).len(), work)
     };
     let nl = level.iter().max().map_or(0, |&l| l + 1);
+    // over the levels: the widest supernode's columns, the largest
+    // supernode's factor and the level's multiply-adds
+    let (mut sum_q, mut sum_fac, mut sum_work) = (0.0, 0.0, 0.0);
     for l in 0..nl {
         let sns: Vec<usize> = (0..ns).filter(|&s| level[s] == l).collect();
-        let (mut q, mut h, mut pairs, mut upd, mut fac) = (0, 0, 0, 0.0, 0.0);
+        let (mut q, mut h, mut pairs, mut upd, mut fac, mut big) = (0, 0, 0, 0.0, 0.0, 0.0f64);
         for &s in &sns {
             let (a, b) = sn.supernode_dims(s);
             let (np, w) = update_work(s);
             (q, h, pairs, upd) = (q.max(a), h.max(b), pairs + np, upd + w);
             let (a, b) = (a as f64, b as f64);
-            fac += a * a * a / 6.0 + (b - a) * a * a / 2.0;
+            let f = a * a * a / 6.0 + (b - a) * a * a / 2.0;
+            fac += f;
+            big = big.max(f);
         }
+        (sum_q, sum_fac, sum_work) = (sum_q + q as f64, sum_fac + big, sum_work + upd + fac);
         println!(
             "  level {l:3}: {:5} supernodes, widest {q:4}, tallest {h:5}, {pairs:6} descendant pairs, updates {:8.0}k, factor {:8.0}k multiply-adds",
             sns.len(),
@@ -200,6 +227,7 @@ fn print_levels(sn: &SupernodalSymbolic) {
             fac / 1e3
         );
     }
+    println!("  over the levels: widest columns {sum_q:.0}, largest factor {sum_fac:.4e}, multiply-adds {sum_work:.4e}");
 }
 
 /// `a`'s factorization (in its AMD block order, as the solver's) and the
@@ -216,10 +244,12 @@ pub fn compare(what: &str, a: &SparseBlockColMat<SparseIndex, f64>, rhs: &[f64])
     };
     let sn = SupernodalSymbolic::new(a.symbolic(), Some(&order), &SupernodalParams::default()).unwrap();
     println!(
-        "{what}, {ordering} order: {} params, {} supernodes, {} factor values; {rounds} rounds, the CPU on {threads} threads",
+        "{what}, {ordering} order: {} params, {} supernodes in {} levels, {} factor values, {:.3e} flops; {rounds} rounds, the CPU on {threads} threads",
         rhs.len(),
         sn.n_supernodes(),
-        sn.factor_val_count()
+        levels_of(&sn).iter().max().map_or(0, |&l| l + 1),
+        sn.factor_val_count(),
+        sn.flops()
     );
     if std::env::var_os("GPU_LEVELS").is_some() {
         print_levels(&sn);
