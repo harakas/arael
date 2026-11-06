@@ -64,7 +64,8 @@ pub const HEADER: usize = 32;
 pub struct GpuSupernodalParams {
     /// Supernodes narrower than this (scalar columns) are factored by the
     /// one-block small kernel, unless their rows below need more than
-    /// `small_flops`; the others by the batched panel steps.
+    /// `small_flops`; the others by the batched panel steps. Capped to what
+    /// one block holds: 256 columns, and the device's shared memory.
     pub small_q: u32,
     /// The most multiply-adds of a small supernode's solve of its rows below
     /// (`q^2 h / 2`) the one-block kernel takes: a taller supernode goes to
@@ -669,7 +670,7 @@ fn split_big(w: &mut LevelWork, p: &Plan, blocks: usize) {
     for it in old.chunks(BIG_ITEM) {
         let (s, row0, col0, r0, r1) = (it[0], it[1], it[2], it[3], it[4]);
         let first = w.big_items.len();
-        let mut push = |w: &mut Vec<u32>, ra: u32, rb: u32, k0: u32, k1: u32| w.extend_from_slice(&[s, row0, col0, ra, rb, k0, k1, 0]);
+        let push = |w: &mut Vec<u32>, ra: u32, rb: u32, k0: u32, k1: u32| w.extend_from_slice(&[s, row0, col0, ra, rb, k0, k1, 0]);
         let (mut start, mut acc) = (r0, 0.0);
         for r in r0..r1 {
             let (wr, dq) = work(r);

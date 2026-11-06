@@ -23,6 +23,13 @@ impl Lcg {
 /// diagonal tiles upper-only. Returns the matrix, its dense twin (column
 /// major, full) and a right-hand side.
 pub fn grid_spd(k: usize, widths: &[usize], seed: u64) -> (SparseBlockColMat<SparseIndex, f64>, Vec<f64>, Vec<f64>) {
+    let (a, rhs) = grid_spd_sparse(k, widths, seed);
+    let dense = dense_of(&a);
+    (a, dense, rhs)
+}
+
+/// [`grid_spd`] without the dense twin, for grids too large for one.
+pub fn grid_spd_sparse(k: usize, widths: &[usize], seed: u64) -> (SparseBlockColMat<SparseIndex, f64>, Vec<f64>) {
     let nblk = k * k;
     let mut part = vec![0u32];
     for b in 0..nblk {
@@ -47,8 +54,42 @@ pub fn grid_spd(k: usize, widths: &[usize], seed: u64) -> (SparseBlockColMat<Spa
     });
     let mut a = SparseBlockColMat::<SparseIndex, f64>::zeroed(sym);
     let asym = a.symbolic().clone();
-    let mut dense = vec![0.0f64; n * n];
     let mut rng = Lcg(seed);
+    for j in 0..asym.nblk_cols() {
+        for b in asym.col_range(j) {
+            let i = asym.blk_row(b);
+            let (wi, wj) = asym.block_dims(b);
+            let base = asym.val_range(b).start;
+            for cc in 0..wj {
+                for rr in 0..wi {
+                    if i == j && rr > cc {
+                        continue;
+                    }
+                    let v = rng.unit();
+                    a.vals_mut()[base + rr + cc * wi] = v;
+                }
+            }
+        }
+    }
+    // dominance: five neighbouring blocks of the widest width at most
+    let boost = 4.0 * *widths.iter().max().unwrap() as f64 * 5.0;
+    for j in 0..asym.nblk_cols() {
+        let b = asym.col_range(j).find(|&b| asym.blk_row(b) == j).unwrap();
+        let (w, _) = asym.block_dims(b);
+        let base = asym.val_range(b).start;
+        for kk in 0..w {
+            a.vals_mut()[base + kk * (w + 1)] += boost;
+        }
+    }
+    let rhs: Vec<f64> = (0..n).map(|_| rng.unit() * 2.0).collect();
+    (a, rhs)
+}
+
+/// The dense twin of upper-stored `a`: column major, full.
+pub fn dense_of(a: &SparseBlockColMat<SparseIndex, f64>) -> Vec<f64> {
+    let asym = a.symbolic();
+    let n = asym.ncols();
+    let mut dense = vec![0.0f64; n * n];
     for j in 0..asym.nblk_cols() {
         let cj = asym.col_span(j).start;
         for b in asym.col_range(j) {
@@ -61,28 +102,14 @@ pub fn grid_spd(k: usize, widths: &[usize], seed: u64) -> (SparseBlockColMat<Spa
                     if i == j && rr > cc {
                         continue;
                     }
-                    let v = rng.unit();
-                    a.vals_mut()[base + rr + cc * wi] = v;
+                    let v = a.vals()[base + rr + cc * wi];
                     dense[(ri + rr) + (cj + cc) * n] = v;
                     dense[(cj + cc) + (ri + rr) * n] = v;
                 }
             }
         }
     }
-    // dominance: five neighbouring blocks of the widest width at most
-    let boost = 4.0 * *widths.iter().max().unwrap() as f64 * 5.0;
-    for j in 0..asym.nblk_cols() {
-        let b = asym.col_range(j).find(|&b| asym.blk_row(b) == j).unwrap();
-        let (w, _) = asym.block_dims(b);
-        let base = asym.val_range(b).start;
-        let cj = asym.col_span(j).start;
-        for kk in 0..w {
-            a.vals_mut()[base + kk * (w + 1)] += boost;
-            dense[(cj + kk) * (n + 1)] += boost;
-        }
-    }
-    let rhs: Vec<f64> = (0..n).map(|_| rng.unit() * 2.0).collect();
-    (a, dense, rhs)
+    dense
 }
 
 /// `|A x - b| / |b|` through the dense twin.

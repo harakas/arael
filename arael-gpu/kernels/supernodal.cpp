@@ -262,12 +262,212 @@ KERNEL_THREADS(THREADS) void k_big_update(GLOBAL const u32* RESTRICT items, GLOB
     }
 }
 
-// A small supernode's diagonal Cholesky in shared memory (q * q + q values
-// of dynamic shared memory: the factor and its diagonal's reciprocals) and
-// the triangular solve of its rows below, in place; one block per
-// supernode of `list`. A pivot that is not positive
-// sets fail[0] to the supernode plus one and continues with 1.
-KERNEL_THREADS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+#if NB != ARAEL_WARP
+#error "supernodal.cpp: a panel step's diagonal rows are one warp"
+#endif
+
+// The loops below that walk the columns of a row held in registers (an
+// array of NB) are not unrolled: each step works on a[0], the row's
+// current column, and then shifts the row down one column (a[c - 1] =
+// a[c]), so the indices into the array stay constant and the array in
+// registers. Unrolled over the columns, a kernel is tens of thousands of
+// instructions, and a block of a small level spends its time fetching
+// them.
+//
+// A step's unrolled loop over the row's later columns runs to a constant
+// width W of 32, 24, 16 or 8 columns, the narrowest that holds the
+// columns left (`left`), the columns past them predicated off: a step
+// issues at most 7 columns it does not need (an f64 multiply-add takes 16
+// issue cycles where f64 is slow, predicated off or not), and no branch
+// splits the loop (which would expose the latency of each column's
+// shuffle or load).
+
+// The width of the loop over `left` columns: 32, 24, 16 or 8.
+DEVICE u32 step_width(u32 left) {
+    return left > 24 ? 32 : left > 16 ? 24 : left > 8 ? 16 : 8;
+}
+
+// The row's first W columns shifted down one.
+template <u32 W>
+DEVICE void shift_down(F (&a)[NB]) {
+#pragma unroll
+    for (u32 c = 1; c < W; c++) a[c - 1] = a[c];
+}
+
+// potf2_regs' pivots k while the columns left (nb - k) fit width W.
+template <u32 W, typename Out>
+DEVICE void potf2_steps(F (&a)[NB], u32 lane, u32 nb, u32& k, F& dr, bool& bad, Out& out) {
+    for (; k < nb && step_width(nb - k) == W; k++) {
+        F d = shfl(a[0], k);
+        if (!(d > F(0))) {
+            bad = true;
+            d = F(1);
+        }
+        // one division per pivot: f64 division is slow where f64 is
+        F lkk = sqrt(d);
+        F rk = F(1) / lkk;
+        if (lane == k) {
+            a[0] = lkk;
+            dr = rk;
+        } else if (lane > k) {
+            a[0] = a[0] * rk;
+        }
+        out.put(k, a[0]);
+        // column k + c less L[r][k] L[k + c][k]; a source lane past the
+        // warp wraps, and its column is past nb
+#pragma unroll
+        for (u32 c = 1; c < W; c++) {
+            F lck = shfl(a[0], k + c);
+            if (k + c < nb && lane >= k + c) a[c] -= a[0] * lck;
+        }
+        shift_down<W>(a);
+    }
+}
+
+// A warp's 32 rows of an nb-column panel factored in place in registers:
+// lane r holds row r from the current column on (a[0]), reading the other
+// rows' entries by shuffles, so no barrier and no shared memory. The top
+// nb x nb block becomes its Cholesky factor, the rows below it are solved
+// against it (L21 = A21 L11^-T), right-looking. Column k of L is handed
+// over as out.put(k, value) on every lane (lane r: L[r][k], meaningful for
+// r >= k); `dr` gets 1 / L[r][r] on the lanes below nb. Returns whether a
+// pivot was not positive; it continues with 1.
+template <typename Out>
+DEVICE bool potf2_regs(F (&a)[NB], u32 lane, u32 nb, F& dr, Out& out) {
+    bool bad = false;
+    u32 k = 0;
+    potf2_steps<32>(a, lane, nb, k, dr, bad, out);
+    potf2_steps<24>(a, lane, nb, k, dr, bad, out);
+    potf2_steps<16>(a, lane, nb, k, dr, bad, out);
+    potf2_steps<8>(a, lane, nb, k, dr, bad, out);
+    return bad;
+}
+
+// potf2_regs' column output into the panel at `tile` (column stride h):
+// lanes below nb their lower part, the others (rows below the tile, which
+// k_small_factor's last step has in the warp) every column, rows before
+// `rows` only.
+struct ColsOut {
+    GLOBAL F* factor;
+    u32 tile;
+    u32 h;
+    u32 lane;
+    u32 nb;
+    u32 rows;
+    DEVICE void put(u32 k, F v) {
+        if (lane < rows && (lane >= nb || lane >= k)) factor[tile + k * h + lane] = v;
+    }
+};
+
+// The nb x nb lower diagonal tile at `tile` (column stride h) of
+// supernode s factored in place by one warp (potf2_regs). A pivot that is
+// not positive sets fail[0] to s plus one and continues with 1.
+DEVICE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s) {
+    F a[NB];
+#pragma unroll
+    for (u32 c = 0; c < NB; c++) a[c] = (lane < nb && c <= lane) ? factor[tile + c * h + lane] : F(0);
+    F dr = F(1);
+    ColsOut out = {factor, tile, h, lane, nb, nb};
+    bool bad = potf2_regs(a, lane, nb, dr, out);
+    if (bad && lane == 0) fail[0] = s + 1;
+}
+
+// k_small_factor's diagonal warp output: the panel, and for the diagonal
+// block's rows the shared copies, `l` (the diagonal block, column-major, q
+// rows) and `l11` (the step's tile, NB rows).
+struct SmallOut {
+    ColsOut cols;
+    SHARED_PTR F* l;
+    SHARED_PTR F* l11;
+    u32 q;
+    u32 j;
+    u32 r;
+    DEVICE void put(u32 k, F v) {
+        cols.put(k, v);
+        if (r < q && cols.lane >= k) {
+            l[(j + k) * q + r] = v;
+            l11[k * NB + cols.lane] = v;
+        }
+    }
+};
+
+// The columns of k_small_factor's rows the plain loops below load first:
+// 8 in f32, 4 in f64, whose rows take twice the registers.
+constexpr u32 SMALL_KU = sizeof(F) == 4 ? 8 : 4;
+
+// small_take's products, the loop over the row's nb columns W wide; L[r][k]
+// comes through a ring of SMALL_KU loads ahead (`lk`, loaded).
+template <u32 W>
+DEVICE void small_take_cols(F (&v)[NB], F (&lk)[SMALL_KU], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
+    for (u32 k = 0; k < j; k++) {
+        F x = lk[0];
+#pragma unroll
+        for (u32 u = 1; u < SMALL_KU; u++) lk[u - 1] = lk[u];
+        lk[SMALL_KU - 1] = k + SMALL_KU < j ? factor[panel + (k + SMALL_KU) * h + r] : F(0);
+#pragma unroll
+        for (u32 c = 0; c < W; c++) {
+            if (c < nb) v[c] -= x * l[k * q + j + c];
+        }
+    }
+}
+
+// k_small_factor's row r at the step at column j: its nb values less the
+// earlier columns' products, v[c] = A[r][j + c] - sum over k < j of
+// L[r][k] L[j + c][k], L's diagonal block (column-major, q rows) in `l`.
+DEVICE void small_take(F (&v)[NB], GLOBAL const F* factor, u32 panel, u32 h, SHARED_PTR const F* l, u32 q, u32 j, u32 nb, u32 r) {
+#pragma unroll
+    for (u32 c = 0; c < NB; c++) v[c] = c < nb ? factor[panel + (j + c) * h + r] : F(0);
+    F lk[SMALL_KU];
+#pragma unroll
+    for (u32 u = 0; u < SMALL_KU; u++) lk[u] = u < j ? factor[panel + u * h + r] : F(0);
+    switch (step_width(nb)) {
+    case 32: small_take_cols<32>(v, lk, factor, panel, h, l, q, j, nb, r); break;
+    case 24: small_take_cols<24>(v, lk, factor, panel, h, l, q, j, nb, r); break;
+    case 16: small_take_cols<16>(v, lk, factor, panel, h, l, q, j, nb, r); break;
+    default: small_take_cols<8>(v, lk, factor, panel, h, l, q, j, nb, r); break;
+    }
+}
+
+// small_solve's columns k while the columns left (nb - k) fit width W.
+template <u32 W>
+DEVICE void small_solve_steps(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r, u32& k) {
+    for (; k < nb && step_width(nb - k) == W; k++) {
+        F x = v[0] * d11[k];
+        factor[panel + (j + k) * h + r] = x;
+        if (r < q) l[(j + k) * q + r] = x;
+#pragma unroll
+        for (u32 c = 1; c < W; c++) {
+            if (k + c < nb) v[c] -= x * l11[k * NB + k + c];
+        }
+        shift_down<W>(v);
+    }
+}
+
+// k_small_factor's row r below the step's diagonal tile solved against it
+// column by column (the tile column-major in `l11`, NB rows, the
+// reciprocals of its diagonal in `d11`) and stored; a row of the diagonal
+// block also into `l`.
+DEVICE void small_solve(F (&v)[NB], GLOBAL F* factor, u32 panel, u32 h, SHARED_PTR F* l, SHARED_PTR const F* l11, SHARED_PTR const F* d11, u32 q, u32 j, u32 nb, u32 r) {
+    u32 k = 0;
+    small_solve_steps<32>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
+    small_solve_steps<24>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
+    small_solve_steps<16>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
+    small_solve_steps<8>(v, factor, panel, h, l, l11, d11, q, j, nb, r, k);
+}
+
+// A small supernode's Cholesky by one block, one supernode of `list` per
+// block, in NB-column steps; thread r owns the panel's row r, and rows r +
+// nt, r + 2 nt, ... for a block of nt threads (q <= nt: the diagonal
+// block's rows are the first). A step at column j: every row from j on
+// takes its nb values less the earlier columns' products, the diagonal
+// block's rows of those columns read from shared memory (q * q + min(q, NB)
+// * NB + NB values of dynamic shared memory: the diagonal block of L,
+// column-major; the step's diagonal tile, its columns NB apart, so at
+// constant offsets, and its diagonal's reciprocals); the warp
+// holding rows j to j + 31 factors them in registers (potf2_regs), the
+// other rows solve against the step's diagonal tile. A pivot that is not
+// positive sets fail[0] to the supernode plus one and continues with 1.
+KERNEL_THREADS_REGS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     DYNAMIC_SHARED(F, l);
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
@@ -276,101 +476,47 @@ KERNEL_THREADS(THREADS) void k_small_factor(GLOBAL const u32* RESTRICT list, GLO
     u32 h = plan[o_dims + 2 * s + 1];
     u32 panel = plan[o_val_ptr + s];
     u32 t = thread_x();
-    const u32 nt = THREADS;
-    for (u32 e = t; e < q * q; e += nt) {
-        u32 c = e / q;
-        u32 r = e - c * q;
-        F v = F(0);
-        if (r >= c) v = factor[panel + c * h + r];
-        l[e] = v;
-    }
-    BARRIER();
-    SHARED_PTR F* dinv = l + q * q;
-    for (u32 j = 0; j < q; j++) {
-        if (t == 0) {
-            F d = l[j * q + j];
-            if (!(d > F(0))) {
-                fail[0] = s + 1;
-                d = F(1);
-            }
-            F ljj = sqrt(d);
-            l[j * q + j] = ljj;
-            // one division per column: f64 division is slow where f64 is
-            dinv[j] = F(1) / ljj;
-        }
-        BARRIER();
-        F rj = dinv[j];
-        for (u32 i = j + 1 + t; i < q; i += nt) l[j * q + i] = l[j * q + i] * rj;
-        BARRIER();
-        u32 w = q - j - 1;
-        for (u32 e2 = t; e2 < w * w; e2 += nt) {
-            u32 kk = j + 1 + e2 / w;
-            u32 ii = j + 1 + e2 % w;
-            if (ii >= kk) {
-                F d = l[j * q + ii] * l[j * q + kk];
-                l[kk * q + ii] -= d;
-            }
-        }
-        BARRIER();
-    }
-    for (u32 e3 = t; e3 < q * q; e3 += nt) {
-        u32 c = e3 / q;
-        u32 r = e3 - c * q;
-        if (r >= c) factor[panel + c * h + r] = l[e3];
-    }
-    BARRIER();
-    for (u32 r = q + t; r < h; r += nt) {
-        for (u32 c = 0; c < q; c++) {
-            F v = factor[panel + c * h + r];
-            for (u32 kk = 0; kk < c; kk++) v -= factor[panel + kk * h + r] * l[kk * q + c];
-            factor[panel + c * h + r] = v * dinv[c];
-        }
-    }
-}
-
-// The nb x nb lower diagonal tile at `tile` (column stride h) of
-// supernode s factored in place by one warp: lane r holds row r in
-// registers and reads the other rows' entries by shuffles, so no barrier
-// and no shared memory. The loops run to the constant NB (= the warp)
-// and skip what is past nb, so the row stays in registers. A pivot that
-// is not positive sets fail[0] to s plus one and continues with 1.
-DEVICE void potf2_warp(GLOBAL F* factor, u32 tile, u32 h, u32 nb, u32 lane, GLOBAL u32* fail, u32 s) {
-    F a[NB];
-#pragma unroll
-    for (u32 c = 0; c < NB; c++) a[c] = (lane < nb && c <= lane) ? factor[tile + c * h + lane] : F(0);
+    u32 nt = block_dim_x();
+    u32 lane = t % NB;
+    SHARED_PTR F* l11 = l + q * q;
+    SHARED_PTR F* d11 = l11 + min(q, NB) * NB;
     bool bad = false;
+    for (u32 j = 0; j < q; j += NB) {
+        u32 nb = min(q - j, NB);
+        F v[NB];
+        if (t >= j && t < h) {
+            small_take(v, factor, panel, h, l, q, j, nb, t);
+        } else {
 #pragma unroll
-    for (u32 k = 0; k < NB; k++) {
-        if (k < nb) {
-            F d = shfl(a[k], k);
-            if (!(d > F(0))) {
-                bad = true;
-                d = F(1);
-            }
-            // one division per pivot: f64 division is slow where f64 is
-            F lkk = sqrt(d);
-            F rk = F(1) / lkk;
-            if (lane == k) a[k] = lkk;
-            else if (lane > k) a[k] = a[k] * rk;
-#pragma unroll
-            for (u32 c = k + 1; c < NB; c++) {
-                F lck = shfl(a[k], c);
-                if (c < nb && lane >= c) a[c] -= a[k] * lck;
-            }
+            for (u32 c = 0; c < NB; c++) v[c] = F(0);
         }
+        bool diag_warp = t / NB == j / NB;
+        if (diag_warp) {
+            // the step's diagonal rows and, in a last step narrower than
+            // the warp, the rows below them
+            F dr = F(1);
+            SmallOut out = {{factor, panel + j * h + j, h, lane, nb, h - j}, l, l11, q, j, t};
+            bad = potf2_regs(v, lane, nb, dr, out) || bad;
+            if (lane < nb) d11[lane] = dr;
+        }
+        BARRIER();
+        if (!diag_warp && t >= j + NB && t < h) small_solve(v, factor, panel, h, l, l11, d11, q, j, nb, t);
+        for (u32 r = t + nt; r < h; r += nt) {
+            small_take(v, factor, panel, h, l, q, j, nb, r);
+            small_solve(v, factor, panel, h, l, l11, d11, q, j, nb, r);
+        }
+        // the step's rows of the diagonal block, read by the next step, and
+        // its tile, rewritten by the next step
+        if (j + NB < q) BARRIER();
     }
-#pragma unroll
-    for (u32 c = 0; c < NB; c++) {
-        if (lane < nb && c <= lane) factor[tile + c * h + lane] = a[c];
-    }
-    if (bad && lane == 0) fail[0] = s + 1;
+    if (bad) fail[0] = s + 1;
 }
 
 // Panel step, part one, for a level's first step: the NB x NB diagonal
 // tile at (0, 0) of every big panel of the level, one warp per panel. The
 // later steps' diagonal tiles are factored by the step before them, at the
 // end of k_syrk.
-KERNEL_THREADS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
+KERNEL_THREADS_REGS(NB) void k_potf2(GLOBAL const u32* RESTRICT panels, GLOBAL const u32* RESTRICT plan, GLOBAL F* RESTRICT factor, GLOBAL u32* RESTRICT fail) {
     u32 o_dims = plan[H_DIMS];
     u32 o_val_ptr = plan[H_VAL_PTR];
     u32 s = panels[block_x()];
