@@ -895,20 +895,17 @@ let cfg = LmConfig::default().with_device_observer_params(true)
     .with_observer(|it: &LmIter<f64>| { draw(it.params); ControlFlow::Continue(()) });
 ```
 
-A root gets these kernels when its every
-constraint has a device form (today: constraints of the root's
-collections over one entity reached through a ref, or over more with a
-cross block of their own per pair (`[hb_ab, hb_ac, hb_bc]`); constraints
-of two entities in any collection, reached through their own refs or
-their parent's, writing into their own cross block or their parent's
-(`parent.hb`); an entity's constraints on itself; and constraints in a
-collection of an entity of the root's collections coupling that entity
-with a ref (`parent =`); over Euler-angle (simple and re-centred) and `QuaternionParam`
+A root gets these kernels when its every constraint has a device form: a
+constraint whose rows write into self blocks and cross blocks has one,
+whatever its form (its entities reached through refs, its parent's refs,
+the parent or an ancestor entity, the root; its cross blocks its own or
+its parent's; the instances held at any depth, in collections or `Option`
+fields), over Euler-angle (simple and re-centred) and `QuaternionParam`
 rotations, `TransformParam` poses, `UnitVecParam` directions and
-`AngleParam` headings, guards included, each evaluated once per
-structure, and robust losses, but no index `select` or `match`, in the
-body or picking the loss);
-`LmProblemInternals::device_unsupported` says why a root has none, and
+`AngleParam` headings, guards included (each evaluated once per
+structure) and robust losses. A constraint writing `coo` pairs, or with
+an index `select` or `match` in its body or picking its loss, has none
+yet. `LmProblemInternals::device_unsupported` says why a root has none, and
 then the CPU assembles and the Hessian's values are uploaded per damped
 solve. `SparseFaerOptions::with_gpu_assembly(false)` keeps the assembly
 on the CPU; `SchurPlan::gpu_assembly` reports which ran. The

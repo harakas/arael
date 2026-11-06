@@ -186,8 +186,8 @@ impl DeviceConstraint {
 /// What a root's structure walk reads from the model, once per structure:
 /// per entity table the parameters' global indices slot by slot (`FIXED`
 /// for a fixed one), per constraint the instances its guard keeps (their
-/// sides' slots and cross slots, [`DeviceConstraint::words`] each) and, in
-/// walk order, which instances it keeps.
+/// words, [`DeviceConstraint::words`] each: each side's slot, then each
+/// pair's cross slot) and, in walk order, which instances it keeps.
 #[derive(Clone, Debug, Default)]
 pub struct DeviceStructure {
     pub idx: Vec<Vec<u32>>,
@@ -204,6 +204,11 @@ impl DeviceStructure {
             keep: shape.constraints.iter().map(|_| Vec::new()).collect(),
         }
     }
+}
+
+/// Word `q` of every instance of `rows`, `w` words each.
+fn word(rows: &[u32], w: usize, q: usize) -> impl Iterator<Item = u32> + Clone + '_ {
+    rows.iter().skip(q).step_by(w).copied()
 }
 
 /// A model's leaf value (`f32`, `f64` or `df32`) as `f64`, for the walks
@@ -651,7 +656,8 @@ fn par_ranges<R: Send>(n: usize, threads: usize, min: usize, r: &Resolver<'_>, f
 }
 
 /// The tiles of the structure `st` in the pattern `r` resolves, on up to
-/// `threads` threads of at least `min` lookups each: per entity table `(base, stride, start)` per slot,
+/// `threads` threads of at least `min` lookups each: per entity table
+/// `(base, stride, start)` per slot,
 /// per cross array `(base, stride, flip)` per slot its instances name,
 /// `flip` 1 when the second side's span is the lower-numbered one and lies
 /// on the tile's rows. Zeros where a side is fixed throughout.
@@ -688,18 +694,18 @@ fn tiles(
     let mut cross: Vec<Vec<u32>> = cross_slots.iter().map(|&n| vec![0u32; 3 * n]).collect();
     let mut done: Vec<Vec<bool>> = cross_slots.iter().map(|&n| vec![false; n]).collect();
     for (c, k) in shape.constraints.iter().enumerate() {
-        let w = k.words();
-        let rows = &st.rows[c];
+        let (w, rows) = (k.words(), &st.rows[c]);
         for (p, &(i, j, x)) in k.pairs.iter().enumerate() {
-            let (ea, eb, at) = (k.sides[i], k.sides[j], k.sides.len() + p);
+            let (ea, eb) = (k.sides[i], k.sides[j]);
             // per row its tile, then the first row of each cross slot keeps it
             let row_tiles = par_ranges(rows.len() / w, threads, min, r, |range, r| {
-                range
-                    .map(|q| {
-                        let rec = &rows[q * w..(q + 1) * w];
+                rows[range.start * w..range.end * w]
+                    .chunks_exact(w)
+                    .map(|rec| (rec[i], rec[j]))
+                    .map(|(a, b)| {
                         // the sides' first live indices from their entity
                         // tiles, a zero stride where a side is fixed throughout
-                        let (ta, tb) = (&entity[ea][3 * rec[i] as usize..], &entity[eb][3 * rec[j] as usize..]);
+                        let (ta, tb) = (&entity[ea][3 * a as usize..], &entity[eb][3 * b as usize..]);
                         if ta[1] == 0 || tb[1] == 0 {
                             return [0, 0, 0];
                         }
@@ -710,11 +716,11 @@ fn tiles(
                     })
                     .collect::<Vec<[u32; 3]>>()
             });
-            for (rec, tile) in rows.chunks_exact(w).zip(row_tiles.iter().flatten()) {
-                let sx = rec[at] as usize;
-                if !done[x][sx] {
-                    done[x][sx] = true;
-                    cross[x][3 * sx..3 * sx + 3].copy_from_slice(tile);
+            for (s, tile) in word(rows, w, k.sides.len() + p).zip(row_tiles.iter().flatten()) {
+                let s = s as usize;
+                if !done[x][s] {
+                    done[x][s] = true;
+                    cross[x][3 * s..3 * s + 3].copy_from_slice(tile);
                 }
             }
         }
@@ -772,19 +778,21 @@ fn write_structure(
     for (c, k) in shape.constraints.iter().enumerate() {
         let (w, rows) = (k.words(), &st.rows[c]);
         for (q, name) in word_names(k).enumerate() {
-            let col: Vec<u32> = rows.chunks_exact(w).map(|rec| rec[q]).collect();
-            put(image, &format!("C{c}_{name}"), cast_slice(&col));
+            let o = offset[&format!("C{c}_{name}")];
+            for (b, v) in image[o..].as_chunks_mut::<4>().0.iter_mut().zip(word(rows, w, q)) {
+                *b = v.to_le_bytes();
+            }
         }
         for (i, &e) in k.sides.iter().enumerate() {
-            let (ptr, list) = by_slot(rows.chunks_exact(w).map(|rec| rec[i]), slots[e]);
+            let (ptr, list) = by_slot(word(rows, w, i), slots[e]);
             put(image, &format!("C{c}_OFF{i}"), cast_slice(&ptr));
             put(image, &format!("C{c}_INST{i}"), cast_slice(&list));
         }
         for (p, &(_, _, x)) in k.pairs.iter().enumerate() {
             // every instance in the list of its tile's first slot, so a
             // tile has one summing thread per entry, the other slots none
-            let (owner, at) = (&owners[x], k.sides.len() + p);
-            let (ptr, list) = by_slot(rows.chunks_exact(w).map(|rec| owner[rec[at] as usize]), cross_slots[x]);
+            let owner = &owners[x];
+            let (ptr, list) = by_slot(word(rows, w, k.sides.len() + p).map(|s| owner[s as usize]), cross_slots[x]);
             put(image, &format!("C{c}_XOFF{p}"), cast_slice(&ptr));
             put(image, &format!("C{c}_XINST{p}"), cast_slice(&list));
         }
@@ -816,8 +824,8 @@ impl<T: crate::utils::Float + 'static, D: Device> DeviceAssembly<T, D> {
         let mut cross_slots = vec![0usize; shape.crosses];
         for (c, k) in shape.constraints.iter().enumerate() {
             for (p, &(_, _, x)) in k.pairs.iter().enumerate() {
-                for rec in st.rows[c].chunks_exact(k.words()) {
-                    cross_slots[x] = cross_slots[x].max(rec[k.sides.len() + p] as usize + 1);
+                if let Some(m) = word(&st.rows[c], k.words(), k.sides.len() + p).max() {
+                    cross_slots[x] = cross_slots[x].max(m as usize + 1);
                 }
             }
         }
@@ -1171,7 +1179,11 @@ mod tests {
         // entity 7 of the first table and entity 11 of the second fixed
         idx0[21..24].fill(FIXED);
         idx1[22..24].fill(FIXED);
-        let rows: Vec<u32> = (0..nrows as u32).flat_map(|k| [k * 7 % s0 as u32, k * 11 % s1 as u32, k]).collect();
+        let cols: Vec<Vec<u32>> = vec![
+            (0..nrows as u32).map(|k| k * 7 % s0 as u32).collect(),
+            (0..nrows as u32).map(|k| k * 11 % s1 as u32).collect(),
+            (0..nrows as u32).collect(),
+        ];
         let shape = DeviceShape {
             entities: vec![3, 2],
             references: Vec::new(),
@@ -1180,15 +1192,16 @@ mod tests {
             entity_data: vec![0, 0],
             root_data: 0,
         };
-        let st = DeviceStructure { idx: vec![idx0, idx1], rows: vec![rows.clone()], keep: vec![vec![true; nrows]] };
+        let rows: Vec<u32> = (0..nrows).flat_map(|k| [cols[0][k], cols[1][k], cols[2][k]]).collect();
+        let st = DeviceStructure { idx: vec![idx0, idx1], rows: vec![rows], keep: vec![vec![true; nrows]] };
         // one block per entity, the diagonal blocks and the coupled pairs
         let mut part = vec![0usize];
         for k in 0..s0 + s1 {
             part.push(part[k] + if k < s0 { 3 } else { 2 });
         }
         let mut cells: Vec<(usize, usize)> = (0..s0 + s1).map(|b| (b, b)).collect();
-        for rec in rows.chunks(3) {
-            cells.push((rec[0] as usize, s0 + rec[1] as usize));
+        for (&a, &b) in cols[0].iter().zip(&cols[1]) {
+            cells.push((a as usize, s0 + b as usize));
         }
         cells.sort_unstable();
         cells.dedup();

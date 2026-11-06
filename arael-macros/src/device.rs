@@ -10,28 +10,25 @@
 //! `arael::__gpu_items!`, which drops it when arael is built without its
 //! `gpu` feature.
 //!
-//! A constraint is a list of sides (its entities, each written into its own
-//! self block) and of pairs of sides with a cross tile. Covered for now:
-//! cross constraints in any collection (two entities with self blocks
-//! reached through the instance's refs or its parent's, the holder's
-//! CrossBlock or its parent's, walked through the parents' loops; parent
-//! data read per instance), root-level multi-cross
-//! constraints (any number of entities through refs, a CrossBlock of the
-//! holder's per pair), root-level
-//! constraints of one entity reached through a ref (written into its self
-//! block), the constraints of an entity of a root-level collection on
-//! itself, and cross constraints in a collection of an entity of a
-//! root-level collection coupling that entity with a ref (`parent =`), with
-//! guards (evaluated once per structure: a guard does not change during a
-//! solve) and robust losses (the record scaled by `sqrt(rho'(s))`, as the
-//! CPU's Jacobian rows are), without an index `select`; over referenced fields
+//! A constraint is read off the block writes its CPU assembly makes (the
+//! constraint emission's plan): a side per entity with parameters written
+//! into a self block (an entity through a ref, the instance itself, its
+//! parent, an ancestor, the root), a pair per cross block between two of
+//! them (the instance's own or a parent's), whatever the constraint's form.
+//! Its instances are walked along the instance type's containment paths,
+//! the walk binding the names the plan's block places, the body's data
+//! leaves and the guard read. Guards are evaluated once per structure (a
+//! guard does not change during a solve); a robust loss scales the record
+//! by `sqrt(rho'(s))`, as the CPU's Jacobian rows are. Over referenced fields
 //! (`SimpleEulerAngleParam` angles, computed and never re-centred; Euler-angle
 //! and `QuaternionParam` rotations, `TransformParam` poses, `UnitVecParam`
 //! directions, whose references the device keeps and moves), atom caches
 //! (an `AngleParam`'s sin and cos, computed in the kernel from the angle)
-//! and `f32` or `f64` roots. A leaf that follows the parameters and that
-//! the device does not compute (a `ScaledTransformParam`'s scale) leaves
-//! the root without a device route, as does any other constraint.
+//! and `f32` or `f64` roots. A constraint has no device form when its rows
+//! write `coo` pairs, when an index `select` or `match` picks its rows or
+//! its loss, or when it reads a leaf that follows the parameters and that
+//! the device does not compute (a `ScaledTransformParam`'s scale); its
+//! root then assembles on the CPU.
 
 use std::collections::BTreeSet;
 
@@ -43,12 +40,15 @@ use quote::{format_ident, quote};
 /// One entity of a device constraint.
 pub(crate) struct DevSide {
     pub ty: String,
-    /// The entity's binding in the walk (`cam`).
+    /// The head of its symbols in the body (`cam` of `cam.t.work().x`).
     pub var: String,
     /// Its SelfBlock field.
     pub hb: String,
     /// Its parameter symbols in slot order (`cam.t.work().x`, ...).
     pub params: Vec<String>,
+    /// Its self block in the instance walk (`self.cams[__ei_cam].hb`,
+    /// `__item.hb`), whose marker's slot is its row.
+    pub slot: TokenStream2,
 }
 
 /// A cross tile of a device constraint: between its sides `i` and `j`
@@ -60,14 +60,6 @@ pub(crate) struct DevPair {
     pub holder: String,
     pub block: String,
     pub access: TokenStream2,
-}
-
-impl DevPair {
-    /// The pair of sides 0 and 1 of an instance of `holder`, its own
-    /// CrossBlock `block`.
-    pub(crate) fn own(holder: &str, block: &syn::Ident) -> DevPair {
-        DevPair { i: 0, j: 1, holder: holder.to_string(), block: block.to_string(), access: quote! { __frine.#block } }
-    }
 }
 
 /// One device constraint, as the root's emission needs it.
@@ -651,31 +643,12 @@ fn cpp_kernels(
     Ok(format!("{gh_kernel}{reduce}{cost_kernel}"))
 }
 
-/// The walk of one constraint group, as the root's emission hands it over:
-/// the cost sweep's loop around a body, which reads the instance as
-/// `__frine`, its entities and the root by their bindings.
+/// The walk over a constraint's instances, as the root's emission hands it
+/// over: loops around a body that reads the instance as `__frine`, its
+/// entities, its parents and the root by the names the body and the plan's
+/// block places use.
 pub(crate) struct DevGroup {
     pub walk: Box<dyn Fn(&TokenStream2) -> TokenStream2>,
-}
-
-impl DevGroup {
-    /// One loop over the root's collection `rc`, the instance's entities
-    /// bound by `resolve`, the root as `root_var`.
-    pub(crate) fn flat(rc: &syn::Ident, resolve: &[TokenStream2], root_var: &syn::Ident) -> DevGroup {
-        let (rc, resolve, root_var) = (rc.clone(), resolve.to_vec(), root_var.clone());
-        DevGroup {
-            walk: Box::new(move |body| {
-                quote! {
-                    for __frine in self.#rc.iter() {
-                        #(#resolve)*
-                        #[allow(unused_variables)]
-                        let #root_var = &*self;
-                        #body
-                    }
-                }
-            }),
-        }
-    }
 }
 
 /// A data record of the image (an entity table's or the root's): its fields
@@ -968,28 +941,28 @@ pub(crate) fn device_root(
         if mine.is_empty() {
             continue;
         }
+        // per constraint its keep flags and its kept instances' words: the
+        // sides' slots, then the pairs' cross slots
         let structure: Vec<TokenStream2> = mine.iter().map(|(c, _)| {
             let cid = c.cid;
-            // the sides' slots, then the pairs' cross slots
             let words = c
                 .sides
                 .iter()
                 .map(|sd| {
-                    let (v, hb) = (format_ident!("{}", sd.var), format_ident!("{}", sd.hb));
-                    quote! { #v.#hb.slot() }
+                    let slot = &sd.slot;
+                    quote! { #slot.slot() }
                 })
                 .chain(c.pairs.iter().map(|p| {
                     let access = &p.access;
                     quote! { #access.slot() }
                 }));
-            let slots = quote! { [#(#words),*] };
             let cond = c.filter.clone().unwrap_or_else(|| quote! { true });
             quote! {
                 {
                     let __k: bool = #cond;
                     __s.keep[#cid].push(__k);
                     if __k {
-                        __s.rows[#cid].extend_from_slice(&#slots);
+                        __s.rows[#cid].extend_from_slice(&[#(#words),*]);
                     }
                 }
             }

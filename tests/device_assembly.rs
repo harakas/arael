@@ -2277,7 +2277,9 @@ fn assembles_and_solves_as_on_the_cpu<P: LmProblemInternals<f64> + RootProblem<f
     assert!(cpu < 0.05 * start, "{what} converges: {start} to {cpu}");
     for d in devices() {
         let (_, device, dx) = run(Some(&d));
-        assert!((device - cpu).abs() <= 1e-9 * cpu, "{what} {}: {device} against the CPU's {cpu}", label(&d));
+        // relative to the optimum's cost, or to the start's where the
+        // optimum's is rounding of zero
+        assert!((device - cpu).abs() <= 1e-9 * cpu + 1e-15 * start, "{what} {}: {device} against the CPU's {cpu}", label(&d));
         assert_close(&dx, &cpu_x, 1e-7, &format!("{what} {}: the solved parameters", label(&d)));
     }
 }
@@ -2297,6 +2299,414 @@ fn parent_owned_cross_blocks_assemble_and_solve_on_the_device_as_on_the_cpu() {
 #[test]
 fn cross_constraints_below_the_root_assemble_and_solve_on_the_device_as_on_the_cpu() {
     assembles_and_solves_as_on_the_cpu(|| own_block_net(9), "own blocks");
+}
+
+/// The mixed form's camera (a focal length) and point, each held near
+/// where it was seen.
+#[arael::model]
+#[arael(constraint(hb, { [(camm.f - camm.pf) * 0.5] }))]
+#[derive(Clone)]
+pub struct CamM {
+    pub f: Param<f64>,
+    pub pf: f64,
+    pub hb: SelfBlock<CamM>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(pointm.p.x - pointm.px) * 0.2, (pointm.p.y - pointm.py) * 0.2] }))]
+#[derive(Clone)]
+pub struct PointM {
+    pub p: Param<vect2<f64>>,
+    pub px: f64,
+    pub py: f64,
+    pub hb: SelfBlock<PointM>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(posem.t.x - posem.px) * 0.3, (posem.t.y - posem.py) * 0.3] }))]
+#[derive(Clone)]
+pub struct PoseM {
+    pub t: Param<vect2<f64>>,
+    pub px: f64,
+    pub py: f64,
+    pub hb: SelfBlock<PoseM>,
+}
+
+/// An observation of a point in an image: its own (point, pose) and
+/// (point, camera) tiles, the image's (pose, camera) tile shared by all
+/// the image's observations, the pose and the camera the image's refs.
+#[arael::model]
+#[arael(constraint([hb_point_pose, hb_point_cam, parent.hb_pose_cam], parent = image, guard = self.on,
+    loss = |s| loss_huber(s, 0.09), {
+    [image.cam.f * (point.p.x - image.pose.t.x) - imgobs.m.x,
+     image.cam.f * (point.p.y - image.pose.t.y) - imgobs.m.y]
+}))]
+#[derive(Clone)]
+pub struct ImgObs {
+    #[arael(ref = root.points)]
+    pub point: Ref<PointM>,
+    pub m: vect2<f64>,
+    pub on: bool,
+    pub hb_point_pose: CrossBlock<PointM, PoseM>,
+    pub hb_point_cam: CrossBlock<PointM, CamM>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct ImageM {
+    #[arael(ref = root.poses)]
+    pub pose: Ref<PoseM>,
+    #[arael(ref = root.cams)]
+    pub cam: Ref<CamM>,
+    pub obs: std::vec::Vec<ImgObs>,
+    pub hb_pose_cam: CrossBlock<PoseM, CamM>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct ImgWorld {
+    pub poses: refs::Vec<PoseM>,
+    pub cams: refs::Vec<CamM>,
+    pub points: refs::Vec<PointM>,
+    pub images: std::vec::Vec<ImageM>,
+}
+
+/// A pose holding its images: the observation reaches it two levels up.
+#[arael::model]
+#[arael(constraint(hb, { [(poseh.t.x - poseh.px) * 0.3, (poseh.t.y - poseh.py) * 0.3] }))]
+#[derive(Clone)]
+pub struct PoseH {
+    pub t: Param<vect2<f64>>,
+    pub px: f64,
+    pub py: f64,
+    pub w: f64,
+    pub images: std::vec::Vec<ImageH>,
+    pub hb: SelfBlock<PoseH>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct ImageH {
+    #[arael(ref = root.cams)]
+    pub cam: Ref<CamM>,
+    pub obs: std::vec::Vec<ObsH>,
+    pub hb_pose_cam: CrossBlock<PoseH, CamM>,
+}
+
+#[arael::model]
+#[arael(constraint([hb_point_pose, hb_point_cam, parent.hb_pose_cam], parent = image, parent.parent = pose,
+    guard = self.on, {
+    [image.cam.f * (point.p.x - pose.t.x) * pose.w - obsh.m.x,
+     image.cam.f * (point.p.y - pose.t.y) * pose.w - obsh.m.y]
+}))]
+#[derive(Clone)]
+pub struct ObsH {
+    #[arael(ref = root.points)]
+    pub point: Ref<PointM>,
+    pub m: vect2<f64>,
+    pub on: bool,
+    pub hb_point_pose: CrossBlock<PointM, PoseH>,
+    pub hb_point_cam: CrossBlock<PointM, CamM>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct PoseWorld {
+    pub poses: refs::Vec<PoseH>,
+    pub cams: refs::Vec<CamM>,
+    pub points: refs::Vec<PointM>,
+}
+
+/// The truth of the mixed scenes: six poses, three cameras, twelve points.
+fn mixed_truth() -> (Vec<(f64, f64)>, Vec<f64>, Vec<(f64, f64)>) {
+    let poses = (0..6).map(|i| (0.4 * i as f64, -0.2 * i as f64 + 0.1)).collect();
+    let cams = vec![1.5, 0.8, 1.2];
+    let points = (0..12).map(|k| (1.0 + 0.3 * (k % 4) as f64, 0.5 - 0.25 * (k / 4) as f64)).collect();
+    (poses, cams, points)
+}
+
+/// The images of the mixed scenes, (pose, camera) pairs; pose 4 through
+/// camera 1 an image of no observations. Every image sees every point but
+/// every seventh, the measurements the truth plus noise, some past the
+/// Huber knee; every fifth observation guarded off.
+fn mixed_images() -> Vec<(usize, usize, Vec<(usize, (f64, f64), bool)>)> {
+    let (tp, tc, tk) = mixed_truth();
+    let mut rng = Lcg(21);
+    let mut n = 0;
+    let mut images = Vec::new();
+    for i in 0..tp.len() {
+        for j in [i % 3, (i + 1) % 3] {
+            let obs = (0..tk.len())
+                .filter(|_| !(i == 4 && j == 1))
+                .filter_map(|k| {
+                    n += 1;
+                    (n % 7 != 0).then(|| {
+                        let m = (tc[j] * (tk[k].0 - tp[i].0) + 0.05 * rng.uniform(), tc[j] * (tk[k].1 - tp[i].1) + 0.05 * rng.uniform());
+                        (k, m, n % 5 != 2)
+                    })
+                })
+                .collect();
+            images.push((i, j, obs));
+        }
+    }
+    images
+}
+
+fn img_world() -> ImgWorld {
+    let (tp, tc, tk) = mixed_truth();
+    let mut poses = refs::Vec::new();
+    for (i, &(x, y)) in tp.iter().enumerate() {
+        poses.push(PoseM { t: Param::new(vect2::new(x + 0.07, y - 0.05 * i as f64)), px: x, py: y, hb: SelfBlock::new() });
+    }
+    let mut cams = refs::Vec::new();
+    for &f in &tc {
+        cams.push(CamM { f: Param::new(f * 1.1), pf: f, hb: SelfBlock::new() });
+    }
+    let mut points = refs::Vec::new();
+    for (k, &(x, y)) in tk.iter().enumerate() {
+        points.push(PointM { p: Param::new(vect2::new(x - 0.06, y + 0.04 * k as f64)), px: x, py: y, hb: SelfBlock::new() });
+    }
+    let images = mixed_images()
+        .into_iter()
+        .map(|(i, j, obs)| ImageM {
+            pose: poses.ref_at(i),
+            cam: cams.ref_at(j),
+            obs: obs
+                .into_iter()
+                .map(|(k, m, on)| ImgObs { point: points.ref_at(k), m: vect2::new(m.0, m.1), on, hb_point_pose: CrossBlock::new(), hb_point_cam: CrossBlock::new() })
+                .collect(),
+            hb_pose_cam: CrossBlock::new(),
+        })
+        .collect();
+    ImgWorld { poses, cams, points, images }
+}
+
+fn pose_world() -> PoseWorld {
+    let (tp, tc, tk) = mixed_truth();
+    let mut cams = refs::Vec::new();
+    for &f in &tc {
+        cams.push(CamM { f: Param::new(f * 1.1), pf: f, hb: SelfBlock::new() });
+    }
+    let mut points = refs::Vec::new();
+    for (k, &(x, y)) in tk.iter().enumerate() {
+        points.push(PointM { p: Param::new(vect2::new(x - 0.06, y + 0.04 * k as f64)), px: x, py: y, hb: SelfBlock::new() });
+    }
+    let mut poses = refs::Vec::new();
+    for (i, &(x, y)) in tp.iter().enumerate() {
+        poses.push(PoseH { t: Param::new(vect2::new(x + 0.07, y - 0.05 * i as f64)), px: x, py: y, w: 1.0, images: std::vec::Vec::new(), hb: SelfBlock::new() });
+    }
+    for (i, j, obs) in mixed_images() {
+        let image = ImageH {
+            cam: cams.ref_at(j),
+            obs: obs
+                .into_iter()
+                .map(|(k, m, on)| ObsH { point: points.ref_at(k), m: vect2::new(m.0, m.1), on, hb_point_pose: CrossBlock::new(), hb_point_cam: CrossBlock::new() })
+                .collect(),
+            hb_pose_cam: CrossBlock::new(),
+        };
+        poses[i].images.push(image);
+    }
+    PoseWorld { poses, cams, points }
+}
+
+/// The mixed form: own cross blocks per observation, the image's shared
+/// one, the entities through the instance's ref, the image's refs and the
+/// pose two levels up.
+#[test]
+fn the_mixed_form_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    let s = img_world();
+    let shape = arael::__gpu::DeviceRoot::<f64>::device_shape(&s);
+    let obs = shape.constraints.iter().find(|k| k.sides.len() == 3).expect("the observation's three sides");
+    assert_eq!(obs.pairs.len(), 3);
+    assembles_and_solves_as_on_the_cpu(img_world, "the image's refs");
+    assembles_and_solves_as_on_the_cpu(pose_world, "the pose two levels up");
+}
+
+/// A sample of a line `y = a x + b` whose parameters are the root's: the
+/// sample writes the root's self block, the root the one entity of its
+/// table.
+#[arael::model]
+#[arael(constraint(root.hb, guard = self.ok, loss = |s| loss_huber(s, 0.01), { [sample.y - root.a * sample.x - root.b] }))]
+#[derive(Clone)]
+pub struct Sample {
+    pub x: f64,
+    pub y: f64,
+    pub ok: bool,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct LineFit {
+    pub a: Param<f64>,
+    pub b: Param<f64>,
+    pub hb: SelfBlock<LineFit>,
+    pub samples: std::vec::Vec<Sample>,
+}
+
+/// A sample of its curve, which holds the parameters: the sample writes
+/// its parent's self block.
+#[arael::model]
+#[arael(constraint(parent.hb, { [csample.y - (curve.m * csample.x + curve.c)] }))]
+#[derive(Clone)]
+pub struct CSample {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct Curve {
+    pub m: Param<f64>,
+    pub c: Param<f64>,
+    pub samples: std::vec::Vec<CSample>,
+    pub hb: SelfBlock<Curve>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct Curves {
+    pub curves: refs::Vec<Curve>,
+}
+
+/// One self-constrained type held in two root collections: one entity
+/// table over both, walked in their order.
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct TwoHomes {
+    pub near: refs::Vec<NodeP>,
+    pub far: refs::Vec<NodeP>,
+}
+
+fn line_fit() -> LineFit {
+    let mut rng = Lcg(31);
+    let samples = (0..40)
+        .map(|i| {
+            let x = 0.1 * i as f64;
+            let out = if i % 9 == 4 { 1.0 } else { 0.0 };
+            Sample { x, y: 2.0 * x + 1.0 + 0.02 * rng.uniform() + out, ok: i % 11 != 7 }
+        })
+        .collect();
+    LineFit { a: Param::new(0.3), b: Param::new(-0.2), hb: SelfBlock::new(), samples }
+}
+
+fn curves() -> Curves {
+    let mut rng = Lcg(32);
+    let mut curves = refs::Vec::new();
+    for k in 0..5 {
+        let (m, c) = (0.5 * k as f64 - 1.0, 0.3 * k as f64);
+        let samples = (0..8).map(|i| CSample { x: 0.2 * i as f64, y: m * 0.2 * i as f64 + c + 0.01 * rng.uniform() }).collect();
+        curves.push(Curve { m: Param::new(m + 0.2), c: Param::new(c - 0.1), samples, hb: SelfBlock::new() });
+    }
+    Curves { curves }
+}
+
+fn two_homes() -> TwoHomes {
+    let mut rng = Lcg(33);
+    let (mut near, mut far) = (refs::Vec::new(), refs::Vec::new());
+    for k in 0..20 {
+        let (px, py) = (k as f64, 0.5 * k as f64);
+        let p = NodeP { x: Param::new(px + 0.1 * rng.uniform()), y: Param::new(py + 0.1 * rng.uniform()), px, py, hb: SelfBlock::new() };
+        if k % 3 == 0 { far.push(p) } else { near.push(p) };
+    }
+    TwoHomes { near, far }
+}
+
+/// A pose held near where it was seen.
+#[arael::model]
+#[arael(constraint(hb_pose, { [(poser.pos.x - poser.px) * 0.5, (poser.pos.y - poser.py) * 0.5] }))]
+#[derive(Clone)]
+pub struct PoseR {
+    pub pos: Param<vect2<f64>>,
+    pub px: f64,
+    pub py: f64,
+    pub hb_pose: SelfBlock<PoseR>,
+}
+
+/// A sighting of a landmark's anchor from a pose, through the root's
+/// offset: the pose's self block is the primary, the (pose, root) pair the
+/// sighting's own cross block, the landmark's anchor parent data.
+#[arael::model]
+#[arael(constraint([pose.hb_pose, hb_root], parent = lm, {
+    let d = lm.anchor - pose.pos;
+    [(d.x + offsetroot.offset - frineo.dx) * offsetroot.isigma,
+     (d.y + offsetroot.offset - frineo.dy) * offsetroot.isigma]
+}))]
+#[derive(Clone)]
+pub struct FrineO {
+    #[arael(ref = root.poses)]
+    pub pose: Ref<PoseR>,
+    pub dx: f64,
+    pub dy: f64,
+    pub hb_root: CrossBlock<PoseR, OffsetRoot>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+pub struct LandmarkO {
+    pub anchor: vect2<f64>,
+    pub frines: std::vec::Vec<FrineO>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct OffsetRoot {
+    pub poses: refs::Vec<PoseR>,
+    pub landmarks: refs::Vec<LandmarkO>,
+    pub offset: Param<f64>,
+    pub isigma: f64,
+    pub hb: SelfBlock<OffsetRoot>,
+}
+
+fn offset_root() -> OffsetRoot {
+    let mut rng = Lcg(34);
+    let mut poses = refs::Vec::new();
+    let truth: Vec<(f64, f64)> = (0..8).map(|k| (k as f64, (0.4 * k as f64).sin())).collect();
+    for &(x, y) in &truth {
+        poses.push(PoseR { pos: Param::new(vect2::new(x + 0.1 * rng.uniform(), y + 0.1 * rng.uniform())), px: x, py: y, hb_pose: SelfBlock::new() });
+    }
+    let mut landmarks = refs::Vec::new();
+    for j in 0..4 {
+        let anchor = vect2::new(2.0 * j as f64 + 0.5, 3.0);
+        let frines = (0..8)
+            .filter(|k| (k + j) % 3 != 0)
+            .map(|k| FrineO {
+                pose: poses.ref_at(k),
+                dx: anchor.x - truth[k].0 + 0.25 + 0.01 * rng.uniform(),
+                dy: anchor.y - truth[k].1 + 0.25 + 0.01 * rng.uniform(),
+                hb_root: CrossBlock::new(),
+            })
+            .collect();
+        landmarks.push(LandmarkO { anchor, frines });
+    }
+    OffsetRoot { poses, landmarks, offset: Param::new(0.0), isigma: 3.0, hb: SelfBlock::new() }
+}
+
+/// Data-only instances writing the root's self block and a parent's, and
+/// an entity type held in two collections: the device assembles as the CPU
+/// does and solves to its optimum.
+#[test]
+fn root_and_parent_self_blocks_assemble_and_solve_on_the_device_as_on_the_cpu() {
+    assert!(line_fit().samples.iter().any(|s| !s.ok));
+    assembles_and_solves_as_on_the_cpu(line_fit, "the root's self block");
+    assembles_and_solves_as_on_the_cpu(curves, "the parent's self block");
+    assembles_and_solves_as_on_the_cpu(two_homes, "a type in two collections");
+}
+
+/// A remote primary block with an own cross block to the root, the root a
+/// side of the constraint (its offset a parameter), the parent's data read
+/// by name.
+#[test]
+fn the_root_as_a_side_assembles_and_solves_on_the_device_as_on_the_cpu() {
+    let s = offset_root();
+    let shape = arael::__gpu::DeviceRoot::<f64>::device_shape(&s);
+    assert!(shape.constraints.iter().any(|k| k.sides.len() == 2 && k.pairs.len() == 1), "the sighting's pose and root");
+    assembles_and_solves_as_on_the_cpu(offset_root, "the root as a side");
 }
 
 /// A scale prior reading a `ScaledTransformParam`'s scale, which the CPU

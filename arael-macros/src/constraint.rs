@@ -3437,6 +3437,25 @@ struct ParentCross {
     parent_refs: Option<(String, String)>,
 }
 
+/// One block write of a constraint's rows: the assembly emits it per row
+/// over the row's partials, the device head reads the constraint's sides
+/// and cross tiles from the list of them. `target` is the block's place in
+/// the assembly loop (`self.nodes[__ei_a].hb`, `__frine.hb`, `__seg0.hb`),
+/// built from names the device's instance walk binds as well.
+enum BlockWrite {
+    /// The partials at `start..start + count` into the self block `field`
+    /// of an entity of type `ty`: its gradient and diagonal tile. `place`
+    /// is the block in the instance walk: through the ref's bound local
+    /// for an entity reached by a ref (`a.hb`), else `target`.
+    Own { ty: String, field: String, target: TokenStream2, place: TokenStream2, start: usize, count: usize },
+    /// The partials of spans `a` and `b` into the CrossBlock `field` of
+    /// `holder`.
+    Cross { holder: String, field: String, target: TokenStream2, a: (usize, usize), b: (usize, usize) },
+    /// The cross pairs of the spans into the solve's list, written when two
+    /// of them are live.
+    Coo { spans: Vec<(usize, usize)> },
+}
+
 /// The mixed parent-cross form: a bracketed block list holding the
 /// constraint's own CrossBlocks together with CrossBlocks owned by the
 /// containing parent, each shared by every instance the parent holds.
@@ -7060,6 +7079,141 @@ pub fn generate_root_methods(
             Some(quote! { #access.#block_ident })
         } else { None };
 
+        // The constraint's block writes, in the order the rows emit them.
+        let self_block_of = |ty: &str| registry_lookup(ty).and_then(|l| l.self_block_field.clone());
+        let block_ident_of = |f: &str| syn::Ident::new(f, proc_macro2::Span::call_site());
+        let mut plan: Vec<BlockWrite> = Vec::new();
+        if is_triplet {
+            // `coo`: per-entity SelfBlock writes grad + within-entity
+            // diagonals; the COO list gets only cross-entity pairs.
+            for (var_id, type_id, start, count) in &triplet_entities {
+                let ty = type_id.to_string();
+                let hb = self_block_of(&ty).ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    format!("type `{}` must declare a `SelfBlock<Self>` field (required as a `coo` participant)", type_id)))?;
+                let (hb_ident, access) = (block_ident_of(&hb), entity_access_expr(&var_id.to_string())?);
+                plan.push(BlockWrite::Own { ty, field: hb, target: quote! { #access.#hb_ident }, place: quote! { #var_id.#hb_ident }, start: *start, count: *count });
+            }
+            plan.push(BlockWrite::Coo { spans: triplet_entities.iter().map(|(_, _, s, c)| (*s, *c)).collect() });
+        } else if is_multi_cross {
+            // Multi-cross: per-entity SelfBlock writes (the root through
+            // `self`, a remote primary through its target path, after the
+            // others) and one write per declared CrossBlock, which together
+            // cover every unordered pair of entities (verified by the
+            // routing build).
+            let root_ident_str = root_name.to_string();
+            let remote_target_type: Option<String> = if is_remote_block {
+                remote_block_info.as_ref().map(|(_, _, t)| t.clone())
+            } else { None };
+            let mut remote_write: Option<BlockWrite> = None;
+            for (var_id, type_id, start, count) in &triplet_entities {
+                let ty = type_id.to_string();
+                let (start, count) = (*start, *count);
+                if ty == root_ident_str {
+                    let hb = self_block_of(&ty).ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                        format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
+                    let hb_ident = block_ident_of(&hb);
+                    plan.push(BlockWrite::Own { ty, field: hb, target: quote! { self.#hb_ident }, place: quote! { self.#hb_ident }, start, count });
+                } else if remote_target_type.as_deref() == Some(ty.as_str()) {
+                    let rtw = remote_target_write.as_ref().unwrap();
+                    let field = self_block_of(&ty).unwrap_or_default();
+                    let rv = block_ident_of(&remote_block_info.as_ref().unwrap().0);
+                    remote_write = Some(BlockWrite::Own { ty, field, target: quote! { #rtw }, place: quote! { #rv.#block_ident }, start, count });
+                } else {
+                    let hb = self_block_of(&ty).ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                        format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
+                    let (hb_ident, access) = (block_ident_of(&hb), entity_access_expr(&var_id.to_string())?);
+                    plan.push(BlockWrite::Own { ty, field: hb, target: quote! { #access.#hb_ident }, place: quote! { #var_id.#hb_ident }, start, count });
+                }
+            }
+            plan.extend(remote_write);
+            for route in &multi_cross_routing {
+                let block = &route.block_ident;
+                // A parent-owned tile is written through the parent prefix
+                // binding, a field disjoint from the iterated collection.
+                let (target, holder): (TokenStream2, String) = if route.parent_owned {
+                    let ctn = nested_container(&cross_prefix);
+                    let pt = find_containing_parent(&root_name.to_string(), &sc.struct_name)
+                        .unwrap_or_else(|| sc.struct_name.clone());
+                    (quote! { #ctn.#block }, pt)
+                } else {
+                    (quote! { __frine.#block }, sc.struct_name.clone())
+                };
+                plan.push(BlockWrite::Cross {
+                    holder, field: block.to_string(), target,
+                    a: (route.a_start, route.a_count), b: (route.b_start, route.b_count),
+                });
+            }
+        } else if is_remote_block {
+            let rtw = remote_target_write.as_ref().unwrap();
+            let rty = remote_block_info.as_ref().unwrap().2.clone();
+            let rv = block_ident_of(&remote_block_info.as_ref().unwrap().0);
+            plan.push(BlockWrite::Own { ty: rty, field: block_ident.to_string(), target: quote! { #rtw }, place: quote! { #rv.#block_ident }, start: 0, count: n_params });
+        } else if is_self_block && is_root_joined {
+            // Root-coupled self-primary: [hb, root.hbt] or a
+            // `root.<selfblock>` primary, the partials [self..., joined...],
+            // either span possibly absent (a param-less entity has no self
+            // entry; `root.<selfblock>` never has one). Up to three writes
+            // preserve every J^T J pair: the self block, the joined
+            // entity's block (a field disjoint from the iterated
+            // collection), and for `[hb, coo]` the (self, joined) pairs.
+            let self_entry = triplet_entities.iter().find(|(v, _, _, _)| *v == "__item").cloned();
+            let joined_entry = triplet_entities.iter().find(|(v, _, _, _)| *v != "__item").cloned();
+            let joined_hb = self_block_of(&joined_type)
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    format!("`{}` must declare a `SelfBlock<Self>` field (required as coupled participant)", joined_type)))?;
+            if let Some(named) = &root_self_primary
+                && *named != joined_hb {
+                return Err(syn::Error::new_spanned(&struct_ident,
+                    format!("`root.{}` does not name the root's `SelfBlock<Self>` \
+                             field (which is `{}`)", named, joined_hb)));
+            }
+            let joined_hb_ident = block_ident_of(&joined_hb);
+            if let Some((_, _, s, c)) = &self_entry {
+                plan.push(BlockWrite::Own { ty: a_type.clone(), field: block_ident.to_string(), target: quote! { __item.#block_ident }, place: quote! { __item.#block_ident }, start: *s, count: *c });
+            }
+            if let Some((_, _, s, c)) = &joined_entry {
+                plan.push(BlockWrite::Own { ty: joined_type.clone(), field: joined_hb.clone(), target: quote! { #joined_accessor.#joined_hb_ident }, place: quote! { #joined_accessor.#joined_hb_ident }, start: *s, count: *c });
+            }
+            let owns_coo = root_triplet_field.is_some() || parent_triplet.is_some();
+            if let (true, Some((_, _, ss, sc_)), Some((_, _, js, jc))) = (owns_coo, &self_entry, &joined_entry) {
+                plan.push(BlockWrite::Coo { spans: vec![(*ss, *sc_), (*js, *jc)] });
+            }
+        } else if is_self_block {
+            plan.push(BlockWrite::Own { ty: a_type.clone(), field: block_ident.to_string(), target: quote! { __item.#block_ident }, place: quote! { __item.#block_ident }, start: 0, count: n_params });
+        } else {
+            // CrossBlock: A's and B's self blocks take their gradients and
+            // diagonals, the cross block the A-B rectangle: the
+            // constraint's own block, or the shared parent-owned block
+            // reached through the prefix binding (a field disjoint from the
+            // iterated collection, so the borrow splits cleanly).
+            let a_hb_name = self_block_of(&a_type).unwrap_or_default();
+            let b_ty = b_type.clone().unwrap_or_default();
+            let b_hb_name = self_block_of(&b_ty).unwrap_or_default();
+            let (a_target, b_target) = (a_write_target.clone().unwrap(), b_write_target.clone().unwrap());
+            // in the walk: a ref's bound local (A of a nested cross
+            // constraint is the parent, `__item`)
+            let (a_hb_ident, b_hb_ident) = (block_ident_of(&a_hb_name), block_ident_of(&b_hb_name));
+            let a_place = if is_root_level_cross {
+                let v = a_var_ident_for_block.as_ref().unwrap();
+                quote! { #v.#a_hb_ident }
+            } else {
+                a_target.clone()
+            };
+            let b_var = b_var_ident_for_block.as_ref().unwrap();
+            plan.push(BlockWrite::Own { ty: a_type.clone(), field: a_hb_name, target: a_target, place: a_place, start: 0, count: a_param_count });
+            plan.push(BlockWrite::Own { ty: b_ty, field: b_hb_name, target: b_target, place: quote! { #b_var.#b_hb_ident }, start: a_param_count, count: b_param_count });
+            let (cross_target, cross_holder): (TokenStream2, String) = if let Some(pc) = &parent_cross {
+                let ctn = nested_container(&cross_prefix);
+                (quote! { #ctn.#block_ident }, pc.parent_type.clone())
+            } else {
+                (quote! { __frine.#block_ident }, sc.struct_name.clone())
+            };
+            plan.push(BlockWrite::Cross {
+                holder: cross_holder, field: block_ident.to_string(), target: cross_target,
+                a: (0, a_param_count), b: (a_param_count, b_param_count),
+            });
+        }
+
         // The dead-branch condition's own statements; everything from here
         // to the deferred writes is skipped when the test is off.
         if let Some((q_stmts, _)) = &guard_code {
@@ -7272,235 +7426,29 @@ pub fn generate_root_methods(
                         }
                     }
                 };
-                let writes: TokenStream2 = if is_triplet {
-                    // `coo`: per-entity SelfBlock writes grad + within-entity
-                    // diagonals; the COO list gets only cross-entity pairs.
-                    let mut triplet_calls: Vec<TokenStream2> = Vec::new();
-                    for (var_id, type_id, start, count) in &triplet_entities {
-                        let hb = registry_lookup(&type_id.to_string())
-                            .and_then(|l| l.self_block_field.clone())
-                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                                format!("type `{}` must declare a `SelfBlock<Self>` field (required as a `coo` participant)", type_id)))?;
-                        let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                        if span_zero(*start, *count) { continue; }
-                        // Write through a fresh temporary exclusive borrow of the
-                        // entity's owning collection slot.
-                        let access = entity_access_expr(&var_id.to_string())?;
-                        let arr = store_array_ident(&type_id.to_string(), &hb);
-                        triplet_calls.push(self_write(&arr, quote! { #access.#hb_ident }, *start, *count));
-                    }
-                    // Cross pairs need two live spans: with <= 1 nonzero span
-                    // every cross product is structurally zero.
-                    let nonzero_spans = triplet_entities.iter()
-                        .filter(|(_, _, start, count)| !span_zero(*start, *count))
-                        .count();
-                    let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
-                        __store.__coo.#m_cross(
-                            #w_only
-                            &__all_idx,
-                            &[#(#dr_f64),*],
-                            &__entity_offsets,
-                        );
-                    }};
-                    quote! {
-                        #(#triplet_calls)*
-                        #cross_call
-                    }
-                } else if is_multi_cross {
-                    // Multi-cross: per-entity SelfBlock writes (same as triplet)
-                    // + one CrossBlock.add_residual_cross per declared CrossBlock
-                    // field. Every unordered pair of entities is covered by
-                    // exactly one CrossBlock (verified by routing build).
-                    //
-                    // Three per-entity emission modes:
-                    //   - Root entity (type matches root_name): write via
-                    //     (&mut *self).<root_hb>.add_residual — no Ref cast.
-                    //   - Remote-block primary (is_remote_block && type matches
-                    //     the remote target type): skip the per-entity call;
-                    //     the __target_block.add_residual below (inside is_remote
-                    //     branch) handles pose's SelfBlock.
-                    //   - Regular Ref entity: unsafe *const→*mut cast pattern.
-                    let root_ident_str = root_name.to_string();
-                    let remote_target_type: Option<String> = if is_remote_block {
-                        remote_block_info.as_ref().map(|(_, _, t)| t.clone())
-                    } else { None };
-                    let mut self_block_calls: Vec<TokenStream2> = Vec::new();
-                    let mut remote_self_block_call: Option<TokenStream2> = None;
-                    for (var_id, type_id, start, count) in &triplet_entities {
-                        if span_zero(*start, *count) { continue; }
-                        let type_id_str = type_id.to_string();
-                        if type_id_str == root_ident_str {
-                            // Root: its block is a root field, disjoint from the
-                            // iterated collection -- write directly through self.
-                            let hb = registry_lookup(&type_id_str)
-                                .and_then(|l| l.self_block_field.clone())
-                                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                                    format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
-                            let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                            let arr = store_array_ident(&type_id_str, &hb);
-                            self_block_calls.push(self_write(&arr, quote! { self.#hb_ident }, *start, *count));
-                            continue;
-                        }
-                        if remote_target_type.as_deref() == Some(type_id_str.as_str()) {
-                            // Remote primary: write through the remote target path.
-                            let rtw = remote_target_write.as_ref().unwrap();
-                            let rhb = registry_lookup(&type_id_str)
-                                .and_then(|l| l.self_block_field.clone())
-                                .unwrap_or_default();
-                            let arr = store_array_ident(&type_id_str, &rhb);
-                            remote_self_block_call = Some(self_write(&arr, quote! { #rtw }, *start, *count));
-                            // Written above, in entity order.
-                            continue;
-                        }
-                        let hb = registry_lookup(&type_id_str)
-                            .and_then(|l| l.self_block_field.clone())
-                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                                format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
-                        let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                        let access = entity_access_expr(&var_id.to_string())?;
-                        let arr = store_array_ident(&type_id_str, &hb);
-                        self_block_calls.push(self_write(&arr, quote! { #access.#hb_ident }, *start, *count));
-                    }
-                    let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
-                    for route in &multi_cross_routing {
-                        if span_zero(route.a_start, route.a_count)
-                            || span_zero(route.b_start, route.b_count) { continue; }
-                        let block = &route.block_ident;
-                        // A parent-owned tile is written through the parent
-                        // prefix binding, a field disjoint from the iterated
-                        // collection.
-                        let (target, holder): (TokenStream2, String) = if route.parent_owned {
-                            let ctn = nested_container(&cross_prefix);
-                            let pt = find_containing_parent(&root_name.to_string(), &sc.struct_name)
-                                .unwrap_or_else(|| sc.struct_name.clone());
-                            (quote! { #ctn.#block }, pt)
+                // The row's writes, as the plan lists them: a self block
+                // write over an entity's span, a cross tile write over two,
+                // the `coo` pairs when two spans are live.
+                let writes: TokenStream2 = plan.iter().map(|w| match w {
+                    BlockWrite::Own { ty, field, target, start, count, .. } =>
+                        self_write(&store_array_ident(ty, field), target.clone(), *start, *count),
+                    BlockWrite::Cross { holder, field, target, a, b } =>
+                        cross_write(&store_array_ident(holder, field), target.clone(), a.0, a.1, b.0, b.1),
+                    BlockWrite::Coo { spans } => {
+                        if spans.iter().filter(|(s, c)| !span_zero(*s, *c)).count() <= 1 {
+                            quote! {}
                         } else {
-                            (quote! { __frine.#block }, sc.struct_name.clone())
-                        };
-                        let arr = store_array_ident(&holder, &block.to_string());
-                        cross_block_calls.push(cross_write(&arr, target,
-                            route.a_start, route.a_count, route.b_start, route.b_count));
-                    }
-                    quote! {
-                        #(#self_block_calls)*
-                        #remote_self_block_call
-                        #(#cross_block_calls)*
-                    }
-                } else if is_remote_block {
-                    let rtw = remote_target_write.as_ref().unwrap();
-                    let rty = remote_block_info.as_ref().unwrap().2.clone();
-                    let arr = store_array_ident(&rty, &block_ident.to_string());
-                    self_write(&arr, quote! { #rtw }, 0, n_params)
-                } else if is_self_block {
-                    if is_root_joined {
-                        // Root-coupled self-primary: [hb, root.hbt] or a
-                        // `root.<selfblock>` primary. dr_f64 is
-                        // [dr_self..., dr_root...], and either span may be
-                        // absent (a param-less entity has no self entry;
-                        // `root.<selfblock>` never has one). Up to three
-                        // writes preserve every J^T J pair:
-                        //   1. __item.<hb_self>.add_residual  -- (self, self)
-                        //      diagonal + grad.
-                        //   2. self.<hb_root>.add_residual -- (root, root)
-                        //      diagonal + grad (root fields are disjoint from
-                        //      the iterated collection).
-                        //   3. the COO write -- the (self, root) across-entity
-                        //      pairs; only for `[hb, coo]` and when both spans
-                        //      live.
-                        let self_entry = triplet_entities.iter()
-                            .find(|(v, _, _, _)| *v == "__item").cloned();
-                        let root_entry = triplet_entities.iter()
-                            .find(|(v, _, _, _)| *v != "__item").cloned();
-                        let joined_hb = registry_lookup(&joined_type)
-                            .and_then(|l| l.self_block_field.clone())
-                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                                format!("`{}` must declare a `SelfBlock<Self>` field (required as coupled participant)", joined_type)))?;
-                        if let Some(named) = &root_self_primary
-                            && named.to_string() != joined_hb {
-                            return Err(syn::Error::new_spanned(&struct_ident,
-                                format!("`root.{}` does not name the root's `SelfBlock<Self>` \
-                                         field (which is `{}`)", named, joined_hb)));
-                        }
-                        let joined_hb_ident = syn::Ident::new(&joined_hb, proc_macro2::Span::call_site());
-                        let self_call = match &self_entry {
-                            Some((_, _, s_start, s_count)) => {
-                                let arr = store_array_ident(&a_type, &block_ident.to_string());
-                                self_write(&arr, quote! { __item.#block_ident }, *s_start, *s_count)
+                            quote! {
+                                __store.__coo.#m_cross(
+                                    #w_only
+                                    &__all_idx,
+                                    &[#(#dr_f64),*],
+                                    &__entity_offsets,
+                                );
                             }
-                            None => quote! {},
-                        };
-                        let root_call = match &root_entry {
-                            Some((_, _, r_start, r_count)) => {
-                                let arr = store_array_ident(&joined_type, &joined_hb);
-                                self_write(&arr, quote! { #joined_accessor.#joined_hb_ident }, *r_start, *r_count)
-                            }
-                            None => quote! {},
-                        };
-                        // The (self, joined) cross pairs need `coo` in the
-                        // list -- joined to the root or to the parent -- and
-                        // both spans live. The entries go to the store's list.
-                        let owned_triplet: Option<syn::Ident> = root_triplet_field.clone()
-                            .or_else(|| parent_triplet.as_ref().map(|(i, _)| i.clone()));
-                        let cross_call = match (&owned_triplet, &self_entry, &root_entry) {
-                            (Some(_), Some((_, _, ss, sc_)), Some((_, _, rs, rc)))
-                                if !span_zero(*ss, *sc_) && !span_zero(*rs, *rc) => quote! {
-                                    __store.__coo
-                                        .#m_cross(
-                                            #w_only
-                                            &__all_idx,
-                                            &[#(#dr_f64),*],
-                                            &__entity_offsets,
-                                        );
-                                },
-                            _ => quote! {},
-                        };
-                        quote! {
-                            #self_call
-                            #root_call
-                            #cross_call
                         }
-                    } else {
-                        let arr = store_array_ident(&a_type, &block_ident.to_string());
-                        self_write(&arr, quote! { __item.#block_ident }, 0, n_params)
                     }
-                } else {
-                    // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
-                    // (next b_param_count). Three calls: A's SelfBlock gets
-                    // grad[A] + H[A,A] diagonal; B's SelfBlock same for B; the
-                    // cross block holds only the A-B rectangular cross Hessian.
-                    // Each write takes a fresh temporary exclusive borrow.
-                    let a_target = a_write_target.as_ref().unwrap();
-                    let b_target = b_write_target.as_ref().unwrap();
-                    let a_hb_name = registry_lookup(&a_type)
-                        .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
-                    let b_hb_name = b_type.as_ref().and_then(|b| registry_lookup(b))
-                        .and_then(|l| l.self_block_field.clone()).unwrap_or_default();
-                    let a_arr = store_array_ident(&a_type, &a_hb_name);
-                    let b_arr = store_array_ident(b_type.as_deref().unwrap_or(""), &b_hb_name);
-                    let a_call = self_write(&a_arr, quote! { #a_target }, 0, a_param_count);
-                    let b_call = self_write(&b_arr, quote! { #b_target }, a_param_count, b_param_count);
-                    // The cross tile: the constraint's own block, or the shared
-                    // parent-owned block reached through the prefix binding
-                    // (disjoint field from the iterated collection, so the
-                    // borrow splits cleanly).
-                    let (cross_target, cross_holder): (TokenStream2, String) =
-                        if let Some(pc) = &parent_cross {
-                            let ctn = nested_container(&cross_prefix);
-                            (quote! { #ctn.#block_ident }, pc.parent_type.clone())
-                        } else {
-                            (quote! { __frine.#block_ident }, sc.struct_name.clone())
-                        };
-                    let cross_arr = store_array_ident(&cross_holder, &block_ident.to_string());
-                    let cross_call = cross_write(&cross_arr, cross_target,
-                        0, a_param_count, a_param_count, b_param_count);
-                    // The partials through the entities' slots, the cross tile
-                    // on the constraint's.
-                    quote! {
-                        #a_call
-                        #b_call
-                        #cross_call
-                    }
-                };
+                }).collect();
                 variant_writes.push(writes);
             }
             // One variant: its writes as they are. Several: a `match` on
@@ -7879,32 +7827,138 @@ pub fn generate_root_methods(
             })
             .transpose()?;
 
-        // the device covers root-level cross constraints, root-level
-        // constraints of one entity reached through a ref, and constraints
-        // of an entity of a root-level collection on itself
-        let remote_at_root = is_remote_block && matches!(entity_location, EntityLocation::RootSelf) && !is_multi_cross && !is_triplet;
-        let self_at_root = is_self_block && !is_triplet && !is_multi_cross
-            && root_self_primary.is_none() && parent_self_primary.is_none()
-            && matches!(entity_location, EntityLocation::Collection { .. })
-            && containing_paths.len() == 1 && containing_paths[0].len() == 1;
-        // a cross constraint in a collection of an entity of a root-level
-        // collection, the entity one of its two sides (`parent = lm`)
-        let nested_at_root = !is_remote_block && !is_self_block && !is_triplet && !is_multi_cross
-            && !is_root_level_cross && parent_cross.is_none() && mixed.is_none()
-            && matches!(entity_location, EntityLocation::Collection { .. });
-        // a multi-cross constraint in a root-level collection over its own
-        // refs and its own cross blocks
-        let multi_at_root = is_multi_cross && !is_triplet && !is_remote_block && mixed.is_none()
-            && !has_root_entity && cross_prefix.is_empty()
-            && multi_cross_routing.iter().all(|r| !r.parent_owned);
-        if device_unsupported.is_none()
-            && !remote_at_root
-            && !self_at_root
-            && !nested_at_root
-            && !multi_at_root
-            && (is_remote_block || is_self_block || is_triplet || is_multi_cross || !is_root_level_cross)
-        {
-            device_unsupported = Some(format!("{}: only root-level cross constraints and root-level constraints of one entity have a device form yet", sc.struct_name));
+        // The device form, read off the plan whatever the constraint's
+        // form: a side per entity with parameters the rows write into a
+        // self block of, in the order of the partials; a pair per cross
+        // tile between two of them. The instances are walked along the
+        // instance type's containment path, the body binding the names the
+        // plan's targets and the guard read.
+        if device_unsupported.is_none() {
+            let built = (|| -> Result<(crate::device::DevConstraint, String, crate::device::DevGroup), String> {
+                if arm_writes.is_some() {
+                    return Err("a select whose arms write apart has no device form yet".into());
+                }
+                if plan.iter().any(|w| matches!(w, BlockWrite::Coo { .. })) {
+                    return Err("a `coo` pair has no device form yet".into());
+                }
+                let mut owns: Vec<(&String, &String, &TokenStream2, usize, usize)> = plan
+                    .iter()
+                    .filter_map(|w| match w {
+                        BlockWrite::Own { ty, field, place, start, count, .. } if *count > 0 => Some((ty, field, place, *start, *count)),
+                        _ => None,
+                    })
+                    .collect();
+                owns.sort_by_key(|o| o.3);
+                let mut at = 0;
+                for o in &owns {
+                    if o.3 != at {
+                        return Err(format!("its partials {at}..{} write into no entity's self block", o.3));
+                    }
+                    at += o.4;
+                }
+                if at != n_params {
+                    return Err(format!("its partials {at}..{n_params} write into no entity's self block"));
+                }
+                let sides: Vec<crate::device::DevSide> = owns
+                    .iter()
+                    .map(|&(ty, field, target, start, count)| crate::device::DevSide {
+                        ty: ty.clone(),
+                        var: param_strs[start].split('.').next().unwrap_or_default().to_string(),
+                        hb: field.clone(),
+                        params: param_strs[start..start + count].iter().map(|p| p.to_string()).collect(),
+                        slot: target.clone(),
+                    })
+                    .collect();
+                let side_at = |start: usize| owns.iter().position(|o| o.3 == start);
+                let mut pairs: Vec<crate::device::DevPair> = Vec::new();
+                for w in &plan {
+                    let BlockWrite::Cross { holder, field, target, a, b } = w else { continue };
+                    if a.1 == 0 || b.1 == 0 {
+                        continue;
+                    }
+                    let (Some(i), Some(j)) = (side_at(a.0), side_at(b.0)) else {
+                        return Err(format!("the cross block `{field}` joins partials of no entity's self block"));
+                    };
+                    pairs.push(crate::device::DevPair { i: i.min(j), j: i.max(j), holder: holder.clone(), block: field.clone(), access: target.clone() });
+                }
+                // the walk: the instance (`__frine`), the assembly loop's
+                // `__item` (the instance, or its parent for a cross
+                // constraint nested in its parent entity), the self and
+                // parent names, the refs, the root
+                let paths = if is_self_block {
+                    containing_paths.clone()
+                } else {
+                    containment_paths(root_fields, &root_name.to_string(), &sc.struct_name)
+                };
+                if paths.is_empty() || paths.iter().any(|p| p.is_empty()) {
+                    return Err("an instance outside the root's collections and fields has no device walk yet".into());
+                }
+                let item_is_parent = is_cross_block && !is_root_level_cross;
+                if item_is_parent && paths.iter().any(|p| p.len() < 2) {
+                    return Err("a cross constraint nested in its parent entity outside a collection of it".into());
+                }
+                let mut names: Vec<TokenStream2> = Vec::new();
+                if is_self_block {
+                    let v = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
+                    names.push(quote! { let #v = __frine; });
+                    names.extend(self_resolve_stmts.iter().cloned());
+                } else {
+                    names.extend(entity_index_copies.iter().cloned());
+                    names.extend(resolve_stmts.iter().cloned());
+                }
+                let key = format!("{}.{}.{}.{}", sc.struct_name, item_is_parent, parent_name, quote! { #(#names)* });
+                let root_var = root_var_ident.clone();
+                // the parent under its name, first, so the instance's own
+                // names override it
+                let parent = syn::Ident::new(&parent_name, proc_macro2::Span::call_site());
+                let walk = move |body: &TokenStream2| -> TokenStream2 {
+                    let walks = paths.iter().map(|path| {
+                        let n = path.len();
+                        let seg = |k: usize| syn::Ident::new(&format!("__seg{k}"), proc_macro2::Span::call_site());
+                        let frine = seg(n - 1);
+                        let item = if item_is_parent { seg(n - 2) } else { frine.clone() };
+                        let parent_alias = (n >= 2).then(|| {
+                            let p = seg(n - 2);
+                            quote! { let #parent = #p; }
+                        });
+                        wrap_in_prefix_scoped(path, false, quote! {
+                            {
+                                #parent_alias
+                                let __frine = #frine;
+                                let __item = #item;
+                                #(#names)*
+                                let #root_var = &*self;
+                                #body
+                            }
+                        }, None, false)
+                    });
+                    quote! { #(#walks)* }
+                };
+                let mut dc = crate::device::device_constraint(
+                    device_constraints.len(),
+                    key.clone(),
+                    precision,
+                    sides,
+                    pairs,
+                    sc.struct_name.clone(),
+                    residual_exprs.len(),
+                    (&gh_intermediates, &gh_simplified),
+                    device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
+                    (&cost_intermediates, &cost_simplified),
+                    device_loss.as_ref(),
+                    &atom_caches,
+                    &root_var_name,
+                )?;
+                dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
+                Ok((dc, key, crate::device::DevGroup { walk: Box::new(walk) }))
+            })();
+            match built {
+                Ok((dc, key, group)) => {
+                    device_constraints.push(dc);
+                    device_groups.entry(key).or_insert(group);
+                }
+                Err(why) => device_unsupported = Some(format!("{}: {why}", sc.struct_name)),
+            }
         }
         if is_remote_block {
             // Remote block: iterate parent collection -> frines,
@@ -8088,54 +8142,6 @@ pub fn generate_root_methods(
             grad_hessian_loops.push(gh_loop);
 
 
-            // The device form of a root-level constraint of one entity: the
-            // referenced entity's parameters, its self block, the root's
-            // collection walked as the cost sweep walks it.
-            if device_unsupported.is_none() && remote_at_root {
-                let why = if arm_writes.is_some() {
-                    Some("a select whose arms write apart")
-                } else if param_strs.is_empty() {
-                    Some("an entity without parameters")
-                } else {
-                    None
-                };
-                if let Some(why) = why {
-                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
-                } else {
-                    let (ref_field_name, target_block_field, target_type) = remote_block_info.as_ref().unwrap();
-                    let side = crate::device::DevSide {
-                        ty: target_type.clone(),
-                        var: ref_field_name.clone(),
-                        hb: target_block_field.clone(),
-                        params: param_strs.iter().map(|p| p.to_string()).collect(),
-                    };
-                    let group_key = frines_ident.to_string();
-                    match crate::device::device_constraint(
-                        device_constraints.len(),
-                        group_key.clone(),
-                        precision,
-                        vec![side],
-                        Vec::new(),
-                        sc.struct_name.clone(),
-                        residual_exprs.len(),
-                        (&gh_intermediates, &gh_simplified),
-                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
-                        (&cost_intermediates, &cost_simplified),
-                        device_loss.as_ref(),
-                        &atom_caches,
-                        &root_var_name,
-                    ) {
-                        Ok(mut dc) => {
-                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
-                            device_constraints.push(dc);
-                            device_groups
-                                .entry(group_key)
-                                .or_insert_with(|| crate::device::DevGroup::flat(&frines_ident, &resolve_stmts, &root_var_ident));
-                        }
-                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
-                    }
-                }
-            }
 
             // The remote form wires nothing at serialize: the store holds
             // the indices and the marker its slot.
@@ -8197,58 +8203,6 @@ pub fn generate_root_methods(
                 Some(entry)
             } else { None };
 
-            // The device form of an entity's constraint on itself: its
-            // parameters, its self block, its collection walked as the cost
-            // sweep walks it, a guard over its data applied when packing.
-            if device_unsupported.is_none() && self_at_root {
-                let why = if arm_writes.is_some() {
-                    Err("a select whose arms write apart".to_string())
-                } else if param_strs.is_empty() {
-                    Err("an entity without parameters".to_string())
-                } else if !self_resolve_stmts.is_empty() {
-                    Err("data refs".to_string())
-                } else {
-                    Ok(guard_expr.as_ref().map(|g| quote! { #g }))
-                };
-                match why {
-                    Err(why) => device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name)),
-                    Ok(filter) => {
-                        let side = crate::device::DevSide {
-                            ty: sc.struct_name.clone(),
-                            var: self_var_name.clone(),
-                            hb: constraint.primary_block_field().to_string(),
-                            params: param_strs.iter().map(|p| p.to_string()).collect(),
-                        };
-                        let coll = &containing_paths[0][0].field;
-                        let group_key = format!("self.{coll}");
-                        match crate::device::device_constraint(
-                            device_constraints.len(),
-                            group_key.clone(),
-                            precision,
-                            vec![side],
-                            Vec::new(),
-                            sc.struct_name.clone(),
-                            residual_exprs.len(),
-                            (&gh_intermediates, &gh_simplified),
-                            device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
-                            (&cost_intermediates, &cost_simplified),
-                            device_loss.as_ref(),
-                            &atom_caches,
-                            &root_var_name,
-                        ) {
-                            Ok(mut dc) => {
-                                dc.filter = filter;
-                                device_constraints.push(dc);
-                                let rc = syn::Ident::new(coll, proc_macro2::Span::call_site());
-                                device_groups
-                                    .entry(group_key)
-                                    .or_insert_with(|| crate::device::DevGroup::flat(&rc, &[quote! { let #self_var = __frine; }], &root_var_ident));
-                            }
-                            Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
-                        }
-                    }
-                }
-            }
 
             match &entity_location {
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. } => {
@@ -8523,71 +8477,6 @@ pub fn generate_root_methods(
             group.gh_entries.push(gh_entry);
             if let Some(ce) = claim_entry { group.claim_entries.push(ce); }
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
-            // The device form of a multi-cross constraint: a side per
-            // participant (its partials in the participants' order), a pair
-            // per declared CrossBlock.
-            if device_unsupported.is_none() && multi_at_root {
-                let side_at = |start: usize| triplet_entities.iter().position(|(_, _, s, _)| *s == start);
-                let pairs: Option<Vec<crate::device::DevPair>> = multi_cross_routing
-                    .iter()
-                    .map(|route| {
-                        let (a, b) = (side_at(route.a_start)?, side_at(route.b_start)?);
-                        let block = &route.block_ident;
-                        Some(crate::device::DevPair {
-                            i: a.min(b),
-                            j: a.max(b),
-                            holder: sc.struct_name.clone(),
-                            block: block.to_string(),
-                            access: quote! { __frine.#block },
-                        })
-                    })
-                    .collect();
-                let why = if arm_writes.is_some() {
-                    Some("a select whose arms write apart")
-                } else if pairs.is_none() {
-                    Some("a cross block of an entity without parameters")
-                } else {
-                    None
-                };
-                if let Some(why) = why {
-                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
-                } else {
-                    let sides: Vec<crate::device::DevSide> = triplet_entities
-                        .iter()
-                        .map(|(var, ty, start, count)| crate::device::DevSide {
-                            ty: ty.to_string(),
-                            var: var.to_string(),
-                            hb: registry_lookup(&ty.to_string()).and_then(|l| l.self_block_field.clone()).unwrap_or_default(),
-                            params: param_strs[*start..start + count].iter().map(|p| p.to_string()).collect(),
-                        })
-                        .collect();
-                    let device_key = format!("multi.{rc_ident}");
-                    match crate::device::device_constraint(
-                        device_constraints.len(),
-                        device_key.clone(),
-                        precision,
-                        sides,
-                        pairs.unwrap_or_default(),
-                        sc.struct_name.clone(),
-                        residual_exprs.len(),
-                        (&gh_intermediates, &gh_simplified),
-                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
-                        (&cost_intermediates, &cost_simplified),
-                        device_loss.as_ref(),
-                        &atom_caches,
-                        &root_var_name,
-                    ) {
-                        Ok(mut dc) => {
-                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
-                            device_constraints.push(dc);
-                            device_groups
-                                .entry(device_key)
-                                .or_insert_with(|| crate::device::DevGroup::flat(&rc_ident, &resolve_stmts, &root_var_ident));
-                        }
-                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
-                    }
-                }
-            }
         } else if is_root_level_cross {
             // Root-level CrossBlock: constraint struct is directly on root (e.g. PosePair, CoincidentPP)
             // Flat iteration, no nesting. Multiple #[arael(constraint(...))] attributes on the
@@ -8665,154 +8554,12 @@ pub fn generate_root_methods(
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
-            // The device form: the two entities through refs (the
-            // instance's own or its parent's), the holder's cross tile or
-            // the parent's shared one, the partials A's then B's; walked as
-            // the cost sweep walks the group (the prefix's loops, then the
-            // collection).
-            if device_unsupported.is_none() {
-                let why = if arm_writes.is_some() {
-                    Some("a select whose arms write apart")
-                } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
-                    Some("an entity without parameters")
-                } else {
-                    None
-                };
-                if let Some(why) = why {
-                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
-                } else {
-                    let var_of = |p: &str| p.split('.').next().unwrap_or_default().to_string();
-                    let hb_of = |t: &str| registry_lookup(t).and_then(|l| l.self_block_field.clone()).unwrap_or_default();
-                    let b_ty = b_type.clone().unwrap_or_default();
-                    let side_a = crate::device::DevSide {
-                        ty: a_type.clone(),
-                        var: var_of(param_strs[0]),
-                        hb: hb_of(&a_type),
-                        params: param_strs[..a_param_count].iter().map(|p| p.to_string()).collect(),
-                    };
-                    let side_b = crate::device::DevSide {
-                        var: var_of(param_strs[a_param_count]),
-                        hb: hb_of(&b_ty),
-                        ty: b_ty,
-                        params: param_strs[a_param_count..a_param_count + b_param_count].iter().map(|p| p.to_string()).collect(),
-                    };
-                    let pair = match &parent_cross {
-                        Some(pc) => {
-                            let (ctn, field) = (nested_container(&cross_prefix), &pc.field);
-                            crate::device::DevPair { i: 0, j: 1, holder: pc.parent_type.clone(), block: field.to_string(), access: quote! { #ctn.#field } }
-                        }
-                        None => crate::device::DevPair::own(&sc.struct_name, &block_ident),
-                    };
-                    let device_key = if cross_prefix.is_empty() {
-                        rc_ident.to_string()
-                    } else {
-                        format!("{}.{}", path_display(&cross_prefix), rc_ident)
-                    };
-                    match crate::device::device_constraint(
-                        device_constraints.len(),
-                        device_key,
-                        precision,
-                        vec![side_a, side_b],
-                        vec![pair],
-                        sc.struct_name.clone(),
-                        residual_exprs.len(),
-                        (&gh_intermediates, &gh_simplified),
-                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
-                        (&cost_intermediates, &cost_simplified),
-                        device_loss.as_ref(),
-                        &atom_caches,
-                        &root_var_name,
-                    ) {
-                        Ok(mut dc) => {
-                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
-                            device_constraints.push(dc);
-                        }
-                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
-                    }
-                }
-            }
         } else {
             // Nested CrossBlock: add inner loops to the collection group
             let frines_ident = frines_ident.unwrap();
             let parent_ident = parent_ident.unwrap();
             let group_key = coll_ident_str.clone();
 
-            // The device form: the containing entity and the instance's ref,
-            // the instance's cross tile, walked as the cost sweep walks
-            // them (the entity's collection, then its instances).
-            if device_unsupported.is_none() && nested_at_root {
-                let why = if arm_writes.is_some() {
-                    Some("a select whose arms write apart")
-                } else if a_param_count == 0 || b_param_count == 0 || b_type.is_none() {
-                    Some("an entity without parameters")
-                } else {
-                    None
-                };
-                if let Some(why) = why {
-                    device_unsupported = Some(format!("{}: {why} has no device form yet", sc.struct_name));
-                } else {
-                    let var_of = |p: &str| p.split('.').next().unwrap_or_default().to_string();
-                    let hb_of = |t: &str| registry_lookup(t).and_then(|l| l.self_block_field.clone()).unwrap_or_default();
-                    let b_ty = b_type.clone().unwrap_or_default();
-                    let side_a = crate::device::DevSide {
-                        ty: a_type.clone(),
-                        var: var_of(param_strs[0]),
-                        hb: hb_of(&a_type),
-                        params: param_strs[..a_param_count].iter().map(|p| p.to_string()).collect(),
-                    };
-                    let side_b = crate::device::DevSide {
-                        var: var_of(param_strs[a_param_count]),
-                        hb: hb_of(&b_ty),
-                        ty: b_ty,
-                        params: param_strs[a_param_count..a_param_count + b_param_count].iter().map(|p| p.to_string()).collect(),
-                    };
-                    let device_key = format!("nested.{}.{}", coll_ident_str, frines_ident);
-                    match crate::device::device_constraint(
-                        device_constraints.len(),
-                        device_key.clone(),
-                        precision,
-                        vec![side_a, side_b],
-                        vec![crate::device::DevPair::own(&sc.struct_name, &block_ident)],
-                        sc.struct_name.clone(),
-                        residual_exprs.len(),
-                        (&gh_intermediates, &gh_simplified),
-                        device_guard.as_ref().map(|(p, q)| (p.as_slice(), q)),
-                        (&cost_intermediates, &cost_simplified),
-                        device_loss.as_ref(),
-                        &atom_caches,
-                        &root_var_name,
-                    ) {
-                        Ok(mut dc) => {
-                            dc.filter = guard_expr.as_ref().map(|g| quote! { #g });
-                            device_constraints.push(dc);
-                            let (coll, frines, parent, resolve, root_var) = (
-                                coll_ident.clone(),
-                                frines_ident.clone(),
-                                parent_ident.clone(),
-                                resolve_stmts.clone(),
-                                root_var_ident.clone(),
-                            );
-                            device_groups.entry(device_key).or_insert_with(|| crate::device::DevGroup {
-                                walk: Box::new(move |body| {
-                                    quote! {
-                                        for __item in self.#coll.iter() {
-                                            #[allow(unused_variables)]
-                                            let #parent = __item;
-                                            for __frine in __item.#frines.iter() {
-                                                #(#resolve)*
-                                                #[allow(unused_variables)]
-                                                let #root_var = &*self;
-                                                #body
-                                            }
-                                        }
-                                    }
-                                }),
-                            });
-                        }
-                        Err(e) => device_unsupported = Some(format!("{}: {e}", sc.struct_name)),
-                    }
-                }
-            }
 
             let self_var = syn::Ident::new(&a_type.to_lowercase(), proc_macro2::Span::call_site());
             let marker = source_marker(sc);
@@ -10694,31 +10441,15 @@ pub fn generate_root_methods(
     let (device_items, device_why, device_accessor) = match &device_unsupported {
         Some(why) => (quote! {}, quote! { Some(#why) }, quote! {}),
         None => {
-            // a cross group's walk: its prefix's loops (the parents, bound
-            // as `__seg<i>`), then its collection
-            let mut groups: std::collections::BTreeMap<String, crate::device::DevGroup> = cross_groups
-                .iter()
-                .map(|(key, g)| {
-                    let (prefix, rc, resolve, root_var) = (g.prefix.clone(), g.rc_ident.clone(), g.resolve_stmts.clone(), g.root_var_ident.clone());
-                    let walk = move |body: &TokenStream2| {
-                        let ctn = nested_container(&prefix);
-                        wrap_in_prefix_scoped(&prefix, false, quote! {
-                            for __frine in #ctn.#rc.iter() {
-                                #(#resolve)*
-                                #[allow(unused_variables)]
-                                let #root_var = &*self;
-                                #body
-                            }
-                        }, None, false)
-                    };
-                    (key.clone(), crate::device::DevGroup { walk: Box::new(walk) })
-                })
-                .collect();
-            groups.append(&mut device_groups);
+            let groups = device_groups;
             let root_str = root_name.to_string();
             // every entity of a type in slot order: the order the block
-            // markers are numbered in, over every path to the type
+            // markers are numbered in, over every path to the type; the
+            // root is the one entity of its type
             let entity_walk = |ty: &str, body: TokenStream2| -> TokenStream2 {
+                if ty == root_str {
+                    return quote! { { let __ent = &*self; #body } };
+                }
                 let walks: Vec<TokenStream2> = containment_paths(root_fields, &root_str, ty)
                     .iter()
                     .filter_map(|path| {
