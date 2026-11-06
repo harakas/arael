@@ -30,7 +30,7 @@ use arael_faer::schur::{SchurReal, SchurSymbolic};
 
 use crate::plan::SparseIndex;
 use crate::supernodal::{GpuFactor, Packer};
-use crate::{Arg, Device, GpuError, Launch, Layout, WIDE, Wide, define_u32s};
+use crate::{Arg, Device, GpuError, Launch, Layout, WIDE, Wide, define_u32s, staged};
 
 /// No kept-kept tile behind a tile of S.
 const NONE: u32 = u32::MAX;
@@ -945,13 +945,6 @@ fn tiles_by_kept_block(p: &SchurPlan) -> (Vec<u32>, Vec<u32>) {
     (ptr, tiles)
 }
 
-/// Whether the Schur kernels read their small blocks once into registers
-/// and shared memory (`SCHUR_STAGED` in schur.cpp): everywhere but CUDA,
-/// which keeps the plain loops until measured there (TODO.md).
-fn staged<D: Device>() -> bool {
-    D::RUNTIME != "cuda"
-}
-
 /// The `#define`s of `schur.cpp`: the block sizes, the width classes, and
 /// the plan header's and the status's slots of [`crate::schur`].
 fn defines(p: &SchurPlan, lanes: u32, staged: bool) -> String {
@@ -960,7 +953,7 @@ fn defines(p: &SchurPlan, lanes: u32, staged: bool) -> String {
         &mut s,
         &[
             ("THREADS", THREADS as usize),
-            ("SCHUR_STAGED", staged as usize),
+            ("STAGED", staged as usize),
             ("TILE_LANES", lanes as usize),
             ("EW", p.ew_cap),
             ("KW", p.kw_cap),

@@ -464,16 +464,17 @@
   registers). Not done: the only 64-lane device at hand is a 6-CU Vega
   iGPU (gfx90c), and RDNA cards keep the 32-lane kernels in any case.
 
-- **arael-gpu: measure the staged Schur kernels on CUDA, then unify.**
-  `staged` in `src/schur.rs` (`SCHUR_STAGED` in `kernels/schur.cpp`): on
-  HIP and the CPU device, `k_schur_w` runs a thread per row of W with the
-  row of C in registers, and `k_schur_tiles` a wavefront per tile
-  (`TILE_LANES`, 64 on GCN) with each pair's W and C blocks staged in
-  shared memory; CUDA keeps the plain loops (a thread per observer, a
-  32-thread plane per tile). On the gfx90c iGPU (bal-bench Ladybug-372,
-  f64 schur), per attempt: `k_schur_w` 43 to 3.0 ms, `k_schur_tiles` 67 to
-  26.5 ms; the iteration with the f32 factor 190 to about 115 ms, same
-  results. Two tiles per 64-lane wavefront, a 32-lane warp each, was
+- **arael-gpu: measure the staged kernels on CUDA, then unify.**
+  `staged` in `src/lib.rs` (`STAGED` in `kernels/schur.cpp` and
+  `kernels/supernodal.cpp`): on HIP and the CPU device, `k_schur_w` runs a
+  thread per row of W with the row of C in registers, `k_schur_tiles` a
+  wavefront per tile (`TILE_LANES`, 64 on GCN) with each pair's W and C
+  blocks staged in shared memory, and the factor's seed (`k_seed_*`) a
+  wavefront per stored tile; CUDA keeps the plain loops (a thread per
+  observer, a 32-thread plane per tile, a thread per stored tile). On the
+  gfx90c iGPU (bal-bench Ladybug-372, f64 schur), per attempt: `k_schur_w`
+  43 to 3.0 ms, `k_schur_tiles` 67 to 26.5 ms, `k_seed_wide` 5.6 to 0.9
+  ms; the iteration with the f32 factor 190 to about 110 ms, same results. Two tiles per 64-lane wavefront, a 32-lane warp each, was
   slower than one (43 against 38 ms then): the tile index differs within
   the wavefront, and the plan reads became vector loads instead of scalar
   ones. Not measured on CUDA: run bal-bench on the 4090 with `staged`

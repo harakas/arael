@@ -14,8 +14,8 @@
 // the loops run to EW or KW and skip what is past the block's width, so the
 // arrays stay in registers (arael_gpu.h's rule, from k_trsm).
 
-// SCHUR_STAGED (from schur.rs, `staged`; not on CUDA until measured there,
-// TODO.md): k_schur_w and k_schur_tiles read their small blocks once, into
+// STAGED (lib.rs, `staged`; not on CUDA until measured there, TODO.md):
+// k_schur_w and k_schur_tiles read their small blocks once, into
 // registers and shared memory, instead of from global memory at every use;
 // k_schur_w takes a thread per row of W, k_schur_tiles a wavefront per
 // tile (TILE_LANES threads, 64 on AMD GCN and CDNA).
@@ -126,7 +126,7 @@ KERNEL_THREADS_REGS(THREADS) void k_schur_elim(GLOBAL const u32* RESTRICT plan, 
     }
 }
 
-#if SCHUR_STAGED
+#if STAGED
 // Stage 2, KW threads per observer, one per row of W_o (those past wo
 // idle): row i of W_o = C_o D_e^-1, row-major wo x we, the row of C_o read
 // once into registers. Neighbouring threads read and write neighbouring
@@ -180,7 +180,7 @@ KERNEL_THREADS(THREADS) void k_schur_w(GLOBAL const u32* RESTRICT plan, GLOBAL c
 }
 #endif
 
-#if SCHUR_STAGED
+#if STAGED
 // Stage 3, one block of TILE_LANES threads per tile of S (the wavefront):
 // the kept-kept tile of H (or nothing) minus W_oa C_ob^T over the tile's
 // pairs, thread `lane` owning the entries lane, lane + TILE_LANES, ... (ACC

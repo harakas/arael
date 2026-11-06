@@ -28,6 +28,55 @@ KERNEL_THREADS(THREADS) void k_zero_u32(GLOBAL u32* RESTRICT buf, u32 n) {
     if (i < n) buf[i] = 0;
 }
 
+#if STAGED
+// Stored tile `t` scattered into its panel by the SEED_LANES threads of a
+// block, its values cast to F: `tiles` has 6 entries per tile (destination,
+// stride, transposed, value offset, rows, columns). An upper tile lands
+// transposed, a diagonal one as is. Lane `lane` takes the elements lane,
+// lane + SEED_LANES, ... in the destination's order, so neighbouring lanes
+// write neighbouring rows; the tile's entries are the same in every lane.
+template <typename M>
+DEVICE void seed_tile_lanes(GLOBAL const u32* tiles, GLOBAL const M* vals, GLOBAL F* factor, u32 t, u32 lane) {
+    u32 dst = tiles[6 * t];
+    u32 stride = tiles[6 * t + 1];
+    u32 trans = tiles[6 * t + 2];
+    u32 off = tiles[6 * t + 3];
+    u32 wr = tiles[6 * t + 4];
+    u32 wc = tiles[6 * t + 5];
+    u32 n = wr * wc;
+    if (trans == 0) {
+        for (u32 e = lane; e < n; e += SEED_LANES) {
+            u32 c = e / wr;
+            u32 r = e - c * wr;
+            factor[dst + c * stride + r] = (F)vals[off + e];
+        }
+    } else {
+        for (u32 e = lane; e < n; e += SEED_LANES) {
+            u32 c = e / wc;
+            u32 r = e - c * wc;
+            factor[dst + c * stride + r] = (F)vals[off + c + r * wr];
+        }
+    }
+}
+
+// The seed from f32 values: a block of SEED_LANES threads per stored tile.
+KERNEL_THREADS(SEED_LANES) void k_seed_f32(GLOBAL const u32* RESTRICT tiles, GLOBAL const float* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
+    u32 t = block_x();
+    if (t < ntiles) seed_tile_lanes<float>(tiles, vals, factor, t, thread_x());
+}
+
+// The seed from f64 values.
+KERNEL_THREADS(SEED_LANES) void k_seed_f64(GLOBAL const u32* RESTRICT tiles, GLOBAL const double* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
+    u32 t = block_x();
+    if (t < ntiles) seed_tile_lanes<double>(tiles, vals, factor, t, thread_x());
+}
+
+// The seed from values of the route's wide scalar (wide.h): S formed on the device.
+KERNEL_THREADS(SEED_LANES) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBAL const W* RESTRICT vals, GLOBAL F* RESTRICT factor, u32 ntiles) {
+    u32 t = block_x();
+    if (t < ntiles) seed_tile_lanes<W>(tiles, vals, factor, t, thread_x());
+}
+#else
 // Stored tile `t` scattered into its panel, its values cast to F: `tiles` has
 // 6 entries per tile (destination, stride, transposed, value offset, rows,
 // columns). An upper tile lands transposed, a diagonal one as is.
@@ -65,6 +114,7 @@ KERNEL_THREADS(THREADS) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBA
     u32 t = global_x();
     if (t < ntiles) seed_tile<W>(tiles, vals, factor, t);
 }
+#endif
 
 // The small descendant updates: one block per piece of `items` (PAIR_ITEM
 // words each, plan.rs's LevelWork::pair_items): rows [i0, i1) of a pair
