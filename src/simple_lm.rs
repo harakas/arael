@@ -5597,6 +5597,7 @@ fn device_solver<T: crate::utils::Float + arael_faer::schur::SchurReal>(
 }
 
 /// A kernel cache entry the runtime could not write, logged once.
+#[cfg(feature = "gpu")]
 fn report_kernel_cache() {
     #[cfg(any(feature = "gpu-cuda", feature = "gpu-hip"))]
     if let Some(why) = arael_gpu::take_cache_failure() {
