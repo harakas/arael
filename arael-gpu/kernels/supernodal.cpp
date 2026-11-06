@@ -70,9 +70,10 @@ KERNEL_THREADS(THREADS) void k_seed_wide(GLOBAL const u32* RESTRICT tiles, GLOBA
 }
 
 // The small descendants' updates: one block per (target, TR x TC tile,
-// chunk), a group of GROUP threads per rectangle with the threads over the
-// rectangle's elements, accumulated in shared memory, subtracted into the
-// panel atomically (a tile may be several chunks). `src` and `dst` are the
+// chunk), a group of threads per rectangle with the threads over the
+// rectangle's elements (GROUP, or more when the chunk has few rectangles,
+// so the block's threads all work), accumulated in shared memory,
+// subtracted into the panel atomically (a tile may be several chunks). `src` and `dst` are the
 // factor: the descendants are read through `src`, the target written
 // through `dst`.
 KERNEL_THREADS(THREADS) void k_tile_update(GLOBAL const u32* RESTRICT items, GLOBAL const u32* RESTRICT rects, GLOBAL const u32* RESTRICT plan, GLOBAL const F* RESTRICT src, GLOBAL F* RESTRICT dst) {
@@ -93,9 +94,13 @@ KERNEL_THREADS(THREADS) void k_tile_update(GLOBAL const u32* RESTRICT items, GLO
     const u32 nt = THREADS;
     for (u32 e = t; e < TR * TC; e += nt) u[e] = F(0);
     BARRIER();
-    u32 g = t / GROUP;
-    u32 lane = t % GROUP;
-    u32 ngroups = nt / GROUP;
+    // the group size: GROUP, doubled while the chunk's rectangles fill no more
+    // than half the block, so a chunk of few rectangles still uses it all
+    u32 gsz = GROUP;
+    while (2 * gsz * (r1 - r0) <= nt) gsz *= 2;
+    u32 g = t / gsz;
+    u32 lane = t % gsz;
+    u32 ngroups = nt / gsz;
     for (u32 rr = r0 + g; rr < r1; rr += ngroups) {
         u32 rb = 4 * rr;
         u32 pi = rects[rb];
@@ -111,7 +116,7 @@ KERNEL_THREADS(THREADS) void k_tile_update(GLOBAL const u32* RESTRICT items, GLO
         u32 dq = plan[o_dims + 2 * d];
         u32 dh = plan[o_dims + 2 * d + 1];
         u32 dp = plan[o_val_ptr + d] + pr0;
-        for (u32 e2 = lane; e2 < ni * nj; e2 += GROUP) {
+        for (u32 e2 = lane; e2 < ni * nj; e2 += gsz) {
             u32 jj = e2 / ni;
             u32 ii = e2 - jj * ni;
             F acc = F(0);

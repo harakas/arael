@@ -98,7 +98,7 @@ impl Default for GpuSupernodalParams {
     fn default() -> Self {
         GpuSupernodalParams {
             small_q: 96,
-            small_flops: 1e6,
+            small_flops: 3e5,
             big_pair_flops: 2e6,
             wide_pair_k: 64,
             wide_pair_flops: 1e5,
@@ -583,6 +583,7 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
     }
     for w in &mut lw {
         split_big(w, p, (multiprocessors * kn.blocks_per_sm) as usize);
+        split_tiles(w, p, (multiprocessors * kn.blocks_per_sm) as usize);
     }
     // the panel steps' grid sizes
     for w in &mut lw {
@@ -606,6 +607,43 @@ pub(crate) fn build_levels(p: &Plan, kn: &GpuSupernodalParams, multiprocessors: 
         }
     }
     lw
+}
+
+/// The least work (multiply-adds) a tile chunk is cut down to.
+const MIN_CHUNK_WORK: f64 = (TR * TC * 16) as f64;
+
+/// The level's small updates cut to fill `blocks` blocks, as [`split_big`]
+/// does the big ones: when its chunks make fewer, a chunk over the level's
+/// share of the work (a rectangle's elements times its descendant's width)
+/// is cut by rectangles. The tile kernel subtracts every chunk atomically.
+fn split_tiles(w: &mut LevelWork, p: &Plan, blocks: usize) {
+    let n_items = w.tile_items.len() / 5;
+    if n_items == 0 || n_items >= blocks {
+        return;
+    }
+    let rects = &w.tile_rects;
+    let work = |r: u32| -> f64 {
+        let r = r as usize;
+        let (pi, geo) = (rects[4 * r] as usize, rects[4 * r + 1]);
+        let (ni, nj) = ((geo >> 8) & 0xff, geo >> 24);
+        (ni * nj) as f64 * p.dims[2 * p.pairs[pi].d as usize] as f64
+    };
+    let total: f64 = (0..(rects.len() / 4) as u32).map(work).sum();
+    let cap = (total / blocks as f64).max(MIN_CHUNK_WORK);
+    let old = std::mem::take(&mut w.tile_items);
+    for it in old.chunks(5) {
+        let (start, end) = (it[3], it[4]);
+        let (mut a, mut acc) = (start, 0.0);
+        for r in start..end {
+            let wr = work(r);
+            if acc > 0.0 && acc + wr > cap {
+                w.tile_items.extend_from_slice(&[it[0], it[1], it[2], a, r]);
+                (a, acc) = (r, 0.0);
+            }
+            acc += wr;
+        }
+        w.tile_items.extend_from_slice(&[it[0], it[1], it[2], a, end]);
+    }
 }
 
 /// The level's big updates cut to fill `blocks` blocks: when its tiles
@@ -852,6 +890,28 @@ mod tests {
             }
         }
         check_coverage(&kn, 128, false);
+    }
+
+    /// On a device too large for the grid's levels the small updates' chunks
+    /// are cut too, each rectangle still in exactly one chunk of its tile.
+    #[test]
+    fn small_updates_are_cut_to_fill_the_device() {
+        let (p, _, _) = analyse(40);
+        let kn = GpuSupernodalParams::default();
+        let (whole, cut) = (build_levels(&p, &kn, 1), build_levels(&p, &kn, 10_000));
+        let items = |lw: &[LevelWork]| lw.iter().map(|w| w.tile_items.len() / 5).sum::<usize>();
+        assert!(items(&cut) > items(&whole), "{} chunks against {}", items(&cut), items(&whole));
+        for w in &cut {
+            let mut seen = vec![0u8; w.tile_rects.len() / 4];
+            for it in w.tile_items.chunks(5) {
+                assert!(it[3] < it[4], "a chunk holds a rectangle");
+                for r in it[3]..it[4] {
+                    seen[r as usize] += 1;
+                }
+            }
+            assert!(seen.iter().all(|&c| c == 1), "every rectangle in one chunk");
+        }
+        check_coverage_of(40, &kn, 10_000, false);
     }
 
     /// With the plain threshold off, the updates of descendants at least

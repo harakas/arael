@@ -90,7 +90,7 @@ scripts/gpu_trace.py -- target/release/examples/repeat_solves
 
 `GpuSupernodalParams`:
 
-- `small_q` (96 columns) and `small_flops` (1e6): a supernode narrower
+- `small_q` (96 columns) and `small_flops` (3e5): a supernode narrower
   than `small_q` is factored by the one-block small kernel unless the
   solve of its rows below takes more than `small_flops` multiply-adds; the
   others take the panel steps, which spread over many blocks.
